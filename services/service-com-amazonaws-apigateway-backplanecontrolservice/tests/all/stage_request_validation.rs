@@ -831,8 +831,10 @@ async fn a_refusals_gateway_response_template_resolves_the_errors_own_context() 
             payload: r#"{"id":"a1"}"#,
             query: "?tenant=acme",
             // Not rendered at all: the caller gets API Gateway's own default body for the
-            // response type instead of a body this emulator guessed at.
-            carries: &[r#"{"message":"Invalid request body"}"#],
+            // response type instead of a body this emulator guessed at — and that default
+            // body is the VALIDATOR's own rendering, which carries a space after the member
+            // separator.
+            carries: &[r#"{"message": "Invalid request body"}"#],
         },
     ];
 

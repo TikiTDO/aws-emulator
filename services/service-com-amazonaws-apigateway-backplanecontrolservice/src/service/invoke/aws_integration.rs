@@ -814,6 +814,10 @@ fn mapped(
         .response_templates
         .as_ref()
         .is_some_and(|templates| !templates.is_empty());
+    let mut headers = mapped_response_headers(Some(method), selected, status);
+    // The media type is the method response's own `Content-Type` mapping where it declares
+    // one; see `super::taken_content_type`.
+    let mapped_type = super::taken_content_type(&mut headers);
     let (content_type, body) = if templated {
         // The template reads its payload off what the INTEGRATION answered, which is the
         // only difference between rendering it here and rendering it for a `MOCK`.
@@ -821,19 +825,27 @@ fn mapped(
             payload: Some(answered.body),
             ..call.inputs.clone()
         };
-        response_body(selected, call, &inputs).map_err(|template| UnservedIntegration {
+        let body = response_body(selected, call, &inputs).map_err(|template| UnservedIntegration {
             refusal: API_CONFIGURATION_ERROR,
             reason: format!(
                 "the {} response template of {} bytes is not one this emulator renders: {}",
                 template.content_type, template.bytes, template.reason
             ),
-        })?
+        })?;
+        // A templated response is rendered from the api's own records, so the media type it
+        // is served with is the mapping's, and `application/json` when none is declared —
+        // never the key of the template the caller's `Accept` chose.
+        (
+            mapped_type.unwrap_or_else(|| JSON_CONTENT_TYPE.to_string()),
+            body,
+        )
     } else {
         // No template: the backend's own bytes and content type are the method response's,
-        // which is what passing a response through means.
+        // which is what passing a response through means — unless the method response
+        // declares a `Content-Type` mapping of its own, which overrides it.
         (
-            answered
-                .content_type
+            mapped_type
+                .or(answered.content_type)
                 .unwrap_or_else(|| JSON_CONTENT_TYPE.to_string()),
             answered.body,
         )
@@ -842,7 +854,7 @@ fn mapped(
         status,
         content_type,
         body,
-        headers: mapped_response_headers(Some(method), selected, status),
+        headers,
     })
 }
 

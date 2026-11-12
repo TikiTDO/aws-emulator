@@ -134,6 +134,12 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 # services in this tree use for certificate material, at the same version, so this emulator
 # has one way of issuing a certificate rather than a hand-rolled DER writer.
 rcgen = "0.13"
+# The CONTENT CODING a response is served under where the api's `minimumCompressionSize`
+# asks for compression (`service::invoke::compression`): the maintained encoder for `gzip`
+# and `deflate`, the two codings API Gateway's own compression documents, so the bytes a
+# client receives are a real encoder's rather than a relabelled body. The same version and
+# spelling the sibling cloudfront service compresses an edge answer with.
+flate2 = "1"
 # The .zip archive a generated client SDK is downloaded as (`GetSdk`): the maintained
 # writer for the format, the same one the sibling services in this tree read and write an
 # archive with, so what a caller saves to a file is an archive every unzip tool opens.

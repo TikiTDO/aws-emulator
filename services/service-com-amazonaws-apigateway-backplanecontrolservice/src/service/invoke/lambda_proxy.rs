@@ -156,9 +156,10 @@ const BODY_MEMBER: &str = "body";
 /// The member that says the body is base64-encoded, in both directions.
 const BASE64_MEMBER: &str = "isBase64Encoded";
 
-/// The response header whose value is the method response's media type rather than one of
-/// its headers.
-const CONTENT_TYPE_HEADER: &str = "content-type";
+// The response header whose value is the method response's media type rather than one of
+// its headers: the parent module's one reading of the name, so the two sides of this plane
+// compare it one way.
+use super::CONTENT_TYPE_HEADER;
 
 /// The `$context` member path an authorizer's values are published under, which the event
 /// carries as `requestContext.authorizer`.

@@ -409,8 +409,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             Some(refusal) => {
                 let response_type = refusal.response_type();
-                let (status, _body) =
-                    crate::service::invoke::refusal_rendering(Some(&api), refusal);
+                let status = crate::service::invoke::refusal_rendering(Some(&api), refusal).status;
                 log.line(format!(
                     "Answered through this API's {response_type} gateway response: the client \
                      would have received HTTP {status}"

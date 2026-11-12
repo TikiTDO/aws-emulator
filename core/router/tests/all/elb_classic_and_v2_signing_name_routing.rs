@@ -122,6 +122,9 @@ fn classic_elb_and_elbv2_route_apart_under_one_signing_name() {
             router.set_request_authentication(false);
 
             let runtime = tokio::runtime::Builder::new_current_thread()
+                // See the sibling `elbv2_subnet_vpc_membership` suite: the IO and TIME
+                // drivers a service's background work needs, without which tokio panics.
+                .enable_all()
                 .build()
                 .expect("a current-thread runtime");
 

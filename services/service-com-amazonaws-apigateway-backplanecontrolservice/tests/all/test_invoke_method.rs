@@ -340,7 +340,9 @@ async fn the_simulated_response_is_the_one_the_methods_own_records_render() {
             }),
             200,
             "no pets",
-            json!({ "Content-Type": "text/plain", "X-Pets": "none" }),
+            // The accepted template decides the BODY; with no `Content-Type` mapping
+            // declared, the media type reported stays `application/json`.
+            json!({ "Content-Type": "application/json", "X-Pets": "none" }),
         ),
         (
             "a content type no template maps is passed through to the default response",

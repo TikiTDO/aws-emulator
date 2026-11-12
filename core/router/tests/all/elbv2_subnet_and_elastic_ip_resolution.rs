@@ -84,6 +84,9 @@ fn a_placement_naming_a_resource_ec2_does_not_hold_is_refused() {
             let mut router = build_router(engine);
             router.set_request_authentication(false);
             let runtime = tokio::runtime::Builder::new_current_thread()
+                // See the sibling `elbv2_subnet_vpc_membership` suite: the IO and TIME
+                // drivers a service's background work needs, without which tokio panics.
+                .enable_all()
                 .build()
                 .expect("a current-thread runtime");
 

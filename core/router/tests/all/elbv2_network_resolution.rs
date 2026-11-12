@@ -353,6 +353,9 @@ fn elbv2_resolves_the_account_network_against_ec2() {
             let mut router = build_router(engine);
             router.set_request_authentication(false);
             let runtime = tokio::runtime::Builder::new_current_thread()
+                // See the sibling `elbv2_subnet_vpc_membership` suite: the IO and TIME
+                // drivers a service's background work needs, without which tokio panics.
+                .enable_all()
                 .build()
                 .expect("a current-thread runtime");
             let network = seed_network(&router, &runtime);

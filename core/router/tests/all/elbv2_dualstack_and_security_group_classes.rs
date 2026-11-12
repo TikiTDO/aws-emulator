@@ -198,6 +198,9 @@ fn an_ipv6_address_type_is_refused_until_the_subnets_carry_an_ipv6_range() {
             let mut router = build_router(engine);
             router.set_request_authentication(false);
             let runtime = tokio::runtime::Builder::new_current_thread()
+                // See the sibling `elbv2_subnet_vpc_membership` suite: the IO and TIME
+                // drivers a service's background work needs, without which tokio panics.
+                .enable_all()
                 .build()
                 .expect("a current-thread runtime");
             let network = seed(&router, &runtime);

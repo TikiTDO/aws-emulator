@@ -128,8 +128,9 @@ use super::types::*;
 use std::collections::{BTreeMap, HashMap};
 
 use crate::service::invoke::{
-    matched_path_parameters, performed_integration, refusal_rendering, sent_query_parameters,
-    with_stage_variables, MethodRequest, JSON_CONTENT_TYPE,
+    matched_path_parameters, parameters_refusal, pending_body_check, performed_integration,
+    refusal_rendering, sent_query_parameters, with_stage_variables, MethodRequest,
+    JSON_CONTENT_TYPE,
 };
 use crate::service::invoke::lambda_proxy::ProxyInputs;
 use crate::service::invoke::simulated_request;
@@ -140,6 +141,18 @@ use crate::service::mapping_template::TemplateInputs;
 /// execution it reports instead of minting an identifier nothing else can be correlated
 /// with.
 const TEST_INVOKE_REQUEST_ID: &str = "test-invoke-request";
+
+/// Why a simulated invocation answers a gateway response rather than an integration's own
+/// answer: the method's own REQUEST VALIDATOR refused the request, or the integration could
+/// not be performed. Both are answered through a gateway response, and the two log
+/// different lines, because a request the validator refused is the CALLER's and an
+/// integration that cannot be performed is the api's configuration.
+enum Refused {
+    /// The method's request validator refused the simulated request.
+    Validator(crate::service::invoke::GatewayRefusal),
+    /// The integration could not be performed.
+    Integration(crate::service::invoke::UnservedIntegration),
+}
 
 // `pub(crate)` on the two items below, and nothing else about this operation, because
 // `TestInvokeAuthorizer` simulates a request to the SAME api and reports it in the same
@@ -463,13 +476,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 tracing_enabled: false,
             },
         );
-        let performed = match with_stage_variables(&method, &simulated_variables) {
-            // The api's own Region is the endpoint an `AWS` integration naming no Region of
-            // its own is called at.
-            Ok(resolved) => {
-                performed_integration(ctx, api.arn_region(), Some(&resolved), &call).await
-            }
-            Err(unserved) => Err(unserved),
+        // The method's own REQUEST VALIDATOR, before the integration is performed: "a
+        // RequestValidator ... validates a request before the integration is invoked"
+        // (`RequestValidator`), and that holds for a SIMULATED request too — a body the
+        // method's `Model` does not admit, or a parameter it declares required and the
+        // simulated request omits, is refused with the integration never performed. Both
+        // halves are the data plane's own ([`parameters_refusal`], [`pending_body_check`]),
+        // so one validator decides a call that reached a socket and one that never did.
+        let refused_by_validator = parameters_refusal(&api, Some(&method), &call).or_else(|| {
+            pending_body_check(&api, Some(&method), &call)
+                .and_then(|pending| pending.refusal(call.payload()))
+        });
+        let performed = match refused_by_validator {
+            Some(refusal) => Err(Refused::Validator(refusal)),
+            None => match with_stage_variables(&method, &simulated_variables) {
+                // The api's own Region is the endpoint an `AWS` integration naming no Region
+                // of its own is called at.
+                Ok(resolved) => {
+                    performed_integration(ctx, api.arn_region(), Some(&resolved), &call)
+                        .await
+                        .map_err(Refused::Integration)
+                }
+                Err(unserved) => Err(Refused::Integration(unserved)),
+            },
         };
         let (status, body, headers) = match performed {
             Ok(served) => {
@@ -478,24 +507,43 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 log.line("Successfully completed execution".to_string());
                 (served.status, served.body, headers)
             }
-            Err(unserved) => {
+            Err(refused) => {
                 // The same sentence the data plane logs for this call, and the same gateway
                 // response it answers through — including a developer's customization of
                 // that response type, which `refusal_rendering` reads off this API.
-                log.line(format!(
-                    "Execution failed due to configuration error: {}",
-                    unserved.reason
-                ));
+                let refusal = match refused {
+                    Refused::Integration(unserved) => {
+                        log.line(format!(
+                            "Execution failed due to configuration error: {}",
+                            unserved.reason
+                        ));
+                        unserved.refusal
+                    }
+                    Refused::Validator(refusal) => {
+                        log.line(
+                            "Request did not pass the method's request validator, so the \
+                             integration was not invoked"
+                                .to_string(),
+                        );
+                        refusal
+                    }
+                };
                 log.line(format!(
                     "Answered through this API's {} gateway response",
-                    unserved.refusal.response_type()
+                    refusal.response_type()
                 ));
-                let (status, body) = refusal_rendering(Some(&api), unserved.refusal);
-                let headers = BTreeMap::from([(
+                let rendered = refusal_rendering(Some(&api), refusal);
+                // The gateway response's own mapped headers reach the REPORT as well as
+                // the wire: a developer's customization of the type is what the caller is
+                // answered with, whether the call reached a socket or not.
+                let mut headers = BTreeMap::from([(
                     CONTENT_TYPE_HEADER.to_string(),
                     vec![JSON_CONTENT_TYPE.to_string()],
                 )]);
-                (status, body, headers)
+                for (name, value) in rendered.headers {
+                    headers.insert(name, vec![value]);
+                }
+                (rendered.status, rendered.body, headers)
             }
         };
         // The response headers with their VALUES, where the request-side line above logs

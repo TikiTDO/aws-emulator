@@ -422,6 +422,10 @@ fn a_lambda_action_is_stored_only_where_lambda_grants_this_rule_the_invocation()
             router.set_request_authentication(false);
 
             let runtime = tokio::runtime::Builder::new_current_thread()
+                // The TIME driver this trace needs: invoking a Lambda function starts that
+                // service's concurrency sampler, which waits on the clock from a background
+                // task, and a runtime with no timer panics inside tokio when it does.
+                .enable_all()
                 .build()
                 .expect("a current-thread runtime");
 

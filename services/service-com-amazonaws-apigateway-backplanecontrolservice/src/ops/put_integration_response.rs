@@ -155,6 +155,19 @@ pub fn is_static_mapping_value(value: &str) -> bool {
     value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'')
 }
 
+/// The literal a STATIC mapped value carries — what is between the quotes — or `None` for a
+/// value that is no static one ([`is_static_mapping_value`]).
+///
+/// The ONE reading of that literal, so every place that serves a mapping a developer stored
+/// statically (a method response's header, a gateway response's header) extracts it the same
+/// way. Read by stripping the quotes rather than by an index, so neither the read nor any
+/// length arithmetic can fail whatever was stored.
+pub fn static_mapping_literal(value: &str) -> Option<&str> {
+    is_static_mapping_value(value)
+        .then(|| value.strip_prefix('\'').and_then(|rest| rest.strip_suffix('\'')))
+        .flatten()
+}
+
 /// Whether `value` is one of the forms a `responseParameters` value may take: a static
 /// value in single quotes, an `integration.response.header.{name}` expression naming a
 /// valid header, or an `integration.response.body.{JSON-expression}` expression carrying

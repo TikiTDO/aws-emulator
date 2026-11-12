@@ -274,7 +274,7 @@ use crate::ops::put_integration::{
     DEFAULT_CONNECTION_TYPE, HTTP_PROXY_INTEGRATION_TYPE, MOCK_INTEGRATION_TYPE,
     VPC_LINK_CONNECTION_TYPE,
 };
-use crate::ops::put_integration_response::is_static_mapping_value;
+use crate::ops::put_integration_response::static_mapping_literal;
 use crate::ops::put_method::method_key;
 use crate::ops::put_method_response::METHOD_RESPONSE_HEADER_PREFIX;
 use crate::ops::types::{GetIntegrationOutput, GetIntegrationResponseOutput, MethodSetting};
@@ -619,7 +619,26 @@ impl GatewayRefusal {
     pub fn response_type(&self) -> &'static str {
         self.response_type
     }
+
+    /// The media type the response states for this refusal's body.
+    ///
+    /// Every gateway response the API renders is `application/json` — that is the content
+    /// type its own default template is keyed by ([`JSON_CONTENT_TYPE`]). The one exception
+    /// is the refusal the EDGE takes before the api's records are read at all
+    /// ([`REQUEST_TOO_LARGE`]), which the endpoint states with the media type a recorded
+    /// over-sized invoke was answered with.
+    fn content_type(&self) -> &'static str {
+        if self.response_type == REQUEST_TOO_LARGE_TYPE {
+            EDGE_REFUSAL_CONTENT_TYPE
+        } else {
+            JSON_CONTENT_TYPE
+        }
+    }
 }
+
+/// The media type the `execute-api` endpoint states for the refusal it takes at the edge;
+/// see [`GatewayRefusal::content_type`].
+const EDGE_REFUSAL_CONTENT_TYPE: &str = "text; charset=utf-8";
 
 /// The API, the stage or the endpoint does not serve this request at all: API Gateway
 /// answers `403` with `{"message":"Forbidden"}` for an API id it does not serve, a stage
@@ -756,9 +775,70 @@ const UNSUPPORTED_MEDIA_TYPE: GatewayRefusal = GatewayRefusal {
     message_member: MESSAGE_MEMBER,
 };
 
+/// The documented limit on the payload of one request to a REST API: API Gateway's
+/// "Payload size" quota is 10,485,760 bytes, and it is one of the quotas the service lists
+/// as not adjustable.
+pub const MAX_REQUEST_PAYLOAD_BYTES: usize = 10_485_760;
+
+/// The request's payload is larger than [`MAX_REQUEST_PAYLOAD_BYTES`]: `413` through
+/// `REQUEST_TOO_LARGE` ([`crate::state::default_gateway_status_code`] gives that type's own
+/// status), carrying the sentence API Gateway documents for that condition, under the media
+/// type the endpoint declares for this refusal ([`EDGE_REFUSAL_CONTENT_TYPE`]) — so the body
+/// is that sentence as text rather than the JSON envelope a gateway response of an api
+/// renders.
+///
+/// Refused at the EDGE, with the api's own records unread and the stage, the route, the
+/// authorization, the validator and the integration never reached: the limit is on what the
+/// endpoint ADMITS, so it cannot depend on what the api or the method declares — and a
+/// developer's customization of a gateway response, which is a record OF an api, therefore
+/// does not reach it.
+const REQUEST_TOO_LARGE: GatewayRefusal = GatewayRefusal {
+    response_type: REQUEST_TOO_LARGE_TYPE,
+    message: Cow::Borrowed("Request Too Long"),
+    error_type: None,
+    validation_detail: Cow::Borrowed(""),
+    message_member: MESSAGE_MEMBER,
+};
+
+/// The refusal a request whose payload is over [`MAX_REQUEST_PAYLOAD_BYTES`] earns, or
+/// `None` for one within it.
+///
+/// Read at the funnel every invoke enters ([`serve`]), so it is the ENDPOINT's limit: it
+/// bounds what arrives from a client, not what one integration passes on to another.
+///
+/// A body the transport did not buffer in memory is one whose size is not known here, and
+/// is admitted: the limit refuses a payload that IS over it rather than one that might be.
+fn oversized_payload(req: &RtRequest) -> Option<GatewayRefusal> {
+    let sent = req.body().bytes()?.len();
+    (sent > MAX_REQUEST_PAYLOAD_BYTES).then_some(REQUEST_TOO_LARGE)
+}
+
+/// The gateway response type a payload the method's `Model` does not admit is answered
+/// through; see [`bad_request_body`].
+const BAD_REQUEST_BODY_TYPE: &str = "BAD_REQUEST_BODY";
+
+/// The gateway response type a request missing a parameter the method declares required is
+/// answered through; see [`bad_request_parameters`].
+const BAD_REQUEST_PARAMETERS_TYPE: &str = "BAD_REQUEST_PARAMETERS";
+
+/// The two gateway response types the method's REQUEST VALIDATOR produces.
+///
+/// Their default bodies are the VALIDATOR's own serialization, which writes a SPACE after
+/// the member separator — `{"message": "Invalid request body"}`, as the Developer Guide's
+/// request-validation walkthrough shows both of them — where every OTHER default body is
+/// what a gateway response's own default template produces
+/// ([`crate::state::DEFAULT_GATEWAY_RESPONSE_TEMPLATE`],
+/// `{"message":$context.error.messageString}`), which is compact. One list, read by
+/// [`default_refusal_body`], so the two renderings cannot drift apart.
+const VALIDATION_RESPONSE_TYPES: [&str; 2] = [BAD_REQUEST_BODY_TYPE, BAD_REQUEST_PARAMETERS_TYPE];
+
+/// The gateway response type an over-sized payload is refused through; see
+/// [`REQUEST_TOO_LARGE`].
+const REQUEST_TOO_LARGE_TYPE: &str = "REQUEST_TOO_LARGE";
+
 /// The method's request validator declares `validateRequestBody` and the request's payload
 /// does not satisfy the JSON Schema of the `Model` the method maps its content type to:
-/// `400` `{"message":"Invalid request body"}` through `BAD_REQUEST_BODY`.
+/// `400` `{"message": "Invalid request body"}` through `BAD_REQUEST_BODY`.
 ///
 /// The sentence is FIXED — it names neither the model nor what about the payload failed.
 /// WHAT failed is the validation's own report, which a gateway response template reads
@@ -766,7 +846,7 @@ const UNSUPPORTED_MEDIA_TYPE: GatewayRefusal = GatewayRefusal {
 /// validator's own finding about THIS payload rather than a sentence written here.
 fn bad_request_body(detail: String) -> GatewayRefusal {
     GatewayRefusal {
-        response_type: "BAD_REQUEST_BODY",
+        response_type: BAD_REQUEST_BODY_TYPE,
         message: Cow::Borrowed("Invalid request body"),
         error_type: Some("BadRequestException"),
         validation_detail: Cow::Owned(detail),
@@ -807,7 +887,7 @@ const QUOTA_EXCEEDED: GatewayRefusal = GatewayRefusal {
 fn bad_request_parameters(missing: &[String]) -> GatewayRefusal {
     let named = missing.join(", ");
     GatewayRefusal {
-        response_type: "BAD_REQUEST_PARAMETERS",
+        response_type: BAD_REQUEST_PARAMETERS_TYPE,
         message: Cow::Owned(format!("Missing required request parameters: [{named}]")),
         error_type: Some("BadRequestException"),
         validation_detail: Cow::Owned(format!("[{named}]")),
@@ -1271,7 +1351,28 @@ pub async fn serve<Eng: Send + Sync + 'static>(
     // read once the response has been computed.
     let started = ::std::time::Instant::now();
     let served = ::service_common::query_error_envelope::with_stated_request_id_header(
-        serve_resolved(engine, req, ctx, 0, &request_id).await,
+        // The documented payload limit is the ENDPOINT's, and it is answered HERE, before
+        // anything the api's own records decide: not the stage, the route, the
+        // authorization, the validator or the integration, and not the content coding
+        // `minimumCompressionSize` asks for either — so a developer's records cannot change
+        // the bytes of a refusal taken before they were read.
+        match oversized_payload(req) {
+            Some(refusal) => {
+                tracing::warn!(
+                    limit = MAX_REQUEST_PAYLOAD_BYTES,
+                    "the request's payload is over the payload limit of a REST API"
+                );
+                refusal_response(None, refusal)
+            }
+            // COMPRESSED at the one funnel every other outcome reaches, so what the api's
+            // `minimumCompressionSize` asks for applies to a served integration, a cached
+            // response and a gateway refusal alike ([`compression`]).
+            None => compression::compressed(
+                engine,
+                req,
+                serve_resolved(engine, req, ctx, 0, &request_id).await,
+            ),
+        },
         &request_id,
     );
     // What the STAGE logs about the request it just answered — its access-log record and the
@@ -1380,7 +1481,6 @@ async fn serving<Eng: Send + Sync + 'static>(
                 // nothing.
                 break 'planned Planned::answered(refusal_response(Some(api), FORBIDDEN));
             }
-
             let Some((stage_name, resource_path)) = split_stage(resolved.invoke_path) else {
                 break 'planned Planned::answered(refusal_response(Some(api), FORBIDDEN));
             };
@@ -1671,7 +1771,7 @@ async fn serving<Eng: Send + Sync + 'static>(
             // request the method declares invalid never gets to the backend. The PARAMETERS
             // half is decided here, from the request's own query string and headers; the BODY
             // half is prepared here and decided below, off the lock.
-            if let Some(refusal) = parameters_refusal(api, deployed_method, req) {
+            if let Some(refusal) = parameters_refusal(api, deployed_method, &call) {
                 break 'planned Planned::answered(refusal_response(Some(api), refusal));
             }
             let pending_body = pending_body_check(api, deployed_method, &call);
@@ -2739,289 +2839,6 @@ fn parameter_source(expression: &str) -> Option<(ParameterIn, &str)> {
     })
 }
 
-/// The `RequestValidator` the method names, or `None` when it names none the API holds.
-///
-/// A `Method` names its validator in `requestValidatorId`, and the `RequestValidator` that
-/// id resolves to declares which halves of the request are checked
-/// (`validateRequestParameters`, `validateRequestBody`, each `@default false`): a method
-/// that names none, or names one of the two flags only, is checked exactly as far as it
-/// declares — which is why the four modes differ in what they refuse. A
-/// `requestValidatorId` naming no validator of the API validates nothing: that is a
-/// configuration this emulator cannot apply, and inventing a refusal for it would refuse
-/// requests AWS serves.
-fn declared_validator<'a>(
-    api: &'a RestApiEntry,
-    method: Option<&MethodEntry>,
-) -> Option<&'a crate::state::RequestValidatorEntry> {
-    api.request_validators
-        .get(method?.request_validator_id.as_deref()?)
-}
-
-/// The refusal the PARAMETERS half of the method's request validator earns this request,
-/// or `None` when it declares no parameter check or the request carries everything the
-/// method declares required.
-///
-/// The parameters are checked FIRST, before the payload: a request that does not even
-/// carry what the method declares required is refused for that rather than for whatever
-/// its payload says.
-fn parameters_refusal(
-    api: &RestApiEntry,
-    method: Option<&MethodEntry>,
-    req: &RtRequest,
-) -> Option<GatewayRefusal> {
-    let validator = declared_validator(api, method)?;
-    if !validator.validate_request_parameters {
-        return None;
-    }
-    let missing = missing_parameters(method?, req);
-    (!missing.is_empty()).then(|| bad_request_parameters(&missing))
-}
-
-/// The names of the request parameters the method declares REQUIRED that this request does
-/// not carry, in the order the method declares them.
-///
-/// `Method$requestParameters` is "a key-value map defining required or optional method
-/// request parameters … the value is a Boolean flag indicating whether the parameter is
-/// required", so only the `true` ones can be missing. A parameter is carried when it is
-/// present and NOT BLANK, which is what request validation verifies of a query-string
-/// parameter or a header.
-///
-/// A PATH parameter is never missing: the request path matched the resource template that
-/// declares it, which cannot match with that segment absent.
-fn missing_parameters(method: &MethodEntry, req: &RtRequest) -> Vec<String> {
-    let mut missing: Vec<String> = Vec::new();
-    for (expression, required) in &method.request_parameters {
-        if !required {
-            continue;
-        }
-        let Some((source, name)) = parameter_source(expression) else {
-            continue;
-        };
-        let carried = match source {
-            ParameterIn::Query => query_of(req.uri()).split('&').any(|pair| {
-                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-                key == name && !value.is_empty()
-            }),
-            ParameterIn::Header => req
-                .headers()
-                .get(name.to_ascii_lowercase())
-                .is_some_and(|value| !value.is_empty()),
-            ParameterIn::Path => true,
-        };
-        if !carried && !missing.iter().any(|already| already == name) {
-            missing.push(name.to_string());
-        }
-    }
-    missing
-}
-
-/// The URL the model `model_name` of the API `api_id` is a JSON Schema resource under —
-/// the identifier API Gateway gives a model's schema, which is what a `$ref` from another
-/// model of the same API names.
-fn model_schema_url(api_id: &str, model_name: &str) -> String {
-    format!("https://apigateway.amazonaws.com/restapis/{api_id}/models/{model_name}")
-}
-
-/// The schema resources this validator resolves a `$ref` against: NOTHING but what this
-/// module registered itself.
-///
-/// A `Model`'s schema is a document any caller stores, and `$ref` is a dynamic resolution
-/// mechanism, so a schema could name a resource by any URL — including a `file:` one.
-/// Registering this as the compiler's loader REPLACES the one it comes with, so a
-/// reference the API's own models do not satisfy resolves to an error instead of reaching
-/// the host's filesystem or network: the only resources are the ones
-/// [`PendingBodyCheck::refusal`] adds, which are models of the api being invoked.
-#[derive(Debug)]
-struct NoSchemasBeyondTheApi;
-
-impl ::boon::UrlLoader for NoSchemasBeyondTheApi {
-    fn load(&self, url: &str) -> Result<::serde_json::Value, Box<dyn ::std::error::Error>> {
-        tracing::warn!(
-            reference = %url,
-            "the model's schema references a resource outside the api's own models, which \
-             this emulator resolves nothing for"
-        );
-        Err("this emulator resolves no schema outside the api's own models".into())
-    }
-}
-
-/// What validating one request's PAYLOAD needs, owned: the schema to validate it against
-/// and the sibling schemas that schema references.
-///
-/// Owned rather than borrowed on purpose. Compiling and evaluating a JSON Schema is the
-/// one piece of work in this data plane whose cost a caller's own RECORDS decide, so it is
-/// done with the shared store's lock RELEASED (see [`serve_resolved`]) — one request's
-/// payload check cannot hold up every other request to this service. The copy is of the
-/// stored schema text, which `CreateModel` bounds at
-/// [`crate::ops::create_model::MAX_MODEL_SCHEMA_CHARS`], and of the siblings that schema
-/// names, so the work and the copy are bounded by records a control-plane call had to
-/// store rather than by anything the invoke carries.
-#[derive(Debug)]
-struct PendingBodyCheck {
-    /// The api whose model this is, for the log and the schema's resource URL.
-    api_id: String,
-    /// The model the method declared for this request's content type.
-    model_name: String,
-    /// That model's schema, as stored.
-    schema: String,
-    /// The sibling models the schema REFERENCES by their model-schema URL, as
-    /// `(url, stored schema)`.
-    referenced: Vec<(String, String)>,
-}
-
-/// The payload check the method's request validator declares for this call, or `None` when
-/// it declares none that can be applied.
-///
-/// `Method$requestModels` is "a key-value map specifying data schemas … a key is a content
-/// type and the value is a `Model` name", so a content type the method maps no model to
-/// declares nothing to validate against. `None` is also the answer when the model names no
-/// record of the API or carries no schema: each is a configuration this emulator cannot
-/// validate against, and inventing a refusal for it would refuse requests AWS serves.
-fn pending_body_check(
-    api: &RestApiEntry,
-    method: Option<&MethodEntry>,
-    call: &MethodRequest,
-) -> Option<PendingBodyCheck> {
-    let validator = declared_validator(api, method)?;
-    if !validator.validate_request_body {
-        return None;
-    }
-    let model_name = method?.request_models.get(call.media_type())?;
-    let schema = api.models.get(model_name)?.schema.as_deref()?.to_string();
-    // A schema composed of references to OTHER models of the API resolves them: API
-    // Gateway identifies a model's schema by [`model_schema_url`], so a sibling the schema
-    // REFERENCES BY THAT URL is carried over with it. Only a referenced sibling is, so the
-    // work one request causes is bounded by the references the schema carries rather than
-    // by how many models the API holds.
-    let referenced = if schema.contains("$ref") {
-        api.models
-            .iter()
-            .filter(|(name, _)| *name != model_name)
-            .filter_map(|(name, sibling)| {
-                let url = model_schema_url(&api.id, name);
-                let text = sibling.schema.clone()?;
-                schema.contains(&url).then_some((url, text))
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    Some(PendingBodyCheck {
-        api_id: api.id.clone(),
-        model_name: model_name.clone(),
-        schema,
-        referenced,
-    })
-}
-
-impl PendingBodyCheck {
-    /// The refusal this request's payload earns against the model, or `None` when it
-    /// satisfies it.
-    ///
-    /// `CreateModel$schema` is "the schema for the model. For application/json models,
-    /// this should be JSON schema draft 4 model", so the payload is validated against that
-    /// document by a JSON Schema validator with draft 4 as the default dialect for a schema
-    /// that names none. A payload that is not a JSON document at all does not satisfy a
-    /// JSON Schema, so an unparseable (including an empty) body is refused exactly as a
-    /// structurally wrong one is; a body the transport did not buffer in memory
-    /// (`None`) is one this emulator cannot read, so it is validated against nothing.
-    ///
-    /// A stored schema this validator cannot READ as a JSON Schema — a document that is a
-    /// JSON object, which is all `CreateModel` requires of it, but no schema, or one whose
-    /// references resolve to nothing — is a method the stage cannot serve as configured:
-    /// the validator the method declares cannot be applied to anything, so the call is
-    /// answered through `API_CONFIGURATION_ERROR` exactly as an integration this module
-    /// cannot perform is, rather than served as if the check had passed.
-    ///
-    /// The work is bounded by its two inputs: the schema is at most
-    /// [`crate::ops::create_model::MAX_MODEL_SCHEMA_CHARS`] and the payload is what the
-    /// front door admitted, and a JSON Schema evaluation applies each keyword of the one
-    /// to the members of the other. Nothing here compiles a pattern into a backtracking
-    /// engine either — the validator's regexes are the `regex` crate's, which has no
-    /// backtracking — so a stored `pattern` cannot make the evaluation super-linear in the
-    /// payload.
-    fn refusal(&self, payload: Option<&[u8]>) -> Option<GatewayRefusal> {
-        let Ok(schema) = ::serde_json::from_str::<::serde_json::Value>(&self.schema) else {
-            return Some(self.unapplicable_schema("it is not a JSON document"));
-        };
-        let Ok(instance) = ::serde_json::from_slice::<::serde_json::Value>(payload?) else {
-            return Some(bad_request_body(unreadable_payload_detail()));
-        };
-
-        let mut compiler = ::boon::Compiler::new();
-        // The only schema resources are the ones registered below: see
-        // [`NoSchemasBeyondTheApi`] for why the compiler's own loader is replaced.
-        compiler.use_loader(Box::new(NoSchemasBeyondTheApi));
-        // "For application/json models, this should be JSON schema draft 4 model"
-        // (`CreateModel$schema`), so draft 4 is the dialect a schema that declares no
-        // `$schema` of its own is read under; one that declares a dialect keeps it.
-        compiler.set_default_draft(::boon::Draft::V4);
-        for (url, text) in &self.referenced {
-            if let Ok(document) = ::serde_json::from_str::<::serde_json::Value>(text) {
-                let _ = compiler.add_resource(url, document);
-            }
-        }
-        let url = model_schema_url(&self.api_id, &self.model_name);
-        if compiler.add_resource(&url, schema).is_err() {
-            return Some(self.unapplicable_schema("it is not a schema resource"));
-        }
-        let mut schemas = ::boon::Schemas::new();
-        let Ok(compiled) = compiler.compile(&url, &mut schemas) else {
-            return Some(self.unapplicable_schema(
-                "it is not a JSON Schema this emulator can compile, or it references a \
-                 resource that resolves to nothing",
-            ));
-        };
-        schemas
-            .validate(&instance, compiled)
-            .err()
-            .map(|failed| bad_request_body(validation_detail(&failed)))
-    }
-
-    /// The refusal a stored schema the validator cannot be built from earns, said once:
-    /// the method declares a check its own records make impossible, which is a
-    /// configuration the stage cannot serve the call through.
-    fn unapplicable_schema(&self, reason: &str) -> GatewayRefusal {
-        tracing::warn!(
-            api_id = %self.api_id,
-            model = %self.model_name,
-            reason = %reason,
-            "the method's request validator cannot be applied: the model's schema is not \
-             one this emulator can validate against"
-        );
-        API_CONFIGURATION_ERROR
-    }
-}
-
-/// The validation detail a payload that is not a JSON document at all earns: there is no
-/// schema finding to report, because the document the schema would be applied to could not
-/// be read.
-fn unreadable_payload_detail() -> String {
-    "[the request body could not be read as a JSON document]".to_string()
-}
-
-/// The validation's own finding about the payload, as one line, for
-/// `$context.error.validationErrorString`.
-///
-/// It is the VALIDATOR's report — which member of the payload failed which keyword of the
-/// model's schema — flattened to one line and bracketed the way API Gateway brackets that
-/// member in a gateway response, so a developer reading the refusal can see which part of
-/// the payload the model rejected. Nothing of it is written here: the schema's own URL line
-/// is dropped (it names the model this emulator compiled, not the payload) and the rest is
-/// the validator's text.
-fn validation_detail(failed: &::boon::ValidationError) -> String {
-    let reported = failed.to_string();
-    let findings = reported
-        .split_once('\n')
-        .map(|(_schema, findings)| findings)
-        .unwrap_or(reported.as_str());
-    let flattened: Vec<&str> = findings
-        .split_whitespace()
-        .filter(|word| *word != "-")
-        .collect();
-    format!("[{}]", flattened.join(" "))
-}
-
 /// What an integration reads off the METHOD REQUEST it serves: the media type the request
 /// declares, which selects the integration REQUEST template, and the media type the caller
 /// accepts, which selects the integration RESPONSE template.
@@ -3095,6 +2912,13 @@ impl MethodRequest {
     /// unmapped content type carries.
     pub fn media_type(&self) -> &str {
         &self.media_type
+    }
+
+    /// The PAYLOAD this call carries, or `None` when it carries none a reader can see —
+    /// what the method's request validator validates against the model's schema
+    /// ([`PendingBodyCheck::refusal`]).
+    pub fn payload(&self) -> Option<&[u8]> {
+        self.inputs.payload.as_deref()
     }
 }
 
@@ -3616,14 +3440,8 @@ fn mapped_request_parameter(
     req: &RtRequest,
     path_parameters: &BTreeMap<String, String>,
 ) -> MappedParameter {
-    if is_static_mapping_value(value) {
-        return match value
-            .strip_prefix('\'')
-            .and_then(|rest| rest.strip_suffix('\''))
-        {
-            Some(literal) => MappedParameter::Value(literal.to_string()),
-            None => MappedParameter::NotRead,
-        };
+    if let Some(literal) = static_mapping_literal(value) {
+        return MappedParameter::Value(literal.to_string());
     }
     if let Some(name) = value.strip_prefix(METHOD_REQUEST_HEADER_PREFIX) {
         return match req.headers().get(name) {
@@ -3852,7 +3670,7 @@ pub fn perform_integration(
         payload: integrated_payload,
         ..call.inputs.clone()
     };
-    let (content_type, body) = response_body(selected, call, &response_inputs).map_err(|template| {
+    let body = response_body(selected, call, &response_inputs).map_err(|template| {
         UnservedIntegration {
             refusal: API_CONFIGURATION_ERROR,
             reason: format!(
@@ -3861,11 +3679,17 @@ pub fn perform_integration(
             ),
         }
     })?;
+    let mut headers = mapped_response_headers(method, selected, status);
+    // The media type is the method response's own `Content-Type` mapping where it declares
+    // one, and `application/json` otherwise — never the key of the response template the
+    // caller's `Accept` chose, which selects the BODY.
+    let content_type =
+        taken_content_type(&mut headers).unwrap_or_else(|| JSON_CONTENT_TYPE.to_string());
     Ok(IntegratedResponse {
         status,
         content_type,
         body,
-        headers: mapped_response_headers(method, selected, status),
+        headers,
     })
 }
 
@@ -3873,9 +3697,8 @@ pub fn perform_integration(
 /// METHOD response declares, mapped as the INTEGRATION response says.
 ///
 /// A `MOCK` has no backend response to map from, so the one mapping it can resolve is the
-/// documented static value in single quotes ([`is_static_mapping_value`]): the literal
-/// between the quotes is the header's value. Read by stripping the quotes rather than by an
-/// index, so neither the read nor the length arithmetic can fail whatever was stored.
+/// documented static value in single quotes ([`static_mapping_literal`]): the literal
+/// between the quotes is the header's value.
 fn mapped_response_headers(
     method: Option<&MethodEntry>,
     selected: &GetIntegrationResponseOutput,
@@ -3892,10 +3715,7 @@ fn mapped_response_headers(
         if declared.is_none_or(|declared| !declared.contains_key(key)) {
             continue;
         }
-        let literal = is_static_mapping_value(value)
-            .then(|| value.strip_prefix('\'').and_then(|rest| rest.strip_suffix('\'')))
-            .flatten();
-        if let Some(literal) = literal {
+        if let Some(literal) = static_mapping_literal(value) {
             // A mapping declares ONE value for the header, so the name carries exactly it.
             mapped.insert(name.to_string(), vec![literal.to_string()]);
         }
@@ -4092,24 +3912,29 @@ fn rendered_mapping_template(template: &str, inputs: &TemplateInputs) -> Result<
     mapping_template::rendered(template, inputs).map_err(|unrendered| unrendered.reason)
 }
 
-/// The content type and body the selected integration response renders.
+/// The body the selected integration response renders.
 ///
 /// The template is chosen by the content type the caller asked for (`Accept`), then the
 /// JSON one, then the single template an integration response that declares exactly one
 /// carries. `Ok` with an EMPTY body when no template applies — a `MOCK` with no template
 /// answers no body — and `Err` when the chosen template is not one this emulator renders
 /// ([`rendered_mapping_template`]).
+///
+/// Which template was chosen decides the BODY and nothing else: the media type the response
+/// is SERVED with is the method response's own `Content-Type` mapping
+/// ([`taken_content_type`]), so a call whose method response declares none is served
+/// `application/json` whichever template keyed the chosen body.
 fn response_body(
     selected: &GetIntegrationResponseOutput,
     call: &MethodRequest,
     inputs: &TemplateInputs,
-) -> Result<(String, Vec<u8>), UnrenderableTemplate> {
+) -> Result<Vec<u8>, UnrenderableTemplate> {
     let Some(templates) = selected
         .response_templates
         .as_ref()
         .filter(|templates| !templates.is_empty())
     else {
-        return Ok((JSON_CONTENT_TYPE.to_string(), Vec::new()));
+        return Ok(Vec::new());
     };
     let chosen = call
         .accepted
@@ -4122,10 +3947,10 @@ fn response_body(
             (entries.len() == 1).then(|| entries[0])
         });
     let Some((content_type, template)) = chosen else {
-        return Ok((JSON_CONTENT_TYPE.to_string(), Vec::new()));
+        return Ok(Vec::new());
     };
     match rendered_mapping_template(template, inputs) {
-        Ok(body) => Ok((content_type.clone(), body.into_bytes())),
+        Ok(body) => Ok(body.into_bytes()),
         Err(reason) => Err(UnrenderableTemplate {
             content_type: content_type.clone(),
             bytes: template.len(),
@@ -4133,6 +3958,25 @@ fn response_body(
         }),
     }
 }
+
+/// The `Content-Type` `mapped` declares, REMOVED from the map, or `None` when the method
+/// response declares no mapping for that header.
+///
+/// `Content-Type` is a response parameter like every other one — a method response declares
+/// it and the integration response maps it ([`mapped_response_headers`]) — so it is the one
+/// thing that changes the media type a call is served with. Taken OUT of the map because a
+/// response carries one media type: it is [`IntegratedResponse::content_type`], and leaving
+/// it among the mapped headers too would send the name twice.
+fn taken_content_type(mapped: &mut BTreeMap<String, Vec<String>>) -> Option<String> {
+    let name = mapped
+        .keys()
+        .find(|name| name.eq_ignore_ascii_case(CONTENT_TYPE_HEADER))?
+        .clone();
+    mapped.remove(&name)?.into_iter().next()
+}
+
+/// The response header a media type travels in, as the wire compares its name.
+const CONTENT_TYPE_HEADER: &str = "content-type";
 
 /// The Velocity directives a mapping template may carry, from the Velocity Template
 /// Language reference (the `#`-introduced statements of the language a mapping template is
@@ -4642,29 +4486,66 @@ fn sigv4_credential_elements(req: &RtRequest) -> Option<Vec<String>> {
 /// service's control-plane model declares.
 fn refusal_response(api: Option<&RestApiEntry>, refusal: GatewayRefusal) -> RtResponse {
     let error_type = refusal.error_type;
-    let (status, body) = refusal_rendering(api, refusal);
-    let mut response = response_with(status, JSON_CONTENT_TYPE, body);
+    let content_type = refusal.content_type();
+    let rendered = refusal_rendering(api, refusal);
+    let mut response = response_with(rendered.status, content_type, rendered.body);
     if let Some(error_type) = error_type {
         let _ = response
             .headers_mut()
             .try_insert(ERROR_TYPE_HEADER, error_type);
     }
+    for (name, value) in rendered.headers {
+        if let Err(refused) = response
+            .headers_mut()
+            .try_insert(name.to_ascii_lowercase(), value)
+        {
+            tracing::warn!(
+                header = %name,
+                error = %refused,
+                "the gateway response's mapped header cannot be sent on the wire and is \
+                 skipped"
+            );
+        }
+    }
     response
 }
 
-/// The status and body one gateway-response refusal renders to, as the API answers it.
+/// What one gateway-response refusal renders to, as the API answers it.
+#[derive(Debug)]
+pub struct RenderedRefusal {
+    /// The status code the response is sent with.
+    pub status: u16,
+    /// The body it carries.
+    pub body: Vec<u8>,
+    /// The headers the API's customization of this gateway response writes on it, by the
+    /// name the mapping declared; see [`refusal_rendering`].
+    pub headers: BTreeMap<String, String>,
+}
+
+/// The status, body and headers one gateway-response refusal renders to, as the API answers
+/// it.
 ///
 /// The status code is the API's customization of this response type when it has one, then
 /// its customization of the whole class (`DEFAULT_4XX` / `DEFAULT_5XX`), then the status
 /// code the response type itself documents. The body is the customized
 /// `application/json` template with its `$context` references resolved
-/// ([`rendered_gateway_template`]), and otherwise the default `{"message": …}` body — which
-/// is what a template this emulator cannot render falls back to.
+/// ([`rendered_gateway_template`]), and otherwise the default `{"message": …}` body
+/// ([`default_refusal_body`]) — which is what a template this emulator cannot render falls
+/// back to.
+///
+/// The HEADERS are that same customization's `responseParameters`: a key is a mapping
+/// expression naming what the customization writes on the response, and a gateway response
+/// writes HEADERS ([`crate::ops::put_gateway_response::GATEWAY_RESPONSE_HEADER_PREFIXES`]),
+/// so a mapping declared there reaches the caller on the response the type is served with.
+/// The mapping this resolves is the documented static value in single quotes
+/// ([`static_mapping_literal`]) — the literal between the quotes is the header's value;
+/// a mapping that reads a value off the REQUEST names nothing here, because a gateway
+/// response is rendered from the refusal rather than from the request that earned it.
 ///
 /// Separate from [`refusal_response`] because the data plane SENDS this rendering while
 /// `TestInvokeMethod` REPORTS it as the simulated response, and a developer's
 /// customization must reach both.
-pub fn refusal_rendering(api: Option<&RestApiEntry>, refusal: GatewayRefusal) -> (u16, Vec<u8>) {
+pub fn refusal_rendering(api: Option<&RestApiEntry>, refusal: GatewayRefusal) -> RenderedRefusal {
     let documented = crate::state::default_gateway_status_code(refusal.response_type)
         .and_then(|code| code.parse::<u16>().ok())
         .unwrap_or(UNPLACEABLE_REFUSAL_STATUS);
@@ -4684,11 +4565,67 @@ pub fn refusal_rendering(api: Option<&RestApiEntry>, refusal: GatewayRefusal) ->
         .and_then(|template| rendered_gateway_template(template, &refusal));
     let body = match templated {
         Some(template) => template.into_bytes(),
-        None => ::serde_json::json!({ refusal.message_member: refusal.message.as_ref() })
-            .to_string()
-            .into_bytes(),
+        None => default_refusal_body(&refusal),
     };
-    (status, body)
+    RenderedRefusal {
+        status,
+        body,
+        headers: gateway_response_headers(customized),
+    }
+}
+
+/// The headers the gateway-response customization `customized` writes on the response it is
+/// served with; see [`refusal_rendering`] for which mappings resolve.
+fn gateway_response_headers(
+    customized: Option<&crate::ops::types::GetGatewayResponseOutput>,
+) -> BTreeMap<String, String> {
+    let mut mapped = BTreeMap::new();
+    for (key, value) in customized
+        .and_then(|response| response.response_parameters.as_ref())
+        .into_iter()
+        .flatten()
+    {
+        let Some(name) = crate::ops::put_gateway_response::GATEWAY_RESPONSE_HEADER_PREFIXES
+            .iter()
+            .find_map(|prefix| key.strip_prefix(prefix))
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        let literal = static_mapping_literal(value);
+        if let Some(literal) = literal {
+            mapped.insert(name.to_string(), literal.to_string());
+        }
+    }
+    mapped
+}
+
+/// API Gateway's OWN default body for `refusal`: the refusal's sentence under the member
+/// the response type carries it in.
+///
+/// Serialized by hand rather than through a JSON writer because the SEPARATOR is part of
+/// what API Gateway sends: the two bodies its request validator serializes itself carry a
+/// space after it ([`VALIDATION_RESPONSE_TYPES`]) and the ones its gateway-response template
+/// renders carry none, so a client comparing or hashing the payload sees the bytes the
+/// service sends.
+/// The member name and the sentence are both written as JSON strings, so a sentence
+/// carrying a quote or a backslash is escaped as the format requires.
+fn default_refusal_body(refusal: &GatewayRefusal) -> Vec<u8> {
+    // A refusal the endpoint states with a TEXT media type ([`EDGE_REFUSAL_CONTENT_TYPE`])
+    // carries the SENTENCE itself: the body a response declares a media type for has to be
+    // readable as that type, so a JSON envelope under `text` would be a body no client could
+    // parse by what the response says it is.
+    if refusal.content_type() != JSON_CONTENT_TYPE {
+        return refusal.message.as_bytes().to_vec();
+    }
+    let member = ::serde_json::Value::String(refusal.message_member.to_string()).to_string();
+    let message = ::serde_json::Value::String(refusal.message.to_string()).to_string();
+    let separator = if VALIDATION_RESPONSE_TYPES.contains(&refusal.response_type) {
+        ": "
+    } else {
+        ":"
+    };
+    format!("{{{member}{separator}{message}}}").into_bytes()
 }
 
 /// One data-plane response: a status, a content type and a body.
@@ -4772,3 +4709,12 @@ mod tests;
 /// re-exported whole, so the resolution above still reaches each name unqualified.
 mod response_cache;
 pub use response_cache::*;
+
+/// The RESPONSE COMPRESSION the api asks for, in a file of its own: the one concern that is
+/// about the BYTES of an answer rather than about which answer is served.
+mod compression;
+
+/// The method's own REQUEST VALIDATOR, in a file of its own; re-exported whole, so the
+/// resolution above still reaches each name unqualified.
+mod request_validation;
+pub use request_validation::*;

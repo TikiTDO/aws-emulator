@@ -334,6 +334,159 @@ pub(crate) fn json_template(body: &str) -> Value {
 }
 
 #[tokio::test]
+async fn an_integration_responses_selection_pattern_is_evaluated_server_side() {
+    // `IntegrationResponse$selectionPattern` is "the regular expression (regex) pattern used
+    // to choose an integration response based on the response from the back end". A `MOCK`
+    // has no back end: its request template IS what the integration answered, and the
+    // `statusCode` that rendering names is the result the patterns are matched against — so
+    // a `5\d{2}` branch surfaces as a real 500 on the wire, with its own body and its own
+    // mapped header, and the branch with NO pattern is the one a result no pattern covers
+    // maps to.
+    struct Case {
+        name: &'static str,
+        /// The `requestTemplates` entry of the `MOCK` integration, which for a `MOCK` is the
+        /// integration's own answer.
+        request_template: &'static str,
+        expected_status: u16,
+        expected_body: &'static str,
+        /// The mapped header the selected branch declares, by lowercased name.
+        expected_header: Option<(&'static str, &'static str)>,
+    }
+
+    // Rows differ along what the rule generalises over: which result the integration
+    // produced — one the unpatterned branch answers, one each patterned branch covers, a
+    // result no branch holds at all, and a rendering that names no result.
+    let cases = [
+        Case {
+            name: "a result the unpatterned branch answers",
+            request_template: r#"{"statusCode": 200}"#,
+            expected_status: 200,
+            expected_body: r#"{"route":"internal"}"#,
+            expected_header: None,
+        },
+        Case {
+            name: "a result the 5xx branch covers",
+            request_template: r#"{"statusCode": 500}"#,
+            expected_status: 500,
+            expected_body: r#"{"branch":"server"}"#,
+            expected_header: Some(("x-branch", "server")),
+        },
+        Case {
+            name: "a result the 4xx branch covers",
+            request_template: r#"{"statusCode": 404}"#,
+            expected_status: 404,
+            expected_body: r#"{"branch":"client"}"#,
+            expected_header: None,
+        },
+        Case {
+            name: "a result no branch holds maps to the unpatterned one",
+            request_template: r#"{"statusCode": 503}"#,
+            expected_status: 200,
+            expected_body: r#"{"route":"internal"}"#,
+            expected_header: None,
+        },
+        Case {
+            name: "a rendering that names no result maps to the unpatterned one",
+            request_template: r#"{"ok":true}"#,
+            expected_status: 200,
+            expected_body: r#"{"route":"internal"}"#,
+            expected_header: None,
+        },
+    ];
+
+    for (index, case) in cases.iter().enumerate() {
+        let gateway = Gateway::new();
+        let (api, root) = create_api(&gateway, "selection-pattern").await;
+        let resource = create_resource(&gateway, &api, &root, &format!("branch{index}")).await;
+        let resource = string_member(&resource, "id", case.name);
+        put_method(
+            &gateway,
+            &api,
+            &resource,
+            "GET",
+            json!({ "authorizationType": "NONE" }),
+        )
+        .await;
+        put_integration(
+            &gateway,
+            &api,
+            &resource,
+            "GET",
+            json!({
+                "type": "MOCK",
+                "requestTemplates": { "application/json": case.request_template },
+            }),
+        )
+        .await;
+        // The three branches: the unpatterned one, and one per status class, each with the
+        // method response that declares what it returns.
+        for (status, pattern, body, declared) in [
+            ("200", None, r#"{"route":"internal"}"#, json!({})),
+            (
+                "404",
+                Some(r"4\d{2}"),
+                r#"{"branch":"client"}"#,
+                json!({}),
+            ),
+            (
+                "500",
+                Some(r"5\d{2}"),
+                r#"{"branch":"server"}"#,
+                json!({ "method.response.header.X-Branch": true }),
+            ),
+        ] {
+            method_response(
+                &gateway,
+                &api,
+                &resource,
+                "GET",
+                status,
+                json!({ "responseParameters": declared }),
+            )
+            .await;
+            let mut request = json!({ "responseTemplates": json_template(body) });
+            if let Some(pattern) = pattern {
+                request["selectionPattern"] = json!(pattern);
+            }
+            if status == "500" {
+                request["responseParameters"] =
+                    json!({ "method.response.header.X-Branch": "'server'" });
+            }
+            integration_response(&gateway, &api, &resource, "GET", status, request).await;
+        }
+        deploy(&gateway, &api, "prod").await;
+
+        let answered = invoke(
+            &gateway,
+            &api,
+            "GET",
+            &format!("/prod/branch{index}"),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            answered.status, case.expected_status,
+            "case {:?}: expected {} on the wire, got {} with {:?}",
+            case.name, case.expected_status, answered.status, answered.body
+        );
+        assert_eq!(
+            answered.body, case.expected_body,
+            "case {:?}: expected the selected branch's body {:?}, got {:?}",
+            case.name, case.expected_body, answered.body
+        );
+        if let Some((name, value)) = case.expected_header {
+            assert_eq!(
+                answered.header(name),
+                Some(value),
+                "case {:?}: expected the selected branch's header {name}: {value}, got {:?}",
+                case.name,
+                answered.header(name)
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn every_request_to_a_deployed_stage_is_answered_from_the_apis_own_records() {
     let gateway = Gateway::new();
     let (api, root) = create_api(&gateway, "invoke-routing").await;
@@ -561,6 +714,9 @@ async fn a_mock_integrations_response_is_built_from_the_selected_integration_res
             absent_headers: &[],
         },
         Case {
+            // The template the caller's `Accept` chooses decides the BODY and nothing
+            // else: with no `Content-Type` mapping declared, the media type the response is
+            // served with stays `application/json`.
             name: "the template of the accepted content type is chosen",
             status: "200",
             templates: json!({
@@ -572,7 +728,7 @@ async fn a_mock_integrations_response_is_built_from_the_selected_integration_res
             accept: Some("text/plain"),
             expected_status: 200,
             expected_body: "form=plain",
-            expected_content_type: "text/plain",
+            expected_content_type: "application/json",
             expected_headers: &[],
             absent_headers: &[],
         },
@@ -588,7 +744,7 @@ async fn a_mock_integrations_response_is_built_from_the_selected_integration_res
             declared: json!({}),
             expected_status: 200,
             expected_body: "form=plain",
-            expected_content_type: "text/plain",
+            expected_content_type: "application/json",
             expected_headers: &[],
             absent_headers: &[],
         },
@@ -680,6 +836,24 @@ async fn a_mock_integrations_response_is_built_from_the_selected_integration_res
             expected_content_type: "application/json",
             expected_headers: &[],
             absent_headers: &["x-bad"],
+        },
+        Case {
+            // The one mapping that DOES change the media type: a `Content-Type` the method
+            // response declares and the integration response maps.
+            name: "a declared Content-Type mapping is the media type the call is served with",
+            status: "200",
+            templates: json!({
+                "application/json": r#"{"form":"json"}"#,
+                "application/xml": "<form>xml</form>",
+            }),
+            mapped: json!({ "method.response.header.Content-Type": "'application/xml'" }),
+            declared: json!({ "method.response.header.Content-Type": true }),
+            accept: Some("application/xml"),
+            expected_status: 200,
+            expected_body: "<form>xml</form>",
+            expected_content_type: "application/xml",
+            expected_headers: &[],
+            absent_headers: &[],
         },
         Case {
             name: "a declared static header mapping is returned, an undeclared one is not",

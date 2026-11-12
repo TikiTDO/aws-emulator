@@ -373,6 +373,9 @@ fn an_iam_authorized_method_authorizes_the_vended_sessions_execute_api_invoke() 
         .stack_size(BOOT_STACK_SIZE)
         .spawn(|| {
             let runtime = tokio::runtime::Builder::new_current_thread()
+                // The IO and TIME drivers a service's background work needs; see the
+                // sibling `apigateway_private_vpce_invoke` suite.
+                .enable_all()
                 .build()
                 .expect("build a current-thread runtime");
             runtime.block_on(async {

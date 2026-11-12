@@ -33,13 +33,10 @@ mod proxy_binary_media_types;
 mod http_proxy_function_url;
 #[path = "all/proxy_event_repeated_names.rs"]
 mod proxy_event_repeated_names;
-// Declared here, at the head, for the reason the entry above records.
 #[path = "all/test_invoke_method_lambda_permission.rs"]
 mod test_invoke_method_lambda_permission;
-// Declared here, at the head, for the reason the entry above records.
 #[path = "all/stage_access_logging.rs"]
 mod stage_access_logging;
-// Declared here, at the head, for the reason the entry above records.
 #[path = "all/stage_proxy_run_logs.rs"]
 mod stage_proxy_run_logs;
 #[path = "all/stage_trace_context.rs"]
@@ -507,8 +504,22 @@ mod stage_cognito_token_refusal_class;
 // reports — the decision its execution produced, and the status a client would have received.
 #[path = "all/test_invoke_authorizer.rs"]
 mod test_invoke_authorizer;
+// Appended for the reason the note above gives: what the EDGE does to a request and to the
+// answer independently of the integration — the payload it admits, and the content coding
+// the api's `minimumCompressionSize` has it serve the answer under.
+#[path = "all/stage_edge_admission.rs"]
+mod stage_edge_admission;
+// Appended for the reason the note above gives: what the edge SENDS for a refused request —
+// the headers a gateway response's `responseParameters` write on it, the exception class it
+// names, and the exact bytes of its default body.
+#[path = "all/gateway_response_wire_rendering.rs"]
+mod gateway_response_wire_rendering;
+// Appended for the reason the note above gives: the method's own REQUEST VALIDATOR applied
+// to a SIMULATED invocation, asserted beside the deployed stage's answer for the same
+// records.
+#[path = "all/test_invoke_method_request_validator.rs"]
+mod test_invoke_method_request_validator;
 // Appended for the reason the note above gives: the exception CLASS a deployed stage names on
 // the `500` it answers when it cannot serve the call at all.
 #[path = "all/stage_internal_error_class.rs"]
 mod stage_internal_error_class;
-

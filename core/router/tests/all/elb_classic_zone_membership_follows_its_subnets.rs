@@ -150,6 +150,9 @@ fn a_classic_load_balancers_zones_follow_the_subnets_it_is_attached_to() {
             let mut router = build_router(engine);
             router.set_request_authentication(false);
             let runtime = tokio::runtime::Builder::new_current_thread()
+                // See the sibling `elbv2_subnet_vpc_membership` suite: the IO and TIME
+                // drivers a service's background work needs, without which tokio panics.
+                .enable_all()
                 .build()
                 .expect("a current-thread runtime");
 

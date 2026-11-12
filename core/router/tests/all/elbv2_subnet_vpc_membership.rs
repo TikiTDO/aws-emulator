@@ -234,6 +234,11 @@ fn a_placement_spanning_two_vpcs_is_refused() {
             let mut router = build_router(engine);
             router.set_request_authentication(false);
             let runtime = tokio::runtime::Builder::new_current_thread()
+                // The IO and TIME drivers, as the sibling suites whose services open a
+                // loopback listener or wait on the clock enable them: a service this router
+                // mounts may do either on a background task of the request it served, and a
+                // runtime without those drivers panics inside tokio when it does.
+                .enable_all()
                 .build()
                 .expect("a current-thread runtime");
 

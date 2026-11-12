@@ -235,6 +235,10 @@ fn a_private_api_is_reached_through_the_endpoint_its_policy_names() {
             let mut router = build_router(engine);
             router.set_request_authentication(false);
             let runtime = tokio::runtime::Builder::new_current_thread()
+                // The IO and TIME drivers a service's background work needs: this suite
+                // stands a load balancer up and invokes a function, and both reach work that
+                // panics inside tokio when the runtime has neither.
+                .enable_all()
                 .build()
                 .expect("a current-thread runtime");
 

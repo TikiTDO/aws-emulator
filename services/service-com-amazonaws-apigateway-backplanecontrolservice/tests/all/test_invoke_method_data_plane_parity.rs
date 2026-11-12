@@ -265,7 +265,9 @@ async fn a_simulated_invocation_reports_what_the_deployed_stage_serves() {
             headers: vec![("Content-Type", "application/json"), ("Accept", "text/plain")],
             status: 200,
             body: "no pets",
-            reported_headers: vec![("Content-Type", "text/plain")],
+            // The accepted template decides the BODY; with no `Content-Type` mapping
+            // declared, the media type stays `application/json` on both sides.
+            reported_headers: vec![("Content-Type", "application/json")],
         },
         Parity {
             case: "a POST method answering its own status",

@@ -483,6 +483,9 @@ fn a_cognito_user_pools_authorizer_gates_a_deployed_rest_method() {
         .stack_size(BOOT_STACK_SIZE)
         .spawn(|| {
             let runtime = tokio::runtime::Builder::new_current_thread()
+                // The IO and TIME drivers a service's background work needs; see the
+                // sibling `apigateway_private_vpce_invoke` suite.
+                .enable_all()
                 .build()
                 .expect("build a current-thread runtime");
             runtime.block_on(async {

@@ -8686,6 +8686,7 @@ dependencies = [
  "bytes",
  "chrono",
  "csv",
+ "flate2",
  "form_urlencoded",
  "hex",
  "http",
