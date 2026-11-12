@@ -130,6 +130,20 @@ const CLASSES: &[Class] = &[
     },
 ];
 
+/// The rows a class service publishes that belong to NO rate class: a COUNT of a
+/// resource rather than a rate, so such a row is published with the quota's own text and
+/// with neither a window nor a call count. Named by `(ServiceCode, QuotaName)`, so a row
+/// whose name states a rate can never be excused by this table.
+///
+/// SOURCE: AWS's published Service Quotas data for the service code, as
+/// `src/state/quota_rows/cognito_idp.rs` carries it: Amazon Cognito User Pools publishes
+/// a count of the account's user pools and a count of one pool's resource servers beside
+/// its category rates.
+const COUNT_ROWS: &[(&str, &str)] = &[
+    ("cognito-idp", "Resource servers per user pool"),
+    ("cognito-idp", "User pools per account"),
+];
+
 /// The display name AWS's integrated-service inventory reports for a `ServiceCode`.
 ///
 /// SOURCE: AWS's own Service Quotas service catalog (what `aws service-quotas
@@ -347,15 +361,38 @@ async fn a_class_service_publishes_no_row_outside_its_classes() {
     for service_code in service_codes {
         for row in default_quotas(&caller, service_code).await {
             let name = row["QuotaName"].as_str().unwrap_or_default();
+            let code = row["QuotaCode"].as_str().unwrap_or_default();
             let matched = CLASSES
                 .iter()
                 .filter(|class| class.service_code == service_code)
                 .any(|class| subject(class, name).is_some());
+            if COUNT_ROWS.contains(&(service_code, name)) {
+                // A count is published over no window and with no call count: the class
+                // rules above are about the rates, so the exemption is only ever a row
+                // AWS publishes as a count. Its `Description` is the quota's own text,
+                // which this catalog publishes only where it can cite it — never wording
+                // authored here — so a count carries none.
+                assert!(
+                    !matched,
+                    "case {service_code}/{code}: a count is not a rate, got {name:?}"
+                );
+                assert!(
+                    row.get("Description").is_none_or(Value::is_null),
+                    "case {service_code}/{code}: this catalog cites no text for a count, so it \
+                     publishes none, got {row}"
+                );
+                assert!(
+                    row.get("Period").is_none_or(Value::is_null)
+                        && row.get("UsageMetric").is_none_or(Value::is_null),
+                    "case {service_code}/{code}: a count is published over no window and with \
+                     no call count, got {row}"
+                );
+                continue;
+            }
             assert!(
                 matched,
-                "case {service_code}/{}: every row of this service belongs to one of its \
-                 published classes, got {name:?}",
-                row["QuotaCode"].as_str().unwrap_or_default()
+                "case {service_code}/{code}: every row of this service belongs to one of its \
+                 published classes, got {name:?}"
             );
         }
     }

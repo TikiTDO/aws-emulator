@@ -3346,12 +3346,10 @@ fn seed_quota_catalog() -> Vec<CatalogService> {
         // [`comprehend_quotas`], [`dax_quotas`], [`directconnect_quotas`],
         // [`dms_quotas`], [`docdb_quotas`], [`quicksight_quotas`]) — the DAX node
         // plane among them, which keeps its name and value under AWS's own code. The
-        // user-pool resource-server row this catalog used to key on `L-7CDAF993` is
-        // withdrawn with them: that evidence publishes the code as one of the
-        // service's CATEGORY request-rate quotas, and the category it names is not
-        // among the data available here, so the code is left to the
-        // default-quota-set gap rather than resolving the per-user-pool plane of
-        // another quota.
+        // user-pool resource-server row is published under `L-7CDAF993`, the code that
+        // evidence states for it, beside the count of the account's user pools under
+        // `L-66E6DF30`: each is a COUNT rather than a category rate, so neither carries
+        // the one-second window or the category call count of the rates around it.
         service(
             "b2bi",
             "B2B Data Interchange",

@@ -39,6 +39,8 @@ mod aws_quota_metadata_per_code;
 mod catalog_identity;
 #[path = "all/catalog_pagination.rs"]
 mod catalog_pagination;
+#[path = "all/cognito_user_pool_default_quotas.rs"]
+mod cognito_user_pool_default_quotas;
 #[path = "all/context_id_domain.rs"]
 mod context_id_domain;
 #[path = "all/cross_region_settlement.rs"]

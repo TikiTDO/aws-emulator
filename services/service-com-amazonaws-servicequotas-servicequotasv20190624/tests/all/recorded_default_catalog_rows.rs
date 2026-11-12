@@ -239,6 +239,59 @@ const ROWS: &[Row] = &[
     Row {
         service_code: "cognito-idp",
         service_name: "Amazon Cognito User Pools",
+        quota_code: "L-574C86AE",
+        quota_name: "Rate of UserResourceUpdate requests",
+        value: 25.0,
+        unit: "None",
+        adjustable: false,
+        description: "The maximum combined call rate (requests per second) for all API operations \
+                      in the UserResourceUpdate category. All operations within a category \
+                      share the same quota. For the list of included operations, see \
+                      https://docs.aws.amazon.com/cognito/latest/developerguide/\
+                      limits.html#category_operations.",
+        period: Some((1, "SECOND")),
+        metric: Metric::Calls {
+            usage_service: "Cognito User Pool",
+            resource: "UserResourceUpdate",
+        },
+        context: None,
+    },
+    // The service's RESOURCE COUNTS: a count of the account's user pools and a count of
+    // one pool's resource servers, neither of them a rate, so neither carries the
+    // category window or the category call count. The service publishes a description for
+    // each, and its text is not among the data available here — unlike the category
+    // sentence, which is fixed text around the category's own name — so the catalog
+    // publishes none for them and the rows below state that gap with an empty
+    // `description`.
+    Row {
+        service_code: "cognito-idp",
+        service_name: "Amazon Cognito User Pools",
+        quota_code: "L-66E6DF30",
+        quota_name: "User pools per account",
+        value: 1000.0,
+        unit: "None",
+        adjustable: true,
+        description: "",
+        period: None,
+        metric: Metric::None,
+        context: None,
+    },
+    Row {
+        service_code: "cognito-idp",
+        service_name: "Amazon Cognito User Pools",
+        quota_code: "L-7CDAF993",
+        quota_name: "Resource servers per user pool",
+        value: 25.0,
+        unit: "None",
+        adjustable: true,
+        description: "",
+        period: None,
+        metric: Metric::None,
+        context: None,
+    },
+    Row {
+        service_code: "cognito-idp",
+        service_name: "Amazon Cognito User Pools",
         quota_code: "L-7D6E8ED3",
         quota_name: "Rate of UserAccountRecovery requests",
         value: 30.0,
@@ -810,8 +863,7 @@ fn covered_service_codes() -> Vec<&'static str> {
 
 /// Codes these services publish NOTHING under: the descriptive stand-ins their quota
 /// names yield (`src/state.rs::descriptive_quota_code`), which this catalog used to key
-/// their rows on, plus one code in AWS's own namespace whose quota this catalog cannot
-/// cite.
+/// their rows on.
 ///
 /// SOURCE: the recorded `ListAWSDefaultServiceQuotas` response of each service code,
 /// which reports each of these as a surplus entry.
@@ -819,10 +871,6 @@ const WITHDRAWN_CODES: &[(&str, &str)] = &[
     ("cognito-identity", "IdentityPools"),
     ("cognito-idp", "UserPoolsPerAccount"),
     ("cognito-idp", "AppClientsPerUserPool"),
-    // A code AWS mints: the recorded listing publishes it as one of this service's
-    // category request-rate quotas, and this catalog cannot cite the category, so it
-    // publishes no row under it rather than resolving another quota's record.
-    ("cognito-idp", "L-7CDAF993"),
     ("comprehend", "CustomClassifiersPerAccount"),
     ("dax", "NodesPerCluster"),
     ("directconnect", "ConnectionsPerRegion"),
@@ -936,7 +984,13 @@ async fn assert_row(caller: &Client, region: &str, row: &Row) {
     );
     assert_eq!(
         quota["Description"],
-        json!(row.description),
+        if row.description.is_empty() {
+            // A row whose published text this catalog cannot cite publishes no
+            // `Description` member at all, rather than wording authored here.
+            Value::Null
+        } else {
+            json!(row.description)
+        },
         "case {case}: a description is the quota's own published text, got {quota}"
     );
     assert_eq!(
@@ -1039,10 +1093,19 @@ async fn a_covered_service_publishes_exactly_the_rows_it_cites() {
             );
             for quota in &quotas {
                 let code = quota["QuotaCode"].as_str().unwrap_or_default();
-                assert!(
-                    !quota["Description"].as_str().unwrap_or_default().is_empty(),
-                    "case {case} {code}: every published row carries the quota's description, \
-                     got {quota}"
+                // Every published row carries the quota's description, except the rows
+                // whose published text this catalog cannot cite, which the table above
+                // names with an empty `description` and which publish no member at all.
+                let citable = ROWS
+                    .iter()
+                    .chain(UNCITED_ROWS)
+                    .any(|row| row.quota_code == code && !row.description.is_empty());
+                let served = quota["Description"].as_str().unwrap_or_default();
+                assert_eq!(
+                    !served.is_empty(),
+                    citable,
+                    "case {case} {code}: a row publishes the quota's description where this \
+                     catalog cites one and none where it does not, got {quota}"
                 );
             }
         }
