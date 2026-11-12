@@ -1,15 +1,27 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListAssociations
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListAssociations`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListAssociations::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the State Manager associations this service's store holds
+//! ([`crate::state::associations::AssociationRecord`]), so what `CreateAssociation`
+//! persisted and `UpdateAssociation` revised is what this lists, and what
+//! `DeleteAssociation` removed is no longer listed. A REPORT: it selects, projects and
+//! pages, and writes nothing.
+//!
+//! "Returns all State Manager associations in the current Amazon Web Services account and
+//! Amazon Web Services Region": an association is reached through the endpoint it was
+//! created at, and the Region comes from the request's own credential scope, so a listing
+//! reports that Region's associations and no other's. The store yields them in ascending
+//! association-id order, which is what makes a page's resume cursor total — the cursor IS
+//! the id the next page starts at, not an offset into a list that may have changed between
+//! two pages, and a `NextToken` shaped like no association id was not issued here, which
+//! is what `InvalidNextToken` reports.
+//!
+//! "You can limit the results to a specific State Manager association document or managed
+//! node by specifying a filter": each filter compares one attribute of the association
+//! against the whole value it carries, two filters narrow together, and the keys are the
+//! modelled `AssociationFilterKey` enum
+//! ([`crate::state::associations::AssociationRecord::matches_filter`]).
 //!
 //! ## Shape of an operation
 //!
@@ -150,18 +162,84 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListAssociations` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListAssociationsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListAssociations"))
+        // `MaxResults`'s range, the filter list's length and each filter's required key and
+        // non-empty value are MODELLED constraints, so the centralized walk has already
+        // refused anything outside them. What is read here is which associations the
+        // request's filters admit, and where its page starts.
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            ListAssociationsErrorModeled::InternalServerError(InternalServerError {
+                message: Some("the association store is unavailable".to_string()),
+            })
+        })?;
+
+        let filters = input.association_filter_list.clone().unwrap_or_default();
+        // A key outside the modelled `AssociationFilterKey` enum names no attribute of an
+        // association, so it is a malformed request rather than a filter that admits
+        // nothing. That enum is a modelled constraint, so this is a backstop rather than the
+        // first line of defence, and the refusal lists what this listing does accept.
+        for filter in &filters {
+            if !associations::is_association_filter_key(&filter.key) {
+                return Err(crate::scaffolded::Scaffolded::validation(
+                    crate::state::invalid_filter_key_message(
+                        &filter.key,
+                        ASSOCIATION_FILTER_KEY_VALUES,
+                    ),
+                ));
+            }
+        }
+
+        let page_size = associations::association_page_size(input.max_results)
+            .map_err(crate::scaffolded::Scaffolded::validation)?;
+
+        // The token this operation hands out is the id of the association the next page
+        // starts at, so a token shaped like no association id was not one of ours.
+        let resume_from = match input.next_token.as_deref() {
+            None | Some("") => None,
+            Some(token) if associations::is_association_id(token) => Some(token),
+            Some(_) => {
+                return Err(ListAssociationsErrorModeled::InvalidNextToken(
+                    InvalidNextToken {
+                        message: Some(crate::state::INVALID_NEXT_TOKEN.to_string()),
+                    },
+                )
+                .into())
+            }
+        };
+
+        let region = crate::state::request_region(ctx.parts());
+        let now = ::std::time::SystemTime::now();
+        let store = state.lock();
+
+        let mut listed = Vec::new();
+        let mut next_token = None;
+        for (id, record) in store.associations_in_region(&region) {
+            if resume_from.is_some_and(|from| id < from) {
+                continue;
+            }
+            // Two filters narrow together: an association is listed only when every filter
+            // the request carries admits it.
+            if !filters
+                .iter()
+                .all(|filter| record.matches_filter(&filter.key, &filter.value, now))
+            {
+                continue;
+            }
+            if listed.len() == page_size {
+                // The page is full and an association is still waiting: hand the caller the
+                // id it resumes at, so the next request continues where this one stopped.
+                next_token = Some(id.to_string());
+                break;
+            }
+            listed.push(record.to_association(now));
+        }
+
+        Ok(ListAssociationsOutput {
+            associations: Some(listed),
+            next_token,
+        })
     }
 }
+
+// The association slice of this service's store: the records a create wrote, the page size
+// this listing serves and the one reading of an association id and a filter key.
+use crate::state::associations;

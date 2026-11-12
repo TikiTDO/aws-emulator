@@ -30,8 +30,9 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 use crate::ops::types::{
-    AlarmConfiguration, AssociationDescription, AssociationOverview,
+    AlarmConfiguration, Association, AssociationDescription, AssociationOverview,
     InstanceAssociationOutputLocation, Target, TargetLocation,
+    ASSOCIATION_FILTER_KEY_VALUES,
 };
 
 use super::ComAmazonawsSsmAmazonssmState;
@@ -213,6 +214,52 @@ pub fn names_no_output_bucket(location: Option<&InstanceAssociationOutputLocatio
     s3.output_s3_bucket_name
         .as_deref()
         .is_none_or(str::is_empty)
+}
+
+// ---------------------------------------------------------------------------
+// Listing the associations an account holds
+// ---------------------------------------------------------------------------
+
+/// The lower bound the modelled `MaxResults` of an association listing carries
+/// (`ListAssociationsRequest$MaxResults`, range 1..50).
+pub const MIN_ASSOCIATION_PAGE_SIZE: i32 = 1;
+
+/// The upper bound of the same member, and the page size a request naming no `MaxResults`
+/// is served up to (see [`super::page_size`]).
+pub const MAX_ASSOCIATION_PAGE_SIZE: i32 = 50;
+
+/// The page size an association listing serves (see [`super::page_size`]).
+pub fn association_page_size(max_results: Option<i32>) -> Result<usize, String> {
+    super::page_size(
+        max_results,
+        MIN_ASSOCIATION_PAGE_SIZE,
+        MAX_ASSOCIATION_PAGE_SIZE,
+    )
+}
+
+/// Whether `candidate` could be an association id, and so whether a `NextToken` is one
+/// this service issued: a listing's cursor is the id of the association the next page
+/// starts at, so a value the modelled `AssociationId` pattern
+/// `^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$` does not
+/// admit was not issued here.
+pub fn is_association_id(candidate: &str) -> bool {
+    let mut groups = candidate.split('-');
+    for width in [8usize, 4, 4, 4, 12] {
+        let Some(group) = groups.next() else {
+            return false;
+        };
+        if group.len() != width || !group.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    groups.next().is_none()
+}
+
+/// Whether `key` is a key an association listing filters on — the modelled
+/// `AssociationFilterKey` enum, which is what tells an accepted filter from a refused one.
+/// The comparison is exact: a filter key is a name, not a prose label.
+pub fn is_association_filter_key(key: &str) -> bool {
+    ASSOCIATION_FILTER_KEY_VALUES.contains(&key)
 }
 
 /// One version of an association: everything a create or an update sets, held as that call
@@ -420,6 +467,99 @@ impl AssociationRecord {
             alarm_configuration: version.alarm_configuration.clone(),
             triggered_alarms: None,
             association_dispatch_assume_role: version.association_dispatch_assume_role.clone(),
+        }
+    }
+
+    /// The modelled `Association` of this association as of `now`: what a listing reports,
+    /// which is this association's version in force narrowed to the members that shape
+    /// carries.
+    ///
+    /// Every member is read from the same place the `AssociationDescription` above reads
+    /// it, so a listing and a describe of one association never disagree:
+    /// `AssociationVersion` is the version in force, and the members a version holds
+    /// (`DocumentVersion`, the targets, the schedule, the association name, the schedule
+    /// offset, the duration and the target maps) are that version's. `LastExecutionDate` is
+    /// unset because nothing has run this association.
+    pub fn to_association(&self, now: SystemTime) -> Association {
+        let version = self.latest();
+        Association {
+            name: Some(self.name.clone()),
+            instance_id: self.instance_id.clone(),
+            association_id: Some(self.association_id.clone()),
+            association_version: Some(self.latest_version().to_string()),
+            document_version: version.and_then(|version| version.document_version.clone()),
+            targets: version
+                .map(|version| version.targets.clone())
+                .filter(|targets| !targets.is_empty()),
+            last_execution_date: None,
+            overview: Some(self.overview(now)),
+            schedule_expression: version.and_then(|version| version.schedule_expression.clone()),
+            association_name: version.and_then(|version| version.association_name.clone()),
+            schedule_offset: version.and_then(|version| version.schedule_offset),
+            duration: version.and_then(|version| version.duration),
+            target_maps: version
+                .map(|version| version.target_maps.clone())
+                .filter(|target_maps| !target_maps.is_empty()),
+        }
+    }
+
+    /// Whether the filter `key`/`value` admits this association as of `now`.
+    ///
+    /// One filter compares ONE attribute of the association against the whole value it
+    /// carries: "Use a filter to return a more specific list of results"
+    /// (`ListAssociationsRequest$AssociationFilterList`), and the keys are the modelled
+    /// `AssociationFilterKey` enum ([`is_association_filter_key`]). A key naming an
+    /// attribute no association here carries admits none: a key this service does not know
+    /// admits none either, which is a case a caller cannot reach, because an unknown key is
+    /// refused before any association is read.
+    pub fn matches_filter(&self, key: &str, value: &str, now: SystemTime) -> bool {
+        let version = self.latest();
+        match key {
+            // "The name of the SSM document" the association applies, by the name the
+            // document is held under.
+            "Name" => self.name == value,
+            // "The ID created by the system when you create an association"
+            // (`Association$AssociationId`).
+            "AssociationId" => self.association_id == value,
+            // "Filtering associations using the InstanceID attribute only returns legacy
+            // associations created using the InstanceID attribute. Associations targeting
+            // the managed node that are part of the Target Attributes ResourceGroup or Tags
+            // aren't returned" (same member), so the node a create NAMED is compared and the
+            // nodes a target selects are not.
+            "InstanceId" => self.instance_id.as_deref() == Some(value),
+            // "The association name" (`Association$AssociationName`), as the version in
+            // force carries it.
+            "AssociationName" => {
+                version.and_then(|version| version.association_name.as_deref()) == Some(value)
+            }
+            // "The status of the association" (`AssociationOverview$Status`), which is the
+            // association's own progress as of this instant.
+            "AssociationStatusName" => self.overview(now).status.as_deref() == Some(value),
+            // The resource group the association targets, named by either target-key
+            // spelling the `Target` doc gives a resource group
+            // (`super::commands::TARGET_KEY_RESOURCE_GROUP_NAME` and
+            // `TARGET_KEY_RESOURCE_GROUP`).
+            "ResourceGroupName" => version.is_some_and(|version| {
+                version.targets.iter().any(|target| {
+                    target.key.as_deref().is_some_and(|key| {
+                        key == super::commands::TARGET_KEY_RESOURCE_GROUP_NAME
+                            || key == super::commands::TARGET_KEY_RESOURCE_GROUP
+                    }) && target
+                        .values
+                        .iter()
+                        .flatten()
+                        .any(|targeted| targeted == value)
+                })
+            }),
+            // "The date on which the association was last run"
+            // (`Association$LastExecutionDate`): running an association is the SSM Agent's
+            // own poll from a managed node and happens on no node here, so no association
+            // has a date either side of the one a filter names.
+            "LastExecutedBefore" | "LastExecutedAfter" => false,
+            // A cloud connector is not something a create or an update of an association
+            // names, so no association carries a connector id to compare.
+            "CloudConnectorId" => false,
+            _ => false,
         }
     }
 
