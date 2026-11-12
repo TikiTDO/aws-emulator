@@ -207,3 +207,7 @@ mod custom_lambda_rule_evaluation;
 mod pack_rule_evaluates_a_recorded_resource;
 #[path = "all/read_paths_and_assigned_ids.rs"]
 mod read_paths_and_assigned_ids;
+#[path = "all/conformance_pack_template_refusal_message.rs"]
+mod conformance_pack_template_refusal_message;
+#[path = "all/conformance_pack_not_found_message.rs"]
+mod conformance_pack_not_found_message;

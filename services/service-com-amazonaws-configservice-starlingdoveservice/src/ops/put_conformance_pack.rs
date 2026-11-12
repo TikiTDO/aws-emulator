@@ -16,7 +16,12 @@
 //!   template declares ([`CONFORMANCE_PACK_TEMPLATE_RESOURCE_TYPES`]); a body that is
 //!   neither is refused with the modelled `ConformancePackTemplateValidationException`
 //!   ("You have specified a template that is not valid or supported") and leaves NO
-//!   pack behind for that name;
+//!   pack behind for that name — worded with the service's fixed text for the reading
+//!   that refused it: [`INVALID_TEMPLATE_MESSAGE`] for a body that is not the
+//!   CloudFormation template a pack is deployed from, and the errors Config's own
+//!   conformance pack validation found in a template it could read
+//!   ([`invalid_conformance_pack_template_message`]), neither reporting any part of the
+//!   body;
 //! * "PutConformancePack is an idempotent API. Subsequent requests won't create a
 //!   duplicate resource if one was already created": a second call for the same name
 //!   redeploys that pack rather than creating another, and "tags will not be updated,
@@ -262,13 +267,42 @@ const PARAMETER_VALUE_MEMBER: &str = "Value";
 /// See [`REMEDIATION_RULE_NAME_MEMBER`].
 const PARAMETER_VALUES_MEMBER: &str = "Values";
 
-/// How Config words `ConformancePackTemplateValidationException` for a template body it
-/// cannot deploy.
+/// How Config words `ConformancePackTemplateValidationException` for a body that is not
+/// the CloudFormation template a conformance pack is deployed from at all — one that is
+/// no single YAML (or JSON) mapping document, that declares no resource, or that declares
+/// a resource without the type and properties CloudFormation requires of it.
 ///
-/// A FIXED service sentence — the recorded refusal of a body that is not a template
-/// carries it and reports no part of the body — which the refusals that name WHAT about
-/// the template is unsupported extend rather than replace.
+/// A FIXED service sentence, carried WHOLE and carrying no part of the body: the recorded
+/// refusal of a body that is not a template is exactly this text and reports nothing of
+/// what was sent, so neither does any other refusal of this class. The errors Config's
+/// own conformance pack validation finds in a template it COULD read are worded the other
+/// way ([`invalid_conformance_pack_template_message`]).
 pub const INVALID_TEMPLATE_MESSAGE: &str = "Template passed in the input parameter is invalid";
+
+/// How Config words `ConformancePackTemplateValidationException` for a template it read as
+/// a CloudFormation template but whose contents its own conformance pack validation found
+/// errors in.
+///
+/// RECORDED behaviour: a fixed opening sentence, the errors that validation found rendered
+/// as the bracketed list they are, and a fixed closing sentence. The only variable part is
+/// the LIST — each entry states a class of fault and names no part of the body, so the
+/// refusal reports neither the logical id nor the type of the resource it was found on.
+pub fn invalid_conformance_pack_template_message(errors: &[&str]) -> String {
+    format!(
+        "Invalid conformance pack template provided. Errors found: [{}]. Fix your template and \
+         try again.",
+        errors.join(", ")
+    )
+}
+
+/// The template error Config reports for a template declaring a resource of a type a
+/// conformance pack does not deploy ([`CONFORMANCE_PACK_TEMPLATE_RESOURCE_TYPES`]).
+///
+/// RECORDED wording, and ONE entry however many such resources the template declares:
+/// the error is about the type(s) the template provided, which is why it names none of
+/// them and reads plurally.
+const UNSUPPORTED_RESOURCE_TYPE_TEMPLATE_ERROR: &str =
+    "Unsupported resource type(s) provided in the template";
 
 /// The section of a template that declares the resources it deploys, and the member of
 /// one declared resource that names its type. Both are CloudFormation's own spelling,
@@ -424,7 +458,8 @@ struct DeclaredRemediation {
     requested: RemediationConfiguration,
 }
 
-/// The resources `body` declares, or why it is not a conformance pack template.
+/// The resources `body` declares, or how Config words its refusal of a body that is not
+/// a conformance pack template.
 ///
 /// The body is READ, not matched: `yaml-rust2` parses it as the YAML 1.2 document a
 /// CloudFormation template is written as (and JSON is a subset of), so a body is judged
@@ -434,22 +469,43 @@ struct DeclaredRemediation {
 /// declares the properties CloudFormation requires for that type — a `Source` for a
 /// Config rule, and a `ConfigRuleName`, `TargetType` and `TargetId` for a remediation
 /// action, whose rule the same template must declare.
+///
+/// Which of the service's two fixed refusal texts the `Err` carries follows WHICH of
+/// those readings the body fails: a body that is not the CloudFormation template a pack
+/// is deployed from is refused with [`INVALID_TEMPLATE_MESSAGE`], while a template that
+/// IS one, declaring a resource of a type a conformance pack does not deploy, is refused
+/// with the errors Config's own conformance pack validation found in it
+/// ([`invalid_conformance_pack_template_message`]). Neither carries any part of the body.
 fn read_conformance_pack_template(body: &str) -> Result<Vec<DeclaredResource>, String> {
     let Some(::serde_json::Value::Object(template)) = read_template(body) else {
         return Err(INVALID_TEMPLATE_MESSAGE.to_string());
     };
     let Some(::serde_json::Value::Object(resources)) = template.get(TEMPLATE_RESOURCES_SECTION)
     else {
-        return Err(format!(
-            "{INVALID_TEMPLATE_MESSAGE}: the template declares no \
-             {TEMPLATE_RESOURCES_SECTION} section"
-        ));
+        return Err(INVALID_TEMPLATE_MESSAGE.to_string());
     };
     if resources.is_empty() {
-        return Err(format!(
-            "{INVALID_TEMPLATE_MESSAGE}: the template's {TEMPLATE_RESOURCES_SECTION} section \
-             declares no resource"
-        ));
+        return Err(INVALID_TEMPLATE_MESSAGE.to_string());
+    }
+
+    // Config's own validation of the template it read: every resource a conformance pack
+    // template declares is one of the two resource types a pack deploys, and a template
+    // declaring any other is refused with the error that validation found — reported ONCE
+    // for the template, whichever resource carries it and however many do, which is why
+    // this is judged over the whole `Resources` section before any resource is read.
+    let declares_an_unsupported_type = resources.values().any(|resource| {
+        resource
+            .as_object()
+            .and_then(|resource| resource.get(TEMPLATE_RESOURCE_TYPE_MEMBER))
+            .and_then(::serde_json::Value::as_str)
+            .is_some_and(|resource_type| {
+                !CONFORMANCE_PACK_TEMPLATE_RESOURCE_TYPES.contains(&resource_type)
+            })
+    });
+    if declares_an_unsupported_type {
+        return Err(invalid_conformance_pack_template_message(&[
+            UNSUPPORTED_RESOURCE_TYPE_TEMPLATE_ERROR,
+        ]));
     }
 
     let mut declared = Vec::new();
@@ -458,11 +514,11 @@ fn read_conformance_pack_template(body: &str) -> Result<Vec<DeclaredResource>, S
         let resource_type = resource
             .and_then(|resource| resource.get(TEMPLATE_RESOURCE_TYPE_MEMBER))
             .and_then(::serde_json::Value::as_str);
+        // CloudFormation requires every declared resource to carry a `Type`, so a
+        // resource declaring none — or declaring one that is no string — is not a
+        // resource of a template a pack is deployed from.
         let Some(resource_type) = resource_type else {
-            return Err(format!(
-                "{INVALID_TEMPLATE_MESSAGE}: the resource '{logical_id}' declares no \
-                 {TEMPLATE_RESOURCE_TYPE_MEMBER}"
-            ));
+            return Err(INVALID_TEMPLATE_MESSAGE.to_string());
         };
         let properties = resource
             .and_then(|resource| resource.get(TEMPLATE_PROPERTIES_SECTION))
@@ -486,10 +542,7 @@ fn read_conformance_pack_template(body: &str) -> Result<Vec<DeclaredResource>, S
                     .and_then(|source| source.get(SOURCE_OWNER_MEMBER))
                     .and_then(::serde_json::Value::as_str);
                 let Some(owner) = owner else {
-                    return Err(format!(
-                        "{INVALID_TEMPLATE_MESSAGE}: the Config rule '{logical_id}' declares no \
-                         {RULE_SOURCE_MEMBER}.{SOURCE_OWNER_MEMBER}"
-                    ));
+                    return Err(INVALID_TEMPLATE_MESSAGE.to_string());
                 };
                 declared.push(DeclaredResource::Rule(DeclaredRule {
                     declared_name: text(RULE_NAME_MEMBER).unwrap_or_else(|| logical_id.clone()),
@@ -554,11 +607,7 @@ fn read_conformance_pack_template(body: &str) -> Result<Vec<DeclaredResource>, S
                     text(REMEDIATION_TARGET_TYPE_MEMBER),
                     text(REMEDIATION_TARGET_ID_MEMBER),
                 ) else {
-                    return Err(format!(
-                        "{INVALID_TEMPLATE_MESSAGE}: the remediation action '{logical_id}' must \
-                         declare {REMEDIATION_RULE_NAME_MEMBER}, \
-                         {REMEDIATION_TARGET_TYPE_MEMBER} and {REMEDIATION_TARGET_ID_MEMBER}"
-                    ));
+                    return Err(INVALID_TEMPLATE_MESSAGE.to_string());
                 };
                 let automatic = properties
                     .and_then(|properties| properties.get(REMEDIATION_AUTOMATIC_MEMBER))
@@ -599,12 +648,13 @@ fn read_conformance_pack_template(body: &str) -> Result<Vec<DeclaredResource>, S
                     },
                 }));
             }
-            other => {
-                return Err(format!(
-                    "{INVALID_TEMPLATE_MESSAGE}: the resource '{logical_id}' is of type \
-                     '{other}', and a conformance pack template declares only {}",
-                    CONFORMANCE_PACK_TEMPLATE_RESOURCE_TYPES.join(" and "),
-                ))
+            // A type that is not one of the two a conformance pack deploys: the reading
+            // above refuses such a template over the whole `Resources` section, and this
+            // arm words the same refusal the same way for the match that is over text.
+            _ => {
+                return Err(invalid_conformance_pack_template_message(&[
+                    UNSUPPORTED_RESOURCE_TYPE_TEMPLATE_ERROR,
+                ]))
             }
         }
     }
@@ -622,11 +672,7 @@ fn read_conformance_pack_template(body: &str) -> Result<Vec<DeclaredResource>, S
     for resource in &declared {
         if let DeclaredResource::Remediation(remediation) = resource {
             if !rule_names.contains(&remediation.rule_declared_name.as_str()) {
-                return Err(format!(
-                    "{INVALID_TEMPLATE_MESSAGE}: the remediation action remediates the Config \
-                     rule '{}', which the template does not declare",
-                    remediation.rule_declared_name,
-                ));
+                return Err(INVALID_TEMPLATE_MESSAGE.to_string());
             }
         }
     }
