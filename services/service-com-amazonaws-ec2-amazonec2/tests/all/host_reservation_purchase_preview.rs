@@ -20,6 +20,12 @@
 //!    `InvalidHostId.Malformed`;
 //! 4. THE CONFIGURATIONS MUST MATCH: an offering id no published offering carries, and one
 //!    for another instance family than the hosts', are each refused `InvalidParameterValue`.
+//! 5. THE RESERVATION COVERS A SET OF HOSTS: one host is priced ONCE however many times the
+//!    request names it, so the totals follow the DISTINCT hosts the reservation would cover;
+//! 6. A REFUSAL NAMES THE WHOLE SET the request asked about, in the one sentence this service
+//!    refuses a set of ids it cannot resolve with;
+//! 7. THE ID LIST IS BOUNDED: a `HostIdSet` longer than the ceiling this crate holds every id
+//!    list to is refused `InvalidParameterValue` before any host is looked up.
 //!
 //! Each table row is a distinct input along what its rule generalises over — the instance
 //! family, the payment option and the term of the offering, how many hosts the reservation
@@ -30,10 +36,11 @@ use ec2::ops::describe_host_reservation_offerings::{
     HOST_OFFERING_CURRENCY_CODE, format_price_milli, host_offering_by_id,
 };
 use ec2::state::ComAmazonawsEc2Amazonec2State as Ec2State;
+use ec2::state::MAX_RESOURCE_IDS;
 use service_com_amazonaws_ec2_amazonec2 as ec2;
 use smithy_server_runtime::MultiServiceRouter;
 
-use super::ec2_query::{call, error_code, indexed, member};
+use super::ec2_query::{call, error_code, error_message, indexed, member};
 use super::wire::{Param, param};
 
 /// The Region every call here is signed for.
@@ -356,5 +363,179 @@ async fn an_offering_that_cannot_be_applied_is_refused() {
             "InvalidParameterValue",
             "case {case:?}: expected InvalidParameterValue, got {body}"
         );
+    }
+}
+
+/// RULE 5: the reservation covers a SET of Dedicated Hosts, so naming one host again does not
+/// price it again — the purchase reports each host once and the totals follow the DISTINCT
+/// hosts the reservation would cover.
+#[tokio::test]
+async fn one_host_is_priced_once_however_many_times_it_is_named() {
+    let (router, _engine) = super::ec2_query::emulator();
+    let hosts = allocate(&router, "m5", 2).await;
+    let (first, second) = (hosts[0].clone(), hosts[1].clone());
+    let offering_id = published_offering(&router, "m5", "AllUpfront", 365 * 24 * 60 * 60).await;
+    let offering =
+        host_offering_by_id(&offering_id).expect("the catalogue published the offering it listed");
+
+    // Rows differ in how often each host is named and in how many distinct hosts are behind
+    // those names: the count the prices follow is the second, never the first.
+    let rows: [(&str, Vec<&str>, Vec<&str>); 4] = [
+        ("one host named once", vec![first.as_str()], vec![first.as_str()]),
+        (
+            "one host named three times",
+            vec![first.as_str(), first.as_str(), first.as_str()],
+            vec![first.as_str()],
+        ),
+        (
+            "two hosts, the first named twice",
+            vec![first.as_str(), second.as_str(), first.as_str()],
+            vec![first.as_str(), second.as_str()],
+        ),
+        (
+            "two hosts, each named twice",
+            vec![
+                first.as_str(),
+                second.as_str(),
+                first.as_str(),
+                second.as_str(),
+            ],
+            vec![first.as_str(), second.as_str()],
+        ),
+    ];
+
+    for (case, named, distinct) in rows {
+        let body = previewed(&router, case, &named, &offering_id).await;
+
+        let covered = super::ec2_query::elements(&body, "hostIdSet")
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("case {case:?}: expected a hostIdSet in {body}"));
+        let mut reported = super::ec2_query::elements(&covered, "item");
+        reported.sort();
+        let mut expected = super::ec2_query::owned(&distinct);
+        expected.sort();
+        assert_eq!(
+            reported, expected,
+            "case {case:?}: expected the reservation to cover {expected:?} once each, \
+             got {reported:?} in {body}"
+        );
+
+        let covered_hosts = i64::try_from(distinct.len()).expect("a small count");
+        assert_eq!(
+            member(&body, "totalHourlyPrice").as_deref(),
+            Some(format_price_milli(offering.hourly_price_milli * covered_hosts).as_str()),
+            "case {case:?}: expected the hourly price over {covered_hosts} host(s), got {body}"
+        );
+        assert_eq!(
+            member(&body, "totalUpfrontPrice").as_deref(),
+            Some(format_price_milli(offering.upfront_price_milli * covered_hosts).as_str()),
+            "case {case:?}: expected the upfront price over {covered_hosts} host(s), got {body}"
+        );
+    }
+}
+
+/// RULE 6: the refusal of an id this preview cannot resolve names the whole set the request
+/// asked about, in the fixed sentence this service refuses a set of unresolvable ids with
+/// (`The specified Dedicated host IDs [..] are not valid.`) — the ids quoted inside it are
+/// the request's own, so the sentence is a template rather than one recorded answer.
+#[tokio::test]
+async fn the_refusal_names_every_host_id_the_request_asked_about() {
+    let (router, _engine) = super::ec2_query::emulator();
+    let held = allocate(&router, "m5", 1).await.remove(0);
+    let offering_id = published_offering(&router, "m5", "AllUpfront", 365 * 24 * 60 * 60).await;
+
+    // Rows differ in how many ids the request named, and in which of them cannot be resolved:
+    // the sentence names the SET either way, because the preview prices the whole set. The
+    // last row's value carries the XML metacharacters, so the refusal that quotes a caller's
+    // own bytes back is pinned to stay a well-formed envelope with that value encoded.
+    let second_unheld = "h-0fedcba987654321f";
+    let rows: [(&str, Vec<&str>); 5] = [
+        ("one id nothing holds", vec![UNHELD_HOST_ID]),
+        ("one value outside the id form", vec!["not-a-host"]),
+        (
+            "two ids nothing holds",
+            vec![UNHELD_HOST_ID, second_unheld],
+        ),
+        (
+            "a held host beside one nothing holds",
+            vec![held.as_str(), UNHELD_HOST_ID],
+        ),
+        ("a value carrying XML metacharacters", vec!["h-<&\"'>x"]),
+    ];
+
+    for (case, host_ids) in rows {
+        let (status, body) = preview(&router, &host_ids, &offering_id).await;
+        assert_eq!(
+            status, 400,
+            "case {case:?}: expected HTTP 400, got {status} with body {body}"
+        );
+        // The body is a document whatever the request's bytes were: a value a caller chose
+        // reaches the envelope encoded, never as markup.
+        let _ = super::wire::document(case, &body);
+        let quoted: Vec<String> = host_ids.iter().map(|id| format!("'{id}'")).collect();
+        let expected = format!(
+            "The specified Dedicated host IDs [{}] are not valid.",
+            quoted.join(", ")
+        );
+        assert_eq!(
+            error_message(&body),
+            expected,
+            "case {case:?}: expected {expected:?}, got {:?} in {body}",
+            error_message(&body)
+        );
+    }
+}
+
+/// RULE 7: the `HostIdSet` the model bounds nowhere is bounded by the ceiling this crate
+/// holds every id list to ([`MAX_RESOURCE_IDS`]), asked BEFORE any id is resolved — so a list
+/// at the ceiling is still judged on its ids, and one past it is refused for its length.
+#[tokio::test]
+async fn an_id_list_past_the_ceiling_is_refused_for_its_length() {
+    let (router, _engine) = super::ec2_query::emulator();
+    let offering_id = published_offering(&router, "m5", "AllUpfront", 365 * 24 * 60 * 60).await;
+    // Distinct ids inside the long host id form (`h-` and 17 lowercase hex digits), so what
+    // decides each case is the LENGTH of the list and nothing about its entries.
+    let ids: Vec<String> = (1..=MAX_RESOURCE_IDS + 1)
+        .map(|index| format!("h-{index:017x}"))
+        .collect();
+    let named: Vec<&str> = ids.iter().map(String::as_str).collect();
+
+    // The ceiling itself and one past it, beside a short list: below and at the bound the
+    // refusal is the one for an id the account holds no host under, past it the one for the
+    // list's length.
+    let rows: [(&str, usize, &str); 3] = [
+        ("one id", 1, "InvalidHostId.Malformed"),
+        ("at the ceiling", MAX_RESOURCE_IDS, "InvalidHostId.Malformed"),
+        (
+            "one past the ceiling",
+            MAX_RESOURCE_IDS + 1,
+            "InvalidParameterValue",
+        ),
+    ];
+
+    for (case, count, expected_code) in rows {
+        let (status, body) = preview(&router, &named[..count], &offering_id).await;
+        assert_eq!(
+            status, 400,
+            "case {case:?}: expected HTTP 400, got {status} with body {body}"
+        );
+        assert_eq!(
+            error_code(&body),
+            expected_code,
+            "case {case:?}: expected {expected_code}, got {body}"
+        );
+        if count <= MAX_RESOURCE_IDS {
+            continue;
+        }
+        // Past the ceiling the refusal names the member, the count the request carried and
+        // the ceiling it is above, so the caller can see what to shorten.
+        let message = error_message(&body);
+        for expected in ["HostIdSet", &count.to_string(), &MAX_RESOURCE_IDS.to_string()] {
+            assert!(
+                message.contains(expected),
+                "case {case:?}: expected the refusal to name {expected:?}, got {message:?}"
+            );
+        }
     }
 }
