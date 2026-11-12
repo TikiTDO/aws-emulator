@@ -69,5 +69,7 @@ mod tag_updated_at;
 mod tag_validation;
 #[path = "all/tag_write_under_teardown.rs"]
 mod tag_write_under_teardown;
+#[path = "all/tagging_absent_resource_request_shape.rs"]
+mod tagging_absent_resource_request_shape;
 #[path = "all/untag_resource.rs"]
 mod untag_resource;
