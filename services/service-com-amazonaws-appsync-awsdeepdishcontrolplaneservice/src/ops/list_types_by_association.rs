@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListTypesByAssociation
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListTypesByAssociation`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListTypesByAssociation::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Implemented: resolves the association the Merged API identifier and the
+//! `associationId` name through the shared lookup rule
+//! (`crate::state::…::resolve_association`) and answers the types the SOURCE API of that
+//! association holds in [`crate::state`], cut into the page the request's `nextToken` and
+//! `maxResults` select and reported in the `format` the request names. This is the ONLY
+//! file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -161,18 +158,108 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListTypesByAssociation` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListTypesByAssociationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListTypesByAssociation"))
+        // A read reports what is stored; nothing of the request's metadata changes what
+        // this answer is.
+        let _ = ctx;
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(ListTypesByAssociationErrorModeled::InternalFailureException(
+                InternalFailureException {
+                    message: Some("the appsync store is unavailable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+
+        let mut guard = state.lock();
+
+        // The ONLY write this read makes: the deletions and merges the CLOCK already made
+        // due, which were owed at this instant whether or not anybody called — and they
+        // carry the schema creations they depend on, so the types this listing reports are
+        // the ones the source API holds now.
+        guard.settle_associations(std::time::SystemTime::now());
+
+        // The pair is resolved by the shared lookup rule, so a malformed identifier, a
+        // Merged API nothing holds and an `associationId` that is not this Merged API's
+        // are refused exactly as every other association operation refuses them.
+        let association = match guard
+            .resolve_association(&input.merged_api_identifier, &input.association_id)
+        {
+            Ok(association) => association,
+            Err(refusal) => return Err(refuse(refusal)),
+        };
+
+        // The association names the source API whose schema is merged into the Merged
+        // API, so the types it lists are that source API's own.
+        let Some(source) = guard.graphql_apis.get(&association.source_api_id) else {
+            return Err(ListTypesByAssociationErrorModeled::NotFoundException(
+                NotFoundException {
+                    message: Some(crate::state::API_NOT_FOUND_MESSAGE.to_string()),
+                },
+            )
+            .into());
+        };
+
+        // The listing walks that API's types in the order they were added
+        // (`crate::state::TypeRecord::seq`), which is the total order the cursor resumes
+        // from, exactly as `ListTypes` walks an API's own types.
+        let mut ordered: Vec<&crate::state::TypeRecord> = source.types.values().collect();
+        ordered.sort_by_key(|record| record.seq);
+
+        let Some(page) = crate::state::paginate(
+            &ordered,
+            |record| record.parsed.name.as_str(),
+            input.next_token.as_deref(),
+            input.max_results,
+        ) else {
+            return Err(ListTypesByAssociationErrorModeled::BadRequestException(
+                BadRequestException {
+                    message: Some(crate::state::INVALID_PAGINATION_TOKEN_MESSAGE.to_string()),
+                    ..Default::default()
+                },
+            )
+            .into());
+        };
+
+        // Each type is reported through the one projection every type report uses, in the
+        // format the request asked for, resolved against the definitions the source API
+        // holds.
+        Ok(ListTypesByAssociationOutput {
+            types: Some(
+                page.items
+                    .iter()
+                    .map(|record| record.to_type(&input.format, &source.types))
+                    .collect(),
+            ),
+            next_token: page.next_token,
+        })
     }
+}
+
+/// This operation's modelled error for a refusal the shared lookup rule states.
+///
+/// Each variant keeps the status the model gives its shape and carries the rule's own
+/// text; an association the pair names does not hold is the absent resource it is, named
+/// by no identifier of the request — the same reading `GetSourceApiAssociation` answers
+/// with, so the two cannot disagree about one pair.
+fn refuse(refusal: crate::state::AssociationLookupRefusal) -> ListTypesByAssociationError {
+    match refusal {
+        crate::state::AssociationLookupRefusal::BadRequest(message) => {
+            ListTypesByAssociationErrorModeled::BadRequestException(BadRequestException {
+                message: Some(message),
+                ..Default::default()
+            })
+        }
+        crate::state::AssociationLookupRefusal::NotFound(message) => {
+            ListTypesByAssociationErrorModeled::NotFoundException(NotFoundException {
+                message: Some(message),
+            })
+        }
+        crate::state::AssociationLookupRefusal::AssociationNotFound(_) => {
+            ListTypesByAssociationErrorModeled::NotFoundException(NotFoundException {
+                message: Some(crate::state::ASSOCIATION_NOT_FOUND_MESSAGE.to_string()),
+            })
+        }
+    }
+    .into()
 }

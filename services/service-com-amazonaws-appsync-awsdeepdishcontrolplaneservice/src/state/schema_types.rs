@@ -298,11 +298,14 @@ pub enum TypeRef {
 
 /// Why a caller-supplied type definition is not one type definition this service can
 /// store.
+///
+/// The ground is kept apart from the TEXT the refusal carries: the service answers one
+/// fixed sentence for every ground ([`DEFINITION_NOT_READABLE_MESSAGE`]), so these
+/// variants say what was wrong for this crate's own readers, not for the caller.
 #[derive(Debug, Clone)]
 pub enum TypeDefinitionError {
-    /// The definition is not well-formed GraphQL, carrying the parser's own account of
-    /// the first thing wrong with it.
-    Unparseable(String),
+    /// The definition is not well-formed GraphQL.
+    Unparseable,
     /// The definition parses but declares no type (an empty document, or one that only
     /// declares something a type cannot be, such as an operation or a directive).
     NoTypeDeclared,
@@ -311,25 +314,22 @@ pub enum TypeDefinitionError {
     MoreThanOneTypeDeclared,
 }
 
+/// The text a `BadRequestException` (HTTP 400) carries for a definition that cannot be
+/// read as one type definition in the declared `TypeDefinitionFormat`.
+///
+/// Recorded behaviour: the sentence is entirely FIXED — it reports neither which token
+/// nor which position failed, nor which of the grounds applies — so the parser's own
+/// diagnostic stays internal and every ground answers the same text.
+pub const DEFINITION_NOT_READABLE_MESSAGE: &str = "Unable to parse provided type definition.";
+
 impl TypeDefinitionError {
-    /// The text a `BadRequestException` (HTTP 400) carries for this refusal: what about
-    /// the definition the caller has to fix.
+    /// The text a `BadRequestException` (HTTP 400) carries for this refusal.
     ///
-    /// The requirement the refusal answers is the status and the error shape; the
-    /// wording follows the service's other malformed-request sentences, with the
-    /// parser's account of a definition it could not read carried through so the caller
-    /// can fix it from the message alone.
+    /// One sentence for every ground ([`DEFINITION_NOT_READABLE_MESSAGE`]), shared by
+    /// every operation that reads a caller-supplied definition, so `CreateType` and
+    /// `UpdateType` cannot disagree about how an unreadable definition is reported.
     pub fn message(&self) -> String {
-        match self {
-            Self::Unparseable(detail) => format!("Invalid type definition: {detail}"),
-            Self::NoTypeDeclared => {
-                "Invalid type definition: it must declare one GraphQL type.".to_string()
-            }
-            Self::MoreThanOneTypeDeclared => {
-                "Invalid type definition: it must declare one GraphQL type, not several."
-                    .to_string()
-            }
-        }
+        DEFINITION_NOT_READABLE_MESSAGE.to_string()
     }
 }
 
@@ -351,8 +351,10 @@ pub fn parse_type_definition(definition: &str) -> Result<TypeDefinition, TypeDef
         .recursion_limit(DEFINITION_RECURSION_LIMIT)
         .token_limit(DEFINITION_TOKEN_LIMIT)
         .parse();
-    if let Some(error) = tree.errors().next() {
-        return Err(TypeDefinitionError::Unparseable(error.message().to_string()));
+    // The parser's account of what is wrong with the definition is NOT reported: the
+    // refusal's sentence is fixed, so only the fact that the parse failed is kept.
+    if tree.errors().next().is_some() {
+        return Err(TypeDefinitionError::Unparseable);
     }
 
     let mut declared: Option<TypeDefinition> = None;
@@ -799,6 +801,19 @@ pub const TYPE_NOT_FOUND_MESSAGE: &str = "Type not found.";
 /// (`crate::state::data_source_exists_message`).
 pub fn type_exists_message(type_name: &str) -> String {
     format!("Type with name {type_name} already exists.")
+}
+
+/// The text a `BadRequestException` (HTTP 400) carries for an update whose new definition
+/// declares a type other than the one the request addresses: both names, which are the two
+/// members the caller has to bring together.
+///
+/// A type is addressed by name within its API and its definition is the definition OF that
+/// type, so a definition declaring another name defines no type the request can update.
+/// This is a definition the service CAN read — so it is not the unreadable-definition
+/// refusal ([`DEFINITION_NOT_READABLE_MESSAGE`]) — and the sentence names the two type
+/// names the caller has to reconcile, taken from the request itself.
+pub fn type_name_mismatch_message(addressed: &str, declared: &str) -> String {
+    format!("Provided type definition must declare the type {addressed}, not {declared}.")
 }
 
 /// One type a whole schema document declares: the SDL text the document writes it in

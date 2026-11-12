@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateType
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateType`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateType::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Implemented: replaces the definition of the type the request addresses by name under
+//! its GraphQL API in [`crate::state`], parsing the new GraphQL SDL definition first and
+//! refusing one GraphQL cannot read, one that declares no single type, and one that
+//! declares a type other than the addressed one. The type keeps its identity (its name,
+//! its ARN and its place among the API's types); the `format` the request names chooses
+//! how the answer reports the stored definition (`crate::state::TypeRecord::to_type`).
+//! This is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -151,18 +149,131 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateType` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateTypeErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        // The new definition comes from the deserialized input and the updated type keeps
+        // the ARN it was named with, so no request metadata takes part and `ctx` is
+        // unused.
+        let _ = ctx;
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(UpdateTypeErrorModeled::InternalFailureException(
+                InternalFailureException {
+                    message: Some("the appsync store is unavailable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+
+        // An `apiId` that is not an API id at all is a malformed request, not a
+        // missing resource (see `crate::state::is_api_id`).
+        if !crate::state::is_api_id(&input.api_id) {
+            return Err(UpdateTypeErrorModeled::BadRequestException(BadRequestException {
+                message: Some(crate::state::invalid_api_id_message(&input.api_id)),
+                ..Default::default()
+            })
+            .into());
+        }
+
+        // The definition the request carries is the type's NEW definition, written in the
+        // same GraphQL SDL a create carries, so it is read the same way and before
+        // anything is written: a definition GraphQL cannot read, or one that declares no
+        // single type, names no definition to store and is refused.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateType"))
+        // `definition` is an OPTIONAL member, so a request that carries none states no new
+        // definition: the stored one stays and the call reports the type as it is.
+        let parsed = match input.definition.as_deref() {
+            Some(definition) => {
+                Some(crate::state::parse_type_definition(definition).map_err(|refusal| {
+                    UpdateTypeErrorModeled::BadRequestException(BadRequestException {
+                        message: Some(refusal.message()),
+                        ..Default::default()
+                    })
+                })?)
+            }
+            None => None,
+        };
+
+        let now = std::time::SystemTime::now();
+        let mut guard = state.lock();
+
+        // Materialise every schema creation the clock already owes first, so this update
+        // acts on the types the API holds at THIS instant: a schema the clock installed is
+        // the API's type system, so a type it declared is updatable and a type it replaced
+        // is already gone.
+        guard.settle_schema_creations(now);
+
+        // A type lives under a GraphQL API, so one cannot be updated under an API this
+        // account does not hold.
+        let Some(api) = guard.graphql_apis.get_mut(&input.api_id) else {
+            return Err(UpdateTypeErrorModeled::NotFoundException(NotFoundException {
+                message: Some(crate::state::API_NOT_FOUND_MESSAGE.to_string()),
+            })
+            .into());
+        };
+
+        // A schema creation the clock still owes is a modification of this API's type
+        // system that is already in progress, and it "must complete before you can make
+        // your change": the update is refused rather than changing a type the creation is
+        // about to replace wholesale.
+        if api.schema_creation_in_progress() {
+            return Err(UpdateTypeErrorModeled::ConcurrentModificationException(
+                ConcurrentModificationException {
+                    message: Some(crate::state::CONCURRENT_MODIFICATION_MESSAGE.to_string()),
+                },
+            )
+            .into());
+        }
+
+        // A type is addressed by name within its API, so a name the API does not hold
+        // names no resource to update — including one held by a DIFFERENT API, and one a
+        // delete already removed. An update never CREATES the type it cannot find.
+        let Some(stored) = api.types.get(&input.type_name) else {
+            return Err(UpdateTypeErrorModeled::NotFoundException(NotFoundException {
+                message: Some(crate::state::TYPE_NOT_FOUND_MESSAGE.to_string()),
+            })
+            .into());
+        };
+
+        // The name a definition declares is what identifies the type it defines, and this
+        // call addresses one type by name, so a definition declaring a different type
+        // defines nothing this request can update: it is refused before the stored
+        // definition is replaced, rather than renaming a type behind its own name.
+        if let Some(other) = parsed
+            .as_ref()
+            .filter(|parsed| parsed.name != input.type_name)
+        {
+            return Err(UpdateTypeErrorModeled::BadRequestException(BadRequestException {
+                message: Some(crate::state::type_name_mismatch_message(
+                    &input.type_name,
+                    &other.name,
+                )),
+                ..Default::default()
+            })
+            .into());
+        }
+
+        // The update replaces the type's DEFINITION; everything that identifies the
+        // record — the name it is addressed by, its ARN and its place in the API's
+        // creation order — is kept, so an update is not a delete followed by a create.
+        let record = crate::state::TypeRecord {
+            seq: stored.seq,
+            arn: stored.arn.clone(),
+            // The SDL the caller wrote is kept as it arrived, so an SDL report answers
+            // the definition that was stored rather than a re-spelling of it.
+            definition: input
+                .definition
+                .clone()
+                .unwrap_or_else(|| stored.definition.clone()),
+            parsed: parsed.unwrap_or_else(|| stored.parsed.clone()),
+        };
+        api.types.insert(input.type_name.clone(), record);
+
+        // Answer from the STORED record, with the definition in the format the request
+        // asked for, so this body is the one `GetType` answers with afterwards.
+        Ok(UpdateTypeOutput {
+            r#type: api
+                .types
+                .get(&input.type_name)
+                .map(|record| record.to_type(&input.format, &api.types)),
+        })
     }
 }
