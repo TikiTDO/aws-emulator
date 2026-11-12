@@ -131,17 +131,21 @@ pub fn reached_endpoint_host(
 /// (`engine.listeners()`), which is the one address a client on this machine can reach
 /// that resource at.
 ///
-/// Composed through [`host_port_authority`], so an IPv6 bind is bracketed and the URL
-/// parses wherever the operator bound it.
+/// The core's own reading of that question
+/// ([`::emulator_server::ResourceListener::authority`], "the `host:port` a client dials…
+/// Use it for a field an AWS API returns without a scheme"), so a published address is the
+/// one the core says the listener is dialable at: a WILDCARD bind (`0.0.0.0`, `::`) has no
+/// single address to dial and is published as loopback, and an IPv6 bind is bracketed, so
+/// the URL parses wherever the operator bound it.
 ///
-/// Services still carrying their own copy of this reading, to be MIGRATED onto it (they
-/// predate this function):
+/// Services still carrying their own copy of this reading, to be MIGRATED onto this function
+/// (they predate it):
 /// `services/service-com-amazonaws-pricing-awspricelistservice/src/state.rs` and
 /// `services/service-com-amazonaws-lambdamicrovms-lambdamicrovms/src/state/microvm_endpoint.rs`.
 /// Nothing new inlines it again — call this module.
 #[must_use]
 pub fn listener_authority(listener: &::emulator_server::ResourceListener) -> String {
-    host_port_authority(&listener.host(), listener.port())
+    listener.authority()
 }
 
 /// The `host[:port]` of the ONE endpoint this emulator serves its whole surface at — what

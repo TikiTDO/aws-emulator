@@ -863,9 +863,15 @@ async fn an_endpoint_type_migration_reassigns_the_endpoint_and_moves_the_status(
         "regionalDomainName",
         "migrate EDGE to REGIONAL",
     );
+    // `regionalDomainName` is the address a client points DNS at and then DIALS, so a
+    // migrated record publishes an address this emulator answers on — the `host:port` of the
+    // socket the update opened for it. The front door on it is driven end to end by the
+    // `regional_custom_domain_front_door` suite.
     assert!(
-        regional_domain_name.ends_with(".amazonaws.com"),
-        "case migrate EDGE to REGIONAL: expected the Region's endpoint name, got \
+        regional_domain_name
+            .parse::<std::net::SocketAddr>()
+            .is_ok(),
+        "case migrate EDGE to REGIONAL: expected an address a client can dial, got \
          {regional_domain_name:?}"
     );
 

@@ -172,6 +172,26 @@ pub(crate) fn gateway_with_ec2() -> Gateway {
     gateway
 }
 
+/// One emulator with this service, Certificate Manager and Amazon S3 mounted on ONE shared
+/// engine.
+///
+/// A REGIONAL custom domain name presents the certificate Certificate Manager holds for its
+/// `regionalCertificateArn` and enforces the mutual-TLS truststore the object store holds at
+/// its `truststoreUri`, so both services have to be mounted on the same router for a case to
+/// bring either through its OWN API. Built on the one constructor above, so this service is
+/// mounted and the router configured exactly once in this target.
+pub(crate) fn gateway_with_acm_and_s3() -> Gateway {
+    let mut gateway = Gateway::new();
+    let engine = Arc::clone(&gateway.engine);
+    gateway.router.register_service(
+        service_com_amazonaws_acm_certificatemanager::EmulatedService::new(Arc::clone(&engine)),
+    );
+    gateway
+        .router
+        .register_service(service_com_amazonaws_s3_amazons3::EmulatedService::new(engine));
+    gateway
+}
+
 /// `CreateRestApi` for `name`, returning the API id and its root resource id.
 pub(crate) async fn create_api(gateway: &Gateway, name: &str) -> (String, String) {
     let answer = gateway

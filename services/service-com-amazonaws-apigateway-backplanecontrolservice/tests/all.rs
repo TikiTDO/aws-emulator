@@ -134,6 +134,11 @@ mod patch_updates;
 mod private_api_resource_policy;
 #[path = "all/query_value_coercion.rs"]
 mod query_value_coercion;
+// The front door a REGIONAL custom domain name publishes as its `regionalDomainName`: the
+// address itself, the certificate it presents, the mutual-TLS truststore it enforces and the
+// stage its base path mappings route to.
+#[path = "all/regional_custom_domain_front_door.rs"]
+mod regional_custom_domain_front_door;
 #[path = "all/request_validator_lifecycle.rs"]
 mod request_validator_lifecycle;
 #[path = "all/resource_tagging.rs"]

@@ -452,6 +452,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx.parts());
         let now = crate::state::now();
 
+        // The ADDRESS a REGIONAL domain name answers on, opened BEFORE the store is locked
+        // because opening a socket is asynchronous. `regionalDomainName` is the address a
+        // client points DNS at and then DIALS, so what is published is the `host:port` this
+        // emulator itself answers on ([`crate::state::open_custom_domain_endpoint`]); an
+        // engine that vends no listeners publishes the name API Gateway's own zone would
+        // carry instead. A create this request goes on to refuse drops the handle, which
+        // closes the port again.
+        let endpoint = if regional && !private {
+            crate::state::open_custom_domain_endpoint(
+                &*self.engine,
+                ctx.callback().clone(),
+                &input.domain_name,
+                &region,
+            )
+            .await
+        } else {
+            None
+        };
+
         let mut store = state.lock();
 
         // Bound the growth a caller drives, at API Gateway's published quota.
@@ -507,8 +526,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             certificate_upload_date: (!regional
                 && (input.certificate_arn.is_some() || input.certificate_body.is_some()))
             .then_some(now),
-            regional_domain_name: (regional && !private)
-                .then(|| regional_endpoint_domain_name(&endpoint_id, &region)),
+            regional_domain_name: (regional && !private).then(|| match endpoint.as_ref() {
+                // The address the socket this create opened answers on: a client that dials
+                // what this domain name published reaches this domain name.
+                Some(endpoint) => endpoint.authority().to_string(),
+                None => regional_endpoint_domain_name(&endpoint_id, &region),
+            }),
             regional_certificate_name: input.regional_certificate_name,
             regional_certificate_arn: input.regional_certificate_arn,
             distribution_domain_name: (!regional && !private)
@@ -568,6 +591,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Reading the record back means what the caller is told is what a later
         // `GetDomainName` will report.
         store.domain_names.insert(key.clone(), entry);
+        // The socket is held for exactly as long as the record it serves: dropping the
+        // handle closes the port, so the address stops answering with the domain name.
+        if let Some(endpoint) = endpoint {
+            store.custom_domain_endpoints.insert(key.clone(), endpoint);
+        }
         let stored = store
             .domain_names
             .get(&key)

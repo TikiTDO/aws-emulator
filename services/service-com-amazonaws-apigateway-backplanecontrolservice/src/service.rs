@@ -111,6 +111,7 @@
 //! is [`invoke`]'s own documentation; the api's own resource policy, which every invoke is
 //! decided against, is [`resource_policy`]'s.
 
+pub mod custom_domain_socket;
 pub mod invoke;
 pub mod mapping_template;
 pub mod query_coercion;

@@ -16,7 +16,7 @@ emulator-server = { workspace = true }
 emulator-telemetry = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }
 aws-smithy-types = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net", "time"] }
 bytes = { workspace = true }
 http = { workspace = true }
 serde = { workspace = true }
@@ -140,6 +140,26 @@ rcgen = "0.13"
 # `deflate` is the compression a .zip entry carries, and no other feature is needed: the
 # archive is written in memory and nothing of the host's file system is read.
 zip = { version = "9", default-features = false, features = ["deflate"] }
+# The front door a REGIONAL custom domain name publishes as its `regionalDomainName` speaks
+# HTTP/1.1 on the raw connection the core hands that domain name's own socket, which is what
+# makes the published address one a client dials with its own client
+# (`src/service/custom_domain_socket.rs`). `hyper-util` carries the tokio IO and timer
+# adapters for it, `http-body-util` the bounded body reader and the one-shot body. The same
+# versions and features the sibling Elastic Load Balancing v2 crate serves its load
+# balancers' own addresses with.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+# Runs the SERVER side of the TLS handshake that front door terminates: the core's own TLS
+# server presents the emulator's certificate and never asks the client for one, so a custom
+# domain name that must present the certificate Certificate Manager holds for it and enforce
+# its `mutualTlsAuthentication` truststore runs the handshake itself.
+# `rustls-pemfile` reads that PEM material (and the truststore's CA certificates) into the
+# DER the handshake and its path validation need, and `tokio-rustls` drives it over the
+# connection the core handed in. The versions this workspace already builds.
+rustls = { workspace = true }
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -174,6 +194,15 @@ service-com-amazonaws-ec2-amazonec2 = { workspace = true }
 # encoding itself is the crate's, as the sibling medialive/codeartifact suites do it,
 # rather than a tenth hand-written copy of RFC 3986.
 percent-encoding = "2"
+# A REGIONAL custom domain name presents the certificate Certificate Manager holds for its
+# `regionalCertificateArn`, so that service is mounted beside this one on the suite's own
+# engine and every certificate a case names is brought in through Certificate Manager's OWN
+# `ImportCertificate` (`tests/all/regional_custom_domain_front_door.rs`).
+service-com-amazonaws-acm-certificatemanager = { workspace = true }
+# That domain name's mutual-TLS truststore is an object Amazon S3 holds, so the object store
+# is mounted beside this one too and every truststore a case names is staged through Amazon
+# S3's own `PutObject` — the very seam the front door reads it over.
+service-com-amazonaws-s3-amazons3 = { workspace = true }
 
 [lints]
 workspace = true

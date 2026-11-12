@@ -380,17 +380,31 @@ fn apply_endpoint_type_patch(
 /// The members a domain name reports are its endpoint's: an edge-optimized one is served
 /// by the CloudFront distribution API Gateway puts in front of it and a regional one by
 /// the Region's API Gateway endpoint, so the migrated record carries the names of the
-/// endpoint it is served by NOW and none of the one it left. The new endpoint's host label
-/// is minted from the store's own id bijection, as the create mints it, and stored, so
-/// every later read reports the same name. The migration itself is a transition the CLOCK
+/// endpoint it is served by NOW and none of the one it left. A record moved to a REGIONAL
+/// endpoint publishes the address of the socket this update opened for it (`published`), as
+/// a created one does; otherwise the new endpoint's host label is minted from the store's own
+/// id bijection, as the create mints it, and stored, so every later read reports the same
+/// name. The migration itself is a transition the CLOCK
 /// owes: until it is due the record reports [`DOMAIN_NAME_UPDATING`], and
 /// `AVAILABLE` after it.
-fn migrate_endpoint(entry: &mut DomainNameEntry, endpoint_id: &str, region: &str) {
+fn migrate_endpoint(
+    entry: &mut DomainNameEntry,
+    endpoint_id: &str,
+    region: &str,
+    published: Option<&str>,
+) {
     if endpoint_types(entry)
         .iter()
         .any(|kind| kind == REGIONAL_ENDPOINT_TYPE)
     {
-        entry.regional_domain_name = Some(regional_endpoint_domain_name(endpoint_id, region));
+        // The address the socket this update opened answers on, and the name API Gateway's
+        // own zone would carry on an engine that vends no listeners — the same two values
+        // `CreateDomainName` publishes, so a migrated record publishes a reachable address
+        // exactly as a created one does.
+        entry.regional_domain_name = Some(match published {
+            Some(authority) => authority.to_string(),
+            None => regional_endpoint_domain_name(endpoint_id, region),
+        });
         entry.distribution_domain_name = None;
         entry.distribution_hosted_zone_id = None;
         // The upload date dates "the certificate that was used by edge-optimized endpoint
@@ -581,6 +595,38 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let key =
             crate::state::domain_name_key(&input.domain_name, input.domain_name_id.as_deref());
 
+        // Whether this update MOVES the record to a regional endpoint, decided on a COPY
+        // before the store is locked for the update itself: a regional record publishes the
+        // address of a socket of this emulator's own, and opening that socket is
+        // asynchronous, so it cannot be done while the store is held. The probe applies the
+        // same patches to a copy of the stored record and reads the endpoint type they
+        // leave; a list this operation goes on to refuse drops the handle, which closes the
+        // port again.
+        let migrates_to_regional = {
+            let store = state.lock();
+            store.domain_names.get(&key).is_some_and(|record| {
+                let mut probe = record.clone();
+                let served_by = endpoint_types(&probe);
+                let applied = patches
+                    .iter()
+                    .try_for_each(|patch| apply_patch(&mut probe, patch));
+                applied.is_ok()
+                    && endpoint_types(&probe) != served_by
+                    && crate::state::is_regional_domain_name(&probe)
+            })
+        };
+        let opened = if migrates_to_regional {
+            crate::state::open_custom_domain_endpoint(
+                &*self.engine,
+                ctx.callback().clone(),
+                &key,
+                &region,
+            )
+            .await
+        } else {
+            None
+        };
+
         let mut store = state.lock();
         // Patched on a COPY: a list whose later op is refused leaves the stored record
         // untouched, rather than keeping the ops before it.
@@ -619,15 +665,43 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // endpoint, which is what assigns the endpoint names it reports from now on. The
         // id the new endpoint's host label is minted from is taken only when there IS a
         // migration, so an update that changes something else consumes none.
-        if endpoint_types(&updated) != served_by {
+        let migrated = endpoint_types(&updated) != served_by;
+        if migrated {
             let endpoint_id = store.mint_id();
-            migrate_endpoint(&mut updated, &endpoint_id, &region);
+            migrate_endpoint(
+                &mut updated,
+                &endpoint_id,
+                &region,
+                opened
+                    .as_ref()
+                    .map(crate::state::CustomDomainEndpoint::authority),
+            );
         }
 
         // Reading the record back means what the caller is told is what a later
         // `GetDomainName` will report, rendered by the one `DomainName` renderer the
         // create and the read use.
         store.domain_names.insert(key.clone(), updated);
+        // The socket is the record's: a migration to a regional endpoint takes the one this
+        // update opened, and a migration away from one drops the handle the record held —
+        // which closes that port, so the address a migrated-away record published answers
+        // nothing. The handle is kept only where the APPLIED update really left the record
+        // regional, so a port is never held open for a record no connection could be served
+        // for.
+        if migrated {
+            let regional = store
+                .domain_names
+                .get(&key)
+                .is_some_and(crate::state::is_regional_domain_name);
+            match opened.filter(|_opened| regional) {
+                Some(endpoint) => {
+                    store.custom_domain_endpoints.insert(key.clone(), endpoint);
+                }
+                None => {
+                    store.custom_domain_endpoints.remove(&key);
+                }
+            }
+        }
         let stored = store
             .domain_names
             .get(&key)

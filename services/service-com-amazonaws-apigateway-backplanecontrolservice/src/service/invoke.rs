@@ -303,7 +303,11 @@ pub const EXECUTE_API_LABEL: &str = "execute-api";
 /// in the path instead. The segment begins with `_`, which no modelled path segment of any
 /// service does, so the prefix cannot collide with a control-plane route however a stage or
 /// a resource is named.
-const EMULATOR_PATH_NAMESPACE: &str = "_aws";
+///
+/// Public because the custom domain name front door
+/// ([`super::custom_domain_socket`]) addresses this plane in exactly this form for a request
+/// it accepts on a domain name's own socket.
+pub const EMULATOR_PATH_NAMESPACE: &str = "_aws";
 
 /// The path segment that belongs to ApiGatewayManagementApi rather than to a stage.
 ///

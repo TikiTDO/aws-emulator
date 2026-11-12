@@ -103,6 +103,14 @@ pub struct ComAmazonawsApigatewayBackplanecontrolserviceState {
     /// ([`MAX_USAGE_INTERVAL_DAYS`]), and reclaimed with the key it meters
     /// ([`ComAmazonawsApigatewayBackplanecontrolserviceState::forget_api_key`]).
     pub usage_logs: BTreeMap<String, UsageLog>,
+    /// The ADDRESS each regional custom domain name is served at, keyed by the
+    /// [`domain_name_key`] of the record it belongs to — the `host:port` the record reports
+    /// as its `regionalDomainName` and the live socket that answers there
+    /// ([`CustomDomainEndpoint`]). One entry per domain name this emulator opened an address
+    /// for; dropping an entry closes that port and severs every connection in flight on it,
+    /// which is what a delete of the domain name (or a migration to another endpoint type)
+    /// does.
+    pub custom_domain_endpoints: BTreeMap<String, CustomDomainEndpoint>,
     /// Drives [`ComAmazonawsApigatewayBackplanecontrolserviceState::mint_id`]; see there for how an id is derived from it.
     pub id_seed: u64,
     /// Drives [`ComAmazonawsApigatewayBackplanecontrolserviceState::next_sequence`]: the creation rank stamped on each
@@ -4349,3 +4357,9 @@ pub use usage::*;
 /// still reaches each name as `crate::state::…`.
 mod client_certificates;
 pub use client_certificates::*;
+
+/// The ADDRESS a regional custom domain name publishes as its `regionalDomainName`, and the
+/// socket that answers there; re-exported whole, so a handler still reaches each name as
+/// `crate::state::…`.
+mod custom_domain_endpoint;
+pub use custom_domain_endpoint::*;

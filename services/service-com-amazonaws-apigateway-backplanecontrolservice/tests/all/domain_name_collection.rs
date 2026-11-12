@@ -310,9 +310,13 @@ async fn a_created_domain_name_is_persisted_and_read_back_for_every_endpoint_typ
         );
         if row.regional {
             let regional = string_member(&created, "regionalDomainName", case);
+            // The member is the address a client points DNS at and then DIALS, so what a
+            // regional record publishes is an address this emulator answers on — the
+            // `host:port` of the socket the create opened for it. What that address serves
+            // is driven end to end by the `regional_custom_domain_front_door` suite.
             assert!(
-                regional.ends_with(".execute-api.us-east-1.amazonaws.com"),
-                "case {case}: expected the Region's endpoint name, got {regional:?}"
+                regional.parse::<std::net::SocketAddr>().is_ok(),
+                "case {case}: expected an address a client can dial, got {regional:?}"
             );
         }
         assert_eq!(

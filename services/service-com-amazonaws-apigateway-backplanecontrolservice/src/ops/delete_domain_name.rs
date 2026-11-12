@@ -241,6 +241,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The lookup, the dependency check and the removal share ONE hold of the store
         // lock, so two concurrent deletes of one record cannot both remove it.
         store.domain_names.remove(&key);
+        // The socket this record published its `regionalDomainName` as goes with it:
+        // dropping the handle closes the port and severs every connection in flight on it,
+        // so a deleted custom domain name answers nowhere.
+        store.custom_domain_endpoints.remove(&key);
         // The store lock is released before the outcome is recorded: the critical section
         // covers the state change only.
         drop(store);
