@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateResolver
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateResolver`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateResolver::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Implemented: rewrites the resolver the request addresses from the members the request
+//! carries and answers the stored record, so every later reader of that field answers
+//! with the updated resolver. This is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -185,18 +179,152 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateResolver` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateResolverErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        // The update is addressed and defined wholly by the deserialized members; the
+        // resolver's ARN is the one its create named, so nothing of the request's
+        // metadata takes part either.
+        let _ = ctx;
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(UpdateResolverErrorModeled::InternalFailureException(
+                InternalFailureException {
+                    message: Some("the appsync store is unavailable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+
+        // An `apiId` that is not an API id at all is a malformed request, not a
+        // missing resource (see `crate::state::is_api_id`).
+        if !crate::state::is_api_id(&input.api_id) {
+            return Err(UpdateResolverErrorModeled::BadRequestException(BadRequestException {
+                message: Some(crate::state::invalid_api_id_message(&input.api_id)),
+                ..Default::default()
+            })
+            .into());
+        }
+
+        // A mapping template outside the modelled `@length` of `MappingTemplate` is
+        // refused here rather than at the boundary (`skip_validation` on
+        // `UpdateResolverInput`), exactly as `CreateResolver` refuses it: the shape's
+        // `@pattern` admits any content, newlines and non-ASCII text included, so the
+        // length is the only bound a template can break.
+        if let Some(message) = crate::state::mapping_templates_refusal(
+            input.request_mapping_template.as_deref(),
+            input.response_mapping_template.as_deref(),
+        ) {
+            return Err(UpdateResolverErrorModeled::BadRequestException(BadRequestException {
+                message: Some(message),
+                ..Default::default()
+            })
+            .into());
+        }
+
+        // An update states the resolver's definition in full, so the kind it is of is
+        // the one THIS request names — "A UNIT resolver is the default resolver type"
+        // (`Resolver$kind`), so a request that names none asks for a UNIT resolver,
+        // whatever kind the resolver was of before.
+        let kind = input
+            .kind
+            .unwrap_or_else(|| crate::state::UNIT_KIND.to_string());
+
+        // The same definition rule the create enforces, over the same members: a
+        // PIPELINE resolver is defined by the functions its `pipelineConfig` lists and
+        // needs no data source of its own, a UNIT resolver names one data source and
+        // carries no pipeline, and `code` and `runtime` define each other. A definition
+        // AppSync could not run is refused and the resolver is left exactly as it was.
+        if let Some(message) = crate::state::resolver_definition_refusal(
+            &kind,
+            input.data_source_name.as_deref(),
+            input.pipeline_config.as_ref(),
+            input.code.as_deref(),
+            input.runtime.as_ref(),
+        ) {
+            return Err(UpdateResolverErrorModeled::BadRequestException(BadRequestException {
+                message: Some(message),
+                ..Default::default()
+            })
+            .into());
+        }
+
+        // The `code` a resolver is defined by has to compile, so an update that would
+        // store code the runtime cannot read is refused with the code faults the compiler
+        // found, and one whose compile could not be run at all is the server's fault —
+        // either way the stored resolver is left untouched.
+        match crate::state::code_definition(input.code.as_deref()).await {
+            crate::state::CodeDefinition::Compiled => {}
+            crate::state::CodeDefinition::Refused(refusal) => {
+                return Err(UpdateResolverErrorModeled::BadRequestException(refusal).into())
+            }
+            crate::state::CodeDefinition::Unknown(reason) => {
+                return Err(UpdateResolverErrorModeled::InternalFailureException(
+                    InternalFailureException {
+                        message: Some(reason),
+                    },
+                )
+                .into())
+            }
+        }
+
+        let mut guard = state.lock();
+
+        // A resolver is attached to a field of a type OF a GraphQL API, so one cannot be
+        // updated under an API this account does not hold.
+        let Some(api) = guard.graphql_apis.get_mut(&input.api_id) else {
+            return Err(UpdateResolverErrorModeled::NotFoundException(NotFoundException {
+                message: Some(crate::state::API_NOT_FOUND_MESSAGE.to_string()),
+            })
+            .into());
+        };
+
+        // A resolver is addressed by the type and field it is attached to, so a field
+        // the API carries no resolver on names no resource to update — the update
+        // attaches none, the way a create is the only call that attaches one.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateResolver"))
+        // What the stored record keeps across the update is what does not come from the
+        // request: the order it was attached in (so a listing is not reordered by an
+        // update) and its ARN, which names the API, type and field the update does not
+        // change.
+        let key = (input.type_name.clone(), input.field_name.clone());
+        let Some((seq, arn)) = api
+            .resolver(&input.type_name, &input.field_name)
+            .map(|stored| (stored.seq, stored.arn.clone()))
+        else {
+            return Err(UpdateResolverErrorModeled::NotFoundException(NotFoundException {
+                message: Some(crate::state::RESOLVER_NOT_FOUND_MESSAGE.to_string()),
+            })
+            .into());
+        };
+
+        // Every member of the definition is the one THIS request carries: the update
+        // states the resolver, so a member it leaves out is a member the resolver no
+        // longer has — a PIPELINE resolver that replaces a UNIT one reports no
+        // `dataSourceName`, and a template the update replaces is kept verbatim.
+        let record = crate::state::ResolverRecord {
+            seq,
+            arn,
+            type_name: input.type_name,
+            field_name: input.field_name,
+            data_source_name: input.data_source_name,
+            request_mapping_template: input.request_mapping_template,
+            response_mapping_template: input.response_mapping_template,
+            kind,
+            pipeline_config: input.pipeline_config,
+            sync_config: input.sync_config,
+            caching_config: input.caching_config,
+            max_batch_size: input.max_batch_size,
+            runtime: input.runtime,
+            code: input.code,
+            metrics_config: input.metrics_config,
+        };
+        api.resolvers.insert(key.clone(), record);
+
+        // Answer from the STORED record, so this body is the one `GetResolver` and
+        // `ListResolvers` answer with afterwards.
+        Ok(UpdateResolverOutput {
+            resolver: api
+                .resolvers
+                .get(&key)
+                .map(crate::state::ResolverRecord::to_resolver),
+        })
     }
 }

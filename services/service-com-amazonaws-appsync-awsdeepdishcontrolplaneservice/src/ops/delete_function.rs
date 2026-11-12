@@ -171,16 +171,32 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // A function is addressed by the id its create minted, within its API, so an id
         // the API does not hold names no resource to delete — including one held by a
-        // DIFFERENT API, and one an earlier delete already removed. Removing the record
-        // is what makes the function gone: every reader of that API (`GetFunction`)
-        // answers without it afterwards, every writer (`UpdateFunction`) refuses it as
-        // missing, and the room it took in the per-API quota is free again.
-        if api.functions.remove(&input.function_id).is_none() {
+        // DIFFERENT API, and one an earlier delete already removed.
+        if !api.functions.contains_key(&input.function_id) {
             return Err(DeleteFunctionErrorModeled::NotFoundException(NotFoundException {
                 message: Some(crate::state::function_not_found_message(&input.function_id)),
             })
             .into());
         }
+
+        // A pipeline resolver invokes the functions its `pipelineConfig` lists, so
+        // deleting one a resolver still invokes would leave that resolver with a step
+        // that no longer exists. The delete is refused, naming the resolver that still
+        // uses it, and the function is left exactly as it was: the caller deletes that
+        // resolver (or takes the function out of its pipeline) first.
+        if let Some(message) = api.function_in_use_refusal(&input.function_id) {
+            return Err(DeleteFunctionErrorModeled::BadRequestException(BadRequestException {
+                message: Some(message),
+                ..Default::default()
+            })
+            .into());
+        }
+
+        // Removing the record is what makes the function gone: every reader of that API
+        // (`GetFunction`) answers without it afterwards, every writer (`UpdateFunction`)
+        // refuses it as missing, and the room it took in the per-API quota is free
+        // again.
+        api.functions.remove(&input.function_id);
 
         Ok(DeleteFunctionOutput {})
     }

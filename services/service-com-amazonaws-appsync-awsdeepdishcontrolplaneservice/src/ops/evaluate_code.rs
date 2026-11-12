@@ -259,11 +259,6 @@ fn answer(evaluation: Evaluation) -> Result<EvaluateCodeOutput, EvaluateCodeErro
 /// The member a code fault is reported against.
 const CODE_MEMBER: &str = "code";
 
-/// The `reason` a code fault is reported under: "Provides context for the cause of the bad
-/// request. The only supported value is `CODE_ERROR`" (`BadRequestException$reason`), for
-/// which "the detail will contain a list of code errors" (`BadRequestDetail`).
-const CODE_ERROR_REASON: &str = "CODE_ERROR";
-
 /// The refusal text a `function` outside the two valid values takes: AppSync names the
 /// member and lists the values it accepts, so the sentence is built from that value set
 /// ([`EVALUATED_FUNCTIONS`]) rather than written out.
@@ -294,27 +289,15 @@ fn bad_request(message: String) -> EvaluateCodeError {
 /// The refusal for code that defines nothing this call could run: the same
 /// `BadRequestException`, with the `CODE_ERROR` reason and one `CodeError` per fault the
 /// engine reported, so a client can place each one in the code it sent.
+///
+/// The reason and the per-fault projection are the shared ones
+/// (`crate::state::code_errors_detail`), so this pre-flight evaluation and the create or
+/// update of a definition report one fault the same way.
 fn code_faults_refusal(faults: &[CodeFault]) -> EvaluateCodeError {
     EvaluateCodeErrorModeled::BadRequestException(BadRequestException {
         message: Some(format!("Invalid {CODE_MEMBER} given.")),
-        reason: Some(CODE_ERROR_REASON.to_string()),
-        detail: Some(BadRequestDetail {
-            code_errors: Some(faults.iter().map(code_error).collect()),
-        }),
+        reason: Some(crate::state::CODE_ERROR_REASON.to_string()),
+        detail: Some(crate::state::code_errors_detail(faults)),
     })
     .into()
-}
-
-/// One fault as the modelled `CodeError` reports it: its type, the user-presentable error
-/// the engine worded, and where in the code it sits.
-fn code_error(fault: &CodeFault) -> CodeError {
-    CodeError {
-        error_type: Some(fault.error_type.to_string()),
-        value: Some(fault.value.clone()),
-        location: Some(CodeErrorLocation {
-            line: fault.line,
-            column: fault.column,
-            span: fault.span,
-        }),
-    }
 }

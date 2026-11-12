@@ -174,16 +174,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // A data source is addressed by name within its API, so a name the API does
         // not hold names no resource to delete — including one held by a DIFFERENT
-        // API, and one an earlier delete already removed. Removing the record is what
-        // makes the resource gone: every reader of that API (`GetDataSource`,
-        // `ListDataSources`) answers without it afterwards, and the room it took in
-        // the per-API quota is free again.
-        if api.data_sources.remove(&input.name).is_none() {
+        // API, and one an earlier delete already removed.
+        if !api.data_sources.contains_key(&input.name) {
             return Err(DeleteDataSourceErrorModeled::NotFoundException(NotFoundException {
                 message: Some(crate::state::data_source_not_found_message(&input.name)),
             })
             .into());
         }
+
+        // A function of this API resolves against the data source it names, so deleting
+        // one a function still names would leave that function resolving against
+        // nothing. The delete is refused, naming the functions that still use it, and
+        // the data source is left exactly as it was: the caller deletes those functions
+        // first.
+        if let Some(message) = api.data_source_in_use_refusal(&input.name) {
+            return Err(DeleteDataSourceErrorModeled::BadRequestException(BadRequestException {
+                message: Some(message),
+                ..Default::default()
+            })
+            .into());
+        }
+
+        // Removing the record is what makes the resource gone: every reader of that API
+        // (`GetDataSource`, `ListDataSources`) answers without it afterwards, and the
+        // room it took in the per-API quota is free again.
+        api.data_sources.remove(&input.name);
 
         Ok(DeleteDataSourceOutput {})
     }

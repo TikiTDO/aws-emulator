@@ -204,6 +204,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        // The `code` the function would be defined by has to compile, exactly as on the
+        // create: an update that would store code the runtime cannot read is refused with
+        // the faults the compiler found, and one whose compile could not be run at all is
+        // the server's fault — either way the stored function is left as it was.
+        match crate::state::code_definition(input.code.as_deref()).await {
+            crate::state::CodeDefinition::Compiled => {}
+            crate::state::CodeDefinition::Refused(refusal) => {
+                return Err(UpdateFunctionErrorModeled::BadRequestException(refusal).into())
+            }
+            crate::state::CodeDefinition::Unknown(reason) => {
+                return Err(UpdateFunctionErrorModeled::InternalFailureException(
+                    InternalFailureException {
+                        message: Some(reason),
+                    },
+                )
+                .into())
+            }
+        }
+
         let mut guard = state.lock();
 
         // The resource this call addresses is resolved first: `apiId` and `functionId`

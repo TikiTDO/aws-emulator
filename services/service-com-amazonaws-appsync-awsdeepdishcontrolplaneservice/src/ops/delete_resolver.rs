@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteResolver
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteResolver`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteResolver::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Implemented: detaches the resolver the request addresses from the field of the
+//! GraphQL API that holds it in [`crate::state`], so every later reader of that field
+//! answers without it. This is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -146,18 +140,59 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteResolver` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteResolverErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteResolver"))
+        // The deletion depends only on the deserialized `apiId`, `typeName` and
+        // `fieldName` — all three URI labels — so no request metadata takes part.
+        let _ = ctx;
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(DeleteResolverErrorModeled::InternalFailureException(
+                InternalFailureException {
+                    message: Some("the appsync store is unavailable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+
+        // An `apiId` that is not an API id at all is a malformed request, not a
+        // missing resource (see `crate::state::is_api_id`).
+        if !crate::state::is_api_id(&input.api_id) {
+            return Err(DeleteResolverErrorModeled::BadRequestException(BadRequestException {
+                message: Some(crate::state::invalid_api_id_message(&input.api_id)),
+                ..Default::default()
+            })
+            .into());
+        }
+
+        let mut guard = state.lock();
+
+        // A resolver is attached to a field of a type OF a GraphQL API, so one cannot be
+        // detached under an API this account does not hold.
+        let Some(api) = guard.graphql_apis.get_mut(&input.api_id) else {
+            return Err(DeleteResolverErrorModeled::NotFoundException(NotFoundException {
+                message: Some(crate::state::API_NOT_FOUND_MESSAGE.to_string()),
+            })
+            .into());
+        };
+
+        // A resolver is addressed by the type and field it is attached to, within its
+        // API, so a pair the API carries no resolver on names no resource to delete —
+        // including one attached under a DIFFERENT API, and one an earlier delete
+        // already detached. Removing the record is what makes the resolver gone:
+        // `GetResolver` answers not-found for that field afterwards, `ListResolvers`
+        // reports it no longer, a create may attach a new resolver to the field, the
+        // functions it invoked are no longer in use by it, and the room it took in the
+        // per-API quota is free again.
+        if api
+            .resolvers
+            .remove(&(input.type_name, input.field_name))
+            .is_none()
+        {
+            return Err(DeleteResolverErrorModeled::NotFoundException(NotFoundException {
+                message: Some(crate::state::RESOLVER_NOT_FOUND_MESSAGE.to_string()),
+            })
+            .into());
+        }
+
+        Ok(DeleteResolverOutput {})
     }
 }

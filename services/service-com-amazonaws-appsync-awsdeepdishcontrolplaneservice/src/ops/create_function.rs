@@ -216,6 +216,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        // The `code` a function is defined by has to compile: AppSync compiles it as the
+        // function is written and refuses code the runtime cannot read, so a definition
+        // that could never run is never stored — a later `GetFunction` and a later
+        // `ListFunctions` report only the functions that compiled. A compile that could
+        // not be run at all is the server's fault, not the request's, and stores nothing
+        // either.
+        match crate::state::code_definition(input.code.as_deref()).await {
+            crate::state::CodeDefinition::Compiled => {}
+            crate::state::CodeDefinition::Refused(refusal) => {
+                return Err(CreateFunctionErrorModeled::BadRequestException(refusal).into())
+            }
+            crate::state::CodeDefinition::Unknown(reason) => {
+                return Err(CreateFunctionErrorModeled::InternalFailureException(
+                    InternalFailureException {
+                        message: Some(reason),
+                    },
+                )
+                .into())
+            }
+        }
+
         // The function is reported in the region the caller addressed, so its ARN is
         // built from that region rather than from a fixed one.
         let region = crate::state::request_region(ctx);

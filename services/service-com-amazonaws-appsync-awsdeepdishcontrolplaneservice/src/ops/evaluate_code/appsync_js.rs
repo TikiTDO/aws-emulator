@@ -126,13 +126,25 @@ pub const PARSER_ERROR: &str = "PARSER_ERROR";
 /// function the request asked to evaluate.
 pub const LINT_ERROR: &str = "LINT_ERROR";
 
+/// The `errorType` of a [`CodeFault`] found by the compile a create or an update of a
+/// resolver or a function runs over the `code` it would store ([`compile_faults`]).
+///
+/// A written definition is compiled rather than evaluated, so the only fault that path can
+/// report is code the engine could not read, and recorded behaviour names that one
+/// `PARSE_ERROR` — the `errorType` member is free text ("Examples include, but aren't
+/// limited to: `LINT_ERROR`, `PARSER_ERROR`", `CodeError$errorType`), so each path reports
+/// the type its own compiler names.
+pub const PARSE_ERROR: &str = "PARSE_ERROR";
+
 /// The `span` a fault carries when the engine does not report one: "The span/length of the
 /// error. Defaults to -1 if unknown" (`CodeErrorLocation$span`).
-const UNKNOWN_SPAN: i32 = -1;
+pub const UNKNOWN_SPAN: i32 = -1;
 
 /// The unit name the evaluated code is compiled under, so a stack frame taken inside it
-/// names the caller's own code rather than a host path.
-const CODE_UNIT: &str = "code.js";
+/// names the caller's own code rather than a host path. It is also the unit a DEFINITION's
+/// own diagnostic names (`crate::state::code_definition`), so one piece of caller code is
+/// named one way wherever it is read.
+pub const CODE_UNIT: &str = "code.js";
 
 /// The member of a context that carries the stash: "An object available inside each
 /// resolver and function handler", which the evaluated code may read and write and which
@@ -202,6 +214,158 @@ pub async fn evaluate(code: String, function: String, context: Json) -> Evaluati
             "the code was given up on after {} seconds",
             CALLER_WAIT_CEILING.as_secs()
         )),
+    }
+}
+
+/// What a compile of a written definition came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Compiled {
+    /// The engine READ the code: the faults it found doing so, none for code it read to
+    /// the end.
+    Read(Vec<CodeFault>),
+    /// The compile did not happen, or did not come back: the engine did not start, a bound
+    /// of this module stopped it, or the host gave up waiting for it. The text says which.
+    /// Nothing was learned about the code, which is a different answer from "it compiled".
+    Unknown(String),
+}
+
+/// Compile `code` without running it, and report what the compile came to.
+///
+/// This is the check a call that WRITES a definition makes: a resolver or a function is
+/// stored only if the engine that would RUN it can compile it, and nothing of the code
+/// runs — no host function and no context is installed, and no module body is evaluated.
+/// Every bound a run is held to holds here too (the engine's memory and stack ceilings,
+/// the wall clock and the step budget, checked by the engine's own interrupt handler), so
+/// one definition's nesting or size cannot take the host's stack: the engine raises inside
+/// itself instead. The compile happens on a blocking thread, and the caller's wait is
+/// bounded the way a run's is.
+///
+/// A compile that did not happen is reported as [`Compiled::Unknown`] rather than as a
+/// clean one: the caller then answers the server fault its model declares instead of
+/// storing a definition nothing could read.
+pub async fn compile_faults(code: String) -> Compiled {
+    let compiling = ::tokio::task::spawn_blocking(move || compile(&code));
+    match ::tokio::time::timeout(CALLER_WAIT_CEILING, compiling).await {
+        Ok(Ok(compiled)) => compiled,
+        Ok(Err(error)) => Compiled::Unknown(format!("the code could not be compiled: {error}")),
+        Err(_) => Compiled::Unknown(format!(
+            "the compile was given up on after {} seconds",
+            CALLER_WAIT_CEILING.as_secs()
+        )),
+    }
+}
+
+/// Compile `code` on THIS thread, under every bound this module declares, and report what
+/// the compiler made of it.
+fn compile(code: &str) -> Compiled {
+    let Ok(runtime) = Runtime::new() else {
+        return Compiled::Unknown("the engine did not start".to_string());
+    };
+    runtime.set_memory_limit(RUN_MEMORY_BYTES);
+    // The engine's own stack ceiling, which is what makes a deeply nested definition a
+    // bounded failure INSIDE the engine rather than a fault of the host's stack.
+    runtime.set_max_stack_size(RUN_STACK_BYTES);
+    // The engine resolves every `import` as it compiles, and what the compile asks is
+    // whether the code can be READ: a specifier is therefore answered with an empty
+    // module rather than with a host path or a resolution failure, so a definition
+    // importing a helper module is not reported as code the engine could not read.
+    // Nothing of that module is evaluated either — the compile never evaluates.
+    runtime.set_loader(AnyResolver, EmptyLoader);
+    let bounds = Arc::new(Bounds::new());
+    let watched = Arc::clone(&bounds);
+    runtime.set_interrupt_handler(Some(Box::new(move || watched.spent())));
+    let Ok(engine_context) = Context::full(&runtime) else {
+        return Compiled::Unknown("the engine did not start".to_string());
+    };
+    let faults = engine_context.with(|ctx| {
+        match Module::declare(ctx.clone(), CODE_UNIT, code.to_string()).catch(&ctx) {
+            Ok(_declared) => Vec::new(),
+            Err(caught) => vec![compile_fault(&caught)],
+        }
+    });
+    // A compile the clock or the step budget stopped did not read the code to the end, so
+    // what it stopped at is not a fault OF the code: the breach is the answer, the way it
+    // is for a run.
+    match bounds.breach() {
+        Some(breach) => Compiled::Unknown(breach),
+        None => Compiled::Read(faults),
+    }
+}
+
+/// How an `import` specifier is resolved for a COMPILE: to itself, whatever it names, so
+/// no specifier fails to resolve and none is looked for on a host path.
+#[derive(Debug, Clone, Copy)]
+struct AnyResolver;
+
+impl Resolver for AnyResolver {
+    fn resolve<'js>(
+        &mut self,
+        _ctx: &Ctx<'js>,
+        _base: &str,
+        name: &str,
+        _attributes: Option<ImportAttributes<'js>>,
+    ) -> ::rquickjs::Result<String> {
+        Ok(name.to_string())
+    }
+}
+
+/// How a resolved specifier is loaded for a COMPILE: as a module declared from this
+/// module's own source. No path is opened and nothing is evaluated, so the import
+/// contributes nothing but the fact that it resolved.
+#[derive(Debug, Clone, Copy)]
+struct EmptyLoader;
+
+impl Loader for EmptyLoader {
+    fn load<'js>(
+        &mut self,
+        ctx: &Ctx<'js>,
+        path: &str,
+        _attributes: Option<ImportAttributes<'js>>,
+    ) -> ::rquickjs::Result<Module<'js>> {
+        Module::declare(ctx.clone(), path.to_string(), EMPTY_MODULE_SOURCE)
+    }
+}
+
+/// The source [`EmptyLoader`] declares every specifier from: a module with one default
+/// member, so the import of a helper module resolves and the compile goes on reading the
+/// code.
+const EMPTY_MODULE_SOURCE: &str = "export default {};\n";
+
+/// The fault code the engine could not compile takes: the engine's own account of where it
+/// stopped reading, at the position it states.
+///
+/// The engine states the failure as one message. Where it carries a position of its own,
+/// that is the fault's; where it carries none, the fault takes the values
+/// `CodeErrorLocation` documents for an unknown one (`0`), and the caller of this module
+/// is what decides whether the code itself states the position instead
+/// (`crate::state::code_definition`).
+fn compile_fault(caught: &::rquickjs::CaughtError<'_>) -> CodeFault {
+    let (value, line, column) = match caught {
+        ::rquickjs::CaughtError::Exception(exception) => {
+            let stated = |member: &str| {
+                exception
+                    .get::<_, Option<i32>>(member)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+            };
+            (
+                exception
+                    .message()
+                    .filter(|message| !message.is_empty())
+                    .unwrap_or_else(|| exception.to_string()),
+                stated("lineNumber"),
+                stated("columnNumber"),
+            )
+        }
+        other => (other.to_string(), 0, 0),
+    };
+    CodeFault {
+        error_type: PARSE_ERROR,
+        value,
+        line,
+        column,
+        span: UNKNOWN_SPAN,
     }
 }
 

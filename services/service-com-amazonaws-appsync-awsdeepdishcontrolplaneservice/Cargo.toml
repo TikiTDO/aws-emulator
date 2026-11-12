@@ -49,7 +49,10 @@ base64 = "0.22"
 # `codeHandlers` — "the event handler functions that run custom business logic to process
 # published events and subscribe requests" (`src/service/event_api/handlers.rs`) — and the
 # `code` an `EvaluateCode` call asks to be evaluated
-# (`src/ops/evaluate_code/appsync_js.rs`). It is an EXECUTION SUBSTRATE: caller-supplied
+# (`src/ops/evaluate_code/appsync_js.rs`) — and which also COMPILES the `code` a resolver
+# or a function is DEFINED by, as the call that would store one is served, so a definition
+# the engine cannot read is refused rather than stored
+# (`src/state/code_definition.rs`). It is an EXECUTION SUBSTRATE: caller-supplied
 # code runs in it, so every run is bounded in host code the code cannot reach (wall clock,
 # engine steps, memory, stack, answer size, and — for the evaluation sandbox — how many log
 # lines and appended errors one run may produce), with the breach LATCHED in host state so

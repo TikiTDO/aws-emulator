@@ -28,7 +28,11 @@
 //!    document the API holds;
 //! 6. an `apiId` that cannot name an API is a 400 `BadRequestException` and one that
 //!    names no API this account holds a 404 `NotFoundException`, whichever format is
-//!    asked for.
+//!    asked for;
+//! 7. a `format` outside the enumerated set is refused by the operation that RENDERS the
+//!    schema under it, naming the member and the rejected value, while a type READ is
+//!    served in whatever format it names and echoes that value — the model's value set is
+//!    stricter than the recorded service on that read.
 //!
 //! The harness (`router`, `call`, `create_api`) is the one the schema-creation suite
 //! already carries, so every assertion goes through the router the production emulator
@@ -834,33 +838,6 @@ async fn a_format_outside_the_value_set_is_refused_naming_the_value() {
             answer.error_type,
             answer.text()
         );
-
-        // The same refusal wherever a report's format is named: a type is reported in a
-        // format out of the same two-value set.
-        let answer = call(
-            &router,
-            "GET",
-            &format!("/v1/apis/{}/types/Query?format={value}", api.id),
-            None,
-        )
-        .await;
-        assert_eq!(
-            (
-                answer.status,
-                answer.error_type.as_str(),
-                answer.body["message"].as_str()
-            ),
-            (
-                400,
-                "BadRequestException",
-                Some(format!("Invalid format {value} given").as_str())
-            ),
-            "case GetType format {value:?}: expected 400 BadRequestException naming the \
-             value, got {} {:?} {:?}",
-            answer.status,
-            answer.error_type,
-            answer.body
-        );
     }
 
     // Every value the set holds is accepted, so the refusal is about the value set and
@@ -875,6 +852,85 @@ async fn a_format_outside_the_value_set_is_refused_naming_the_value() {
             answer.status,
             answer.error_type,
             answer.text()
+        );
+    }
+}
+
+/// A type READ reports the stored definition in the representation the `format` it is
+/// asked in selects, and echoes that value — whatever the value is.
+///
+/// The value set `TypeDefinitionFormat` declares is not a bound this operation holds its
+/// callers to (recorded behaviour: a read asked in a format outside the set is served,
+/// with the stored SDL and the requested value echoed), so the rows span the whole class:
+/// both declared values and values outside the set. `JSON` is the one value that selects
+/// the type's introspection JSON; every other value reports the SDL the type was defined
+/// with.
+#[tokio::test]
+async fn a_type_is_reported_in_the_format_the_read_asks_for() {
+    let router = router();
+    let api = create_api(&router, "type-format", state::GRAPHQL_API_TYPE).await;
+    let definition = "type Query {\n  hello: String\n}\n";
+    let started = start_creation(&router, &api.id, definition).await;
+    assert_eq!(
+        started, 200,
+        "case seed the schema: expected StartSchemaCreation 200, got {started}"
+    );
+    tokio::time::sleep(state::SCHEMA_CREATION_SPAN + PAST_THE_CREATION).await;
+
+    // The declared values, then values outside the declared set: a format name the
+    // service does not render in, and the right value in the wrong case.
+    let mut sdl_reports: Vec<(&str, String)> = Vec::new();
+    for value in [state::SDL_FORMAT, state::JSON_FORMAT, "YAML", "GRAPHQL", "sdl"] {
+        let answer = call(
+            &router,
+            "GET",
+            &format!("/v1/apis/{}/types/Query?format={value}", api.id),
+            None,
+        )
+        .await;
+        assert_eq!(
+            (answer.status, answer.body["type"]["format"].as_str()),
+            (200, Some(value)),
+            "case GetType format {value:?}: expected 200 echoing the requested format, got {} \
+             {:?}",
+            answer.status,
+            answer.body
+        );
+
+        // `JSON` is what selects the introspection JSON; every other value reports the
+        // SDL the type is defined with, which is what the type declares.
+        let reported = answer.body["type"]["definition"]
+            .as_str()
+            .unwrap_or_default();
+        if value == state::JSON_FORMAT {
+            let introspection: Value =
+                serde_json::from_str(reported).expect("the JSON format reports JSON");
+            assert_eq!(
+                introspection["name"].as_str(),
+                Some("Query"),
+                "case GetType format {value:?}: expected the type's introspection JSON, got \
+                 {reported:?}"
+            );
+        } else {
+            for declared in ["type Query", "hello: String"] {
+                assert!(
+                    reported.contains(declared),
+                    "case GetType format {value:?}: expected the stored SDL to carry \
+                     {declared:?}, got {reported:?}"
+                );
+            }
+            sdl_reports.push((value, reported.to_string()));
+        }
+    }
+
+    // Every value that is not `JSON` reports the SAME stored SDL, so a value outside the
+    // declared set selects no representation of its own.
+    for (value, reported) in &sdl_reports {
+        assert_eq!(
+            reported, &sdl_reports[0].1,
+            "case GetType format {value:?}: expected the same stored SDL the {:?} read \
+             reported, got {reported:?}",
+            sdl_reports[0].0
         );
     }
 }

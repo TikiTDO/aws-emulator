@@ -37,6 +37,8 @@ mod api_keys_across_api_families;
 mod association_refusal_messages;
 #[path = "all/channel_namespaces.rs"]
 mod channel_namespaces;
+#[path = "all/code_definition_refusals.rs"]
+mod code_definition_refusals;
 #[path = "all/constraint_refusal_error_code.rs"]
 mod constraint_refusal_error_code;
 #[path = "all/custom_domain_api_association.rs"]
@@ -105,6 +107,8 @@ mod list_apis;
 mod merged_api_association_topology;
 #[path = "all/merged_api_disassociation.rs"]
 mod merged_api_disassociation;
+#[path = "all/plane_dependency_refusals.rs"]
+mod plane_dependency_refusals;
 #[path = "all/resolvers.rs"]
 mod resolvers;
 #[path = "all/resource_tags.rs"]

@@ -43,6 +43,16 @@ pub use resolvers::*;
 mod free_text;
 pub use free_text::*;
 
+/// What inside one API still uses one of its resources, and the refusal a delete that
+/// would break that use answers with.
+mod dependencies;
+pub use dependencies::*;
+
+/// The APPSYNC_JS `code` a resolver or a function is defined by: the compile a call that
+/// stores one runs over it, and the refusal code that does not compile takes.
+mod code_definition;
+pub use code_definition::*;
+
 use crate::ops::types::{
     AdditionalAuthenticationProvider, Api, ApiAssociation, ApiCache, ApiKey, AppSyncRuntime,
     AuthMode, ChannelNamespace, DataSource, DomainNameConfig, DynamodbDataSourceConfig,
