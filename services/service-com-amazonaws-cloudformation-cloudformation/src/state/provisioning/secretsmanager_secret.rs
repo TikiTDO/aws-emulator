@@ -58,20 +58,13 @@ use std::collections::BTreeMap;
 use serde_json::{Map, Value};
 
 use super::{
-    applicable_tags, call_json_rpc, key_value_tag_list, Created, Readiness, Refusal, Removal,
-    AWS_JSON_1_1,
+    applicable_tags, call_secretsmanager, key_value_tag_list, Created, Readiness, Refusal, Removal,
 };
 use crate::state::provisioner::tags_of;
 use crate::state::StoredResource;
 
 /// The resource type this module provisions.
 pub(super) const SECRETSMANAGER_SECRET: &str = "AWS::SecretsManager::Secret";
-
-/// AWS Secrets Manager's signing name and `X-Amz-Target` prefix, from its model
-/// (`sigv4Name: secretsmanager`, service shape `secretsmanager`), which speaks `awsJson1_1`.
-const SECRETSMANAGER_SIGNING_NAME: &str = "secretsmanager";
-/// See [`SECRETSMANAGER_SIGNING_NAME`].
-const SECRETSMANAGER_TARGET_PREFIX: &str = "secretsmanager";
 
 /// The error code Secrets Manager answers for a secret it does not hold
 /// (`ResourceNotFoundException`, the modelled refusal of its reads, updates and deletes),
@@ -563,24 +556,6 @@ fn refuse_unapplied_properties(properties: &Value, resource_type: &str) -> Resul
         });
     }
     Ok(())
-}
-
-/// Call one AWS Secrets Manager operation on the awsJson1_1 wire its model declares.
-async fn call_secretsmanager(
-    ctx: &smithy_server_runtime::OperationContext<'_>,
-    region: &str,
-    operation: &str,
-    request: &Value,
-) -> Result<Value, Refusal> {
-    call_json_rpc(
-        ctx,
-        SECRETSMANAGER_SIGNING_NAME,
-        region,
-        AWS_JSON_1_1,
-        &format!("{SECRETSMANAGER_TARGET_PREFIX}.{operation}"),
-        request,
-    )
-    .await
 }
 
 #[cfg(test)]

@@ -2365,6 +2365,12 @@ pub fn identity_is_service_assigned(resource_type: &str) -> bool {
         // on one takes. The ARN computed here is the stand-in a declaration is resolved
         // against until that create has answered, which the deployment then re-points.
         || resource_type == SECRETSMANAGER_SECRET
+        // Its ROTATION is one more, and for the same reason: the resource is the rotation
+        // configured on a secret, "Ref returns the ARN of the secret", and that ARN is the
+        // one `RotateSecret` answered rather than a value computed here — so the identifier
+        // in force is carried forward and a later deployment applies its declaration to the
+        // rotation that exists ([`SECRETSMANAGER_ROTATION_SCHEDULE`]).
+        || resource_type == SECRETSMANAGER_ROTATION_SCHEDULE
         // A NESTED STACK is one more, and the clearest case of it: "Ref returns the stack
         // ID" of the stack CloudFormation created for the resource, which carries the unique
         // id that service minted for it — the name the naming rules compute is only what the
@@ -3520,6 +3526,16 @@ pub const STEP_FUNCTIONS_STATE_MACHINE: &str = "AWS::StepFunctions::StateMachine
 /// is the ARN `secretsmanager describe-secret` answers with, not a value a naming rule here
 /// could compute.
 pub const SECRETSMANAGER_SECRET: &str = "AWS::SecretsManager::Secret";
+
+/// The rotation an AWS Secrets Manager secret is configured with, as a resource type of its
+/// own. This is a type `super::provisioning` puts in force in Secrets Manager itself, and
+/// "Ref returns the ARN of the secret" — the ARN of the secret the declaration's `SecretId`
+/// names, which `RotateSecret` answers and whose six trailing characters that service drew
+/// per secret. That is why [`identity_is_service_assigned`] names the type: the identifier
+/// the resource is known by is one no naming rule here can compute, so a re-deploy carries
+/// the one in force forward and the declaration is applied to the rotation that exists
+/// rather than read as a different resource.
+pub const SECRETSMANAGER_ROTATION_SCHEDULE: &str = "AWS::SecretsManager::RotationSchedule";
 
 /// A Systems Manager Parameter Store parameter's resource type (the SSM model:
 /// `cloudFormationName: SSM`). This is a type `super::provisioning` creates in Systems

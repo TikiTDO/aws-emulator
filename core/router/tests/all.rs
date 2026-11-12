@@ -1534,3 +1534,10 @@ mod s3_notification_pipeline_lifecycle;
 // CloudFormation at once — no single service crate's test target can see both hops.
 #[path = "all/s3_sns_lambda_chain_invoke_permission.rs"]
 mod s3_sns_lambda_chain_invoke_permission;
+// Declared in the appended tail, which is where every new suite inserts its lines: what a
+// stack-declared secret rotation DOES — the four-step rotation protocol a CloudFormation
+// `AWS::SecretsManager::RotationSchedule` puts in force — spans CloudFormation, AWS Secrets
+// Manager, AWS Lambda, IAM and STS at once, so no single service crate's test target can ask
+// it.
+#[path = "all/cloudformation_rotation_schedule_rotates_its_secret.rs"]
+mod cloudformation_rotation_schedule_rotates_its_secret;

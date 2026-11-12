@@ -67,6 +67,12 @@ impl Owner {
             Self::CognitoIdentityPool(kind) => {
                 cognito_identity_pool::create(ctx, region, kind, resource, propagated).await
             }
+            // A rotation schedule carries no tags of its own: it is not a resource of the
+            // owning service, but the rotation CONFIGURATION of the secret it names, so
+            // CloudFormation propagates none to it.
+            Self::SecretsManagerRotationSchedule => {
+                secretsmanager_rotation_schedule::create(ctx, region, resource).await
+            }
             // A secret IS taggable: its `Tags` property is the tag list `CreateSecret` takes,
             // so it carries the tags CloudFormation gives the resource beside its own.
             Self::SecretsManagerSecret => {
@@ -189,6 +195,13 @@ impl Owner {
             Self::NestedStack => {
                 Box::pin(nested_stack::readiness(ctx, region, physical_resource_id)).await
             }
+            // `RotateSecret` answers while the rotation it started is still in flight, so
+            // the resource is held open until the owning service reports the secret settled
+            // ([`secretsmanager_rotation_schedule::readiness`]).
+            Self::SecretsManagerRotationSchedule => {
+                secretsmanager_rotation_schedule::readiness(ctx, region, physical_resource_id)
+                    .await
+            }
             Self::SecretsManagerSecret => Ok(secretsmanager_secret::readiness()),
             Self::StepFunctionsStateMachine => Ok(step_functions_state_machine::readiness()),
             // Each of these resources EXISTS from the moment its create answers: API Gateway
@@ -283,6 +296,9 @@ impl Owner {
             // A secret's ARN and name are the ones its own create answered with, so there is
             // nothing left to read once the resource is up; a state machine's `Arn` and `Name`
             // are the same case.
+            // A rotation schedule's `Id` is the ARN of the secret it was configured on, which
+            // its own create answered, so there is nothing left to read once it is up.
+            Self::SecretsManagerRotationSchedule => Ok(BTreeMap::new()),
             Self::SecretsManagerSecret | Self::StepFunctionsStateMachine => Ok(BTreeMap::new()),
             // An api's id and its root resource, and the id of a resource or a deployment, are
             // the ones their own creates answered with, so there is nothing left to read once
@@ -370,6 +386,9 @@ impl Owner {
             // open until CloudFormation no longer holds the stack.
             Self::NestedStack => {
                 Box::pin(nested_stack::removal(ctx, region, physical_resource_id)).await
+            }
+            Self::SecretsManagerRotationSchedule => {
+                Ok(secretsmanager_rotation_schedule::removal())
             }
             Self::SecretsManagerSecret => Ok(secretsmanager_secret::removal()),
             Self::StepFunctionsStateMachine => {
@@ -482,6 +501,9 @@ impl Owner {
                 ))
                 .await
             }
+            Self::SecretsManagerRotationSchedule => {
+                secretsmanager_rotation_schedule::update(ctx, region, resource, declared).await
+            }
             Self::SecretsManagerSecret => {
                 secretsmanager_secret::update(ctx, region, resource, declared).await
             }
@@ -572,6 +594,8 @@ impl Owner {
             // The tags of a secret and of a state machine that already exist are reconciled by
             // no arm here yet ([`Provisioner::retag`]'s own default), so nothing is asked about
             // them.
+            // A rotation schedule is not taggable at all, so nothing is asked about its tags.
+            Self::SecretsManagerRotationSchedule => Ok(()),
             Self::SecretsManagerSecret | Self::StepFunctionsStateMachine => Ok(()),
             // Nor are the tags of an api or a stage that already exists ([`Provisioner::retag`]'s
             // own default), so nothing is asked about those either.
@@ -662,6 +686,12 @@ impl Owner {
             // and each resource of it under ITS own deletion policies — with no snapshot
             // invented for it. Boxed for the reason [`Self::create`]'s arm records.
             Self::NestedStack => Box::pin(nested_stack::delete(ctx, region, resource)).await,
+            // Secrets Manager takes no snapshot of a rotation configuration on the way out:
+            // there is no such call, so a `Snapshot` deletion policy on this type turns the
+            // rotation off with no snapshot invented for it.
+            Self::SecretsManagerRotationSchedule => {
+                secretsmanager_rotation_schedule::delete(ctx, region, resource).await
+            }
             // Secrets Manager takes no snapshot of a secret on the way out: there is no such
             // call, so a `Snapshot` deletion policy on this type deletes the secret with no
             // snapshot invented for it.
@@ -768,6 +798,10 @@ impl Owner {
             // DetectStackDrift directly on the nested stack"), so this arm reads nothing
             // back for the parent's resource rather than guessing at it.
             Self::NestedStack => Ok(None),
+            Self::SecretsManagerRotationSchedule => {
+                secretsmanager_rotation_schedule::actual_configuration(ctx, region, resource)
+                    .await
+            }
             Self::SecretsManagerSecret => {
                 secretsmanager_secret::actual_configuration(ctx, region, resource).await
             }
@@ -821,7 +855,9 @@ impl Owner {
             // child's own refusal, which is the account of why the stack was not created.
             Self::NestedStack => message.to_string(),
             // AWS Secrets Manager's and AWS Step Functions' do the same.
-            Self::SecretsManagerSecret | Self::StepFunctionsStateMachine => message.to_string(),
+            Self::SecretsManagerRotationSchedule
+            | Self::SecretsManagerSecret
+            | Self::StepFunctionsStateMachine => message.to_string(),
             // Amazon API Gateway's does the same.
             Self::ApiGatewayRestApi(_) => message.to_string(),
             // Application Auto Scaling's does the same.

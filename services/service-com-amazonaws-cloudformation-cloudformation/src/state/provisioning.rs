@@ -243,6 +243,9 @@ mod nested_stack;
 /// `AWS::S3::Bucket`: the halves of that type's provider the catalogue cannot carry — how a
 /// changed declaration reaches a bucket that exists, and how the provider words a refusal.
 mod s3_bucket;
+/// `AWS::SecretsManager::RotationSchedule`: the rotation a stack binds to a secret, put in
+/// force in AWS Secrets Manager itself ([`secretsmanager_rotation_schedule`]).
+mod secretsmanager_rotation_schedule;
 /// `AWS::SecretsManager::Secret`: the secret a stack declares, created in AWS Secrets
 /// Manager itself ([`secretsmanager_secret`]).
 mod secretsmanager_secret;
@@ -360,6 +363,35 @@ pub(super) const REST_JSON: &str = "application/json";
 /// The media type a REST-XML service's requests and answers carry ([`call_rest_xml`]): a
 /// `restXml` service (Amazon Route 53) takes an XML document rather than a JSON one.
 pub(super) const REST_XML: &str = "application/xml";
+
+/// AWS Secrets Manager's signing name and `X-Amz-Target` prefix, from its model
+/// (`sigv4Name: secretsmanager`, service shape `secretsmanager`), which speaks `awsJson1_1`.
+///
+/// Here rather than in one of the modules that call it, because more than one provisions a
+/// resource of that service: the SECRET itself ([`secretsmanager_secret`]) and the rotation
+/// configured on it ([`secretsmanager_rotation_schedule`]), which have to address the same
+/// service the same way.
+pub(super) const SECRETSMANAGER_SIGNING_NAME: &str = "secretsmanager";
+/// See [`SECRETSMANAGER_SIGNING_NAME`].
+pub(super) const SECRETSMANAGER_TARGET_PREFIX: &str = "secretsmanager";
+
+/// Call one AWS Secrets Manager operation on the awsJson1_1 wire its model declares.
+pub(super) async fn call_secretsmanager(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    operation: &str,
+    request: &Value,
+) -> Result<Value, Refusal> {
+    call_json_rpc(
+        ctx,
+        SECRETSMANAGER_SIGNING_NAME,
+        region,
+        AWS_JSON_1_1,
+        &format!("{SECRETSMANAGER_TARGET_PREFIX}.{operation}"),
+        request,
+    )
+    .await
+}
 
 /// What the service that owns a resource answered when it created it.
 ///
@@ -792,6 +824,9 @@ pub(super) enum Owner {
     /// CloudFormation itself, so a nested stack is created by the same `CreateStack` a
     /// client calls.
     NestedStack,
+    /// `AWS::SecretsManager::RotationSchedule`, whose arms are
+    /// [`secretsmanager_rotation_schedule`]'s.
+    SecretsManagerRotationSchedule,
     /// `AWS::SecretsManager::Secret`, whose arms are [`secretsmanager_secret`]'s.
     SecretsManagerSecret,
     /// `AWS::StepFunctions::StateMachine`, whose arms are
@@ -865,6 +900,9 @@ pub(super) fn owner_for(resource_type: &str) -> Option<Owner> {
     }
     if resource_type == nested_stack::CLOUDFORMATION_STACK {
         return Some(Owner::NestedStack);
+    }
+    if resource_type == secretsmanager_rotation_schedule::SECRETSMANAGER_ROTATION_SCHEDULE {
+        return Some(Owner::SecretsManagerRotationSchedule);
     }
     if resource_type == secretsmanager_secret::SECRETSMANAGER_SECRET {
         return Some(Owner::SecretsManagerSecret);
