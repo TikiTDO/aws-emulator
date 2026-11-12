@@ -232,7 +232,12 @@ async fn child_model(router: &MultiServiceRouter, name: &str) -> (String, String
         json!({
             "assetModelName": name,
             "assetModelProperties": [
-                measurement("ChildPower"),
+                {
+                    "name": "ChildPower",
+                    "externalId": "child_power",
+                    "dataType": "DOUBLE",
+                    "type": {"measurement": {}},
+                },
                 metric(
                     "ChildAverage",
                     "avg(power)",
@@ -256,7 +261,11 @@ async fn child_model(router: &MultiServiceRouter, name: &str) -> (String, String
 /// RULE: a variable resolves in ONE scope — the model being written, or the child
 /// model of the hierarchy the variable names — so a `hierarchyId` the definition
 /// declares no hierarchy for and a `propertyId` the scope does not hold are both
-/// refused, naming the label the request sent.
+/// refused, naming the label the request sent. The NAME spelling of a
+/// `propertyId` is accepted by the model being written ALONE, since it is
+/// documented for a property "from the same asset model", so a reference through
+/// a hierarchy has to be an identifier and anything else is an id invalid for
+/// that variable.
 #[tokio::test]
 async fn a_variable_resolves_only_inside_its_scope() {
     let router = router();
@@ -267,6 +276,9 @@ async fn a_variable_resolves_only_inside_its_scope() {
         Accepted,
         NoProperty(String),
         NoHierarchy(&'static str),
+        /// The label is not an identifier at all, in a scope that accepts only
+        /// those: the refusal names the label and the formula member carrying it.
+        InvalidId(String),
     }
 
     // Rows differ along HOW the variable addresses its property (by id, by name,
@@ -322,6 +334,24 @@ async fn a_variable_resolves_only_inside_its_scope() {
         (
             "the child model's own property name through the hierarchy",
             json!({"propertyId": "ChildPower", "hierarchyId": "Turbines"}),
+            Expected::InvalidId("ChildPower".to_string()),
+        ),
+        (
+            "the model's OWN property name through the hierarchy",
+            json!({"propertyId": "LocalPower", "hierarchyId": "Turbines"}),
+            Expected::InvalidId("LocalPower".to_string()),
+        ),
+        (
+            "an id-shaped label the child model does not hold, through the hierarchy",
+            json!({
+                "propertyId": "11111111-2222-3333-4444-555555555555",
+                "hierarchyId": "Turbines",
+            }),
+            Expected::NoProperty("11111111-2222-3333-4444-555555555555".to_string()),
+        ),
+        (
+            "the child model's own property externalId through the hierarchy",
+            json!({"propertyId": "externalId:child_power", "hierarchyId": "Turbines"}),
             Expected::Accepted,
         ),
     ];
@@ -369,6 +399,20 @@ async fn a_variable_resolves_only_inside_its_scope() {
                     status,
                     &body,
                     &format!("AssetModelHierarchy {hierarchy} does not exist."),
+                );
+                assert!(
+                    !holds_name(&router, &name).await,
+                    "case {case:?}: a refused create must leave no asset model behind"
+                );
+            }
+            Expected::InvalidId(label) => {
+                // The formula member is the one the row's property carries: every
+                // row above states its variable on a `metric`.
+                assert_refused(
+                    case,
+                    status,
+                    &body,
+                    &format!("Property Id {label} invalid for variables in Metric property."),
                 );
                 assert!(
                     !holds_name(&router, &name).await,

@@ -486,7 +486,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // A component-model-based composite model has no properties of its own: the
         // component model it reuses provides them, and
         // `DescribeAssetModelCompositeModel` reads them from there.
-        let properties = if composed_asset_model_id.is_some() {
+        let mut properties = if composed_asset_model_id.is_some() {
             None
         } else {
             Some(
@@ -513,6 +513,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         store
             .check_asset_model_definition(&definition)
             .map_err(invalid_request)?;
+        // Every variable reference that resolved is stored as the ID it resolved
+        // to, exactly as it is on the asset model's own writes.
+        if let Some(properties) = properties.as_mut() {
+            definition.resolve_variable_references(properties);
+        }
 
         let record = store
             .asset_models

@@ -394,7 +394,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(already_exists(&holder, holder_arn, "name"));
         }
 
-        let properties =
+        let mut properties =
             convert_property_definitions(input.asset_model_properties.as_deref().unwrap_or(&[]))?;
 
         // Each hierarchy names the asset model whose assets may be children of this
@@ -461,6 +461,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         store
             .check_asset_model_definition(&definition)
             .map_err(invalid_request)?;
+        // Every variable reference that resolved is stored as the ID it resolved
+        // to: a property name and an `externalId:` alias are input spellings of an
+        // id, and the properties and hierarchies this create mints ids for are the
+        // scope those spellings resolve in, so a read of the stored model reports
+        // the identifier of the member each reference names.
+        definition.resolve_variable_references(&mut properties);
+        definition.resolve_composite_variable_references(&mut composite_models);
 
         let record = crate::state::AssetModelRecord {
             id: asset_model_id.clone(),

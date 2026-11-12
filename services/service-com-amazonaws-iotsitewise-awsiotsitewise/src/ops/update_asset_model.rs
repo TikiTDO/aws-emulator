@@ -406,7 +406,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .asset_models
             .get(&id)
             .ok_or_else(|| model_not_found(&input.asset_model_id))?;
-        let properties =
+        let mut properties =
             crate::state::resolve_updated_properties(&record.properties, requested_properties)
                 .map_err(invalid_request)?;
         // "If you remove a property from an asset model, IoT SiteWise deletes all
@@ -582,6 +582,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         store
             .check_asset_model_definition(&definition)
             .map_err(invalid_request)?;
+        // Every variable reference that resolved is stored as the ID it resolved
+        // to, exactly as it is on the create: a property name and an `externalId:`
+        // alias are input spellings of an id, so what the new definition stores is
+        // the identifier of the member each of its references names.
+        definition.resolve_variable_references(&mut properties);
+        definition.resolve_composite_variable_references(&mut composite_models);
 
         // Nothing can be refused from here on, so the writes land together.
         let record = store

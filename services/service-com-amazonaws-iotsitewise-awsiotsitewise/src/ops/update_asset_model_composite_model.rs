@@ -402,7 +402,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // and cannot change its type or its data type. One rule for every stored
         // property list an update rewrites, so a model's own properties and those
         // of one of its composite models are resolved by the same code.
-        let properties = if component_based {
+        let mut properties = if component_based {
             None
         } else {
             Some(
@@ -441,6 +441,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         store
             .check_asset_model_definition(&definition)
             .map_err(invalid_request)?;
+        // Every variable reference that resolved is stored as the ID it resolved
+        // to, exactly as it is on the asset model's own writes.
+        if let Some(properties) = properties.as_mut() {
+            definition.resolve_variable_references(properties);
+        }
 
         // Nothing can be refused from here on, so the writes land together.
         let record = store

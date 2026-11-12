@@ -2984,6 +2984,27 @@ pub fn formula_variables(
     transform.chain(metric)
 }
 
+/// The expression variables of a property's formula, as mutable references: the
+/// counterpart of [`formula_variables`], for the ONE write that rewrites what a
+/// variable points at ([`DefinitionUnderWrite::resolve_variable_references`]).
+///
+/// Shares that function's definition of which members carry a formula, so a
+/// member read as a dependency cannot be a member a resolution skips.
+pub fn formula_variables_mut(
+    property: &mut AssetModelProperty,
+) -> impl Iterator<Item = &mut ExpressionVariable> {
+    let PropertyType {
+        transform, metric, ..
+    } = &mut property.r#type;
+    let transform = transform
+        .iter_mut()
+        .flat_map(|transform| transform.variables.iter_mut());
+    let metric = metric
+        .iter_mut()
+        .flat_map(|metric| metric.variables.iter_mut().flatten());
+    transform.chain(metric)
+}
+
 /// Total order on a `TimeInNanos`: whole seconds first, then the nanosecond
 /// offset, exactly as the modelled members are defined.
 pub fn timestamp_key(timestamp: &TimeInNanos) -> (i64, i32) {

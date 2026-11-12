@@ -17,7 +17,11 @@
 //!   variable names a `hierarchyId`, the child model of THAT hierarchy
 //!   (`VariableValue.hierarchyId`: "The ID of the hierarchy to query for the
 //!   property ID") — so a hierarchy the model does not declare and a property the
-//!   scope does not hold both name nothing;
+//!   scope does not hold both name nothing; and the NAME spelling of a
+//!   `propertyId` is one the model being written accepts alone, because it is
+//!   documented for a property "from the same asset model", so a reference
+//!   through a hierarchy has to be an identifier and a name there is an id
+//!   invalid for that variable;
 //! * a formula is PARSED: every identifier in it is a declared variable or a
 //!   function applied to arguments, and every declared variable appears in it
 //!   (`Metric.expression` / `Transform.expression` are the expressions, and
@@ -30,6 +34,13 @@
 //! modelled `InvalidRequestException` (HTTP 400), and every one of them is decided
 //! before a single field is written, so a refused write leaves the model exactly
 //! as it was.
+//!
+//! A variable that DOES resolve is then rewritten to the id it resolved to —
+//! [`DefinitionUnderWrite::resolve_variable_references`] — because a name and an
+//! `externalId:` alias are accepted INPUT spellings of an id, and every property
+//! and hierarchy of a written model carries a server-assigned one: the scope a
+//! reference is checked in is the scope it is resolved in, so a stored model
+//! reports the identifier of the member each of its references names.
 //!
 //! The expression grammar itself is IoT SiteWise's own formula language, so the
 //! identifiers of an expression are read here rather than through a parser for
@@ -119,6 +130,56 @@ pub const MAX_FORMULA_IDENTIFIERS: usize = MAX_EXPRESSION_CHARACTERS;
 /// bounds the per-variable resolution below: whatever a request declares, at most
 /// this many variables are ever resolved.
 pub const MAX_VARIABLES_PER_EXPRESSION: usize = 10;
+
+/// The group lengths of the `ID` form, as the model fixes it: `@length 36..36`
+/// and pattern
+/// `^(?!0{8}-0{4}-0{4}-0{4}-0{12})[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
+/// (`smithy_query(query="shape", shape="ID")`) — five groups of lowercase
+/// hexadecimal digits, separated by hyphens.
+///
+/// `VariableValue.propertyId` targets `Macro` rather than `ID`, so a reference's
+/// spelling is not constrained on the wire and the write is what reads it: this
+/// is what tells an IDENTIFIER spelling from a property NAME (see
+/// [`spelled_as_property_id`]).
+const ID_GROUP_LENGTHS: [usize; 5] = [8, 4, 4, 4, 12];
+
+/// The one value the modelled `ID` pattern's negative lookahead refuses, so it is
+/// no property's id and not an id spelling either.
+const NIL_ID: &str = "00000000-0000-0000-0000-000000000000";
+
+/// The name of the formula member a refusal reports a bad variable of: the two
+/// shapes that declare `variables`, named as the model names them.
+const METRIC_FORMULA: &str = "Metric";
+
+/// See [`METRIC_FORMULA`].
+const TRANSFORM_FORMULA: &str = "Transform";
+
+/// Whether `label` is spelled as an IDENTIFIER of a property rather than as its
+/// name: the modelled `ID` form ([`ID_GROUP_LENGTHS`], and not the [`NIL_ID`] its
+/// pattern refuses), or `externalId:` followed by a non-empty external id.
+///
+/// Those are the two spellings every resolution scope accepts. The NAME spelling
+/// is documented for one scope only — a property "from the same asset model" —
+/// so this is what a scope that is not the model being written holds a reference
+/// to (see [`Spellings`]).
+fn spelled_as_property_id(label: &str) -> bool {
+    if let Some(external_id) = label.strip_prefix(EXTERNAL_ID_PREFIX) {
+        return !external_id.is_empty();
+    }
+    if label == NIL_ID {
+        return false;
+    }
+    let mut groups = label.split('-');
+    let shaped = ID_GROUP_LENGTHS.iter().all(|length| {
+        groups.next().is_some_and(|group| {
+            group.len() == *length
+                && group
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    });
+    shaped && groups.next().is_none()
+}
 
 /// One identifier of a formula expression: its text, where it starts, and whether
 /// the expression APPLIES it to arguments.
@@ -255,6 +316,19 @@ pub fn hierarchy_does_not_exist_message(hierarchy_id: &str) -> String {
     format!("AssetModelHierarchy {hierarchy_id} does not exist.")
 }
 
+/// The message a `propertyId` spelled in a form the scope it resolves in does not
+/// accept is refused with: the label exactly as the request sent it, and the
+/// formula member whose variables carry it.
+///
+/// A property NAME is a spelling only the model being written accepts, so a
+/// reference scoped to a hierarchy's child model carries an id or an `externalId:`
+/// alias; a name there is not a property the scope does not hold but an id that is
+/// invalid for that variable, which is the distinction AWS words here.
+#[must_use]
+pub fn invalid_property_id_message(property_id: &str, formula: &str) -> String {
+    format!("Property Id {property_id} invalid for variables in {formula} property.")
+}
+
 /// The message a declared variable the expression never names is refused with:
 /// the expression, then the variable.
 #[must_use]
@@ -337,24 +411,47 @@ pub fn check_property_names_unique(properties: &[AssetModelProperty]) -> Result<
     Ok(())
 }
 
-/// Every label that names one of `properties`: each one's id, its `externalId:`
-/// alias and its name — the three forms `VariableValue.propertyId` documents.
+/// Which spellings of a property a resolution scope accepts.
+///
+/// `VariableValue.propertyId` documents the NAME spelling for one scope only —
+/// "You can use the property `name` if it's from the same asset model" — so a
+/// scope that is NOT the model being written resolves a reference by the
+/// property's id or its `externalId:` alias alone, and a name reaching it names
+/// nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Spellings {
+    /// The id, the `externalId:` alias and the name: the model being written.
+    IncludingNames,
+    /// The id and the `externalId:` alias: the child model of a declared
+    /// hierarchy, which is not the model being written.
+    IdsOnly,
+}
+
+/// Every label that names one of `properties` — each one's id, its `externalId:`
+/// alias and, where `spellings` admits it, its name — mapped to the id of the
+/// property it names, or to `None` for a property that carries no id at all.
 ///
 /// A resolution scope is asked the same question once per variable, so it is
-/// indexed ONCE here and each question is then a single set lookup, whatever the
-/// scope holds.
+/// indexed ONCE here and each question is then a single map lookup, whatever the
+/// scope holds. The id each label resolves to is what turns an accepted INPUT
+/// spelling into the value a read of the model reports (see
+/// [`DefinitionUnderWrite::resolve_variable_references`]).
 fn property_labels<'a>(
     properties: impl Iterator<Item = &'a AssetModelProperty>,
-) -> HashSet<String> {
-    let mut labels = HashSet::new();
+    spellings: Spellings,
+) -> HashMap<String, Option<String>> {
+    let mut labels = HashMap::new();
     for property in properties {
-        if let Some(id) = property.id.as_deref().filter(|id| !id.is_empty()) {
-            labels.insert(id.to_string());
+        let id = property.id.clone().filter(|id| !id.is_empty());
+        if let Some(id) = id.clone() {
+            labels.insert(id.clone(), Some(id));
         }
         if let Some(external_id) = property.external_id.as_deref() {
-            labels.insert(format!("{EXTERNAL_ID_PREFIX}{external_id}"));
+            labels.insert(format!("{EXTERNAL_ID_PREFIX}{external_id}"), id.clone());
         }
-        labels.insert(property.name.clone());
+        if spellings == Spellings::IncludingNames {
+            labels.insert(property.name.clone(), id);
+        }
     }
     labels
 }
@@ -390,20 +487,20 @@ pub struct DefinitionUnderWrite {
     /// each checked by the same rules as the model's own list.
     pub composite_property_lists: Vec<Vec<AssetModelProperty>>,
     /// Every label naming a property the model will carry — its own and the ones
-    /// its composite models contribute: the scope a variable with no
-    /// `hierarchyId` resolves in.
-    scope: HashSet<String>,
+    /// its composite models contribute — mapped to that property's id: the scope
+    /// a variable with no `hierarchyId` resolves in.
+    scope: HashMap<String, Option<String>>,
     /// `childAssetModelId` -> every label naming a property that child model
-    /// exposes: the scope a variable naming one of this definition's hierarchies
-    /// resolves in.
-    hierarchy_scopes: HashMap<String, HashSet<String>>,
+    /// exposes, mapped to that property's id: the scope a variable naming one of
+    /// this definition's hierarchies resolves in.
+    hierarchy_scopes: HashMap<String, HashMap<String, Option<String>>>,
 }
 
 impl DefinitionUnderWrite {
     /// Whether the model being written carries a property the label
     /// `property_label` names.
     fn holds_property(&self, property_label: &str) -> bool {
-        self.scope.contains(property_label)
+        self.scope.contains_key(property_label)
     }
 
     /// Whether the child model of `hierarchy` exposes a property the label
@@ -411,7 +508,105 @@ impl DefinitionUnderWrite {
     fn child_holds_property(&self, hierarchy: &AssetModelHierarchy, property_label: &str) -> bool {
         self.hierarchy_scopes
             .get(&hierarchy.child_asset_model_id)
-            .is_some_and(|labels| labels.contains(property_label))
+            .is_some_and(|labels| labels.contains_key(property_label))
+    }
+
+    /// The id of the property the label `property_label` names in the model being
+    /// written, when that label names one and it carries an id.
+    fn resolved_property(&self, property_label: &str) -> Option<&str> {
+        self.scope.get(property_label)?.as_deref()
+    }
+
+    /// The id of the property the label `property_label` names in the CHILD model
+    /// of `hierarchy`, when that label names one and it carries an id.
+    fn child_resolved_property(
+        &self,
+        hierarchy: &AssetModelHierarchy,
+        property_label: &str,
+    ) -> Option<&str> {
+        self.hierarchy_scopes
+            .get(&hierarchy.child_asset_model_id)?
+            .get(property_label)?
+            .as_deref()
+    }
+
+    /// Rewrite every variable reference `properties` carries from the spelling
+    /// the request used to the id of the member it resolves to, so what is STORED
+    /// — and so what every read of the model reports — is the identifier of the
+    /// referenced property and hierarchy rather than the accepted input spelling.
+    ///
+    /// `VariableValue.propertyId` and `VariableValue.hierarchyId` each document a
+    /// name and an `externalId:` alias as alternative spellings of an id ("You can
+    /// use the property `name` if it's from the same asset model", "You can use
+    /// the hierarchy's name instead of the hierarchy's ID"), and every property
+    /// and hierarchy of a written model carries a server-assigned id, so a
+    /// reference is resolved once, here, against the same scopes it was checked
+    /// in. A label that resolves to nothing is left as it arrived: it was already
+    /// refused before anything was stored.
+    ///
+    /// Asked by every operation that writes property definitions onto an asset
+    /// model, so one rule resolves references for all of them.
+    pub fn resolve_variable_references(&self, properties: &mut [AssetModelProperty]) {
+        for property in properties {
+            for variable in formula_variables_mut(property) {
+                self.resolve_variable(&mut variable.value);
+            }
+        }
+    }
+
+    /// [`Self::resolve_variable_references`] over the property list each composite
+    /// model of the written definition states; a composite model that states none
+    /// contributes the properties of the component model it reuses, which were
+    /// resolved by the write that stated them.
+    pub fn resolve_composite_variable_references(
+        &self,
+        composite_models: &mut [AssetModelCompositeModel],
+    ) {
+        for composite in composite_models {
+            if let Some(properties) = composite.properties.as_mut() {
+                self.resolve_variable_references(properties);
+            }
+        }
+    }
+
+    /// Rewrite ONE variable reference, in the scope `VariableValue` documents for
+    /// it: with no `hierarchyId` the model being written, with one the hierarchy
+    /// it names and the CHILD model of that hierarchy.
+    fn resolve_variable(&self, value: &mut VariableValue) {
+        let Some(hierarchy_label) = value.hierarchy_id.clone() else {
+            let resolved = value
+                .property_id
+                .as_deref()
+                .and_then(|label| self.resolved_property(label))
+                .map(str::to_string);
+            if let Some(id) = resolved {
+                value.property_id = Some(id);
+            }
+            return;
+        };
+        let Some(hierarchy) = self
+            .hierarchies
+            .iter()
+            .find(|hierarchy| names_hierarchy(hierarchy, &hierarchy_label))
+        else {
+            return;
+        };
+        let resolved_property = value
+            .property_id
+            .as_deref()
+            .and_then(|label| self.child_resolved_property(hierarchy, label))
+            .map(str::to_string);
+        let resolved_hierarchy = hierarchy
+            .id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+        if let Some(id) = resolved_hierarchy {
+            value.hierarchy_id = Some(id);
+        }
+        if let Some(id) = resolved_property {
+            value.property_id = Some(id);
+        }
     }
 }
 
@@ -508,6 +703,12 @@ impl ComAmazonawsIotsitewiseAwsiotsitewiseState {
     /// `contributed`), and the labels naming a property each declared hierarchy's
     /// CHILD model exposes.
     ///
+    /// The two scopes accept different SPELLINGS: a property of the model being
+    /// written is named by its id, its `externalId:` alias or its name, while one
+    /// of a child model is named by its id or alias only — the name spelling is
+    /// documented for a property "from the same asset model", and a child model is
+    /// another model (see [`Spellings`]).
+    ///
     /// Done ONCE per write, so every variable of every formula in it resolves
     /// through a set lookup. The child scopes are indexed per hierarchy, of which
     /// a model carries at most [`MAX_HIERARCHIES_PER_ASSET_MODEL`], so this costs
@@ -517,7 +718,10 @@ impl ComAmazonawsIotsitewiseAwsiotsitewiseState {
         definition: &mut DefinitionUnderWrite,
         contributed: &[AssetModelProperty],
     ) {
-        definition.scope = property_labels(definition.properties.iter().chain(contributed.iter()));
+        definition.scope = property_labels(
+            definition.properties.iter().chain(contributed.iter()),
+            Spellings::IncludingNames,
+        );
         for hierarchy in &definition.hierarchies {
             if definition
                 .hierarchy_scopes
@@ -531,6 +735,7 @@ impl ComAmazonawsIotsitewiseAwsiotsitewiseState {
             let labels = property_labels(
                 self.exposed_asset_model_properties(child, &HashSet::new())
                     .iter(),
+                Spellings::IdsOnly,
             );
             definition
                 .hierarchy_scopes
@@ -604,7 +809,12 @@ impl ComAmazonawsIotsitewiseAwsiotsitewiseState {
         definition: &DefinitionUnderWrite,
     ) -> Result<(), String> {
         if let Some(transform) = property.r#type.transform.as_ref() {
-            self.check_formula(&transform.expression, &transform.variables, definition)?;
+            self.check_formula(
+                &transform.expression,
+                &transform.variables,
+                definition,
+                TRANSFORM_FORMULA,
+            )?;
         }
         if let Some(metric) = property.r#type.metric.as_ref() {
             // `Metric.expression` and `Metric.variables` both carry a modelled
@@ -613,7 +823,7 @@ impl ComAmazonawsIotsitewiseAwsiotsitewiseState {
             // about here.
             let expression = metric.expression.clone().unwrap_or_default();
             let variables = metric.variables.clone().unwrap_or_default();
-            self.check_formula(&expression, &variables, definition)?;
+            self.check_formula(&expression, &variables, definition, METRIC_FORMULA)?;
             check_metric_window(&expression, &metric.window)?;
         }
         Ok(())
@@ -631,6 +841,7 @@ impl ComAmazonawsIotsitewiseAwsiotsitewiseState {
         expression: &str,
         variables: &[ExpressionVariable],
         definition: &DefinitionUnderWrite,
+        formula: &str,
     ) -> Result<(), String> {
         // The published per-formula quota, checked before anything is resolved:
         // every rule below is then asked of at most this many variables, whatever
@@ -639,7 +850,7 @@ impl ComAmazonawsIotsitewiseAwsiotsitewiseState {
             return Err(variable_quota_message(expression, variables.len()));
         }
         for variable in variables {
-            self.check_variable(&variable.value, definition)?;
+            self.check_variable(&variable.value, definition, formula)?;
         }
         let named = formula_identifiers(expression);
         // An identifier the expression applies to arguments is a function of the
@@ -675,19 +886,27 @@ impl ComAmazonawsIotsitewiseAwsiotsitewiseState {
     }
 
     /// Refuse a variable that resolves to nothing: a `hierarchyId` the definition
-    /// declares no hierarchy for, or a `propertyId` its resolution scope does not
-    /// hold.
+    /// declares no hierarchy for, a `propertyId` spelled in a form its scope does
+    /// not accept, or one its scope does not hold.
     ///
     /// The scope is the one `VariableValue` documents: with no `hierarchyId` the
     /// model being written (its own properties and the ones its composite models
     /// contribute), with one the CHILD model of that hierarchy. Both were indexed
-    /// when the definition was built, so this is a set lookup. A variable carrying
-    /// no `propertyId` names no property to resolve — it addresses the property
+    /// when the definition was built, so this is a set lookup — and the child
+    /// scope was indexed under the spellings it accepts, which do not include a
+    /// property NAME ([`Spellings`]): a reference reaching it has to be an
+    /// identifier, so one that is not is refused as an id invalid for the variable
+    /// rather than as a property the scope lacks. A variable carrying no
+    /// `propertyId` names no property to resolve — it addresses the property
     /// through its `propertyPath` instead — so there is nothing to refuse.
+    ///
+    /// `formula` is the formula member the variable belongs to, which the
+    /// invalid-spelling refusal names.
     fn check_variable(
         &self,
         value: &VariableValue,
         definition: &DefinitionUnderWrite,
+        formula: &str,
     ) -> Result<(), String> {
         match value.hierarchy_id.as_deref() {
             Some(hierarchy_label) => {
@@ -701,6 +920,9 @@ impl ComAmazonawsIotsitewiseAwsiotsitewiseState {
                 let Some(property_label) = value.property_id.as_deref() else {
                     return Ok(());
                 };
+                if !spelled_as_property_id(property_label) {
+                    return Err(invalid_property_id_message(property_label, formula));
+                }
                 if definition.child_holds_property(hierarchy, property_label) {
                     return Ok(());
                 }
