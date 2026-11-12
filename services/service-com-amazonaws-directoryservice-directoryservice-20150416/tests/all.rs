@@ -125,6 +125,8 @@ mod snapshot_deletion;
 mod snapshot_read_scopes;
 #[path = "all/snapshots.rs"]
 mod snapshots;
+#[path = "all/sso_access_url_assignment.rs"]
+mod sso_access_url_assignment;
 #[path = "all/sso_access_url_prerequisite.rs"]
 mod sso_access_url_prerequisite;
 #[path = "all/state_roundtrip.rs"]
