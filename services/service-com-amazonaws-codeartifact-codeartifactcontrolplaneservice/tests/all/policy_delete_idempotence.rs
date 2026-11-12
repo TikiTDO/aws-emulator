@@ -103,7 +103,13 @@ impl Resource {
             }
         };
         if let Some(revision) = revision {
-            uri.push_str(&format!("&policy-revision={revision}"));
+            // A revision is base64, so it can carry `+`, `/` and `=` — characters a query
+            // string reads as a space, a separator and a delimiter. It travels encoded,
+            // the way an SDK sends it.
+            uri.push_str(&format!(
+                "&policy-revision={}",
+                crate::resource_tags::encode_query(revision)
+            ));
         }
         call(router, "DELETE", &uri, None).await
     }

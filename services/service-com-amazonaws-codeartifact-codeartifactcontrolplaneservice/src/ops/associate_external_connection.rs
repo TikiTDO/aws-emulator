@@ -182,37 +182,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &input.repository,
         )
         .map_err(AssociateExternalConnectionErrorModeled::AccessDeniedException)?;
-        // `externalConnection` is modelled as a free string, so the boundary validator has
-        // only checked its length and pattern: whether it NAMES a registry CodeArtifact
-        // can connect to is this handler's check, and its package format comes from the
-        // same catalog rather than from the request.
-        //
-        // A well-formed name that is not in the catalog names a connection that does not
-        // exist, which is a 404 and not a 400: the value satisfies every constraint
-        // `ExternalConnectionName` declares (len 2..100, pattern
-        // `^[A-Za-z0-9][A-Za-z0-9._\-:]{1,99}$`), so there is nothing about the REQUEST to
-        // refuse — the registry it asks for is simply not one this service offers.
-        // `resourceType` is left unset: `ResourceType` models only `asset`, `domain`,
-        // `package`, `package-version` and `repository`, so there is no enum value for an
-        // external connection to report.
-        let Some(package_format) =
-            crate::state::external_connection_package_format(&input.external_connection)
-        else {
-            return Err(
-                AssociateExternalConnectionErrorModeled::ResourceNotFoundException(
-                    ResourceNotFoundException {
-                        message: format!(
-                            "The external connection '{}' does not exist",
-                            input.external_connection
-                        ),
-                        resource_id: Some(input.external_connection.clone()),
-                        resource_type: None,
-                    },
-                )
-                .into(),
-            );
-        };
-
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(
                 AssociateExternalConnectionErrorModeled::InternalServerException(
@@ -252,6 +221,43 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         ),
                         resource_id: Some(input.repository.clone()),
                         resource_type: Some("repository".to_string()),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        // `externalConnection` is modelled as a free string, so the boundary validator has
+        // only checked its length and pattern: whether it NAMES a registry CodeArtifact
+        // can connect to is this handler's check, and its package format comes from the
+        // same catalog rather than from the request.
+        //
+        // A well-formed name that is not in the catalog names a connection that does not
+        // exist, which is a 404 and not a 400: the value satisfies every constraint
+        // `ExternalConnectionName` declares (len 2..100, pattern
+        // `^[A-Za-z0-9][A-Za-z0-9._\-:]{1,99}$`), so there is nothing about the REQUEST to
+        // refuse — the registry it asks for is simply not one this service offers.
+        // `resourceType` is left unset: `ResourceType` models only `asset`, `domain`,
+        // `package`, `package-version` and `repository`, so there is no enum value for an
+        // external connection to report.
+        //
+        // Asked AFTER the domain and the repository are resolved: a request is answered
+        // for the resources it ADDRESSES first, so a call naming a repository that is not
+        // there is refused for that repository whatever else it asks for.
+        let Some(package_format) =
+            crate::state::external_connection_package_format(&input.external_connection)
+        else {
+            return Err(
+                AssociateExternalConnectionErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: crate::state::external_connection_not_found_message(
+                            &domain_name,
+                            input.domain_owner.as_deref(),
+                            &input.repository,
+                            &input.external_connection,
+                        ),
+                        resource_id: Some(input.external_connection.clone()),
+                        resource_type: None,
                     },
                 )
                 .into(),

@@ -19,7 +19,8 @@
 //!    for the read — a domain that holds no policy, reporting the type of resource asked
 //!    for and the name the request addressed it by.
 //! 3. Attaching a policy replaces whatever was attached, answers with what it stored, and
-//!    mints a fresh `revision` on every write; `policyRevision` is optimistic locking, so a
+//!    carries the `revision` of the DOCUMENT it stored — the same document always mints the
+//!    same token and other bytes mint another; `policyRevision` is optimistic locking, so a
 //!    write that names any revision other than the one currently attached is refused with
 //!    `ConflictException` (409) and stores nothing, while omitting it writes
 //!    unconditionally.
@@ -102,7 +103,13 @@ async fn delete_domain_policy(
         uri.push_str(&format!("&domain-owner={owner}"));
     }
     if let Some(revision) = policy_revision {
-        uri.push_str(&format!("&policy-revision={revision}"));
+        // A revision is base64, so it can carry `+`, `/` and `=` — characters a query
+        // string reads as a space, a separator and a delimiter. It travels encoded, the
+        // way an SDK sends it.
+        uri.push_str(&format!(
+            "&policy-revision={}",
+            crate::resource_tags::encode_query(revision)
+        ));
     }
     call(router, "DELETE", &uri, None).await
 }
@@ -317,10 +324,11 @@ async fn attached_policy_round_trips_through_stored_state() {
     }
 }
 
-/// RULE 3: a write replaces what was attached and mints a fresh revision; a write that
-/// names a revision other than the attached one is refused and stores nothing.
+/// RULE 3: a write replaces what was attached and reports the revision of the document it
+/// stored; a write that names a revision other than the attached one is refused and stores
+/// nothing.
 #[tokio::test]
-async fn policy_revision_locks_the_write_and_changes_on_every_write() {
+async fn policy_revision_locks_the_write_and_follows_the_document() {
     let (router, _engine) = emulator_with_engine();
 
     let first = r#"{"Version":"2012-10-17","Statement":[]}"#;
@@ -377,7 +385,8 @@ async fn policy_revision_locks_the_write_and_changes_on_every_write() {
         );
     }
 
-    // The attached revision unlocks the write, and the write mints a new one.
+    // The attached revision unlocks the write, and the write reports the new document's
+    // own revision.
     let put_second =
         put_domain_policy(&router, "locking", None, second, Some(&revision_one)).await;
     assert_eq!(
@@ -387,12 +396,15 @@ async fn policy_revision_locks_the_write_and_changes_on_every_write() {
     let revision_two = revision_of(&put_second).expect("the write mints a revision");
     assert_ne!(
         revision_two, revision_one,
-        "a write must mint a fresh revision, got {revision_two:?} twice"
+        "a write of a different document must report a different revision, got \
+         {revision_two:?} twice"
     );
     assert_modelled_revision("second write", Some(&revision_two));
 
-    // Restoring the document stored before still mints a NEW revision, so a revision a
-    // caller held from before never starts matching again.
+    // Restoring the document stored before restores ITS revision: the token identifies the
+    // document, so the one a caller read while that document was attached matches again
+    // once it is attached again — and the revision of the document that is no longer
+    // attached stops matching.
     let restored = put_domain_policy(&router, "locking", None, first, Some(&revision_two)).await;
     let revision_three = revision_of(&restored).expect("the write mints a revision");
     assert_eq!(
@@ -400,16 +412,16 @@ async fn policy_revision_locks_the_write_and_changes_on_every_write() {
         (200, Some(first)),
         "restoring an earlier document must succeed, got {restored:?}"
     );
-    assert!(
-        revision_three != revision_one && revision_three != revision_two,
-        "restoring an earlier document must still mint a fresh revision, got \
-         {revision_three:?} against {revision_one:?} and {revision_two:?}"
+    assert_eq!(
+        revision_three, revision_one,
+        "restoring a document must restore its revision, got {revision_three:?} against \
+         {revision_one:?}"
     );
-    let stale_again = put_domain_policy(&router, "locking", None, second, Some(&revision_one)).await;
+    let stale_again = put_domain_policy(&router, "locking", None, second, Some(&revision_two)).await;
     assert_eq!(
         (stale_again.status, stale_again.code()),
         (409, "ConflictException".to_string()),
-        "the first revision must not match again, got {stale_again:?}"
+        "the revision of a document no longer attached must not match, got {stale_again:?}"
     );
 
     // Omitting the revision writes unconditionally.
@@ -429,10 +441,9 @@ async fn policy_revision_locks_the_write_and_changes_on_every_write() {
         "the read must answer with the last write, got {read_back:?}"
     );
 
-    // A delete does not restart the revision line either: re-attaching, after a delete,
-    // the very document that was attached before it must still mint a revision this domain
-    // has never reported, so a revision a caller held from before the delete cannot start
-    // matching again.
+    // A delete does not change what a revision identifies either: re-attaching, after a
+    // delete, the very document that was attached before it reports that document's own
+    // revision again, and the lock holds against it exactly while it is attached.
     let held = revision_of(&unconditional).expect("the last write mints a revision");
     let removed = delete_domain_policy(&router, "locking", None, None).await;
     assert_eq!(
@@ -449,20 +460,22 @@ async fn policy_revision_locks_the_write_and_changes_on_every_write() {
         (200, Some(second)),
         "re-attaching after a delete must succeed, got {reattached:?}"
     );
-    assert!(
-        revision_after_delete != held
-            && revision_after_delete != revision_one
-            && revision_after_delete != revision_two
-            && revision_after_delete != revision_three,
-        "re-attaching after a delete must mint a revision never reported before, got \
-         {revision_after_delete:?} against {held:?}, {revision_one:?}, {revision_two:?} and \
-         {revision_three:?}"
+    assert_eq!(
+        revision_after_delete, held,
+        "re-attaching the same document after a delete must report its revision, got \
+         {revision_after_delete:?} against {held:?}"
+    );
+    let unlocked = put_domain_policy(&router, "locking", None, first, Some(&held)).await;
+    assert_eq!(
+        unlocked.status, 200,
+        "the revision of the attached document must unlock the write, got {unlocked:?}"
     );
     let stale_across_delete = put_domain_policy(&router, "locking", None, first, Some(&held)).await;
     assert_eq!(
         (stale_across_delete.status, stale_across_delete.code()),
         (409, "ConflictException".to_string()),
-        "a revision held from before the delete must not match, got {stale_across_delete:?}"
+        "a revision naming a document that is no longer attached must not match, got \
+         {stale_across_delete:?}"
     );
 }
 

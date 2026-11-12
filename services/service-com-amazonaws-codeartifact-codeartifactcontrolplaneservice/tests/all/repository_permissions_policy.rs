@@ -19,8 +19,9 @@
 //! 2. `policyRevision` is an optimistic lock: a put or delete that names one proceeds only
 //!    while that is still the revision held (a caller that names none is not locking), and
 //!    a refused write is `ConflictException` (409) that leaves the stored policy unchanged.
-//! 3. Every write mints a new revision, even for a byte-identical document, and a revision
-//!    is stable across reads and distinct between resources.
+//! 3. A revision is the DOCUMENT's own token: a write of a byte-identical document
+//!    reports the same revision, a write of other bytes reports another, and a revision is
+//!    stable across reads.
 //! 4. `policyDocument` must be a JSON policy object; anything else is
 //!    `ValidationException` (400) and stores nothing.
 //! 5. Addressing a resource that is not held is `ResourceNotFoundException` (404): an
@@ -86,7 +87,13 @@ async fn delete_policy(
     let mut uri =
         format!("/v1/repository/permissions/policies?domain={domain}&repository={repository}");
     if let Some(revision) = revision {
-        uri.push_str(&format!("&policy-revision={revision}"));
+        // A revision is base64, so it can carry `+`, `/` and `=` — characters a query
+        // string reads as a space, a separator and a delimiter. It travels encoded, the
+        // way an SDK sends it.
+        uri.push_str(&format!(
+            "&policy-revision={}",
+            crate::resource_tags::encode_query(revision)
+        ));
     }
     call(router, "DELETE", &uri, None).await
 }
@@ -373,25 +380,27 @@ async fn policy_round_trips_through_the_store_and_its_revision_locks_the_next_wr
         );
 
         // And the repository itself is untouched by its policy's removal: a fresh put
-        // works again, this time with no lock named.
+        // works again, this time with no lock named — and it reports the revision of the
+        // document it stored, which is the one the FIRST put of those bytes reported.
         let reattached = put_policy(&router, &domain, &repository, &case.document, None).await;
         assert_eq!(
             reattached.status, 200,
             "case {label:?}: re-attaching after a delete, got {reattached:?}"
         );
-        assert_ne!(
+        assert_eq!(
             policy_field(&reattached, "revision"),
-            second_revision,
-            "case {label:?}: the re-attached policy must carry a new revision"
+            first_revision,
+            "case {label:?}: re-attaching the first document must report its revision"
         );
     }
 }
 
-/// RULE 3: a revision identifies one resource's one write. Re-writing a byte-identical
-/// document mints a new revision (otherwise the lock would accept a stale token), and the
-/// same document on two different repositories gets two different revisions.
+/// RULE 3: a revision identifies the DOCUMENT. Re-writing a byte-identical document
+/// reports the revision that document already had, a document of other bytes reports
+/// another one, and the token is stable across reads — which is what lets a caller use it
+/// as the precondition for "the document I read is still the one attached".
 #[tokio::test]
-async fn revisions_are_per_write_and_per_resource() {
+async fn revisions_follow_the_document_they_identify() {
     let router = emulator();
     let document = r#"{"Version":"2012-10-17","Statement":[{"Sid":"Same","Effect":"Allow","Principal":"*","Action":"codeartifact:ReadFromRepository","Resource":"*"}]}"#;
 
@@ -406,7 +415,7 @@ async fn revisions_are_per_write_and_per_resource() {
         "create domain rev-domain-b"
     );
     // The same repository NAME in two domains, plus a second name in one domain: the three
-    // resources a revision must distinguish.
+    // resources the rule is asserted over.
     for (domain, repository) in [
         ("rev-domain-a", "shared-name"),
         ("rev-domain-a", "other-name"),
@@ -421,7 +430,9 @@ async fn revisions_are_per_write_and_per_resource() {
         );
     }
 
-    // Three successive writes of the SAME document to one repository.
+    // Three successive writes of the SAME document to one repository: each reports the
+    // revision of the bytes it stored, so all three are the one token — and each unlocks
+    // the next write, because the document the caller read is still the one attached.
     let mut chain = Vec::new();
     for write in 0..3 {
         let revision = chain.last().cloned();
@@ -439,15 +450,24 @@ async fn revisions_are_per_write_and_per_resource() {
         );
         let minted = policy_field(&put, "revision").to_string();
         assert!(
-            !chain.contains(&minted),
-            "write {write}: an identical document must still mint a fresh revision, got {minted:?} after {chain:?}"
+            chain.iter().all(|earlier| *earlier == minted),
+            "write {write}: an identical document must report the same revision, got \
+             {minted:?} after {chain:?}"
+        );
+        // 44 characters of base64 ending in '=': the digest form a revision is reported in.
+        assert!(
+            minted.len() == 44
+                && minted.ends_with('=')
+                && !minted.contains(char::is_whitespace),
+            "write {write}: expected a 44-character base64 revision, got {minted:?}"
         );
         chain.push(minted);
     }
 
-    // The same document on three different resources: three different revisions, each
-    // under its own ARN.
-    let mut per_resource = Vec::new();
+    // The SAME document, written to other resources: the token identifies the document, so
+    // it is that same revision — while the policy itself is reported under each
+    // repository's OWN ARN, which is what tells the three resources apart.
+    let held = chain.last().cloned().expect("a revision was minted");
     for (domain, repository) in [
         ("rev-domain-a", "other-name"),
         ("rev-domain-b", "shared-name"),
@@ -462,16 +482,33 @@ async fn revisions_are_per_write_and_per_resource() {
             repository_arn(domain, repository),
             "case {domain}/{repository}: the policy must name its own repository's ARN"
         );
-        per_resource.push(policy_field(&put, "revision").to_string());
-    }
-    per_resource.push(chain.last().cloned().expect("a revision was minted"));
-    for (index, revision) in per_resource.iter().enumerate() {
         assert_eq!(
-            per_resource.iter().filter(|other| *other == revision).count(),
-            1,
-            "resource {index}: two resources must not share a revision, got {per_resource:?}"
+            policy_field(&put, "revision"),
+            held,
+            "case {domain}/{repository}: the same document must report the same revision, \
+             got {put:?}"
         );
     }
+
+    // A document of OTHER bytes reports another revision.
+    let other_document = r#"{"Version":"2012-10-17","Statement":[{"Sid":"Other","Effect":"Allow","Principal":"*","Action":"codeartifact:DescribeRepository","Resource":"*"}]}"#;
+    let other = put_policy(
+        &router,
+        "rev-domain-a",
+        "shared-name",
+        other_document,
+        Some(&held),
+    )
+    .await;
+    assert_eq!(
+        other.status, 200,
+        "a write naming the attached revision must succeed, got {other:?}"
+    );
+    assert_ne!(
+        policy_field(&other, "revision"),
+        held,
+        "another document must report another revision, got {other:?}"
+    );
 
     // Deleting one resource's policy leaves the others attached.
     assert_eq!(

@@ -35,6 +35,10 @@ use crate::ops::types::{
 /// released, so every plane that changes a version announces it the same way.
 pub mod package_version_events;
 
+/// The KMS key a domain is encrypted with: the one resolution of a create's
+/// `encryptionKey` against KMS, and of the managed key a create that names none asks for.
+pub mod domain_encryption;
+
 /// This service's SigV4 signing name, which is also the service segment of every ARN
 /// it mints (`arn:aws:codeartifact:...`).
 pub const SERVICE_SIGNING_NAME: &str = "codeartifact";
@@ -865,12 +869,6 @@ pub struct Domain {
     pub s3_bucket_arn: String,
     pub tags: Vec<Tag>,
     pub policy: Option<ResourcePolicy>,
-    /// How many resource policies this domain has ever had attached, counting the one
-    /// attached now. Never reset — not by replacing the policy and not by deleting it —
-    /// because it is what the revision in [`attached_policy`] is derived from: a revision
-    /// a caller held before a delete must not start matching again when the same document
-    /// is re-attached.
-    pub policy_attachments: u64,
     /// The domain's repositories, keyed by repository name. `repositoryCount` is
     /// derived from this map's length and never stored beside it.
     pub repositories: BTreeMap<String, Repository>,
@@ -889,11 +887,10 @@ impl Domain {
     /// Attach `document` as this domain's resource policy, replacing any policy it already
     /// holds, and answer with the record that was stored.
     ///
-    /// The counter advances first, so the minted revision is one this domain has never
-    /// reported — see [`attached_policy`].
+    /// The revision the record carries identifies the DOCUMENT that is now attached — see
+    /// [`attached_policy`].
     pub fn attach_policy(&mut self, document: String) -> ResourcePolicy {
-        self.policy_attachments = self.policy_attachments.saturating_add(1);
-        let policy = attached_policy(&self.arn, document, self.policy_attachments);
+        let policy = attached_policy(&self.arn, document);
         self.policy = Some(policy.clone());
         policy
     }
@@ -1422,9 +1419,6 @@ pub struct Repository {
     pub created_time: SystemTime,
     pub tags: Vec<Tag>,
     pub policy: Option<ResourcePolicy>,
-    /// How many resource policies this repository has ever had attached, counting the one
-    /// attached now — see [`Domain::policy_attachments`] for why it is never reset.
-    pub policy_attachments: u64,
     /// The packages held in this repository, keyed by [`package_key`]. Sorted for the
     /// same reason as the maps above: `ListPackages` is `@paginated`, and a stable key
     /// order is what makes its opaque `nextToken` resolve to the same place next call.
@@ -1435,13 +1429,11 @@ impl Repository {
     /// Attach `document` as this repository's resource policy, replacing any policy it
     /// already holds, and answer with the record that was stored.
     ///
-    /// The counter advances first, so the minted revision is one this repository has
-    /// never reported. Both policy-bearing records attach a policy through this one rule
+    /// Both policy-bearing records attach a policy through this one rule
     /// ([`Domain::attach_policy`]), so a revision minted on a domain and one minted on a
     /// repository cannot follow different schemes.
     pub fn attach_policy(&mut self, document: String) -> ResourcePolicy {
-        self.policy_attachments = self.policy_attachments.saturating_add(1);
-        let policy = attached_policy(&self.arn, document, self.policy_attachments);
+        let policy = attached_policy(&self.arn, document);
         self.policy = Some(policy.clone());
         policy
     }
@@ -2298,15 +2290,15 @@ pub fn policy_revision_matches(current: Option<&ResourcePolicy>, supplied: Optio
 }
 
 /// The policy to store on the resource `resource_arn` names: `document` in the form a
-/// policy is stored in ([`stored_policy_document`]), under the revision minted for this
-/// resource's `attachment`-th policy.
+/// policy is stored in ([`stored_policy_document`]), under the revision that document's
+/// own bytes mint ([`policy_revision`]).
 ///
 /// The revision is derived from the STORED form, so the token a write mints identifies the
 /// document a later read answers with and not a rendering of it nobody can observe.
-pub fn attached_policy(resource_arn: &str, document: String, attachment: u64) -> ResourcePolicy {
+pub fn attached_policy(resource_arn: &str, document: String) -> ResourcePolicy {
     let document = stored_policy_document(&document);
     ResourcePolicy {
-        revision: Some(policy_revision(resource_arn, &document, attachment)),
+        revision: Some(policy_revision(&document)),
         resource_arn: Some(resource_arn.to_string()),
         document: Some(document),
     }
@@ -2491,26 +2483,25 @@ pub fn deleted_policy(resource_arn: &str, removed: Option<ResourcePolicy>) -> Re
     })
 }
 
-/// The revision a resource policy carries once it is written.
+/// The revision a resource policy carries once it is written: the DIGEST of the document
+/// stored under it — base64 (standard alphabet) of its SHA-256, which is 44 characters,
+/// inside `PolicyRevision`'s modelled 1..100 length and matching its `^\S+$` pattern.
 ///
-/// Derived from the resource the policy hangs off, the document being written and
-/// `attachment` — how many policies that resource has ever had attached — so it is stable
-/// across every read of the same policy (nothing per-call goes into it) and distinct
-/// between resources. The counter is what makes the revision a usable optimistic lock: it
-/// only ever grows, so every write mints a revision this resource has never reported,
-/// even one that rewrites a byte-identical document or re-attaches, after a delete, the
-/// document that was attached before it — a revision a caller still holds can therefore
-/// never start matching again.
-fn policy_revision(resource_arn: &str, document: &str, attachment: u64) -> String {
-    let digest = identity_digest(&[
-        "policy-revision",
-        resource_arn,
-        document,
-        &attachment.to_string(),
-    ]);
-    // 16 bytes rendered as 32 hex characters: inside `PolicyRevision`'s modelled 1..100
-    // length and matching its `^\S+$` pattern.
-    hex::encode(&digest[..16])
+/// A revision identifies the DOCUMENT, not the write: the token is a function of the
+/// stored bytes alone, so it is stable across every read of the attached policy (nothing
+/// per-call and nothing counted goes into it), two writes of the same document report the
+/// same token, and a write of other bytes reports another one. That is what makes it
+/// usable as the `policyRevision` precondition: a revision a caller holds matches exactly
+/// while the document it read is still the document attached, which is the question
+/// optimistic locking asks.
+///
+/// Digested over the document's own bytes, with nothing prepended or appended, so the
+/// token reported for a document is the same on whichever resource it is attached to.
+fn policy_revision(document: &str) -> String {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+
+    base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(document.as_bytes()))
 }
 
 /// This service's store in the shared engine: call it with a handler's `&*self.engine`.
@@ -2655,6 +2646,29 @@ pub fn repository_already_exists_message(domain: &str, repository: &str) -> Stri
 /// whatever domain was addressed and however many repositories remain, so it reports no
 /// count of a domain the caller may not be able to list.
 pub const DOMAIN_NOT_EMPTY_MESSAGE: &str = "Domain must contain 0 repositories before deletion";
+
+/// The `ResourceNotFoundException` message for an `externalConnection` that is not a
+/// registry this service offers ([`EXTERNAL_CONNECTIONS`]).
+///
+/// Worded the way this service words every other resource it looked for and did not find
+/// ([`domain_not_found_message`], [`repository_not_found_message`],
+/// [`package_group_not_found_message`]): the resource KIND and its "not found" clause,
+/// then the kind again with the identifier the request supplied, the resources it was
+/// looked for IN — the repository, its domain and the account owning that domain — and the
+/// statement that it does not exist. Naming the repository is what distinguishes "no such
+/// connection" from "not this repository's connection" for a caller reading the sentence.
+pub fn external_connection_not_found_message(
+    domain: &str,
+    domain_owner: Option<&str>,
+    repository: &str,
+    external_connection: &str,
+) -> String {
+    format!(
+        "External connection not found. External connection '{external_connection}' in \
+         repository '{repository}' in domain '{domain}' owned by account '{}' does not exist.",
+        addressed_domain_owner(domain_owner)
+    )
+}
 
 /// The `ResourceNotFoundException` message for a package group the addressed domain does
 /// not hold, as CodeArtifact itself words it — the resource kind capitalised, its "not
@@ -3118,33 +3132,19 @@ pub fn repository_endpoint(
     )
 }
 
-/// The ARN of the S3 bucket a domain stores its assets in.
+/// The ARN of the S3 bucket a domain stores its package assets in: the asset bucket of
+/// the account that OWNS the domain, in the Region the domain lives in.
 ///
-/// CodeArtifact names this bucket `assets-<account>-<region>-<suffix>`. An S3 ARN carries
-/// NO region or account segment of its own, so this one cannot go through
-/// `engine::emulator_arn` (which always writes both) and is formatted here instead; the
-/// partition is the same `aws` that helper uses, so every ARN this service emits agrees
-/// on it. The suffix is derived from the domain's identity (account, region, name) so it
-/// is stable across every read of the same domain and distinct between domains — never a
-/// per-call random value.
-pub fn asset_bucket_arn(region: &str, domain: &str) -> String {
-    let suffix = hex::encode(&identity_digest(&["s3-assets", region, domain])[..6]);
-    format!(
-        "arn:aws:s3:::assets-{}-{region}-{suffix}",
-        ::engine::emulator_account_id()
-    )
-}
-
-/// The KMS key ARN a domain created without an explicit `encryptionKey` is encrypted
-/// with.
-///
-/// CodeArtifact creates (or reuses) an AWS-managed key for the domain when the caller
-/// names none, and reports its ARN. The key id is derived from the domain's identity for
-/// the same reason as [`asset_bucket_arn`]'s suffix: the same domain must report the
-/// same key on every read.
-pub fn default_encryption_key_arn(region: &str, domain: &str) -> String {
-    let key_id = opaque_id(&identity_digest(&["kms-key", region, domain]));
-    ::engine::emulator_arn("kms", region, &format!("key/{key_id}"))
+/// CodeArtifact keeps those assets in one bucket per account and Region, named
+/// `assets-<domain-owner>-<region>`, so the ARN carries exactly those two suffix
+/// components and nothing per-domain or per-call: every domain an account owns in one
+/// Region reports the same bucket, and the value a domain reports is the same string for
+/// its whole lifetime. An S3 ARN carries NO region or account segment of its own, so this
+/// one cannot go through `engine::emulator_arn` (which always writes both) and is
+/// formatted here instead; the partition is the same `aws` that helper uses, so every ARN
+/// this service emits agrees on it.
+pub fn asset_bucket_arn(region: &str, domain_owner: &str) -> String {
+    format!("arn:aws:s3:::assets-{domain_owner}-{region}")
 }
 
 /// The internal id this service knows one repository by — the `repoId` a refusal that
@@ -3153,9 +3153,9 @@ pub fn default_encryption_key_arn(region: &str, domain: &str) -> String {
 /// Not a modelled member: no operation returns it, and nothing addresses a repository by
 /// it; it is the id the service's own refusals name a repository by, beside the name the
 /// request used. Derived from the repository's identity — the account owning its domain,
-/// the domain, and the repository name — for the same reason [`asset_bucket_arn`]'s suffix
-/// is: the same repository reports the same id on every read, two repositories never
-/// report one id, and no refusal carries a per-call random value.
+/// the domain, and the repository name — so the same repository reports the same id on
+/// every read, two repositories never report one id, and no refusal carries a per-call
+/// random value.
 pub fn repository_id(domain_owner: &str, domain: &str, repository: &str) -> String {
     opaque_id(&identity_digest(&[
         "repository-id",

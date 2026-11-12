@@ -322,8 +322,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             created_time: ::std::time::SystemTime::now(),
             tags,
             policy: None,
-            // No policy has ever been attached to a repository that was just created.
-            policy_attachments: 0,
             // A new repository holds no packages; a package record appears only when a
             // caller publishes a version into it or sets origin restrictions on it.
             packages: ::std::collections::BTreeMap::new(),

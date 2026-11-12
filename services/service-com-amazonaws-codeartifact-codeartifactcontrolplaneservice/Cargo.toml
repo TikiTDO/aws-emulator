@@ -42,6 +42,10 @@ service-common = { path = "../common" }
 service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
 # The IAM store, for the identity-based policy documents in force on that principal.
 service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+# The KMS store, for the key a domain is encrypted with: the key a `CreateDomain`
+# `encryptionKey` reference resolves to, and the Amazon Web Services managed key of the
+# account and Region a create that names none is given.
+service-com-amazonaws-kms-trentservice = { workspace = true }
 # The remaining two algorithms of the model's `HashAlgorithm` enum, which an
 # `AssetSummary.hashes` map reports beside SHA-256 and SHA-512.
 md-5 = "0.10"

@@ -19,7 +19,8 @@
 //!      remaining set — on every taggable kind, and with the keys it did not name keeping
 //!      their values and their order.
 //!    * `DeletePackageGroup` removes the group, so `DescribePackageGroup` for its pattern
-//!      is refused `ResourceNotFoundException` (404) and the pattern can be created again.
+//!      is refused `ResourceNotFoundException` (404) and the pattern can be created again;
+//!      the delete itself is `@idempotent`, so repeating it answers 200 describing nothing.
 //!    * `DeletePackageVersions` removes the named versions, so `DescribePackageVersion` is
 //!      refused for each; the PACKAGE survives even when its last version goes, because
 //!      deleting every version of a package is not deleting the package (that is
@@ -751,12 +752,13 @@ async fn a_deleted_package_group_is_no_longer_readable() {
             "case {case:?}: the refusal must name the pattern, got {described:?}"
         );
 
-        // A second delete of the same pattern finds nothing: the first one committed.
+        // A second delete of the same pattern has its goal already met: the delete is
+        // idempotent, so it answers 200 and describes nothing.
         let again = delete_package_group(&router, "group-removal", pattern).await;
         assert_eq!(
-            (again.status, again.code()),
-            (404, "ResourceNotFoundException".to_string()),
-            "case {case:?}: a second DeletePackageGroup must be 404, got {again:?}"
+            (again.status, again.code(), again.body.clone()),
+            (200, String::new(), serde_json::json!({})),
+            "case {case:?}: a second DeletePackageGroup must be an empty 200, got {again:?}"
         );
 
         // RULE 2: the root group, and any child, are still there — "deleting a package
@@ -794,7 +796,8 @@ async fn a_deleted_package_group_is_no_longer_readable() {
     }
 }
 
-/// RULE 5 for `DeletePackageGroup`: what it cannot delete, and what it refuses to.
+/// RULE 5 for `DeletePackageGroup`: what it cannot delete, what it refuses to, and what it
+/// answers for a group that is not there at all.
 #[tokio::test]
 async fn package_group_delete_refusals_change_nothing() {
     let router = emulator();
@@ -813,20 +816,6 @@ async fn package_group_delete_refusals_change_nothing() {
             "ValidationException",
         ),
         (
-            "a pattern the domain holds no group under",
-            "group-refusals",
-            "/pypi/*",
-            404,
-            "ResourceNotFoundException",
-        ),
-        (
-            "a pattern that is not a path from the domain root",
-            "group-refusals",
-            "npm",
-            404,
-            "ResourceNotFoundException",
-        ),
-        (
             "a domain that is not held",
             "absent-domain",
             "/npm/*",
@@ -841,6 +830,20 @@ async fn package_group_delete_refusals_change_nothing() {
             (answer.status, answer.code()),
             (*status, (*code).to_string()),
             "case {case:?}: DeletePackageGroup expected {status} {code}, got {answer:?}"
+        );
+    }
+
+    // A pattern the domain holds no group under is not a refusal at all: the delete is
+    // `@idempotent` and its `packageGroup` output member is optional, so there is nothing
+    // to remove and nothing to describe. Rows differ along HOW the pattern misses: one the
+    // domain never held, and one that is not even a path from the domain root.
+    for pattern in ["/pypi/*", "npm"] {
+        let answer = delete_package_group(&router, "group-refusals", pattern).await;
+        assert_eq!(
+            (answer.status, answer.code(), answer.body.clone()),
+            (200, String::new(), serde_json::json!({})),
+            "case {pattern:?}: deleting a group that is not there must be an empty 200, got \
+             {answer:?}"
         );
     }
 

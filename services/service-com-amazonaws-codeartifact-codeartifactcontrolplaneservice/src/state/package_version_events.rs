@@ -443,7 +443,6 @@ mod tests {
             created_time: SystemTime::UNIX_EPOCH,
             tags: Vec::new(),
             policy: None,
-            policy_attachments: 0,
             packages: ::std::collections::BTreeMap::new(),
         }
     }

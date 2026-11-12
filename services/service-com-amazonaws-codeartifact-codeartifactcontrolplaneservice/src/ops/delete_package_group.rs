@@ -6,8 +6,11 @@
 //! and answers with the description of what was removed:
 //!
 //! * the pattern is the group's identifier within the domain, so the lookup is the one
-//!   `DescribePackageGroup` performs — a domain this caller does not hold, or a pattern
-//!   the domain holds no group under, is `ResourceNotFoundException` (404);
+//!   `DescribePackageGroup` performs — but the DELETE is `@idempotent` and its
+//!   `packageGroup` output member is optional, so a pattern the domain holds no group
+//!   under is the delete's goal already met: HTTP 200 describing nothing. A domain this
+//!   caller does not hold is still `ResourceNotFoundException` (404) — the domain is the
+//!   resource the request addresses, not the one it removes;
 //! * the answer is the group's description PROJECTED BEFORE the removal, so it reports the
 //!   group as it last stood (its `parent` included);
 //! * the removal is committed to the store, so the next `DescribePackageGroup` for that
@@ -227,19 +230,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // stood — its `parent` and its effective origin modes resolved against the
         // hierarchy it was still part of. `resourceType` is unset for the same reason as
         // in `DescribePackageGroup`: `ResourceType` models no value for a package group.
+        //
+        // A pattern the domain holds no group under is NOT a refusal: this delete is
+        // `@idempotent` and `DeletePackageGroupResult$packageGroup` is optional, so a
+        // request asking for a group that is not there — a repeat of a delete that already
+        // committed, or a speculative one — has its goal already met and is answered with
+        // the success that carries no description, leaving the domain untouched.
         let Some(description) = domain.package_group_description(&input.package_group) else {
-            return Err(DeletePackageGroupErrorModeled::ResourceNotFoundException(
-                ResourceNotFoundException {
-                    message: crate::state::package_group_not_found_message(
-                        &domain.name,
-                        Some(&domain.owner),
-                        &input.package_group,
-                    ),
-                    resource_id: Some(input.package_group.clone()),
-                    resource_type: None,
-                },
-            )
-            .into());
+            return Ok(DeletePackageGroupOutput {
+                package_group: None,
+            });
         };
 
         // Removing it is the whole operation: the next DescribePackageGroup must answer

@@ -343,9 +343,9 @@ async fn a_repository_policy_is_reported_as_the_service_renders_it() {
 }
 
 /// The revision is minted over the document AS STORED, so it is stable across reads of one
-/// policy and identical for two spellings of the same policy on one resource — a client
-/// that re-writes the document it read gets a new token (every write does), but two
-/// different spellings of one policy are not two different policies.
+/// policy and identical for two spellings of the same policy — two different spellings of
+/// one policy are not two different policies, and the token follows the bytes the service
+/// stored rather than the bytes the request spelled.
 #[tokio::test]
 async fn the_revision_follows_the_rendered_document() {
     let router = emulator();
@@ -376,10 +376,11 @@ async fn the_revision_follows_the_rendered_document() {
         revisions.push(put.body["policy"]["revision"].clone());
     }
 
-    // Different resources, so different revisions — but the documents they hold are byte
-    // identical, which is what the two spellings were about.
-    assert_ne!(
+    // The two requests spelled the policy differently and the service stored the SAME
+    // bytes for both, so both report that document's own revision: the token is a function
+    // of what was stored, which is the whole point of minting it over the stored form.
+    assert_eq!(
         revisions[0], revisions[1],
-        "two resources must not share a revision, got {revisions:?}"
+        "one stored document must have one revision, got {revisions:?}"
     );
 }

@@ -246,6 +246,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let owner = ::engine::emulator_account_id().to_string();
         let created_time = ::std::time::SystemTime::now();
 
+        // The key this domain is encrypted with, resolved against KMS before the record is
+        // stored: the key the request named, or the managed key this service holds in the
+        // account and Region when it named none.
+        let encryption_key = crate::state::domain_encryption::domain_encryption_key(
+            &*self.engine,
+            &region,
+            input.encryption_key.as_deref(),
+        );
+
         let domain = crate::state::Domain {
             name: input.domain.clone(),
             owner: owner.clone(),
@@ -253,16 +262,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             status: crate::state::DOMAIN_STATUS_ACTIVE.to_string(),
             created_time,
             // CodeArtifact encrypts a domain with the key the caller named, or with a
-            // managed key it selects for the domain when the caller named none — and
-            // reports the key either way.
-            encryption_key: Some(input.encryption_key.clone().unwrap_or_else(|| {
-                crate::state::default_encryption_key_arn(&region, &input.domain)
-            })),
-            s3_bucket_arn: crate::state::asset_bucket_arn(&region, &input.domain),
+            // managed key it selects for the account and Region when the caller named
+            // none — and reports the key, as its ARN, either way.
+            encryption_key,
+            s3_bucket_arn: crate::state::asset_bucket_arn(&region, &owner),
             tags,
             policy: None,
-            // No policy has ever been attached to a domain that was just created.
-            policy_attachments: 0,
             repositories: ::std::collections::BTreeMap::new(),
             // A domain is created WITH its root package group `/*`: it is the ancestor
             // every later package group inherits its origin restrictions from, so a

@@ -102,6 +102,16 @@ fn package_group_not_found(domain: &str, owner: &str, pattern: &str) -> String {
     )
 }
 
+/// RULE 4: the sentence a well-formed `externalConnection` that names no registry this
+/// service offers is refused with — the same not-found form, naming the connection and the
+/// repository, domain and account it was asked for.
+fn external_connection_not_found(domain: &str, repository: &str, connection: &str) -> String {
+    format!(
+        "External connection not found. External connection '{connection}' in repository \
+         '{repository}' in domain '{domain}' owned by account '{ACCOUNT}' does not exist."
+    )
+}
+
 /// The `resourceId`/`resourceType`/`message` of a refusal, as the wire reports them.
 fn envelope(answer: &Answer) -> (Option<&str>, Option<&str>, String) {
     (
@@ -488,7 +498,7 @@ async fn external_connection_refusals_are_classified_by_what_is_wrong() {
             ),
             (
                 Some(*connection),
-                format!("The external connection '{connection}' does not exist").as_str()
+                external_connection_not_found(domain, &repository, connection).as_str()
             ),
             "case {connection:?}: the refusal names the connection asked for, got {answer:?}"
         );
