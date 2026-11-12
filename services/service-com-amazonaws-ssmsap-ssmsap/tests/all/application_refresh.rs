@@ -587,6 +587,16 @@ async fn a_refresh_is_refused_while_a_change_is_already_owed() {
             "case {label:?}: expected 200 from RegisterApplication, got {created:?}"
         );
         settle().await;
+        // The registration's own change has fallen due, and the first request at or after
+        // that instant is what materialises it: this read is that request, so the
+        // application the edit below starts from is the DISCOVERED one every other caller
+        // sees rather than one whose registration never settled.
+        let discovered = emulator.read_application(id).await;
+        assert_eq!(
+            discovered.app_str("DiscoveryStatus"),
+            DISCOVERY_STATUS_SUCCESS,
+            "case {label:?}: the registration must have settled, got {discovered:?}"
+        );
 
         // The store is edited rather than driven over the wire ONLY to place the due
         // instant: every asynchronous call of this service makes the change due one

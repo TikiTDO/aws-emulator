@@ -4,18 +4,23 @@
 //!
 //! Registers an SAP application and PERSISTS it, so every later `GetApplication`,
 //! `ListApplications`, `StartApplication`, `StopApplication` and
-//! `DeregisterApplication` resolves the same record. A registration that omits a member
-//! its `ApplicationType` conditionally requires
+//! `DeregisterApplication` resolves the same record. A registration whose members do not
+//! describe an application of the `ApplicationType` it carries
 //! ([`crate::state::CONDITIONALLY_REQUIRED_MEMBERS`]) is refused with the modelled
 //! `ValidationException` before anything is stored, as is one carrying a tag key outside
-//! the form the model declares for one ([`crate::state::tags_within_modelled_form`]). The
+//! the form the model declares for one ([`crate::state::tags_within_modelled_form`]) and
+//! one the account has no room for under its Applications quota
+//! ([`crate::state::APPLICATIONS_QUOTA`]). The
 //! call is asynchronous in the
 //! real service: the application is returned `REGISTERING` and the `OperationId` names
-//! a stored `INPROGRESS` operation record that reaches `SUCCESS`
+//! a stored `INPROGRESS` operation record that reaches its outcome
 //! [`crate::state::TRANSITION_SPAN`] later, materialised by the first request at or
 //! after that instant. Discovery runs as part of that registration, so the components of
 //! the application come into being with it and not with this call
-//! ([`crate::state::StoredApplication::components`]).
+//! ([`crate::state::StoredApplication::components`]) — and WHAT the registration settles
+//! as is what that discovery can do on the instances the request named
+//! ([`crate::state::discovery::run_document`]): a discovery that cannot be carried out is
+//! a registration that fails, with the refusal it ran into on its operation record.
 //!
 //! What the registration declares twice it declares once: the credentials it carries are
 //! applied by credential identity ([`crate::state::credentials_with`]), exactly as its
@@ -180,6 +185,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The Region this request was signed for: the registration is made in THIS
         // Region, which is also the Region its ARN carries.
         let region = crate::state::request_region(ctx.parts());
+
+        // Registering an application DISCOVERS it: the service runs a Systems Manager
+        // document on the instances the request named, and what that run can do is what
+        // the registration settles as. The owner of those instances is asked here, before
+        // this service's own store is touched, so no lock is held across the hop; the hop
+        // reads and refuses nothing, so a registration refused below is refused on exactly
+        // the grounds it always was.
+        let discovery_refusal =
+            crate::state::discovery::run_document(ctx, &region, &input.instances).await;
+
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             RegisterApplicationErrorModeled::InternalServerException(
                 crate::state::store_unavailable(),
@@ -205,10 +220,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // Some members the model leaves optional are required by the service for some
-        // application types (`crate::state::CONDITIONALLY_REQUIRED_MEMBERS`): a HANA
-        // application cannot be managed without the SID and instance number that name
-        // the HANA instance and the credentials that reach it. The check runs before
-        // ANY state is written, so a refused registration leaves nothing behind.
+        // application types, and some describe an application another type is
+        // (`crate::state::CONDITIONALLY_REQUIRED_MEMBERS`): a HANA application cannot be
+        // managed without the SID and instance number that name the HANA instance and the
+        // credentials that reach it, and an SAP_ABAP application has no credentials of its
+        // own because the SAP HANA database it runs on is named by ARN. The check runs
+        // before ANY state is written, so a refused registration leaves nothing behind.
         crate::state::conditional_requirements_met(
             &input.application_type,
             input.sid.as_deref(),
@@ -251,15 +268,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        if state.region(&region).applications.len() >= crate::state::MAX_APPLICATIONS {
-            // The emulator's own per-Region store ceiling, expressed with an error this
-            // operation models rather than by growing without bound.
-            return Err(RegisterApplicationErrorModeled::ConflictException(
-                crate::state::conflict(format!(
-                    "Cannot register application {}: this account and Region already hold {} applications",
-                    input.application_id,
-                    crate::state::MAX_APPLICATIONS
-                )),
+        // An account is allotted a fixed number of registered applications per Region,
+        // and the registration that would exceed the allotment is refused: the count is
+        // the one this Region holds RIGHT NOW, so a deregistration frees a slot and the
+        // identical call then succeeds. Refused before anything is written, so the
+        // applications that reached the allotment are all that stay registered.
+        let registered = state.region(&region).applications.len();
+        if registered >= crate::state::APPLICATIONS_QUOTA {
+            return Err(RegisterApplicationErrorModeled::ValidationException(
+                crate::state::validation(crate::state::applications_quota_message(registered)),
             )
             .into());
         }
@@ -394,15 +411,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // (`crate::state::StoredDbms`). While the registration itself is still under
             // way no database status follows from it at all.
             dbms: crate::state::StoredDbms::running(),
-            // Registration is asynchronous: the application becomes ACTIVATED with a
-            // SUCCESS discovery one `TRANSITION_SPAN` from now, and the first request at
-            // or after that instant reports it — the instant its discovery has completed
-            // and the components it describes exist. Nothing sleeps.
+            // Registration is asynchronous: the application reaches the status its
+            // DISCOVERY leaves it in one `TRANSITION_SPAN` from now, and the first request
+            // at or after that instant reports it. A discovery that can be carried out
+            // leaves it ACTIVATED with a SUCCESS discovery — the instant its components
+            // exist — and one that cannot leaves it FAILED with a REGISTRATION_FAILED
+            // discovery, which is what the refusal above means: nothing was discovered, so
+            // the service manages nothing for it. Nothing sleeps.
             pending: Some(crate::state::PendingTransition {
                 due_at: now + crate::state::TRANSITION_SPAN,
                 change: crate::state::PendingChange::Status {
-                    status: crate::state::APPLICATION_STATUS_ACTIVATED.to_string(),
-                    discovery_status: crate::state::DISCOVERY_STATUS_SUCCESS.to_string(),
+                    status: if discovery_refusal.is_some() {
+                        crate::state::APPLICATION_STATUS_FAILED.to_string()
+                    } else {
+                        crate::state::APPLICATION_STATUS_ACTIVATED.to_string()
+                    },
+                    discovery_status: if discovery_refusal.is_some() {
+                        crate::state::DISCOVERY_STATUS_REGISTRATION_FAILED.to_string()
+                    } else {
+                        crate::state::DISCOVERY_STATUS_SUCCESS.to_string()
+                    },
                 },
             }),
         };
@@ -428,11 +456,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .map_err(RegisterApplicationErrorModeled::ValidationException)?;
         }
 
-        let operation_id = region_state.record_operation(
+        // The record of the registration, which reaches the outcome of the work it
+        // tracks: the discovery's refusal is what the registration failed with, so the
+        // record reaches `ERROR` carrying it, and a discovery that can be carried out
+        // reaches `SUCCESS`.
+        let operation_id = region_state.record_operation_outcome(
             crate::state::OPERATION_TYPE_REGISTER_APPLICATION,
             &application,
             properties,
             now,
+            discovery_refusal,
         );
         // Projected through the partition, because what an `Application` reports about
         // the applications it is associated with is a relation between registrations

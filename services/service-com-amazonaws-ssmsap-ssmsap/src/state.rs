@@ -22,6 +22,16 @@
 //! `STARTING`, `STOPPING`, `DELETING`), and [`RegionState::settle`] materialises the
 //! change for every reader at the same instant without anything ever sleeping.
 //!
+//! WHICH change a registration owes is the outcome of the DISCOVERY it runs on the Amazon
+//! EC2 instances it named ([`discovery::run_document`]): a discovery that can be carried
+//! out brings the application to `ACTIVATED`/`SUCCESS`, and one that cannot brings it to
+//! `FAILED`/`REGISTRATION_FAILED` with the refusal it ran into on the operation record
+//! the registration filed ([`StoredOperation::terminal_status`]). So a registration is
+//! reported as successful only where the instances it named really can be reached, and
+//! every call whose precondition is a working application reads that outcome off the
+//! application ([`StoredApplication::registered_successfully`],
+//! [`StoredApplication::registration_failed`]) rather than off what else is in flight.
+//!
 //! Those records are held PER REGION: the service is regional, so the store is a
 //! [`RegionState`] per Region ([`ComAmazonawsSsmsapSsmsapState::region`]) and a handler
 //! only ever reaches the partition of the Region its request was signed for
@@ -133,6 +143,10 @@
 /// through.
 pub mod ec2;
 
+/// The discovery a registration runs on the Amazon EC2 instances it named, which is what
+/// decides whether that registration can complete.
+pub mod discovery;
+
 /// Shutting down the Amazon EC2 instances of an application through the service that
 /// owns them, which is what `StopApplication$IncludeEc2InstanceShutdown` asks for.
 pub mod ec2_shutdown;
@@ -199,6 +213,11 @@ pub const APPLICATION_STATUS_STOPPED: &str = "STOPPED";
 /// the status a deregistration that is still running reports.
 pub const APPLICATION_STATUS_DELETING: &str = "DELETING";
 
+/// `ApplicationStatus` of an application whose registration did not complete: the
+/// registration ran and its discovery could not be carried out, so the service manages
+/// nothing for it ([`StoredApplication::registration_failed`]).
+pub const APPLICATION_STATUS_FAILED: &str = "FAILED";
+
 /// `ApplicationDiscoveryStatus` while the registration's discovery is still running.
 /// One of the model's `ApplicationDiscoveryStatus` values (see
 /// [`crate::ops::types::APPLICATION_DISCOVERY_STATUS_VALUES`]).
@@ -206,6 +225,10 @@ pub const DISCOVERY_STATUS_REGISTERING: &str = "REGISTERING";
 
 /// `ApplicationDiscoveryStatus` once discovery has completed.
 pub const DISCOVERY_STATUS_SUCCESS: &str = "SUCCESS";
+
+/// `ApplicationDiscoveryStatus` of an application whose registration's discovery could
+/// not be carried out: the discovery result a failed registration converges to.
+pub const DISCOVERY_STATUS_REGISTRATION_FAILED: &str = "REGISTRATION_FAILED";
 
 /// `ApplicationDiscoveryStatus` while the application's deregistration is running.
 pub const DISCOVERY_STATUS_DELETING: &str = "DELETING";
@@ -352,22 +375,25 @@ pub const MAX_DATABASE_ID_LENGTH: usize = 300;
 /// ([`StoredApplication::settle`] / [`StoredOperation::settle`]); nothing ever sleeps.
 pub const TRANSITION_SPAN: Duration = Duration::from_millis(500);
 
-/// How many applications this emulator will hold PER REGION.
+/// How many applications ONE account may have registered in ONE Region: the account's
+/// Applications quota for AWS Systems Manager for SAP.
 ///
-/// The real service caps registered applications per account per Region with a service
-/// quota, so the ceiling is per Region here too. This number is NOT a fidelity claim
-/// about the published quota: it is the emulator's own ceiling, generous enough that no
-/// realistic workflow meets it, so a caller looping on `RegisterApplication` cannot grow
-/// this process's memory without bound. It is reported with `ConflictException`, which
-/// `RegisterApplication` models.
-pub const MAX_APPLICATIONS: usize = 1_000;
+/// A registration is scoped to an account and a Region ([`RegionState`]), and the service
+/// allots an account a fixed number of registered applications there; the registration
+/// that would exceed the allotment is refused and nothing is written for it
+/// ([`applications_quota_message`], the modelled `ValidationException`). The allotment is
+/// the quota this service is recorded answering with rather than a number this crate
+/// chose, and it is checked against the applications the Region currently holds, so
+/// deregistering one frees a slot and the identical call then succeeds. It is also what
+/// bounds how much one Region's partition can hold.
+pub const APPLICATIONS_QUOTA: usize = 10;
 
 /// How many Region partitions this emulator will hold.
 ///
 /// The store is partitioned per Region (see [`RegionState`]) and the Region comes from
 /// the caller's own SigV4 credential scope, so without a ceiling a caller could mint a
 /// partition per made-up Region. Comfortably more than the Regions AWS operates, so no
-/// real multi-Region workflow meets it; with [`MAX_APPLICATIONS`],
+/// real multi-Region workflow meets it; with [`APPLICATIONS_QUOTA`],
 /// [`MAX_RETAINED_OPERATIONS`] and the per-resource ceilings
 /// ([`MAX_CREDENTIALS_PER_APPLICATION`], [`MAX_TAGS_PER_RESOURCE`],
 /// [`MAX_PERMISSIONED_RESOURCES`]) it is what bounds the whole store. Like the
@@ -406,13 +432,13 @@ pub const MAX_DECLARED_COMPONENTS: usize = 5;
 pub const MAX_COMPONENTS_PER_APPLICATION: usize = MAX_DECLARED_COMPONENTS + 1;
 
 /// How many components one Region can hold, derived from the two ceilings that bound
-/// it: at most [`MAX_APPLICATIONS`] applications, each with at most
+/// it: at most [`APPLICATIONS_QUOTA`] applications, each with at most
 /// [`MAX_COMPONENTS_PER_APPLICATION`] components. So the set a component listing walks
 /// is bounded by a constant, independent of how many requests a caller makes. Both
 /// ceilings are enforced where a component is written, so this is the invariant that
 /// follows from them rather than a third check: a listing states it as a debug-build
 /// assertion and still reports every component it holds.
-pub const MAX_COMPONENTS_PER_REGION: usize = MAX_APPLICATIONS * MAX_COMPONENTS_PER_APPLICATION;
+pub const MAX_COMPONENTS_PER_REGION: usize = APPLICATIONS_QUOTA * MAX_COMPONENTS_PER_APPLICATION;
 
 /// Refuse a registration that declares more components than one `ComponentsInfo` may
 /// carry ([`MAX_DECLARED_COMPONENTS`]).
@@ -953,6 +979,47 @@ impl StoredApplication {
         Ok(credentials)
     }
 
+    /// Whether the service's registration of this application COMPLETED successfully:
+    /// its discovery ran and succeeded, so the service manages the SAP system the
+    /// registration described.
+    ///
+    /// This is the precondition every call that acts on the managed system has: a
+    /// registration that is still under way has discovered nothing yet and one that
+    /// failed never will, and in both cases there is nothing for such a call to act on
+    /// ([`not_registered_successfully`]).
+    pub fn registered_successfully(&self) -> bool {
+        self.discovery_completed
+    }
+
+    /// Whether the registration of this application ENDED without completing: its
+    /// discovery could not be carried out, which is the terminal state a failed
+    /// registration converges to ([`DISCOVERY_STATUS_REGISTRATION_FAILED`]).
+    ///
+    /// Distinct from [`Self::registered_successfully`] being false, which a registration
+    /// still under way also is: this one is settled and will not become successful, so a
+    /// call that needs a working application reports that the registration is failed
+    /// rather than that work is in flight ([`failed_registration_message`]).
+    pub fn registration_failed(&self) -> bool {
+        self.discovery_status == DISCOVERY_STATUS_REGISTRATION_FAILED
+    }
+
+    /// The `ApplicationDiscoveryStatus` this application is GOING to report: the one the
+    /// change the clock owes it carries, or the one it already reports when that change
+    /// carries none.
+    ///
+    /// A control call that supersedes an outstanding status change carries this forward
+    /// rather than the status the application reports right now, so the result of a
+    /// discovery that was already running — the one its registration started — is not
+    /// lost by a call made while it was still under way.
+    pub fn owed_discovery_status(&self) -> &str {
+        match self.pending.as_ref().map(|pending| &pending.change) {
+            Some(PendingChange::Status {
+                discovery_status, ..
+            }) => discovery_status.as_str(),
+            _ => self.discovery_status.as_str(),
+        }
+    }
+
     /// Whether a deregistration is running against this application: it reports
     /// `DELETING` and its removal is the change the clock owes it.
     pub fn is_deregistering(&self) -> bool {
@@ -1476,7 +1543,20 @@ pub struct StoredOperation {
     pub end_time: Option<SystemTime>,
     pub last_updated_time: SystemTime,
     /// When this operation's terminal status falls due. See [`TRANSITION_SPAN`].
-    pub success_due_at: SystemTime,
+    pub terminal_due_at: SystemTime,
+    /// The `OperationStatus` this operation reaches at [`Self::terminal_due_at`]: the
+    /// outcome of the work it was filed for.
+    ///
+    /// An operation of this service is asynchronous, so its outcome is settled when the
+    /// work it tracks is — which for the registration that files one is whether the
+    /// discovery it runs can be carried out at all. The outcome is therefore STORED on
+    /// the record when it is filed and materialised by the clock ([`Self::settle`]),
+    /// never decided by the read that observes it.
+    pub terminal_status: String,
+    /// What the record explains that terminal status with, absent for an outcome that
+    /// explains itself: `StatusMessage` explains a non-success status, so this is the
+    /// refusal the work ran into.
+    pub terminal_status_message: Option<String>,
     /// The resources BESIDES the one the call named that this operation acted on, in the
     /// order it acted on them; see [`OperationTarget`]. Empty for a call that acted on
     /// its own resource alone.
@@ -1556,14 +1636,16 @@ impl StoredOperation {
         (self.status == OPERATION_STATUS_INPROGRESS, self.start_time)
     }
     /// Materialise the terminal status the clock already owes this operation: it was
-    /// due to succeed at `success_due_at` whether or not anybody asked.
+    /// due to reach [`Self::terminal_status`] at [`Self::terminal_due_at`] whether or not
+    /// anybody asked.
     pub fn settle(&mut self, now: SystemTime) {
-        if self.status != OPERATION_STATUS_INPROGRESS || now < self.success_due_at {
+        if self.status != OPERATION_STATUS_INPROGRESS || now < self.terminal_due_at {
             return;
         }
-        self.status = OPERATION_STATUS_SUCCESS.to_string();
-        self.end_time = Some(self.success_due_at);
-        self.last_updated_time = self.success_due_at.max(self.last_updated_time);
+        self.status = self.terminal_status.clone();
+        self.status_message = self.terminal_status_message.clone();
+        self.end_time = Some(self.terminal_due_at);
+        self.last_updated_time = self.terminal_due_at.max(self.last_updated_time);
     }
 
     /// The milestones this operation has reached, oldest first: the events
@@ -1858,7 +1940,7 @@ impl RegionState {
     /// resources derived from it has those enumerated twice, and the ARNs that stopped
     /// existing are then resolved against ONE enumeration of the partition's remaining
     /// resources rather than one per ARN. So the whole pass costs at most a few
-    /// enumerations of the applications this Region holds ([`MAX_APPLICATIONS`]) and the
+    /// enumerations of the applications this Region holds ([`APPLICATIONS_QUOTA`]) and the
     /// resources each registration gives rise to, and never their product, however many
     /// changes fall due in the same instant.
     pub fn settle(&mut self, now: SystemTime) {
@@ -2072,7 +2154,7 @@ impl RegionState {
     ///
     /// The work is ONE enumeration of this partition's applications and of the databases
     /// each registration derives, so what a read costs is bounded by the store's own
-    /// ceilings ([`MAX_APPLICATIONS`], [`MAX_CREDENTIALS_PER_APPLICATION`]) rather than by
+    /// ceilings ([`APPLICATIONS_QUOTA`], [`MAX_CREDENTIALS_PER_APPLICATION`]) rather than by
     /// anything a request carries.
     pub fn associated_application_arns(&self, application: &StoredApplication) -> Vec<String> {
         let databases: BTreeSet<String> = application
@@ -2402,6 +2484,24 @@ impl RegionState {
         properties: HashMap<String, String>,
         now: SystemTime,
     ) -> String {
+        self.record_operation_outcome(op_type, application, properties, now, None)
+    }
+
+    /// File an operation record whose work has an outcome of its own: `refusal` is what
+    /// the work ran into, so the record reaches `ERROR` carrying it instead of `SUCCESS`.
+    ///
+    /// The outcome is known when the record is filed and reached when the clock brings
+    /// the record to its terminal status, exactly as a success is: the work is
+    /// asynchronous either way, so a caller polling straight after the call still observes
+    /// it `INPROGRESS`. `None` is the plain success [`Self::record_operation`] files.
+    pub fn record_operation_outcome(
+        &mut self,
+        op_type: &str,
+        application: &StoredApplication,
+        properties: HashMap<String, String>,
+        now: SystemTime,
+        refusal: Option<String>,
+    ) -> String {
         let id = new_operation_id();
         self.operations.insert(
             id.clone(),
@@ -2424,7 +2524,15 @@ impl RegionState {
                 // An operation that has not finished has no end time yet.
                 end_time: None,
                 last_updated_time: now,
-                success_due_at: now + TRANSITION_SPAN,
+                terminal_due_at: now + TRANSITION_SPAN,
+                // What the work this record tracks comes to: the refusal it ran into, or
+                // the success it reaches when it ran into none.
+                terminal_status: if refusal.is_some() {
+                    OPERATION_STATUS_ERROR.to_string()
+                } else {
+                    OPERATION_STATUS_SUCCESS.to_string()
+                },
+                terminal_status_message: refusal,
                 // The resources an operation reaches beyond the one the call named are
                 // recorded as the work on each of them is asked for and answered
                 // ([`Self::record_operation_target`]); a record starts with none.
@@ -3183,91 +3291,137 @@ impl ConditionalMember {
     }
 }
 
-/// The members `RegisterApplication` requires IN ADDITION to the modelled `@required`
-/// ones, per `ApplicationType`.
+/// What `RegisterApplication` requires of a registration of ONE `ApplicationType`,
+/// beyond the modelled `@required` members.
+///
+/// The model cannot express a requirement conditional on another member's value
+/// (`smithy_query(query="operation", operation="RegisterApplication")` marks only
+/// `ApplicationId`, `ApplicationType` and `Instances` `@required`), so WHICH of the
+/// optional members an application of a given type must carry — and which it must not —
+/// belongs to the service. One row per value of the model's `ApplicationType` enum (see
+/// [`crate::ops::types::APPLICATION_TYPE_VALUES`]), and the service states the whole rule
+/// for the type in ONE sentence ([`Self::requirement`]) rather than per member, so a
+/// client reads the same wording whichever member it got wrong.
+#[derive(Debug, Clone, Copy)]
+pub struct TypeMemberRule {
+    /// The `ApplicationType` this row is about.
+    pub application_type: &'static str,
+    /// The members a registration of this type must CARRY. Empty when it requires
+    /// nothing beyond the modelled members, so such a registration is accepted on those
+    /// alone.
+    pub required: &'static [ConditionalMember],
+    /// The members a registration of this type must NOT carry: a member that names
+    /// something only another type of application has, so carrying it describes an
+    /// application this type cannot be.
+    pub excluded: &'static [ConditionalMember],
+    /// How the service states what a registration of this type has to specify — the
+    /// phrase its refusal is built around ([`conditional_requirement_message`]), in SAP's
+    /// own vocabulary rather than in wire member names. It names what the type requires,
+    /// so it answers both a registration that left one of those out and one that
+    /// described the application as another type instead.
+    pub requirement: &'static str,
+}
+
+/// The member rules of every `ApplicationType` the model declares.
 ///
 /// A HANA application IS its database: AWS Systems Manager for SAP cannot manage one
 /// without the System ID and instance number that name the HANA instance and the
 /// credentials that reach it — which is why every member of `ApplicationCredential`
-/// (`DatabaseName`, `CredentialType`, `SecretId`) is documented in terms of "the SAP
-/// HANA database". A type whose row is EMPTY requires nothing beyond the modelled
-/// members, so a registration of that type is accepted on those alone.
+/// (`DatabaseName`, `CredentialType`, `SecretId`) is documented in terms of "the SAP HANA
+/// database".
 ///
-/// One row per value of the model's `ApplicationType` enum (see
-/// [`crate::ops::types::APPLICATION_TYPE_VALUES`]); a type this table does not name
-/// requires nothing conditionally.
-pub const CONDITIONALLY_REQUIRED_MEMBERS: &[(&str, &[ConditionalMember])] = &[
-    (
-        HANA_APPLICATION_TYPE,
-        &[
+/// An SAP_ABAP application is NOT its database: the SAP HANA database it runs on belongs
+/// to the HANA application that manages it, so an ABAP registration names that database by
+/// its ARN (`RegisterApplication$DatabaseArn`) and never by credentials of its own.
+/// Credentials therefore describe a HANA registration, and one carried on an ABAP
+/// registration is the registration's own account of what it is contradicting its
+/// `ApplicationType` — which is why the refusal states what an ABAP registration has to
+/// specify instead.
+pub const CONDITIONALLY_REQUIRED_MEMBERS: &[TypeMemberRule] = &[
+    TypeMemberRule {
+        application_type: HANA_APPLICATION_TYPE,
+        required: &[
             ConditionalMember::Sid,
             ConditionalMember::SapInstanceNumber,
             ConditionalMember::Credentials,
         ],
-    ),
-    ("SAP_ABAP", &[]),
+        excluded: &[],
+        requirement: "SID, instance number, and credentials of HANA instance",
+    },
+    TypeMemberRule {
+        application_type: ABAP_APPLICATION_TYPE,
+        required: &[],
+        excluded: &[ConditionalMember::Credentials],
+        requirement: "The SID and database ARN of ASCS or Application Server",
+    },
 ];
+
+/// The member rule of `application_type`, and `None` for a type this table does not name,
+/// which therefore requires and excludes nothing.
+pub fn type_member_rule(application_type: &str) -> Option<&'static TypeMemberRule> {
+    CONDITIONALLY_REQUIRED_MEMBERS
+        .iter()
+        .find(|rule| rule.application_type == application_type)
+}
 
 /// The members an application of `application_type` must carry beyond the modelled
 /// `@required` ones. Empty when the type requires none.
 pub fn conditionally_required_members(application_type: &str) -> &'static [ConditionalMember] {
-    CONDITIONALLY_REQUIRED_MEMBERS
-        .iter()
-        .find(|(name, _)| *name == application_type)
-        .map(|(_, members)| *members)
-        .unwrap_or(&[])
+    type_member_rule(application_type).map_or(&[], |rule| rule.required)
 }
 
-/// Refuse a registration that omits a member its `ApplicationType` conditionally
-/// requires ([`CONDITIONALLY_REQUIRED_MEMBERS`]).
+/// The members a registration of `application_type` must NOT carry. Empty when the type
+/// excludes none.
+pub fn excluded_members(application_type: &str) -> &'static [ConditionalMember] {
+    type_member_rule(application_type).map_or(&[], |rule| rule.excluded)
+}
+
+/// Refuse a registration whose members do not describe an application of the
+/// `ApplicationType` it carries ([`CONDITIONALLY_REQUIRED_MEMBERS`]).
 ///
-/// `Ok(())` when the type requires nothing, or when every member it requires is
-/// carried; otherwise the modelled `ValidationException` (HTTP 400) stating the whole
-/// requirement for that type — the requirement is one condition, so it is reported as
-/// one sentence rather than per omitted member. The caller must apply this BEFORE
-/// writing anything, so a refused registration leaves no application behind.
+/// `Ok(())` when the type's rule is met: every member it requires is carried and none it
+/// excludes is. Otherwise the modelled `ValidationException` (HTTP 400) stating what a
+/// registration of that type has to specify — one condition, so one sentence, whether the
+/// request left a required member out or carried one that belongs to another type. The
+/// caller must apply this BEFORE writing anything, so a refused registration leaves no
+/// application behind.
 pub fn conditional_requirements_met(
     application_type: &str,
     sid: Option<&str>,
     sap_instance_number: Option<&str>,
     credentials: &[ApplicationCredential],
 ) -> Result<(), ValidationException> {
-    let required = conditionally_required_members(application_type);
+    let Some(rule) = type_member_rule(application_type) else {
+        return Ok(());
+    };
+    // A member is CARRIED when it specifies something: an empty list specifies nothing,
+    // which is what the member's modelled `[]` default leaves behind for a request that
+    // omits it — so it neither satisfies a requirement nor trips an exclusion.
     let carried = |member: ConditionalMember| match member {
         ConditionalMember::Sid => sid.is_some(),
         ConditionalMember::SapInstanceNumber => sap_instance_number.is_some(),
         ConditionalMember::Credentials => !credentials.is_empty(),
     };
-    if required.iter().copied().all(carried) {
+    if rule.required.iter().copied().all(carried)
+        && !rule.excluded.iter().copied().any(carried)
+    {
         return Ok(());
     }
-    Err(validation(conditional_requirement_message(
-        application_type,
-        required,
-    )))
+    Err(validation(conditional_requirement_message(application_type)))
 }
 
-/// How the service states the requirement that an application of `application_type`
-/// carries `members` ([`CONDITIONALLY_REQUIRED_MEMBERS`]).
+/// How the service states what a registration of `application_type` has to specify
+/// ([`TypeMemberRule::requirement`]).
 ///
 /// One sentence for one condition, whichever call ran into it: a registration that omits
-/// what its type requires states the whole requirement for that type, and an
-/// `UpdateApplicationSettings` call that would leave an application without one of them
-/// states it for that one member — so a client reads the same wording for the same rule.
-pub fn conditional_requirement_message(
-    application_type: &str,
-    members: &[ConditionalMember],
-) -> String {
+/// what its type requires, one that carries a member of another type, and an
+/// `UpdateApplicationSettings` call that would leave an application without a member its
+/// type requires all state the same rule — so a client reads one wording for it.
+pub fn conditional_requirement_message(application_type: &str) -> String {
+    let requirement = type_member_rule(application_type).map_or("", |rule| rule.requirement);
     format!(
-        "{} of {application_type} instance must be specified for SAP applications with type {application_type}.",
-        join_labels(members)
+        "{requirement} must be specified for SAP applications with type {application_type}."
     )
-}
-
-/// The labels of `members`, joined as a sentence lists them: `A`, `A and B`,
-/// `A, B, and C`.
-fn join_labels(members: &[ConditionalMember]) -> String {
-    join_phrases(&members.iter().map(|member| member.label()).collect::<Vec<&str>>())
 }
 
 /// `labels`, joined as a sentence lists them: `A`, `A and B`, `A, B, and C`.
@@ -3614,11 +3768,22 @@ enum ControlRefusal {
 /// one rule, so one place decides it and one place words it, and every control call lifts
 /// what comes back into its own modelled error variant. The caller applies this BEFORE
 /// writing anything, so a refused call leaves the application exactly as it was.
+///
+/// STOPPING is the exception, and the registration is what it is an exception to: a stop
+/// does not wait for the registration that is still running, because stopping an SAP
+/// application is not a change to what that registration is establishing — so a caller
+/// that registers an application and stops it straight away is served and gets the
+/// operation it needs to track the stop, whatever the registration goes on to settle as.
 pub fn application_control_available(
     application: &StoredApplication,
     control: ApplicationControl,
 ) -> Result<(), ConflictException> {
     if application.pending.is_none() {
+        return Ok(());
+    }
+    if control == ApplicationControl::Stop
+        && application.status == APPLICATION_STATUS_REGISTERING
+    {
         return Ok(());
     }
     Err(conflict(match control.refusal() {
@@ -3632,6 +3797,60 @@ pub fn application_control_available(
             application.id
         ),
     }))
+}
+
+/// The message a call that needs a WORKING application reports when the registration of
+/// the application it names has not completed successfully
+/// ([`StoredApplication::registered_successfully`]).
+///
+/// ENTIRELY fixed text: the condition is the application's own state and the refusal
+/// states nothing of the request that met it, not even the id the request carried, so a
+/// client reads the same sentence whichever application it named. It is the service's own
+/// wording for this precondition verbatim, as the `ssm-sap` configuration-check recording
+/// shows it, and it is what tells this condition apart from the other conflicts a control
+/// call reports ([`application_control_available`]), since both carry the same error code.
+pub const NOT_REGISTERED_SUCCESSFULLY_MESSAGE: &str =
+    "The specified application has not been registered successfully";
+
+/// The modelled `ConflictException` (HTTP 409) a call is refused with when the
+/// registration of the application it names has not completed successfully.
+///
+/// The ONE construction site for that refusal, so every call that has this precondition
+/// reports the same code and the same sentence ([`NOT_REGISTERED_SUCCESSFULLY_MESSAGE`]),
+/// and it is decided by the application's registration outcome alone — never by what else
+/// is in flight — so concurrent callers are all refused the same way whatever order they
+/// arrive in.
+pub fn not_registered_successfully() -> ConflictException {
+    conflict(NOT_REGISTERED_SUCCESSFULLY_MESSAGE)
+}
+
+/// The message a call that moves an application's own status reports when the
+/// registration of the application it names FAILED.
+///
+/// Built from the request: the `ApplicationId` the caller sent is the only variable part,
+/// and the fixed text around it is the service's own for this condition verbatim, as the
+/// `ssm-sap` application-control recording shows it. A failed registration is settled —
+/// the application will not become usable without being registered again — so it is the
+/// modelled `ValidationException` (HTTP 400) a caller has to act on rather than the
+/// `ConflictException` that says to wait.
+pub fn failed_registration_message(application_id: &str) -> String {
+    format!("The registration of application {application_id} is failed.")
+}
+
+/// The message `RegisterApplication` reports when the account has already registered
+/// every application it is allotted in this Region ([`APPLICATIONS_QUOTA`]).
+///
+/// `count` is what the account currently holds there, which at the boundary equals its
+/// allotment: the refusal tracks the LIVE count rather than anything the request carried,
+/// so deregistering one application lets the identical call through. The account comes
+/// from the core's single source of truth, and the fixed text around the three values is
+/// the service's own for this refusal verbatim, as the `ssm-sap` registration recording
+/// shows it.
+pub fn applications_quota_message(count: usize) -> String {
+    format!(
+        "Resource Limit Reached. Account {} is only allotted {APPLICATIONS_QUOTA} applications. Currently has {count} applications",
+        ::engine::emulator_account_id()
+    )
 }
 
 /// The `Name` values a `ListApplications` filter may carry: the members the model
@@ -3696,7 +3915,7 @@ pub const MAX_FILTERS: usize = 10;
 
 /// The most pieces splitting one `Filter$Value` on `,` can yield, derived from
 /// [`FILTER_VALUE_MAX_LENGTH`]: a value of `n` characters splits into at most `n + 1`
-/// pieces. With [`MAX_FILTERS`] filters and at most [`MAX_APPLICATIONS`] applications,
+/// pieces. With [`MAX_FILTERS`] filters and at most [`APPLICATIONS_QUOTA`] applications,
 /// the work [`filter_matches`] does for one request is bounded by a constant,
 /// independent of the request body's size.
 ///

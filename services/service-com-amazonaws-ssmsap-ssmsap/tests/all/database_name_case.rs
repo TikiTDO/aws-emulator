@@ -129,14 +129,11 @@ fn cases() -> Vec<Case> {
             expected_id: NAME_AT_LENGTH_BOUND.to_uppercase(),
             expected_type: DATABASE_TYPE_TENANT,
         },
-        Case {
-            name: "the same rule on an application of the other type",
-            application_id: "abap-case",
-            application_type: "SAP_ABAP",
-            spellings: spellings(&["Tnt9", "tNT9"]),
-            expected_id: "TNT9".to_string(),
-            expected_type: DATABASE_TYPE_TENANT,
-        },
+        // Every row is of the type whose registration CARRIES credentials: the other
+        // modelled type runs on the SAP HANA database of such an application and names it
+        // by ARN, so a registration of that type carries no credentials at all
+        // (`service_com_amazonaws_ssmsap_ssmsap::state::CONDITIONALLY_REQUIRED_MEMBERS`)
+        // and there is no database name on one for this rule to be about.
     ]
 }
 

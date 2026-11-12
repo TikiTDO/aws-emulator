@@ -45,6 +45,16 @@ const RESOURCE_NOT_FOUND: &str = "ResourceNotFoundException";
 /// start filed none.
 const ALL_OPERATIONS: &str = "ALL_OPERATIONS";
 
+/// How this service states the OTHER condition this operation refuses with the same
+/// error code: the application's registration has not completed successfully, which is
+/// what a registration still running has not done.
+///
+/// Spelled out here rather than taken from the crate, so the wording is pinned
+/// independently of the one place the handler builds it in. It names nothing of the
+/// request, which is what tells it apart from the in-flight refusal.
+const NOT_REGISTERED_SUCCESSFULLY: &str =
+    "The specified application has not been registered successfully";
+
 /// The call that leaves a change the clock owes the application outstanding.
 #[derive(Debug, Clone, Copy)]
 enum InFlight {
@@ -267,11 +277,25 @@ async fn a_start_is_refused_while_the_application_owes_a_change() {
                 CONFLICT_EXCEPTION,
                 "case {label:?}: expected {CONFLICT_EXCEPTION}, got {refused:?}"
             );
-            assert!(
-                message(&refused).contains(case.id),
-                "case {label:?}: the refusal must name the application, got {:?}",
-                message(&refused)
-            );
+            // WHICH condition the refusal states depends on the work in flight: a
+            // registration that has not settled has not been registered successfully
+            // either, and that precondition is the one this operation reports first — in
+            // the fixed wording that names nothing of the request. Any other work in
+            // flight is an operation in progress on an application that IS registered, so
+            // the refusal names it.
+            let refusal = message(&refused);
+            if matches!(case.in_flight, InFlight::Registration) {
+                assert_eq!(
+                    refusal, NOT_REGISTERED_SUCCESSFULLY,
+                    "case {label:?}: expected the not-registered-successfully refusal, got \
+                     {refusal:?}"
+                );
+            } else {
+                assert!(
+                    refusal.contains(case.id),
+                    "case {label:?}: the refusal must name the application, got {refusal:?}"
+                );
+            }
             assert!(
                 refused.member("ConfigurationCheckOperations").is_none(),
                 "case {label:?}: a refusal reports no started operation, got {refused:?}"

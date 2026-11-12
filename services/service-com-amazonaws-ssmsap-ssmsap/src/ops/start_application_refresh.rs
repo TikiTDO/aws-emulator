@@ -170,6 +170,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         };
 
+        // A refresh RE-RUNS the discovery of an application the service already
+        // discovered, so an application whose registration has not completed
+        // successfully has nothing to re-discover: it is refused with the modelled
+        // `ConflictException`, in the one wording this service states that precondition
+        // with. Asked of the application's own registration outcome and BEFORE the
+        // in-flight gate, so concurrent callers are all refused the same way whatever
+        // order they arrive in.
+        if !application.registered_successfully() {
+            return Err(StartApplicationRefreshErrorModeled::ConflictException(
+                crate::state::not_registered_successfully(),
+            )
+            .into());
+        }
+
         // A change the clock still owes this application is an operation already under
         // way on it, which is what `ConflictException` reports — decided and worded in
         // the one place every control call of this service refuses that condition from.

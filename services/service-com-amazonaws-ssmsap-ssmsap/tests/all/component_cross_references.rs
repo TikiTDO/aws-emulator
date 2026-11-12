@@ -226,7 +226,7 @@ const CASES: &[Case] = &[
     Case {
         name: "the largest ComponentsInfo beside the HANA component of its own system",
         application_id: "abap-five-declared",
-        application_type: "SAP_ABAP",
+        application_type: "HANA",
         sid: Some("ZZ9"),
         sap_instance_number: Some("42"),
         components_info: &[

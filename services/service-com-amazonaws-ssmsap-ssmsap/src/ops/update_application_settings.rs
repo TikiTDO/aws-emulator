@@ -233,7 +233,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(UpdateApplicationSettingsErrorModeled::ValidationException(
                 crate::state::validation(crate::state::conditional_requirement_message(
                     &application.app_type,
-                    &[crate::state::ConditionalMember::Credentials],
                 )),
             )
             .into());

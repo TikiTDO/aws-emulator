@@ -179,6 +179,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         let application_id = application.id.clone();
 
+        // A configuration check inspects the configuration of an application the service
+        // DISCOVERED, so one whose registration has not completed successfully has no
+        // configuration to check: it is refused with the modelled `ConflictException`, in
+        // the one wording this service states that precondition with. Asked of the
+        // application's own registration outcome and BEFORE the in-flight gate, so the
+        // answer does not depend on what else is happening to the application.
+        if !application.registered_successfully() {
+            return Err(StartConfigurationChecksErrorModeled::ConflictException(
+                crate::state::not_registered_successfully(),
+            )
+            .into());
+        }
+
         // A change the clock still owes this application is an operation already under
         // way on it, which is what `ConflictException` reports — decided and worded in
         // the one place every control call of this service refuses that condition from —

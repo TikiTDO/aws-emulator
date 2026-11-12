@@ -169,6 +169,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
+        // A registration that FAILED leaves nothing to start: the application was never
+        // discovered, so there is no SAP system behind it and the caller has to register
+        // it again rather than wait. Asked of the application's own registration outcome
+        // and BEFORE the in-flight gate, so the answer is the same for every caller
+        // whatever else is happening to the application.
+        if application.registration_failed() {
+            return Err(StartApplicationErrorModeled::ValidationException(
+                crate::state::validation(crate::state::failed_registration_message(
+                    &input.application_id,
+                )),
+            )
+            .into());
+        }
+
         // A change the clock still owes this application is an operation already under
         // way on it, which is what `ConflictException` reports — decided and worded in
         // the one place every control call of this service refuses that condition from.

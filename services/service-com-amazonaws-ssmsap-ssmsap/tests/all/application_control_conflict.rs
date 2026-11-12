@@ -15,6 +15,15 @@
 //! 409) while it is outstanding, in the one wording this service words that condition
 //! with, and is served against an application that owes none.
 //!
+//! Two calls answer a REGISTRATION still running on their own terms instead, because what
+//! the registration owes is not an operation that call has to wait for:
+//! `StopApplication` is SERVED (stopping an SAP application is no change to what the
+//! registration is establishing), and `StartApplicationRefresh` and
+//! `StartConfigurationChecks` refuse the precondition that application has not met — it
+//! has not been registered successfully — in the fixed wording that names nothing of the
+//! request. Both are part of the same rule: what a control call does is decided by the
+//! state of the application, not by the order calls arrive in.
+//!
 //! The rows span what the rule generalises over: WHICH control call runs into the gate,
 //! which call left the change owed (a registration still settling, a start, a stop, a
 //! refresh, a settings update, a deregistration), the application type and the form of
@@ -111,6 +120,43 @@ impl Control {
             ),
         }
     }
+
+    /// What this call answers against an application whose REGISTRATION is still running.
+    ///
+    /// A registration that has not settled is not an operation every control call has to
+    /// wait for: it is the application not having been registered successfully yet, which
+    /// the two calls whose precondition that is state in their own fixed wording, while a
+    /// stop is served and the other two refuse the work in flight as they do for any
+    /// other call.
+    fn against_a_running_registration(self, application: &str, status: &str) -> Expected {
+        match self {
+            Self::Stop => Expected::Served,
+            Self::Refresh | Self::ConfigurationChecks => {
+                Expected::Refused(NOT_REGISTERED_SUCCESSFULLY.to_string())
+            }
+            Self::Start | Self::SettingsUpdate => {
+                Expected::Refused(self.refusal(application, status))
+            }
+        }
+    }
+}
+
+/// How this service states that the application a call names has not been registered
+/// successfully: entirely fixed text, naming nothing of the request, which is what tells
+/// it apart from the refusal of work in flight.
+///
+/// Spelled out here rather than taken from the crate, for the same reason
+/// [`Control::refusal`] is.
+const NOT_REGISTERED_SUCCESSFULLY: &str =
+    "The specified application has not been registered successfully";
+
+/// What a control call answers in the window a change is owed.
+#[derive(Debug)]
+enum Expected {
+    /// HTTP 200: the call does not wait for what the application owes.
+    Served,
+    /// HTTP 409 `ConflictException` carrying this message.
+    Refused(String),
 }
 
 /// The call that leaves a change the clock owes the application outstanding.
@@ -159,6 +205,21 @@ impl InFlight {
             Self::Stop => APPLICATION_STATUS_STOPPING,
             Self::Refresh | Self::SettingsUpdate => APPLICATION_STATUS_ACTIVATED,
             Self::Deregistration => APPLICATION_STATUS_DELETING,
+        }
+    }
+
+    /// What `control` answers against an application with THIS call's change owed.
+    ///
+    /// Every call that runs into work in flight on a registered application is refused in
+    /// the one wording this service words that condition with; a registration still
+    /// running is the application not yet being registered successfully, which two of them
+    /// answer on their own terms ([`Control::against_a_running_registration`]).
+    fn expected(self, control: Control, application: &str) -> Expected {
+        match self {
+            Self::Registration => {
+                control.against_a_running_registration(application, self.status())
+            }
+            _ => Expected::Refused(control.refusal(application, self.status())),
         }
     }
 }
@@ -298,28 +359,48 @@ async fn every_control_call_refuses_an_application_that_owes_a_change() {
              owed, got {read:?}",
             case.in_flight.status()
         );
-        for ((control, refused), served) in CONTROLS.iter().zip(&refused).zip(&served) {
-            assert_eq!(
-                (refused.status, refused.code()),
-                (409, CONFLICT_EXCEPTION),
-                "case {label:?}: expected 409 {CONFLICT_EXCEPTION} from {} while a change \
-                 is owed, got {refused:?}",
-                control.path()
-            );
-            assert_eq!(
-                message(refused),
-                control.refusal(case.id, &status),
-                "case {label:?}: expected {} to word the refusal as this service words it, \
-                 got {:?}",
-                control.path(),
-                message(refused)
-            );
-            assert!(
-                refused.member("OperationId").is_none()
-                    && refused.member("ConfigurationCheckOperations").is_none(),
-                "case {label:?}: a refusal from {} reports no filed work, got {refused:?}",
-                control.path()
-            );
+        for ((control, answered), served) in CONTROLS.iter().zip(&refused).zip(&served) {
+            match case.in_flight.expected(*control, case.id) {
+                Expected::Served => {
+                    assert_eq!(
+                        answered.status, 200,
+                        "case {label:?}: expected 200 from {} while the registration is \
+                         still running, got {answered:?}",
+                        control.path()
+                    );
+                    assert!(
+                        answered.member("OperationId").is_some()
+                            || answered.member("ConfigurationCheckOperations").is_some(),
+                        "case {label:?}: a served {} reports the work it filed, got \
+                         {answered:?}",
+                        control.path()
+                    );
+                }
+                Expected::Refused(expected) => {
+                    assert_eq!(
+                        (answered.status, answered.code()),
+                        (409, CONFLICT_EXCEPTION),
+                        "case {label:?}: expected 409 {CONFLICT_EXCEPTION} from {} while a \
+                         change is owed, got {answered:?}",
+                        control.path()
+                    );
+                    assert_eq!(
+                        message(answered),
+                        expected,
+                        "case {label:?}: expected {} to word the refusal as this service \
+                         words it, got {:?}",
+                        control.path(),
+                        message(answered)
+                    );
+                    assert!(
+                        answered.member("OperationId").is_none()
+                            && answered.member("ConfigurationCheckOperations").is_none(),
+                        "case {label:?}: a refusal from {} reports no filed work, got \
+                         {answered:?}",
+                        control.path()
+                    );
+                }
+            }
 
             // The same call against an application that owes nothing is served, so the
             // gate refuses the condition and not the operation.

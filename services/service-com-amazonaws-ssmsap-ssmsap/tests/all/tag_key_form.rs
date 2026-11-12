@@ -208,9 +208,12 @@ fn assert_refused(case: &str, reply: &Reply, expected: &str) {
 /// carrying an admitted key is registered and reports that key back.
 #[tokio::test]
 async fn a_registration_is_refused_for_a_tag_key_outside_the_modelled_form() {
-    let emulator = Emulator::new();
-
     for (index, case) in cases().into_iter().enumerate() {
+        // One emulator per row: each row is a registration of its own, and an account is
+        // allotted only so many registered applications per Region
+        // (`service_com_amazonaws_ssmsap_ssmsap::state::APPLICATIONS_QUOTA`), so the rows
+        // must not compete for that allotment.
+        let emulator = Emulator::new();
         let application_id = format!("tag-key-{index}");
         let reply = register_with_tag(&emulator, &application_id, case.key).await;
 

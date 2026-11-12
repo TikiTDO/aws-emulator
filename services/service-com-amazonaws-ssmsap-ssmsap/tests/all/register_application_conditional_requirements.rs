@@ -252,20 +252,28 @@ fn the_conditional_requirement_table_covers_every_modelled_application_type() {
         assert!(
             CONDITIONALLY_REQUIRED_MEMBERS
                 .iter()
-                .any(|(name, _)| name == app_type),
+                .any(|rule| rule.application_type == *app_type),
             "case {app_type:?}: the conditional-requirement table must name every modelled \
              ApplicationType, got {:?}",
             CONDITIONALLY_REQUIRED_MEMBERS
                 .iter()
-                .map(|(name, _)| *name)
+                .map(|rule| rule.application_type)
                 .collect::<Vec<&str>>()
         );
     }
-    for (name, _) in CONDITIONALLY_REQUIRED_MEMBERS {
+    for rule in CONDITIONALLY_REQUIRED_MEMBERS {
         assert!(
-            APPLICATION_TYPE_VALUES.contains(name),
-            "case {name:?}: the table may only name a modelled ApplicationType, got {:?}",
+            APPLICATION_TYPE_VALUES.contains(&rule.application_type),
+            "case {:?}: the table may only name a modelled ApplicationType, got {:?}",
+            rule.application_type,
             APPLICATION_TYPE_VALUES
+        );
+        assert!(
+            !rule.requirement.is_empty(),
+            "case {:?}: the table must state what a registration of the type has to \
+             specify, got {:?}",
+            rule.application_type,
+            rule.requirement
         );
     }
 }

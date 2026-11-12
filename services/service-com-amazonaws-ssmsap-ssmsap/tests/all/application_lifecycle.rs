@@ -572,7 +572,7 @@ const REGISTER_CASES: &[RegisterCase] = &[
     // One component, several tags, a database ARN and credentials.
     RegisterCase {
         id: "abap.prod_01",
-        app_type: "SAP_ABAP",
+        app_type: "HANA",
         sid: Some("PRD"),
         sap_instance_number: Some("01"),
         components_info: &[("ASCS", "PRD", "i-00000000000000001")],

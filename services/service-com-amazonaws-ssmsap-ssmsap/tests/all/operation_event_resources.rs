@@ -297,16 +297,18 @@ async fn reports_one_milestone_per_resource_the_operation_acted_on() {
 /// beside it reports.
 #[tokio::test]
 async fn a_refused_resource_reports_a_failed_milestone() {
-    let case = "an application whose Instances entry EC2 does not hold";
+    let case = "an application whose component instance EC2 does not hold";
     let emulator = Emulator::new();
     let held = emulator.launch_running(1).await;
-    let component_instance = held[0].clone();
+    let system_instance = held[0].clone();
     let id = "partly-held";
+    // The SAP system runs on an instance EC2 holds, so the registration settles as
+    // discovered; the declared component is the one on an instance EC2 refuses.
     register_activated(
         &emulator,
         id,
-        UNHELD_INSTANCE,
-        &[("WD", component_instance.as_str())],
+        &system_instance,
+        &[("WD", UNHELD_INSTANCE)],
     )
     .await;
 
@@ -320,7 +322,21 @@ async fn a_refused_resource_reports_a_failed_milestone() {
         "case {case}: both instances the registration named were asked for, got {settled:?}"
     );
 
-    let refused = &instances[0];
+    // The instances are asked for in the order the registration named them: the SAP
+    // system's own first, then the declared component's.
+    let carried_out = &instances[0];
+    assert_eq!(
+        resource_field(carried_out, "ResourceArn"),
+        expected_instance_arn(&system_instance),
+        "case {case}: the first milestone names the instance EC2 does hold, got {carried_out:?}"
+    );
+    assert_eq!(
+        field(carried_out, "Status"),
+        OPERATION_EVENT_STATUS_COMPLETED,
+        "case {case}: work the owner carried out is COMPLETED, got {carried_out:?}"
+    );
+
+    let refused = &instances[1];
     assert_eq!(
         resource_field(refused, "ResourceArn"),
         expected_instance_arn(UNHELD_INSTANCE),
@@ -336,17 +352,6 @@ async fn a_refused_resource_reports_a_failed_milestone() {
         "case {case}: a failed milestone explains its status, got {refused:?}"
     );
 
-    let carried_out = &instances[1];
-    assert_eq!(
-        resource_field(carried_out, "ResourceArn"),
-        expected_instance_arn(&component_instance),
-        "case {case}: the second milestone names the instance EC2 does hold, got {carried_out:?}"
-    );
-    assert_eq!(
-        field(carried_out, "Status"),
-        OPERATION_EVENT_STATUS_COMPLETED,
-        "case {case}: one instance refused does not fail the next, got {carried_out:?}"
-    );
     let states = emulator.instance_states(&held).await;
     assert!(
         states.values().all(|state| state == "stopped"),

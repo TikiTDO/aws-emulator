@@ -211,7 +211,7 @@ const CASES: &[Case] = &[
     Case {
         name: "a component declared under another System ID",
         application_id: "abap.prod_01",
-        application_type: "SAP_ABAP",
+        application_type: "HANA",
         sid: Some("PRD"),
         sap_instance_number: Some("01"),
         components_info: &[

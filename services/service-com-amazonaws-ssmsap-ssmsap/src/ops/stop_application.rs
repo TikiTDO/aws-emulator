@@ -21,6 +21,13 @@
 //!   application's databases then reports. A stop that does NOT name it leaves the DBMS
 //!   as it was — running, if that is what it was — while the application stops.
 //!
+//! A registration still running does not hold a stop up: stopping an SAP application is
+//! not a change to what that registration is establishing, so the call is served for an
+//! application that is still `REGISTERING`
+//! ([`crate::state::application_control_available`]) and the discovery result that
+//! registration owed is reported all the same
+//! ([`crate::state::StoredApplication::owed_discovery_status`]).
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -301,8 +308,11 @@ fn record_stop(
         change: crate::state::PendingChange::Status {
             status: crate::state::APPLICATION_STATUS_STOPPED.to_string(),
             // Stopping an application does not re-run discovery, so the discovery
-            // status it already reached is the one it keeps.
-            discovery_status: application.discovery_status.clone(),
+            // status it already reached is the one it keeps — and for an application
+            // whose registration is still running, the result that registration's own
+            // discovery was going to report, which this stop takes over the delivery of
+            // rather than discarding.
+            discovery_status: application.owed_discovery_status().to_string(),
         },
     });
 

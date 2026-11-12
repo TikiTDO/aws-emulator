@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 use serde_json::{json, Map, Value};
 use service_com_amazonaws_ssmsap_ssmsap::ops::types::BACKINT_MODE_VALUES;
 use service_com_amazonaws_ssmsap_ssmsap::state::{
-    application_not_found_message, conditional_requirement_message, ConditionalMember,
+    application_not_found_message, conditional_requirement_message,
     MAX_CREDENTIALS_PER_APPLICATION, MISSING_SETTINGS_MESSAGE, OPERATION_STATUS_INPROGRESS,
     OPERATION_STATUS_SUCCESS, OPERATION_TYPE_UPDATE_APPLICATION_SETTINGS,
 };
@@ -692,9 +692,7 @@ fn refusals() -> Vec<Refusal> {
             expected_code: VALIDATION_EXCEPTION,
             // The requirement an application of this type carries, stated in the words
             // its registration states it in.
-            expected_message: |_| {
-                conditional_requirement_message("HANA", &[ConditionalMember::Credentials])
-            },
+            expected_message: |_| conditional_requirement_message("HANA"),
         },
         Refusal {
             name: "a Backint mode outside the modelled catalogue",

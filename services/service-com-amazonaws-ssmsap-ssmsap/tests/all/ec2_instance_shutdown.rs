@@ -39,6 +39,12 @@ const AMI: &str = "ami-00112233445566778";
 /// An instance id no launch in this emulator ever mints (EC2 issues `i-` and 17
 /// hexadecimal digits of a counter that starts at one), so EC2 holds no such instance
 /// while it satisfies the `Ec2InstanceId` pattern a registration requires.
+///
+/// It is named as a declared COMPONENT's instance wherever a suite needs an application
+/// whose work on an instance EC2 refuses: the instance the SAP system itself runs on is
+/// the one the registration's own discovery has to reach
+/// (`tests/all/registration_instance_resolution.rs` pins what naming it there does), so a
+/// registration that has to settle as discovered names an instance EC2 holds there.
 pub(crate) const UNHELD_INSTANCE: &str = "i-0ffffffffffffffff";
 
 /// How long a launch is given to reach `running`: the EC2 emulator moves an instance out
@@ -81,6 +87,20 @@ impl Emulator {
             "case {path}: expected HTTP 200, got {reply:?}"
         );
         reply.body
+    }
+
+    /// One Systems Manager for SAP call as the wire answered it, WHATEVER its status.
+    ///
+    /// `pub(crate)` for the suite whose rule is about what this service refuses once the
+    /// owner of an instance has answered for it
+    /// (`tests/all/registration_outcome.rs`): it reads the status and the error of a
+    /// reply, which [`Self::ssm_sap`] asserts away.
+    pub(crate) async fn reply(
+        &self,
+        path: &str,
+        body: Value,
+    ) -> crate::application_lifecycle::Reply {
+        self.sap.send(path, body).await
     }
 
     /// An EC2 client for [`REGION`] over the in-process callback — the same seam the
@@ -394,24 +414,25 @@ async fn the_flag_shuts_down_the_instances_the_registration_associated() {
 async fn an_instance_ec2_does_not_hold_does_not_hold_back_the_others() {
     let emulator = Emulator::new();
     let held = emulator.launch_running(1).await;
-    let component_instance = held[0].clone();
+    let system_instance = held[0].clone();
 
-    // The SAP system is registered on an instance EC2 holds no record of, and the
-    // component on one it does.
+    // The SAP system is registered on an instance EC2 holds, so its discovery completes,
+    // and a declared component on one EC2 holds no record of — which is the instance the
+    // shutdown then cannot carry out.
     let id = "partly-held";
     register_activated(
         &emulator,
         id,
-        UNHELD_INSTANCE,
-        &[("WD", component_instance.as_str())],
+        &system_instance,
+        &[("WD", UNHELD_INSTANCE)],
     )
     .await;
 
-    let case = "an application whose Instances entry EC2 does not hold";
+    let case = "an application whose component instance EC2 does not hold";
     let operation_id = stop(&emulator, id, Some(true)).await;
     let during = emulator.instance_states(&held).await;
     assert_eq!(
-        during.get(&component_instance).map(String::as_str),
+        during.get(&system_instance).map(String::as_str),
         Some("stopping"),
         "case {case}: the instance EC2 does hold must be stopping, got {during:?}"
     );
@@ -429,7 +450,7 @@ async fn an_instance_ec2_does_not_hold_does_not_hold_back_the_others() {
     );
     let after = emulator.instance_states(&held).await;
     assert_eq!(
-        after.get(&component_instance).map(String::as_str),
+        after.get(&system_instance).map(String::as_str),
         Some("stopped"),
         "case {case}: the instance EC2 does hold must be stopped, got {after:?}"
     );
@@ -440,7 +461,7 @@ async fn an_instance_ec2_does_not_hold_does_not_hold_back_the_others() {
     let again = stop(&emulator, id, Some(true)).await;
     let repeated = emulator.instance_states(&held).await;
     assert_eq!(
-        repeated.get(&component_instance).map(String::as_str),
+        repeated.get(&system_instance).map(String::as_str),
         Some("stopped"),
         "case {case}: an instance already stopped stays stopped, got {repeated:?}"
     );

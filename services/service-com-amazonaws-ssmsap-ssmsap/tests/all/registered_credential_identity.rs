@@ -147,15 +147,13 @@ const CASES: &[Case] = &[
         ],
         rotated: None,
     },
-    // The same rule on the other `ApplicationType`, which requires no credentials at all.
-    Case {
-        name: "a repeated declaration on an application of the other type",
-        application_id: "abap-duplicate",
-        application_type: "SAP_ABAP",
-        declared: &[("TNT9", "sap/tnt9/first"), ("TNT9", "sap/tnt9/last")],
-        expected: &[("TNT9", "sap/tnt9/last")],
-        rotated: Some(("TNT9", "TNT9")),
-    },
+    // Every row is of the type whose registration CARRIES credentials: the other modelled
+    // type runs on the SAP HANA database of such an application and names it by ARN, so a
+    // registration of that type carries no credentials at all
+    // (`service_com_amazonaws_ssmsap_ssmsap::state::CONDITIONALLY_REQUIRED_MEMBERS`) and
+    // the declarations this rule is about never reach one through a registration. The same
+    // declarations reaching one through `UpdateApplicationSettings` are what
+    // `tests/all/update_application_settings.rs` drives.
 ];
 
 /// One `(DatabaseName, SecretId)` pair as the `ApplicationCredential` the wire carries.
@@ -270,9 +268,12 @@ async fn register(emulator: &Emulator, case: &Case, body: Value) {
 /// `CredentialType`), carrying the secret the last declaration of that credential named.
 #[tokio::test]
 async fn a_registration_holds_one_credential_per_database_and_type() {
-    let emulator = Emulator::new();
-
     for case in CASES {
+        // One emulator per row: an account is allotted only so many registered
+        // applications per Region
+        // (`service_com_amazonaws_ssmsap_ssmsap::state::APPLICATIONS_QUOTA`), and each row
+        // is a registration of its own, so the rows must not compete for that allotment.
+        let emulator = Emulator::new();
         register(
             &emulator,
             case,
@@ -297,9 +298,11 @@ async fn a_registration_holds_one_credential_per_database_and_type() {
 /// the same credentials whichever call carried them.
 #[tokio::test]
 async fn the_registering_and_updating_paths_agree_on_the_same_declarations() {
-    let emulator = Emulator::new();
-
     for case in CASES {
+        // One emulator per row, for the reason the suite's first case states: each row
+        // registers two applications of its own.
+        let emulator = Emulator::new();
+
         // The registering path: every declaration in the registration.
         register(
             &emulator,
@@ -358,9 +361,9 @@ async fn the_registering_and_updating_paths_agree_on_the_same_declarations() {
 /// for the same database afterwards.
 #[tokio::test]
 async fn an_update_replaces_the_one_credential_a_registration_left() {
-    let emulator = Emulator::new();
-
     for case in CASES {
+        // One emulator per row, for the reason the suite's first case states.
+        let emulator = Emulator::new();
         let Some((database_name, database_id)) = case.rotated else {
             continue;
         };

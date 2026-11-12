@@ -503,6 +503,13 @@ impl ConfigurationRule {
 /// (see [`crate::ops::types::APPLICATION_TYPE_VALUES`]).
 pub const HANA_APPLICATION_TYPE: &str = "HANA";
 
+/// The `ApplicationType` of an SAP NetWeaver ABAP application, which RUNS ON an SAP HANA
+/// database rather than being one — so a registration of that type names the database by
+/// ARN and carries no credentials of its own (see [`CONDITIONALLY_REQUIRED_MEMBERS`]). One
+/// of the model's `ApplicationType` values (see
+/// [`crate::ops::types::APPLICATION_TYPE_VALUES`]).
+pub const ABAP_APPLICATION_TYPE: &str = "SAP_ABAP";
+
 /// The longest `RuleResultMetadata` value the model admits
 /// (`smithy_query(query="shape", shape="RuleResultMetadataValue")`: length 1..1000),
 /// which is what [`rule_metadata`] cuts a value to — a registration may name more

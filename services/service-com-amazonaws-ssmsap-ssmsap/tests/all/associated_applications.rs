@@ -108,15 +108,14 @@ fn cases() -> Vec<Case> {
                 ("assoc-bystander", &[]),
             ],
         },
-        // The shared connection the other way round: the HANA application's registration
-        // names a database of the ABAP application's, which is the same sharing seen from
-        // the other record.
+        // The shared connection the other way round: one application's registration names
+        // a database of the other's, which is the same sharing seen from the other record.
         Case {
             name: "a HANA application registered with the other application's database ARN",
             registrations: vec![
                 Registration {
                     id: "reverse-abap",
-                    app_type: "SAP_ABAP",
+                    app_type: "HANA",
                     database_names: &["TNT1"],
                     database_arn: None,
                 },

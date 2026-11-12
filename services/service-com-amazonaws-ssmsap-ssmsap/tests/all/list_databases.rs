@@ -146,14 +146,18 @@ fn cases() -> Vec<Case> {
             expected: &[(NAME_AT_LENGTH_BOUND, "TENANT")],
         },
         Case {
-            name: "an ABAP application whose registration named a database",
-            application_id: "abap-with-database",
-            application_type: "SAP_ABAP",
+            name: "a HANA application whose registration named the system database",
+            application_id: "hdb-with-system-database",
+            application_type: "HANA",
             sid: Some("ABC"),
             database_names: &[SYSTEM_DATABASE_NAME],
             expected_component: Some("ABC-HANA"),
             expected: &[("SYSTEMDB", "SYSTEM")],
         },
+        // The other modelled type runs on the SAP HANA database of such an application
+        // and names it by ARN, so its registration carries no credentials at all
+        // (`service_com_amazonaws_ssmsap_ssmsap::state::CONDITIONALLY_REQUIRED_MEMBERS`):
+        // it therefore derives no database from credentials, which is this row.
         Case {
             name: "an ABAP application registered with no credentials has no databases",
             application_id: "abap-no-credentials",

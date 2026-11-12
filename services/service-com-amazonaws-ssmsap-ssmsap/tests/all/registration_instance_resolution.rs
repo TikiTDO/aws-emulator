@@ -1,32 +1,40 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! What a registration does about the Amazon EC2 instances it names: it STORES them, and
-//! resolves nothing against the service that owns them.
+//! What a registration does about the Amazon EC2 instances it names: it STORES them and
+//! refuses nothing synchronously — and the DISCOVERY it then runs on them is what decides
+//! the outcome it settles as.
 //!
 //! RULE under test: `RegisterApplication` is asynchronous and accepts the Amazon EC2
 //! instance ids it is given on their modelled form alone
 //! (`smithy_query(query="shape", shape="InstanceId")`: `^i-[\w\d]{8}$|^i-[\w\d]{17}$`) —
-//! it does not ask the service that owns instances whether one exists, so a registration
-//! naming an id that owner holds no record of is SERVED, the application it creates is
-//! readable, and the ids it named are the ids the stored record reports. This service
-//! invents no instance state of its own either way.
+//! it refuses nothing for an id the service that owns instances holds no record of, so
+//! such a registration is SERVED, the application it creates is readable, and the ids it
+//! named are the ids the stored record reports. What that owner answers decides the
+//! asynchronous OUTCOME instead: the discovery of the registration runs a Systems Manager
+//! document on the instance, so an instance the owner reports running is discovered
+//! (`ACTIVATED`/`SUCCESS`) and one it holds no record of, or will not read as an instance
+//! id at all, is a discovery that could not be carried out
+//! (`FAILED`/`REGISTRATION_FAILED`). This service invents no instance state of its own
+//! either way.
 //!
-//! WHY that is the rule, rather than the refusal it would be easy to read into the
-//! modelled `ResourceNotFoundException`: the recorded behaviour of this service registers
-//! applications against instance ids nothing ever launched, and the call succeeds — the
+//! WHY the CALL is served rather than refused, as the modelled
+//! `ResourceNotFoundException` would make it easy to read: the recorded behaviour of this
+//! service registers applications against instance ids nothing ever launched, and the
+//! call succeeds — the
 //! behavioural units `ssm-sap.deregister-application-removes-resource`,
 //! `ssm-sap.get-application-missing-identifier-rejected`,
 //! `ssm-sap.get-application-nonexistent-id-validation-error` and
 //! `ssm-sap.get-operation-invalid-uuid-format-rejected` each register on a freshly
 //! generated id of exactly that kind. This suite is the guardrail for it: a later change
-//! that starts resolving instances at registration time fails here, beside the rule,
-//! rather than only against the corpus.
+//! that starts refusing such a registration fails here, beside the rule, rather than only
+//! against the corpus.
 //!
 //! The rows span what the rule generalises over: both lengths the modelled id form
 //! admits, ids the owning service would answer as unknown and ids it would not read as an
 //! instance id at all, an id that owner really does hold, which member names it
 //! (`Instances`, a declared component's `Ec2InstanceId`) — and whether that owner is
-//! mounted beside this service at all, since the answer must not depend on it.
+//! mounted beside this service at all, since what this service can CONCLUDE about an
+//! instance is only what that owner answered.
 
 use serde_json::{json, Value};
 
@@ -89,21 +97,34 @@ fn operation_id(case: &str, reply: &Value) -> String {
 }
 
 /// RULE: with the owner of the instances mounted beside this service, a registration
-/// naming an instance that owner holds nothing for is still served — and the instance it
-/// named is what the stored record reports.
+/// naming an instance that owner holds nothing for is still served — the instance it
+/// named is what the stored record reports — and what that registration SETTLES as is
+/// what the discovery on that instance could do.
 #[tokio::test]
 async fn a_registration_is_served_whatever_the_owner_of_the_instance_holds() {
     let emulator = Emulator::new();
     // The control: an id that owner really does hold, so the rows differ in what EC2
     // would answer and in nothing else.
     let launched = emulator.launch_running(1).await[0].clone();
-    let mut rows: Vec<(String, String)> = INSTANCES_NOBODY_HOLDS
+    let mut rows: Vec<(String, String, &str, &str)> = INSTANCES_NOBODY_HOLDS
         .iter()
-        .map(|(label, instance_id)| ((*label).to_string(), (*instance_id).to_string()))
+        .map(|(label, instance_id)| {
+            (
+                (*label).to_string(),
+                (*instance_id).to_string(),
+                "FAILED",
+                "REGISTRATION_FAILED",
+            )
+        })
         .collect();
-    rows.push(("an id the owner does hold".to_string(), launched));
+    rows.push((
+        "an id the owner does hold".to_string(),
+        launched,
+        "ACTIVATED",
+        "SUCCESS",
+    ));
 
-    for (index, (label, instance_id)) in rows.iter().enumerate() {
+    for (index, (label, instance_id, status, discovery_status)) in rows.iter().enumerate() {
         let application_id = format!("stored-instance-{index}");
         let reply = emulator
             .ssm_sap(
@@ -112,7 +133,8 @@ async fn a_registration_is_served_whatever_the_owner_of_the_instance_holds() {
             )
             .await;
 
-        // The registration is under way, as an asynchronous call's answer reports it.
+        // The registration is under way, as an asynchronous call's answer reports it:
+        // nothing about the instance is refused here, and no outcome is reported yet.
         assert_eq!(
             reply.get("Application").and_then(|app| app.get("Status")),
             Some(&json!("REGISTERING")),
@@ -132,8 +154,8 @@ async fn a_registration_is_served_whatever_the_owner_of_the_instance_holds() {
              named, got {recorded:?}"
         );
 
-        // Nothing about the instance changes the registration's own outcome: the change
-        // the clock owes it is the one every registration gets.
+        // What the clock owes the registration is the outcome of its discovery on that
+        // instance, which is what the owner of the instance answered for.
         tokio::time::sleep(settle_wait()).await;
         let fetched = emulator
             .ssm_sap(
@@ -141,10 +163,14 @@ async fn a_registration_is_served_whatever_the_owner_of_the_instance_holds() {
                 json!({"ApplicationId": &application_id}),
             )
             .await;
+        let application = fetched.get("Application");
         assert_eq!(
-            fetched.get("Application").and_then(|app| app.get("Status")),
-            Some(&json!("ACTIVATED")),
-            "case {label:?}: expected an ACTIVATED application, got {fetched}"
+            (
+                application.and_then(|app| app.get("Status")),
+                application.and_then(|app| app.get("DiscoveryStatus")),
+            ),
+            (Some(&json!(status)), Some(&json!(discovery_status))),
+            "case {label:?}: expected {status}/{discovery_status}, got {fetched}"
         );
     }
 }
@@ -208,10 +234,10 @@ async fn a_component_on_an_instance_the_owner_holds_nothing_for_is_stored_too() 
     }
 }
 
-/// RULE: the answer does not depend on the owner of the instances being reachable at all
-/// — with no EC2 mounted beside this service the same registrations are served, so a
-/// caller that never launched an instance can register against an id of the modelled
-/// form.
+/// RULE: with no owner of the instances mounted beside this service there is nothing to
+/// answer for one, so this service concludes nothing about it: the same registrations are
+/// served and settle as discovered, which is what lets a caller that never launched an
+/// instance register against an id of the modelled form.
 #[tokio::test]
 async fn a_registration_is_served_where_the_owner_of_the_instance_is_not_mounted() {
     let emulator = crate::application_lifecycle::Emulator::new();
