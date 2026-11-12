@@ -1454,6 +1454,18 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// stored.
     pub local_gateway_virtual_interface_groups:
         BTreeMap<String, crate::ops::types::LocalGatewayVirtualInterfaceGroup>,
+    /// When a `pending` local gateway virtual interface GROUP's move to `available` falls
+    /// due, by `LocalGatewayVirtualInterfaceGroupId`, on the same monotonic clock and at the
+    /// same [`TRANSITION_DELAY`] span as every other transition this store owes.
+    ///
+    /// Beside [`Self::local_gateway_virtual_interface_groups`] rather than on the stored
+    /// group, for the reason [`Self::local_gateway_virtual_interface_available_at`] sits
+    /// beside the interfaces: the modelled `LocalGatewayVirtualInterfaceGroup` shape carries
+    /// no member for when its next configuration state falls due, and holding the instant
+    /// here keeps the stored group the modelled shape every reader answers with. A group a
+    /// writer stored ready carries no entry. [`Self::materialize_due_transitions`] is the one
+    /// place an entry is applied and dropped.
+    pub local_gateway_virtual_interface_group_available_at: BTreeMap<String, Instant>,
     /// Every local gateway virtual interface the account holds, by
     /// `LocalGatewayVirtualInterfaceId`, as the modelled
     /// [`crate::ops::types::LocalGatewayVirtualInterface`] shape itself — so a member a
@@ -3326,6 +3338,7 @@ impl Default for ComAmazonawsEc2Amazonec2State {
             // A local gateway route table lives on an Outpost, which no EC2 call creates.
             local_gateway_route_tables: BTreeMap::new(),
             local_gateway_virtual_interface_groups: BTreeMap::new(),
+            local_gateway_virtual_interface_group_available_at: BTreeMap::new(),
             // A local gateway virtual interface comes with an Outpost, which no EC2 call
             // creates either, so the account holds none and none owes a move.
             local_gateway_virtual_interfaces: BTreeMap::new(),

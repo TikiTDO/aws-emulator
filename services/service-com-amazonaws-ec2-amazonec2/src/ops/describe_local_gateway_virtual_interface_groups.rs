@@ -244,7 +244,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let named_ids: ::std::collections::HashSet<&str> =
             requested.iter().map(String::as_str).collect();
 
-        let store = state.lock();
+        let mut store = state.lock();
+        // A configuration-state move the clock already owed a group fell due whether or not
+        // anybody called, so those moves are applied before this read reports the store: a
+        // group whose `available` instant has passed is reported `available`. That is the
+        // ONLY write on this path, and it changes nothing a later caller would not have seen
+        // anyway.
+        store.materialize_due_transitions();
 
         // The default is to describe every virtual interface group the account holds; the
         // ids narrow the store to those named, and every filter must then hold ("If you

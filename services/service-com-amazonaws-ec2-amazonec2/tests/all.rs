@@ -1921,6 +1921,12 @@ mod get_associated_ipv6_pool_cidrs;
 // and the tail of this file are where every new ec2 suite inserts its lines.
 #[path = "all/delete_managed_prefix_list.rs"]
 mod delete_managed_prefix_list;
+// `CreateLocalGatewayVirtualInterfaceGroup`: the group it mints and persists on the local
+// gateway it names, the move the clock then owes it, the interface a later create puts in it,
+// and what it refuses. Declared at the tail of this file, which is where every new ec2 suite
+// lands, for the reason the note at the top records.
+#[path = "all/create_local_gateway_virtual_interface_group.rs"]
+mod create_local_gateway_virtual_interface_group;
 // `CreateCoipPool`: the one customer-owned address pool a create writes onto the local gateway
 // route table it names, the members it mints for that pool, and what it refuses — declared at
 // the tail of this file, which is where every new ec2 suite lands.

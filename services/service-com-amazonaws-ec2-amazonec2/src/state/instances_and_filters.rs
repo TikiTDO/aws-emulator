@@ -901,6 +901,24 @@ impl ComAmazonawsEc2Amazonec2State {
                 record.pending = None;
             }
         }
+        // A virtual interface GROUP `CreateLocalGatewayVirtualInterfaceGroup` answered as
+        // `pending` is up once its due instant has passed, whether or not anybody called —
+        // the same contract as the association above, on the same clock. The due instant is
+        // dropped with the move, so a group reaches `available` once.
+        let due: Vec<String> = self
+            .local_gateway_virtual_interface_group_available_at
+            .iter()
+            .filter(|(_, available_at)| now >= **available_at)
+            .map(|(group_id, _)| group_id.clone())
+            .collect();
+        for group_id in due {
+            self.local_gateway_virtual_interface_group_available_at
+                .remove(&group_id);
+            if let Some(group) = self.local_gateway_virtual_interface_groups.get_mut(&group_id) {
+                group.configuration_state =
+                    Some(LOCAL_GATEWAY_VIF_GROUP_STATE_AVAILABLE.to_string());
+            }
+        }
         // A virtual interface `CreateLocalGatewayVirtualInterface` answered as `pending` is
         // carrying traffic once its due instant has passed, whether or not anybody called —
         // the same contract as the association above, on the same clock. The due instant is

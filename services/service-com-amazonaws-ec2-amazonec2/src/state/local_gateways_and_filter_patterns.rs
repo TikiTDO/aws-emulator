@@ -2894,6 +2894,41 @@ pub const INVALID_LOCAL_GATEWAY_VIF_GROUP_ID_MALFORMED: &str =
 pub const INVALID_LOCAL_GATEWAY_VIF_GROUP_ID_NOT_FOUND: &str =
     "InvalidLocalGatewayVirtualInterfaceGroupID.NotFound";
 
+/// The code EC2 answers when a request would take the account past the virtual interface
+/// groups it may hold, in the `<Resource>LimitExceeded` family this service's other quotas
+/// are refused with ([`LOCAL_GATEWAY_ROUTE_TABLE_LIMIT_EXCEEDED`]).
+pub const LOCAL_GATEWAY_VIF_GROUP_LIMIT_EXCEEDED: &str =
+    "LocalGatewayVirtualInterfaceGroupLimitExceeded";
+
+/// Refuse a virtual interface group create this store cannot take: HTTP 400
+/// [`LOCAL_GATEWAY_VIF_GROUP_LIMIT_EXCEEDED`], naming the two bounds this emulator holds a
+/// group against ([`MAX_LOCAL_GATEWAY_VIF_GROUPS`] and [`MAX_STORED_BYTES`]) the way
+/// [`local_gateway_route_table_limit_exceeded`] names the route table store's.
+pub fn local_gateway_virtual_interface_group_limit_exceeded<E>() -> Scaffolded<E> {
+    Scaffolded::service_error(
+        LOCAL_GATEWAY_VIF_GROUP_LIMIT_EXCEEDED,
+        400,
+        format!(
+            "This emulator stores at most {MAX_LOCAL_GATEWAY_VIF_GROUPS} local gateway virtual \
+             interface groups and at most {MAX_STORED_BYTES} bytes of caller-supplied data, and \
+             this request would take it past one of the two"
+        ),
+    )
+}
+
+/// A virtual interface group that is being brought up and is not carrying traffic yet:
+/// `LocalGatewayVirtualInterfaceGroupConfigurationState`'s `pending`
+/// ([`crate::ops::types::LOCAL_GATEWAY_VIRTUAL_INTERFACE_GROUP_CONFIGURATION_STATE_VALUES`]
+/// is the generated catalog).
+pub const LOCAL_GATEWAY_VIF_GROUP_STATE_PENDING: &str = "pending";
+
+/// A virtual interface group that is up: that same enum's `available`. The move from
+/// [`LOCAL_GATEWAY_VIF_GROUP_STATE_PENDING`] is owed by the clock ([`TRANSITION_DELAY`],
+/// through
+/// [`ComAmazonawsEc2Amazonec2State::local_gateway_virtual_interface_group_available_at`]), so
+/// a caller that describes the groups straight after the create still sees `pending`.
+pub const LOCAL_GATEWAY_VIF_GROUP_STATE_AVAILABLE: &str = "available";
+
 /// Whether `id` is a well-formed local gateway virtual interface group id — one EC2 could
 /// have issued.
 ///
@@ -3064,6 +3099,19 @@ impl ComAmazonawsEc2Amazonec2State {
         self.local_gateway_virtual_interface_groups
             .insert(group_id.clone(), group);
         Some(group_id)
+    }
+
+    /// Record the move to [`LOCAL_GATEWAY_VIF_GROUP_STATE_AVAILABLE`] the clock owes the
+    /// virtual interface group `group_id`, [`TRANSITION_DELAY`] from now.
+    ///
+    /// A writer that answers a new group in the non-terminal
+    /// [`LOCAL_GATEWAY_VIF_GROUP_STATE_PENDING`] state calls this; one that stored a group
+    /// already up does not, so a group written ready owes nothing. The instant is RECORDED,
+    /// never slept for: [`Self::materialize_due_transitions`] applies it once the clock has
+    /// passed it, so a caller asking straight after the write still sees `pending`.
+    pub fn owe_local_gateway_virtual_interface_group_available(&mut self, group_id: &str) {
+        self.local_gateway_virtual_interface_group_available_at
+            .insert(group_id.to_string(), Instant::now() + TRANSITION_DELAY);
     }
 }
 

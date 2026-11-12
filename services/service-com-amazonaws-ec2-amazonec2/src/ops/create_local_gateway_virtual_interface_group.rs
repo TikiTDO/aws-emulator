@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateLocalGatewayVirtualInterfaceGroup
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateLocalGatewayVirtualInterfaceGroup`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateLocalGatewayVirtualInterfaceGroup::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! "Create a local gateway virtual interface group": the group is created ON the local
+//! gateway `LocalGatewayId` names, holds no virtual interface until one is created in it,
+//! carries the local BGP configuration the request asked for, and is answered as the store
+//! holds it — so this operation and `DescribeLocalGatewayVirtualInterfaceGroups` cannot
+//! report one group differently.
 //!
 //! ## Shape of an operation
 //!
@@ -139,10 +136,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // `ctx` carries request metadata only; a virtual interface group is a resource OF
-        // the local gateway the request names.
-        let _ = ctx;
         use crate::state;
+
+        // The Region of the request's SigV4 credential scope: a virtual interface group is a
+        // Region's resource and its own ARN names that Region
+        // (`LocalGatewayVirtualInterfaceGroup$LocalGatewayVirtualInterfaceGroupArn`).
+        // Everything else the group reports comes from the request or from the store.
+        let region = state::request_region(ctx.parts());
 
         // "The ID of the local gateway" (`LocalGatewayId`) is `@required` but modelled
         // `clientOptional`, so a request that left it out reaches this handler as an empty
@@ -160,7 +160,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // "The tags assigned to the virtual interface group" (`TagSpecifications`) — "you
         // must specify the resource type to tag, otherwise the request will fail"
         // (`TagSpecification`), and the only type this action tags is the group it creates.
-        let _tags: Vec<Tag> = state::tags_from_specifications(
+        let tags: Vec<Tag> = state::tags_from_specifications(
             input.tag_specifications.as_deref(),
             state::RESOURCE_TYPE_LOCAL_GATEWAY_VIRTUAL_INTERFACE_GROUP,
             Self::NAME,
@@ -206,10 +206,45 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // reads that id with.
         state::require_known_local_gateway(&store, &input.local_gateway_id)?;
 
-        // Storing the group itself is still unwritten, so the operation answers the
-        // scaffold's 501 rather than a success it cannot back with state. Every refusal the
-        // request earns is minted above, before this point, so a client learns that its
-        // input is wrong from the code the real service answers rather than from this.
-        Err(crate::scaffolded::Scaffolded::not_implemented(Self::NAME))
+        // The record itself: the group id, its ARN and the owning account come from the
+        // store, never from the request. A new group holds NO virtual interface — one is put
+        // in it by `CreateLocalGatewayVirtualInterface`, which names the group it creates the
+        // interface in — and starts in the TRANSIENT `pending` configuration state with the
+        // clock owing it `available` one TRANSITION_DELAY later, so a caller describing the
+        // groups straight after this call still sees `pending`.
+        let Some(group_id) = store.insert_local_gateway_virtual_interface_group(
+            state::LocalGatewayVirtualInterfaceGroupSpec {
+                local_gateway_id: input.local_gateway_id.clone(),
+                local_gateway_virtual_interface_ids: Vec::new(),
+                local_bgp_asn: input.local_bgp_asn,
+                local_bgp_asn_extended: input.local_bgp_asn_extended,
+                region,
+                configuration_state: state::LOCAL_GATEWAY_VIF_GROUP_STATE_PENDING.to_string(),
+                tags,
+            },
+        ) else {
+            return Err(state::local_gateway_virtual_interface_group_limit_exceeded());
+        };
+        // The group was answered `pending`, so the clock owes it
+        // `LOCAL_GATEWAY_VIF_GROUP_STATE_AVAILABLE`: the instant is RECORDED here and applied
+        // by the store's own materialisation once it has passed, never slept for.
+        store.owe_local_gateway_virtual_interface_group_available(&group_id);
+
+        // "Information about the created local gateway virtual interface group"
+        // (`CreateLocalGatewayVirtualInterfaceGroupResult$LocalGatewayVirtualInterfaceGroup`):
+        // the group as it was STORED, so this operation and
+        // `DescribeLocalGatewayVirtualInterfaceGroups` cannot report one group differently.
+        let Some(group) = store
+            .local_gateway_virtual_interface_groups
+            .get(&group_id)
+            .cloned()
+        else {
+            return Err(state::internal_error(format!(
+                "the local gateway virtual interface group '{group_id}' could not be read back"
+            )));
+        };
+        Ok(CreateLocalGatewayVirtualInterfaceGroupOutput {
+            local_gateway_virtual_interface_group: Some(group),
+        })
     }
 }
