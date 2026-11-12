@@ -40,6 +40,10 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 # `sqlparser`: the `SELECT` `StartQuery` accepts for the SQL query language is PARSED with
 # it, so what `GetQueryResults` runs is the structure of the caller's own statement.
 sqlparser = "0.59"
+# `cron`: the `cron(...)` half of a scheduled query's `scheduleExpression` is read by this
+# maintained parser, so a schedule a write states is judged field by field rather than by
+# shape alone.
+cron = "0.15"
 # An ingested Embedded Metric Format log event publishes its metrics into the CloudWatch
 # emulator's own metric store, which is reached through the shared engine and needs the
 # owning service's state TYPE.

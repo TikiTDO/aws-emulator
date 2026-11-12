@@ -252,6 +252,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         }
 
+        // "The updated cron expression that defines when the scheduled query runs": the schedule
+        // this request states is parsed on the same rule the create's is, so a value that
+        // schedules nothing is refused with the sentence naming the expected format rather than
+        // written over the schedule the query already runs on.
+        if let Some(message) = crate::state::schedule_expression_refusal(&input.schedule_expression)
+        {
+            return Err(
+                UpdateScheduledQueryErrorModeled::ValidationException(ValidationException {
+                    message: Some(message),
+                })
+                .into(),
+            );
+        }
+
         // "This operation uses PUT semantics": the stored configuration becomes exactly what
         // this request states, so every configuration member is written from it — a member the
         // request omits goes back to the value a query naming none holds rather than keeping

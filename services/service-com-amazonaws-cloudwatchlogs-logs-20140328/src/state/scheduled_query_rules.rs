@@ -4,12 +4,19 @@
 //! STATE one — `CreateScheduledQuery` and `UpdateScheduledQuery` — so a configuration a create
 //! accepts is one an update accepts and both refuse the same request in the same words.
 //!
-//! Three rules live here:
+//! Four rules live here:
 //!
 //! * `executionRoleArn` ("The ARN of the IAM role that grants permissions to execute the query")
 //!   must be an IAM ROLE ARN, which the service's own request validator holds as a regular
 //!   expression ([`EXECUTION_ROLE_ARN_PATTERN`]) and states as the member-constraint refusal
 //!   every other parameter outside its constraint is stated with;
+//! * `scheduleExpression` ("A cron expression that defines when the scheduled query runs. The
+//!   expression uses standard cron syntax and supports minute-level precision") must PARSE as a
+//!   schedule — a six-field `cron(...)`, read field by field by the `cron` crate, or a
+//!   `rate(<value> <unit>)` — and one that does not is refused before anything is stored
+//!   ([`schedule_expression_refusal`]). The format is this service's own, down to the field
+//!   count its refusal names, so the rule lives with the other rules of a scheduled query's
+//!   configuration rather than with any other service's schedule;
 //! * the log groups a query reads ("An array of log group names or ARNs to query") are resolved
 //!   against the log groups the account HOLDS, so a write naming one it does not hold is refused
 //!   about that log group rather than about the scheduled query;
@@ -55,6 +62,181 @@ pub fn execution_role_arn_refusal(role_arn: &str) -> Option<String> {
     })
 }
 
+/// The number of whitespace-separated fields a `cron(...)` schedule carries — "minutes hours
+/// day_of_month month day_of_week year" — which is the format the refusal below states and the
+/// one definition the check itself reads, so the two cannot drift apart.
+const CRON_FIELD_COUNT: usize = 6;
+
+/// The units a `rate(...)` schedule states its value in, in the singular and plural forms AWS
+/// publishes for a schedule expression: minutes, hours and days.
+const RATE_UNITS: [&str; 6] = ["minute", "minutes", "hour", "hours", "day", "days"];
+
+/// The clause a schedule expression that is neither form is refused with, naming the format
+/// expected of it and NOTHING of the value submitted or of the resource being written.
+const INVALID_SCHEDULE_EXPRESSION_CLAUSE: &str = "Invalid cron expression format. Expected \
+     format: cron(minutes hours day_of_month month day_of_week year)";
+
+/// The refusal a request whose schedule expression does not parse is answered with: the
+/// service's violation envelope over [`INVALID_SCHEDULE_EXPRESSION_CLAUSE`], whose count is the
+/// number of violations the request carries — ONE, the schedule this check judges.
+fn invalid_schedule_expression_message() -> String {
+    format!("1 validation errors detected: {INVALID_SCHEDULE_EXPRESSION_CLAUSE}")
+}
+
+/// The refusal message for a `scheduleExpression` that is not a schedule at all, or `None` for
+/// one that is.
+///
+/// The member is "A cron expression that defines when the scheduled query runs", so a value that
+/// does not PARSE as a schedule configures nothing and is refused rather than stored: the whole
+/// value is either a `cron(...)` of [`CRON_FIELD_COUNT`] fields that PARSE, or a
+/// `rate(<value> <unit>)` stating a positive count of one of the [`RATE_UNITS`] (singular for a
+/// value of one, plural for any larger one, as AWS publishes the rate form).
+///
+/// The cron body is read field by field by the `cron` crate, so a field that is not a legal cron
+/// field in the place it sits — a value past the field's range, a name no month or weekday has,
+/// a token that is not cron at all — fails the parse rather than being stored for a schedule
+/// nothing could run; an expression that parses is reported back byte for byte by every reader.
+pub fn schedule_expression_refusal(expression: &str) -> Option<String> {
+    (!is_schedule_expression(expression)).then(invalid_schedule_expression_message)
+}
+
+/// Whether `expression` parses as either form of schedule expression. The ONE parse both writes
+/// of a scheduled query are held to, so a schedule a create accepts is one an update accepts.
+fn is_schedule_expression(expression: &str) -> bool {
+    if let Some(body) = schedule_body(expression, "cron") {
+        return is_cron_body(body);
+    }
+    if let Some(body) = schedule_body(expression, "rate") {
+        return is_rate_body(body);
+    }
+    false
+}
+
+/// The text inside `form(...)`, or `None` when `expression` is not that form at all.
+fn schedule_body<'a>(expression: &'a str, form: &str) -> Option<&'a str> {
+    expression
+        .strip_prefix(form)?
+        .strip_prefix('(')?
+        .strip_suffix(')')
+}
+
+/// Whether a `cron(...)` body carries its [`CRON_FIELD_COUNT`] fields and each of them parses in
+/// the place it sits, so the whole expression names instants.
+fn is_cron_body(body: &str) -> bool {
+    let fields: Vec<&str> = body.split_whitespace().collect();
+    fields.len() == CRON_FIELD_COUNT
+        && fields
+            .iter()
+            .enumerate()
+            .all(|(index, field)| cron_field_parses(index, field))
+        && parsed_cron(&fields).is_some()
+}
+
+/// The index of the day-of-month and the day-of-week field in the six the format states, the two
+/// fields `?` ("no specific value") and AWS's own day markers are written in.
+const DAY_OF_MONTH_FIELD: usize = 2;
+const DAY_OF_WEEK_FIELD: usize = 4;
+
+/// Whether `field` is a legal cron field in the place `index` names, judged by parsing it THERE
+/// with every other field held at `*` — the token every field accepts — so the field that cannot
+/// be read is the one that fails rather than the whole expression.
+fn cron_field_parses(index: usize, field: &str) -> bool {
+    let mut expression = ["0", "*", "*", "*", "*", "*", "*"];
+    expression[index + 1] = normalised_cron_field(index, field);
+    expression.join(" ").parse::<::cron::Schedule>().is_ok()
+}
+
+/// The whole expression as the parser reads it, or `None` for a combination of fields its grammar
+/// does not admit even though each field parses in its own place.
+fn parsed_cron(fields: &[&str]) -> Option<::cron::Schedule> {
+    let normalised: Vec<&str> = ::std::iter::once("0")
+        .chain(
+            fields
+                .iter()
+                .enumerate()
+                .map(|(index, field)| normalised_cron_field(index, field)),
+        )
+        .collect();
+    normalised.join(" ").parse::<::cron::Schedule>().ok()
+}
+
+/// What the parser reads a field as, for the tokens AWS's cron syntax carries and the standard
+/// grammar has no spelling of:
+///
+/// * `?` is "no specific value", which in the day-of-month and day-of-week fields — the only two
+///   it may be written in — states the same set of days as `*`;
+/// * `L` (the last day), `LW` (the last weekday) and `<day>W` (the weekday nearest a day) in the
+///   day-of-month field, and `<day>L` (the last such weekday) and `<day>#<nth>` (the nth such
+///   weekday) in the day-of-week field, each name a day of the month the grammar cannot spell,
+///   so they stand for their field's whole range once the expression is handed to the parser.
+///
+/// Everything else is handed over as written, which is what makes the parser — rather than this
+/// module — the judge of a field's values, names, ranges, lists and steps.
+fn normalised_cron_field(index: usize, field: &str) -> &str {
+    let stands_for_the_whole_field = match index {
+        DAY_OF_MONTH_FIELD => field == "?" || is_day_of_month_marker(field),
+        DAY_OF_WEEK_FIELD => field == "?" || is_day_of_week_marker(field),
+        _ => false,
+    };
+    if stands_for_the_whole_field {
+        "*"
+    } else {
+        field
+    }
+}
+
+/// Whether a day-of-month field is one of AWS's day markers: the last day of the month, the last
+/// weekday of the month, or the weekday nearest a day of the month.
+fn is_day_of_month_marker(field: &str) -> bool {
+    field == "L"
+        || field == "LW"
+        || field
+            .strip_suffix('W')
+            .is_some_and(|day| day.parse::<u8>().is_ok_and(|day| (1..=31).contains(&day)))
+}
+
+/// Whether a day-of-week field is one of AWS's day markers: the last given weekday of the month,
+/// or the nth given weekday of the month (AWS admits the first through the fifth).
+fn is_day_of_week_marker(field: &str) -> bool {
+    if let Some(day) = field.strip_suffix('L') {
+        return is_weekday(day);
+    }
+    match field.split_once('#') {
+        Some((day, nth)) => {
+            is_weekday(day) && nth.parse::<u8>().is_ok_and(|nth| (1..=5).contains(&nth))
+        }
+        None => false,
+    }
+}
+
+/// Whether a token names ONE day of the week, in either spelling the field takes: the day's
+/// number (1 through 7, SUN through SAT), or its three-letter name — AWS's `<day>L` and
+/// `<day>#<nth>` markers each name a single day, so a wildcard, a list or a range in that place
+/// is not one of them.
+fn is_weekday(day: &str) -> bool {
+    /// The three-letter name of each day, in the order the field numbers them.
+    const WEEKDAY_NAMES: [&str; 7] = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+
+    day.parse::<u8>().is_ok_and(|number| (1..=7).contains(&number))
+        || WEEKDAY_NAMES
+            .iter()
+            .any(|name| day.eq_ignore_ascii_case(name))
+}
+
+/// Whether a `rate(...)` body states a positive value and a unit that agrees with it in number.
+fn is_rate_body(body: &str) -> bool {
+    let fields: Vec<&str> = body.split_whitespace().collect();
+    let [value, unit] = fields[..] else {
+        return false;
+    };
+    let Ok(value) = value.parse::<u64>() else {
+        return false;
+    };
+    // A rate runs the query every `value` units, so a value of none is no schedule; and a value
+    // of one takes the singular unit, every larger one the plural.
+    value > 0 && RATE_UNITS.contains(&unit) && unit.ends_with('s') == (value > 1)
+}
+
 /// The refusal message for the FIRST of `identifiers` naming a log group this account does not
 /// hold, in the order the request named them, or `None` when every one of them names a group it
 /// holds.
@@ -90,9 +272,66 @@ pub fn effective_end_time_offset(stated: Option<i64>) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_end_time_offset, execution_role_arn_refusal, DEFAULT_END_TIME_OFFSET_SECONDS,
-        EXECUTION_ROLE_ARN_PATTERN,
+        effective_end_time_offset, execution_role_arn_refusal, schedule_expression_refusal,
+        DEFAULT_END_TIME_OFFSET_SECONDS, EXECUTION_ROLE_ARN_PATTERN,
     };
+
+    /// A schedule expression parses as a six-field `cron(...)` or a well-formed `rate(...)`, and
+    /// every value that is neither is refused with the one sentence this class is stated with.
+    #[test]
+    fn a_schedule_expression_parses_as_a_six_field_cron_or_a_rate() {
+        // (case, the value, whether it parses as a schedule)
+        let cases: [(&str, &str, bool); 32] = [
+            ("every hour, on the hour", "cron(0 * * * ? *)", true),
+            ("every five minutes", "cron(*/5 * * * ? *)", true),
+            ("a list, a range and a step", "cron(0,30 9-17/2 ? * MON-FRI *)", true),
+            ("the last day of the month", "cron(15 10 L * ? *)", true),
+            ("the last weekday of the month", "cron(15 10 LW * ? *)", true),
+            ("the weekday nearest the 15th", "cron(15 10 15W * ? *)", true),
+            ("the third Friday", "cron(0 12 ? * 6#3 *)", true),
+            ("the last Friday", "cron(0 12 ? * 6L *)", true),
+            ("a year stated as a range", "cron(0 12 1 * ? 2026-2030)", true),
+            ("a rate of minutes", "rate(5 minutes)", true),
+            ("a rate of one minute", "rate(1 minute)", true),
+            ("a rate of hours", "rate(12 hours)", true),
+            ("a rate of one day", "rate(1 day)", true),
+            ("four cron fields", "cron(0 12 * *)", false),
+            ("five cron fields", "cron(0 12 * * ?)", false),
+            ("seven cron fields", "cron(0 12 * * ? * *)", false),
+            ("an empty cron body", "cron()", false),
+            ("a cron field outside cron's alphabet", "cron(0 12 * * ? ev€ry)", false),
+            ("a minute spelled as a word", "cron(sixty 10 * * ? *)", false),
+            ("a minute past its range", "cron(99 10 * * ? *)", false),
+            ("an hour past its range", "cron(0 99 * * ? *)", false),
+            ("a day of the month past its range", "cron(0 12 32 * ? *)", false),
+            ("a month no calendar has", "cron(0 12 * SMARCH ? *)", false),
+            ("a weekday no week has", "cron(0 10 ? * FUNDAY *)", false),
+            ("markers in place of every field", "cron(sixty 99 L L L L)", false),
+            ("a last-weekday marker over a wildcard", "cron(0 12 ? * *L *)", false),
+            ("a weekday marker outside the field's days", "cron(0 12 ? * 0L *)", false),
+            ("a nth-weekday marker over a list", "cron(0 12 ? * 1,2#3 *)", false),
+            ("a rate of no units at all", "rate(5)", false),
+            ("a rate of zero", "rate(0 minutes)", false),
+            ("a rate whose unit disagrees in number", "rate(1 minutes)", false),
+            ("a rate of an unpublished unit", "rate(5 fortnights)", false),
+        ];
+        for (case, value, parses) in cases {
+            let refusal = schedule_expression_refusal(value);
+            assert_eq!(
+                refusal.is_none(),
+                parses,
+                "case {case:?}: expected parses={parses}, got {refusal:?}"
+            );
+            if let Some(said) = refusal {
+                assert_eq!(
+                    said,
+                    "1 validation errors detected: Invalid cron expression format. Expected \
+                     format: cron(minutes hours day_of_month month day_of_week year)",
+                    "case {case:?}: the refusal states the expected format"
+                );
+            }
+        }
+    }
 
     /// The published expression admits an IAM role ARN of each partition it names and refuses
     /// every other shape of value, and the refusal states that expression.

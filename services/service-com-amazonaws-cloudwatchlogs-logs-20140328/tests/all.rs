@@ -249,6 +249,8 @@ mod scheduled_query_insights_start;
 mod scheduled_query_name_conflict;
 #[path = "all/scheduled_query_removal.rs"]
 mod scheduled_query_removal;
+#[path = "all/scheduled_query_schedule_expressions.rs"]
+mod scheduled_query_schedule_expressions;
 #[path = "all/scheduled_query_updates.rs"]
 mod scheduled_query_updates;
 #[path = "all/scratch_queries.rs"]

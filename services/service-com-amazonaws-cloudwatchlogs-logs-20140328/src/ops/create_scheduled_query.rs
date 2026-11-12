@@ -222,6 +222,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         }
 
+        // "A cron expression that defines when the scheduled query runs": a value that does not
+        // PARSE as a schedule — neither a six-field `cron(...)` nor a `rate(...)` — schedules
+        // nothing, so it is refused with the sentence naming the expected format BEFORE anything
+        // is resolved against state and before any record is stored.
+        if let Some(message) =
+            crate::state::schedule_expression_refusal(&input.schedule_expression)
+        {
+            return Err(
+                CreateScheduledQueryErrorModeled::ValidationException(ValidationException {
+                    message: Some(message),
+                })
+                .into(),
+            );
+        }
+
         // "The name must be unique within your account and region": a create under a name the
         // account already holds a scheduled query under is refused as the conflict this
         // operation models ("This operation attempted to create a resource that already
