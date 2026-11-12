@@ -30,6 +30,9 @@ pub struct DescribeConformancePackStatusOutput {
 #[derive(Debug, Clone)]
 pub struct ConformancePackStatusDetail {
     pub conformance_pack_name: String,
+    /// `Type` — which KIND of conformance pack this is, reported here as it is on the
+    /// pack's configuration read ([`ConformancePackDetail`]).
+    pub r#type: Option<String>,
     pub conformance_pack_id: String,
     pub conformance_pack_arn: String,
     pub conformance_pack_state: String,

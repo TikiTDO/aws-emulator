@@ -5,6 +5,18 @@
 
 use super::*;
 
+/// The `Type` of a conformance pack the account deployed itself, with
+/// `PutConformancePack`.
+///
+/// Every conformance pack read reports which KIND of pack it is describing, so a client
+/// can tell a pack the account authored from one an Amazon Web Services service deployed
+/// on its behalf — the latter being the pack that names that service in `CreatedBy`
+/// (`ConformancePackDetail$CreatedBy`: "The Amazon Web Services service that created the
+/// conformance pack"). `PutConformancePack` is the one way a pack enters this store, and
+/// a pack it deployed is the account's own, so that is the type its record carries
+/// ([`ConformancePackEntry::pack_type`]).
+pub const CONFORMANCE_PACK_TYPE_CUSTOM: &str = "CUSTOM";
+
 /// One conformance pack deployed in this account and Region.
 ///
 /// A conformance pack is deployed as a CloudFormation stack, which is why the pack
@@ -35,6 +47,11 @@ pub struct ConformancePackEntry {
     pub arn: String,
     /// The ARN of the CloudFormation stack the pack is deployed as.
     pub stack_arn: String,
+    /// WHICH KIND of conformance pack this is, as the pack's reads report it in `Type`
+    /// ([`CONFORMANCE_PACK_TYPE_CUSTOM`]). Taken at creation from the provenance of the
+    /// call that created the pack, and kept by a redeploy, so a pack's provenance cannot
+    /// change under it.
+    pub pack_type: String,
     /// The template the pack was last deployed from, byte for byte as it was sent, and
     /// the Amazon S3 location Config stores conformance pack templates at. Both are
     /// replaced by a later `PutConformancePack` for the same name, and
@@ -96,6 +113,7 @@ impl ConformancePackEntry {
         let complete = self.state_at(now) == CONFORMANCE_PACK_STATE_CREATE_COMPLETE;
         ConformancePackStatusDetail {
             conformance_pack_name: self.name.clone(),
+            r#type: Some(self.pack_type.clone()),
             conformance_pack_id: self.id.clone(),
             conformance_pack_arn: self.arn.clone(),
             conformance_pack_state: self.state_at(now).to_string(),
@@ -120,6 +138,7 @@ impl ConformancePackEntry {
     pub fn to_detail(&self) -> ConformancePackDetail {
         ConformancePackDetail {
             conformance_pack_name: self.name.clone(),
+            r#type: Some(self.pack_type.clone()),
             conformance_pack_arn: self.arn.clone(),
             conformance_pack_id: self.id.clone(),
             delivery_s3_bucket: self.delivery_s3_bucket.clone(),

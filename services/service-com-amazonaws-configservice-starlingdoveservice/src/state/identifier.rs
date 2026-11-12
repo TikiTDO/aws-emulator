@@ -5,8 +5,9 @@
 //! Every id Config hands back for a resource a caller created is opaque: the caller
 //! cannot derive it, and holding one tells it nothing about any other. The two forms
 //! those ids take here are a run of base-36 characters ([`opaque_id`]) and a run of
-//! hexadecimal characters ([`uuid_id`]), and both are drawn from randomness, so an id
-//! carries neither the order its resource was created in nor a hint of the next one.
+//! hexadecimal characters, unbroken ([`uuid_id`]) or hyphenated ([`stack_id`]), and all
+//! are drawn from randomness, so an id carries neither the order its resource was
+//! created in nor a hint of the next one.
 
 use rand::Rng;
 
@@ -30,6 +31,13 @@ pub fn opaque_id(digits: usize) -> String {
 /// is the form of the opaque ids AWS hands back as an unbroken run of hex digits.
 pub fn uuid_id() -> String {
     ::uuid::Uuid::new_v4().simple().to_string()
+}
+
+/// One random (version 4) uuid in its hyphenated 36-character form (8-4-4-4-12), which
+/// is the form AWS writes the identifiers it spells as uuids in — a CloudFormation
+/// stack's id, the last segment of a stack ARN, among them.
+pub fn stack_id() -> String {
+    ::uuid::Uuid::new_v4().as_hyphenated().to_string()
 }
 
 #[cfg(test)]
@@ -65,6 +73,7 @@ mod tests {
         for (case, mint) in [
             ("base-36", (|| opaque_id(16)) as fn() -> String),
             ("uuid", uuid_id as fn() -> String),
+            ("hyphenated uuid", stack_id as fn() -> String),
         ] {
             let mut ids: Vec<String> = (0..DRAWS).map(|_| mint()).collect();
             ids.sort_unstable();
@@ -82,6 +91,27 @@ mod tests {
             assert!(
                 leading.len() > 1,
                 "case {case:?}: every id starts with the same character, got {leading:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stack_id_takes_the_hyphenated_uuid_form() {
+        // The widths of the five groups a hyphenated uuid is written in.
+        const GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
+        for _ in 0..64 {
+            let id = stack_id();
+            let widths: Vec<usize> = id.split('-').map(|group| group.chars().count()).collect();
+            assert_eq!(
+                widths.as_slice(),
+                GROUPS.as_slice(),
+                "a stack id is written in the groups {GROUPS:?}, got {id:?}"
+            );
+            assert!(
+                id.chars()
+                    .all(|digit| digit == '-'
+                        || (digit.is_ascii_hexdigit() && !digit.is_ascii_uppercase())),
+                "a stack id is lowercase hex and hyphens, got {id:?}"
             );
         }
     }

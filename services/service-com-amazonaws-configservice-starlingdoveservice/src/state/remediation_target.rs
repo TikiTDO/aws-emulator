@@ -93,6 +93,53 @@ pub async fn remediation_target(
     }
 }
 
+/// Why the remediation configuration `requested` is not one this account can create, or
+/// `None` for one it can.
+///
+/// These are the preconditions `PutRemediationConfigurations` enforces on a remediation
+/// action a caller writes directly — a parameter that selects neither or both of the two
+/// value kinds a `RemediationParameterValue` carries, an AUTOMATIC configuration with no
+/// value for the role the remediation runs as, and a target Systems Manager holds no
+/// automation document for — asked in ONE place so a remediation action a conformance
+/// pack's template declares is judged by exactly the same rules: nothing can create a
+/// remediation a create of it would refuse.
+///
+/// The answer is a REASON for a deployment that could not be performed rather than the
+/// refusal the API answers a caller with, because that is what the caller of this is
+/// reporting; it names the Config rule the configuration was declared for and what about
+/// the configuration cannot be created.
+pub async fn unusable_remediation(
+    callback: &smithy_server_runtime::EmbeddedEmulator,
+    region: &str,
+    requested: &crate::ops::types::RemediationConfiguration,
+) -> Option<String> {
+    let config_rule_name = requested.config_rule_name.trim();
+    if let Some((parameter, wrong)) = super::ill_formed_parameter(requested) {
+        return Some(format!(
+            "the remediation action for {config_rule_name} carries parameter '{parameter}' \
+             with {wrong}"
+        ));
+    }
+    if requested.automatic && !super::has_assume_role(requested) {
+        return Some(format!(
+            "the remediation action for {config_rule_name} provides no value for {}, which \
+             the role an automatic remediation runs as is taken from",
+            super::assume_role_parameter_names(requested.automatic).join(" or "),
+        ));
+    }
+    if targets_an_ssm_document(&requested.target_type)
+        && remediation_target(callback, region, requested.target_id.trim()).await
+            == RemediationTarget::NotFound
+    {
+        return Some(format!(
+            "the remediation action for {config_rule_name} targets the automation document \
+             '{}', which Systems Manager holds none of",
+            requested.target_id.trim(),
+        ));
+    }
+    None
+}
+
 /// A Systems Manager client over the in-process callback, built the way this crate's
 /// other cross-service clients are ([`super::s3_client`]): the emulator supplies the
 /// transport,

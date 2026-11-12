@@ -443,6 +443,13 @@ async fn a_request_the_report_cannot_serve_is_refused() {
             result(EC2_VOLUME, "vol-0ab", DETECTIVE, NON_COMPLIANT, 1),
         ],
     );
+    // The sibling report below carries a rule only once Config has placed it, so the
+    // pack's SECOND rule needs a result too for a page of one to leave a next page.
+    seed(
+        &emulator,
+        &mine[1],
+        &[result(S3_BUCKET, "audit", DETECTIVE, COMPLIANT, 0)],
+    );
 
     // A token the SIBLING report issues, which this one must not accept: a token is
     // opaque to the caller but belongs to the operation that minted it.
@@ -647,7 +654,7 @@ async fn a_request_the_report_cannot_serve_is_refused() {
     let (reported, _) = walk("after the refusals", &emulator, "mine", &json!({})).await;
     assert_eq!(
         reported.len(),
-        2,
+        3,
         "a refused request must leave the pack's recorded results as they were, got \
          {reported:#?}"
     );

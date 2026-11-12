@@ -210,3 +210,5 @@ mod conformance_pack_template_refusal_message;
 mod conformance_pack_not_found_message;
 #[path = "all/remediation_needs_a_non_compliant_finding.rs"]
 mod remediation_needs_a_non_compliant_finding;
+#[path = "all/conformance_pack_type_and_stack_identity.rs"]
+mod conformance_pack_type_and_stack_identity;

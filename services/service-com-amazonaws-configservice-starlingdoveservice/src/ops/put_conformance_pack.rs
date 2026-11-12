@@ -56,11 +56,17 @@
 //! written as the remediation of the rule it names. So a pack this operation reports
 //! `CREATE_COMPLETE` is one whose rules `DescribeConfigRules` reports and whose
 //! remediation actions `DescribeRemediationConfigurations` reports; a REDEPLOY of the
-//! same pack replaces exactly the resources its previous deployment created; and a
-//! deployment whose rules would not fit under this Region's Config rules quota creates
-//! nothing — leaving a previous deployment of the same pack standing — and is reported in
-//! the modelled `CREATE_FAILED` state with the reason
-//! (`ConformancePackStatusReason`) rather than as a completion of work nothing performed.
+//! same pack replaces exactly the resources its previous deployment created.
+//!
+//! A deployment can only create a resource THIS ACCOUNT COULD CREATE DIRECTLY, so every
+//! resource the template declares is judged by the preconditions the operation that
+//! creates that kind of resource enforces: a remediation action by
+//! `PutRemediationConfigurations`' own ([`crate::state::unusable_remediation`]) and the
+//! declared Config rules by this Region's Config rules quota. A deployment that cannot
+//! create what the template declares creates NOTHING — leaving a previous deployment of
+//! the same pack standing — and is reported in the modelled `CREATE_FAILED` state with
+//! the reason (`ConformancePackStatusReason`) rather than as a completion of work nothing
+//! performed.
 //!
 //! What the deployment does NOT do is evaluate those rules itself: the evaluation is the
 //! pass Config owes a rule it has just created ("when you create a rule, Config evaluates
@@ -966,6 +972,35 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx);
         let now = ::std::time::SystemTime::now();
         let completes_at = now + crate::state::CONFORMANCE_PACK_DEPLOY_SETTLE_AFTER;
+
+        // A deployment can only CREATE a resource this account could create directly, so
+        // every resource the template declares is judged by the preconditions the
+        // operation that creates that kind of resource enforces. For a remediation action
+        // those are `PutRemediationConfigurations`' own
+        // ([`crate::state::unusable_remediation`]), asked of Systems Manager before the
+        // store is locked because the target is another service's resource. A template
+        // declaring one the account could not create deploys NOTHING and the pack settles
+        // in the modelled `CREATE_FAILED` carrying this reason, rather than reporting a
+        // deployment that created a remediation no create would have accepted.
+        let mut deployment_failure: Option<String> = None;
+        for resource in &declared {
+            let DeclaredResource::Remediation(remediation) = resource else {
+                continue;
+            };
+            // Judged under the rule name the TEMPLATE declared the action for, which is
+            // what the reason has to name: the name Config gives that rule is minted
+            // below, and the template's author cannot fix a name they never wrote.
+            let mut declared_for = remediation.requested.clone();
+            declared_for.config_rule_name = remediation.rule_declared_name.clone();
+            if let Some(detail) =
+                crate::state::unusable_remediation(ctx.callback(), &region, &declared_for).await
+            {
+                deployment_failure =
+                    Some(format!("The conformance pack could not be deployed: {detail}."));
+                break;
+            }
+        }
+
         let mut store = state.lock();
 
         // "For PutConformancePack and PutOrganizationConformancePack, a conformance pack
@@ -1001,11 +1036,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // cannot be updated with this operation"). Only a NEW pack has to fit under this
         // Region's conformance pack quota.
         let existing = store.conformance_packs.get(&name).cloned();
-        let (id, arn, stack_arn, tags, previously_deployed) = match existing {
+        let (id, arn, stack_arn, pack_type, tags, previously_deployed) = match existing {
             Some(pack) => (
                 pack.id,
                 pack.arn,
                 pack.stack_arn,
+                pack.pack_type,
                 pack.tags,
                 pack.deployed_rule_names,
             ),
@@ -1025,12 +1061,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     );
                 }
                 // The id, the ARN and the stack ARN are Config's to assign, never read
-                // off the request.
+                // off the request. The stack's own id is CloudFormation's, which is why
+                // it is DRAWN rather than derived from the pack.
                 let id = crate::state::mint_conformance_pack_id();
                 (
                     id.clone(),
                     crate::state::conformance_pack_arn(&region, &name, &id),
-                    crate::state::conformance_pack_stack_arn(&region, &name, &id),
+                    crate::state::conformance_pack_stack_arn(
+                        &region,
+                        &name,
+                        &id,
+                        &crate::state::stack_id(),
+                    ),
+                    // This call is the account deploying a pack of its own, which is the
+                    // provenance the pack reports from here on.
+                    crate::state::CONFORMANCE_PACK_TYPE_CUSTOM.to_string(),
                     // The tags a create carries are this resource's tag set, reached by
                     // the tagging operations through the store's one ARN-to-tags path.
                     crate::state::tag_set(input.tags.as_deref().unwrap_or_default()),
@@ -1061,8 +1106,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .count();
         let held_by_others = store.config_rules.len().saturating_sub(held_by_this_pack);
         let mut deployed_rule_names = Vec::new();
-        let mut failure_reason = None;
-        if held_by_others + rules.len() > crate::state::CONFIG_RULES_QUOTA {
+        let mut failure_reason = deployment_failure;
+        if failure_reason.is_none()
+            && held_by_others + rules.len() > crate::state::CONFIG_RULES_QUOTA
+        {
             failure_reason = Some(format!(
                 "The conformance pack could not be deployed: creating the {} Config rule(s) it \
                  declares would take this account past the limit of {} Config rules in this \
@@ -1070,6 +1117,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 rules.len(),
                 crate::state::CONFIG_RULES_QUOTA,
             ));
+        }
+        if failure_reason.is_some() {
             // Nothing was created, so what the pack's previous deployment created is
             // still what it holds.
             deployed_rule_names = previously_deployed;
@@ -1153,6 +1202,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 id,
                 arn: arn.clone(),
                 stack_arn,
+                pack_type,
                 template_body,
                 delivery_s3_bucket: input.delivery_s3_bucket,
                 delivery_s3_key_prefix: input.delivery_s3_key_prefix,

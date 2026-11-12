@@ -27,11 +27,14 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use service_com_amazonaws_configservice_starlingdoveservice::state::{
     CONFIG_RULES_QUOTA, CONFORMANCE_PACKS_QUOTA, CONFORMANCE_PACK_DEPLOY_SETTLE_AFTER,
-    CONFORMANCE_PACK_SERVICE_PRINCIPAL, CONFORMANCE_PACK_STATE_CREATE_COMPLETE,
-    CONFORMANCE_PACK_STATE_CREATE_IN_PROGRESS, DESCRIBE_CONFORMANCE_PACK_STATUS_PAGE_SIZE,
+    CONFORMANCE_PACK_SERVICE_PRINCIPAL, CONFORMANCE_PACK_STACK_NAME_PREFIX,
+    CONFORMANCE_PACK_STATE_CREATE_COMPLETE, CONFORMANCE_PACK_STATE_CREATE_FAILED,
+    CONFORMANCE_PACK_STATE_CREATE_IN_PROGRESS, CONFORMANCE_PACK_TYPE_CUSTOM,
+    DESCRIBE_CONFORMANCE_PACK_STATUS_PAGE_SIZE,
 };
 
 use crate::config_setup_and_rule_loop::Emulator;
+use crate::conformance_pack_type_and_stack_identity::{is_stack_id, settled};
 
 /// Long enough for the clock to have made a pack's deployment due, read from the service
 /// itself so the test cannot drift from the span the service owes.
@@ -63,7 +66,11 @@ pub(crate) fn rule_template(rule_name: &str) -> String {
 /// action that remediates it.
 ///
 /// `ConfigRuleName`, `TargetType` and `TargetId` are what CloudFormation requires of an
-/// `AWS::Config::RemediationConfiguration`.
+/// `AWS::Config::RemediationConfiguration`, and `AutomationAssumeRole` is the role an
+/// AUTOMATIC remediation runs as, which Config requires of one ("for AUTOMATIC
+/// remediation configuration, the only valid assumeRole field value is
+/// AutomationAssumeRole and you need to provide a value for AutomationAssumeRole to
+/// remediate your resources", `PutRemediationConfigurations`).
 fn rule_and_remediation_template(rule_name: &str) -> String {
     format!(
         "{}  TheFix:\n    Type: {REMEDIATION_TYPE}\n    Properties:\n      ConfigRuleName: \
@@ -71,8 +78,18 @@ fn rule_and_remediation_template(rule_name: &str) -> String {
          AWS-EnableS3BucketVersioning\n      Automatic: true\n      Parameters:\n        \
          BucketName:\n          ResourceValue:\n            Value: RESOURCE_ID\n        \
          VersioningState:\n          StaticValue:\n            Values:\n              - \
-         Enabled\n",
-        rule_template(rule_name)
+         Enabled\n        AutomationAssumeRole:\n          StaticValue:\n            \
+         Values:\n              - {}\n",
+        rule_template(rule_name),
+        remediation_role(),
+    )
+}
+
+/// The IAM role an automatic remediation in these templates runs as, in this account.
+fn remediation_role() -> String {
+    format!(
+        "arn:aws:iam::{}:role/aws-config-remediation",
+        emulator_server::emulator_account_id(),
     )
 }
 
@@ -323,13 +340,30 @@ async fn a_conformance_pack_template_deploys_a_pack_that_reaches_create_complete
             "case {case:?}: a deployment in flight is {CONFORMANCE_PACK_STATE_CREATE_IN_PROGRESS} \
              and has not completed, got {detail}"
         );
+        // The stack the pack is deployed as is named the way Config names it — the pack's
+        // name AND the pack id inside the conformance pack stack-name prefix — and the
+        // last ARN segment is CloudFormation's own stack id, a uuid, not anything the
+        // pack already carries.
+        let pack_id = detail["ConformancePackId"].as_str().unwrap_or_default();
+        let expected_stack = emulator_server::emulator_arn(
+            "cloudformation",
+            &emulator.region,
+            &format!("stack/{CONFORMANCE_PACK_STACK_NAME_PREFIX}{name}-{pack_id}/"),
+        );
+        let stack_arn = detail["StackArn"].as_str().unwrap_or_default();
         assert!(
-            detail["ConformancePackId"].as_str().is_some_and(|id| !id.is_empty())
-                && detail["StackArn"]
-                    .as_str()
-                    .is_some_and(|stack| stack.contains(&format!("stack/awsconfigconforms-{name}/"))),
-            "case {case:?}: the status carries the pack's id and the ARN of the stack it is \
-             deployed as, got {detail}"
+            !pack_id.is_empty() && stack_arn.starts_with(&expected_stack),
+            "case {case:?}: expected the stack ARN to start with {expected_stack:?}, got {detail}"
+        );
+        assert!(
+            is_stack_id(&stack_arn[expected_stack.len().min(stack_arn.len())..]),
+            "case {case:?}: expected a uuid stack id as the last ARN segment, got {detail}"
+        );
+        assert_eq!(
+            detail["Type"].as_str(),
+            Some(CONFORMANCE_PACK_TYPE_CUSTOM),
+            "case {case:?}: a pack this account deployed is \
+             {CONFORMANCE_PACK_TYPE_CUSTOM}, got {detail}"
         );
         assert!(
             detail["LastUpdateRequestedTime"].is_number()
@@ -467,6 +501,141 @@ async fn a_remediation_action_the_template_declares_is_deployed_for_the_rule_it_
         (Some("RESOURCE_ID"), Some("Enabled")),
         "both parameter forms the template declared are deployed, got {remediations}"
     );
+}
+
+#[tokio::test]
+async fn a_template_declaring_a_resource_the_account_cannot_create_fails_the_deployment() {
+    // A deployment creates only what this account could create directly, so a template
+    // declaring a remediation action `PutRemediationConfigurations` would refuse deploys
+    // nothing and the pack settles in CREATE_FAILED with the reason. Rows differ along
+    // WHICH of that operation's preconditions the declared action breaks — an automatic
+    // remediation with no value for the role it runs as, a parameter selecting both value
+    // kinds, a parameter selecting neither — and the last row is the positive control:
+    // the same template with the role supplied deploys.
+    //
+    // The remaining precondition, a target Systems Manager holds no automation document
+    // for, cannot be exercised here: this harness serves Config alone, so Systems Manager
+    // answers nothing about any document and a target stays unknown rather than missing.
+    let remediation = |properties: &str| {
+        format!(
+            "{}  TheFix:\n    Type: {REMEDIATION_TYPE}\n    Properties:\n      ConfigRuleName: \
+             fixed-rule\n      TargetType: SSM_DOCUMENT\n      TargetId: \
+             AWS-EnableS3BucketVersioning\n{properties}",
+            rule_template("fixed-rule")
+        )
+    };
+    let cases: [(&str, String, bool); 4] = [
+        (
+            "an automatic remediation with no role to run as",
+            remediation("      Automatic: true\n"),
+            false,
+        ),
+        (
+            "a parameter selecting both a static and a resource value",
+            remediation(
+                "      Parameters:\n        BucketName:\n          StaticValue:\n            \
+                 Values:\n              - logs\n          ResourceValue:\n            Value: \
+                 RESOURCE_ID\n",
+            ),
+            false,
+        ),
+        (
+            "a parameter selecting neither kind of value",
+            remediation("      Parameters:\n        BucketName: {}\n"),
+            false,
+        ),
+        (
+            "the same remediation with the role it runs as",
+            rule_and_remediation_template("fixed-rule"),
+            true,
+        ),
+    ];
+
+    for (case, template_body, deploys) in cases {
+        let emulator = Emulator::new();
+        let name = "failing-pack";
+        // The deployment is ACCEPTED — it is the deployment that fails, not the request.
+        let created = emulator
+            .ok("PutConformancePack", &pack_from_body(name, &template_body))
+            .await;
+        assert!(
+            created["ConformancePackArn"].as_str().is_some(),
+            "case {case:?}: the pack is created and its deployment then runs, got {created}"
+        );
+
+        let detail = settled(case, &emulator, name).await;
+        let detail = &detail;
+        if deploys {
+            assert_eq!(
+                detail["ConformancePackState"].as_str(),
+                Some(CONFORMANCE_PACK_STATE_CREATE_COMPLETE),
+                "case {case:?}: a declared remediation the account can create deploys, got \
+                 {detail}"
+            );
+            assert!(
+                detail["ConformancePackStatusReason"].is_null(),
+                "case {case:?}: a deployment that succeeded has no failure reason, got {detail}"
+            );
+            continue;
+        }
+
+        assert_eq!(
+            detail["ConformancePackState"].as_str(),
+            Some(CONFORMANCE_PACK_STATE_CREATE_FAILED),
+            "case {case:?}: a deployment the account cannot perform is \
+             {CONFORMANCE_PACK_STATE_CREATE_FAILED}, got {detail}"
+        );
+        assert!(
+            detail["ConformancePackStatusReason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("fixed-rule")),
+            "case {case:?}: the failure names the declared rule whose remediation could not be \
+             created, got {detail}"
+        );
+        assert!(
+            detail["LastUpdateCompletedTime"].is_null(),
+            "case {case:?}: a deployment that failed never completed, got {detail}"
+        );
+
+        // A deployment that failed created NOTHING: neither the rules the template
+        // declared nor the remediation it declared for them.
+        let rules = emulator.ok("DescribeConfigRules", &json!({})).await;
+        assert_eq!(
+            rules["ConfigRules"].as_array().map(Vec::len),
+            Some(0),
+            "case {case:?}: a failed deployment creates no Config rule, got {rules}"
+        );
+        let remediations = emulator
+            .ok("DescribeRemediationConfigurations", &json!({ "ConfigRuleNames": [] }))
+            .await;
+        assert_eq!(
+            remediations["RemediationConfigurations"]
+                .as_array()
+                .map(Vec::len),
+            Some(0),
+            "case {case:?}: a failed deployment creates no remediation action, got {remediations}"
+        );
+
+        // The pack is still the account's to redeploy: the same name with a template the
+        // account can create deploys, which is what makes the failure observable rather
+        // than terminal.
+        emulator
+            .ok(
+                "PutConformancePack",
+                &pack_from_body(name, &rule_and_remediation_template("fixed-rule")),
+            )
+            .await;
+        let redeployed = settled(case, &emulator, name).await;
+        assert_eq!(
+            redeployed["ConformancePackState"].as_str(),
+            Some(CONFORMANCE_PACK_STATE_CREATE_COMPLETE),
+            "case {case:?}: a redeploy the account can perform completes, got {redeployed}"
+        );
+        assert!(
+            redeployed["ConformancePackStatusReason"].is_null(),
+            "case {case:?}: the reason of the deployment that failed is gone, got {redeployed}"
+        );
+    }
 }
 
 #[tokio::test]

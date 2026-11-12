@@ -323,15 +323,23 @@ async fn reports_each_packs_compliance_status_and_rule_counts() {
                 "case {case:?}: expected the source account and Region, got {entry:?}"
             );
             // The pack's OWN compliance report must place its rules the same way: an
-            // aggregate read and the pack's own reader cannot disagree.
+            // aggregate read and the pack's own reader cannot disagree about what Config
+            // found. They differ in one thing only, and the rows above name it: the
+            // aggregate TOTAL counts every rule the pack deployed, while the pack's own
+            // report carries a rule only once a result places it, so it is a subset.
             let placed = per_rule_compliance(case, &emulator, &entry.name).await;
             let compliant = placed.iter().filter(|at| *at == COMPLIANT).count() as i64;
             let non_compliant = placed.iter().filter(|at| *at == NON_COMPLIANT).count() as i64;
             assert_eq!(
-                (compliant, non_compliant, placed.len() as i64),
-                (entry.compliant, entry.non_compliant, entry.total),
+                (compliant, non_compliant),
+                (entry.compliant, entry.non_compliant),
                 "case {case:?}: expected the pack's own report to agree, got {placed:?} for \
                  {entry:?}"
+            );
+            assert!(
+                (placed.len() as i64) <= entry.total,
+                "case {case:?}: the pack reports at most one rule per rule it deployed, got \
+                 {placed:?} for {entry:?}"
             );
         }
         assert!(

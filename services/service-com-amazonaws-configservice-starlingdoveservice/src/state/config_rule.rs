@@ -518,6 +518,19 @@ impl ConfigRuleEntry {
         )
     }
 
+    /// The `ComplianceType` Config has PLACED this rule at ([`Self::compliance`]), or
+    /// `None` for a rule nothing has evaluated yet.
+    ///
+    /// The two are not interchangeable: a report of what Config FOUND carries a rule
+    /// only once an evaluation has produced a result for it, while
+    /// [`Self::compliance`] answers what the results recorded so far roll up to, which
+    /// for a rule with no results at all is the `INSUFFICIENT_DATA` of a rule nothing
+    /// has placed either way. This is the ONE place that distinction is drawn, so every
+    /// read that must not invent a result for an unevaluated rule asks here.
+    pub fn recorded_compliance(&self) -> Option<&'static str> {
+        (!self.evaluation_results.is_empty()).then(|| self.compliance())
+    }
+
     /// This rule's modelled `Compliance`: the `ComplianceType` it rolls up to
     /// ([`Self::compliance`]) and how many resources contribute that result.
     ///

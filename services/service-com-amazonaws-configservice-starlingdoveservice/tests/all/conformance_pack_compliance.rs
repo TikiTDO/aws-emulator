@@ -12,6 +12,12 @@
 //! name the pack deployed no rule for, a compliance type the report does not hold and a
 //! token the operation did not issue.
 //!
+//! The report carries what Config has FOUND, so a rule the pack deployed and that nothing
+//! has evaluated yet is in no entry at all — which is why
+//! `ConformancePackRuleComplianceList` is modelled `@length(min: 0)`, and why the answer
+//! for a pack whose rules have produced no result is the empty list rather than one entry
+//! per declared rule.
+//!
 //! Every case drives the emulator the way a client does — an `awsJson1_1` `POST /`
 //! through the same `MultiServiceRouter` the production router builds — over a TABLE of
 //! inputs rather than one recorded call, using the `Emulator` harness
@@ -166,7 +172,8 @@ async fn every_rule_of_the_pack_reports_the_compliance_its_results_roll_up_to() 
     // all, one compliant resource, several, one noncompliant, a noncompliant one among
     // compliant ones, and only results that place the rule neither way. The pack's
     // SECOND rule carries no result in any row, so each row also shows the report is per
-    // rule rather than per pack.
+    // rule rather than per pack — and, since the report carries a rule only once Config
+    // has produced a result for it, that second rule is reported in no row at all.
     let cases: [(&str, &[&str], &str); 7] = [
         ("no result at all", &[], INSUFFICIENT_DATA),
         ("one compliant resource", &[COMPLIANT], COMPLIANT),
@@ -207,15 +214,18 @@ async fn every_rule_of_the_pack_reports_the_compliance_its_results_roll_up_to() 
             Some(pack),
             "case {case:?}: the report names the pack it is about, got {body}"
         );
+        // A rule Config has produced a result for is reported at what those results roll
+        // up to; a rule nothing has evaluated is reported at nothing.
+        let rows: Vec<(String, &str)> = if verdicts.is_empty() {
+            Vec::new()
+        } else {
+            vec![(rules[0].clone(), expected)]
+        };
         assert_eq!(
             reported(case, &body),
-            in_name_order(&[
-                (rules[0].clone(), expected),
-                (rules[1].clone(), INSUFFICIENT_DATA),
-            ]),
-            "case {case:?}: expected {expected} for {:?} and {INSUFFICIENT_DATA} for the rule \
-             with no result, got {body}",
-            rules[0]
+            in_name_order(&rows),
+            "case {case:?}: expected {rows:?} — and no row for a rule nothing has evaluated — \
+             got {body}"
         );
         // "Controls for the conformance pack": this template declares none, so none is
         // reported rather than one being invented.
@@ -253,6 +263,84 @@ async fn every_rule_of_the_pack_reports_the_compliance_its_results_roll_up_to() 
 }
 
 #[tokio::test]
+async fn a_rule_nothing_has_evaluated_is_in_no_entry_of_the_report() {
+    // Rows differ along how many rules the pack deployed and how many of them Config has
+    // produced a result for: a pack whose single rule has none, the same pack once it
+    // has one, and a pack of several rules with none, some and all of them evaluated. The
+    // third element is how many entries the report must carry.
+    let cases: [(&str, &[&str], usize, usize); 5] = [
+        ("one rule, nothing evaluated", &["alpha"], 0, 0),
+        ("one rule, evaluated", &["alpha"], 1, 1),
+        (
+            "three rules, none evaluated",
+            &["alpha", "bravo", "charlie"],
+            0,
+            0,
+        ),
+        (
+            "three rules, one evaluated",
+            &["alpha", "bravo", "charlie"],
+            1,
+            1,
+        ),
+        (
+            "three rules, all evaluated",
+            &["alpha", "bravo", "charlie"],
+            3,
+            3,
+        ),
+    ];
+
+    let pack = "unevaluated-pack";
+    for (case, declared, evaluated, entries) in cases {
+        let emulator = Emulator::new();
+        let rules = deploy(case, &emulator, pack, declared).await;
+        for rule in rules.iter().take(evaluated) {
+            record_results(&emulator, rule, &[COMPLIANT]);
+        }
+
+        let body = emulator
+            .ok("DescribeConformancePackCompliance", &request(pack, json!({})))
+            .await;
+        let reported = reported(case, &body);
+        assert_eq!(
+            reported,
+            in_name_order(
+                &rules
+                    .iter()
+                    .take(evaluated)
+                    .map(|rule| (rule.clone(), COMPLIANT))
+                    .collect::<Vec<(String, &str)>>()
+            ),
+            "case {case:?}: expected {entries} entries, one per rule Config has placed, got \
+             {body}"
+        );
+
+        // The rules themselves are all there: the pack deployed every one of them, and it
+        // is the REPORT that carries only the ones a result places.
+        let deployed = emulator.ok("DescribeConfigRules", &json!({})).await;
+        let held: Vec<String> = deployed["ConfigRules"]
+            .as_array()
+            .unwrap_or_else(|| panic!("case {case:?}: expected ConfigRules, got {deployed}"))
+            .iter()
+            .map(|rule| {
+                rule["ConfigRuleName"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        for rule in &rules {
+            assert!(
+                held.contains(rule),
+                "case {case:?}: the pack's rule {rule:?} must exist whether or not it has been \
+                 evaluated, got {held:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn the_filter_narrows_the_rules_the_report_carries() {
     // One pack of three rules, each placed at a different compliance type, read through a
     // TABLE of filters: the rows differ along which rule names the filter selects, which
@@ -263,12 +351,15 @@ async fn the_filter_narrows_the_rules_the_report_carries() {
         "the shared pack",
         &emulator,
         pack,
-        &["alpha", "bravo", "charlie"],
+        &["alpha", "bravo", "charlie", "delta"],
     )
     .await;
     record_results(&emulator, &rules[0], &[COMPLIANT]);
     record_results(&emulator, &rules[1], &[COMPLIANT, NON_COMPLIANT]);
-    // `rules[2]` carries no result at all, so it rolls up to INSUFFICIENT_DATA.
+    // `rules[2]` carries only results that place it neither way, so Config HAS evaluated
+    // it and it rolls up to INSUFFICIENT_DATA; `rules[3]` carries no result at all, so
+    // the report has no row for it and no filter can select it.
+    record_results(&emulator, &rules[2], &[NOT_APPLICABLE]);
 
     let placed: [(String, &str); 3] = [
         (rules[0].clone(), COMPLIANT),
@@ -276,7 +367,7 @@ async fn the_filter_narrows_the_rules_the_report_carries() {
         (rules[2].clone(), INSUFFICIENT_DATA),
     ];
 
-    let cases: [FilterCase; 8] = [
+    let cases: [FilterCase; 10] = [
         ("no filter at all", json!({}), placed.to_vec()),
         (
             "one rule name",
@@ -323,6 +414,16 @@ async fn the_filter_narrows_the_rules_the_report_carries() {
             }),
             Vec::new(),
         ),
+        (
+            "the name of a rule the pack deployed and nothing has evaluated",
+            json!({ "Filters": { "ConfigRuleNames": [rules[3].clone()] } }),
+            Vec::new(),
+        ),
+        (
+            "that rule's name beside one the report carries",
+            json!({ "Filters": { "ConfigRuleNames": [rules[3].clone(), rules[0].clone()] } }),
+            vec![placed[0].clone()],
+        ),
     ];
 
     for (case, extras, expected) in cases {
@@ -344,6 +445,10 @@ async fn a_request_the_pack_cannot_answer_is_refused() {
     let emulator = Emulator::new();
     let mine = deploy("the shared pack", &emulator, "mine", &["alpha", "bravo"]).await;
     let theirs = deploy("the other pack", &emulator, "theirs", &["alpha"]).await;
+    // Both of this pack's rules carry a result, so the report below has a row for each
+    // and "the refusals changed nothing" is a claim about something.
+    record_results(&emulator, &mine[0], &[COMPLIANT]);
+    record_results(&emulator, &mine[1], &[NON_COMPLIANT]);
 
     // Rows differ along what the request asks for that the pack cannot answer: a pack
     // this account holds none of, a rule name nothing holds, a rule name another pack
@@ -494,8 +599,8 @@ async fn a_request_the_pack_cannot_answer_is_refused() {
             .map(|(name, _)| name)
             .collect::<Vec<String>>(),
         in_name_order(&[
-            (mine[0].clone(), INSUFFICIENT_DATA),
-            (mine[1].clone(), INSUFFICIENT_DATA),
+            (mine[0].clone(), COMPLIANT),
+            (mine[1].clone(), NON_COMPLIANT),
         ])
         .into_iter()
         .map(|(name, _)| name)
@@ -513,6 +618,11 @@ async fn the_report_pages_over_the_rules_name_ordering() {
     let declared = ["alpha", "bravo", "charlie", "delta", "echo"];
     let emulator = Emulator::new();
     let rules = deploy("the shared pack", &emulator, pack, &declared).await;
+    // Every rule of the pack carries a result, so every one of them is a row the paging
+    // under test has to serve.
+    for rule in &rules {
+        record_results(&emulator, rule, &[COMPLIANT]);
+    }
     let mut expected: Vec<String> = rules.clone();
     expected.sort();
 

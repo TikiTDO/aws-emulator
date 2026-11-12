@@ -12,6 +12,11 @@
 //!   `ComplianceType` that rule's recorded evaluation results roll up to
 //!   ([`crate::state::ComAmazonawsConfigserviceStarlingdoveserviceState::conformance_pack_rule_compliance`]),
 //!   which is the same roll-up the rule's own compliance read reports;
+//! * the list reports what Config has FOUND, so a rule the pack deployed and that
+//!   nothing has evaluated yet contributes no entry — which is why
+//!   `ConformancePackRuleComplianceList` is modelled `@length(min: 0)` and is empty for a
+//!   pack whose rules have produced no result — rather than an entry carrying the
+//!   `INSUFFICIENT_DATA` of a rule nothing has placed either way;
 //! * `Controls` is "controls for the conformance pack", which a template declares beside
 //!   its rules: a pack deployed from a template that declares none has no control to
 //!   report, so the member is absent rather than invented;
@@ -329,6 +334,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             {
                 continue;
             }
+            // "Returns a list of ConformancePackRuleCompliance objects": the list reports
+            // the compliance Config has PRODUCED for the pack's rules, so a rule nothing
+            // has evaluated yet contributes no row at all rather than a row carrying the
+            // `INSUFFICIENT_DATA` of a rule nothing has placed — which is why the list is
+            // modelled `@length(min: 0)` and is empty for a pack whose rules have not
+            // been evaluated.
+            let Some(compliance) = compliance else {
+                continue;
+            };
             // The compliance filter selects on what the rule ROLLS UP TO, so a rule the
             // filter does not place is left out rather than reported with another type.
             if filtered_compliance.is_some_and(|requested| requested != *compliance) {

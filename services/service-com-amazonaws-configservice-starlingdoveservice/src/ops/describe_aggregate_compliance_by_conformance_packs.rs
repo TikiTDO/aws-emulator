@@ -343,10 +343,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 for placed in rule_compliance.values() {
                     total_rule_count = total_rule_count.saturating_add(1);
                     match *placed {
-                        crate::state::COMPLIANCE_TYPE_COMPLIANT => {
+                        Some(crate::state::COMPLIANCE_TYPE_COMPLIANT) => {
                             compliant_rule_count = compliant_rule_count.saturating_add(1);
                         }
-                        crate::state::COMPLIANCE_TYPE_NON_COMPLIANT => {
+                        Some(crate::state::COMPLIANCE_TYPE_NON_COMPLIANT) => {
                             non_compliant_rule_count = non_compliant_rule_count.saturating_add(1);
                         }
                         _ => {}

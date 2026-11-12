@@ -2654,26 +2654,33 @@ impl ComAmazonawsConfigserviceStarlingdoveserviceState {
         expired.len()
     }
 
-    /// The `ComplianceType` each Config rule of the conformance pack `pack` rolls up
-    /// to, keyed by the name Config gave that rule when the pack deployed it.
+    /// The `ComplianceType` each Config rule of the conformance pack `pack` HAS BEEN
+    /// PLACED AT, keyed by the name Config gave that rule when the pack deployed it, and
+    /// `None` for a rule nothing has evaluated yet.
     ///
     /// A conformance pack's compliance is the compliance of the rules it deployed, so
     /// each entry is the roll-up of the evaluation results recorded for that rule
-    /// ([`ConfigRuleEntry::compliance`]) — the ONE precedence this service holds, so a
-    /// pack's report cannot disagree with the rule's own. A rule the pack deployed and
-    /// that is no longer in [`Self::config_rules`] has no compliance to report and is
-    /// left out rather than reported unevaluated.
+    /// ([`ConfigRuleEntry::recorded_compliance`]) — the ONE precedence this service
+    /// holds, so a pack's report cannot disagree with the rule's own. A rule the pack
+    /// deployed and that is no longer in [`Self::config_rules`] is not a rule of this
+    /// pack any more and is left out of the map altogether.
+    ///
+    /// The distinction between a rule PLACED at `INSUFFICIENT_DATA` and a rule nothing
+    /// has evaluated is carried here rather than flattened, because the two are different
+    /// answers: the pack's rule-compliance report has a row only for a rule Config has
+    /// produced a result for, while the pack's own rule COUNTS count every rule it
+    /// deployed.
     ///
     /// Keyed in NAME ordering, which is what a paged report of it pages over.
     pub fn conformance_pack_rule_compliance(
         &self,
         pack: &ConformancePackEntry,
-    ) -> BTreeMap<String, &'static str> {
+    ) -> BTreeMap<String, Option<&'static str>> {
         pack.deployed_rule_names
             .iter()
             .filter_map(|name| {
                 let rule = self.config_rules.get(name)?;
-                Some((name.clone(), rule.compliance()))
+                Some((name.clone(), rule.recorded_compliance()))
             })
             .collect()
     }
@@ -2690,7 +2697,11 @@ impl ComAmazonawsConfigserviceStarlingdoveserviceState {
     /// from, so a count of compliant packs and a report of one pack's rules cannot
     /// disagree.
     pub fn conformance_pack_compliance(&self, pack: &ConformancePackEntry) -> &'static str {
-        roll_up_compliance(self.conformance_pack_rule_compliance(pack).into_values())
+        roll_up_compliance(
+            self.conformance_pack_rule_compliance(pack)
+                .into_values()
+                .flatten(),
+        )
     }
 
     /// The tags of the resource `arn` identifies, or `None` when this store holds no
@@ -2962,14 +2973,21 @@ pub fn conformance_pack_arn(region: &str, name: &str, id: &str) -> String {
 pub const CONFORMANCE_PACK_STACK_NAME_PREFIX: &str = "awsconfigconforms-";
 
 /// The ARN of the CloudFormation stack a conformance pack is deployed as:
-/// `arn:aws:cloudformation:<region>:<account>:stack/awsconfigconforms-<name>/<id>`,
+/// `arn:aws:cloudformation:<region>:<account>:stack/awsconfigconforms-<name>-<id>/<stack_id>`,
 /// the form a CloudFormation stack ARN takes. The ARN names the CLOUDFORMATION service
 /// rather than Config, because the stack is CloudFormation's resource.
-pub fn conformance_pack_stack_arn(region: &str, name: &str, id: &str) -> String {
+///
+/// A CloudFormation stack ARN is `stack/<stack name>/<stack id>`, so the two segments
+/// are different things and neither stands in for the other: the stack NAME is the one
+/// Config gives the pack's stack — the prefix above followed by the pack's name and the
+/// pack id, so two packs of the same name in different accounts do not name one stack —
+/// and the stack ID is CloudFormation's own identifier for the stack, which is why it is
+/// DRAWN here ([`stack_id`]) rather than built from anything the pack already carries.
+pub fn conformance_pack_stack_arn(region: &str, name: &str, id: &str, stack_id: &str) -> String {
     ::emulator_server::emulator_arn(
         "cloudformation",
         region,
-        &format!("stack/{CONFORMANCE_PACK_STACK_NAME_PREFIX}{name}/{id}"),
+        &format!("stack/{CONFORMANCE_PACK_STACK_NAME_PREFIX}{name}-{id}/{stack_id}"),
     )
 }
 

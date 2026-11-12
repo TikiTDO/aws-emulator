@@ -30,6 +30,10 @@ pub struct DescribeConformancePacksOutput {
 #[derive(Debug, Clone, Default)]
 pub struct ConformancePackDetail {
     pub conformance_pack_name: String,
+    /// `Type` — which KIND of conformance pack this is. Recorded behaviour: the live
+    /// service reports it on every conformance pack read, as `CUSTOM` for a pack the
+    /// account deployed itself.
+    pub r#type: Option<String>,
     pub conformance_pack_arn: String,
     pub conformance_pack_id: String,
     pub delivery_s3_bucket: Option<String>,
