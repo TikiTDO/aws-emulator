@@ -682,11 +682,9 @@ impl ComAmazonawsEc2Amazonec2State {
     /// Insert a customer-owned IP (CoIP) address pool, and answer the `PoolId` it was
     /// given.
     ///
-    /// The writer seam for the CoIP store, ahead of the operation that will call it:
-    /// `CreateCoipPool` is still a scaffold stub with its own open issue, so for now this
-    /// is reached only from this crate's tests, which seed pools the way that create will.
-    /// It lives here rather than in a test so the create lands on this one record instead
-    /// of a second copy of a pool beside it.
+    /// The writer seam for the CoIP store: `CreateCoipPool` mints a pool through it, and
+    /// this crate's tests seed pools the same way, so the create and a fixture land on this
+    /// one record instead of a second copy of a pool beside it.
     ///
     /// Everything the service itself owns is derived here rather than taken from the
     /// caller — the id and the `PoolArn` built from it — so two writers cannot report the

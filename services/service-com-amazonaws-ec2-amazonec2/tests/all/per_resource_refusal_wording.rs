@@ -16,10 +16,10 @@
 //!   service's `VpcEndpointService Id`, and the network interface's `interface ID`;
 //! * where EC2 answers ONE refusal class with two sentences, each operation keeps the one its
 //!   own validator words: a client VPN attachment — the Client VPN endpoint's resource, not the
-//!   transit gateway's — keeps the service's shared `<kind> ID '<id>'` template, and so does
-//!   every reader of a local gateway route table id bar `CreateLocalGatewayRoute`, whose own
-//!   validator answers `Invalid LocalGateway Route Table id <id>`; the rows drive both halves
-//!   of each split;
+//!   transit gateway's — keeps the service's shared `<kind> ID '<id>'` template, and so do the
+//!   local gateway route table's own operations, while the creates of a resource belonging to
+//!   that table answer `Invalid LocalGateway Route Table id <id>`; the rows drive both halves of
+//!   each split;
 //! * a class whose sentence interpolates the request's value does so in that class's own
 //!   QUOTING and POSITION — unquoted and in the middle for the attachment, single-quoted for
 //!   the address and the interface, unquoted and last for the route table;
@@ -336,15 +336,20 @@ fn malformed_image_rows() -> Vec<Row> {
 
 /// Class 8: a value that is no local gateway route table id at all.
 ///
-/// Two sentences, one per VALIDATOR: `CreateLocalGatewayRoute` words it with a fixed prefix and
-/// the id UNQUOTED and last, while every other reader of this id — the search and the delete of
-/// a route, the describe of the tables themselves — keeps the service's
-/// `The <kind> ID '<id>' is malformed` shape. The rows drive both, over the same values, so the
-/// split is pinned rather than assumed.
+/// Two sentences, one per VALIDATOR: a create of a resource BELONGING to the table — a static
+/// route, a customer-owned address pool — words it with a fixed prefix and the id UNQUOTED and
+/// last, while the readers of the table itself — the search and the delete of a route, the
+/// describe of the tables themselves — keep the service's `The <kind> ID '<id>' is malformed`
+/// shape. The rows drive both, over the same values, so the split is pinned rather than assumed.
 fn malformed_route_table_rows() -> Vec<Row> {
-    let actions: [ActionFieldWording; 4] = [
+    let actions: [ActionFieldWording; 5] = [
         (
             "CreateLocalGatewayRoute",
+            "LocalGatewayRouteTableId",
+            create_route_wording,
+        ),
+        (
+            "CreateCoipPool",
             "LocalGatewayRouteTableId",
             create_route_wording,
         ),
@@ -387,13 +392,13 @@ fn malformed_route_table_rows() -> Vec<Row> {
         .collect()
 }
 
-/// The sentence `CreateLocalGatewayRoute`'s own validator words a malformed route table id
-/// with.
+/// The sentence the validator of a create of a resource belonging to the table words a
+/// malformed route table id with.
 fn create_route_wording(id: &str) -> String {
     format!("Invalid LocalGateway Route Table id {id}")
 }
 
-/// The sentence every other reader of this id words the same class with.
+/// The sentence the readers of the table itself word the same class with.
 fn table_wording(id: &str) -> String {
     format!("The local-gateway-route-table ID '{id}' is malformed")
 }

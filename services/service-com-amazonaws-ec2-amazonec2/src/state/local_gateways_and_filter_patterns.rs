@@ -1906,11 +1906,12 @@ pub fn cidr_block_is_well_formed(value: &str) -> bool {
 /// `InvalidLocalGatewayRouteTableID.Malformed`, `The local-gateway-route-table ID '<id>' is
 /// malformed`, built from the request's own value.
 ///
-/// This is the sentence EVERY operation that reads a `LocalGatewayRouteTableId` answers, bar
-/// one: `CreateLocalGatewayRoute`'s own validator words it differently
-/// ([`invalid_route_table_id_for_create_local_gateway_route`]), as the recorded refusals of the
-/// two show. Which sentence an operation answers is a fact of that operation's validator, and
-/// only the operation whose recorded refusal differs carries its own writer.
+/// This is the sentence the operations that read a `LocalGatewayRouteTableId` as a parameter of
+/// an action on the TABLE itself answer — the delete of a table, the associations with it, and
+/// the search and the delete of a route in it — as their recorded refusals show. The operations
+/// that CREATE a resource belonging to the table word the same class differently
+/// ([`invalid_route_table_id_for_create`]). Which sentence an operation answers is a fact of
+/// that operation's validator, read off its own recorded refusal.
 pub fn invalid_local_gateway_route_table_id_malformed<E>(id: &str) -> Scaffolded<E> {
     Scaffolded::service_error(
         INVALID_LOCAL_GATEWAY_ROUTE_TABLE_ID_MALFORMED,
@@ -1922,17 +1923,20 @@ pub fn invalid_local_gateway_route_table_id_malformed<E>(id: &str) -> Scaffolded
     )
 }
 
-/// Refuse something that is not a local gateway route table id at all, for
-/// `CreateLocalGatewayRoute`: HTTP 400 `InvalidLocalGatewayRouteTableID.Malformed`.
+/// Refuse something that is not a local gateway route table id at all, for an operation that
+/// CREATES a resource belonging to that table: HTTP 400
+/// `InvalidLocalGatewayRouteTableID.Malformed`.
 ///
 /// `Invalid LocalGateway Route Table id <id>` — a fixed prefix naming the resource in the prose
 /// spelling [`invalid_local_gateway_route_table_id_not_found`] uses, then the id the REQUEST
-/// sent, UNQUOTED and last, bounded by [`echoed_resource_id`]. The sentence THAT operation's
-/// recorded refusal carries, and the only operation of this resource that does not word the
-/// class with the service's shared [`invalid_local_gateway_route_table_id_malformed`] sentence,
-/// which every other reader of this id — the search and the delete of a route included — is
-/// recorded answering.
-pub fn invalid_route_table_id_for_create_local_gateway_route<E>(id: &str) -> Scaffolded<E> {
+/// sent, UNQUOTED and last, bounded by [`echoed_resource_id`]. The sentence the recorded
+/// refusals of the two creates that take this id as the table their new resource belongs to —
+/// a static route (`CreateLocalGatewayRoute`) and a customer-owned address pool
+/// (`CreateCoipPool`) — each carry, rather than the service's shared
+/// [`invalid_local_gateway_route_table_id_malformed`] sentence the table's own operations and
+/// the associations with it are recorded answering. The sentence belongs to the validators
+/// recorded with it, so an operation added later takes the one ITS recorded refusal carries.
+pub fn invalid_route_table_id_for_create<E>(id: &str) -> Scaffolded<E> {
     Scaffolded::service_error(
         INVALID_LOCAL_GATEWAY_ROUTE_TABLE_ID_MALFORMED,
         400,
@@ -1943,34 +1947,25 @@ pub fn invalid_route_table_id_for_create_local_gateway_route<E>(id: &str) -> Sca
     )
 }
 
-/// Refuse a `LocalGatewayRouteTableId` `CreateLocalGatewayRoute` cannot resolve: a malformed one
-/// with that operation's own sentence
-/// ([`invalid_route_table_id_for_create_local_gateway_route`]) before an unknown one with the
-/// resource's single `NotFound` sentence, the order [`require_well_formed_id`] documents.
+/// Refuse a `LocalGatewayRouteTableId` a create of a resource belonging to that table cannot
+/// resolve: a malformed one with those creates' own sentence
+/// ([`invalid_route_table_id_for_create`]) before an unknown one with the resource's single
+/// `NotFound` sentence, the order [`require_well_formed_id`] documents.
 ///
 /// The resolution itself is [`require_known_local_gateway_route_table_worded`]'s, shared with
-/// every other reader of this id, so only the malformed sentence is this operation's own.
-pub fn require_known_route_table_for_create_local_gateway_route<E>(
+/// every other reader of this id, so only the malformed sentence is these operations' own.
+pub fn require_known_route_table_for_create<E>(
     store: &ComAmazonawsEc2Amazonec2State,
     id: &str,
 ) -> Result<(), Scaffolded<E>> {
-    require_known_local_gateway_route_table_worded(
-        store,
-        id,
-        invalid_route_table_id_for_create_local_gateway_route,
-    )
+    require_known_local_gateway_route_table_worded(store, id, invalid_route_table_id_for_create)
 }
 
-/// The form check [`require_known_route_table_for_create_local_gateway_route`] makes before it
-/// looks an id up, for the create's own earlier reading of the request's FORM — a `DryRun` is
-/// answered only once that form has been read.
-pub fn require_well_formed_route_table_id_for_create_local_gateway_route<E>(
-    id: &str,
-) -> Result<(), Scaffolded<E>> {
-    require_well_formed_local_gateway_route_table_id_worded(
-        id,
-        invalid_route_table_id_for_create_local_gateway_route,
-    )
+/// The form check [`require_known_route_table_for_create`] makes before it looks an id up, for
+/// a create's own earlier reading of the request's FORM — a `DryRun` is answered only once that
+/// form has been read.
+pub fn require_well_formed_route_table_id_for_create<E>(id: &str) -> Result<(), Scaffolded<E>> {
+    require_well_formed_local_gateway_route_table_id_worded(id, invalid_route_table_id_for_create)
 }
 
 /// Refuse a well-formed local gateway route table id this account holds no route table
@@ -1991,9 +1986,9 @@ pub fn invalid_local_gateway_route_table_id_not_found<E>(id: &str) -> Scaffolded
 ///
 /// The one form check [`require_known_local_gateway_route_table`] itself makes before it
 /// looks an id up, so an operation that needs it earlier asks the same question of the same
-/// reader. `CreateLocalGatewayRoute` asks it through
-/// [`require_well_formed_route_table_id_for_create_local_gateway_route`], which differs only in
-/// the sentence its own validator words the refusal with.
+/// reader. A create of a resource belonging to the table asks it through
+/// [`require_well_formed_route_table_id_for_create`], which differs only in the sentence those
+/// validators word the refusal with.
 pub fn require_well_formed_local_gateway_route_table_id<E>(id: &str) -> Result<(), Scaffolded<E>> {
     require_well_formed_local_gateway_route_table_id_worded(
         id,
@@ -2016,16 +2011,15 @@ pub(super) fn require_well_formed_local_gateway_route_table_id_worded<E>(
     Ok(())
 }
 
-/// Refuse a `LocalGatewayRouteTableId` an operation other than `CreateLocalGatewayRoute` cannot
-/// resolve — the table's own operations, an association with it, and the search and the delete
-/// of a route in it: a malformed one before an unknown one, the order
-/// [`require_well_formed_id`] documents.
+/// Refuse a `LocalGatewayRouteTableId` the table's own operations cannot resolve — the delete of
+/// a table, an association with it, and the search and the delete of a route in it: a malformed
+/// one before an unknown one, the order [`require_well_formed_id`] documents.
 ///
 /// The ONE place those operations resolve a local gateway route table id, so each refuses the
 /// same id the same way; the contract [`require_known_instance`] writes out for instances.
-/// `CreateLocalGatewayRoute` resolves it through
-/// [`require_known_route_table_for_create_local_gateway_route`] instead, which shares this
-/// resolution and differs only in the sentence it words a malformed id with.
+/// A create of a resource belonging to the table resolves it through
+/// [`require_known_route_table_for_create`] instead, which shares this resolution and differs
+/// only in the sentence it words a malformed id with.
 pub fn require_known_local_gateway_route_table<E>(
     store: &ComAmazonawsEc2Amazonec2State,
     id: &str,

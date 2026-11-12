@@ -154,8 +154,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
         // The request's own FORM before anything is resolved, through the crate's one reader
         // of this id's form, so "not a route table id of this kind" never reads as "no such
-        // route table".
-        state::require_well_formed_local_gateway_route_table_id(route_table_id)?;
+        // route table". The sentence is the one a create of a resource belonging to the table
+        // words this class with, which is the refusal this operation is recorded answering
+        // rather than the service's shared malformed template.
+        state::require_well_formed_route_table_id_for_create(route_table_id)?;
 
         // "The tags to assign to the CoIP address pool" (`TagSpecifications`) — "you must
         // specify the resource type to tag, otherwise the request will fail"
@@ -186,9 +188,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // A CoIP pool belongs TO a local gateway route table
         // (`CoipPool$LocalGatewayRouteTableId`), so an id this account holds no route table
         // for has nothing to create a pool on: it is refused with the route table's own
-        // `NotFound` code, by the one resolver every operation of this crate reads that id
-        // with, and NOTHING is stored.
-        state::require_known_local_gateway_route_table(&store, route_table_id)?;
+        // `NotFound` sentence, by the one lookup every operation of this crate resolves that
+        // id with, and NOTHING is stored.
+        state::require_known_route_table_for_create(&store, route_table_id)?;
 
         // "Information about the CoIP address pool" (`CreateCoipPoolResult$CoipPool`): the
         // pool is stored by the crate's one writer of that store — which mints the pool id

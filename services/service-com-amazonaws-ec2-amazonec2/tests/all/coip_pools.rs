@@ -85,7 +85,10 @@ fn tag(key: &str, value: &str) -> Tag {
 
 /// The `<item>` texts of the one `<set>…</set>` element the body carries, or none when the
 /// service wrote the set empty (a self-closing element has no inner text).
-fn set_items(xml: &str, set: &str) -> Vec<String> {
+///
+/// `pub`, like [`describe_one`] and [`described_ids`], so the `CreateCoipPool` suite reads a
+/// pool's address ranges and tags out of a body the one way this test tree does.
+pub fn set_items(xml: &str, set: &str) -> Vec<String> {
     match element(xml, set) {
         Some(inner) => elements(&inner, "item"),
         None => Vec::new(),

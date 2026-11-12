@@ -1921,3 +1921,8 @@ mod get_associated_ipv6_pool_cidrs;
 // and the tail of this file are where every new ec2 suite inserts its lines.
 #[path = "all/delete_managed_prefix_list.rs"]
 mod delete_managed_prefix_list;
+// `CreateCoipPool`: the one customer-owned address pool a create writes onto the local gateway
+// route table it names, the members it mints for that pool, and what it refuses — declared at
+// the tail of this file, which is where every new ec2 suite lands.
+#[path = "all/create_coip_pool.rs"]
+mod create_coip_pool;
