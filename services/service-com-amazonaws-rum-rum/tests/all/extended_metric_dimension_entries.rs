@@ -31,8 +31,9 @@ use crate::metric_definitions::{
     EXTENDED_DIMENSION_KEYS, EXTENDED_METRICS,
 };
 use crate::support::{
-    all_metric_definitions, call, create, emulator, held_metric_definition, message,
-    metric_definition_id, put_metrics_destination, sole_metric_definition, Reply,
+    all_metric_definitions, assert_created_definitions, call, create, emulator,
+    held_metric_definition, message, metric_definition_id, put_metrics_destination,
+    sole_metric_definition, Reply,
 };
 
 /// The destination every case stores its definitions under: the one that carries no ARN.
@@ -284,13 +285,8 @@ async fn every_listed_dimension_entry_is_created_and_read_back() {
         "accepted",
         answered["Errors"]
     );
-    let created = answered["MetricDefinitions"].clone();
-    assert_eq!(
-        created,
-        json!([]),
-        "case {:?}: expected the create to report no MetricDefinitions, got {answered}",
-        "accepted"
-    );
+    // The create echoes one definition per entry it created, in request order.
+    assert_created_definitions("accepted", &answered, &requested);
 
     // Each is read back as the definition that was asked for.
     let held = all_metric_definitions(&router, "accepted", monitor, DESTINATION, None, None).await;
@@ -361,8 +357,7 @@ async fn no_dimension_entry_outside_the_list_is_stored_by_either_operation() {
         String::from_utf8_lossy(&reply.body)
     );
     let answered = reply.json("refused");
-    // The create reports no definition, so what it stored is read back from the
-    // destination.
+    // What the partly refused batch stored is read back from the destination.
     let created: Vec<Value> =
         all_metric_definitions(&router, "refused", monitor, DESTINATION, None, None)
             .await

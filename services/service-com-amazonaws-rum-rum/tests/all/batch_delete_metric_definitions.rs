@@ -176,10 +176,9 @@ async fn put_destination(router: &MultiServiceRouter, case: &str, monitor: &str,
 
 /// `BatchCreateRumMetricDefinitions`, returning the ids it minted in request order.
 ///
-/// The create's answer reports no definition — `MetricDefinitions` carries the EMPTY list
-/// whatever the call created — so the ids are read back through
-/// `BatchGetRumMetricDefinitions` and matched to the definitions the request named by the
-/// `Name` each carries, which is unique across the seeded rows.
+/// The create's answer echoes one definition per entry it created; the ids returned here are
+/// read back through `BatchGetRumMetricDefinitions` and matched to the definitions the
+/// request named by the `Name` each carries, which is unique across the seeded rows.
 async fn create_definitions(
     router: &MultiServiceRouter,
     case: &str,
@@ -211,9 +210,12 @@ async fn create_definitions(
         answered["Errors"]
     );
     assert_eq!(
-        answered["MetricDefinitions"],
-        json!([]),
-        "case {case:?}: expected the create to report no MetricDefinitions, got {answered}"
+        answered["MetricDefinitions"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or_default(),
+        count,
+        "case {case:?}: expected the create to echo {count} definition(s), got {answered}"
     );
     let held = stored_definitions(router, case, monitor, &target.query()).await;
     assert_eq!(
@@ -800,14 +802,17 @@ async fn deleting_metric_definitions_is_authorized_and_a_refusal_deletes_nothing
             created.status,
             String::from_utf8_lossy(&created.body)
         );
-        assert_eq!(
-            created.json(case)["MetricDefinitions"],
-            json!([]),
-            "case {case:?}: expected the create to report no MetricDefinitions, got {:?}",
-            String::from_utf8_lossy(&created.body)
-        );
-        // The create reports no definition, so the id it minted is read back through
-        // `BatchGetRumMetricDefinitions`, with the account's own credential.
+        let echoed_id = created.json(case)["MetricDefinitions"][0]["MetricDefinitionId"]
+            .as_str()
+            .unwrap_or_else(|| {
+                panic!(
+                    "case {case:?}: expected the create to echo the definition it created, got {:?}",
+                    String::from_utf8_lossy(&created.body)
+                )
+            })
+            .to_string();
+        // The same definition is read back through `BatchGetRumMetricDefinitions`, with the
+        // account's own credential.
         let seeded = authorized
             .rum(
                 ACCOUNT_KEY,
@@ -823,6 +828,11 @@ async fn deleting_metric_definitions_is_authorized_and_a_refusal_deletes_nothing
             .as_str()
             .unwrap_or_else(|| panic!("case {case:?}: the seed minted no MetricDefinitionId"))
             .to_string();
+        assert_eq!(
+            id, echoed_id,
+            "case {case:?}: expected the stored definition to be held under the id the create \
+             echoed ({echoed_id:?}), got {id:?}"
+        );
 
         let role = format!("metric-deleter-{index}");
         let key = authorized

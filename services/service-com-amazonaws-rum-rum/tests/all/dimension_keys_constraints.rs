@@ -503,21 +503,39 @@ async fn a_dimension_entry_inside_the_modelled_constraints_is_stored_and_read_ba
             "case {case:?}: expected the definition to be accepted, got {:?}",
             answered["Errors"]
         );
+        let created = answered["MetricDefinitions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         assert_eq!(
-            answered["MetricDefinitions"],
-            json!([]),
-            "case {case:?}: expected the create to report no MetricDefinitions, got {answered:?}"
+            created.len(),
+            1,
+            "case {case:?}: expected the create to echo the definition it created, got \
+             {answered:?}"
         );
+        assert_eq!(
+            created[0]["DimensionKeys"], requested["DimensionKeys"],
+            "case {case:?}: expected the echoed DimensionKeys to be {:?}, got {:?}",
+            requested["DimensionKeys"], created[0]["DimensionKeys"]
+        );
+        let echoed_id = created[0]["MetricDefinitionId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("case {case:?}: the echo carries no id: {answered:?}"))
+            .to_string();
 
-        // Read back through the implemented reader: the map is persisted whole, key for key.
-        // The create reports no definition, so the id it minted is the one the destination
-        // now holds this very definition under.
+        // Read back through the implemented reader: the map is persisted whole, key for key,
+        // under the id the create echoed.
         let held = stored(&router, &case, monitor).await;
         let (id, reported) = held
             .iter()
             .find(|(_, held)| held["DimensionKeys"] == requested["DimensionKeys"])
             .unwrap_or_else(|| panic!("case {case:?}: the definition was not stored: {held:?}"));
         let id = id.clone();
+        assert_eq!(
+            id, echoed_id,
+            "case {case:?}: expected the stored definition to be held under the id the create \
+             echoed ({echoed_id:?}), got {id:?}"
+        );
         assert_eq!(
             reported["DimensionKeys"], requested["DimensionKeys"],
             "case {case:?}: expected the stored DimensionKeys to be {:?}, got {:?}",

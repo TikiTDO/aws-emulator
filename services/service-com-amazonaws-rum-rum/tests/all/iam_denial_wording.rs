@@ -485,8 +485,8 @@ async fn seed(emulator: &Emulator, monitor: &str, case: &str, seed: Seed) -> Str
         created.status,
         String::from_utf8_lossy(&created.body)
     );
-    // The create reports no definition, so the id it minted is read back through
-    // `BatchGetRumMetricDefinitions` — the only operation that reports a stored one.
+    // The id the seed minted is read back through `BatchGetRumMetricDefinitions`, the
+    // operation that reports a stored definition.
     let page = emulator
         .rum(
             ACCOUNT_KEY,

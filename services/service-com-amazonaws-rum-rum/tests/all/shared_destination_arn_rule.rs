@@ -267,14 +267,19 @@ async fn create_definition(
         "case {case:?}: expected no per-definition errors, got {:?}",
         answered["Errors"]
     );
+    let echoed = answered["MetricDefinitions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     assert_eq!(
-        answered["MetricDefinitions"],
-        json!([]),
-        "case {case:?}: expected the create to report no MetricDefinitions, got {answered}"
+        echoed.len(),
+        1,
+        "case {case:?}: expected the create to echo the definition it created, got {answered}"
     );
-    // The create reports no definition, so the id it minted is read back through
-    // `BatchGetRumMetricDefinitions` — under the same spelling of the pair, which is what
-    // makes this a check of the ARN rule rather than of the create's own answer.
+    let echoed_id = metric_definition_id(case, &echoed[0]);
+    // The id the create echoed is read back through `BatchGetRumMetricDefinitions` — under
+    // the same spelling of the pair, which is what makes this a check of the ARN rule rather
+    // than of the create's own answer.
     let created = all_metric_definitions(router, case, monitor, destination, destination_arn, None)
         .await
         .into_values()
@@ -284,7 +289,13 @@ async fn create_definition(
         1,
         "case {case:?}: expected one created definition, got {created:?}"
     );
-    metric_definition_id(case, &created[0])
+    let held_id = metric_definition_id(case, &created[0]);
+    assert_eq!(
+        held_id, echoed_id,
+        "case {case:?}: expected the stored definition to be held under the id the create \
+         echoed ({echoed_id:?}), got {held_id:?}"
+    );
+    held_id
 }
 
 #[tokio::test]

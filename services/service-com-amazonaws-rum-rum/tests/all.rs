@@ -21,6 +21,8 @@ mod app_monitor_data;
 mod app_monitor_lifecycle;
 #[path = "all/authorization.rs"]
 mod authorization;
+#[path = "all/batch_create_metric_definitions_echo.rs"]
+mod batch_create_metric_definitions_echo;
 #[path = "all/batch_create_metric_definitions_targeting.rs"]
 mod batch_create_metric_definitions_targeting;
 #[path = "all/batch_delete_metric_definitions.rs"]

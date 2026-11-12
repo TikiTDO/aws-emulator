@@ -117,14 +117,15 @@ async fn seed_definitions(
         "case {case:?}: the seed batch was refused in part: {answered}"
     );
     assert_eq!(
-        answered["MetricDefinitions"],
-        json!([]),
-        "case {case:?}: expected the create to report no MetricDefinitions, got {answered}"
+        answered["MetricDefinitions"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or_default(),
+        count,
+        "case {case:?}: expected the create to echo {count} definition(s), got {answered}"
     );
-    // The create reports no definition — `MetricDefinitions` carries the EMPTY list
-    // whatever the call created — so the ids it minted are read back through the operation
-    // under test, matched to the definitions the seed named by the unique `Name` each
-    // carries.
+    // The ids the seed minted are read back through the operation under test, matched to the
+    // definitions the seed named by the unique `Name` each carries.
     let held = all_metric_definitions(router, case, monitor, destination, destination_arn, None)
         .await
         .into_values()

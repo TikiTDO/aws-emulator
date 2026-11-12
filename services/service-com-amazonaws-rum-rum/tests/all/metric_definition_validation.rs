@@ -32,7 +32,9 @@ use crate::metric_definitions::{
     custom, dimension_keys, event_pattern, extended, extended_with_dimensions, with,
     EXTENDED_DIMENSION_KEYS, EXTENDED_METRICS,
 };
-use crate::support::{call, canonical_metric_definition, create, emulator, message, Reply};
+use crate::support::{
+    assert_created_definitions, call, canonical_metric_definition, create, emulator, message, Reply,
+};
 
 /// The `ErrorCode` a per-definition error carries for a definition the service will not
 /// store — the modelled error the single-definition update answers with.
@@ -434,15 +436,8 @@ async fn every_definition_the_model_declares_valid_is_created_and_read_back() {
         "accepted",
         answered["Errors"]
     );
-    // The create reports no definition of its own — `MetricDefinitions` carries the EMPTY
-    // list whatever the call created — so what it created is read back through the
-    // operation that reports it.
-    assert_eq!(
-        answered["MetricDefinitions"],
-        json!([]),
-        "case {:?}: expected the create to report no MetricDefinitions, got {answered}",
-        "accepted"
-    );
+    // The create echoes one definition per entry it created, in request order.
+    assert_created_definitions("accepted", &answered, &requested);
 
     // Each is read back as the definition that was asked for.
     let held = stored(&router, "accepted", monitor).await;

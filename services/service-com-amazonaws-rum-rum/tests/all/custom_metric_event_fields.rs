@@ -30,8 +30,9 @@ use serde_json::{json, Value};
 use smithy_server_runtime::multi_service_router::MultiServiceRouter;
 
 use crate::support::{
-    all_metric_definitions, call, create, emulator, held_metric_definition, message,
-    metric_definition_id, put_metrics_destination, sole_metric_definition, Reply,
+    all_metric_definitions, assert_created_definitions, call, create, emulator,
+    held_metric_definition, message, metric_definition_id, put_metrics_destination,
+    sole_metric_definition, Reply,
 };
 
 /// Every field a RUM event carries, which is every first-level key a custom metric's
@@ -432,12 +433,8 @@ async fn every_custom_metric_naming_only_rum_event_fields_is_created_and_read_ba
         "accepted",
         answered["Errors"]
     );
-    assert_eq!(
-        answered["MetricDefinitions"],
-        json!([]),
-        "case {:?}: expected the create to report no MetricDefinitions, got {answered}",
-        "accepted"
-    );
+    // The create echoes one definition per entry it created, in request order.
+    assert_created_definitions("accepted", &answered, &requested);
 
     // Each is read back as the definition that was asked for.
     let held = all_metric_definitions(&router, "accepted", monitor, DESTINATION, None, None).await;
@@ -514,8 +511,7 @@ async fn no_custom_metric_naming_a_field_no_rum_event_has_is_stored_by_either_op
         String::from_utf8_lossy(&reply.body)
     );
     let answered = reply.json("refused");
-    // The create reports no definition, so what it stored is read back from the
-    // destination.
+    // What the partly refused batch stored is read back from the destination.
     let created: Vec<Value> =
         all_metric_definitions(&router, "refused", monitor, DESTINATION, None, None)
             .await
