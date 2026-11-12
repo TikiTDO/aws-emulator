@@ -52,3 +52,6 @@ mod workspace_bundles;
 
 #[path = "all/workspace_lifecycle.rs"]
 mod workspace_lifecycle;
+
+#[path = "all/workspace_properties_local_members.rs"]
+mod workspace_properties_local_members;

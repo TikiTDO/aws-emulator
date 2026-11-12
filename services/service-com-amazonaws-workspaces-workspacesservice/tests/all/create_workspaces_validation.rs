@@ -21,31 +21,34 @@
 //! with is large enough to be its own issue — so the registration's own state is read
 //! through this service's store, the way the lifecycle suite reads the clock.)
 //!
-//! "Verbatim" is over the members the MODEL declares: a request member this service's
-//! Smithy model does not declare is dropped at the boundary, before any handler sees it,
-//! so no echo can carry it. `WorkspaceProperties` carries `RunningMode`,
+//! "Verbatim" is over the members this service DECLARES: a request member it declares
+//! nowhere is dropped at the boundary, before any handler sees it, so no echo can carry
+//! it. `WorkspaceProperties` carries `RunningMode`,
 //! `RunningModeAutoStopTimeoutInMinutes`, `RootVolumeSizeGib`, `UserVolumeSizeGib`,
-//! `ComputeTypeName`, `Protocols`, `OperatingSystemName`, `GlobalAccelerator` and
-//! `NestedVirtualizationEnabled` — and the cases below stay inside that set. Two members
-//! are not echoed exactly as submitted:
+//! `ComputeTypeName`, `Protocols`, `OperatingSystemName`, `GlobalAccelerator`,
+//! `NestedVirtualizationEnabled` and `RecycleMode` (the member AWS answers with that the
+//! published snapshot does not declare — see `smithy-model/LOCAL-ADDITIONS.md`), and the
+//! cases below stay inside that set. Two members are not echoed exactly as submitted:
 //!
 //! * `Tags`: a recorded AWS echo carries the list even for a request that sent none, so
 //!   an absent `Tags` comes back as `[]`;
 //! * `WorkspaceProperties`: the echo carries the EFFECTIVE property set, so a property
-//!   the service resolved for the caller (an omitted `RunningMode`) is echoed with the
-//!   value the WorkSpace would have been created with. That rule is asserted over its own
-//!   table in `create_workspaces_effective_properties`; here it only shapes what the echo
-//!   of each case must be.
+//!   the service resolved for the caller (an omitted `RunningMode` or `RecycleMode`) is
+//!   echoed with the value the WorkSpace would have been created with. That rule is
+//!   asserted over its own table in `create_workspaces_effective_properties`; here it
+//!   only shapes what the echo of each case must be.
 
 use std::sync::Arc;
 
 use serde_json::{json, Value};
 use service_com_amazonaws_workspaces_workspacesservice::state::{
-    service_state, DirectoryRegistrationState, DEFAULT_RUNNING_MODE,
+    service_state, DirectoryRegistrationState,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
-use crate::workspace_lifecycle::{call, emulator_with_engine, register_directory, settle};
+use crate::workspace_lifecycle::{
+    call, effective_properties, emulator_with_engine, register_directory, settle,
+};
 
 /// What one element of a submitted batch must produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,16 +98,9 @@ fn expected_echo(submitted: &Value) -> Value {
     if echo.get("Tags").is_none() {
         echo["Tags"] = json!([]);
     }
-    // The effective property set: the submitted properties with the service's default
-    // `RunningMode` filled in. See `create_workspaces_effective_properties`.
-    let mut properties = echo
-        .get("WorkspaceProperties")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    if properties.get("RunningMode").is_none() {
-        properties["RunningMode"] = json!(DEFAULT_RUNNING_MODE);
-    }
-    echo["WorkspaceProperties"] = properties;
+    // The effective property set: the submitted properties with the ones the service
+    // resolves for the caller filled in. See `create_workspaces_effective_properties`.
+    echo["WorkspaceProperties"] = effective_properties(echo.get("WorkspaceProperties"));
     echo
 }
 

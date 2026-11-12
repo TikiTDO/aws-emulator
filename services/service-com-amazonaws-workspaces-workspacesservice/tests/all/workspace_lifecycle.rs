@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use service_com_amazonaws_workspaces_workspacesservice::ops::types::WorkspaceRequest;
 use service_com_amazonaws_workspaces_workspacesservice::state::{
-    service_state, DEFAULT_RUNNING_MODE, ERROR_CODE_WORKSPACE_INVALID_STATE,
+    service_state, DEFAULT_RECYCLE_MODE, DEFAULT_RUNNING_MODE, ERROR_CODE_WORKSPACE_INVALID_STATE,
     ERROR_CODE_WORKSPACE_NOT_FOUND, MAX_STORED_WORKSPACES, MESSAGE_WORKSPACE_NOT_FOUND,
     TRANSITION_DELAY,
 };
@@ -120,6 +120,24 @@ pub(crate) fn settle(engine: &Arc<engine::InMemoryEngine>) {
     state
         .lock()
         .settle_at(Instant::now() + TRANSITION_DELAY + Duration::from_millis(1));
+}
+
+/// The EFFECTIVE `WorkspaceProperties` a submitted property object is reported as,
+/// wherever this service reports the properties a request asked for: every member the
+/// request submitted, unchanged, plus the value the service resolves for a switch-like
+/// property the request left out (`RunningMode`, `RecycleMode`).
+///
+/// `pub(crate)` because every suite that submits a create asserts against the same
+/// resolution: see [`emulator_with_engine`].
+pub(crate) fn effective_properties(submitted: Option<&Value>) -> Value {
+    let mut properties = submitted.cloned().unwrap_or_else(|| json!({}));
+    if properties.get("RunningMode").is_none() {
+        properties["RunningMode"] = json!(DEFAULT_RUNNING_MODE);
+    }
+    if properties.get("RecycleMode").is_none() {
+        properties["RecycleMode"] = json!(DEFAULT_RECYCLE_MODE);
+    }
+    properties
 }
 
 /// Create one WorkSpace and return its id, asserting the call was accepted.
@@ -336,8 +354,15 @@ async fn created_workspaces_are_persisted_and_described_back() {
             if member == "Tags" {
                 continue;
             }
+            // `WorkspaceProperties` is the one member reported as the EFFECTIVE set
+            // rather than exactly as supplied: see [`effective_properties`].
+            let expected = if member == "WorkspaceProperties" {
+                effective_properties(Some(supplied))
+            } else {
+                supplied.clone()
+            };
             assert_eq!(
-                &described[member], supplied,
+                &described[member], &expected,
                 "case {workspace_id}: {member} must be reported as supplied, got {described:?}"
             );
         }
@@ -601,11 +626,11 @@ async fn create_reports_per_item_failures_without_a_top_level_error() {
         // The echo carries the submitted request, with `Tags` reported as a list even
         // for a request that sent none and `WorkspaceProperties` reported as the
         // effective property set (see `create_workspaces_effective_properties`); none of
-        // these cases submits any property, so the effective set is the default running
-        // mode on its own.
+        // these cases submits any property, so the effective set is what the service
+        // resolves on its own.
         let mut echoed = request.clone();
         echoed["Tags"] = json!([]);
-        echoed["WorkspaceProperties"] = json!({ "RunningMode": DEFAULT_RUNNING_MODE });
+        echoed["WorkspaceProperties"] = effective_properties(None);
         let (status, body) =
             call(&router, "CreateWorkspaces", &json!({ "Workspaces": [request] })).await;
         assert_eq!(

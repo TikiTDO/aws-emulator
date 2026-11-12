@@ -55,3 +55,40 @@ Model evidence (services/service-com-amazonaws-workspaces-workspacesservice/smit
 2. Replay the simparity-wire-aws-v1 wire corpus.
 3. Cause 1: replay fixture workspaces-create-and-migrate-workspace-to-new-bundle step setup#3 (CreateWorkspaces with a batch element whose WorkspaceProperties sets RecycleMode and which is rejected). Compare FailedRequests[0].WorkspaceRequest to the submitted element: the emulator's echo omits WorkspaceProperties.RecycleMode that the request supplied. The same loss reproduces on workspaces-create-and-rebuild-workspace#task#3, workspaces-create-and-restore-workspace#setup#3, workspaces-create-primary-and-standby-workspace-dr#setup#3 and workspaces-operate-on-terminated-workspace-errors#setup#3.
 4. Cause 2: replay fixture workspaces-create-workspaces-batch-start-stop-reboot step task#3 (CreateWorkspaces batch whose second element names an existing directory and a bundle id that does not exist). Read FailedRequests[1]: the emulator returns ErrorCode 'ResourceNotFound.Directory' / 'The specified directory could not be found in the specified region.' where AWS returns 'ResourceNotFound.Bundle' / 'The specified bundle could not be found in the specified region.' (HTTP 200 either way).
+
+## Resolution
+
+Cause 1 — FIXED (key `$.FailedRequests[*].WorkspaceRequest.WorkspaceProperties.RecycleMode`,
+6 units). `WorkspaceProperties` now DECLARES `RecycleMode`, so the member exists end to end
+— parsed from the request, persisted on the record, reported by every operation that reads
+that shape. The declaration is this crate's own, generated from the small overlay model
+`smithy-model/local-additions.json` rather than by editing the published snapshot, which is
+kept as shipped (`smithy-model/LOCAL-ADDITIONS.md` says what is declared locally and why).
+Beside that, the member joins the EFFECTIVE property set
+(`state::effective_workspace_properties`): a submitted value is echoed and stored verbatim,
+and a request that omits it gets `state::DEFAULT_RECYCLE_MODE`, the value a recorded AWS
+response reports for a request that carried no `WorkspaceProperties` at all — the same
+resolution `RunningMode` already had. Pinned by
+`tests/all/workspace_properties_local_members.rs`, which drives the whole declared member
+set through the wire and fails if the snapshot is ever refreshed with the member or with one
+the local declaration does not carry.
+
+Cause 2 — DECLINED (keys `$.FailedRequests[*].ErrorCode` and
+`$.FailedRequests[*].ErrorMessage`, one unit:
+workspaces-create-workspaces-batch-start-stop-reboot). The emulator already resolves each
+reference independently and reports the one that failed, with AWS's own fixed sentence for
+each class — `ResourceNotFound.Bundle` / "The specified bundle could not be found in the
+specified region." for an unheld `BundleId`, `ResourceNotFound.Directory` / "The specified
+directory could not be found in the specified region." for an unregistered `DirectoryId` —
+which `create_workspaces_effective_properties::a_refusal_names_the_resource_that_failed_to_resolve`
+pins over a table, message included. Neither wording differs from AWS; what differs for that
+one element is which class applies. Measured on this checkout by resolving the bundle before
+the directory and replaying: the recorded element then answers `Bundle`, but the element the
+other five fixtures record as `Directory` answers `Bundle` too — so in the emulator BOTH
+references of all these elements are unresolvable, and the recordings ask for two different
+answers to the same resolution result. The only input left to tell them apart is the
+recorded identifier strings themselves: AWS-generated, per-run ids (a Directory Service
+directory, an Amazon catalog bundle) that no step of these fixtures creates in the emulator.
+Matching them would take a case keyed to the recorded input, so the order stays the model's
+own member order (`DirectoryId` before `BundleId`) — the answer five of the six recordings
+corroborate.

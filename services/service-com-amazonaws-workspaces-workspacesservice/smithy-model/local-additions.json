@@ -1,0 +1,109 @@
+{
+  "smithy": "2.0",
+  "shapes": {
+    "com.amazonaws.workspaces#WorkspaceProperties": {
+      "type": "structure",
+      "members": {
+        "RunningMode": { "target": "com.amazonaws.workspaces#RunningMode" },
+        "RunningModeAutoStopTimeoutInMinutes": { "target": "com.amazonaws.workspaces#RunningModeAutoStopTimeoutInMinutes" },
+        "RootVolumeSizeGib": { "target": "com.amazonaws.workspaces#RootVolumeSizeGib" },
+        "UserVolumeSizeGib": { "target": "com.amazonaws.workspaces#UserVolumeSizeGib" },
+        "ComputeTypeName": { "target": "com.amazonaws.workspaces#Compute" },
+        "Protocols": { "target": "com.amazonaws.workspaces#ProtocolList" },
+        "OperatingSystemName": { "target": "com.amazonaws.workspaces#OperatingSystemName" },
+        "GlobalAccelerator": { "target": "com.amazonaws.workspaces#GlobalAcceleratorForWorkSpace" },
+        "NestedVirtualizationEnabled": { "target": "com.amazonaws.workspaces#BooleanObject" },
+        "RecycleMode": { "target": "com.amazonaws.workspaces#RecycleMode" }
+      }
+    },
+    "com.amazonaws.workspaces#RecycleMode": {
+      "type": "string"
+    },
+    "com.amazonaws.workspaces#RunningMode": {
+      "type": "enum",
+      "members": {
+        "AUTO_STOP": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "AUTO_STOP" } },
+        "ALWAYS_ON": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "ALWAYS_ON" } },
+        "MANUAL": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "MANUAL" } }
+      }
+    },
+    "com.amazonaws.workspaces#RunningModeAutoStopTimeoutInMinutes": {
+      "type": "integer"
+    },
+    "com.amazonaws.workspaces#RootVolumeSizeGib": {
+      "type": "integer"
+    },
+    "com.amazonaws.workspaces#UserVolumeSizeGib": {
+      "type": "integer"
+    },
+    "com.amazonaws.workspaces#Compute": {
+      "type": "enum",
+      "members": {
+        "VALUE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "VALUE" } },
+        "STANDARD": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "STANDARD" } },
+        "PERFORMANCE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "PERFORMANCE" } },
+        "POWER": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "POWER" } },
+        "GRAPHICS": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICS" } },
+        "POWERPRO": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "POWERPRO" } },
+        "GENERALPURPOSE_4XLARGE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GENERALPURPOSE_4XLARGE" } },
+        "GENERALPURPOSE_8XLARGE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GENERALPURPOSE_8XLARGE" } },
+        "GRAPHICSPRO": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICSPRO" } },
+        "GRAPHICS_G4DN": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICS_G4DN" } },
+        "GRAPHICSPRO_G4DN": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICSPRO_G4DN" } },
+        "GRAPHICS_G6_XLARGE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICS_G6_XLARGE" } },
+        "GRAPHICS_G6_2XLARGE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICS_G6_2XLARGE" } },
+        "GRAPHICS_G6_4XLARGE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICS_G6_4XLARGE" } },
+        "GRAPHICS_G6_8XLARGE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICS_G6_8XLARGE" } },
+        "GRAPHICS_G6_16XLARGE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICS_G6_16XLARGE" } },
+        "GRAPHICS_GR6_4XLARGE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICS_GR6_4XLARGE" } },
+        "GRAPHICS_GR6_8XLARGE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICS_GR6_8XLARGE" } },
+        "GRAPHICS_G6F_LARGE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICS_G6F_LARGE" } },
+        "GRAPHICS_G6F_XLARGE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICS_G6F_XLARGE" } },
+        "GRAPHICS_G6F_2XLARGE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICS_G6F_2XLARGE" } },
+        "GRAPHICS_G6F_4XLARGE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICS_G6F_4XLARGE" } },
+        "GRAPHICS_GR6F_4XLARGE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICS_GR6F_4XLARGE" } },
+        "GRAPHICS_G7_2XLARGE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICS_G7_2XLARGE" } },
+        "GRAPHICS_G7_4XLARGE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICS_G7_4XLARGE" } },
+        "GRAPHICS_G7_8XLARGE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICS_G7_8XLARGE" } },
+        "GRAPHICS_G7_12XLARGE": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "GRAPHICS_G7_12XLARGE" } }
+      }
+    },
+    "com.amazonaws.workspaces#ProtocolList": {
+      "type": "list",
+      "member": { "target": "com.amazonaws.workspaces#Protocol" }
+    },
+    "com.amazonaws.workspaces#Protocol": {
+      "type": "enum",
+      "members": {
+        "PCOIP": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "PCOIP" } },
+        "WSP": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "WSP" } }
+      }
+    },
+    "com.amazonaws.workspaces#OperatingSystemName": {
+      "type": "enum",
+      "members": {
+        "AMAZON_LINUX_2": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "AMAZON_LINUX_2" } },
+        "UBUNTU_18_04": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "UBUNTU_18_04" } },
+        "UBUNTU_20_04": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "UBUNTU_20_04" } },
+        "UBUNTU_22_04": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "UBUNTU_22_04" } },
+        "UNKNOWN": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "UNKNOWN" } },
+        "WINDOWS_10": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "WINDOWS_10" } },
+        "WINDOWS_11": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "WINDOWS_11" } },
+        "WINDOWS_7": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "WINDOWS_7" } },
+        "WINDOWS_SERVER_2016": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "WINDOWS_SERVER_2016" } },
+        "WINDOWS_SERVER_2019": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "WINDOWS_SERVER_2019" } },
+        "WINDOWS_SERVER_2022": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "WINDOWS_SERVER_2022" } },
+        "WINDOWS_SERVER_2025": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "WINDOWS_SERVER_2025" } },
+        "RHEL_8": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "RHEL_8" } },
+        "ROCKY_8": { "target": "smithy.api#Unit", "traits": { "smithy.api#enumValue": "ROCKY_8" } }
+      }
+    },
+    "com.amazonaws.workspaces#BooleanObject": {
+      "type": "boolean"
+    },
+    "com.amazonaws.workspaces#GlobalAcceleratorForWorkSpace": {
+      "type": "structure",
+      "members": {}
+    }
+  }
+}

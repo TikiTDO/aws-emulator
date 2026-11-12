@@ -182,15 +182,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     // The refused element is echoed back as submitted: a client
                     // matches a failure to the request it sent by reading it
                     // here, and retries the batch by resubmitting exactly these
-                    // `WorkspaceRequest`s. Two members are reported RESOLVED
-                    // rather than as submitted, so that retry asks for the same
-                    // WorkSpace an accepted element would have got:
+                    // `WorkspaceRequest`s. Every member the element carried is
+                    // echoed unchanged; two are reported RESOLVED rather than as
+                    // submitted, so that retry asks for the same WorkSpace an
+                    // accepted element would have got:
                     //
                     // * `WorkspaceProperties` is the EFFECTIVE property set
                     //   (`crate::state::effective_workspace_properties`) — the
-                    //   submitted properties with the service's defaults filled
-                    //   in — so it is never absent and never drops a property
-                    //   the WorkSpace would have been created with;
+                    //   submitted properties with the ones the service decides
+                    //   for the caller filled in — so it is never absent and
+                    //   never drops a property the WorkSpace would have been
+                    //   created with;
                     // * `Tags` is reported as a list even for a request that
                     //   sent none, which is what a recorded AWS echo carries.
                     let mut echoed = request.clone();

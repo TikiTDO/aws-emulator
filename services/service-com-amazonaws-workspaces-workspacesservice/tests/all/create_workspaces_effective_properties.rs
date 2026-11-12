@@ -14,15 +14,17 @@
 //!    created WorkSpace in `PendingRequests`, and the one `DescribeWorkspaces` reports for
 //!    it later — it reports the EFFECTIVE property set: every property the request
 //!    submitted, unchanged, plus the value the service resolves for a property the request
-//!    left to it (an omitted `RunningMode` becomes
-//!    [`DEFAULT_RUNNING_MODE`]). It is never absent, so a client that retries a partial
-//!    batch by resubmitting an echoed `WorkspaceRequest` asks for the same WorkSpace.
+//!    left to it (an omitted `RunningMode` becomes [`DEFAULT_RUNNING_MODE`], an omitted
+//!    `RecycleMode` becomes `DEFAULT_RECYCLE_MODE`). It is never absent, so a client that
+//!    retries a partial batch by resubmitting an echoed `WorkspaceRequest` asks for the
+//!    same WorkSpace.
 //! 2. A per-element refusal names the resource that actually failed to resolve:
 //!    `ResourceNotFound.Bundle` for a `BundleId` the store does not hold and
 //!    `ResourceNotFound.Directory` for a `DirectoryId` no `RegisterWorkspaceDirectory`
-//!    registered. An element with BOTH unresolvable has two failures and one `ErrorCode`,
-//!    and reports the first in the model's own member order (`WorkspaceRequest` declares
-//!    `DirectoryId` before `BundleId`).
+//!    registered, each beside the fixed sentence AWS answers for that class. An element
+//!    with BOTH unresolvable has two failures and one `ErrorCode`, and reports the first
+//!    in the model's own member order (`WorkspaceRequest` declares `DirectoryId` before
+//!    `BundleId`).
 //!
 //! The property values the rows carry come from the model: the `RunningMode` values from
 //! `RUNNING_MODE_VALUES` (the `RunningMode` enum), the compute names from
@@ -39,7 +41,7 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use crate::create_workspaces_validation::amazon_bundle_ids;
 use crate::workspace_lifecycle::{
-    call, describe_one, emulator_with_engine, register_directory, settle,
+    call, describe_one, effective_properties, emulator_with_engine, register_directory, settle,
 };
 
 /// A directory this suite registers, so an element naming it is satisfiable. Matches the
@@ -154,7 +156,12 @@ fn property_table() -> Vec<(&'static str, Option<Value>, Value)> {
         }
         rows.push((case, Some(submitted.clone()), submitted));
     }
-    rows
+    // The rows above write out the properties they expect member by member; the ones the
+    // service resolves for a row that left them out are filled in here, in one place, by
+    // the same resolution every suite asserts against.
+    rows.into_iter()
+        .map(|(case, submitted, effective)| (case, submitted, effective_properties(Some(&effective))))
+        .collect()
 }
 
 /// Submit `element` as a one-element `CreateWorkspaces` batch and return
@@ -336,6 +343,19 @@ async fn resubmitting_an_echoed_request_asks_for_the_same_workspace() {
     }
 }
 
+/// The `ErrorMessage` AWS answers beside each per-resource code: fixed text for the error
+/// CLASS, interpolating nothing from the request, as a recorded response carries it beside
+/// an id that appears nowhere in it.
+fn expected_message(code: &str) -> &'static str {
+    match code {
+        "ResourceNotFound.Bundle" => "The specified bundle could not be found in the specified region.",
+        "ResourceNotFound.Directory" => {
+            "The specified directory could not be found in the specified region."
+        }
+        other => panic!("no recorded message for the per-item code {other}"),
+    }
+}
+
 #[tokio::test]
 async fn a_refusal_names_the_resource_that_failed_to_resolve() {
     let (router, _engine) = emulator_with_engine();
@@ -421,11 +441,10 @@ async fn a_refusal_names_the_resource_that_failed_to_resolve() {
                     Some(*code),
                     "case {case:?}: expected ErrorCode {code}, got {failed:?}"
                 );
-                assert!(
-                    failed[0]["ErrorMessage"]
-                        .as_str()
-                        .is_some_and(|message| !message.is_empty()),
-                    "case {case:?}: a failure carries an ErrorMessage, got {failed:?}"
+                assert_eq!(
+                    failed[0]["ErrorMessage"].as_str(),
+                    Some(expected_message(code)),
+                    "case {case:?}: expected the fixed message for {code}, got {failed:?}"
                 );
             }
         }

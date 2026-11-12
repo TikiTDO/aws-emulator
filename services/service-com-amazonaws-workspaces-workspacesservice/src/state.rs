@@ -202,23 +202,43 @@ pub const MESSAGE_BUNDLE_NOT_FOUND: &str =
 /// WorkSpaces Core. Contact your account team to be allow-listed").
 pub const DEFAULT_RUNNING_MODE: &str = "ALWAYS_ON";
 
+/// The `RecycleMode` a WorkSpace is created with when the request names none.
+///
+/// `WorkspaceProperties$RecycleMode` is the member AWS answers with that this
+/// crate declares itself (see `smithy-model/LOCAL-ADDITIONS.md`): it is optional
+/// like every other property, so a create request may omit it — and a recorded
+/// AWS response reports `DISABLED` for a request that carried no
+/// `WorkspaceProperties` at all, so the service resolves the omission the same
+/// way it resolves the running mode. `DISABLED` is also the OFF value of the
+/// two-valued vocabulary this service spells everywhere else it reports a
+/// switch (`DedicatedTenancySupportResultEnum`,
+/// `CertificateBasedAuthStatusEnum` and `AGAModeForWorkSpaceEnum` are all
+/// `DISABLED`/`ENABLED`), so a WorkSpace nobody asked to recycle reports the
+/// off value rather than nothing.
+pub const DEFAULT_RECYCLE_MODE: &str = "DISABLED";
+
 /// The EFFECTIVE property set for a create request's `WorkspaceProperties`.
 ///
 /// One resolution, used wherever this service reports a WorkSpace's properties:
 /// what it persists for an accepted request, and what it echoes back for a
 /// refused one. Resolving means filling in what the service decides for the
-/// caller — today only [`DEFAULT_RUNNING_MODE`] for an omitted `RunningMode`.
-/// Every other member is left exactly as submitted: a member the request did not
-/// carry stays absent rather than being invented, because nothing in this
-/// emulator derives a volume size, a compute type or a protocol for a WorkSpace.
-/// The result is never absent, so a client that resubmits an echoed
-/// `WorkspaceRequest` resubmits the properties the WorkSpace would have had.
+/// caller — the two switch-like properties a WorkSpace always has one value of,
+/// [`DEFAULT_RUNNING_MODE`] for an omitted `RunningMode` and
+/// [`DEFAULT_RECYCLE_MODE`] for an omitted `RecycleMode`. Every other member is
+/// left exactly as submitted: a member the request did not carry stays absent
+/// rather than being invented, because nothing in this emulator derives a volume
+/// size, a compute type or a protocol for a WorkSpace. The result is never
+/// absent, so a client that resubmits an echoed `WorkspaceRequest` resubmits the
+/// properties the WorkSpace would have had.
 pub fn effective_workspace_properties(
     requested: Option<&WorkspaceProperties>,
 ) -> WorkspaceProperties {
     let mut properties = requested.cloned().unwrap_or_default();
     if properties.running_mode.is_none() {
         properties.running_mode = Some(DEFAULT_RUNNING_MODE.to_string());
+    }
+    if properties.recycle_mode.is_none() {
+        properties.recycle_mode = Some(DEFAULT_RECYCLE_MODE.to_string());
     }
     properties
 }

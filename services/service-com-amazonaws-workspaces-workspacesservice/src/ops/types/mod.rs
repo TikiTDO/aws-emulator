@@ -106,6 +106,10 @@ pub mod update_rules_of_ip_group_types;
 pub mod update_workspace_bundle_types;
 pub mod update_workspace_image_permission_types;
 pub mod update_workspaces_pool_types;
+/// `WorkspaceProperties`, declared from the local overlay model rather than from
+/// the published snapshot: AWS carries a member the snapshot does not declare
+/// (see `smithy-model/LOCAL-ADDITIONS.md`).
+pub mod workspace_properties_types;
 
 #[allow(ambiguous_glob_reexports, unused_imports)]
 pub use accept_account_link_invitation_types::*;
@@ -291,4 +295,6 @@ pub use update_workspace_bundle_types::*;
 pub use update_workspace_image_permission_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
 pub use update_workspaces_pool_types::*;
+#[allow(ambiguous_glob_reexports, unused_imports)]
+pub use workspace_properties_types::*;
 

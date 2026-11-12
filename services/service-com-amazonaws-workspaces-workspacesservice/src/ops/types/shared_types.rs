@@ -187,19 +187,12 @@ pub struct OperatingSystem {
     pub r#type: Option<String>,
 }
 
-#[smithy_macros::smithy(shape = "com.amazonaws.workspaces#WorkspaceProperties")]
-#[derive(Debug, Clone, Default)]
-pub struct WorkspaceProperties {
-    pub running_mode: Option<String>,
-    pub running_mode_auto_stop_timeout_in_minutes: Option<i32>,
-    pub root_volume_size_gib: Option<i32>,
-    pub user_volume_size_gib: Option<i32>,
-    pub compute_type_name: Option<String>,
-    pub protocols: Option<Vec<String>>,
-    pub operating_system_name: Option<String>,
-    pub global_accelerator: Option<GlobalAcceleratorForWorkSpace>,
-    pub nested_virtualization_enabled: Option<bool>,
-}
+// `WorkspaceProperties` is NOT declared here, although `Workspace`,
+// `WorkspaceRequest` and `ModifyWorkspacePropertiesRequest` all reach it: AWS
+// answers with a member the published snapshot does not declare, so the shape is
+// declared in `workspace_properties_types` from the local overlay model instead
+// (see `smithy-model/LOCAL-ADDITIONS.md`). `types/mod.rs` re-exports it, so
+// `use super::types::*` resolves it from here as it does any other shape.
 
 #[smithy_macros::smithy(shape = "com.amazonaws.workspaces#GlobalAcceleratorForWorkSpace")]
 #[derive(Debug, Clone, Default)]
