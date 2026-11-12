@@ -270,6 +270,7 @@ mod crawl_source;
 mod crawler_roles_and_connections;
 mod crawlers;
 mod data_assets;
+mod data_catalog_export;
 mod identity_center;
 mod integrations;
 mod job_script;
@@ -295,6 +296,7 @@ pub use crawl_source::*;
 pub use crawler_roles_and_connections::*;
 pub use crawlers::*;
 pub use data_assets::*;
+pub use data_catalog_export::*;
 pub use identity_center::*;
 pub use integrations::*;
 pub use job_script::*;
@@ -348,6 +350,7 @@ use crate::ops::types::{
     DataQualityRulesetListDetails, DataQualityTargetTable,
     DataSource, Database, DatabaseIdentifier, DatabaseInput,
     Edge, EncryptionAtRest, EncryptionConfiguration, ErrorDetail, EventBatchingCondition,
+    ExportEncryptionConfiguration,
     ExecutionAttempt, ExecutionProperty, FederatedCatalog, FederatedDatabase,
     FederatedTable, GlueTable, GrokClassifier, IcebergOptimizationPropertiesOutput, Job,
     JsonClassifier, LastCrawlInfo, MLTransform,
@@ -1882,6 +1885,19 @@ impl ComAmazonawsGlueAwsglueState {
                     .unwrap_or_else(default_connection_password_encryption),
             ),
         }
+    }
+
+    /// The export configuration record stored for `catalog_id`, or `None` while no
+    /// `PutDataCatalogExportConfiguration` has written one for it — the record a write reads
+    /// back and a read reports through
+    /// [`DataCatalogExportConfigurationEntry::to_output`].
+    pub fn data_catalog_export_configuration(
+        &self,
+        catalog_id: &str,
+    ) -> Option<&DataCatalogExportConfigurationEntry> {
+        self.catalogs
+            .get(catalog_id)
+            .and_then(|catalog| catalog.export_configuration.as_ref())
     }
 
     /// The migration status `catalog_id` REPORTS: whether a migration of an

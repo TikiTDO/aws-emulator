@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op PutDataCatalogExportConfiguration
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `PutDataCatalogExportConfiguration`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`PutDataCatalogExportConfiguration::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! The WRITE of the catalog's export configuration: it stores the setting the request asks
+//! for and leaves the catalog in that setting's transitional `ExportStatus` until the clock
+//! owes it the settled one ([`crate::state::EXPORT_CONFIGURATION_SETTLES_AFTER`]), which is
+//! what a `GetDataCatalogExportConfiguration` straight after this call reports.
+//!
+//! Enabling the export also brings the table bucket it writes into
+//! ([`crate::state::EXPORT_TABLE_BUCKET_NAME`]) into existence in S3 TABLES, the service that
+//! owns table buckets, under the encryption this write asked for. That bucket's encryption is
+//! the bucket's own, so a write naming a different one is refused with the operation's
+//! modelled `ConflictException` — unless it carries the `ClientToken` of the write already
+//! stored, in which case it is that write's retry and is answered with it.
 //!
 //! ## Shape of an operation
 //!
@@ -155,18 +158,170 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `PutDataCatalogExportConfiguration` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(PutDataCatalogExportConfigurationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("PutDataCatalogExportConfiguration"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            // This operation models a server fault, so an unreachable store is reported as
+            // that rather than as a client error the caller could act on.
+            return Err(
+                PutDataCatalogExportConfigurationErrorModeled::InternalServiceException(
+                    InternalServiceException {
+                        message: Some("the Glue Data Catalog store is unavailable".into()),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        // "The server-side encryption algorithm used for the exported data. Valid values are
+        // AES256 and aws:kms" (`ExportEncryptionConfiguration$SseAlgorithm`). The member is
+        // a plain string, so the request walk admits any value; a value outside the
+        // documented pair names an encryption the service does not perform, so the write is
+        // refused rather than storing a configuration that reads back as if it did.
+        if let Some(algorithm) = input
+            .encryption_configuration
+            .as_ref()
+            .and_then(|configuration| configuration.sse_algorithm.as_deref())
+        {
+            if !crate::state::EXPORT_SSE_ALGORITHMS.contains(&algorithm) {
+                return Err(
+                    PutDataCatalogExportConfigurationErrorModeled::InvalidInputException(
+                        InvalidInputException {
+                            message: Some(
+                                crate::state::messages::unsupported_export_sse_algorithm(
+                                    algorithm,
+                                ),
+                            ),
+                            from_federation_source: None,
+                        },
+                    )
+                    .into(),
+                );
+            }
+        }
+
+        // The request names no `CatalogId`, so the catalog written is always the Data
+        // Catalog of the account this endpoint serves — the default the model documents
+        // wherever an operation does carry one.
+        let catalog_id = crate::state::resolve_catalog_id(None);
+        let region = crate::state::request_region(ctx.parts());
+        let now = ::std::time::SystemTime::now();
+
+        // "A unique, case-sensitive identifier that you provide to ensure the idempotency of
+        // the request" (`ClientToken`): a retry of the very same write is answered with the
+        // configuration that write already stored, so it neither re-arms the change nor is
+        // examined against the export's bucket a second time.
+        if let Some(stored) = input.client_token.as_deref().and_then(|token| {
+            state
+                .lock()
+                .data_catalog_export_configuration(&catalog_id)
+                .filter(|configuration| configuration.was_written_with(token))
+                .cloned()
+        }) {
+            return Ok(PutDataCatalogExportConfigurationOutput {
+                export_setting: Some(stored.setting),
+                encryption_configuration: stored.encryption_configuration,
+            });
+        }
+
+        // The catalog metadata is exported into ONE table bucket per account and Region
+        // ([`crate::state::EXPORT_TABLE_BUCKET_NAME`]), and that bucket's encryption is the
+        // BUCKET's: it is settled when the bucket is created and an export configuration
+        // cannot re-set it. So a write naming an encryption the bucket already there does not
+        // use conflicts with that bucket and is refused; what encryption the bucket uses is
+        // answered by the service that owns it rather than assumed here.
+        if let Some(requested) = input.encryption_configuration.as_ref() {
+            if let Some((sse_algorithm, kms_key_arn)) =
+                crate::state::export_table_bucket_encryption(&*self.engine, &region)
+            {
+                if crate::state::export_encryption_differs(
+                    requested,
+                    &sse_algorithm,
+                    kms_key_arn.as_deref(),
+                ) {
+                    return Err(
+                        PutDataCatalogExportConfigurationErrorModeled::ConflictException(
+                            ConflictException {
+                                message: Some(
+                                    crate::state::messages::export_table_bucket_encryption_conflict(
+                                        crate::state::EXPORT_TABLE_BUCKET_NAME,
+                                    ),
+                                ),
+                            },
+                        )
+                        .into(),
+                    );
+                }
+            }
+        }
+
+        // "Specify ENABLED to start exporting catalog metadata to S3 Tables": the export has
+        // somewhere to write only once the table bucket it writes into exists, so enabling it
+        // brings that bucket into existence in S3 Tables — under the encryption this write
+        // asked for — and leaves the one already there as it is.
+        if input.export_setting == crate::state::EXPORT_SETTING_ENABLED {
+            crate::state::create_export_table_bucket(
+                &*self.engine,
+                &region,
+                input.encryption_configuration.as_ref(),
+            );
+        }
+
+        let mut store = state.lock();
+
+        // The catalog container is materialised here if this store does not hold it yet,
+        // through the one place a catalog is brought into existence. `None` means the store
+        // already holds the maximum number of catalogs without holding this one, which the
+        // account's own catalog id cannot be, so it is answered as the server-side failure
+        // it would be rather than blamed on the request.
+        let Some(catalog) = store.catalog_mut_for_create(&catalog_id) else {
+            return Err(
+                PutDataCatalogExportConfigurationErrorModeled::InternalServiceException(
+                    InternalServiceException {
+                        message: Some(format!(
+                            "the Glue Data Catalog store cannot hold a catalog under \
+                             CatalogId {catalog_id}"
+                        )),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        // "Creates or updates the export configuration": the first write on a catalog
+        // creates the record, and a later one replaces what it holds while keeping the
+        // instant the configuration was created.
+        let stored = match catalog.export_configuration.as_mut() {
+            Some(configuration) => {
+                configuration.apply_put(
+                    &input.export_setting,
+                    input.encryption_configuration.as_ref(),
+                    input.client_token.as_deref(),
+                    now,
+                );
+                configuration.clone()
+            }
+            None => {
+                let configuration = crate::state::DataCatalogExportConfigurationEntry::from_put(
+                    &input.export_setting,
+                    input.encryption_configuration.as_ref(),
+                    input.client_token.as_deref(),
+                    now,
+                );
+                catalog.export_configuration = Some(configuration.clone());
+                configuration
+            }
+        };
+        ::tracing::info!(
+            operation = "PutDataCatalogExportConfiguration",
+            catalog_id = %catalog_id,
+            export_setting = %stored.setting,
+            "set a Data Catalog's export configuration"
+        );
+
+        // Both members come from the record just stored, so the write reports exactly what a
+        // later `GetDataCatalogExportConfiguration` reports from it.
+        Ok(PutDataCatalogExportConfigurationOutput {
+            export_setting: Some(stored.setting),
+            encryption_configuration: stored.encryption_configuration,
+        })
     }
 }

@@ -13203,6 +13203,7 @@ dependencies = [
  "service-com-amazonaws-lakeformation-awslakeformation",
  "service-com-amazonaws-lambda-awsgirapiservice",
  "service-com-amazonaws-s3-amazons3",
+ "service-com-amazonaws-s3tables-s3tablebuckets",
  "service-com-amazonaws-ssoadmin-swbexternalservice",
  "service-com-amazonaws-sts-awssecuritytokenservicev20110615",
  "service-common",

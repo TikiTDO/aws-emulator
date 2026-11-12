@@ -1545,3 +1545,35 @@ pub fn configuration_min_above_max(parameter: &str, section: &str, max_value: &s
              to max value {max_value}."
     )
 }
+
+/// A `PutDataCatalogExportConfiguration` whose `EncryptionConfiguration` is not the
+/// encryption the table bucket the export writes into is already protected by
+/// ([`super::export_encryption_differs`]): the bucket's encryption is the bucket's own, so a
+/// configuration that disagrees with it cannot be applied and the write is refused rather
+/// than stored.
+///
+/// RECORDED template: the refusal text is itself a JSON document carrying the sentence under
+/// a `Message` key, the way this surface's other documents are
+/// ([`super::glossary_already_exists_message`]), and the sentence names the bucket the export
+/// writes into — which is the service's own bucket for it
+/// ([`super::EXPORT_TABLE_BUCKET_NAME`]) and the one variable part, since no request names a
+/// bucket.
+pub fn export_table_bucket_encryption_conflict(table_bucket_name: &str) -> String {
+    super::catalog_refusal_document(&format!(
+        "The existing table bucket {table_bucket_name} uses a different encryption \
+             configuration than the request."
+    ))
+}
+
+/// A `PutDataCatalogExportConfiguration` whose `ExportEncryptionConfiguration` names an
+/// `SseAlgorithm` that is not one of the two the member documents
+/// ([`super::EXPORT_SSE_ALGORITHMS`]). NOT recorded: what is pinned is the behaviour — 400
+/// with the operation's modelled `InvalidInputException` — and a sentence carrying the value
+/// as submitted and the values the member admits.
+pub fn unsupported_export_sse_algorithm(value: &str) -> String {
+    format!(
+        "SseAlgorithm {value} is not supported for the data catalog export; supported \
+             values are {}",
+        super::EXPORT_SSE_ALGORITHMS.join(" and ")
+    )
+}

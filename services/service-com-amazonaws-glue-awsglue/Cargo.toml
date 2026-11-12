@@ -41,6 +41,11 @@ service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true 
 # the `InstanceArn` of a Glue Identity Center configuration is resolved against the
 # instances `CreateInstance`/`ListInstances` answer for.
 service-com-amazonaws-ssoadmin-swbexternalservice = { workspace = true }
+# The account's own S3 Tables table buckets, reached through the same shared engine: the
+# Data Catalog export writes its metadata into a table bucket, and S3 Tables owns that
+# resource — so the bucket enabling the export brings into existence is created there and
+# the encryption a write is checked against is the bucket's own, read from that service.
+service-com-amazonaws-s3tables-s3tablebuckets = { workspace = true }
 # The KMS client the catalog resolves `EncryptionAtRest$SseAwsKmsKeyId` through, and
 # encrypts and decrypts a catalog object's data key with, over the in-process callback
 # into this same emulator (no network client feature is enabled: the transport is the

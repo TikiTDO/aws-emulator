@@ -22,6 +22,15 @@ pub struct Catalog {
     /// than merging into it. What a read reports from it, defaults included, is
     /// [`ComAmazonawsGlueAwsglueState::data_catalog_encryption_settings`].
     pub encryption_settings: Option<DataCatalogEncryptionSettings>,
+    /// The EXPORT configuration a `PutDataCatalogExportConfiguration` last wrote for this
+    /// catalog, or `None` while no write has configured one.
+    ///
+    /// ONE record per catalog, like [`Self::encryption_settings`]: neither operation that
+    /// addresses the export configuration carries a `CatalogId` at all, so the account's own
+    /// Data Catalog is the whole address and a write REPLACES this record rather than merging
+    /// into it. What a read reports from it — including for a catalog that has none — is
+    /// [`ComAmazonawsGlueAwsglueState::data_catalog_export_configuration`].
+    pub export_configuration: Option<DataCatalogExportConfigurationEntry>,
     /// The MIGRATION of an Athena-managed data catalog into this catalog that an
     /// `ImportCatalogToGlue` performed, or `None` while no such request has migrated one.
     ///
