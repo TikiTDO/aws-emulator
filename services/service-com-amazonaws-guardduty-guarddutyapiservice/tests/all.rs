@@ -101,6 +101,8 @@ mod findings_metadata_batch_clock;
 mod findings_statistics;
 #[path = "all/free_trial_days.rs"]
 mod free_trial_days;
+#[path = "all/identity_authorization.rs"]
+mod identity_authorization;
 #[path = "all/investigation_clock_coupling.rs"]
 mod investigation_clock_coupling;
 #[path = "all/investigation_detector_timestamp.rs"]

@@ -14,6 +14,12 @@
 //! paginated, so a caller walking it with any `maxResults` sees each feature
 //! exactly once.
 //!
+//! The report exists only where its subject does: with no account selected as the
+//! organization's GuardDuty delegated administrator, there is nothing to report, so
+//! the call is refused with
+//! [`crate::scaffolded::DELEGATED_ADMINISTRATOR_NOT_ENABLED_MESSAGE`] before any
+//! detector is resolved.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -184,6 +190,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // A pure report: nothing below writes to the store.
         let state = state.lock();
+
+        // "Returns information about the account selected as the delegated
+        // administrator for GuardDuty"
+        // (`smithy_query(query="doc",shape="DescribeOrganizationConfiguration")`):
+        // with no account selected as the organization's GuardDuty delegated
+        // administrator, there is no such information to return, so the report is
+        // refused rather than answered with a configuration nobody administers
+        // ([`crate::scaffolded::caller_is_delegated_administrator`] is the one
+        // reading of that standing every operation restricted to it shares).
+        // Refused BEFORE the detector is resolved, so the answer says nothing about
+        // what the account holds.
+        if !crate::scaffolded::caller_is_delegated_administrator(&state, &region) {
+            return Err(crate::scaffolded::Scaffolded::invalid_input(
+                crate::scaffolded::DELEGATED_ADMINISTRATOR_NOT_ENABLED_MESSAGE,
+            ));
+        }
+
         let Some(detector) = state.detector_in(&region, &input.detector_id) else {
             // Classified from the REQUEST — a malformed id is a parameter failure,
             // a well-formed one this account does not hold an ownership failure.

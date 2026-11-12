@@ -7,6 +7,22 @@ publish = false
 build = "build.rs"
 
 [dependencies]
+# The shared reading of a URI path label and `iam_authorization` — the ONE evaluation
+# of IAM policy documents against an action on a resource, so every service that
+# enforces authorization decides alike. It also carries the shared readings of a
+# caller-supplied IAM role ARN — which role of this account it names, and what this
+# account's IAM records say that role may do — which a Malware Protection plan's
+# `Role` is held to before a plan is recorded, rather than a copy of that reading
+# here.
+service-common = { path = "../common" }
+# The two services this one's authorization gate reads the caller and its permissions
+# through: STS resolves the access key id a request presents to the principal it
+# speaks for (`src/service/authorization.rs`), and IAM holds the identity-based policy
+# documents and the permissions boundary in force on that principal. Read through
+# those services' own accessors, so a document their operations wrote takes effect on
+# the next request.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
 engine = { workspace = true }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }
@@ -37,11 +53,6 @@ aws-sdk-eks = { version = "1", default-features = false }
 # token names its own listing; `hex` renders that digest into the token.
 sha2 = { workspace = true }
 hex = { workspace = true }
-# `service-common` carries the shared readings of a caller-supplied IAM role ARN —
-# which role of this account it names, and what this account's IAM records say that
-# role may do — which a Malware Protection plan's `Role` is held to before a plan is
-# recorded, rather than a copy of that reading here.
-service-common = { path = "../common" }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

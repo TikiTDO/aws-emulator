@@ -29,6 +29,10 @@
 //!    auto-enablement value the model does not carry, and the two Runtime Monitoring
 //!    features enabled together.
 //! 5. A read changes nothing a later read sees.
+//! 6. The report is about the account selected as the GuardDuty delegated
+//!    administrator, so an organization that has none selected has no report: the read
+//!    is refused with HTTP 400 and GuardDuty's sentence for that missing precondition,
+//!    whatever made the standing absent.
 
 use serde_json::{json, Value};
 
@@ -36,6 +40,8 @@ use crate::detector_lifecycle::{
     call, call_in, enabled_detector, error_code, error_shape, new_router, Router,
     ABSENT_DETECTOR_ID,
 };
+// The designation this report is about, made through the operation that makes it.
+use crate::organization_admin_accounts::{disable_admin, enable_admin, past_the_removal};
 // The Region a case that does not name one calls through, defined once beside the
 // member-call harness.
 use crate::member_association::DEFAULT_REGION;
@@ -94,11 +100,31 @@ const GOVERNED_NODES: [(&str, &[&str]); 3] = [
 /// (`smithy_query(shape="OrgFeatureAdditionalConfiguration")`).
 const ADDITIONAL_CONFIGURATION: &str = "EC2_AGENT_MANAGEMENT";
 
+/// Designate the account this emulator serves as the GuardDuty delegated administrator
+/// `region`'s endpoint holds.
+///
+/// `DescribeOrganizationConfiguration` "returns information about the account selected
+/// as the delegated administrator for GuardDuty"
+/// (`smithy_query(query="doc",shape="DescribeOrganizationConfiguration")`), so an
+/// organization with no account selected has no such report and the call is refused
+/// (asserted by [`the_report_needs_a_delegated_administrator_to_be_about`]). That
+/// standing is the PRECONDITION of every read below, so it is established here —
+/// re-designating the account a Region already holds is the same designation, which is
+/// why this is safe before every read.
+pub(crate) async fn delegated_administrator_in(router: &Router, region: &str) {
+    let (status, got) = enable_admin(router, region, ::engine::emulator_account_id()).await;
+    assert_eq!(
+        status, 200,
+        "designating the delegated administrator of {region}: expected 200, got {status} {got:?}"
+    );
+}
+
 /// `DescribeOrganizationConfiguration` through `region`'s endpoint, asserting it
 /// succeeded. The region-less [`describe`] is this with [`DEFAULT_REGION`], so a
 /// suite that spans two administrators and one that stays with a single detector
 /// read an organization configuration through ONE helper.
 pub(crate) async fn describe_in(router: &Router, region: &str, detector_id: &str) -> Value {
+    delegated_administrator_in(router, region).await;
     let (status, got) = call_in(
         router,
         region,
@@ -126,6 +152,7 @@ async fn describe_page(
     max_results: Option<usize>,
     next_token: Option<&str>,
 ) -> (u16, Value) {
+    delegated_administrator_in(router, DEFAULT_REGION).await;
     let mut query = Vec::new();
     if let Some(max_results) = max_results {
         query.push(format!("maxResults={max_results}"));
@@ -796,9 +823,20 @@ async fn an_unheld_detector_id_is_refused_by_both_operations() {
         ),
     ];
     let router = new_router();
+    // The describe half is about the DETECTOR id, so the standing that report needs is
+    // established first — otherwise its refusal would be the delegated-administrator one
+    // ([`the_report_needs_a_delegated_administrator_to_be_about`]) and the row would
+    // assert nothing about the id.
+    delegated_administrator_in(&router, DEFAULT_REGION).await;
     for (id, why) in ids {
         let (status, got) = call(&router, "GET", &format!("/detector/{id}/admin"), None).await;
         assert_rejected(status, &got, &format!("describe {why}"));
+        assert_ne!(
+            got["message"].as_str().unwrap_or_default(),
+            service_com_amazonaws_guardduty_guarddutyapiservice::scaffolded::DELEGATED_ADMINISTRATOR_NOT_ENABLED_MESSAGE,
+            "describe {why}: the refusal must be about the detector id, not the standing, \
+             got {got:?}"
+        );
         let (status, got) =
             update(&router, id, json!({"autoEnableOrganizationMembers": "NEW"})).await;
         assert_rejected(status, &got, &format!("update {why}"));
@@ -1047,6 +1085,119 @@ async fn a_read_changes_nothing_a_later_read_sees() {
         assert_eq!(
             again, first,
             "read {round}: a report must not change what a later caller sees"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule 6.
+// ---------------------------------------------------------------------------
+
+/// The report is about the account selected as the GuardDuty delegated administrator,
+/// so without one selected there is nothing to report and the read is refused.
+///
+/// The rows span every way the standing can be absent — never designated, designated
+/// for ANOTHER account, designated through another Region's endpoint only, and a
+/// designation whose removal the clock has already settled — and the refusal is the
+/// same 400 with the same sentence for each, because the one fact it reports is that
+/// the precondition is missing. Each row then designates this account and reads again,
+/// so the test cannot pass against a handler that simply always refuses.
+#[tokio::test]
+async fn the_report_needs_a_delegated_administrator_to_be_about() {
+    // What the delegated-administrator refusal states — the service's own sentence for
+    // the missing precondition, read from the crate so the test tracks the handler's
+    // wording rather than restating it.
+    use service_com_amazonaws_guardduty_guarddutyapiservice::scaffolded::DELEGATED_ADMINISTRATOR_NOT_ENABLED_MESSAGE;
+
+    // The account this emulator serves, which is the only one a designation makes the
+    // delegated administrator of the organization it answers for.
+    let served = ::engine::emulator_account_id();
+    // An account id of the modelled form that is not the one this emulator serves.
+    const ANOTHER_ACCOUNT: &str = "999999999000";
+    // A second Region's endpoint, since a designation is held by the Region the
+    // designating request was signed for and by no other.
+    const ANOTHER_REGION: &str = "eu-west-1";
+
+    // (the case, whether the row has to wait out a removal the clock owes)
+    type Absent = (&'static str, bool);
+    let rows: [Absent; 4] = [
+        ("no designation at all", false),
+        ("a designation for another account", false),
+        ("a designation through another Region only", false),
+        ("a designation whose removal has settled", true),
+    ];
+
+    for (case, waits) in rows {
+        let router = new_router();
+        let detector_id = enabled_detector(&router).await;
+        match case {
+            "a designation for another account" => {
+                let (status, got) = enable_admin(&router, DEFAULT_REGION, ANOTHER_ACCOUNT).await;
+                assert_eq!(
+                    status, 200,
+                    "case {case:?}: the setup designation expected 200, got {status} {got:?}"
+                );
+            }
+            "a designation through another Region only" => {
+                let (status, got) = enable_admin(&router, ANOTHER_REGION, served).await;
+                assert_eq!(
+                    status, 200,
+                    "case {case:?}: the setup designation expected 200, got {status} {got:?}"
+                );
+            }
+            "a designation whose removal has settled" => {
+                let (status, got) = enable_admin(&router, DEFAULT_REGION, served).await;
+                assert_eq!(
+                    status, 200,
+                    "case {case:?}: the setup designation expected 200, got {status} {got:?}"
+                );
+                let (status, got) = disable_admin(&router, DEFAULT_REGION, served).await;
+                assert_eq!(
+                    status, 200,
+                    "case {case:?}: the setup removal expected 200, got {status} {got:?}"
+                );
+            }
+            _ => {}
+        }
+        if waits {
+            tokio::time::sleep(past_the_removal()).await;
+        }
+
+        let (status, got) = call(
+            &router,
+            "GET",
+            &format!("/detector/{detector_id}/admin"),
+            None,
+        )
+        .await;
+        assert_rejected(status, &got, case);
+        assert_eq!(
+            got["message"].as_str().unwrap_or_default(),
+            DELEGATED_ADMINISTRATOR_NOT_ENABLED_MESSAGE,
+            "case {case:?}: expected GuardDuty's sentence for a missing delegated \
+             administrator, got {got:?}"
+        );
+
+        // The same read, once this account IS the organization's delegated
+        // administrator: the refusal above is the missing standing and nothing else.
+        if case == "a designation for another account" {
+            // One organization has at most one delegated administrator, so the other
+            // account's designation is removed before this one is made.
+            let (status, got) = disable_admin(&router, DEFAULT_REGION, ANOTHER_ACCOUNT).await;
+            assert_eq!(
+                status, 200,
+                "case {case:?}: the setup removal expected 200, got {status} {got:?}"
+            );
+            tokio::time::sleep(past_the_removal()).await;
+        }
+        let reported = describe(&router, &detector_id).await;
+        assert_eq!(
+            reported["autoEnableOrganizationMembers"]
+                .as_str()
+                .unwrap_or_default(),
+            "NONE",
+            "case {case:?}: with the standing held the read must report the stored \
+             configuration, got {reported:?}"
         );
     }
 }

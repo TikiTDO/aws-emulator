@@ -40,6 +40,11 @@
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
 
+/// Whether IAM lets a request perform the action it names — the decision taken in
+/// front of every operation whose model declares `AccessDeniedException`, through
+/// the [`authorization::Gated`] wrapper `override_operation` below resolves.
+pub mod authorization;
+
 /// The refusal sentences this service answers whatever the operation and whatever
 /// made the request unacceptable — the wording that belongs to no one resource
 /// family, beside `override_refusal` below, which words what the request boundary
@@ -47,8 +52,9 @@
 pub mod refusals;
 
 use smithy_server_runtime::{
-    http, ErasedOperation, Refusal, Refused, Service,
+    http, ErasedOperation, Operation, Refusal, Refused, Service,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// The `com-amazonaws-guardduty-guarddutyapiservice` emulated service: the generated [`ServiceDefinition`] plus
@@ -58,6 +64,13 @@ use std::sync::Arc;
 /// router builds one shared engine and hands it to `new`.
 pub struct EmulatedService<Eng: Send + Sync + 'static> {
     entry: crate::ServiceDefinition<Eng>,
+    /// One [`authorization::Gated`] per operation whose model declares
+    /// `AccessDeniedException`, keyed by the routing key the model names that
+    /// operation by ([`Operation::NAME`], the same key the generated routing table
+    /// uses). Built once here, never per request; each entry carries the operation's
+    /// TYPE and a handle on the one shared engine, so this is a table of names rather
+    /// than a second set of operations.
+    gated: HashMap<&'static str, Box<dyn ErasedOperation>>,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -66,9 +79,69 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// operation's behaviour lives in that operation's own `impl Operation`.
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
+            gated: gated_table::<Eng>(&engine),
             entry: crate::ServiceDefinition::new(engine),
         }
     }
+}
+
+/// The [`authorization::Gated`] wrapper for every operation whose model declares
+/// `AccessDeniedException` ([`authorization::GATED_OPERATIONS`]).
+///
+/// Authorization is a property of the request's identity, the action it names and the
+/// resource it addresses rather than of what a handler goes on to do, so it is taken
+/// here for all of them at once — implemented or still scaffolded. A stub answers 501
+/// for a request whose caller IAM permits and the refusal otherwise, which is the
+/// order the real service evaluates them in; leaving a modelled operation out would
+/// serve an unauthorized caller, the very divergence this removes.
+fn gated_table<Eng: Send + Sync + 'static>(
+    engine: &Arc<Eng>,
+) -> HashMap<&'static str, Box<dyn ErasedOperation>> {
+    let mut wrappers: HashMap<&'static str, Box<dyn ErasedOperation>> = HashMap::new();
+    macro_rules! register {
+        ($($module:ident :: $operation:ident),+ $(,)?) => {
+            $(
+                wrappers.insert(
+                    <crate::ops::$module::$operation<Eng> as Operation>::NAME,
+                    Box::new(authorization::Gated::<
+                        crate::ops::$module::$operation<Eng>,
+                        Eng,
+                    >::new(Arc::clone(engine))) as Box<dyn ErasedOperation>,
+                );
+            )+
+        };
+    }
+    register!(
+        create_custom_detection_rule_association::CreateCustomDetectionRuleAssociation,
+        create_custom_detection_rule_org_configuration::CreateCustomDetectionRuleOrgConfiguration,
+        create_investigation::CreateInvestigation,
+        create_ip_set::CreateIPSet,
+        create_malware_protection_plan::CreateMalwareProtectionPlan,
+        create_threat_intel_set::CreateThreatIntelSet,
+        delete_custom_detection_rule_association::DeleteCustomDetectionRuleAssociation,
+        delete_custom_detection_rule_org_configuration::DeleteCustomDetectionRuleOrgConfiguration,
+        delete_malware_protection_plan::DeleteMalwareProtectionPlan,
+        get_custom_detection_rule::GetCustomDetectionRule,
+        get_custom_detection_rule_association::GetCustomDetectionRuleAssociation,
+        get_custom_detection_rule_org_configuration::GetCustomDetectionRuleOrgConfiguration,
+        get_investigation::GetInvestigation,
+        get_malware_protection_plan::GetMalwareProtectionPlan,
+        list_custom_detection_rule_associations::ListCustomDetectionRuleAssociations,
+        list_custom_detection_rule_org_configurations::ListCustomDetectionRuleOrgConfigurations,
+        list_custom_detection_rules::ListCustomDetectionRules,
+        list_investigations::ListInvestigations,
+        list_malware_protection_plans::ListMalwareProtectionPlans,
+        list_tags_for_resource::ListTagsForResource,
+        send_object_malware_scan::SendObjectMalwareScan,
+        tag_resource::TagResource,
+        untag_resource::UntagResource,
+        update_custom_detection_rule_association::UpdateCustomDetectionRuleAssociation,
+        update_custom_detection_rule_org_configuration::UpdateCustomDetectionRuleOrgConfiguration,
+        update_ip_set::UpdateIPSet,
+        update_malware_protection_plan::UpdateMalwareProtectionPlan,
+        update_threat_intel_set::UpdateThreatIntelSet,
+    );
+    wrappers
 }
 
 impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
@@ -93,12 +166,16 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         &self,
         req: &aws_smithy_runtime_api::http::Request,
     ) -> Option<&dyn ErasedOperation> {
-        // Return `Some(op)` to serve a request the model's routing key cannot name
-        // correctly; `None` (the default) lets the generated routing table resolve
-        // it. `req` is the whole request, so a decision that depends on the body —
-        // the `Action` form field on a query protocol, say — is reachable here.
-        let _ = req;
-        None
+        // NOT a re-route: the key is the one the generated table's own protocol
+        // resolves, and the operation it names is the one served — wrapped in
+        // [`authorization::Gated`] so IAM's decision about the action is taken BEFORE
+        // the handler runs, as AWS takes it. Only the operations whose model declares
+        // `AccessDeniedException` are in that table
+        // ([`authorization::GATED_OPERATIONS`]); every other key resolves to `None`
+        // here exactly as it did before, so the generated table serves it unchanged
+        // and the router's routing-error path is untouched.
+        let key = self.entry.protocol().routing_key(req).ok()?;
+        self.gated.get(key).map(::std::convert::AsRef::as_ref)
     }
 
     fn override_refusal(&self, refusal: &Refusal) -> Option<Refused> {
@@ -160,5 +237,32 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // consume it on `None`.
         let _ = error;
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RULE: the operations REGISTERED behind the authorization gate are exactly the ones
+    /// [`authorization::GATED_OPERATIONS`] names — which that module's own test holds to
+    /// the set the model declares `AccessDeniedException` for.
+    ///
+    /// Without this, the `register!` list above could drop an operation while the model and
+    /// the constant still said it was judged, and that operation would serve an
+    /// unauthorized caller. The table is built over a stand-in engine type carrying no
+    /// state: this asserts which KEYS are registered, and no request is served.
+    #[test]
+    fn every_gated_operation_is_registered_behind_the_authorization_gate() {
+        let registered = gated_table::<()>(&Arc::new(()));
+        let mut keys: Vec<&str> = registered.keys().copied().collect();
+        keys.sort_unstable();
+        let mut gated: Vec<&str> = authorization::GATED_OPERATIONS.to_vec();
+        gated.sort_unstable();
+        assert_eq!(
+            keys, gated,
+            "case \"the registered table\": expected exactly the gated operations, got \
+             {keys:?} against {gated:?}"
+        );
     }
 }

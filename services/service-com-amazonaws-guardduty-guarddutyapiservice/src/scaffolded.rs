@@ -273,6 +273,24 @@ pub const ACCESS_DENIED_EXCEPTION: &str = "AccessDeniedException";
 pub const NOT_AUTHORIZED_MESSAGE: &str =
     "The request is rejected because the caller is not authorized to call this API.";
 
+/// The message an operation that reports the GuardDuty DELEGATED ADMINISTRATOR's own
+/// configuration refuses a request with when the organization the endpoint serves has
+/// no delegated administrator enabled.
+///
+/// `DescribeOrganizationConfiguration` "returns information about the account
+/// selected as the delegated administrator for GuardDuty"
+/// (`smithy_query(query="doc",shape="DescribeOrganizationConfiguration")`): with no
+/// account selected there is no such information, so the request is refused rather
+/// than answered with a configuration nobody administers. Entirely FIXED text — it
+/// names neither the account nor the Region, because the one fact it reports is that
+/// the precondition is missing.
+///
+/// It is a DIFFERENT refusal from [`NOT_AUTHORIZED_MESSAGE`], which answers a caller
+/// that may not make a call the organization's delegated administrator may: this one
+/// says the organization has no delegated administrator at all.
+pub const DELEGATED_ADMINISTRATOR_NOT_ENABLED_MESSAGE: &str =
+    "The request failed because a delegated administrator account has not been enabled.";
+
 /// The error CLASS GuardDuty names a request it refuses because work it collides
 /// with is already running.
 ///
