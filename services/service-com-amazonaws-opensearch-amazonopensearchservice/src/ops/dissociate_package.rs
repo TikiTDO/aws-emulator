@@ -88,7 +88,7 @@ use super::types::*;
 
 use std::time::SystemTime;
 
-use crate::state::{internal_failure, AssociationRefusal};
+use crate::state::{domain_not_on_latest_software_version, internal_failure, AssociationRefusal};
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -202,8 +202,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 }
 
 /// The shared refusal, as THIS operation's error channel names it.
+///
+/// The decision reports an unresolvable `DomainName` as a condition rather than
+/// wording it, so this operation answers it with the sentence the service words ITS
+/// refusal with: this call reaches the domain behind the capability gate the feature
+/// sits behind, so a name it cannot resolve is refused as a domain that cannot serve
+/// the feature, and the refusal carries no part of the request.
 fn refuse(refusal: AssociationRefusal) -> DissociatePackageError {
     match refusal {
+        AssociationRefusal::DomainUnresolved(_) => {
+            DissociatePackageErrorModeled::ValidationException(
+                domain_not_on_latest_software_version(),
+            )
+        }
         AssociationRefusal::Conflict(payload) => {
             DissociatePackageErrorModeled::ConflictException(payload)
         }

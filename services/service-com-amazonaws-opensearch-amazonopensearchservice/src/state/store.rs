@@ -939,10 +939,13 @@ impl ComAmazonawsOpensearchAmazonopensearchserviceState {
         request: &AssociationRequest,
         associated_by_request: &BTreeSet<String>,
     ) -> Result<Package, AssociationRefusal> {
+        // The condition is reported, not worded: which sentence an unresolvable
+        // `DomainName` is refused with belongs to the OPERATION that answers, so this
+        // decision hands the name back and the handler words it.
         let domain = self
             .domains
             .get(domain_name)
-            .ok_or_else(|| AssociationRefusal::Validation(domain_does_not_exist(domain_name)))?;
+            .ok_or_else(|| AssociationRefusal::DomainUnresolved(domain_name.to_string()))?;
         let package = self
             .packages
             .get(&request.package_id)
@@ -1073,10 +1076,13 @@ impl ComAmazonawsOpensearchAmazonopensearchserviceState {
         domain_name: &str,
         package_id: &str,
     ) -> Result<Package, AssociationRefusal> {
+        // As on the association side, the condition is reported and the handler words
+        // it: these two operations do not refuse an unresolvable `DomainName` with the
+        // same sentence.
         let domain = self
             .domains
             .get(domain_name)
-            .ok_or_else(|| AssociationRefusal::Validation(domain_does_not_exist(domain_name)))?;
+            .ok_or_else(|| AssociationRefusal::DomainUnresolved(domain_name.to_string()))?;
         let package = self
             .packages
             .get(package_id)

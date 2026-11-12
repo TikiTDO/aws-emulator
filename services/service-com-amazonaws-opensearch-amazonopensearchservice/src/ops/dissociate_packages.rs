@@ -257,8 +257,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 }
 
 /// The shared refusal, as THIS operation's error channel names it.
+///
+/// The decision reports an unresolvable `DomainName` as a condition; the sentence is
+/// this operation's, the same one it refuses such a batch with before any entry is
+/// planned.
 fn refuse(refusal: AssociationRefusal) -> DissociatePackagesError {
     match refusal {
+        AssociationRefusal::DomainUnresolved(domain_name) => {
+            DissociatePackagesErrorModeled::ValidationException(domain_does_not_exist(&domain_name))
+        }
         AssociationRefusal::Conflict(payload) => {
             DissociatePackagesErrorModeled::ConflictException(payload)
         }

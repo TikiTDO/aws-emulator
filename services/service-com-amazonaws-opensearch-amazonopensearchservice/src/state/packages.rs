@@ -449,6 +449,18 @@ pub const PACKAGE_NOT_FOUND: &str = "Package not found.";
 pub const DUPLICATE_PACKAGES_IN_REQUEST: &str =
     "Operation not allowed. Duplicate packages found in the request.";
 
+/// The message the single-package dissociation refuses a `DomainName` it cannot
+/// resolve with ([`domain_not_on_latest_software_version`]).
+///
+/// That call reaches the domain through the capability gate this feature sits behind
+/// rather than through a plain existence check, so a name it cannot resolve is
+/// reported as a domain that cannot serve the feature. The service's own fixed
+/// sentence for that condition: it is the WHOLE message, trailing space included, and
+/// has no variable part — neither the domain nor the package appears in it.
+pub const DOMAIN_NOT_ON_LATEST_SOFTWARE_VERSION: &str =
+    "The domain is not on the latest software version. Upgrade the domain to start using \
+     this feature. ";
+
 /// The message a dissociation of a package the domain is not holding is refused with
 /// ([`package_not_associated`]).
 ///
@@ -728,6 +740,21 @@ pub fn domain_does_not_exist(domain_name: &str) -> ValidationException {
     }
 }
 
+/// The `ValidationException` payload the single-package dissociation answers a
+/// `DomainName` that names no domain of this account with.
+///
+/// Unlinking one package resolves the domain behind the capability gate the feature
+/// sits behind, so a name that resolves to nothing is reported as a domain that cannot
+/// serve the call ([`DOMAIN_NOT_ON_LATEST_SOFTWARE_VERSION`]) rather than as a value
+/// that names no domain: the wording carries no part of the request. Compare
+/// [`domain_does_not_exist`], which is what the association calls answer the same
+/// condition with.
+pub fn domain_not_on_latest_software_version() -> ValidationException {
+    ValidationException {
+        message: Some(DOMAIN_NOT_ON_LATEST_SOFTWARE_VERSION.to_string()),
+    }
+}
+
 /// The `ValidationException` payload for a batch that names the same package more than
 /// once: a domain holds ONE association per package, so a request that names it twice
 /// asks for two states of one association and is refused as a WHOLE.
@@ -776,6 +803,15 @@ pub struct AssociationRequest {
 /// though the error channels do not.
 #[derive(Debug)]
 pub enum AssociationRefusal {
+    /// The call's `DomainName` resolves to no domain of this account, carried as the
+    /// name that could not be resolved.
+    ///
+    /// Reported on its OWN variant because the WORDING of this refusal belongs to the
+    /// operation that emits it, not to the decision: the shared decision reports the
+    /// condition, and each handler answers it with the sentence the service words that
+    /// operation's refusal with. The class (client input, HTTP 400) is the same for
+    /// all of them.
+    DomainUnresolved(String),
     /// The package or the association is in a status that cannot serve the call.
     Conflict(ConflictException),
     /// The request is not one the domain can serve as asked — a value it carries
