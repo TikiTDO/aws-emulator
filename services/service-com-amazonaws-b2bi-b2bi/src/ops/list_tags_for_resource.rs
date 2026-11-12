@@ -4,9 +4,11 @@
 //! Reports the tags stored on the resource an ARN names. `@readonly`: it writes nothing.
 //!
 //! Each reported `Tag` object carries the `__type` discriminator this service's
-//! `awsJson1_0` wire puts on a structure value, naming the shape the object is an
-//! instance of ([`TAG_WIRE_SHAPE_ID`]) — on every entry of the list, whatever stored the
-//! tag. [`Discriminated`] is what writes it.
+//! `awsJson1_0` wire puts on a structure value, naming the shape the object is an instance
+//! of — on every entry of the list, whatever stored the tag. That is written at the wire
+//! seam every response of this service passes through (`crate::service::wire`), not here:
+//! the discriminator belongs to the SHAPE, so one place writes it for every operation that
+//! reports one.
 //!
 //! The `ResourceARN` is validated in two steps, each with its own wording, and this
 //! operation raises no not-found refusal at all: a value that does not satisfy the ARN
@@ -86,9 +88,6 @@
 #[allow(unused_imports)]
 use super::types::*;
 
-use ::aws_smithy_schema::serde::{SerdeError, SerializableStruct, ShapeSerializer};
-use ::aws_smithy_schema::{Schema, ShapeId, ShapeType};
-
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -123,119 +122,6 @@ impl From<ListTagsForResourceErrorModeled> for ListTagsForResourceError {
     }
 }
 
-/// The shape id this service's wire names a `Tag` object by, written as its `__type`
-/// member before the structure's own modelled members.
-///
-/// `awsJson1_0` lets any structure value on the wire carry a `__type` member naming the
-/// shape it is an instance of, and this service writes one on every `Tag` object it
-/// reports — the discriminator is a property of the SHAPE, so it travels with each entry
-/// whatever put the tag there (a create-time `tags` list, `TagResource`, or what survived
-/// an `UntagResource`) and however many entries the list holds.
-///
-/// The id is the one this service's own internal model declares the shape under, which is
-/// not the public `com.amazonaws.b2bi#Tag` id the projection in `smithy-model/` carries:
-/// the recorded AWS responses for this operation name the internal shape. It is a constant
-/// of the shape, not of any one request.
-const TAG_WIRE_SHAPE_ID: &str = "com.amazonaws.visby.common#Tag";
-
-/// Schema for the `__type` discriminator a structure value carries on this service's
-/// wire.
-///
-/// Synthetic: no service model declares it, so it lives in the `smithy.api` namespace the
-/// framework's own error-envelope discriminator uses rather than colliding with a modelled
-/// shape. The codec needs a [`Schema`] to write a string through; what reaches the wire is
-/// this member's name.
-///
-/// This is written from OUTSIDE `Tag` rather than from inside its own
-/// `SerializableStruct`, because `Tag` is read from the wire as well as written to it (it
-/// is the element of the `tags` / `Tags` member of the creates and of `TagResource`): its
-/// `#[smithy_macros::smithy(shape = …)]` expansion is also what derives its deserializer
-/// and captures the `@length` bounds on `Key` and `Value` for the request-path validating
-/// walk, so replacing that expansion to add one response-only member would hand-write both
-/// and leave the modelled bounds to drift. Pairing the value with its id at the point it
-/// is SERIALIZED keeps the model-derived shape intact, and the validating walk — which
-/// drives an input through a serializer — never sees a member the model does not declare.
-static TYPE_DISCRIMINATOR_SCHEMA: Schema = Schema::new_member(
-    ShapeId::from_static("smithy.api#__type", "smithy.api", "__type"),
-    ShapeType::String,
-    "__type",
-    0,
-)
-.with_json_name("__type");
-
-/// The one member the modelled `ListTagsForResourceResponse` declares
-/// (`smithy_query(query="operation",operation="ListTagsForResource")`: `Tags`, a
-/// `TagList` of `len 0..200`). Named, not restated: the member's own schema is read off
-/// the GENERATED output schema below, so the model stays the single source of what the
-/// response member is called and how it is spelled on the wire.
-const TAGS_MEMBER_NAME: &str = "Tags";
-
-/// A modelled structure paired with the shape id this service's wire discriminates it by.
-///
-/// It serializes as the structure's own members with `__type` written first, so wrapping a
-/// value is the whole difference between a bare object and the document AWS sends for it.
-/// Generic over the structure: another of this service's nested shapes is discriminated by
-/// pairing it with ITS internal shape id, with no second copy of this adaptor.
-pub struct Discriminated<'a, T> {
-    /// The shape id written as `__type`.
-    shape_id: &'static str,
-    /// The structure whose members follow it.
-    value: &'a T,
-}
-
-impl<'a, T> Discriminated<'a, T> {
-    /// Pair `value` with the shape id the wire names it by.
-    pub fn new(shape_id: &'static str, value: &'a T) -> Self {
-        Self { shape_id, value }
-    }
-}
-
-impl<T: SerializableStruct> SerializableStruct for Discriminated<'_, T> {
-    fn serialize_members(&self, s: &mut dyn ShapeSerializer) -> Result<(), SerdeError> {
-        s.write_string(&TYPE_DISCRIMINATOR_SCHEMA, self.shape_id)?;
-        self.value.serialize_members(s)
-    }
-}
-
-/// This operation's response: the stored tag list, written as the modelled
-/// `ListTagsForResourceResponse` with every entry discriminated.
-///
-/// It stands in for the generated `ListTagsForResourceOutput` because a generated output
-/// shape serializes exactly the members the model declares, and the `__type` the wire
-/// carries on a nested structure is not one of them.
-pub struct ListTagsForResourceResponse {
-    /// The tags persisted on the resource, in the order the store holds them.
-    pub tags: Vec<Tag>,
-}
-
-impl SerializableStruct for ListTagsForResourceResponse {
-    fn serialize_members(&self, s: &mut dyn ShapeSerializer) -> Result<(), SerdeError> {
-        // The generated schema of the modelled output shape is what names and spells this
-        // member, so the member it declares is the one written — a `Tags` the model no
-        // longer declares is a serialize error (HTTP 500) rather than a member invented
-        // here.
-        let tags_member = super::types::LIST_TAGS_FOR_RESOURCE_OUTPUT_SCHEMA
-            .members()
-            .iter()
-            .copied()
-            .find(|member| member.member_name() == Some(TAGS_MEMBER_NAME))
-            .ok_or_else(|| {
-                SerdeError::custom(format!(
-                    "ListTagsForResourceResponse declares no {TAGS_MEMBER_NAME} member"
-                ))
-            })?;
-
-        // A resource nobody tagged reports an EMPTY list rather than an absent member:
-        // the tags are known, and there are none.
-        s.write_list(tags_member, &|items| {
-            for tag in &self.tags {
-                items.write_struct(&Tag::SCHEMA, &Discriminated::new(TAG_WIRE_SHAPE_ID, tag))?;
-            }
-            Ok(())
-        })
-    }
-}
-
 /// The `ListTagsForResource` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -259,7 +145,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     for ListTagsForResource<Eng>
 {
     type Input = ListTagsForResourceInput;
-    type Output = ListTagsForResourceResponse;
+    type Output = ListTagsForResourceOutput;
     type Error = ListTagsForResourceError;
 
     const NAME: &'static str = "ListTagsForResource";
@@ -319,6 +205,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // Every stored resource owns a tag list, so one nobody tagged reports an EMPTY
         // list rather than an absent member: the tags are known, and there are none.
-        Ok(ListTagsForResourceResponse { tags: tags.clone() })
+        Ok(ListTagsForResourceOutput {
+            tags: Some(tags.clone()),
+        })
     }
 }

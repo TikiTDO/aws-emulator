@@ -774,6 +774,20 @@ pub fn now() -> ::aws_smithy_types::DateTime {
     ::aws_smithy_types::DateTime::from(::std::time::SystemTime::now())
 }
 
+/// The two timestamps a resource record is STORED with, as `(createdAt, modifiedAt)`.
+///
+/// `modifiedAt` reports when the record was last written, and creating it IS a write: a
+/// resource nobody has updated since reports a `modifiedAt` equal to its `createdAt`
+/// rather than no `modifiedAt` at all. One [`now`] for both, so the pair cannot disagree
+/// by the time the call takes.
+pub fn created_timestamps() -> (
+    ::aws_smithy_types::DateTime,
+    Option<::aws_smithy_types::DateTime>,
+) {
+    let at = now();
+    (at, Some(at))
+}
+
 /// The ARN a request's own identifier names, for authorization.
 ///
 /// Built from the REQUEST rather than from the store, because a request is authorized

@@ -23,6 +23,7 @@ use crate::onboarding_loop::{
 // The shape id this service's wire discriminates a `Tag` object by, stated once for the
 // whole test target in the suite that owns that rule.
 use crate::tag_type_discriminator::TAG_WIRE_SHAPE_ID;
+use crate::wire_timestamps_and_discriminators::as_wire_reports;
 
 /// Every configuration member `CreateTransformerResponse` can echo, so a row can assert
 /// that what it did NOT send comes back absent.
@@ -230,9 +231,12 @@ async fn a_created_transformer_round_trips_every_persisted_member() {
             created["tags"]
         );
 
+        // A nested structure is reported with the `__type` this service's wire puts on its
+        // shape, which `as_wire_reports` adds to the value the request carried.
         for member in CONFIGURATION_MEMBERS {
             assert_eq!(
-                created[*member], request[*member],
+                created[*member],
+                as_wire_reports(member, &request[*member]),
                 "case {case:?}: {member} must come back exactly as supplied (absent when \
                  omitted): got {:?}, sent {:?}",
                 created[*member], request[*member]
@@ -264,10 +268,10 @@ async fn a_created_transformer_round_trips_every_persisted_member() {
             );
         }
         assert_eq!(
-            fetched["modifiedAt"],
-            Value::Null,
-            "case {case:?}: a never-updated transformer has no modifiedAt, got {:?}",
-            fetched["modifiedAt"]
+            fetched["modifiedAt"], fetched["createdAt"],
+            "case {case:?}: a transformer nobody has updated reports its creation instant as \
+             modifiedAt, got {:?} against a createdAt of {:?}",
+            fetched["modifiedAt"], fetched["createdAt"]
         );
 
         // Tags live on the stored record, so this service's tag reader reports exactly

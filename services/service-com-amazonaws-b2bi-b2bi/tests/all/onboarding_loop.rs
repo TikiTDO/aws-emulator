@@ -496,9 +496,10 @@ async fn a_created_profile_is_readable_listable_and_carries_its_derived_members(
             );
         }
         assert_eq!(
-            fetched["modifiedAt"], Value::Null,
-            "case {case:?}: a never-updated profile has no modifiedAt, got {:?}",
-            fetched["modifiedAt"]
+            fetched["modifiedAt"], fetched["createdAt"],
+            "case {case:?}: a profile nobody has updated reports its creation instant as \
+             modifiedAt, got {:?} against a createdAt of {:?}",
+            fetched["modifiedAt"], fetched["createdAt"]
         );
     }
 
@@ -623,8 +624,10 @@ async fn a_created_capability_round_trips_its_configuration_and_instructions_doc
             "case {case:?}: createdAt must be stable across reads"
         );
         assert_eq!(
-            fetched["modifiedAt"], Value::Null,
-            "case {case:?}: a never-updated capability has no modifiedAt"
+            fetched["modifiedAt"], fetched["createdAt"],
+            "case {case:?}: a capability nobody has updated reports its creation instant as \
+             modifiedAt, got {:?} against a createdAt of {:?}",
+            fetched["modifiedAt"], fetched["createdAt"]
         );
     }
 
@@ -828,8 +831,10 @@ async fn a_created_partnership_round_trips_every_persisted_member() {
             );
         }
         assert_eq!(
-            fetched["modifiedAt"], Value::Null,
-            "case {case:?}: a never-updated partnership has no modifiedAt"
+            fetched["modifiedAt"], fetched["createdAt"],
+            "case {case:?}: a partnership nobody has updated reports its creation instant as \
+             modifiedAt, got {:?} against a createdAt of {:?}",
+            fetched["modifiedAt"], fetched["createdAt"]
         );
     }
 }
@@ -1380,7 +1385,7 @@ async fn updating_a_profile_applies_only_the_members_it_names() {
             "case {case:?}: the update must succeed, got {status} {updated}"
         );
         assert!(
-            updated["modifiedAt"].is_number(),
+            updated["modifiedAt"].is_string(),
             "case {case:?}: an update must report when it happened, got {updated}"
         );
         assert_eq!(

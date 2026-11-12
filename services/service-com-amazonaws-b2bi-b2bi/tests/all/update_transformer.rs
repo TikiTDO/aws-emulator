@@ -20,6 +20,7 @@ use crate::onboarding_loop::{
     b2bi_router, call, call_signed_for, error_code, text, ACCOUNT, SIGNING_REGION,
 };
 use crate::transformer_lifecycle::{current_members, legacy_members, CONFIGURATION_MEMBERS};
+use crate::wire_timestamps_and_discriminators::{as_wire_reports, date_time_seconds};
 
 /// The members `UpdateTransformer` can write: the eight configuration members plus the two
 /// the model lets a caller set directly.
@@ -55,11 +56,11 @@ async fn created_transformer(
     (text(&created, "transformerId"), created)
 }
 
-/// The epoch seconds of a timestamp member, which awsJson1_0 renders as a number.
+/// The epoch seconds of a timestamp member, which this service renders in the `date-time`
+/// form its model declares (`crate::wire_timestamps_and_discriminators`, which owns that
+/// rule, is what asserts the form).
 fn seconds(body: &Value, member: &str) -> f64 {
-    body[member]
-        .as_f64()
-        .unwrap_or_else(|| panic!("{member} must be an epoch-seconds number, got {:?}", body[member]))
+    date_time_seconds(body, member)
 }
 
 /// RULE: `UpdateTransformer` writes exactly the members the request names onto the stored
@@ -193,6 +194,10 @@ async fn an_update_writes_the_named_members_and_leaves_the_rest() {
                 // `status` is the only member the create assigns rather than echoes.
                 created.get(member).cloned().unwrap_or(Value::Null)
             });
+            // A nested structure is reported with the `__type` this service's wire puts on
+            // its shape, so that is part of the expectation — `as_wire_reports` adds it to
+            // the value the request carried.
+            let expected = as_wire_reports(member, &expected);
             assert_eq!(
                 updated[member], expected,
                 "case {case:?}: {member} must be {expected:?} (the update's value, or the \
@@ -362,7 +367,8 @@ async fn an_active_transformer_takes_no_update_at_all() {
             "case {member:?}: an inactive transformer must take the update, got {status} {served}"
         );
         assert_eq!(
-            served[*member], *value,
+            served[*member],
+            as_wire_reports(member, value),
             "case {member:?}: the update must be stored, got {:?}",
             served[*member]
         );
@@ -488,7 +494,7 @@ async fn mixing_the_deprecated_and_current_configuration_members_is_refused() {
     }
 
     // None of the 16 refusals touched the record: it is still exactly what the create
-    // stored, and still carries no `modifiedAt`.
+    // stored, and its `modifiedAt` is still the instant the create stamped.
     let (status, fetched) = call(
         &router,
         "GetTransformer",
@@ -497,10 +503,9 @@ async fn mixing_the_deprecated_and_current_configuration_members_is_refused() {
     .await;
     assert_eq!(status, 200, "GetTransformer must succeed, got {status} {fetched}");
     assert_eq!(
-        fetched["modifiedAt"],
-        Value::Null,
-        "a refused update must not stamp modifiedAt, got {:?}",
-        fetched["modifiedAt"]
+        fetched["modifiedAt"], fetched["createdAt"],
+        "a refused update must not stamp modifiedAt, got {:?} against a createdAt of {:?}",
+        fetched["modifiedAt"], fetched["createdAt"]
     );
     for member in updatable_members() {
         assert_eq!(

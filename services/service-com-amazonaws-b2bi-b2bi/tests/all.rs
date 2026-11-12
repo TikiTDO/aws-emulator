@@ -73,5 +73,7 @@ mod update_partnership_refusal_status;
 mod update_transformer;
 #[path = "all/wire_response_text.rs"]
 mod wire_response_text;
+#[path = "all/wire_timestamps_and_discriminators.rs"]
+mod wire_timestamps_and_discriminators;
 #[path = "all/list_transformers.rs"]
 mod list_transformers;

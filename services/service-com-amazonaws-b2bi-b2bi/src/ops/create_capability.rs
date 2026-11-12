@@ -414,6 +414,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         while state.capabilities.contains_key(&capability_id) {
             capability_id = crate::state::new_resource_id("ca");
         }
+        let (created_at, modified_at) = crate::state::created_timestamps();
         let capability = crate::state::Capability {
             capability_arn: ::engine::emulator_arn(
                 "b2bi",
@@ -426,8 +427,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             configuration: input.configuration,
             instructions_documents: input.instructions_documents,
             request_digest: digest,
-            created_at: crate::state::now(),
-            modified_at: None,
+            created_at,
+            modified_at,
             tags: input.tags.unwrap_or_default(),
         };
 

@@ -514,6 +514,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             transformer_id = crate::state::new_resource_id("t");
         }
         let region = crate::state::request_region(ctx.parts());
+        let (created_at, modified_at) = crate::state::created_timestamps();
         let transformer = crate::state::Transformer {
             transformer_arn: ::engine::emulator_arn(
                 "b2bi",
@@ -531,8 +532,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             mapping: input.mapping,
             output_conversion: input.output_conversion,
             sample_documents: input.sample_documents,
-            created_at: crate::state::now(),
-            modified_at: None,
+            created_at,
+            modified_at,
             tags: input.tags.unwrap_or_default(),
             request_digest: digest,
         };

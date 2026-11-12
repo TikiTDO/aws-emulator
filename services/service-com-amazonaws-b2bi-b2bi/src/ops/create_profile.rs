@@ -562,6 +562,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             if let Some(settled) = replayed {
                 settled
             } else {
+                let (created_at, modified_at) = crate::state::created_timestamps();
                 let profile = crate::state::Profile {
                     profile_arn: ::engine::emulator_arn(
                         "b2bi",
@@ -575,8 +576,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     phone: input.phone,
                     business_name: input.business_name,
                     logging: input.logging,
-                    created_at: crate::state::now(),
-                    modified_at: None,
+                    created_at,
+                    modified_at,
                     tags: input.tags.unwrap_or_default(),
                     request_digest: digest,
                 };

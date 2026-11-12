@@ -18,6 +18,7 @@ use crate::onboarding_loop::{
     b2bi_router, call, call_signed_for, error_code, given_transformer, text, SIGNING_REGION,
 };
 use crate::transformer_lifecycle::{current_members, legacy_members};
+use crate::wire_timestamps_and_discriminators::{as_wire_reports, date_time_seconds};
 
 /// Every member `TransformerSummary` declares.
 ///
@@ -107,8 +108,9 @@ fn ids(summaries: &[Value]) -> Vec<String> {
 /// `outputConversion` / `sampleDocuments` members and the deprecated `ediType` /
 /// `fileFormat` / `mappingTemplate` / `sampleDocument` ones), several subsets of each, a
 /// create with no configuration member at all, tags present and absent, two signing
-/// regions, and both values of the modelled `TransformerStatus` (a record left `inactive`
-/// and one activated, which also carries a `modifiedAt`).
+/// regions, and both values of the modelled `TransformerStatus` (a record left `inactive`,
+/// whose `modifiedAt` is still the instant it was created, and one activated, whose
+/// `modifiedAt` the update moved).
 #[tokio::test]
 async fn listing_reports_every_stored_transformer_in_creation_order() {
     let router = b2bi_router();
@@ -226,10 +228,13 @@ async fn listing_reports_every_stored_transformer_in_creation_order() {
                 summary[*member], fetched[*member]
             );
         }
-        // A configuration member the create omitted is absent from the summary too.
+        // A configuration member the create omitted is absent from the summary too, and a
+        // nested structure is reported with the `__type` this service's wire puts on its
+        // shape, which `as_wire_reports` adds to the value the request carried.
         for member in crate::transformer_lifecycle::CONFIGURATION_MEMBERS {
             assert_eq!(
-                summary[*member], request[*member],
+                summary[*member],
+                as_wire_reports(member, &request[*member]),
                 "case {case:?}: {member} must be reported exactly as supplied (absent when \
                  omitted): got {:?}, sent {:?}",
                 summary[*member], request[*member]
@@ -241,11 +246,14 @@ async fn listing_reports_every_stored_transformer_in_creation_order() {
             "case {case:?}: expected the stored status, got {:?}",
             summary["status"]
         );
-        assert_eq!(
-            summary["modifiedAt"].is_null(),
-            !*activate,
-            "case {case:?}: only an updated transformer carries a modifiedAt, got {:?}",
-            summary["modifiedAt"]
+        // Every stored transformer carries a `modifiedAt`: the instant it was created,
+        // which an update (this row's activation) moves forward.
+        let created_at = date_time_seconds(summary, "createdAt");
+        let modified_at = date_time_seconds(summary, "modifiedAt");
+        assert!(
+            modified_at >= created_at,
+            "case {case:?}: modifiedAt {modified_at} must be at or after createdAt \
+             {created_at}"
         );
         // `TransformerSummary` models no ARN and no tags, so neither is reported.
         for absent in ["transformerArn", "tags"] {

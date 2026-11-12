@@ -382,6 +382,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             partnership_id = crate::state::new_resource_id("ps");
         }
         let region = crate::state::request_region(ctx.parts());
+        let (created_at, modified_at) = crate::state::created_timestamps();
         let partnership = crate::state::Partnership {
             partnership_arn: ::engine::emulator_arn(
                 "b2bi",
@@ -397,8 +398,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             capability_options: input.capability_options,
             trading_partner_id: crate::state::new_resource_id("tp"),
             request_digest: digest,
-            created_at: crate::state::now(),
-            modified_at: None,
+            created_at,
+            modified_at,
             tags: input.tags.unwrap_or_default(),
         };
 

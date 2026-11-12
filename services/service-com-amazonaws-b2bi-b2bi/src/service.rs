@@ -34,11 +34,18 @@
 //!   failure the orchestrator detects up front (e.g. a malformed `aws-chunked`
 //!   body). The default returns `None`, keeping the entry's protocol-correct
 //!   rendering. Return `Some(resp)` to reword it if desired.
+//! - `override_protocol` — the codec the modelled sequence runs through. This
+//!   service returns its own [`wire::B2biJsonProtocol`]: the model's `awsJson1_0`
+//!   with the two corrections that belong to the wire rather than to any one
+//!   operation (the `date-time` form of a timestamp, and the `__type` a nested
+//!   structure carries).
 //!
 //! The model-derived half of this service — its identity, wire protocol, routing
 //! table, and the default error renderers — lives in the generated `ServiceDefinition`
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
+
+pub mod wire;
 
 use smithy_server_runtime::{
     http, ErasedOperation, Refusal, Refused, Service, Violation, ViolationKind,
@@ -160,6 +167,9 @@ fn reworded_envelope(violations: &[Violation]) -> Option<String> {
 /// router builds one shared engine and hands it to `new`.
 pub struct EmulatedService<Eng: Send + Sync + 'static> {
     entry: crate::ServiceDefinition<Eng>,
+    /// This service's wire protocol, built once here because `override_protocol` hands
+    /// back a borrow of it. See [`wire`].
+    protocol: wire::B2biJsonProtocol,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -169,6 +179,7 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
             entry: crate::ServiceDefinition::new(engine),
+            protocol: wire::B2biJsonProtocol::new(),
         }
     }
 }
@@ -236,6 +247,17 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // word that routing failure in your own envelope instead.
         let _ = req;
         None
+    }
+
+    fn override_protocol(&self) -> Option<&dyn smithy_server_runtime::ServerHttpProtocol> {
+        // The model-derived protocol is `awsJson1_0`, and so is this one: it delegates
+        // routing, request deserialization and the error envelope to the framework's own
+        // `awsJson1_0`, and differs only in the success body — where a timestamp goes out
+        // in the `date-time` form its model declares, and a nested structure of the
+        // service's shared internal model carries the `__type` discriminator the
+        // recordings of this API show on it. See [`wire`] for both rules and the shapes
+        // they cover.
+        Some(&self.protocol)
     }
 
     fn override_framework_error(

@@ -514,7 +514,8 @@ async fn an_update_whose_configuration_does_not_resolve_is_refused_and_writes_no
         );
 
         // Nothing was written: every member, including the `name` the same request asked
-        // to change, is still the created one, and the record carries no `modifiedAt`.
+        // to change, is still the created one, and `modifiedAt` is still the instant the
+        // create stamped.
         let fetched = get_capability(&router, &capability_id).await;
         assert_eq!(
             fetched, created,
@@ -522,10 +523,10 @@ async fn an_update_whose_configuration_does_not_resolve_is_refused_and_writes_no
              {fetched} instead of {created}"
         );
         assert_eq!(
-            fetched["modifiedAt"],
-            Value::Null,
-            "case {case:?}: a refused update must not stamp modifiedAt, got {:?}",
-            fetched["modifiedAt"]
+            fetched["modifiedAt"], fetched["createdAt"],
+            "case {case:?}: a refused update must not stamp modifiedAt, got {:?} against a \
+             createdAt of {:?}",
+            fetched["modifiedAt"], fetched["createdAt"]
         );
     }
 
