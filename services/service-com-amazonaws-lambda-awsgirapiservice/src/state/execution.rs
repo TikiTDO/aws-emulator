@@ -67,6 +67,10 @@ pub mod package;
 pub mod outcome;
 pub use outcome::{Budget, Completion, Finished, Stop};
 
+/// The clock a run's time-based bounds are read against, which the HOST owns.
+pub mod run_clock;
+pub use run_clock::Clock;
+
 /// The Python interpreter one invocation runs in, and everything that bounds and contains
 /// it.
 pub mod python;
@@ -277,7 +281,7 @@ pub const MAX_ABANDONED_RUNS: usize = 8;
 /// The stack one run's thread is given. Well above the interpreter's clamped recursion
 /// limit, so deep guest recursion ends that run with the interpreter's own
 /// `RecursionError` rather than touching the thread's guard page.
-pub(crate) const RUN_STACK_BYTES: usize = 16 * 1024 * 1024;
+pub const RUN_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 /// The smallest `Timeout` the model allows (`smithy_query(query="shape",
 /// shape="Timeout")`: `@range(min: 1)`), which a stored value is clamped up to before it

@@ -55,6 +55,12 @@
 //!   `sys.gettrace`, so no guest call can clear or replace it either. The stop is LATCHED:
 //!   once the budget is spent the run's answer is that stop, whatever the guest goes on to
 //!   return or catch.
+//!   Every deadline of a run — the one the hook spends and the one the host's own watch
+//!   samples — is read against the CLOCK the host hands the run ([`run_against`]), which is
+//!   this host's own for every invocation this emulator serves. A run can therefore be
+//!   judged against a clock whose span the host's own speed cannot spend, which is what lets
+//!   a run asked about one of the bounds below be answered by THAT bound rather than by its
+//!   deadline on a host slow enough to spend it.
 //! * MEMORY is sampled from outside the guest — this thread's faulted pages and the
 //!   process's resident size — because the interpreter exposes no allocation seam; a sample
 //!   past the run's own ceiling ends the run, and so does one showing the run has grown the
@@ -88,6 +94,11 @@ use rustpython_vm::{AsObject, Interpreter, PyObjectRef, PyRef, PyResult, Setting
 // What one run may spend and what it came to are the same for every engine, so they are
 // the shared ones ([`super::outcome`]) rather than this interpreter's own.
 pub use super::outcome::{Budget, Completion, Finished, Stop};
+
+// So is the clock a run's time-based bounds are read against ([`super::run_clock`]): WHICH
+// clock a run is judged by is a property of the run ([`run_against`]) rather than a call to
+// the host buried inside each check.
+pub use super::run_clock::Clock;
 
 use super::aws_api::{AwsAccess, Refusal, MAX_CALLS_PER_RUN};
 use super::outcome::{captured, Capture};
@@ -235,9 +246,25 @@ pub struct Run<'a> {
 /// interpreter is synchronous and CPU-bound.
 #[must_use]
 pub fn run(request: &Run<'_>) -> Finished {
+    run_against(request, &Clock::host())
+}
+
+/// [`run`], against the CLOCK this run's time-based bounds are read from.
+///
+/// Which bound stops a run is the host's own reading, so which clock the host reads is a
+/// property of the run: every invocation this emulator serves is bounded against this host's
+/// own clock ([`Clock::host`], which is what [`run`] passes), and a run driven to establish
+/// that ONE named bound is what stops it is bounded against a clock whose span this host's
+/// speed cannot spend ([`super::run_clock`]) — so a run asked about its memory ceiling, its
+/// step budget or its response cap is not answered by its deadline instead because the host
+/// was slow.
+#[must_use]
+pub fn run_against(request: &Run<'_>, clock: &Clock) -> Finished {
+    // The run's own DURATION is this host's own elapsed time whatever clock bounds the run:
+    // what it reports is how long the caller waited, which is not a bound.
     let started = Instant::now();
     let capture = Arc::new(Mutex::new(Capture::new(request.budget.log_bytes)));
-    let bounds = Arc::new(Bounds::new(&request.budget));
+    let bounds = Arc::new(Bounds::new(&request.budget, clock.clone()));
     let completion = evaluate(request, &capture, &bounds);
     let elapsed = started.elapsed();
     // The stop LATCH wins over whatever the guest answered: a run whose budget was spent
@@ -1219,6 +1246,9 @@ pub struct Bounds {
     deadline: Mutex<Instant>,
     /// How long the handler may run for.
     wall_clock: Duration,
+    /// The clock every deadline of this run is read against, which the HOST hands the run
+    /// ([`run_against`]) and no guest code can reach.
+    clock: Clock,
     /// When the HANDLER's run must be over, in milliseconds since the epoch, which is what
     /// the handler is told it has left. Set by [`Self::start`].
     deadline_epoch_ms: ::std::sync::atomic::AtomicI64,
@@ -1265,12 +1295,13 @@ impl Bounds {
     /// The MEMORY baselines are taken by [`Self::measure_memory_from_here`], once the
     /// interpreter this emulator builds is standing and before any of the run's own code is
     /// read — by the host, because a baseline a guest could re-take is no ceiling at all.
-    fn new(budget: &Budget) -> Self {
+    fn new(budget: &Budget, clock: Clock) -> Self {
         Self {
             deadline: Mutex::new(
-                Instant::now() + super::INIT_PHASE_LIMIT.saturating_add(budget.wall_clock),
+                clock.now() + super::INIT_PHASE_LIMIT.saturating_add(budget.wall_clock),
             ),
             wall_clock: budget.wall_clock,
+            clock,
             deadline_epoch_ms: ::std::sync::atomic::AtomicI64::new(0),
             steps: AtomicU64::new(budget.steps),
             spent: AtomicU64::new(0),
@@ -1320,7 +1351,9 @@ impl Bounds {
             return self.deadline_epoch_ms.load(Ordering::Relaxed);
         }
         *self.deadline.lock().unwrap_or_else(PoisonError::into_inner) =
-            Instant::now() + self.wall_clock;
+            self.clock.now() + self.wall_clock;
+        // What the handler is TOLD it has left is a host wall-clock instant rather than a
+        // bound: the bound is the deadline above, which this run's own clock is read for.
         let epoch_ms = super::epoch_millis(SystemTime::now() + self.wall_clock);
         self.deadline_epoch_ms.store(epoch_ms, Ordering::Relaxed);
         epoch_ms
@@ -1358,7 +1391,7 @@ impl Bounds {
         if self.stopped().is_some() {
             return;
         }
-        if Instant::now() >= self.deadline() {
+        if self.clock.now() >= self.deadline() {
             self.breach(Stop::Deadline);
             return;
         }
@@ -1381,7 +1414,7 @@ impl Bounds {
         if self.steps.fetch_sub(1, Ordering::Relaxed) == 0 {
             return Some(self.breach(Stop::Steps));
         }
-        if Instant::now() >= self.deadline() {
+        if self.clock.now() >= self.deadline() {
             return Some(self.breach(Stop::Deadline));
         }
         // The run's OWN memory is sampled at EVERY traced event, so there is no sampling
@@ -1449,7 +1482,7 @@ impl Bounds {
 
     /// How long the run has left.
     fn remaining(&self) -> Duration {
-        self.deadline().saturating_duration_since(Instant::now())
+        self.deadline().saturating_duration_since(self.clock.now())
     }
 }
 
@@ -1478,26 +1511,54 @@ mod tests {
 
     /// A budget small enough to exhaust in a test and large enough for any handler one
     /// runs.
+    ///
+    /// Its memory ceiling is out of reach ([`CEILING_OUT_OF_REACH`]), because a row that is
+    /// not about the ceiling must not be answered by it: the ceiling is read from the whole
+    /// PROCESS as well as from the run, and this binary's own growth belongs to no row. A row
+    /// about the ceiling gives itself one it can reach.
     fn budget() -> Budget {
         Budget {
             wall_clock: Duration::from_secs(5),
             steps: 2_000_000,
-            memory_bytes: 256 * 1024 * 1024,
+            memory_bytes: CEILING_OUT_OF_REACH,
             log_bytes: 16 * 1024,
             response_bytes: 64 * 1024,
             recursion_limit: 2_000,
         }
     }
 
-    /// The wall clock a row about the MEMORY ceiling is given.
+    /// How long this module waits for a run's own thread to end before it reports the run as
+    /// one that did not end at all.
     ///
-    /// A row that names ONE bound has to be answerable by that bound alone, and the row
-    /// that names the ceiling reaches it by allocating: a run is stopped the moment the
-    /// allocation that passes the ceiling lands, so a row never spends this span — it only
-    /// keeps a host that faults those pages in slowly from answering the row with the clock
-    /// instead of with the ceiling. It stays well inside the span each row asserts the stop
-    /// arrives within.
-    const ROOM_TO_ALLOCATE: Duration = Duration::from_secs(20);
+    /// NOT a bound on the run: every bound a run has is the host's own, read inside the run
+    /// ([`Bounds`]). This is the backstop that keeps a run which will not end from wedging
+    /// the suite — the host gives such a run up and answers its caller anyway
+    /// ([`super::run_invocation`]), and so does this module. It is far above any span a
+    /// row's own bound takes, so no row is ever answered by it.
+    const RUN_ANSWER_CEILING: Duration = Duration::from_secs(240);
+
+    /// How far ONE reading drives the clock a row about the DEADLINE is judged against.
+    ///
+    /// A deadline read against a driven clock ([`Clock::driven`]) falls after a NUMBER of
+    /// readings — the run's own traced events, and the host watch's samples of it — rather
+    /// than after a span of this host's time, so which bound answers such a row is the same
+    /// on an idle host and on a loaded one. It is small against the span it has to drive the
+    /// clock across, so the phase a row is about is reached long before the readings taken
+    /// getting there have driven the deadline past it.
+    const DRIVEN_TICK: Duration = Duration::from_micros(10);
+
+    /// A memory ceiling a row about any OTHER bound cannot reach: the largest `MemorySize` a
+    /// function may have (`smithy_query(query="shape", shape="MemorySize")`:
+    /// `@range(min: 128, max: 32768)`), in bytes.
+    ///
+    /// The ceiling is read from the whole PROCESS as well as from the run
+    /// ([`Bounds::past_process_ceiling`]): a run that allocated nothing of its own is stopped
+    /// for memory once this process has grown past its ceiling by more than the run's own
+    /// ceiling allows it to add — and in a test binary running many suites at once, that
+    /// growth is other suites' and no row's own. A row that names another bound is therefore
+    /// given the largest ceiling a function may have, which neither half of the memory bound
+    /// can reach, so the bound the row names is the only one that can answer it.
+    const CEILING_OUT_OF_REACH: u64 = 32_768 * 1024 * 1024;
 
     /// Run `source` as the module `lambda_function` of a one-file package, on a thread with
     /// the stack a run is given — the same way [`super::run_invocation`] runs one.
@@ -1505,13 +1566,40 @@ mod tests {
         ran_with(source, handler, event, &BTreeMap::new(), budget())
     }
 
-    /// [`ran`] with an environment and a budget of its own.
+    /// [`ran`] with an environment and a budget of its own, against this host's own clock.
     fn ran_with(
         source: &str,
         handler: &str,
         event: Option<&str>,
         environment: &BTreeMap<String, String>,
         budget: Budget,
+    ) -> Finished {
+        ran_against(
+            source,
+            handler,
+            event,
+            environment,
+            budget,
+            &Clock::host(),
+            "a run against this host's own clock",
+        )
+    }
+
+    /// [`ran_with`] against `clock`, which is what leaves ONE bound able to answer the run:
+    /// a row that names a bound other than the deadline is judged against a clock that does
+    /// not advance, and a row that names the deadline against one the run's own readings
+    /// drive.
+    ///
+    /// The run's answer is waited for rather than joined on, so a run that will not end
+    /// fails the row that asked for it ([`RUN_ANSWER_CEILING`]) instead of holding the suite.
+    fn ran_against(
+        source: &str,
+        handler: &str,
+        event: Option<&str>,
+        environment: &BTreeMap<String, String>,
+        budget: Budget,
+        clock: &Clock,
+        case: &str,
     ) -> Finished {
         let modules = vec![PackageModule {
             path: "lambda_function.py".to_string(),
@@ -1520,27 +1608,35 @@ mod tests {
         let handler = handler.to_string();
         let event = event.map(str::to_string);
         let environment = environment.clone();
+        let clock = clock.clone();
+        let (answered, answer) = ::std::sync::mpsc::channel();
         ::std::thread::Builder::new()
             .stack_size(crate::state::execution::RUN_STACK_BYTES)
             .spawn(move || {
-                run(&Run {
-                    modules: &modules,
-                    handler: &handler,
-                    environment: &environment,
-                    event: event.as_deref(),
-                    request_id: "11111111-2222-3333-4444-555555555555",
-                    invoked_function_arn: "arn:aws:lambda:us-west-2:000000000000:function:probe",
-                    client_context: None,
-                    tenant_id: None,
-                    budget,
-                    // These runs are the interpreter's own containment and bounds: no
-                    // emulator is standing behind them, so there is no SDK seam either.
-                    aws: None,
-                })
+                let finished = run_against(
+                    &Run {
+                        modules: &modules,
+                        handler: &handler,
+                        environment: &environment,
+                        event: event.as_deref(),
+                        request_id: "11111111-2222-3333-4444-555555555555",
+                        invoked_function_arn:
+                            "arn:aws:lambda:us-west-2:000000000000:function:probe",
+                        client_context: None,
+                        tenant_id: None,
+                        budget,
+                        // These runs are the interpreter's own containment and bounds: no
+                        // emulator is standing behind them, so there is no SDK seam either.
+                        aws: None,
+                    },
+                    &clock,
+                );
+                let _ = answered.send(finished);
             })
-            .expect("a run thread")
-            .join()
-            .expect("the run thread ended")
+            .expect("a run thread");
+        answer.recv_timeout(RUN_ANSWER_CEILING).unwrap_or_else(|_| {
+            panic!("case {case}: the run did not end, so no bound of it ended it")
+        })
     }
 
     /// The JSON the handler returned, or a panic naming what it came to instead.
@@ -1737,60 +1833,121 @@ mod tests {
 
     /// Every bound is the HOST's: one row per bound, each exhausted from guest code, and
     /// each ends the run with that bound rather than with an answer.
+    ///
+    /// A row names ONE bound, so the row is given a run only that bound can answer: the
+    /// CLOCK the run's deadline is read against is the row's own
+    /// ([`super::super::run_clock`]), and a row about a bound that is not a span of time is
+    /// judged against a clock that does not advance — which is what keeps a host slow enough
+    /// to spend the deadline from answering the row with the deadline instead of with the
+    /// bound the row is about. The MEMORY ceiling is put out of reach of every row but the
+    /// one about it for the same reason ([`CEILING_OUT_OF_REACH`]). The last two rows are the
+    /// same guest code under two different runs, so what differs between their answers is the
+    /// bound each run left reachable and nothing of the host.
     #[test]
     fn a_run_that_breaches_a_bound_is_stopped_by_it() {
-        let cases: &[(&str, &str, Stop)] = &[
-            (
-                "a loop with no exit",
-                "while True:\n        pass\n",
-                Stop::Steps,
-            ),
-            (
-                "unbounded recursion",
-                "def deep(n):\n        return deep(n + 1)\n    deep(0)\n",
-                Stop::Steps,
-            ),
-            (
-                "a response larger than one may be",
-                "return 'x' * 200000\n",
-                Stop::Response,
-            ),
-            (
-                "an allocating loop",
-                "kept = []\n    \
-                     while True:\n        \
-                         kept.append(bytearray(1024 * 1024))\n",
-                Stop::Memory,
-            ),
+        /// One row: the bound it is about, the handler body that reaches it, and the run
+        /// that leaves that bound the only one able to answer.
+        struct BoundCase<'a> {
+            /// What the row is about.
+            case: &'a str,
+            /// The handler's body, which reaches the bound below.
+            body: &'a str,
+            /// The bound that has to end the run.
+            expected: Stop,
+            /// The clock the run's deadline is read against.
+            clock: Clock,
+            /// How many traced events the run may spend: a row about the DEADLINE has to
+            /// reach it before the step budget answers instead.
+            steps: u64,
+            /// How long the handler may run for, in that clock's own time.
+            wall_clock: Duration,
+            /// How much memory the run may add to this process.
+            memory_bytes: u64,
+        }
+        // Enough events for a row about another bound to reach it, and far fewer than a row
+        // about the deadline drives its clock across.
+        let few_steps = 50_000;
+        let many_steps = 2_000_000_000;
+        // Small enough that an allocating handler passes it inside the step budget, and far
+        // above what building the interpreter itself faults in.
+        let reachable_ceiling = 64 * 1024 * 1024;
+        let cases = vec![
+            BoundCase {
+                case: "a loop with no exit",
+                body: "while True:\n        pass\n",
+                expected: Stop::Steps,
+                clock: Clock::still(),
+                steps: few_steps,
+                wall_clock: budget().wall_clock,
+                memory_bytes: CEILING_OUT_OF_REACH,
+            },
+            BoundCase {
+                case: "unbounded recursion",
+                body: "def deep(n):\n        return deep(n + 1)\n    deep(0)\n",
+                expected: Stop::Steps,
+                clock: Clock::still(),
+                steps: few_steps,
+                wall_clock: budget().wall_clock,
+                memory_bytes: CEILING_OUT_OF_REACH,
+            },
+            BoundCase {
+                case: "a response larger than one may be",
+                body: "return 'x' * 200000\n",
+                expected: Stop::Response,
+                clock: Clock::still(),
+                steps: few_steps,
+                wall_clock: budget().wall_clock,
+                memory_bytes: CEILING_OUT_OF_REACH,
+            },
+            BoundCase {
+                case: "an allocating loop",
+                body: "kept = []\n    \
+                       while True:\n        \
+                           kept.append(bytearray(1024 * 1024))\n",
+                expected: Stop::Memory,
+                clock: Clock::still(),
+                steps: few_steps,
+                wall_clock: budget().wall_clock,
+                memory_bytes: reachable_ceiling,
+            },
+            BoundCase {
+                case: "a loop with no exit, with events enough to drive its clock past the \
+                       deadline",
+                body: "while True:\n        pass\n",
+                expected: Stop::Deadline,
+                clock: Clock::driven(DRIVEN_TICK),
+                steps: many_steps,
+                wall_clock: Duration::from_secs(1),
+                memory_bytes: CEILING_OUT_OF_REACH,
+            },
         ];
-        for (case, body, expected) in cases {
-            let source = format!("def handler(event, context):\n    {body}");
+        for case in &cases {
+            let source = format!("def handler(event, context):\n    {}", case.body);
             let mut tight = budget();
-            tight.steps = 50_000;
-            // Small enough that an allocating handler passes it inside the step budget,
-            // and far above what building the interpreter itself faults in.
-            tight.memory_bytes = 64 * 1024 * 1024;
-            if *expected == Stop::Memory {
-                tight.wall_clock = ROOM_TO_ALLOCATE;
-            }
-            let finished = ran_with(
+            tight.steps = case.steps;
+            tight.wall_clock = case.wall_clock;
+            tight.memory_bytes = case.memory_bytes;
+            let finished = ran_against(
                 &source,
                 "lambda_function.handler",
                 None,
                 &BTreeMap::new(),
                 tight,
+                &case.clock,
+                case.case,
             );
             let stopped = match &finished.completion {
                 Completion::Stopped(stop) => Some(*stop),
                 // Deep recursion may end at the interpreter's own clamped limit first,
                 // which is also the host's bound doing its job.
                 Completion::Raised { error_type, .. } if error_type == "RecursionError" => None,
-                other => panic!("case {case}: expected a stop, got {other:?}"),
+                other => panic!("case {}: expected a stop, got {other:?}", case.case),
             };
             if let Some(stopped) = stopped {
                 assert_eq!(
-                    stopped, *expected,
-                    "case {case}: expected {expected:?}, got {stopped:?}"
+                    stopped, case.expected,
+                    "case {}: expected {:?}, got {stopped:?}",
+                    case.case, case.expected
                 );
             }
         }
@@ -1798,6 +1955,9 @@ mod tests {
 
     /// The step budget cannot be escaped by catching what the hook raises: the stop is
     /// LATCHED, so the run's answer is the stop whatever the guest returns afterwards.
+    ///
+    /// The run is judged against a clock that does not advance, so the stop the guest
+    /// catches is the step budget whatever this host's own clock did meanwhile.
     #[test]
     fn a_guest_that_catches_the_stop_is_still_stopped() {
         let source = "def handler(event, context):\n    \
@@ -1808,16 +1968,19 @@ mod tests {
                               return {'escaped': True}\n";
         let mut tight = budget();
         tight.steps = 20_000;
-        let finished = ran_with(
+        let case = "a guest that catches the stop it was given";
+        let finished = ran_against(
             source,
             "lambda_function.handler",
             None,
             &BTreeMap::new(),
             tight,
+            &Clock::still(),
+            case,
         );
         assert!(
-            matches!(finished.completion, Completion::Stopped(_)),
-            "expected the latched stop to win, got {:?}",
+            matches!(finished.completion, Completion::Stopped(Stop::Steps)),
+            "case {case}: expected the latched step stop to win, got {:?}",
             finished.completion
         );
     }
@@ -1963,26 +2126,25 @@ mod tests {
                               pass\n";
         let mut tight = budget();
         // A small STEP budget, so the stop the guest cannot reach arrives at once: with the
-        // hook switched off nothing would arrive at all.
+        // hook switched off nothing would arrive at all. The run is judged against a clock
+        // that does not advance, so that budget is the only bound that can answer it and
+        // nothing of this host's own speed decides what the row came to.
         tight.steps = 20_000;
-        tight.wall_clock = Duration::from_secs(2);
-        let started = Instant::now();
-        let finished = ran_with(
+        let case = "a guest that rebound every name the host module carries";
+        let finished = ran_against(
             source,
             "lambda_function.handler",
             None,
             &BTreeMap::new(),
             tight,
+            &Clock::still(),
+            case,
         );
         assert!(
-            matches!(finished.completion, Completion::Stopped(_)),
-            "expected the run to be stopped by a bound the guest cannot reach, got {:?}",
+            matches!(finished.completion, Completion::Stopped(Stop::Steps)),
+            "case {case}: expected the run to be stopped by the step budget the guest cannot \
+             reach, got {:?}",
             finished.completion
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(30),
-            "expected the stop inside the run's own ceiling, took {:?}",
-            started.elapsed()
         );
     }
 
@@ -2052,39 +2214,53 @@ mod tests {
                  KEPT.extend(megabyte() for _ in range({ALLOCATIONS}))\n    \
                  return {{'held': len(KEPT)}}\n"
         );
-        let cases: &[(&str, &str, Stop, Duration)] = &[
+        /// One row: what it is about, the package's module source, the bound that has to end
+        /// the run, the clock the run is judged against, the span the handler is given in
+        /// that clock's own time, and the ceiling the run may add to this process.
+        type PhaseCase<'a> = (&'a str, &'a str, Stop, Clock, Duration, u64);
+        let cases: &[PhaseCase<'_>] = &[
             (
                 "the deadline, hunted for from inside a handler that never returns",
                 hunts_the_deadline.as_str(),
                 Stop::Deadline,
+                Clock::driven(DRIVEN_TICK),
                 Duration::from_secs(1),
+                CEILING_OUT_OF_REACH,
             ),
             (
                 "the memory baseline, hunted for while the module is being imported",
                 hunts_the_baseline.as_str(),
                 Stop::Memory,
-                ROOM_TO_ALLOCATE,
+                Clock::still(),
+                budget().wall_clock,
+                // Under what the two allocations hold together and over what either holds
+                // on its own, so this row is stopped only if the baseline stayed where the
+                // host took it.
+                64 * 1024 * 1024,
             ),
         ];
-        for (case, source, expected, wall_clock) in cases {
+        for (case, source, expected, clock, wall_clock, memory_bytes) in cases {
             let mut tight = budget();
-            // The bound each row names has to be the only one that can answer it: the row
-            // about the DEADLINE is given a clock short enough to fall first and far more
-            // steps than a second of spinning spends, and the row about the BASELINE a
-            // clock far above what its allocations take.
+            // The bound each row names has to be the only one that can answer it, and WHICH
+            // clock the run's deadline is read against is what settles that: the row about
+            // the DEADLINE is judged against a clock its own traced events drive, so the
+            // deadline falls after a number of events rather than after a span of this
+            // host's time, and the row about the BASELINE against a clock that does not
+            // advance, so no deadline falls for it at all however slowly this host faults
+            // its allocations in. Both are given far more steps than either spends, so the
+            // step budget answers neither, and the row about the deadline is given a ceiling
+            // out of reach, so the memory bound answers it no more than the clock does.
             tight.wall_clock = *wall_clock;
             tight.steps = 2_000_000_000;
-            // Under what the two allocations hold together and over what either holds on
-            // its own, so the row about the BASELINE is stopped only if the baseline stayed
-            // where the host took it.
-            tight.memory_bytes = 64 * 1024 * 1024;
-            let started = Instant::now();
-            let finished = ran_with(
+            tight.memory_bytes = *memory_bytes;
+            let finished = ran_against(
                 source,
                 "lambda_function.handler",
                 None,
                 &BTreeMap::new(),
                 tight,
+                clock,
+                case,
             );
             match &finished.completion {
                 Completion::Stopped(stopped) => assert_eq!(
@@ -2096,18 +2272,13 @@ mod tests {
                     "case {case}: expected the run to be stopped by {expected:?}, got {other:?}"
                 ),
             }
-            assert!(
-                started.elapsed() < Duration::from_secs(30),
-                "case {case}: expected the stop inside the run's own ceiling, took {:?}",
-                started.elapsed()
-            );
         }
     }
 
     /// A guest `atexit` callback runs during the interpreter's finalization, which is after
     /// the handler returned — and it is bounded like every other guest frame: the hook is
     /// still installed and still answers itself as the local tracer, so a callback that spins
-    /// is stopped on the run's own deadline rather than wedging the thread.
+    /// is stopped on one of the run's own bounds rather than wedging the thread.
     #[test]
     fn a_guest_atexit_callback_is_bounded_like_the_handler() {
         let source = "import atexit\n\
@@ -2119,27 +2290,25 @@ mod tests {
                           return {'registered': True}\n";
         let mut tight = budget();
         // The callback is stopped on a budget, so this row is about WHETHER it is bounded and
-        // not about how much it is given: a small step budget keeps the spin short.
+        // not about how much it is given: a small step budget keeps the spin short, and a
+        // clock that does not advance leaves that budget the only bound that can answer the
+        // run — the stop here is the callback's own spending and not this host's speed.
         tight.steps = 20_000;
-        tight.wall_clock = Duration::from_secs(2);
-        let started = Instant::now();
-        let finished = ran_with(
+        let case = "an atexit callback that spins during the interpreter's finalization";
+        let finished = ran_against(
             source,
             "lambda_function.handler",
             None,
             &BTreeMap::new(),
             tight,
+            &Clock::still(),
+            case,
         );
         assert!(
-            !matches!(finished.completion, Completion::Internal(_)),
-            "expected the run to end on the handler's answer or on its own bound, got {:?}",
+            matches!(finished.completion, Completion::Stopped(Stop::Steps)),
+            "case {case}: expected the spinning callback to spend the run's step budget, got \
+             {:?}",
             finished.completion
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(30),
-            "expected the spinning atexit callback to be stopped inside the run's ceiling, \
-             took {:?}",
-            started.elapsed()
         );
     }
 
