@@ -50,7 +50,11 @@
 //! holds, the detector still answers for the part it measured: `RecognizeCelebrities`
 //! reports every face it measured as an unrecognized face — the side the operation itself
 //! puts a face it does not recognise on — and names no celebrity, rather than refusing the
-//! call or inventing one.
+//! call or inventing one. `DetectProtectiveEquipment` answers the same way about the PERSONS
+//! a frame carries: each face the detector measured locates a person, reported with the
+//! confidence and the one body part measured for it, while an item of equipment and whether
+//! it covers a body part are a judgement no detector here makes, so each person the summary
+//! covers is reported as one whose PPE adornment could not be determined.
 //!
 //! The one comparison this emulator can make about two STORED faces is IDENTITY:
 //! [`image_signature`] digests what an image is, so two indexed faces can be told to have

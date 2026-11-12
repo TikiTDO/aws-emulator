@@ -35,6 +35,8 @@ mod label_detection;
 mod photographic_enrolment;
 #[path = "all/projects.rs"]
 mod projects;
+#[path = "all/protective_equipment.rs"]
+mod protective_equipment;
 #[path = "all/resource_tag_values.rs"]
 mod resource_tag_values;
 #[path = "all/resource_tags.rs"]
