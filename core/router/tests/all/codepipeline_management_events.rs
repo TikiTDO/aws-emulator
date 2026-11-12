@@ -23,6 +23,11 @@
 //! suite in this crate runs it: what a credential scope carries is the key id a handler
 //! reads the caller from. Assembling the whole router costs stack (see `boot_serve.rs`), so
 //! it is built — and the requests driven — on a sized thread.
+//!
+//! The harness below — the whole router over one engine, and the roles, bucket and session
+//! a pipeline's approval needs — is shared with
+//! `codepipeline_approval_reviewer_attribution`, which pins the PER-CALLER half of the same
+//! rule: that two reviewers' decisions are each attributed to their own session.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -34,7 +39,7 @@ use smithy_server_runtime::MultiServiceRouter;
 use crate::query_wire::{block_of, element, form_encode};
 
 /// Keep this at or above `boot_serve.rs`'s stack: the same assembly runs here.
-const BOOT_STACK_SIZE: usize = 64 * 1024 * 1024;
+pub(crate) const BOOT_STACK_SIZE: usize = 64 * 1024 * 1024;
 
 /// CodePipeline's `X-Amz-Target` prefix, from that service's own model (service shape
 /// `CodePipeline_20150709`).
@@ -45,7 +50,7 @@ const REGION: &str = "us-east-1";
 
 /// The long-term access key id the SETUP calls carry — the roles, the bucket and the
 /// pipeline — so the reviewer's own calls are the only ones made with a session.
-const SETUP_KEY_ID: &str = "AKIDTEST";
+pub(crate) const SETUP_KEY_ID: &str = "AKIDTEST";
 
 /// The `eventSource` CloudTrail stamps on a CodePipeline management event
 /// (`smithy_query(query="service_info")` ->
@@ -58,9 +63,14 @@ const MANAGEMENT: &str = "Management";
 /// The pipeline the decision is made on, and the bucket its source and artifacts live in.
 const PIPELINE: &str = "cp-audited-approval";
 
-/// The stage and action the approval is addressed by.
-const STAGE: &str = "Review";
-const ACTION: &str = "ManualApproval";
+/// The stage and action the approval is addressed by — the names [`declaration`] builds a
+/// pipeline's approval stage under, so both suites that read the stage address it by these.
+pub(crate) const STAGE: &str = "Review";
+pub(crate) const ACTION: &str = "ManualApproval";
+
+/// The key [`declaration`]'s source action reads, which is also the object a suite has to
+/// put into the artifact bucket for the execution to get past that stage.
+pub(crate) const SOURCE_OBJECT_KEY: &str = "source.zip";
 
 /// The summary the reviewer submits with the decision.
 const SUMMARY: &str = "four eyes: approved by the reviewer session";
@@ -76,18 +86,28 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// The trust policy of the pipeline's SERVICE role: the role the pipeline itself runs
 /// under, which must appear in no record of the reviewer's call.
-const PIPELINE_TRUST_POLICY: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+pub(crate) const PIPELINE_TRUST_POLICY: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
 "Principal":{"Service":"codepipeline.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+
+/// The trust policy of a REVIEWER's role: one this account may assume, so the session a
+/// decision is signed with is one STS actually minted for that role.
+pub(crate) fn reviewer_trust(account: &str) -> String {
+    format!(
+        "{{\"Version\":\"2012-10-17\",\"Statement\":[{{\"Effect\":\"Allow\",\
+         \"Principal\":{{\"AWS\":\"arn:aws:iam::{account}:root\"}},\
+         \"Action\":\"sts:AssumeRole\"}}]}}"
+    )
+}
 
 /// The emulator this suite drives: the whole router over one engine, and the runtime its
 /// requests are blocked on.
-struct Audited {
+pub(crate) struct Audited {
     router: MultiServiceRouter,
     runtime: tokio::runtime::Runtime,
 }
 
 impl Audited {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let engine: Arc<InMemoryEngine> = Arc::new(InMemoryEngine::new());
         let mut router = build_router(engine);
         router.set_request_authentication(false);
@@ -164,7 +184,7 @@ impl Audited {
     }
 
     /// One awsJson1_1 CodePipeline operation, signed with `access_key_id`.
-    fn cp(&self, access_key_id: &str, operation: &str, body: &Value) -> (u16, Value) {
+    pub(crate) fn cp(&self, access_key_id: &str, operation: &str, body: &Value) -> (u16, Value) {
         let (status, payload) = self.send(
             access_key_id,
             "codepipeline",
@@ -187,7 +207,7 @@ impl Audited {
     }
 
     /// One CodePipeline operation that has to succeed.
-    fn cp_ok(&self, access_key_id: &str, operation: &str, body: &Value) -> Value {
+    pub(crate) fn cp_ok(&self, access_key_id: &str, operation: &str, body: &Value) -> Value {
         let (status, answer) = self.cp(access_key_id, operation, body);
         assert_eq!(
             status, 200,
@@ -197,7 +217,7 @@ impl Audited {
     }
 
     /// Create a role with `policy` as its trust policy; answer its ARN.
-    fn role(&self, name: &str, policy: &str) -> String {
+    pub(crate) fn role(&self, name: &str, policy: &str) -> String {
         let (status, body) = self.query(
             SETUP_KEY_ID,
             "iam",
@@ -216,7 +236,7 @@ impl Audited {
     /// and the SESSION's own ARN as the assume reported it (`AssumedRoleUser.Arn`), so the
     /// assertions below compare the record against what the emulator actually minted
     /// rather than against a second statement of the ARN form.
-    fn assume(&self, role_arn: &str, session_name: &str) -> (String, String) {
+    pub(crate) fn assume(&self, role_arn: &str, session_name: &str) -> (String, String) {
         let (status, body) = self.query(
             SETUP_KEY_ID,
             "sts",
@@ -235,7 +255,7 @@ impl Audited {
     }
 
     /// Create a bucket and put the pipeline's source object into it.
-    fn bucket_with_source(&self, bucket: &str, key: &str, body: &[u8]) {
+    pub(crate) fn bucket_with_source(&self, bucket: &str, key: &str, body: &[u8]) {
         for (uri, payload) in [(format!("/{bucket}"), b"".as_slice()), (format!("/{bucket}/{key}"), body)] {
             let (status, answer) = self.send(
                 SETUP_KEY_ID,
@@ -256,7 +276,7 @@ impl Audited {
 
     /// `cloudtrail:LookupEvents` filtered on one attribute, answering each event's
     /// `CloudTrailEvent` document, most recent first.
-    fn lookup(&self, attribute_key: &str, attribute_value: &str) -> Vec<Value> {
+    pub(crate) fn lookup(&self, attribute_key: &str, attribute_value: &str) -> Vec<Value> {
         let (status, payload) = self.send(
             SETUP_KEY_ID,
             "cloudtrail",
@@ -299,7 +319,7 @@ impl Audited {
 }
 
 /// A string member of an event document.
-fn at(event: &Value, pointer: &str) -> Option<String> {
+pub(crate) fn at(event: &Value, pointer: &str) -> Option<String> {
     event
         .pointer(pointer)
         .and_then(Value::as_str)
@@ -318,7 +338,7 @@ fn shape_name(body: &Value) -> String {
 }
 
 /// Poll until `read` answers, or give up after [`SETTLE_TIMEOUT`].
-fn settle<T>(what: &str, mut read: impl FnMut() -> Result<T, String>) -> T {
+pub(crate) fn settle<T>(what: &str, mut read: impl FnMut() -> Result<T, String>) -> T {
     let deadline = Instant::now() + SETTLE_TIMEOUT;
     let mut last = String::new();
     while Instant::now() < deadline {
@@ -331,12 +351,12 @@ fn settle<T>(what: &str, mut read: impl FnMut() -> Result<T, String>) -> T {
     panic!("timed out waiting for {what}; last saw {last}");
 }
 
-/// The declaration of the pipeline the decision is made on: an S3 source stage and a
-/// manual-approval stage.
-fn declaration(role_arn: &str, bucket: &str) -> Value {
+/// The declaration of a pipeline a decision is made on: an S3 source stage and a
+/// manual-approval stage, under the name and over the artifact bucket it is given.
+pub(crate) fn declaration(pipeline: &str, role_arn: &str, bucket: &str) -> Value {
     json!({
         "pipeline": {
-            "name": PIPELINE,
+            "name": pipeline,
             "roleArn": role_arn,
             "artifactStore": { "type": "S3", "location": bucket },
             "stages": [
@@ -352,7 +372,7 @@ fn declaration(role_arn: &str, bucket: &str) -> Value {
                         },
                         "configuration": {
                             "S3Bucket": bucket,
-                            "S3ObjectKey": "source.zip",
+                            "S3ObjectKey": SOURCE_OBJECT_KEY,
                             "PollForSourceChanges": "false",
                         },
                         "outputArtifacts": [{ "name": "SourceArtifact" }],
@@ -376,7 +396,12 @@ fn declaration(role_arn: &str, bucket: &str) -> Value {
 }
 
 /// Assert the facts every record of a CodePipeline call carries.
-fn assert_codepipeline_record(case: &str, event: &Value, operation: &str, read_only: bool) {
+pub(crate) fn assert_codepipeline_record(
+    case: &str,
+    event: &Value,
+    operation: &str,
+    read_only: bool,
+) {
     assert_eq!(
         at(event, "/eventName").as_deref(),
         Some(operation),
@@ -406,7 +431,7 @@ fn assert_codepipeline_record(case: &str, event: &Value, operation: &str, read_o
 
 /// Assert that `event` attributes the call to the reviewer's SESSION and to the role that
 /// issued it — and to neither the pipeline's service role nor the long-term setup key.
-fn assert_reviewer_attribution(
+pub(crate) fn assert_reviewer_attribution(
     case: &str,
     event: &Value,
     session_key: &str,
@@ -462,12 +487,7 @@ fn a_manual_approval_decision_and_its_refused_replay_are_audited_as_the_reviewer
             // The pipeline's own service role, and the SECOND, distinct role the reviewer
             // assumes to answer the approval.
             let pipeline_role = emulator.role("cp-audited-pipeline", PIPELINE_TRUST_POLICY);
-            let reviewer_trust = format!(
-                "{{\"Version\":\"2012-10-17\",\"Statement\":[{{\"Effect\":\"Allow\",\
-                 \"Principal\":{{\"AWS\":\"arn:aws:iam::{account}:root\"}},\
-                 \"Action\":\"sts:AssumeRole\"}}]}}"
-            );
-            let reviewer_role = emulator.role("cp-audited-reviewer", &reviewer_trust);
+            let reviewer_role = emulator.role("cp-audited-reviewer", &reviewer_trust(&account));
             // The session's own ARN comes from the assume's answer, so the attribution
             // assertions compare the record against the session STS actually minted.
             let (session_key, session_arn) = emulator.assume(&reviewer_role, SESSION_NAME);
@@ -476,11 +496,11 @@ fn a_manual_approval_decision_and_its_refused_replay_are_audited_as_the_reviewer
                 "setup: the assume must report this reviewer's session, got {session_arn}"
             );
 
-            emulator.bucket_with_source(PIPELINE, "source.zip", b"the approved source bytes");
+            emulator.bucket_with_source(PIPELINE, SOURCE_OBJECT_KEY, b"the approved source bytes");
             emulator.cp_ok(
                 SETUP_KEY_ID,
                 "CreatePipeline",
-                &declaration(&pipeline_role, PIPELINE),
+                &declaration(PIPELINE, &pipeline_role, PIPELINE),
             );
 
             // The execution the pipeline's own creation started parks at the approval and

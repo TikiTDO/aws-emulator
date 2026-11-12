@@ -1447,3 +1447,9 @@ mod cloudformation_provisions_mwaa_environments;
 // no request in flight is accepted.
 #[path = "all/sfn_execution_status_change_on_an_authenticating_router.rs"]
 mod sfn_execution_status_change_on_an_authenticating_router;
+// Declared in the appended tail, which is where every new suite inserts its lines: WHICH
+// reviewer released a change is a fact about the caller of one call, so pinning it spans the
+// roles IAM writes, the sessions STS mints, the decisions CodePipeline serves and the records
+// CloudTrail reports at once — no single service crate's test target can ask it.
+#[path = "all/codepipeline_approval_reviewer_attribution.rs"]
+mod codepipeline_approval_reviewer_attribution;
