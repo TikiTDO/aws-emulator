@@ -37,6 +37,22 @@ hex = { workspace = true }
 # `CreateApplicationVersion$Process` pre-processes the files INSIDE it, so the archive
 # format is read by the archive reader rather than by this emulator.
 zip = { version = "9", default-features = false, features = ["deflate"] }
+# The HTTP/1.1 server the socket an environment's own address is served on speaks
+# (`src/state/environment_plane_endpoint.rs`): the core hands that socket a plain TCP
+# connection, so the HTTP framing on it is the `hyper` server's rather than this
+# emulator's. `hyper-util` carries the tokio IO and timer adapters for it, and
+# `http-body-util` the bounded body reader and the one-shot body.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+# `rquickjs` is the QuickJS JavaScript engine, embedded in this process, which is what RUNS
+# the application an environment deploys: an Elastic Beanstalk environment's observable
+# outputs — the log lines the compiled environment information carries and the content the
+# environment's own address serves — are produced by the deployed bundle's own entry point,
+# so that code is executed rather than interpreted by hand (`state::application_runtime`).
+# It is also a NATIVE component: `rquickjs-sys` compiles the QuickJS C sources with `cc`
+# inside this build, so nothing is fetched or started outside this process.
+rquickjs = "0.14"
 # Parses the `env.yaml` manifest and the `.ebextensions/*.config` files that
 # pre-processing validates; yaml-rust2 is the pure-Rust YAML 1.2 implementation the
 # other services that read caller-supplied YAML use (YAML 1.2 is a superset of JSON,

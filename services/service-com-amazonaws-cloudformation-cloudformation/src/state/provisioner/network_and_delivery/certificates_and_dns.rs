@@ -1563,14 +1563,15 @@ pub(crate) async fn delete_eb_application_version(
 /// upper bound on the wait, not a duration anything is owed. Elastic Beanstalk reports a
 /// terminated environment as `Terminating` and removes it from the live set a moment
 /// later (its own transition span), so the check is far shorter than that moment and the
-/// whole wait is a small multiple of it — enough that a loaded machine still gets there,
-/// and bounded so a `DeleteStack` of several environments cannot hold its request open.
+/// whole wait is a small multiple of it — enough that a loaded machine still gets there
+/// after that span has passed, and bounded so a `DeleteStack` of several environments
+/// cannot hold its request open.
 /// The wait matters because the application the environment belongs to cannot be deleted
 /// while it still has a running environment, and that application is the next resource
 /// the same stack deletes.
 pub(crate) const ENVIRONMENT_TERMINATION_CHECK_INTERVAL: ::std::time::Duration =
     ::std::time::Duration::from_millis(25);
-pub(crate) const ENVIRONMENT_TERMINATION_CHECKS: usize = 40;
+pub(crate) const ENVIRONMENT_TERMINATION_CHECKS: usize = 240;
 
 /// The code a refusal carries where a resource the owning service ACCEPTED the delete of
 /// had not reached the deleted state by the time the bounded wait ran out:

@@ -2,13 +2,15 @@
 
 //! `CheckDNSAvailability`, over the service's awsQuery HTTP surface.
 //!
-//! The rule under test: the CNAME a prefix forms is
-//! `<prefix>.<region>.elasticbeanstalk.com`, it can be RESERVED by at most ONE
-//! live environment — the one that took it when it was created and still carries
-//! it — and it is available exactly when the prefix can be a host name label at
-//! all and no live environment holds that reservation. Checking a prefix is a
-//! REPORT: it reserves nothing and releases nothing. What a swap leaves of those
-//! reservations is `cname_reservation.rs`.
+//! The rule under test: the CNAME a prefix forms is the address the environment
+//! holding it is SERVED at — the emulator's own endpoint with the environment's
+//! Region and that prefix in the path, because a client reads that address and
+//! dials it — it can be RESERVED by at most ONE live environment in its Region —
+//! the one that took it when it was created and still carries it — and it is
+//! available exactly when the prefix can be a host name label at all and no live
+//! environment holds that reservation. Checking a prefix is a REPORT: it reserves
+//! nothing and releases nothing. What a swap leaves of those reservations is
+//! `cname_reservation.rs`.
 //!
 //! The HTTP harness (the router, the form encoder and the XML element reader) is
 //! the one `lifecycle.rs` already owns in this same test binary, so this suite
@@ -16,9 +18,12 @@
 
 use crate::lifecycle::{Emulator, PAST_DUE, SOLUTION_STACK, TEST_REGION};
 
-/// The zone every environment URL sits in, as `state::environment_cname` builds it.
-fn fully_qualified(prefix: &str, region: &str) -> String {
-    format!("{prefix}.{region}.elasticbeanstalk.com")
+/// The address `prefix` forms in `region`, as `state::environment_cname` builds
+/// it: the socket this emulator serves the environment plane on, then the plane
+/// path that prefix's environment is served at. Read off the emulator, because
+/// the port that socket answers on is the core's to choose.
+fn fully_qualified(emulator: &Emulator, prefix: &str, region: &str) -> String {
+    emulator.environment_address(region, prefix)
 }
 
 /// One `CheckDNSAvailability` call: its prefix, the region it is signed for, and
@@ -66,7 +71,7 @@ async fn availability_is_derived_from_the_prefix_and_the_live_environments() {
     );
     assert_eq!(
         held.expect("CNAME", "setup"),
-        fully_qualified("held-prefix", TEST_REGION),
+        fully_qualified(&emulator, "held-prefix", TEST_REGION),
         "case \"setup\": the environment must hold the CNAME its prefix forms, got {}",
         held.body
     );
@@ -169,7 +174,7 @@ async fn availability_is_derived_from_the_prefix_and_the_live_environments() {
         );
         assert_eq!(
             answer.expect("FullyQualifiedCNAME", case.name),
-            fully_qualified(case.prefix, case.region),
+            fully_qualified(&emulator, case.prefix, case.region),
             "case {:?}: unexpected FullyQualifiedCNAME in {}",
             case.name,
             answer.body
@@ -284,7 +289,7 @@ async fn checking_a_prefix_neither_reserves_nor_releases_it() {
         .await;
     assert_eq!(
         described.values_at("Environments/member/CNAME"),
-        vec![fully_qualified(prefix, TEST_REGION).as_str()],
+        vec![fully_qualified(&emulator, prefix, TEST_REGION).as_str()],
         "case {case:?}: the checked name must still belong to its environment, got {}",
         described.body
     );
@@ -415,7 +420,7 @@ async fn create_environment_holds_the_same_cname_rule() {
     );
     assert_eq!(
         elsewhere.expect("CNAME", "another region"),
-        fully_qualified("taken-prefix", "eu-central-1"),
+        fully_qualified(&emulator, "taken-prefix", "eu-central-1"),
         "case \"another region\": unexpected CNAME in {}",
         elsewhere.body
     );

@@ -241,6 +241,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let region = crate::state::request_region(ctx);
+        // The socket every environment's published address is served on, opened
+        // on the first call that needs one: the address this launch publishes has
+        // to be one a client can dial, and binding it reaches the core — which
+        // cannot happen while the store is held.
+        let plane_authority =
+            crate::state::environment_plane_authority(&*self.engine, ctx).await;
 
         // A parameter this request needs but did not supply is answered BEFORE any
         // resource the request names is resolved: an absent input is a statement about
@@ -391,11 +397,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                      letters, numbers, and hyphens, and cannot start or end with a hyphen."
                 )));
             }
-            let cname = crate::state::environment_cname(cname_prefix, &region);
-            // Two environments cannot answer at one host name, so the name any
+            let cname_prefix_taken =
+                crate::state::environment_serving_cname_prefix(&store, &region, cname_prefix)
+                    .map(|serving| serving.cname.clone());
+            // Two environments cannot answer at one address, so the name any
             // live environment is serving cannot be taken — including one it
             // took in a swap rather than reserved itself.
-            if crate::state::environment_serving_cname(&store, &cname).is_some() {
+            if let Some(cname) = cname_prefix_taken {
                 return Err(CreateEnvironmentError::invalid_parameter_value(format!(
                     "DNS name ({cname}) is not available."
                 )));
@@ -500,15 +508,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             platform_arn,
             template_name: input.template_name.clone(),
             description: input.description.clone(),
-            cname: crate::state::environment_cname(&cname_prefix, &region),
+            cname: crate::state::environment_cname(&plane_authority, &region, &cname_prefix),
             // The launch RESERVES the name the prefix forms, which is what
             // `CheckDNSAvailability` reports a prefix as taken for until this
             // environment stops carrying it.
-            reserved_cname: crate::state::environment_cname(&cname_prefix, &region),
+            reserved_cname: crate::state::environment_cname(
+                &plane_authority,
+                &region,
+                &cname_prefix,
+            ),
             // `EndpointURL` is "the URL to the LoadBalancer" or "the IP address
-            // of the instance". Neither serves application traffic here, so
-            // there is no reachable endpoint to report and none is invented.
-            endpoint_url: None,
+            // of the instance" — the address the environment's traffic goes to,
+            // which is the one address this environment answers at.
+            endpoint_url: Some(crate::state::environment_cname(
+                &plane_authority,
+                &region,
+                &cname_prefix,
+            )),
             // The tier the request named, with every member it left out filled
             // in from the defaults the model documents: a Standard-mode
             // EC2-based web server at the latest compatible tier version.

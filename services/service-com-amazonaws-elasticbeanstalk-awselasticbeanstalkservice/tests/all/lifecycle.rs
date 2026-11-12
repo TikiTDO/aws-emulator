@@ -178,6 +178,33 @@ impl Emulator {
         Self { router, engine }
     }
 
+    /// The `host:port` every environment address this emulator publishes starts
+    /// with: the socket the environment plane is served on, which the first call
+    /// that needed an address opened.
+    ///
+    /// For a suite that asserts the address a prefix forms: the port is the
+    /// core's to choose, so the expectation is read off the socket rather than
+    /// written here. Empty before any call has needed an address.
+    pub(crate) fn plane_authority(&self) -> String {
+        self.store()
+            .lock()
+            .environment_plane
+            .as_ref()
+            .map(|endpoint| endpoint.authority().to_string())
+            .unwrap_or_default()
+    }
+
+    /// The address the CNAME prefix `prefix` forms in `region`, as
+    /// `state::environment_cname` builds it: the socket above, then the plane
+    /// path that prefix's environment is served at.
+    pub(crate) fn environment_address(&self, region: &str, prefix: &str) -> String {
+        format!(
+            "{}{}",
+            self.plane_authority(),
+            eb::state::environment_plane_path(region, prefix)
+        )
+    }
+
     /// Dispatch a request the caller built itself, for a suite that drives
     /// ANOTHER mounted service over ITS own wire protocol (the SNS awsQuery
     /// surface, the SQS awsJson one) rather than this service's.
@@ -996,10 +1023,7 @@ async fn created_environments_are_derived_from_the_request_and_persisted() {
             .unwrap_or_else(|| format!("{name}-{}", environment_id.trim_start_matches("e-")));
         assert_eq!(
             cname,
-            format!(
-                "{expected_prefix}.{}.elasticbeanstalk.com",
-                case.region
-            ),
+            emulator.environment_address(case.region, &expected_prefix),
             "case {name:?}: unexpected CNAME, got {cname:?}"
         );
         assert_eq!(
@@ -1136,12 +1160,12 @@ async fn describe_environments_filters_and_paginates() {
         FilterCase {
             case: "no filter",
             params: vec![],
-            expected: vec!["left-env-1", "left-env-2", "right-env-1"],
+            expected: vec!["right-env-1", "left-env-2", "left-env-1"],
         },
         FilterCase {
             case: "ApplicationName",
             params: vec![("ApplicationName", "left")],
-            expected: vec!["left-env-1", "left-env-2"],
+            expected: vec!["left-env-2", "left-env-1"],
         },
         FilterCase {
             case: "EnvironmentNames",
@@ -1180,7 +1204,7 @@ async fn describe_environments_filters_and_paginates() {
         .await;
     assert_eq!(
         first.values_at("Environments/member/EnvironmentName"),
-        vec!["left-env-1", "left-env-2"],
+        vec!["right-env-1", "left-env-2"],
         "case \"MaxRecords=2\": unexpected first page in {}",
         first.body
     );
@@ -1196,7 +1220,7 @@ async fn describe_environments_filters_and_paginates() {
         .await;
     assert_eq!(
         second.values_at("Environments/member/EnvironmentName"),
-        vec!["right-env-1"],
+        vec!["left-env-1"],
         "case \"page 2\": unexpected second page in {}",
         second.body
     );

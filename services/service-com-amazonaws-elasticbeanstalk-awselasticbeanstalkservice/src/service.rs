@@ -54,6 +54,7 @@
 //! `<Message>` — stays with the framework.
 
 pub mod authorization;
+pub mod environment_plane;
 pub mod query_error_envelope;
 
 use query_error_envelope::{ElasticBeanstalkDefinition, RequestIdEnvelopeOperation};
@@ -72,6 +73,13 @@ pub struct EmulatedService<Eng: Send + Sync + 'static> {
     /// The envelope wrapper every routable request is served through. Held in a field,
     /// built once, because `override_operation` hands back a reference to it.
     envelope: RequestIdEnvelopeOperation<Eng>,
+    /// The ENVIRONMENT data plane: the traffic a client sends to the address an
+    /// environment publishes, which names no modelled operation. Held in a field
+    /// for the same reason.
+    environment_plane: environment_plane::EnvironmentPlane<Eng>,
+    /// The one shared engine, which the data plane's CLAIM reads the store
+    /// through: `can_handle` is answered from the records this service holds.
+    engine: Arc<Eng>,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -81,7 +89,9 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
             entry: ElasticBeanstalkDefinition::new(Arc::clone(&engine)),
-            envelope: RequestIdEnvelopeOperation::new(engine),
+            envelope: RequestIdEnvelopeOperation::new(Arc::clone(&engine)),
+            environment_plane: environment_plane::EnvironmentPlane::new(Arc::clone(&engine)),
+            engine,
         }
     }
 }
@@ -100,7 +110,14 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // name shared by several services, or access-key-id-based routing.
         match smithy_server_runtime::resolve_route_key(parts) {
             Some(key) => key == self.entry.identity().signing_name(),
-            None => false,
+            // And an ENVIRONMENT's own traffic: a request addressed to the
+            // address an environment of this store publishes
+            // ([`environment_plane::claims_parts`]). Such a request names no
+            // modelled operation and carries no credential scope naming this
+            // service — a client of a published address has no AWS credential to
+            // sign with — so the front door answered a routing failure for the
+            // one address this service told the caller to use.
+            None => environment_plane::claims_parts(&*self.engine, parts),
         }
     }
 
@@ -108,6 +125,14 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         &self,
         req: &aws_smithy_runtime_api::http::Request,
     ) -> Option<&dyn ErasedOperation> {
+        // An ENVIRONMENT's own traffic is served by the data plane, which is the
+        // one request this service answers that names no modelled operation by
+        // construction (no modelled operation is bound at an environment's
+        // address). It gets first refusal, so the claim `can_handle` made and the
+        // serving are decided by the one rule.
+        if self.environment_plane.claims(req) {
+            return Some(&self.environment_plane as _);
+        }
         // Every request the generated routing table can serve is served through the
         // envelope wrapper, which delegates to that same table entry and then adds the
         // `<RequestId>` the awsQuery error envelope carries (see

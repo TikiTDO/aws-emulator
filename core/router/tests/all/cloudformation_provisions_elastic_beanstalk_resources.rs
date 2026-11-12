@@ -38,9 +38,15 @@ use smithy_server_runtime::MultiServiceRouter;
 // (`tests/all/query_wire.rs`): "Nothing new should write another one — call this module."
 use super::query_wire::{element, elements, form_encode, opt_element};
 
-/// Long enough for the stack's clock-owed span (`STATUS_TRANSITION_DELAY`, 500 ms) to come
-/// due, so the stack reports the deployment it carried out.
-const PAST_STACK_SPAN: Duration = Duration::from_millis(900);
+/// Long enough for the stack's clock-owed span (`STATUS_TRANSITION_DELAY`, 500 ms) AND for
+/// the Elastic Beanstalk transitions each stack operation starts there to come due: an
+/// environment the stack launches reaches `Ready`, and the deletion of the stack terminates
+/// that environment and THEN deletes the application it belonged to — two of that service's
+/// own transition spans, one after the other. Derived from the service's own constant, so
+/// the two cannot drift apart.
+const PAST_STACK_SPAN: Duration = eb::state::STATUS_TRANSITION_SPAN
+    .saturating_mul(2)
+    .saturating_add(Duration::from_millis(900));
 
 /// Elastic Beanstalk's API version, as its model declares it (`version: 2010-12-01`).
 const EB_API_VERSION: &str = "2010-12-01";

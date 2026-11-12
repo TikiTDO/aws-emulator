@@ -131,6 +131,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let region = crate::state::request_region(ctx);
+        // The address a prefix forms is the address the environment holding it is
+        // SERVED at, so the report needs the socket that answers there — opened
+        // on the first call that needs it, before the store is taken, and the
+        // same address on every later call. It is this service's own socket, not
+        // a resource this caller holds: nothing a later caller sees changes.
+        let plane_authority =
+            crate::state::environment_plane_authority(&*self.engine, ctx).await;
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             CheckDNSAvailabilityError::internal_failure(
                 "the Elastic Beanstalk store is unavailable",
@@ -148,7 +155,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // so the two cannot disagree about which name a prefix names. It is
         // reported for an unusable prefix too: the member says which name the
         // prefix WOULD form, and `Available` is what says it cannot be had.
-        let fully_qualified_cname = crate::state::environment_cname(&input.cname_prefix, &region);
+        let fully_qualified_cname =
+            crate::state::environment_cname(&plane_authority, &region, &input.cname_prefix);
         // Available unless the name cannot exist at all, or a live environment
         // holds the RESERVATION for it. Nothing is written for the answer:
         // checking a prefix neither reserves a free one nor releases a held one.

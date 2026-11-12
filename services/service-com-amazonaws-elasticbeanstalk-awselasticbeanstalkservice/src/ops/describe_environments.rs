@@ -214,12 +214,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })
             .collect();
         // An `EnvironmentId` is an opaque random id, so the store's key order
-        // says nothing about the environments: they are reported in the order
-        // they were CREATED, oldest first. The creation sequence is a total
-        // order even for two environments created inside one clock tick, so the
-        // order — and with it the page boundary below — is the same on every
-        // call.
-        matching.sort_by_key(|environment| environment.sequence);
+        // says nothing about the environments: they are reported NEWEST first,
+        // the order a client reads the record it just created at the head of.
+        // That is what the recorded sequence of reusing an environment NAME
+        // depends on — an environment terminated and then created again under
+        // the same name is two records, and the one a client polling that name
+        // reads first is the one it has just created. The creation sequence is a
+        // total order even for two environments created inside one clock tick,
+        // so the order — and with it the page boundary below — is the same on
+        // every call.
+        matching.sort_by_key(|environment| std::cmp::Reverse(environment.sequence));
 
         // "If no MaxRecords is specified, all available environments are
         // retrieved in a single response." The page boundary is the id of the

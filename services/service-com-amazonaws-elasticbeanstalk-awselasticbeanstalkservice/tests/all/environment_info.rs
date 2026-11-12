@@ -88,7 +88,10 @@ pub(crate) struct Entry {
 
 /// Every entry of a `RetrieveEnvironmentInfo` answer, in the order it lists
 /// them.
-fn entries(answer: &Answer) -> Vec<Entry> {
+///
+/// `pub(crate)`: the deployed-application suite reads the same entries to follow
+/// the URL one of them reports, so neither suite keeps a second reader.
+pub(crate) fn entries(answer: &Answer) -> Vec<Entry> {
     answer
         .elements_at("EnvironmentInfo/member")
         .iter()
@@ -129,12 +132,14 @@ const PRESIGNED_PARAMETERS: &[&str] = &[
 ];
 
 /// Everything before the query string of the URL the file compiled from
-/// `ec2_instance_id` must be reported at: the account's Elastic Beanstalk
-/// storage bucket, addressed in the path, and the service's own key for that
-/// file.
+/// `ec2_instance_id` must be reported at: the base URL this emulator is reached
+/// on — a `Message` is an address the caller FOLLOWS, so it names a host this
+/// emulator answers — then the account's Elastic Beanstalk storage bucket,
+/// addressed in the path, and the service's own key for that file.
 fn expected_url_prefix(info_type: &str, environment_id: &str, ec2_instance_id: &str) -> String {
     format!(
-        "https://s3.{TEST_REGION}.amazonaws.com/{}/{}?",
+        "{}/{}/{}?",
+        smithy_server_runtime::UNSERVED_URL_BASE,
         eb::state::storage_bucket_name(TEST_REGION),
         eb::state::environment_info_key(info_type, environment_id, ec2_instance_id)
     )

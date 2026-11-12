@@ -47,20 +47,26 @@ use crate::ops::types::{
     PlatformBranchSummary, PlatformDescription, PlatformFramework, PlatformProgrammingLanguage,
     PlatformSummary, S3Location, SingleInstanceHealth, StatusCodes, Tag,
 };
+pub mod application_runtime;
 pub mod caller_archive;
 pub mod configuration_option_catalog;
 pub mod configuration_option_descriptions;
+pub mod deployed_application;
 pub mod environment_health;
+pub mod environment_plane_endpoint;
 pub mod event_notifications;
 pub mod managed_action_schedule;
 pub mod platform_build;
 pub mod platform_catalog;
 pub mod version_processing;
 
+pub use application_runtime::*;
 pub use caller_archive::*;
 pub use configuration_option_catalog::*;
 pub use configuration_option_descriptions::*;
+pub use deployed_application::*;
 pub use environment_health::*;
+pub use environment_plane_endpoint::*;
 pub use event_notifications::*;
 pub use managed_action_schedule::*;
 pub use platform_build::*;
@@ -81,11 +87,12 @@ const DEFAULT_REGION: &str = "us-east-1";
 /// AbortEnvironmentUpdate, `Creating` -> `Ready` after CreatePlatformVersion.
 ///
 /// The real service takes minutes, so this span is CHOSEN, not documented. It is
-/// deliberately non-zero: a caller that describes the environment straight after
-/// creating it must still observe the transient status the real service reports.
-/// The due instant is stored on the record and materialised when a later call
-/// observes it — nothing sleeps.
-pub const STATUS_TRANSITION_SPAN: Duration = Duration::from_millis(500);
+/// deliberately non-zero, and long enough that a client POLLING the environment
+/// still sees the transient status: a caller that calls an operation and then
+/// describes the environment over the wire must observe the status that operation
+/// moved it to before the clock settles it back. The due instant is stored on the
+/// record and materialised when a later call observes it — nothing sleeps.
+pub const STATUS_TRANSITION_SPAN: Duration = Duration::from_secs(3);
 
 /// How long after the `RequestEnvironmentInfo` that starts it the compile of an
 /// environment's information finishes, so that `RetrieveEnvironmentInfo`
@@ -1136,26 +1143,26 @@ pub struct CompiledEnvironmentInfoFile {
 }
 
 /// What compiling one environment's information produced: the bucket it was
-/// stored in, one file per instance, and the credential the URLs are signed
-/// with — withdrawn when the files are deleted.
+/// stored in, and one file per instance.
 #[derive(Debug, Clone, Default)]
 pub struct CompiledEnvironmentInfo {
     pub bucket: String,
     pub files: Vec<CompiledEnvironmentInfoFile>,
-    pub credential_id: Option<String>,
 }
 
 /// A compile whose files the clock has deleted: the objects object storage must
-/// forget, and the credential whose only purpose was signing their URLs.
+/// forget.
 #[derive(Debug, Clone)]
 pub struct DiscardedEnvironmentInfo {
     pub bucket: String,
     pub s3_keys: Vec<String>,
-    pub credential_id: Option<String>,
 }
 
-/// The credential's name in the presigned URL's provider, for diagnostics only.
-const ENVIRONMENT_INFO_SIGNER: &str = "ElasticBeanstalkEnvironmentInfo";
+/// The signing name of the object storage a compiled file's download URL
+/// addresses: the URL names an object in a bucket, which is a request to Amazon
+/// S3, so that is the service the presigned URL is signed for and the service
+/// the emulator routes a caller that follows it to.
+const OBJECT_STORAGE_SIGNING_NAME: &str = "s3";
 
 /// Compile `log` into the account's Elastic Beanstalk storage bucket, one object
 /// per instance in `ec2_instance_ids`, and sign a download URL for each.
@@ -1167,13 +1174,12 @@ const ENVIRONMENT_INFO_SIGNER: &str = "ElasticBeanstalkEnvironmentInfo";
 /// client that follows the URL downloads the bytes this service stored, and no
 /// URL names an object nothing wrote.
 ///
-/// The URL is signed with a credential the emulator's credential store MINTS for
-/// it, never with the emulator's own: a service may hand a caller a credential
-/// it minted, and a presigned URL carries only that credential's id and the
-/// signature of this one `GetObject`, so the URL grants exactly the download it
-/// names. It is signed for [`ENVIRONMENT_INFO_RETENTION`], which is how long the
-/// files live ("the files are deleted after 15 minutes"), so the URL stops
-/// working at the instant the file it names is deleted.
+/// The URL is signed against the base URL this emulator is REACHED on, through
+/// the framework's own URL signer: a `Message` is an address the CALLER follows,
+/// so it has to name a host this emulator answers on — no production Amazon S3
+/// hostname resolves to it. It is signed for [`ENVIRONMENT_INFO_RETENTION`],
+/// which is how long the files live ("the files are deleted after 15 minutes"),
+/// so the URL stops working at the instant the file it names is deleted.
 ///
 /// Every failure is answered by compiling fewer files rather than by failing the
 /// request: an emulator assembled without object storage, or one that refused
@@ -1187,8 +1193,6 @@ pub async fn compile_environment_info(
     ec2_instance_ids: &[String],
     log: &str,
 ) -> CompiledEnvironmentInfo {
-    use ::emulator_server::aws_credentials::{AWS_ACCESS_KEY, SECRET_ACCESS_KEY};
-
     let bucket = storage_bucket_name(region);
     if ec2_instance_ids.is_empty() {
         return CompiledEnvironmentInfo {
@@ -1209,20 +1213,6 @@ pub async fn compile_environment_info(
         );
     }
 
-    let credentials = ctx.credential_store();
-    let minted = credentials.create(&AWS_ACCESS_KEY);
-    let signer = minted.secret(SECRET_ACCESS_KEY).map(|secret| {
-        (
-            minted.id.clone(),
-            s3_signing_client(ctx, region, &minted.id, secret),
-        )
-    });
-    if signer.is_none() {
-        // A credential without its secret cannot sign anything, so it is
-        // withdrawn rather than left in the store.
-        let _ = credentials.delete(&minted.id);
-    }
-
     let mut files = Vec::with_capacity(ec2_instance_ids.len());
     for ec2_instance_id in ec2_instance_ids {
         let s3_key = environment_info_key(info_type, environment_id, ec2_instance_id);
@@ -1235,10 +1225,9 @@ pub async fn compile_environment_info(
             ))
             .send()
             .await;
-        let message = match (stored, signer.as_ref()) {
-            (Ok(_), Some((_, client))) => presigned_download(client, &bucket, &s3_key).await,
-            (Ok(_), None) => None,
-            (Err(failure), _) => {
+        let message = match stored {
+            Ok(_) => presigned_download(ctx, region, &bucket, &s3_key),
+            Err(failure) => {
                 ::tracing::warn!(
                     bucket,
                     key = %s3_key,
@@ -1256,29 +1245,14 @@ pub async fn compile_environment_info(
         });
     }
 
-    // A credential that signed no URL is of no use to anyone, so it does not
-    // stay in the store either.
-    let credential_id = match signer {
-        Some((id, _)) if files.iter().any(|file| file.message.is_some()) => Some(id),
-        Some((id, _)) => {
-            let _ = credentials.delete(&id);
-            None
-        }
-        None => None,
-    };
-    CompiledEnvironmentInfo {
-        bucket,
-        files,
-        credential_id,
-    }
+    CompiledEnvironmentInfo { bucket, files }
 }
 
-/// Delete the objects of every compile the clock has deleted and withdraw the
-/// credential that signed their URLs — the housekeeping behind "the files are
-/// deleted after 15 minutes".
+/// Delete the objects of every compile the clock has deleted — the housekeeping
+/// behind "the files are deleted after 15 minutes".
 ///
 /// Called by the two operations that have a request context to reach object
-/// storage and the credential store through, with the records
+/// storage through, with the records
 /// [`ComAmazonawsElasticbeanstalkAwselasticbeanstalkserviceState::take_deleted_environment_info`]
 /// handed back. Nothing a caller can observe depends on it: a deleted compile is
 /// never reported, and its presigned URL expired at the same instant.
@@ -1304,81 +1278,36 @@ pub async fn discard_compiled_environment_info(
                 );
             }
         }
-        if let Some(credential_id) = &compile.credential_id {
-            if let Err(why) = ctx.credential_store().delete(credential_id) {
-                ::tracing::warn!(
-                    reason = ?why,
-                    "the credential that signed a compiled environment information URL could not \
-                     be withdrawn",
-                );
-            }
-        }
     }
-}
-
-/// The Amazon S3 client a download URL is SIGNED with: the same configuration
-/// [`s3_client`] uses, with the minted credential in place of the emulator's own
-/// so the URL carries that credential's id and nothing else.
-///
-/// It sends no request — presigning only signs — but it is given the same
-/// in-process transport anyway, so the URL it signs addresses the endpoint the
-/// emulator's own Amazon S3 requests go to.
-fn s3_signing_client(
-    ctx: &smithy_server_runtime::OperationContext<'_>,
-    region: &str,
-    access_key_id: &str,
-    secret_access_key: &str,
-) -> ::aws_sdk_s3::Client {
-    let config = ::aws_sdk_s3::Config::builder()
-        .behavior_version(::aws_sdk_s3::config::BehaviorVersion::latest())
-        .region(::aws_sdk_s3::config::Region::new(region.to_string()))
-        .endpoint_url(format!("https://s3.{region}.amazonaws.com"))
-        .force_path_style(true)
-        .credentials_provider(::aws_sdk_s3::config::Credentials::new(
-            access_key_id,
-            secret_access_key,
-            None,
-            None,
-            ENVIRONMENT_INFO_SIGNER,
-        ))
-        .http_client(ctx.callback().http_client())
-        .retry_config(::aws_sdk_s3::config::retry::RetryConfig::disabled())
-        .timeout_config(::aws_sdk_s3::config::timeout::TimeoutConfig::disabled())
-        .identity_cache(::aws_sdk_s3::config::IdentityCache::no_cache())
-        .stalled_stream_protection(::aws_sdk_s3::config::StalledStreamProtectionConfig::disabled())
-        .build();
-    ::aws_sdk_s3::Client::from_conf(config)
 }
 
 /// The presigned `GetObject` URL of `bucket`/`key`, valid as long as the file it
 /// names lives, or `None` when the URL could not be signed.
-async fn presigned_download(
-    client: &::aws_sdk_s3::Client,
+///
+/// Path-style, the way object storage addresses a bucket and a key in a URL, and
+/// signed through the framework's URL signer — which signs for the base URL this
+/// emulator is reached on, so the address leads back to the object this service
+/// really stored rather than to a host only the real Amazon S3 answers.
+fn presigned_download(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
     bucket: &str,
     key: &str,
 ) -> Option<String> {
-    let expires = match ::aws_sdk_s3::presigning::PresigningConfig::expires_in(
-        ENVIRONMENT_INFO_RETENTION,
-    ) {
-        Ok(config) => config,
-        Err(failure) => {
-            ::tracing::warn!(detail = %failure, "the download URL's validity is not a presignable span");
-            return None;
-        }
-    };
-    match client
-        .get_object()
-        .bucket(bucket)
-        .key(key)
-        .presigned(expires)
-        .await
-    {
-        Ok(request) => Some(request.uri().to_string()),
+    let path = format!("/{bucket}/{key}");
+    let request = ::smithy_server_runtime::SignedUrlRequest::new(
+        ::smithy_server_runtime::http::Method::GET,
+        OBJECT_STORAGE_SIGNING_NAME,
+        &path,
+    )
+    .region(region);
+    match ctx.url_signer().sign(request, ENVIRONMENT_INFO_RETENTION) {
+        Ok(signed) => Some(signed.as_str().to_string()),
         Err(failure) => {
             ::tracing::warn!(
                 bucket,
                 key,
-                detail = %::aws_smithy_types::error::display::DisplayErrorContext(&failure),
+                detail = %failure,
                 "the compiled environment information file's download URL could not be signed",
             );
             None
@@ -1443,10 +1372,48 @@ pub fn platform_version_arn(region: &str, platform_name: &str, platform_version:
     )
 }
 
-/// The DNS name an environment is reached at:
-/// `<cname prefix>.<region>.elasticbeanstalk.com`.
-pub fn environment_cname(cname_prefix: &str, region: &str) -> String {
-    format!("{cname_prefix}.{region}.elasticbeanstalk.com")
+/// The reserved path segment that names THIS service's data plane behind the
+/// emulator's own data-plane namespace: the `endpointPrefix`/`arnNamespace` this
+/// model publishes.
+pub const DATA_PLANE_SEGMENT: &str = "elasticbeanstalk";
+
+/// The path one environment's application is served at on the emulator's own
+/// endpoint: `/_aws/elasticbeanstalk/<region>/<cname prefix>`, which a request
+/// path then follows.
+///
+/// The REGION is part of the address because it is part of the name a prefix
+/// forms: an environment's CNAME sits in its own Region's zone
+/// (`<prefix>.<region>.elasticbeanstalk.com`), so the same prefix in two Regions
+/// is two names and `CheckDNSAvailability` reports on them separately.
+///
+/// ONE place writes that addressing and one place reads it back
+/// ([`crate::service::environment_plane`]), so the address this service PUBLISHES
+/// and the requests it claims cannot drift apart.
+pub fn environment_plane_path(region: &str, cname_prefix: &str) -> String {
+    format!(
+        "/{}/{DATA_PLANE_SEGMENT}/{region}/{cname_prefix}",
+        ::service_common::data_plane_addressing::EMULATOR_PATH_NAMESPACE
+    )
+}
+
+/// The address an environment is reached at — `EnvironmentDescription$CNAME`,
+/// "the URL to the CNAME for this environment", and the `EndpointURL` beside it.
+///
+/// A client READS that address and dials it, so it has to be an address this
+/// emulator answers on: a name under Elastic Beanstalk's own zone
+/// (`<prefix>.<region>.elasticbeanstalk.com`) resolves to nothing on the machine
+/// this emulator runs on, which would make the one address the API publishes the
+/// one address nobody can reach. So the address is `authority` — the socket the
+/// environment plane is served on
+/// ([`environment_plane_endpoint::environment_plane_authority`]) — with the
+/// environment's Region and CNAME prefix in the PATH, which is where its
+/// application is served ([`crate::service::environment_plane`]).
+///
+/// The CNAME PREFIX is still what identifies the name, inside its Region: it is
+/// what `CheckDNSAvailability` reports on and what at most one live environment
+/// may hold, exactly as the DNS name it forms was.
+pub fn environment_cname(authority: &str, region: &str, cname_prefix: &str) -> String {
+    format!("{authority}{}", environment_plane_path(region, cname_prefix))
 }
 
 /// The resource portion of `arn` when it is an ARN of THIS service, i.e.
@@ -1727,6 +1694,12 @@ pub struct ApplicationVersion {
     pub arn: String,
     pub description: Option<String>,
     pub source_bundle: Option<S3Location>,
+    /// The FILES that source bundle carries, read out of object storage when the
+    /// version was created: an environment that deploys this version runs them,
+    /// so the application's log and the content served at the environment's
+    /// address both come from here. `None` for a version with no bundle this
+    /// service could read. See [`ApplicationBundle`].
+    pub bundle: Option<ApplicationBundle>,
     /// What the caller asked for in `Process`: whether Elastic Beanstalk
     /// "pre-processed and validated the environment manifest (env.yaml) and
     /// configuration files (*.config files in the .ebextensions folder) in the
@@ -2904,15 +2877,17 @@ impl Environment {
 
     /// Start a rebuild: RebuildEnvironment "deletes and recreates all of the
     /// Amazon Web Services resources … for a specified environment and forces a
-    /// restart", so the environment goes back through the same deployment the
-    /// model describes for a new one — "Launching: Environment is in the process
-    /// of initial deployment" — and the move back to `Ready` is what the clock
-    /// then owes, exactly as after CreateEnvironment.
+    /// restart", so Elastic Beanstalk is working on an environment that is
+    /// already running — "Updating: Environment is in the process of updating its
+    /// configuration settings or application version", the status every operation
+    /// that acts on a RUNNING environment reports, since "Launching" is the
+    /// status of "initial deployment" alone — and the move back to `Ready` is
+    /// what the clock then owes, exactly as after CreateEnvironment.
     pub fn begin_rebuild(&mut self, request_id: &str) {
         // The rebuild "forces a restart": the environment is deployed onto the
         // resources it recreates below, which is a deployment of its own.
         self.begin_deployment();
-        self.status = STATUS_LAUNCHING.to_string();
+        self.status = STATUS_UPDATING.to_string();
         self.health = HEALTH_GREY.to_string();
         self.health_status = Some(HEALTH_STATUS_PENDING.to_string());
         self.date_updated = now();
@@ -2927,12 +2902,15 @@ impl Environment {
         ));
     }
 
-    /// Start an application-server restart: the environment keeps its status —
-    /// RestartAppServer restarts the container server, it does not redeploy —
-    /// while its health checks are suspended, which the model's `Health` doc
-    /// gives as the `Grey` case ("health checks are suspended during an
-    /// UpdateEnvironment or RestartEnvironment request"). The health the
-    /// environment reported before the restart is what the clock owes back.
+    /// Start an application-server restart: Elastic Beanstalk is working on an
+    /// environment that is already running, so it reports `Updating`
+    /// ("Environment is in the process of updating its configuration settings or
+    /// application version") until the restart finishes, with its health checks
+    /// suspended — the model's `Health` doc gives that as the `Grey` case
+    /// ("health checks are suspended during an UpdateEnvironment or
+    /// RestartEnvironment request"). The status and the health the environment
+    /// reported before the restart are what the clock owes back: a restart
+    /// redeploys nothing, so the environment comes back exactly as it was.
     pub fn begin_app_server_restart(&mut self, request_id: &str) {
         let restored = PendingStatus {
             due_at: Instant::now() + STATUS_TRANSITION_SPAN,
@@ -2946,6 +2924,7 @@ impl Environment {
             request_id: request_id.to_string(),
             completion_message: "restartAppServer completed successfully.".to_string(),
         };
+        self.status = STATUS_UPDATING.to_string();
         self.health = HEALTH_GREY.to_string();
         self.health_status = Some(HEALTH_STATUS_PENDING.to_string());
         self.date_updated = now();
@@ -3148,9 +3127,6 @@ pub struct EnvironmentInfoCompilation {
     pub files: Vec<CompiledEnvironmentInfoFile>,
     /// The Amazon S3 bucket the compiled files were stored in.
     pub bucket: String,
-    /// The credential the files' download URLs are signed with, withdrawn when
-    /// the files are deleted. `None` when no URL was signed.
-    pub credential_id: Option<String>,
     /// The request that started the compile, which the event its completion
     /// records belongs to.
     pub request_id: String,
@@ -3173,7 +3149,6 @@ impl EnvironmentInfoCompilation {
             expires_at: due_at + ENVIRONMENT_INFO_RETENTION,
             files: compiled.files,
             bucket: compiled.bucket,
-            credential_id: compiled.credential_id,
             request_id: request_id.to_string(),
             completion_recorded: false,
         }
@@ -3189,13 +3164,11 @@ impl EnvironmentInfoCompilation {
         self.expires_at <= at
     }
 
-    /// What object storage and the credential store must forget once the files
-    /// are deleted.
+    /// What object storage must forget once the files are deleted.
     pub fn to_discarded(&self) -> DiscardedEnvironmentInfo {
         DiscardedEnvironmentInfo {
             bucket: self.bucket.clone(),
             s3_keys: self.files.iter().map(|file| file.s3_key.clone()).collect(),
-            credential_id: self.credential_id.clone(),
         }
     }
 
@@ -3348,6 +3321,10 @@ pub struct ComAmazonawsElasticbeanstalkAwselasticbeanstalkserviceState {
     /// [`event_notifications::deliver_environment_notifications`], which is what
     /// publishes them.
     pub pending_notifications: Vec<PendingEventNotification>,
+    /// The socket every environment's published address is served on, opened when
+    /// the first address is needed. `None` until then, and on an engine that
+    /// vends no listeners at all. See [`EnvironmentPlaneEndpoint`].
+    pub environment_plane: Option<EnvironmentPlaneEndpoint>,
 }
 
 /// The store a fresh engine starts from: no applications, versions, custom
@@ -3380,6 +3357,9 @@ impl Default for ComAmazonawsElasticbeanstalkAwselasticbeanstalkserviceState {
             // Nothing has happened to an environment yet, so nothing is owed a
             // notification.
             pending_notifications: Vec::new(),
+            // No environment has an address yet, so there is no socket to serve
+            // one on.
+            environment_plane: None,
         }
     }
 }
@@ -4295,8 +4275,8 @@ impl ComAmazonawsElasticbeanstalkAwselasticbeanstalkserviceState {
         }
     }
 
-    /// The activity log of the environment `environment_id`: the content the
-    /// information compiled from one of its instances carries.
+    /// The activity log of the environment `environment_id`: what Elastic
+    /// Beanstalk itself did to the environment.
     ///
     /// Elastic Beanstalk writes what it DOES to an environment to the activity
     /// log on the environment's instances, and this store's event log is that
@@ -4307,11 +4287,9 @@ impl ComAmazonawsElasticbeanstalkAwselasticbeanstalkserviceState {
     /// log line takes. Nothing here is invented: an environment whose log holds
     /// nothing compiles to nothing.
     ///
-    /// This emulator runs no application server on an environment's instances —
-    /// the same reason `DescribeInstancesHealth` reports no measured
-    /// per-instance health — so there are no application server log files to
-    /// compile, and the activity log is the one log it has. It is therefore the
-    /// same content for every instance of an environment.
+    /// The log of the APPLICATION the environment runs is a second file, whose
+    /// lines are the ones that application itself wrote; the compiled
+    /// information carries both ([`Self::compiled_environment_information`]).
     ///
     /// `max_lines`, where given, keeps only the LAST that many lines: "setting
     /// the `InfoType` to `tail` compiles the last lines" of the log, while
@@ -4353,6 +4331,47 @@ impl ComAmazonawsElasticbeanstalkAwselasticbeanstalkserviceState {
         }
         // A text log file ends in a newline, so the last line is a line.
         format!("{}\n", lines.join("\n"))
+    }
+
+    /// The content the environment information compiled from one of
+    /// `environment_id`'s instances carries, as far as this store holds it: the
+    /// activity log, and the application the environment RUNS, whose own log is
+    /// produced by running it (see [`DeployedApplication`] and
+    /// [`compiled_environment_information`], which puts the two together).
+    pub fn environment_log_sources(
+        &self,
+        environment_id: &str,
+        max_lines: Option<usize>,
+    ) -> (String, Option<DeployedApplication>) {
+        (
+            self.environment_activity_log(environment_id, max_lines),
+            self.deployed_application(environment_id),
+        )
+    }
+
+    /// The application the environment `environment_id` is running: the bundle of
+    /// the version it reports deployed, with the process environment its own
+    /// configuration gives that application.
+    ///
+    /// `None` for an environment that deploys no version, one whose version this
+    /// service holds no readable bundle for, and one that is not running at all —
+    /// "Terminated: Environment is not running", so it runs no application
+    /// either.
+    pub fn deployed_application(&self, environment_id: &str) -> Option<DeployedApplication> {
+        let environment = self.environments.get(environment_id)?;
+        if environment.is_terminated() {
+            return None;
+        }
+        let version_label = environment.version_label.clone()?;
+        let version = self
+            .application_versions
+            .get(&(environment.application_name.clone(), version_label.clone()))?;
+        let bundle = version.bundle.clone()?;
+        Some(DeployedApplication {
+            version_label,
+            bundle,
+            environment: application_environment(&environment.option_settings),
+        })
     }
 
     /// Materialise just the application deletions the clock has already
@@ -4752,4 +4771,39 @@ pub fn environment_serving_cname<'store>(
     store.environments.values().find(|environment| {
         !environment.is_terminated() && environment.cname.eq_ignore_ascii_case(cname)
     })
+}
+
+/// The live environment in `store` whose address carries the CNAME prefix
+/// `cname_prefix` in `region` — the one a request to that address is served by.
+///
+/// The PREFIX inside its Region is what identifies the address
+/// ([`environment_cname`]), and the address a request reached carries both in the
+/// path, so this is the same question [`environment_serving_cname`] answers,
+/// asked by a request rather than by a name: the environment serving the address
+/// is the one whose published CNAME ends in that prefix's plane path.
+pub fn environment_serving_cname_prefix<'store>(
+    store: &'store ComAmazonawsElasticbeanstalkAwselasticbeanstalkserviceState,
+    region: &str,
+    cname_prefix: &str,
+) -> Option<&'store Environment> {
+    let path = environment_plane_path(region, cname_prefix);
+    store
+        .environments
+        .values()
+        .find(|environment| !environment.is_terminated() && ends_in_path(&environment.cname, &path))
+}
+
+/// Whether the address `cname` ends in the plane path `path`, compared the way
+/// DNS compares names: case-insensitively, since a CNAME prefix is a host name
+/// label and `TAKEN-PREFIX` names the name `taken-prefix` names.
+///
+/// `get` rather than a slice: the address is composed of stored values, but a
+/// byte offset that falls inside a multi-byte character is not a split point —
+/// it answers `false` here instead of panicking.
+fn ends_in_path(cname: &str, path: &str) -> bool {
+    cname
+        .len()
+        .checked_sub(path.len())
+        .and_then(|start| cname.get(start..))
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(path))
 }

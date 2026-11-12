@@ -166,8 +166,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })?;
 
         // What this request compiles, read under the lock; the lock is DROPPED
-        // before the compile below, which reaches object storage in process.
-        let (environment_id, ec2_instance_ids, log, subject, mut discarded) = {
+        // before the compile below, which reaches object storage in process and
+        // runs the deployed application.
+        let (environment_id, ec2_instance_ids, activity, deployed, subject, mut discarded) = {
             let mut store = state.lock();
             store.materialize_due_transitions();
 
@@ -229,12 +230,39 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // `InfoType` is `@required` and modelled as an enum, so the
             // boundary validator has already refused a request that names none
             // or one outside `ENVIRONMENT_INFO_TYPE_VALUES`.
-            let log = store.environment_activity_log(
+            let (activity, deployed) = store.environment_log_sources(
                 &environment_id,
                 crate::state::environment_info_log_lines(input.info_type.as_str()),
             );
-            (environment_id, ec2_instance_ids, log, subject, discarded)
+            (
+                environment_id,
+                ec2_instance_ids,
+                activity,
+                deployed,
+                subject,
+                discarded,
+            )
         };
+
+        // "Compiles the last lines from the application server log files of
+        // every Amazon EC2 instance in your environment": the application's own
+        // log is what the application WROTE, so the environment's deployed code
+        // is run and the lines it wrote are the lines compiled. Nothing is
+        // compiled for an environment running no application of this emulator's
+        // engine.
+        let started = match deployed.as_ref() {
+            Some(deployed) => deployed.start().await,
+            None => None,
+        };
+        let application_log = started
+            .as_ref()
+            .map(crate::state::application_log_lines)
+            .unwrap_or_default();
+        let log = crate::state::compiled_environment_information(
+            &activity,
+            &application_log,
+            crate::state::environment_info_log_lines(input.info_type.as_str()),
+        );
 
         // "Initiates a request to COMPILE the specified type of information":
         // the file is written into the account's Elastic Beanstalk storage

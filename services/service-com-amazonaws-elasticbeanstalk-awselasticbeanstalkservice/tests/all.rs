@@ -41,6 +41,8 @@ mod custom_platform_version_tags;
 mod delete_configuration_template;
 #[path = "all/delete_platform_version.rs"]
 mod delete_platform_version;
+#[path = "all/deployed_application.rs"]
+mod deployed_application;
 #[path = "all/describe_application_versions.rs"]
 mod describe_application_versions;
 #[path = "all/dns_availability.rs"]
@@ -55,6 +57,8 @@ mod environment_event_notifications;
 mod environment_info;
 #[path = "all/environment_info_request_shape.rs"]
 mod environment_info_request_shape;
+#[path = "all/environment_name_reuse.rs"]
+mod environment_name_reuse;
 #[path = "all/environment_operations.rs"]
 mod environment_operations;
 #[path = "all/environment_resources.rs"]

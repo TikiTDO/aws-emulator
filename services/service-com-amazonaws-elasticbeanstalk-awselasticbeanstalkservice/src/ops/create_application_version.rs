@@ -237,6 +237,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             _ => None,
         };
+        // The FILES of that source bundle, read here for the same reason and in
+        // the same place: an environment that deploys this version RUNS them, so
+        // the version is created with the files it was created from rather than
+        // with a reference nothing ever read. The read reaches object storage, so
+        // it happens before the store is locked.
+        let bundle = match input.source_bundle.as_ref() {
+            Some(source_bundle) => {
+                crate::state::read_application_bundle(ctx, &region, source_bundle).await
+            }
+            None => None,
+        };
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             CreateApplicationVersionError::internal_failure(
                 "the Elastic Beanstalk store is unavailable",
@@ -360,6 +371,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .is_none()
                     .then(|| crate::state::sample_application_source_bundle(&region))
             }),
+            // The files that bundle carries, which an environment deploying this
+            // version runs. A version whose bundle nothing could read carries
+            // none, and such an environment runs no application of its own.
+            bundle,
             process: input.process,
             // The status a version starts in: `Processing` while the
             // pre-processing the clock owes it is outstanding, and `Unprocessed`

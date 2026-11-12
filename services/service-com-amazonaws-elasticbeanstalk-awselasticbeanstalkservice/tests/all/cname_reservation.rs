@@ -54,9 +54,12 @@ fn rows() -> Vec<Row> {
     ]
 }
 
-/// The CNAME a prefix forms, as `state::environment_cname` builds it.
-fn fully_qualified(prefix: &str) -> String {
-    format!("{prefix}.{TEST_REGION}.elasticbeanstalk.com")
+/// The CNAME a prefix forms, as `state::environment_cname` builds it: the socket
+/// this emulator serves the environment plane on, then the plane path that
+/// prefix's environment is served at. Read off the emulator, because the port
+/// that socket answers on is the core's to choose.
+fn fully_qualified(emulator: &Emulator, prefix: &str) -> String {
+    emulator.environment_address(TEST_REGION, prefix)
 }
 
 /// Create the environment `name` holding the CNAME `prefix` forms, and answer its
@@ -172,12 +175,12 @@ async fn a_swap_releases_the_prefixes_it_exchanges_and_a_second_swap_takes_them_
         // Each environment now answers at the OTHER's name...
         assert_eq!(
             reported_cname(&emulator, case, &source_id).await,
-            fully_qualified(&destination_prefix),
+            fully_qualified(&emulator, &destination_prefix),
             "case {case:?}: the swap must hand the source the destination's CNAME"
         );
         assert_eq!(
             reported_cname(&emulator, case, &destination_id).await,
-            fully_qualified(&source_prefix),
+            fully_qualified(&emulator, &source_prefix),
             "case {case:?}: the swap must hand the destination the source's CNAME"
         );
         // ... and neither carries the name it reserved, so both exchanged
@@ -196,7 +199,7 @@ async fn a_swap_releases_the_prefixes_it_exchanges_and_a_second_swap_takes_them_
         );
         assert_eq!(
             reported_cname(&emulator, case, &untouched_id).await,
-            fully_qualified(&untouched_prefix),
+            fully_qualified(&emulator, &untouched_prefix),
             "case {case:?}: the untouched environment keeps its own CNAME"
         );
 
@@ -221,7 +224,7 @@ async fn a_swap_releases_the_prefixes_it_exchanges_and_a_second_swap_takes_them_
         );
         let expected = format!(
             "DNS name ({}) is not available.",
-            fully_qualified(&source_prefix)
+            fully_qualified(&emulator, &source_prefix)
         );
         assert_eq!(
             taken.error_message(),
@@ -235,7 +238,7 @@ async fn a_swap_releases_the_prefixes_it_exchanges_and_a_second_swap_takes_them_
         swap(&emulator, &row, &source_id, &destination_id).await;
         assert_eq!(
             reported_cname(&emulator, case, &source_id).await,
-            fully_qualified(&source_prefix),
+            fully_qualified(&emulator, &source_prefix),
             "case {case:?}: swapping twice must restore the source's CNAME"
         );
         for prefix in [&source_prefix, &destination_prefix] {
@@ -288,12 +291,12 @@ async fn checking_a_released_prefix_changes_nothing() {
     // And the environments are exactly as the swap left them.
     assert_eq!(
         reported_cname(&emulator, case, &source_id).await,
-        fully_qualified("green-prefix"),
+        fully_qualified(&emulator, "green-prefix"),
         "case {case:?}: the reads must not move either CNAME"
     );
     assert_eq!(
         reported_cname(&emulator, case, &destination_id).await,
-        fully_qualified("blue-prefix"),
+        fully_qualified(&emulator, "blue-prefix"),
         "case {case:?}: the reads must not move either CNAME"
     );
 }

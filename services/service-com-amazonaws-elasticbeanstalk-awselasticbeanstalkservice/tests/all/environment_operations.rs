@@ -259,10 +259,13 @@ async fn naming_no_environment_is_refused_with_the_code_that_operations_model_do
 // Acting on an environment
 // ---------------------------------------------------------------------------
 
-/// RULE: RestartAppServer restarts the container server without redeploying, so
-/// the environment keeps its status while its health checks are suspended
-/// (`Grey`), and the health it reported comes back when the clock makes the
-/// restart due. Asserted for each member that can name the environment.
+/// RULE: an operation that acts on a RUNNING environment reports `Updating`
+/// while Elastic Beanstalk carries it out — `Launching` is the status of an
+/// initial deployment alone — and the clock owes the move back to the state the
+/// environment came from. RestartAppServer restarts the container server without
+/// redeploying, so its health checks are suspended (`Grey`) while it runs and the
+/// status and health it reported come back when the clock makes the restart due.
+/// Asserted for each member that can name the environment.
 #[tokio::test]
 async fn restart_app_server_suspends_health_checks_and_gives_them_back() {
     for by_id in [false, true] {
@@ -295,8 +298,8 @@ async fn restart_app_server_suspends_health_checks_and_gives_them_back() {
         let during = described(&emulator, "restart-env-1").await;
         assert_eq!(
             during.values_at("Environments/member/Status"),
-            vec!["Ready"],
-            "case {case:?}: a restart does not change the environment's status, got {}",
+            vec!["Updating"],
+            "case {case:?}: a restart puts the environment into Updating, got {}",
             during.body
         );
         assert_eq!(
@@ -308,6 +311,12 @@ async fn restart_app_server_suspends_health_checks_and_gives_them_back() {
 
         std::thread::sleep(PAST_DUE);
         let after = described(&emulator, "restart-env-1").await;
+        assert_eq!(
+            after.values_at("Environments/member/Status"),
+            vec!["Ready"],
+            "case {case:?}: the status before the restart must come back, got {}",
+            after.body
+        );
         assert_eq!(
             after.values_at("Environments/member/Health"),
             vec!["Green"],
@@ -324,10 +333,10 @@ async fn restart_app_server_suspends_health_checks_and_gives_them_back() {
 }
 
 /// RULE: RebuildEnvironment recreates the environment's resources and forces a
-/// restart, so the environment re-enters `Launching` and the clock owes the move
-/// back to `Ready`; and an environment that is not `Ready` ("Ready: Environment
-/// is available to have an action performed on it") accepts neither a rebuild nor
-/// a restart.
+/// restart on an environment that is already running, so it reports `Updating`
+/// while the rebuild runs and the clock owes the move back to `Ready`; and an
+/// environment that is not `Ready` ("Ready: Environment is available to have an
+/// action performed on it") accepts neither a rebuild nor a restart.
 #[tokio::test]
 async fn rebuild_environment_runs_the_deployment_again_and_only_from_ready() {
     let emulator = Emulator::new();
@@ -345,8 +354,8 @@ async fn rebuild_environment_runs_the_deployment_again_and_only_from_ready() {
     let during = described(&emulator, "rebuild-env-1").await;
     assert_eq!(
         during.values_at("Environments/member/Status"),
-        vec!["Launching"],
-        "case {case:?}: a rebuilt environment re-enters its deployment, got {}",
+        vec!["Updating"],
+        "case {case:?}: a rebuilt environment reports Updating, got {}",
         during.body
     );
     assert_eq!(
@@ -365,7 +374,7 @@ async fn rebuild_environment_runs_the_deployment_again_and_only_from_ready() {
         assert_eq!(
             refused.error_code(),
             "InvalidParameterValue",
-            "case {action:?} while launching: expected InvalidParameterValue, got {}",
+            "case {action:?} while updating: expected InvalidParameterValue, got {}",
             refused.body
         );
     }
