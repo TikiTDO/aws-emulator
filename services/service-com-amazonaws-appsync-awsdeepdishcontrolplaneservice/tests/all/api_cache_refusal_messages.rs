@@ -7,17 +7,17 @@
 //! rather than the one request that exposed it:
 //!
 //! 1. a cache operation that finds no cache to address is refused 404
-//!    `NotFoundException` whose message names the CALL that met the absence; for the
-//!    three calls that address a cache's contents or configuration it also names
-//!    whether the cache was torn down or never configured, while the teardown — which
-//!    asks for the absence itself — names the absent resource either way;
+//!    `NotFoundException` whose message names the CALL that met the absence and whether
+//!    the cache was torn down or never configured; the teardown is not one of them — it
+//!    asks for the absence itself, so an empty cache slot already satisfies it and it is
+//!    served;
 //! 2. a create on an API that already has a cache is refused 400 `BadRequestException`
 //!    with AppSync's fixed sentence for that class, and the stored cache is untouched;
 //! 3. a teardown's precondition is the CREATION of the instance, not the status it is
 //!    in at the moment: a cache whose create has not completed cannot be deleted, while
 //!    one that exists is deletable even while new settings are being applied to it — so
-//!    an update never leaves a cache that cannot be removed, and of two deletes racing
-//!    on one cache exactly one is served and the other meets the absence.
+//!    an update never leaves a cache that cannot be removed, and two deletes racing on
+//!    one cache remove it once and are both served.
 //!
 //! The sentences asserted here are written out in full rather than read from the
 //! service, so the assertion is about AppSync's wording rather than about whatever the
@@ -59,17 +59,15 @@ const CACHE_TYPES: &[&str] = &["MEDIUM", "LARGE_4X", "XLARGE", "R4_XLARGE"];
 /// Source: `smithy_query(query="shape", shape="CacheHealthMetricsConfig")`.
 const HEALTH_METRICS: &[&str] = &["ENABLED", "DISABLED"];
 
-/// AWS's sentence a delete that finds no cache to tear down carries — the teardown asks
-/// for the absence itself, so its refusal names the absent resource whether or not a
-/// cache was there before.
-const DELETE_ABSENT_MESSAGE: &str =
-    "Unable to delete the cache as it doesn't exist, please create the cache first.";
-
-/// One cache operation, as a client reaches it: the call's name, its HTTP method, the
-/// path under the API, whether it carries a body, and the sentence AppSync's
-/// `NotFoundException` carries when that call finds no cache to address — one for an API
-/// that never had a cache and one for an API whose cache was torn down, which are the
-/// same sentence for the teardown, the call that asks for the absence itself.
+/// One cache operation that ADDRESSES an existing cache, as a client reaches it: the
+/// call's name, its HTTP method, the path under the API, whether it carries a body, and
+/// the sentence AppSync's `NotFoundException` carries when that call finds no cache to
+/// address — one for an API that never had a cache and one for an API whose cache was
+/// torn down.
+///
+/// `DeleteApiCache` is not one of them: a teardown asks for the absence of the cache, so
+/// an empty slot already satisfies it and it renders no absent-cache refusal at all (its
+/// served no-op is asserted on its own below).
 ///
 /// Source for the method and path of each: `smithy_query(query="digest")` — `GET`/`POST
 /// …/ApiCaches`, `POST …/ApiCaches/update`, `DELETE …/ApiCaches`, `DELETE
@@ -109,14 +107,6 @@ const CACHE_OPS: &[CacheOp] = &[
                           the cache.",
     },
     CacheOp {
-        name: "DeleteApiCache",
-        method: "DELETE",
-        path: "ApiCaches",
-        carries_body: false,
-        never_configured_message: DELETE_ABSENT_MESSAGE,
-        deleted_message: DELETE_ABSENT_MESSAGE,
-    },
-    CacheOp {
         name: "FlushApiCache",
         method: "DELETE",
         path: "FlushCache",
@@ -132,6 +122,12 @@ const CACHE_OPS: &[CacheOp] = &[
 /// assertions below read back.
 const DELETED_MESSAGE: &str =
     "Unable to get the cache as it has been deleted, please re-create the cache.";
+
+/// AWS's sentence for a read of an API that holds no cache the last teardown of it
+/// removed — one that never had one, and one whose teardown has since been re-issued and
+/// found nothing to remove.
+const NEVER_CONFIGURED_MESSAGE: &str =
+    "Unable to get the cache as it doesn't exist, please create the cache first.";
 
 /// AWS's fixed sentence for a create on an API that already has a cache.
 const ALREADY_ENABLED_MESSAGE: &str = "The API has already enabled caching.";
@@ -282,7 +278,8 @@ enum Absence {
 }
 
 /// Rule 1: an absent cache's refusal names the call that met it, and a read of an API
-/// whose cache was torn down names the deletion.
+/// whose cache was torn down names the deletion — while the teardown, which asks for
+/// that absence, is served instead of refused.
 ///
 /// The rows differ along what the rule generalises over: why the cache is absent, the
 /// settings the deleted cache was created with, and which of the four cache operations
@@ -344,6 +341,31 @@ async fn an_absent_caches_refusal_names_the_call_that_met_it() {
                 operation.name
             );
         }
+
+        // The teardown meets the same absence and is SERVED: it asked for exactly what
+        // it found, so it answers the modelled empty response rather than a refusal. It
+        // removed no instance, so from then on a reader reports an API that holds no
+        // cache rather than one whose cache was torn down.
+        let no_op = delete_cache(&router, &api_id).await;
+        assert_eq!(
+            no_op.status, 200,
+            "case {case:?} DeleteApiCache: expected the teardown of an absent cache to be \
+             served, got {no_op:?}"
+        );
+        assert!(
+            carries_no_members(&no_op.body),
+            "case {case:?} DeleteApiCache: expected a response with no members, got {no_op:?}"
+        );
+        let after_no_op = get_cache(&router, &api_id).await;
+        assert_eq!(
+            after_no_op.status, 404,
+            "case {case:?}: expected the cache to still be absent, got {after_no_op:?}"
+        );
+        assert_eq!(
+            after_no_op.message, NEVER_CONFIGURED_MESSAGE,
+            "case {case:?}: expected {NEVER_CONFIGURED_MESSAGE:?} once the last teardown \
+             removed nothing, got {after_no_op:?}"
+        );
 
         // None of those refusals wrote anything: a create is still accepted, and once
         // it has run the read reports a cache rather than either absence.
@@ -573,12 +595,12 @@ async fn a_cache_whose_create_has_not_completed_is_not_deletable() {
     }
 }
 
-/// Rule 3's arbitration: when two deletes race on one cache exactly one is served and
-/// the other finds no cache to tear down — and the loser's refusal names the delete.
-/// Asserted after concurrent updates too, so a reconfigured cache is removable by the
-/// same rule.
+/// Rule 3's arbitration: when two deletes race on one cache the cache is removed once
+/// and BOTH callers are served — the teardown asks for the absence of the cache, so the
+/// racer that arrives second finds what it asked for. Asserted after concurrent updates
+/// too, so a reconfigured cache is removable by the same rule.
 #[tokio::test]
-async fn one_of_two_racing_deletes_is_served_and_the_other_finds_no_cache() {
+async fn two_racing_deletes_remove_the_cache_once_and_both_are_served() {
     let router = router();
 
     // (case, how many PAIRS of simultaneous updates race before the deletes do)
@@ -611,43 +633,29 @@ async fn one_of_two_racing_deletes_is_served_and_the_other_finds_no_cache() {
             delete_cache(&router, &api_id),
             delete_cache(&router, &api_id)
         );
-        let served = [&first, &second]
-            .into_iter()
-            .filter(|answer| answer.status == 200)
-            .count();
-        assert_eq!(
-            served, 1,
-            "case {case:?}: expected exactly one racer to be served, got {first:?} and {second:?}"
-        );
-        let winner = if first.status == 200 { &first } else { &second };
-        assert!(
-            carries_no_members(&winner.body),
-            "case {case:?}: expected the served racer to answer with no members, got {winner:?}"
-        );
-        let loser = if first.status == 200 { &second } else { &first };
-        assert_eq!(
-            loser.status, 404,
-            "case {case:?}: expected the loser to find no cache, got {loser:?}"
-        );
-        assert_eq!(
-            loser.error_type, "NotFoundException",
-            "case {case:?}: expected the loser's error type to be NotFoundException, \
-             got {loser:?}"
-        );
-        assert_eq!(
-            loser.message, DELETE_ABSENT_MESSAGE,
-            "case {case:?}: expected the loser's refusal to name the delete, got {loser:?}"
-        );
+        for (racer, answer) in [&first, &second].into_iter().enumerate() {
+            assert_eq!(
+                answer.status, 200,
+                "case {case:?} racing delete {racer}: expected status 200, got {answer:?}"
+            );
+            assert!(
+                carries_no_members(&answer.body),
+                "case {case:?} racing delete {racer}: expected a response with no members, \
+                 got {answer:?}"
+            );
+        }
 
-        // The cache is gone for every later caller, whichever racer removed it.
+        // The cache is gone for every later caller, whichever racer removed it — and the
+        // racer that arrived second removed nothing, so the absence a reader meets is the
+        // one an API that holds no cache has.
         let gone = get_cache(&router, &api_id).await;
         assert_eq!(
             gone.status, 404,
             "case {case:?}: expected the cache to be gone, got {gone:?}"
         );
         assert_eq!(
-            gone.message, DELETED_MESSAGE,
-            "case {case:?}: expected {DELETED_MESSAGE:?}, got {gone:?}"
+            gone.message, NEVER_CONFIGURED_MESSAGE,
+            "case {case:?}: expected {NEVER_CONFIGURED_MESSAGE:?}, got {gone:?}"
         );
     }
 }

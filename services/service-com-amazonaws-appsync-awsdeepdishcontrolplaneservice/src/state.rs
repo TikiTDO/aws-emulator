@@ -100,13 +100,14 @@ pub struct GraphqlApiRecord {
     /// [`GraphqlApiRecord::put_api_cache`] and [`GraphqlApiRecord::take_api_cache`],
     /// which keep it and [`Self::api_cache_deleted`] in step.
     pub api_cache: Option<ApiCacheRecord>,
-    /// Whether a cache of this API was torn down, i.e. whether the empty cache slot
-    /// above is empty because a delete emptied it rather than because nothing ever
-    /// filled it. The two are distinguishable to a caller — a call that finds a cache
-    /// that was deleted is answered differently from one that finds an API that never
-    /// had a cache — so the distinction is kept here rather than recomputed from
-    /// anything the request carries. Cleared by a create that fills the slot again,
-    /// which leaves no deletion behind.
+    /// Whether the empty cache slot above is empty because a TEARDOWN emptied it rather
+    /// than because nothing ever filled it. The two are distinguishable to a caller — a
+    /// call that finds a cache that was torn down is answered differently from one that
+    /// finds an API that never had a cache — so the distinction is kept here rather than
+    /// recomputed from anything the request carries. It reports what the LAST teardown
+    /// of this API removed, so it is cleared both by a create that fills the slot again
+    /// and by a teardown that found nothing to remove, neither of which leaves a
+    /// deletion behind.
     pub api_cache_deleted: bool,
     /// The data sources created under this API, keyed by their caller-supplied
     /// name — the name is what every data-source operation addresses one by, so it
@@ -162,15 +163,18 @@ impl GraphqlApiRecord {
         self.api_cache_deleted = false;
     }
 
-    /// Tear down this API's cache, recording that the slot was emptied by a delete.
+    /// Tear down this API's cache, recording what THIS teardown removed.
+    ///
+    /// The slot is emptied either way, and the deletion marker says whether this call is
+    /// what emptied it: a teardown that found the slot already empty removed no instance,
+    /// so it leaves no deletion behind for a later reader to report.
     pub fn take_api_cache(&mut self) {
-        self.api_cache = None;
-        self.api_cache_deleted = true;
+        self.api_cache_deleted = self.api_cache.take().is_some();
     }
 
-    /// Whether this API's cache slot is empty BECAUSE a delete emptied it — the one
-    /// case a call reports as a torn-down cache rather than as one that was never
-    /// configured.
+    /// Whether this API's cache slot is empty BECAUSE the last teardown of it removed an
+    /// instance — the one case a call reports as a torn-down cache rather than as one
+    /// that was never configured.
     pub fn api_cache_was_deleted(&self) -> bool {
         self.api_cache.is_none() && self.api_cache_deleted
     }
@@ -2791,20 +2795,20 @@ pub const CACHE_AVAILABLE: &str = "AVAILABLE";
 /// [`ApiCacheRecord::settle`] applies it.
 pub const CACHE_SPAN: Duration = Duration::from_millis(500);
 
-/// One of the cache operations an API's cache is addressed by — the call a refusal
-/// about that cache names.
+/// One of the cache operations that ADDRESS an API's cache — the call a refusal about
+/// that cache names.
 ///
 /// AppSync's absent-cache refusal names the call that was attempted rather than the
 /// resource alone, so each handler hands its own variant to
-/// [`absent_cache_message`] and no handler borrows another's wording.
+/// [`absent_cache_message`] and no handler borrows another's wording. `DeleteApiCache`
+/// is not among them: a teardown asks for the absence of the cache, so it is satisfied
+/// by an empty slot and renders no absent-cache refusal at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheCall {
     /// `GetApiCache`.
     Get,
     /// `UpdateApiCache`.
     Update,
-    /// `DeleteApiCache`.
-    Delete,
     /// `FlushApiCache`.
     Flush,
 }
@@ -2816,7 +2820,6 @@ impl CacheCall {
         match self {
             Self::Get => "get",
             Self::Update => "update",
-            Self::Delete => "delete",
             Self::Flush => "flush",
         }
     }
@@ -2833,8 +2836,8 @@ pub fn cache_not_found_message(call: CacheCall) -> String {
 }
 
 /// The text `NotFoundException` (HTTP 404) carries when `call` found no cache to
-/// address on an API whose cache was torn down
-/// ([`GraphqlApiRecord::api_cache_was_deleted`]): a cache that was deleted is not a
+/// address on an API whose cache the last teardown removed
+/// ([`GraphqlApiRecord::api_cache_was_deleted`]): a cache that was torn down is not a
 /// cache that was never configured, so the refusal names the deletion and points the
 /// caller at re-creating it rather than at creating a first one.
 pub fn cache_deleted_message(call: CacheCall) -> String {
@@ -2847,12 +2850,8 @@ pub fn cache_deleted_message(call: CacheCall) -> String {
 /// The text `NotFoundException` (HTTP 404) carries when `call` found no cache to
 /// address, for either reason an API can have none: `was_deleted` says whether a delete
 /// emptied the cache slot, which the refusal reports as such.
-///
-/// [`CacheCall::Delete`] is the one call that asks for the absence itself, so its
-/// refusal names only the absent resource; the recorded refusal of a delete that finds
-/// no cache carries the never-configured text whether or not a cache was there before.
 pub fn absent_cache_message(call: CacheCall, was_deleted: bool) -> String {
-    if was_deleted && call != CacheCall::Delete {
+    if was_deleted {
         cache_deleted_message(call)
     } else {
         cache_not_found_message(call)

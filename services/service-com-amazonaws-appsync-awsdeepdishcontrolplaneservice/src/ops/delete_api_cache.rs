@@ -12,9 +12,18 @@
 //! cache is left exactly where it was, so a caller can read it again and retry.
 //!
 //! A delete addresses the cache through the API that owns it, so an `apiId` that is not
-//! an API id is a bad request (400), one that names no API of this account is a
-//! not-found (404), and an API that holds no cache has no cache to delete — also a
-//! not-found.
+//! an API id is a bad request (400) and one that names no API of this account is a
+//! not-found (404). The cache itself carries no identifier of its own — an API holds at
+//! most one — so the teardown asks for the absence of the instance rather than for the
+//! instance: on an API that holds no cache there is nothing left to tear down and the
+//! call answers the modelled empty response (200), as it does for the delete that
+//! emptied the slot. The absent-cache not-found belongs to the readers and mutators of
+//! the cache, never to its deleter.
+//!
+//! What a later reader of the absent cache reports is what the LAST teardown removed
+//! ([`crate::state::GraphqlApiRecord::take_api_cache`]): a delete that removed an
+//! instance leaves a cache that was torn down, and a delete that found nothing leaves an
+//! API that holds no cache at all.
 //!
 //! ## Shape of an operation
 //!
@@ -182,28 +191,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })
             .into());
         };
-        // An API that holds no cache has nothing to tear down, whether a delete
-        // emptied the cache slot or nothing ever filled it: a teardown asks for the
-        // absence itself, so its refusal names this call and the absent resource (see
-        // `crate::state::absent_cache_message`).
-        let Some(cache) = api.api_cache.as_ref() else {
-            let message = crate::state::absent_cache_message(
-                crate::state::CacheCall::Delete,
-                api.api_cache_was_deleted(),
-            );
-            return Err(DeleteApiCacheErrorModeled::NotFoundException(NotFoundException {
-                message: Some(message),
-            })
-            .into());
-        };
-
-        // The teardown precondition: an instance whose CREATION has not completed
-        // cannot be torn down — it is still being created, or its creation failed.
-        // Once it has been created it is deletable whatever the service is doing to it
-        // at the moment, so settings being applied to an existing instance never make
-        // it undeletable. The refusal writes nothing, so the cache is still reported
-        // afterwards in whatever status it is in.
-        if !cache.was_created() {
+        // The teardown precondition, which is about the instance the slot HOLDS: an
+        // instance whose CREATION has not completed cannot be torn down — it is still
+        // being created, or its creation failed. Once it has been created it is deletable
+        // whatever the service is doing to it at the moment, so settings being applied to
+        // an existing instance never make it undeletable. The refusal writes nothing, so
+        // the cache is still reported afterwards in whatever status it is in.
+        if api.api_cache.as_ref().is_some_and(|cache| !cache.was_created()) {
             return Err(DeleteApiCacheErrorModeled::BadRequestException(BadRequestException {
                 message: Some(crate::state::CACHE_NOT_DELETABLE_MESSAGE.to_string()),
                 ..Default::default()
@@ -213,9 +207,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // Removing the record is what makes the cache gone: `GetApiCache`,
         // `FlushApiCache` and `UpdateApiCache` all answer not-found for this API
-        // afterwards, and a `CreateApiCache` is no longer a duplicate. The teardown is
-        // recorded with it, so a later read reports a cache that was deleted rather
-        // than one that never existed.
+        // afterwards, and a `CreateApiCache` is no longer a duplicate. An API that holds
+        // no cache is already what the teardown asks for, whether a delete emptied the
+        // slot or nothing ever filled it, so the same call is served there too. Either
+        // way the teardown records what IT removed, so a later read reports a cache that
+        // was torn down only after the delete that tore one down.
         api.take_api_cache();
 
         // The modelled response carries no members.

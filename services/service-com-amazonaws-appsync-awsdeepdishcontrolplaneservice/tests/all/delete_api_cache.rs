@@ -10,6 +10,12 @@
 //! 200 with a response that carries no members and the cache stops existing, so every
 //! later reader of that API answers not-found and a fresh create is accepted again.
 //!
+//! The teardown asks for the absence of the cache rather than for the cache, so it is
+//! idempotent: on an API that holds none it is already satisfied and answers the same
+//! empty 200 however often it is repeated. What a reader of the absent cache reports is
+//! what the LAST teardown removed — a cache that was torn down after the delete that
+//! removed one, and an API that holds no cache at all after one that found nothing.
+//!
 //! The `call`/`create_api`/`Answer` harness is the error-contract suite's.
 
 use std::sync::Arc;
@@ -319,13 +325,6 @@ async fn deleting_an_available_cache_removes_it_and_answers_without_members() {
                 })),
                 state::cache_deleted_message(state::CacheCall::Update),
             ),
-            (
-                "delete again",
-                "DELETE",
-                format!("/v1/apis/{api_id}/ApiCaches"),
-                None,
-                state::cache_not_found_message(state::CacheCall::Delete),
-            ),
         ] {
             let answer = call(&router, method, &path, body).await;
             assert_eq!(
@@ -341,6 +340,32 @@ async fn deleting_an_available_cache_removes_it_and_answers_without_members() {
                 answer.message, expected_message,
                 "case {case:?} {op} after delete: expected {expected_message:?}, \
                  got {answer:?}"
+            );
+        }
+
+        // Repeating the teardown is served exactly as the first one was: the delete asks
+        // for the absence it now finds, so each repetition answers the modelled empty
+        // 200 — and it removed no instance, so from then on every reader of the absent
+        // cache reports an API that holds no cache rather than one whose cache was torn
+        // down.
+        for attempt in 2..=4 {
+            let again = delete_cache(&router, &api_id).await;
+            assert_eq!(
+                again.status, 200,
+                "case {case:?} delete {attempt}: expected status 200, got {again:?}"
+            );
+            assert!(
+                carries_no_members(&again.body),
+                "case {case:?} delete {attempt}: expected a response with no members, \
+                 got {again:?}"
+            );
+            let expected = state::cache_not_found_message(state::CacheCall::Get);
+            let read = get_cache(&router, &api_id).await;
+            assert_eq!(
+                (read.status, read.error_type.as_str(), read.message.as_str()),
+                (404, "NotFoundException", expected.as_str()),
+                "case {case:?} delete {attempt}: expected the reader to report an API that \
+                 holds no cache, got {read:?}"
             );
         }
 
@@ -360,19 +385,37 @@ async fn deleting_an_available_cache_removes_it_and_answers_without_members() {
     }
 }
 
-/// There is nothing to delete where there is no cache: the call is a not-found and it
-/// removes nothing. An `apiId` that is not an API id at all is the bad request the
-/// shape rule makes it, on this operation as on every other that resolves one — and it
-/// is NOT the status refusal, so the two refusals stay distinguishable.
+/// There is nothing to refuse where there is no cache: on an API that holds none the
+/// teardown is already satisfied and answers the modelled empty 200, writing nothing.
+/// The `apiId` checks ahead of it are untouched — an `apiId` that is not an API id at
+/// all is the bad request the shape rule makes it, on this operation as on every other
+/// that resolves one, a well-formed id naming no API is a not-found, and neither is the
+/// status refusal, so the refusals stay distinguishable.
 ///
-/// The rows differ along what the `apiId` names and along its length: an API that holds
-/// no cache, well-formed ids of several lengths that name no API, and ids past the
-/// length an AppSync API id has.
+/// The rows differ along what the `apiId` names and along its length: APIs that hold no
+/// cache for either reason one can hold none, well-formed ids of several lengths that
+/// name no API, and ids past the length an AppSync API id has.
 #[tokio::test]
-async fn deleting_what_holds_no_cache_is_a_not_found_and_removes_nothing() {
+async fn deleting_what_holds_no_cache_is_served_and_the_id_checks_are_unchanged() {
     let router = router();
 
     let cacheless = create_api(&router, "Api_delete_no_cache").await;
+    // An API whose cache slot a delete emptied: the other reason an API holds no cache.
+    let emptied = api_with_cache(
+        &router,
+        "Api_delete_emptied",
+        120,
+        "PER_RESOLVER_CACHING",
+        "LARGE",
+        "DISABLED",
+    )
+    .await;
+    tokio::time::sleep(CACHE_SPAN + Duration::from_millis(100)).await;
+    let seeded = delete_cache(&router, &emptied).await;
+    assert_eq!(
+        seeded.status, 200,
+        "case empty the cache slot by deleting its cache: expected 200, got {seeded:?}"
+    );
     let absent_short = "a".to_string();
     let absent_exact = "b".repeat(API_ID_LEN);
     let overlong_by_one = "c".repeat(API_ID_LEN + 1);
@@ -380,7 +423,8 @@ async fn deleting_what_holds_no_cache_is_a_not_found_and_removes_nothing() {
 
     // (case, apiId, expected status)
     let rows: &[(&str, &String, u16)] = &[
-        ("an api that holds no cache", &cacheless, 404),
+        ("an api that never had a cache", &cacheless, 200),
+        ("an api whose cache a delete emptied", &emptied, 200),
         ("a one-character id naming no api", &absent_short, 404),
         ("a well-formed id naming no api", &absent_exact, 404),
         ("an id one past the id length", &overlong_by_one, 400),
@@ -393,6 +437,17 @@ async fn deleting_what_holds_no_cache_is_a_not_found_and_removes_nothing() {
             answer.status, *expected,
             "case {case:?}: expected status {expected}, got {answer:?}"
         );
+        if *expected == 200 {
+            assert!(
+                carries_no_members(&answer.body),
+                "case {case:?}: expected a response with no members, got {answer:?}"
+            );
+            assert!(
+                answer.error_type.is_empty(),
+                "case {case:?}: expected no error shape at all, got {answer:?}"
+            );
+            continue;
+        }
         let error_type = if *expected == 404 {
             "NotFoundException"
         } else {
@@ -413,8 +468,8 @@ async fn deleting_what_holds_no_cache_is_a_not_found_and_removes_nothing() {
         );
     }
 
-    // The refused delete left the API alone, so the cache it holds none of can still be
-    // created — and that create is what makes the very same call serveable.
+    // The served no-op created nothing, so the cache the API holds none of can still be
+    // created — and that create is what gives the very same call something to remove.
     let created = create_cache(
         &router,
         &cacheless,
@@ -499,5 +554,122 @@ async fn a_delete_removes_only_the_cache_it_addressed() {
                 "case {case:?}: expected the stored {member} to be unchanged, got {read:?}"
             );
         }
+    }
+}
+
+/// Why the API a row addresses holds no cache when the redundant deletes arrive.
+#[derive(Debug, Clone, Copy)]
+enum Absence {
+    /// No create ever ran for this API, so nothing ever filled the slot.
+    NeverConfigured,
+    /// A cache existed and a delete emptied the slot.
+    Deleted,
+}
+
+/// The teardown is idempotent with respect to the absence of the cache: however many
+/// times it is repeated on an API that holds none, each call answers the modelled empty
+/// 200, and a create still fills the slot again afterwards. A teardown that found no
+/// instance removed none, so from then on a reader of the absent cache reports an API
+/// that holds no cache rather than one whose cache was torn down, and further
+/// repetitions change nothing.
+///
+/// The rows differ along what the rule generalises over: why the API holds no cache, how
+/// many redundant deletes are issued, and the settings the deleted row's cache was
+/// created with.
+#[tokio::test]
+async fn the_teardown_is_idempotent_however_often_it_is_repeated() {
+    let router = router();
+
+    // AppSync's two absent-cache sentences a reader meets, taken from the service so the
+    // assertion cannot drift from the wording the handlers answer.
+    let never_configured = state::cache_not_found_message(state::CacheCall::Get);
+    let torn_down = state::cache_deleted_message(state::CacheCall::Get);
+
+    // (case, why the cache is absent, how many redundant deletes, ttl of the seeded cache)
+    let rows: &[(&str, Absence, usize, i64)] = &[
+        ("an api that never had a cache, deleted once", Absence::NeverConfigured, 1, 60),
+        ("an api that never had a cache, deleted five times", Absence::NeverConfigured, 5, 60),
+        ("an api whose minimum-ttl cache was deleted, once more", Absence::Deleted, 1, 1),
+        ("an api whose mid-window cache was deleted, twice more", Absence::Deleted, 2, 600),
+        ("an api whose maximum-ttl cache was deleted, five times more", Absence::Deleted, 5, 3_600),
+    ];
+
+    for (index, (case, absence, repeats, ttl)) in rows.iter().enumerate() {
+        let cache_type = CACHE_TYPES[index % CACHE_TYPES.len()];
+        let behavior = CACHING_BEHAVIORS[index % CACHING_BEHAVIORS.len()];
+        let health = HEALTH_METRICS[index % HEALTH_METRICS.len()];
+        let case = format!("{case} ({cache_type} caching {behavior}, metrics {health})");
+        let api_id = create_api(&router, &format!("Api_delete_idempotent_{index}")).await;
+
+        if let Absence::Deleted = absence {
+            let created = create_cache(&router, &api_id, *ttl, behavior, cache_type, health).await;
+            assert_eq!(
+                created.status, 200,
+                "case {case:?}: expected the seed create to be accepted, got {created:?}"
+            );
+            // The instance has to have been created before it can be torn down.
+            tokio::time::sleep(CACHE_SPAN + Duration::from_millis(100)).await;
+            let first = delete_cache(&router, &api_id).await;
+            assert_eq!(
+                first.status, 200,
+                "case {case:?}: expected the seed delete to be served, got {first:?}"
+            );
+        }
+
+        // What a reader of the absent cache answers before the redundant deletes: the
+        // sentence for the absence this row built, which names a teardown only where one
+        // removed an instance.
+        let expected_before = match absence {
+            Absence::NeverConfigured => &never_configured,
+            Absence::Deleted => &torn_down,
+        };
+        let before = get_cache(&router, &api_id).await;
+        assert_eq!(
+            (before.status, before.error_type.as_str(), before.message.as_str()),
+            (404, "NotFoundException", expected_before.as_str()),
+            "case {case:?}: expected the reader to report this row's absence, got {before:?}"
+        );
+
+        for attempt in 1..=*repeats {
+            let again = delete_cache(&router, &api_id).await;
+            assert_eq!(
+                again.status, 200,
+                "case {case:?} redundant delete {attempt}: expected status 200, got {again:?}"
+            );
+            assert!(
+                again.error_type.is_empty(),
+                "case {case:?} redundant delete {attempt}: expected no error shape, \
+                 got {again:?}"
+            );
+            assert!(
+                carries_no_members(&again.body),
+                "case {case:?} redundant delete {attempt}: expected a response with no \
+                 members, got {again:?}"
+            );
+
+            // It removed no instance, so there is no teardown for a reader to report:
+            // from here on the absence is the one an API that holds no cache has, and it
+            // stays that way however often the call is repeated.
+            let read = get_cache(&router, &api_id).await;
+            assert_eq!(
+                (read.status, read.error_type.as_str(), read.message.as_str()),
+                (404, "NotFoundException", never_configured.as_str()),
+                "case {case:?} redundant delete {attempt}: expected the reader to report an \
+                 API that holds no cache, got {read:?}"
+            );
+        }
+
+        // And the slot is still fillable, so the no-ops left the API able to cache again.
+        let recreated = create_cache(&router, &api_id, *ttl, behavior, cache_type, health).await;
+        assert_eq!(
+            recreated.status, 200,
+            "case {case:?}: expected the cache to be creatable after the no-ops, \
+             got {recreated:?}"
+        );
+        assert_eq!(
+            recreated.body["apiCache"]["ttl"].as_i64(),
+            Some(*ttl),
+            "case {case:?}: expected the new instance to report its own ttl, got {recreated:?}"
+        );
     }
 }
