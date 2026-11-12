@@ -222,7 +222,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // — rather than `UnsupportedActionForDeploymentTypeException`, which
             // is what a hook execution of a deployment TYPE that cannot report a
             // result would be refused with.
-            let hooks = platform_hooks(&deployment.compute_platform).unwrap_or_default();
+            let hooks = crate::state::lifecycle_hook::platform_hooks(&deployment.compute_platform)
+                .unwrap_or_default();
             // A validation function reports a RESULT, so only the two terminal
             // lifecycle statuses are reportable.
             if status != crate::state::LIFECYCLE_EVENT_STATUS_SUCCEEDED
@@ -276,31 +277,51 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 return Err(
                     PutLifecycleEventHookExecutionStatusErrorModeled::LifecycleEventAlreadyCompletedException(
                         LifecycleEventAlreadyCompletedException {
-                            message: Some(format!(
-                                "The lifecycle event of deployment {deployment_id} reported by \
-                                 hook execution {hook_execution_id} has already completed"
+                            message: Some(crate::state::lifecycle_event_already_completed(
+                                &deployment_id,
+                                &hook_execution_id,
                             )),
                         },
                     ),
                 );
             }
-            // A deployment has one hook execution per lifecycle hook its compute
-            // platform runs, so an id past that count — and ANY id against a
-            // platform that runs none — names no hook execution of this
-            // deployment. Each accepted report takes the next of those hooks, in
-            // the order the platform runs them.
-            let Some(lifecycle_event_name) = hooks.get(deployment.lifecycle_hook_executions.len())
-            else {
-                return Err(
-                    PutLifecycleEventHookExecutionStatusErrorModeled::InvalidLifecycleEventHookExecutionIdException(
-                        InvalidLifecycleEventHookExecutionIdException {
-                            message: Some(
-                                crate::state::LIFECYCLE_EVENT_HOOK_EXECUTION_ID_INVALID
-                                    .to_string(),
-                            ),
-                        },
-                    ),
-                );
+            // The hook execution the id NAMES, when it is one this deployment
+            // dispatched: CodeDeploy hands a validation function the execution id
+            // of the lifecycle event it is validating, and the function reports
+            // back under it, so that is the hook execution this report is for —
+            // whichever of the deployment's hooks it belongs to.
+            let dispatched = deployment.hook_executions.iter().any(|hook| {
+                hook.lifecycle_event_hook_execution_id.as_deref() == Some(hook_execution_id.as_str())
+            });
+            // A deployment whose revision DECLARED its hooks has exactly those
+            // hook executions, each reporting under the id this service minted for
+            // it, so an id naming none of them names no hook execution of this
+            // deployment at all. A deployment that declared none issued no id
+            // either: its platform's hooks are what a report lands on, one per
+            // lifecycle hook that platform runs, in the order it runs them — and
+            // an id past that count, or ANY id against a platform that runs none,
+            // names no hook execution of it.
+            let lifecycle_event_name = if dispatched {
+                None
+            } else {
+                let named_hook = if deployment.hook_executions.is_empty() {
+                    hooks.get(deployment.lifecycle_hook_executions.len())
+                } else {
+                    None
+                };
+                let Some(name) = named_hook else {
+                    return Err(
+                        PutLifecycleEventHookExecutionStatusErrorModeled::InvalidLifecycleEventHookExecutionIdException(
+                            InvalidLifecycleEventHookExecutionIdException {
+                                message: Some(
+                                    crate::state::LIFECYCLE_EVENT_HOOK_EXECUTION_ID_INVALID
+                                        .to_string(),
+                                ),
+                            },
+                        ),
+                    );
+                };
+                Some((*name).to_string())
             };
             // Every lifecycle event of a deployment that already reached a
             // terminal status completed with it, so there is no result left to
@@ -311,9 +332,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 return Err(
                     PutLifecycleEventHookExecutionStatusErrorModeled::LifecycleEventAlreadyCompletedException(
                         LifecycleEventAlreadyCompletedException {
-                            message: Some(format!(
-                                "The lifecycle events of deployment {deployment_id} have already \
-                                 completed with it"
+                            message: Some(crate::state::lifecycle_events_already_completed(
+                                &deployment_id,
                             )),
                         },
                     ),
@@ -321,7 +341,41 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
 
             let now_ms = crate::state::now_ms();
-            let lifecycle_event_name = (*lifecycle_event_name).to_string();
+            // The report lands on the dispatched hook execution the id names, and
+            // the lifecycle event it was for is that hook's own; see
+            // `crate::state::lifecycle_hook`.
+            let lifecycle_event_name = match lifecycle_event_name {
+                Some(name) => name,
+                None => {
+                    match crate::state::lifecycle_hook::record_report(
+                        state,
+                        &deployment_id,
+                        &hook_execution_id,
+                        &status,
+                        now_ms,
+                    ) {
+                        Some(Ok(name)) => name,
+                        // Both cases are a hook execution that has already
+                        // completed with a result: one that reported, and — a
+                        // record this deployment no longer holds — one there is
+                        // nothing left to report for.
+                        _ => {
+                            return Err(
+                                PutLifecycleEventHookExecutionStatusErrorModeled::LifecycleEventAlreadyCompletedException(
+                                    LifecycleEventAlreadyCompletedException {
+                                        message: Some(
+                                            crate::state::lifecycle_event_already_completed(
+                                                &deployment_id,
+                                                &hook_execution_id,
+                                            ),
+                                        ),
+                                    },
+                                ),
+                            );
+                        }
+                    }
+                }
+            };
             // Re-borrowed mutably only once every refusal above has been answered,
             // so a refused request writes nothing. The record was just read under
             // this same lock, so a store that no longer holds it is a broken
@@ -340,24 +394,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 });
             // A validation function that reports `Failed` fails the deployment it
             // was validating, which CodeDeploy reports as a hook execution
-            // failure.
+            // failure — and rolls it back when its configuration asks for that on
+            // a deployment failure.
             if status == crate::state::LIFECYCLE_EVENT_STATUS_FAILED {
-                let _settled = state.settle_deployment(
+                let _settled = crate::state::lifecycle_hook::fail_for_hook(
+                    state,
                     &deployment_id,
-                    crate::state::DEPLOYMENT_STATUS_FAILED,
-                    Some(ErrorInformation {
-                        code: Some(crate::state::ERROR_CODE_HOOK_EXECUTION_FAILURE.to_string()),
-                        message: Some(format!(
-                            "The {lifecycle_event_name} lifecycle event hook execution \
-                             {hook_execution_id} reported {}",
-                            crate::state::LIFECYCLE_EVENT_STATUS_FAILED
-                        )),
-                    }),
+                    crate::state::lifecycle_hook::reported_failure_message(
+                        &lifecycle_event_name,
+                        &hook_execution_id,
+                    ),
                     now_ms,
                 );
-                // The record was read and written under this same lock, so the
-                // store cannot have lost it in between.
-                debug_assert!(_settled, "the deployment was read under this same lock");
             }
             Ok(hook_execution_id)
         })
@@ -371,30 +419,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     }
 }
 
-/// The lifecycle hooks a Lambda validation function reports on, per compute
-/// platform, from this operation's own documentation: "For Lambda deployments,
-/// the available lifecycle hooks are BeforeAllowTraffic and AfterAllowTraffic.
-/// For Amazon ECS deployments, the available lifecycle hooks are BeforeInstall,
-/// AfterInstall, AfterAllowTestTraffic, BeforeAllowTraffic, and
-/// AfterAllowTraffic."
-/// (`smithy_query(query="doc",shape="PutLifecycleEventHookExecutionStatus")`).
-///
-/// `None` for every other compute platform: EC2/on-premises lifecycle events are
-/// run by the CodeDeploy agent rather than by a Lambda validation function, so
-/// such a deployment issues no hook execution id and has no hook execution an id
-/// could name — which is why a report against one is refused as an invalid
-/// hook-execution id. How many hooks a platform has is also how many hook
-/// executions one deployment can ever have.
-fn platform_hooks(compute_platform: &str) -> Option<&'static [&'static str]> {
-    match compute_platform {
-        "Lambda" => Some(&["BeforeAllowTraffic", "AfterAllowTraffic"]),
-        "ECS" => Some(&[
-            "BeforeInstall",
-            "AfterInstall",
-            "AfterAllowTestTraffic",
-            "BeforeAllowTraffic",
-            "AfterAllowTraffic",
-        ]),
-        _ => None,
-    }
-}
+// The lifecycle hooks a Lambda validation function reports on, per compute
+// platform, live with the deployment's own hook executions
+// (`crate::state::lifecycle_hook::platform_hooks`), which is also where the order
+// they run in is stated.

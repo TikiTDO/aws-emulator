@@ -25,7 +25,9 @@ use serde_json::{json, Value};
 
 use service_com_amazonaws_codedeploy_codedeploy_20141006::state::MAX_DESCRIPTION_CHARS;
 
-use crate::codedeploy_lifecycle::{error_code, s3_revision, seeded_group, Emulator};
+use crate::codedeploy_lifecycle::{
+    deployment_on_free_group, error_code, s3_revision, seeded_group, Emulator,
+};
 
 /// One comment to send, and whether this service accepts it.
 struct Comment {
@@ -203,9 +205,8 @@ async fn creating_a_deployment_refuses_the_same_comment_past_the_bound() {
         if let Some(description) = &comment.description {
             request["description"] = json!(description);
         }
-        let (status, body) = emulator.call("CreateDeployment", request).await;
-
         if !comment.accepted {
+            let (status, body) = emulator.call("CreateDeployment", request).await;
             assert_eq!(
                 (status, error_code(&body).as_str()),
                 (400, "DescriptionTooLongException"),
@@ -219,11 +220,9 @@ async fn creating_a_deployment_refuses_the_same_comment_past_the_bound() {
             continue;
         }
 
-        assert_eq!(
-            status, 200,
-            "case {case:?}: a comment of {characters:?} characters must be accepted, got {status} \
-             {body:?}"
-        );
+        // A deployment group runs one deployment at a time, so each accepted row
+        // waits for the row before it exactly as a client would.
+        let body = deployment_on_free_group(&emulator, request).await;
         let deployment_id = body["deploymentId"]
             .as_str()
             .unwrap_or_else(|| panic!("case {case:?}: expected a deploymentId, got {body:?}"))

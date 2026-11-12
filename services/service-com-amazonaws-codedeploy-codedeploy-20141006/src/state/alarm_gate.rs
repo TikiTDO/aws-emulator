@@ -50,7 +50,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use ::service_com_amazonaws_cloudwatch_graniteserviceversion20100801 as cloudwatch;
 
-use crate::ops::types::{AlarmConfiguration, AutoRollbackConfiguration, ErrorInformation};
+use crate::ops::types::{AlarmConfiguration, ErrorInformation};
 
 use super::{
     deployment_is_terminal, now_ms, rollback, service_state,
@@ -218,12 +218,7 @@ fn group_of<'a>(
     state: &'a ComAmazonawsCodedeployCodedeploy20141006State,
     deployment: &Deployment,
 ) -> Option<&'a DeploymentGroup> {
-    let group_name = deployment.deployment_group_name.as_deref()?;
-    state
-        .applications
-        .get(&deployment.application_name)?
-        .deployment_groups
-        .get(group_name)
+    rollback::group_of(state, deployment)
 }
 
 /// The alarm configuration `deployment` runs under: its own override, else its
@@ -237,31 +232,14 @@ fn effective_alarm_configuration<'a>(
     })
 }
 
-/// The automatic rollback configuration `deployment` runs under, read the same
-/// way as its alarm configuration: the deployment's own, else its group's.
-fn effective_auto_rollback_configuration<'a>(
-    state: &'a ComAmazonawsCodedeployCodedeploy20141006State,
-    deployment: &'a Deployment,
-) -> Option<&'a AutoRollbackConfiguration> {
-    deployment.auto_rollback_configuration.as_ref().or_else(|| {
-        group_of(state, deployment).and_then(|group| group.auto_rollback_configuration.as_ref())
-    })
-}
-
 /// Whether stopping `deployment` for an alarm also rolls it back: only an enabled
-/// configuration that names the `DEPLOYMENT_STOP_ON_ALARM` event asks for that.
+/// configuration that names the `DEPLOYMENT_STOP_ON_ALARM` event asks for that,
+/// read through the one place that question is answered ([`rollback::rolls_back_on`]).
 fn rolls_back_on_alarm(
     state: &ComAmazonawsCodedeployCodedeploy20141006State,
     deployment: &Deployment,
 ) -> bool {
-    effective_auto_rollback_configuration(state, deployment).is_some_and(|configuration| {
-        configuration.enabled
-            && configuration
-                .events
-                .iter()
-                .flatten()
-                .any(|event| event == AUTO_ROLLBACK_EVENT_STOP_ON_ALARM)
-    })
+    rollback::rolls_back_on(state, deployment, AUTO_ROLLBACK_EVENT_STOP_ON_ALARM)
 }
 
 /// The state CloudWatch holds for each alarm the armed gates poll; `None` for an

@@ -673,8 +673,34 @@ async fn a_stop_and_its_rollback_are_published_to_the_triggers_that_select_them(
     awaited_inbox(&emulator, case, &rollback_queue, 0, 1).await;
 
     // A rollback redeploys "the revision deployed before" this deployment, so the
-    // group needs an earlier deployment for one to exist at all.
-    create_deployment(&emulator, application).await;
+    // group needs an earlier deployment for one to exist at all. A deployment group
+    // takes one deployment at a time, so that earlier one is brought to its
+    // outcome first — `SkipWaitTimeForInstanceTermination` "overrides any specified
+    // wait time", which is what this group's own 60-minute wait is — before the
+    // deployment this case stops is created.
+    let earlier = create_deployment(&emulator, application).await;
+    // The wait can only be skipped once CodeDeploy has dispatched the deployment,
+    // which is what `DeploymentNotStartedException` refuses before — so the skip
+    // is retried until it is taken, exactly as a client would.
+    let deadline = Instant::now() + DELIVERY_DEADLINE;
+    loop {
+        let (status, answered) = emulator
+            .call(
+                "SkipWaitTimeForInstanceTermination",
+                json!({"deploymentId": earlier}),
+            )
+            .await;
+        if status == 200 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "case {case:?}: expected the earlier deployment's wait to be skippable, got \
+             {status} {answered:?}"
+        );
+        tokio::time::sleep(DELIVERY_INTERVAL).await;
+    }
+    terminal_deployment(&emulator, &earlier, case).await;
     let deployment_id = create_deployment(&emulator, application).await;
     let stopped = emulator
         .ok(

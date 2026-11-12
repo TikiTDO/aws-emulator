@@ -463,7 +463,11 @@ pub(crate) async fn seeded_group(
 
 /// How long a suite waits for a transition the clock owes, and how often it
 /// looks: the emulator owes a deployment its terminal status well inside this.
-pub(crate) const POLL_DEADLINE: Duration = Duration::from_secs(5);
+///
+/// A deployment runs for the span this emulator gives a transition a caller has
+/// to be able to read (`state::DEPLOYMENT_COMPLETION_MILLIS`), so the deadline
+/// sits well above it — a suite waiting for one is not a suite measuring it.
+pub(crate) const POLL_DEADLINE: Duration = Duration::from_secs(15);
 /// See [`POLL_DEADLINE`].
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
@@ -516,10 +520,53 @@ pub(crate) async fn terminal_deployment_within(
     }
 }
 
+/// How long a suite waits for the deployment group it is deploying to to be free.
+///
+/// A deployment group runs ONE deployment at a time, so a second deployment to it
+/// is refused while the first is active ([`deployment_on_free_group`] waits that
+/// out): the wait is one deployment's own run, so this sits above the deadline a
+/// single deployment is given.
+pub(crate) const GROUP_FREE_DEADLINE: Duration = Duration::from_secs(15);
+
+/// Create a deployment, waiting out the refusal a deployment group that is
+/// already running one answers with.
+///
+/// A client that deploys twice to one deployment group is refused with
+/// `DeploymentLimitExceededException` until the first deployment is terminal, so a
+/// suite that deploys to one group repeatedly waits exactly as a client does. Any
+/// other refusal is this suite's own failure.
+pub(crate) async fn deployment_on_free_group(emulator: &Emulator, request: Value) -> Value {
+    let deadline_at = Instant::now() + GROUP_FREE_DEADLINE;
+    loop {
+        let (status, body) = emulator.call("CreateDeployment", request.clone()).await;
+        if status == 200 {
+            return body;
+        }
+        assert_eq!(
+            (status, error_code(&body).as_str()),
+            (400, "DeploymentLimitExceededException"),
+            "CreateDeployment must succeed or wait for its deployment group, got {status} {body:?}"
+        );
+        assert!(
+            Instant::now() < deadline_at,
+            "expected the deployment group to be free within {GROUP_FREE_DEADLINE:?}, got \
+             {body:?}"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// The id of a deployment created through [`deployment_on_free_group`].
+pub(crate) async fn deployment_id_on_free_group(emulator: &Emulator, request: Value) -> String {
+    deployment_on_free_group(emulator, request).await["deploymentId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Applications
 // ---------------------------------------------------------------------------
-
 /// RULE: a created resource is answered from the stored record — the id
 /// `CreateApplication` minted comes back from `GetApplication`, with the
 /// compute platform the request asked for, or CodeDeploy's `Server` default
@@ -1231,17 +1278,16 @@ async fn a_deployment_reads_back_as_it_was_created() {
 
     let mut seen_ids: Vec<String> = Vec::new();
     for (case, revision) in cases {
-        let created = emulator
-            .ok(
-                "CreateDeployment",
-                json!({
-                    "applicationName": "deployed",
-                    "deploymentGroupName": group,
-                    "revision": revision,
-                    "description": format!("deploy {case}"),
-                }),
-            )
-            .await;
+        let created = deployment_on_free_group(
+            &emulator,
+            json!({
+                "applicationName": "deployed",
+                "deploymentGroupName": group,
+                "revision": revision,
+                "description": format!("deploy {case}"),
+            }),
+        )
+        .await;
         let deployment_id = created["deploymentId"]
             .as_str()
             .unwrap_or_default()
@@ -1365,7 +1411,7 @@ async fn a_deployment_reaches_a_terminal_status() {
 
     // The transition is owed by the clock, not by the poll: it arrives without
     // anyone asking more than once.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + POLL_DEADLINE;
     let terminal = loop {
         let polled = emulator
             .ok("GetDeployment", json!({"deploymentId": deployment_id}))
@@ -1375,7 +1421,7 @@ async fn a_deployment_reaches_a_terminal_status() {
         }
         assert!(
             Instant::now() < deadline,
-            "case waiting for completion: expected Succeeded within 5s, got {:?}",
+            "case waiting for completion: expected Succeeded within {POLL_DEADLINE:?}, got {:?}",
             polled["deploymentInfo"]["status"]
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -1532,16 +1578,15 @@ async fn listing_deployments_orders_and_filters_by_the_stored_records() {
         ("beta", second_group.as_str()),
         ("alpha", first_group.as_str()),
     ] {
-        let response = emulator
-            .ok(
-                "CreateDeployment",
-                json!({
-                    "applicationName": application,
-                    "deploymentGroupName": group,
-                    "revision": s3_revision("my-bucket", "app.zip"),
-                }),
-            )
-            .await;
+        let response = deployment_on_free_group(
+            &emulator,
+            json!({
+                "applicationName": application,
+                "deploymentGroupName": group,
+                "revision": s3_revision("my-bucket", "app.zip"),
+            }),
+        )
+        .await;
         created.push((
             application.to_string(),
             group.to_string(),
@@ -1626,7 +1671,7 @@ async fn listing_deployments_orders_and_filters_by_the_stored_records() {
     // A status every deployment eventually holds selects them all. Every group
     // here is an EC2/on-premises one that resolves no target, so the status they
     // all reach is `Failed`.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + POLL_DEADLINE;
     loop {
         let succeeded = ids(&emulator
             .ok("ListDeployments", json!({"includeOnlyStatuses": ["Failed"]}))
@@ -1636,7 +1681,8 @@ async fn listing_deployments_orders_and_filters_by_the_stored_records() {
         }
         assert!(
             Instant::now() < deadline,
-            "case by status Failed: expected every deployment within 5s, got {succeeded:?}"
+            "case by status Failed: expected every deployment within {POLL_DEADLINE:?}, got \
+             {succeeded:?}"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -1741,7 +1787,7 @@ async fn a_deployment_group_reports_its_last_deployment() {
         "case one deployment: expected its revision as the group's targetRevision, got {info:?}"
     );
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + POLL_DEADLINE;
     loop {
         let polled = emulator
             .ok(
@@ -1760,7 +1806,8 @@ async fn a_deployment_group_reports_its_last_deployment() {
         }
         assert!(
             Instant::now() < deadline,
-            "case succeeded deployment: expected a lastSuccessfulDeployment within 5s, got {successful:?}"
+            "case succeeded deployment: expected a lastSuccessfulDeployment within \
+             {POLL_DEADLINE:?}, got {successful:?}"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -1783,7 +1830,7 @@ async fn a_deployment_group_reports_its_last_deployment() {
         .as_str()
         .unwrap_or_default()
         .to_string();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + POLL_DEADLINE;
     loop {
         let polled = emulator
             .ok(
@@ -1806,7 +1853,8 @@ async fn a_deployment_group_reports_its_last_deployment() {
         }
         assert!(
             Instant::now() < deadline,
-            "case failed deployment: expected a terminal lastAttemptedDeployment within 5s, got {info:?}"
+            "case failed deployment: expected a terminal lastAttemptedDeployment within \
+             {POLL_DEADLINE:?}, got {info:?}"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -1863,11 +1911,25 @@ async fn the_published_quotas_are_enforced() {
 #[tokio::test]
 async fn the_deployment_history_is_bounded() {
     let emulator = Emulator::new();
-    let group = seeded_group(&emulator, "churn", "Server").await;
+    seeded_group(&emulator, "churn", "Server").await;
     // Retention bound: `state::MAX_DEPLOYMENT_HISTORY`.
     let retained = 500;
     let mut ids: Vec<String> = Vec::new();
-    for _ in 0..(retained + 2) {
+    for index in 0..(retained + 2) {
+        // Each deployment goes to a group of its own: a deployment group runs one
+        // deployment at a time, and what this case is about is the HISTORY's
+        // bound, not one group's.
+        let group = format!("churn-dg-{index}");
+        emulator
+            .ok(
+                "CreateDeploymentGroup",
+                json!({
+                    "applicationName": "churn",
+                    "deploymentGroupName": group,
+                    "serviceRoleArn": "arn:aws:iam::123456789012:role/CodeDeployRole",
+                }),
+            )
+            .await;
         let created = emulator
             .ok(
                 "CreateDeployment",

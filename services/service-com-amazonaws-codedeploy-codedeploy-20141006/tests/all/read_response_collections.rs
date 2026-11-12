@@ -21,7 +21,7 @@
 
 use serde_json::{json, Value};
 
-use crate::codedeploy_lifecycle::{s3_revision, Emulator};
+use crate::codedeploy_lifecycle::{deployment_on_free_group, s3_revision, Emulator};
 
 /// The service role every deployment group here is created with.
 const ROLE: &str = "arn:aws:iam::123456789012:role/CodeDeployRole";
@@ -187,18 +187,18 @@ async fn a_revision_reports_every_group_targeting_it_at_any_count() {
         )
         .await;
 
-    /// Deploy `revision` to `group`.
+    /// Deploy `revision` to `group`, waiting out a deployment of that group that
+    /// is still active (a group runs one deployment at a time).
     async fn deploy(emulator: &Emulator, application: &str, group: &str, revision: &Value) {
-        emulator
-            .ok(
-                "CreateDeployment",
-                json!({
-                    "applicationName": application,
-                    "deploymentGroupName": group,
-                    "revision": revision,
-                }),
-            )
-            .await;
+        deployment_on_free_group(
+            emulator,
+            json!({
+                "applicationName": application,
+                "deploymentGroupName": group,
+                "revision": revision,
+            }),
+        )
+        .await;
     }
 
     let cases: &[TargetCase<'_>] = &[

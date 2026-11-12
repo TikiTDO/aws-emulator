@@ -51,6 +51,14 @@ pub mod lambda_traffic_shift;
 /// this service.
 pub mod deployment_clock;
 
+/// The LIFECYCLE EVENT HOOKS a deployment runs through a Lambda validation
+/// function: which ones its revision declares, and the gate the results they
+/// report hold the deployment at.
+pub mod lifecycle_hook;
+
+/// The INVOCATION of one of those validation functions, in AWS Lambda itself.
+pub mod hook_invocation;
+
 /// The Amazon SNS notifications a deployment group's stored
 /// `triggerConfigurations` publish: the one place a trigger is ACTED on.
 pub mod trigger_notifications;
@@ -70,12 +78,18 @@ use crate::ops::types::{
 /// and then its terminal status.
 ///
 /// CodeDeploy documents no duration for either step, so both spans are CHOSEN,
-/// each inside the emulator-wide 250–750 ms window for a clock-owed transition.
-/// Neither is zero, so a caller that polls straight after `CreateDeployment`
-/// still observes the non-terminal statuses the real service reports.
+/// and neither is zero: the window between them is the one every client of a
+/// deployment reads — a caller polls `GetDeployment` for `InProgress`, reads its
+/// targets while they are being deployed to, and is refused a second deployment
+/// to the same deployment group while this one is active — so it has to OUTLAST
+/// the call that opened it and the next few calls a client makes. The start is the
+/// lead-in a caller sees `Created` for; the deployment then runs for the span this
+/// emulator gives a transition it owes a caller, which is where the work a real
+/// deployment does — the agent on each target, the traffic shift, the validation
+/// functions — would be spent.
 const DEPLOYMENT_START_MILLIS: i64 = 250;
-/// See [`DEPLOYMENT_START_MILLIS`]: 250 ms after the deployment starts.
-const DEPLOYMENT_COMPLETION_MILLIS: i64 = 500;
+/// See [`DEPLOYMENT_START_MILLIS`]: three seconds after the deployment starts.
+const DEPLOYMENT_COMPLETION_MILLIS: i64 = DEPLOYMENT_START_MILLIS + 3_000;
 
 /// The statuses a deployment the emulator created moves through. All three are
 /// members of the model's `DeploymentStatus` enum
@@ -136,6 +150,19 @@ pub const TARGET_LABEL_BLUE: &str = "Blue";
 pub const LIFECYCLE_EVENT_STATUS_SUCCEEDED: &str = "Succeeded";
 /// See [`LIFECYCLE_EVENT_STATUS_SUCCEEDED`].
 pub const LIFECYCLE_EVENT_STATUS_FAILED: &str = "Failed";
+/// See [`LIFECYCLE_EVENT_STATUS_SUCCEEDED`]: the status of a lifecycle event this
+/// service has dispatched to its validation function and is awaiting the report
+/// of ([`hook_event_status`]).
+pub const LIFECYCLE_EVENT_STATUS_IN_PROGRESS: &str = "InProgress";
+/// See [`LIFECYCLE_EVENT_STATUS_IN_PROGRESS`]: a lifecycle event the deployment
+/// has not reached yet.
+pub const LIFECYCLE_EVENT_STATUS_PENDING: &str = "Pending";
+/// See [`LIFECYCLE_EVENT_STATUS_IN_PROGRESS`]: a lifecycle event a deployment
+/// that was stopped never ran.
+pub const LIFECYCLE_EVENT_STATUS_SKIPPED: &str = "Skipped";
+/// See [`LIFECYCLE_EVENT_STATUS_IN_PROGRESS`]: a lifecycle event this service
+/// holds no status for.
+pub const LIFECYCLE_EVENT_STATUS_UNKNOWN: &str = "Unknown";
 
 /// The `ErrorCode` CodeDeploy reports on a deployment a lifecycle event hook
 /// failed (`smithy_query(query="shape",shape="ErrorCode")`).
@@ -275,6 +302,41 @@ pub fn deployment_already_completed(deployment_id: &str, status: &str) -> String
         "The deployment {deployment_id} has already completed, current state {}.",
         deployment_internal_state(status)
     )
+}
+
+/// `DeploymentLimitExceededException` (HTTP 400): the deployment group a second
+/// deployment was refused for, and the deployment of it that is still active.
+///
+/// A deployment group runs one deployment at a time, so the refusal names what is
+/// in the way: the group — by the name the request carried AND by the id
+/// CodeDeploy minted for it, which is how every refusal about a deployment group's
+/// own state identifies it — and the deployment holding it.
+pub fn deployment_already_active(
+    deployment_group_name: &str,
+    deployment_group_id: &str,
+    active_deployment_id: &str,
+) -> String {
+    format!(
+        "The Deployment Group '{deployment_group_name} (id={deployment_group_id})' already has \
+         an active Deployment '{active_deployment_id}'"
+    )
+}
+
+/// `LifecycleEventAlreadyCompletedException` (HTTP 400): the hook execution of a
+/// deployment that has already reported its result, so its lifecycle event
+/// completed with that result and there is none left to report.
+pub fn lifecycle_event_already_completed(deployment_id: &str, hook_execution_id: &str) -> String {
+    format!(
+        "The lifecycle event of deployment {deployment_id} reported by hook execution \
+         {hook_execution_id} has already completed"
+    )
+}
+
+/// `LifecycleEventAlreadyCompletedException` (HTTP 400): the deployment itself
+/// reached a terminal status, so every lifecycle event of it completed with the
+/// deployment and none has a result left to report.
+pub fn lifecycle_events_already_completed(deployment_id: &str) -> String {
+    format!("The lifecycle events of deployment {deployment_id} have already completed with it")
 }
 
 /// `UnsupportedActionForDeploymentTypeException` (HTTP 400): the deployment id
@@ -1426,6 +1488,16 @@ pub struct Deployment {
     /// The results reported for this deployment's lifecycle event hooks, in the
     /// order they were reported.
     pub lifecycle_hook_executions: Vec<LifecycleEventHookExecution>,
+    /// The lifecycle event hooks this deployment RUNS, read ONCE out of its
+    /// revision's AppSpec when the deployment was recorded, in the order its
+    /// compute platform runs them.
+    ///
+    /// Each is a Lambda validation function this service invokes and waits for;
+    /// which is what holds the deployment non-terminal, and the traffic shift
+    /// back, until the function reports (see [`lifecycle_hook`]). Empty for a
+    /// deployment whose revision declares no hook, and for every platform whose
+    /// lifecycle events the CodeDeploy agent runs.
+    pub hook_executions: Vec<lifecycle_hook::HookExecution>,
     /// The deployment targets the deployment group resolved for this deployment,
     /// in resolution order, as they were resolved WHEN it was created.
     ///
@@ -2200,6 +2272,10 @@ impl ComAmazonawsCodedeployCodedeploy20141006State {
     /// have ever been created.
     fn advance_clock(&mut self, now_ms: i64) {
         let deployments = &mut self.deployments;
+        // The deployments this pass settled in a FAILED status, which is what an
+        // automatic rollback configured for a deployment failure then acts on:
+        // collected here and rolled back below, once the walk is over.
+        let mut failed: Vec<String> = Vec::new();
         self.pending_deployments.retain(|id| {
             let Some(deployment) = deployments.get_mut(id) else {
                 // Dropped from the history; there is nothing left to settle.
@@ -2233,12 +2309,46 @@ impl ComAmazonawsCodedeployCodedeploy20141006State {
                 // pass settles it.
                 && deployment.traffic_shift
                     != lambda_traffic_shift::TrafficShiftProgress::InFlight
+                // Nor is a deployment whose lifecycle event hooks have not all
+                // reported `Succeeded`: the result of a validation function is
+                // what the lifecycle event it validates completed with, so a
+                // deployment whose hook has not reported stays in flight however
+                // long the function takes (see `lifecycle_hook`).
+                && lifecycle_hook::hooks_are_complete(deployment)
             {
-                deployment.status = terminal_status(deployment.target_count()).to_string();
+                let status = terminal_status(deployment.target_count());
+                deployment.status = status.to_string();
                 deployment.complete_time_ms = Some(deployment.completes_at_ms);
+                if status == DEPLOYMENT_STATUS_FAILED {
+                    failed.push(id.clone());
+                }
             }
             deployment.complete_time_ms.is_none()
         });
+        for deployment_id in failed {
+            rollback::roll_back_on_failure(self, &deployment_id, now_ms);
+        }
+    }
+
+    /// The deployment of `deployment_group_name` that is still in flight, if any.
+    ///
+    /// A deployment group runs ONE deployment at a time, so this is what
+    /// `CreateDeployment` refuses a second one against that group for. Only the
+    /// deployments the clock still owes a transition are walked, so the cost is
+    /// bounded by how many are in flight rather than by the history's length.
+    pub fn active_deployment_of(
+        &self,
+        application_name: &str,
+        deployment_group_name: &str,
+    ) -> Option<&Deployment> {
+        self.pending_deployments
+            .iter()
+            .filter_map(|id| self.deployments.get(id))
+            .find(|deployment| {
+                deployment.application_name == application_name
+                    && deployment.deployment_group_name.as_deref() == Some(deployment_group_name)
+                    && !deployment_is_terminal(&deployment.status)
+            })
     }
 
     /// Whether any deployment is still in flight, which is what the deployment
@@ -2618,6 +2728,15 @@ impl ComAmazonawsCodedeployCodedeploy20141006State {
     fn digest(&mut self, kind: &str) -> [u8; 32] {
         digest_from(&mut self.next_id, kind)
     }
+
+    /// Mint the id of one lifecycle event hook execution: the opaque token
+    /// CodeDeploy hands a validation function in the lifecycle event and that the
+    /// function reports its result back under
+    /// (`smithy_query(query="shape",shape="LifecycleEventHookExecutionId")` states
+    /// no form for it), cut from this store's own minting.
+    pub fn mint_hook_execution_id(&mut self) -> String {
+        hex::encode(self.digest("lifecycle-event-hook-execution"))
+    }
 }
 
 /// [`ComAmazonawsCodedeployCodedeploy20141006State::mint_uuid`] over the id
@@ -2794,8 +2913,10 @@ pub fn malformed_deployment_id_message(deployment_id: &str) -> String {
 /// * `Lambda`: a Lambda deployment has exactly one target, the function the
 ///   revision's AppSpec names — whatever the revision holds, there is one of
 ///   them — so a Lambda group never resolves none. That function's NAME lives
-///   inside the revision, which CodeDeploy's state does not hold, so the target
-///   is resolved without an id (see [`DeploymentTargetSnapshot::target_id`]).
+///   inside the revision, so the target is resolved without an id here and NAMED
+///   from the revision's own AppSpec ([`name_lambda_targets`]); a revision that
+///   declares no function leaves it unnamed (see
+///   [`DeploymentTargetSnapshot::target_id`]).
 /// * `Server` (EC2/on-premises): the instances the group selects, reported under
 ///   their instance ids. The instances this emulator HOLDS are the on-premises
 ///   ones registered with it, so they are resolved from that registry through
@@ -2859,6 +2980,30 @@ pub fn deployment_targets(
                 })
                 .collect()
         }
+    }
+}
+
+/// Name the LAMBDA targets of a deployment from the shift its revision declares.
+///
+/// A Lambda deployment's target is reported under "a Lambda function name"
+/// (`smithy_query(query="doc",shape="BatchGetDeploymentTargetsInput",member="targetIds")`),
+/// and the function a Lambda deployment deploys to is the one its revision's
+/// AppSpec names ([`appspec::declared_shift`]) — so the target is NAMED here,
+/// once, when the deployment is recorded. A revision that declares none leaves it
+/// unnamed: this service holds no other record of which function the deployment
+/// went to, and a target it cannot name is not one a client can fetch by id.
+pub fn name_lambda_targets(
+    targets: &mut [DeploymentTargetSnapshot],
+    declared: Option<&appspec::LambdaTrafficShift>,
+) {
+    let Some(declared) = declared else {
+        return;
+    };
+    for target in targets
+        .iter_mut()
+        .filter(|target| target.target_type == DEPLOYMENT_TARGET_TYPE_LAMBDA)
+    {
+        target.target_id = Some(declared.function_name.clone());
     }
 }
 
@@ -3011,33 +3156,119 @@ pub fn target_last_updated_at_ms(deployment: &Deployment) -> i64 {
         .unwrap_or(deployment.create_time_ms)
 }
 
-/// The lifecycle events of `deployment` this service holds a result for, as the
-/// modelled `LifecycleEvent` list a target carries.
+/// The lifecycle events of `deployment`, as the modelled `LifecycleEvent` list a
+/// target carries.
 ///
-/// CodeDeploy reports a target's lifecycle events as the hooks its deployment
-/// ran on that target. The only lifecycle event results this emulator HOLDS are
-/// the ones a validation function reported through
-/// `PutLifecycleEventHookExecutionStatus` ([`LifecycleEventHookExecution`]):
-/// nothing here runs the EC2/on-premises hooks the CodeDeploy agent runs, so a
-/// deployment no result was reported for carries no lifecycle event rather than
-/// events nothing ran. A report says what the lifecycle event ended as and
-/// when it was made, which is when that event ENDED; when it started is not
-/// something a report carries, so it is left absent.
+/// CodeDeploy reports a target's lifecycle events as the hooks its deployment ran
+/// on that target. Two kinds of event are held here, and both are reported:
+///
+/// * the hooks the revision DECLARED, which this service dispatched to a Lambda
+///   validation function ([`lifecycle_hook`]) — each as far as its own execution
+///   has got ([`hook_event_status`]), in the order its platform runs them;
+/// * a result reported against a hook execution this deployment did not mint,
+///   which is a report of one of the platform's lifecycle events made directly
+///   rather than by a function this service invoked.
+///
+/// Nothing here runs the EC2/on-premises hooks the CodeDeploy agent runs, so a
+/// deployment that declared no hook and nothing reported for carries no lifecycle
+/// event rather than events nothing ran. A report says what the lifecycle event
+/// ended as and when it was made, which is when that event ENDED; when it started
+/// is not something a report carries, so it is left absent.
 fn target_lifecycle_events(
     deployment: &Deployment,
 ) -> Option<Vec<crate::ops::types::LifecycleEvent>> {
-    let events: Vec<crate::ops::types::LifecycleEvent> = deployment
+    let declared = deployment.hook_executions.iter().map(|hook| {
+        crate::ops::types::LifecycleEvent {
+            lifecycle_event_name: Some(hook.lifecycle_event_name.clone()),
+            diagnostics: None,
+            start_time: None,
+            end_time: hook.update_time_ms.map(timestamp),
+            status: Some(hook_event_status(deployment, hook).to_string()),
+        }
+    });
+    // A report that landed on a declared hook is already one of the events above,
+    // so it is not reported twice.
+    let reported = deployment
         .lifecycle_hook_executions
         .iter()
+        .filter(|execution| {
+            !deployment.hook_executions.iter().any(|hook| {
+                hook.lifecycle_event_hook_execution_id.as_deref()
+                    == Some(execution.lifecycle_event_hook_execution_id.as_str())
+            })
+        })
         .map(|execution| crate::ops::types::LifecycleEvent {
             lifecycle_event_name: Some(execution.lifecycle_event_name.clone()),
             diagnostics: None,
             start_time: None,
             end_time: Some(timestamp(execution.update_time_ms)),
             status: Some(execution.status.clone()),
-        })
-        .collect();
+        });
+    let events: Vec<crate::ops::types::LifecycleEvent> = declared.chain(reported).collect();
     non_empty(&events)
+}
+
+/// The `LifecycleEventStatus` one declared hook's lifecycle event carries
+/// (`smithy_query(query="shape",shape="LifecycleEventStatus")`: Failed |
+/// InProgress | Pending | Skipped | Succeeded | Unknown).
+///
+/// The result its validation function reported, when it reported one: that result
+/// IS what the lifecycle event completed with. Otherwise the event is as far along
+/// as the deployment has taken it — dispatched to the function and awaiting its
+/// report (`InProgress`), not dispatched yet (`Pending`), or ended with the
+/// deployment itself: a deployment that FAILED for a hook that reported nothing
+/// has a failed lifecycle event, and one a caller stopped never ran the rest of
+/// them (`Skipped`).
+fn hook_event_status(
+    deployment: &Deployment,
+    hook: &lifecycle_hook::HookExecution,
+) -> &'static str {
+    if let Some(reported) = hook.status.as_deref() {
+        return match reported {
+            LIFECYCLE_EVENT_STATUS_FAILED => LIFECYCLE_EVENT_STATUS_FAILED,
+            LIFECYCLE_EVENT_STATUS_SUCCEEDED => LIFECYCLE_EVENT_STATUS_SUCCEEDED,
+            // Only the two results above are reportable, so anything else is a
+            // status this service does not hold for the event.
+            _ => LIFECYCLE_EVENT_STATUS_UNKNOWN,
+        };
+    }
+    match deployment.status.as_str() {
+        DEPLOYMENT_STATUS_FAILED => LIFECYCLE_EVENT_STATUS_FAILED,
+        DEPLOYMENT_STATUS_STOPPED => LIFECYCLE_EVENT_STATUS_SKIPPED,
+        DEPLOYMENT_STATUS_SUCCEEDED => LIFECYCLE_EVENT_STATUS_SUCCEEDED,
+        _ if hook.lifecycle_event_hook_execution_id.is_some() => {
+            LIFECYCLE_EVENT_STATUS_IN_PROGRESS
+        }
+        _ => LIFECYCLE_EVENT_STATUS_PENDING,
+    }
+}
+
+/// What a Lambda deployment's target reports about the function it deploys:
+/// `LambdaFunctionInfo`, built from the shift its revision's AppSpec DECLARED
+/// ([`appspec::declared_shift`]) and how far that shift has got.
+///
+/// `None` for a deployment whose revision declares none — there is then no
+/// function, alias or version this service holds for the target. The weight is
+/// "the percentage of production traffic that the target version of a Lambda
+/// function receives"
+/// (`smithy_query(query="doc",shape="LambdaFunctionInfo",member="targetVersionWeight")`),
+/// which is the percentage the last increment carried out put there: nothing of
+/// it is on the target version before the first increment, and all of it once the
+/// move is complete.
+fn lambda_function_info(deployment: &Deployment) -> Option<crate::ops::types::LambdaFunctionInfo> {
+    let declared = deployment.lambda_traffic_shift.as_ref()?;
+    let applied = deployment
+        .traffic_increments_applied
+        .checked_sub(1)
+        .and_then(|index| deployment.traffic_increments.get(index))
+        .map_or(0, |increment| increment.percent);
+    Some(crate::ops::types::LambdaFunctionInfo {
+        function_name: Some(declared.function_name.clone()),
+        function_alias: Some(declared.alias_name.clone()),
+        current_version: declared.current_version.clone(),
+        target_version: Some(declared.target_version.clone()),
+        target_version_weight: f64::from(applied),
+    })
 }
 
 /// One target of `deployment` as the modelled `DeploymentTarget`.
@@ -3093,7 +3324,7 @@ pub fn deployment_target_view(
                 status,
                 last_updated_at,
                 lifecycle_events,
-                lambda_function_info: None,
+                lambda_function_info: lambda_function_info(deployment),
             });
         }
         // An EC2/on-premises instance target, which is what a snapshot of this

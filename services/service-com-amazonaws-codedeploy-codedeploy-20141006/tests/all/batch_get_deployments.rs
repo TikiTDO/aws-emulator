@@ -19,7 +19,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use crate::codedeploy_lifecycle::{error_code, s3_revision, seeded_group, Emulator};
+use crate::codedeploy_lifecycle::{
+    deployment_id_on_free_group, error_code, s3_revision, seeded_group, Emulator, POLL_DEADLINE,
+};
 
 /// The request-size quota one `BatchGet*` request may carry, which is the one
 /// `BatchLimitExceededException` states for every batch reader of this service
@@ -45,13 +47,16 @@ fn reported_ids(body: &Value) -> Vec<String> {
 
 /// Create `count` deployments on one freshly seeded group, answering their ids
 /// in creation order.
+///
+/// The group runs one deployment at a time, so each is created once the one
+/// before it is terminal ([`deployment_id_on_free_group`]).
 async fn seeded_deployments(emulator: &Emulator, application: &str, count: usize) -> Vec<String> {
     let group = seeded_group(emulator, application, "Server").await;
     let mut ids = Vec::new();
     for index in 0..count {
-        let created = emulator
-            .ok(
-                "CreateDeployment",
+        ids.push(
+            deployment_id_on_free_group(
+                emulator,
                 json!({
                     "applicationName": application,
                     "deploymentGroupName": group,
@@ -59,12 +64,7 @@ async fn seeded_deployments(emulator: &Emulator, application: &str, count: usize
                     "description": format!("deployment {index}"),
                 }),
             )
-            .await;
-        ids.push(
-            created["deploymentId"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
+            .await,
         );
     }
     ids
@@ -82,7 +82,7 @@ async fn await_terminal(emulator: &Emulator, ids: &[String]) {
     // InProgress | Baking | Succeeded | Failed | Stopped | Ready — the last three
     // of those are the outcomes.
     const TERMINAL: [&str; 3] = ["Succeeded", "Failed", "Stopped"];
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + POLL_DEADLINE;
     for id in ids {
         loop {
             let polled = emulator
@@ -97,7 +97,8 @@ async fn await_terminal(emulator: &Emulator, ids: &[String]) {
             }
             assert!(
                 Instant::now() < deadline,
-                "case waiting for {id}: expected one of {TERMINAL:?} within 5s, got {status:?}"
+                "case waiting for {id}: expected one of {TERMINAL:?} within {POLL_DEADLINE:?}, \
+                 got {status:?}"
             );
             tokio::time::sleep(Duration::from_millis(25)).await;
         }

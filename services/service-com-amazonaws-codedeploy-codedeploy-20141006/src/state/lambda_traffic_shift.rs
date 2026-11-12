@@ -194,6 +194,12 @@ fn due_claim(deployment_id: &str, deployment: &Deployment, now_ms: i64) -> Optio
     if deployment.traffic_shift != TrafficShiftProgress::Declared
         || deployment.complete_time_ms.is_some()
         || deployment_is_terminal(&deployment.status)
+        // Traffic does not move while a lifecycle event hook that runs BEFORE it
+        // has not reported `Succeeded`: that is what such a hook is for — "the
+        // function validates lifecycle hooks during a deployment" — so the shift
+        // waits for the validation function's own report (see
+        // `super::lifecycle_hook`).
+        || !super::lifecycle_hook::traffic_is_allowed(deployment)
     {
         return None;
     }
@@ -302,4 +308,7 @@ fn fail_deployment(
         }),
         now_ms,
     );
+    // A deployment that failed is rolled back when its configuration asks for
+    // that on a deployment failure, from the one place that is decided.
+    super::rollback::roll_back_on_failure(state, deployment_id, now_ms);
 }

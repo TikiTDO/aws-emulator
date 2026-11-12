@@ -29,7 +29,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use crate::codedeploy_lifecycle::{error_code, s3_revision, seeded_group, Emulator};
+use crate::codedeploy_lifecycle::{
+    deployment_on_free_group, error_code, s3_revision, seeded_group, Emulator,
+};
 
 /// The request-size quota every `BatchGet*` reader of this service enforces, as
 /// `BatchLimitExceededException` states it ("The maximum number of names or IDs
@@ -152,7 +154,7 @@ async fn poll_deployment(
     deployment_id: &str,
     ready: impl Fn(&Value) -> bool,
 ) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let info = emulator
             .ok("GetDeployment", json!({"deploymentId": deployment_id}))
@@ -306,23 +308,16 @@ async fn a_deployment_overrides_alarms_under_its_own_quota() {
     ];
 
     for (count, accepted) in cases {
-        let (status, body) = emulator
-            .call(
-                "CreateDeployment",
-                json!({
-                    "applicationName": application,
-                    "deploymentGroupName": group,
-                    "revision": s3_revision("artifacts", "app.zip"),
-                    "overrideAlarmConfiguration": alarms(*count),
-                }),
-            )
-            .await;
+        let request = json!({
+            "applicationName": application,
+            "deploymentGroupName": group,
+            "revision": s3_revision("artifacts", "app.zip"),
+            "overrideAlarmConfiguration": alarms(*count),
+        });
         if *accepted {
-            assert_eq!(
-                status, 200,
-                "case {count} overridden alarms: expected the deployment to be created, got \
-                 {status} {body:?}"
-            );
+            // A deployment group runs one deployment at a time, so each accepted
+            // row waits for the row before it exactly as a client would.
+            let body = deployment_on_free_group(&emulator, request).await;
             // The override is persisted as sent, so a read answers it back.
             let deployment_id = body["deploymentId"].as_str().unwrap_or_default();
             let info = emulator
@@ -339,6 +334,7 @@ async fn a_deployment_overrides_alarms_under_its_own_quota() {
             );
             continue;
         }
+        let (status, body) = emulator.call("CreateDeployment", request).await;
         assert_eq!(
             (status, error_code(&body).as_str()),
             (400, "AlarmsLimitExceededException"),
@@ -713,7 +709,7 @@ async fn a_target_id_outside_the_deployment_is_refused_whatever_its_progress() {
 
     // The target the deployment DOES have is reported, once the clock has
     // started the deployment.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(20);
     let target = loop {
         let (status, body) = emulator
             .call(

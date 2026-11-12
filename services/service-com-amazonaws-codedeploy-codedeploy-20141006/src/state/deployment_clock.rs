@@ -31,7 +31,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{now_ms, service_state, with_state};
+use ::smithy_server_runtime::EmbeddedEmulator;
+
+use super::{hook_invocation, now_ms, service_state, with_state};
 
 /// How often the clock wakes up to ask what is due.
 ///
@@ -116,15 +118,16 @@ impl DeploymentClock {
 ///
 /// Call it from an operation that leaves a deployment in flight — creating one, or
 /// stopping one in a way that creates its rollback — with that handler's own
-/// engine handle.
+/// engine handle and its own clone of the in-process callback.
 ///
-/// `callback` is the in-process emulator the trigger notifications this clock's own
-/// transitions owe are published through ([`super::trigger_notifications`]), cloned
-/// from the request that started the clock: the publishes it makes reach the same
-/// Amazon SNS handlers a client's own calls reach.
+/// The callback is what this clock reaches the rest of the emulator through: the
+/// lifecycle event hooks of a deployment in flight are INVOKED through it
+/// ([`super::hook_invocation`]), and the trigger notifications its own transitions
+/// owe are PUBLISHED through it ([`super::trigger_notifications`]) — so both reach
+/// the same handlers a client's own calls reach.
 pub fn drive_deployment_clock<Eng: Send + Sync + 'static>(
     engine: &Arc<Eng>,
-    callback: &::smithy_server_runtime::EmbeddedEmulator,
+    callback: &EmbeddedEmulator,
 ) {
     let Some(state) = service_state(&**engine) else {
         return;
@@ -150,6 +153,11 @@ pub fn drive_deployment_clock<Eng: Send + Sync + 'static>(
             // The pass every handler performs: the alarm gate, the traffic
             // increments the clock owes, and the status transitions.
             let in_flight = with_state(&*engine, |store| store.deployments_in_flight());
+            // And the one pass no handler can perform: dispatching the lifecycle
+            // event hook a deployment in flight is due, which INVOKES a Lambda
+            // validation function and so needs both a runtime to dispatch on and
+            // the callback to dispatch through.
+            hook_invocation::dispatch_due_hooks(&engine, &callback);
             // The trigger notifications that pass came to owe, published before
             // the loop can end: a deployment's LAST transition is the one that
             // takes it out of flight, so a drain only on the next tick would

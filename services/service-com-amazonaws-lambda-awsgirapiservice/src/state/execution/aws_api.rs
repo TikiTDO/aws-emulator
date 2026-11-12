@@ -520,6 +520,28 @@ pub const APIS: &[Api] = &[
         },
         answer_model: Some(&CONFIG_ANSWERS),
     },
+    // `services/service-com-amazonaws-codedeploy-codedeploy-20141006/smithy-model/
+    // com-amazonaws-codedeploy-codedeploy-20141006.json`: awsJson1_1, sigv4Name `codedeploy`,
+    // endpointPrefix `codedeploy`, sdkId `CodeDeploy`, service shape `CodeDeploy_20141006`.
+    //
+    // A function that is a DEPLOYMENT'S OWN VALIDATION FUNCTION has to reach this service:
+    // CodeDeploy invokes the function for a lifecycle event of a Lambda or Amazon ECS
+    // deployment, handing it the deployment id and the hook execution id, and the function
+    // reports what it found with `PutLifecycleEventHookExecutionStatus` — the call every such
+    // function AWS documents ends with — so a handler that cannot reach CodeDeploy cannot
+    // deliver the verdict it was invoked to produce, and the deployment it gates never learns
+    // of it.
+    Api {
+        sdk_token: "codedeploy",
+        signing_name: "codedeploy",
+        endpoint_prefix: "codedeploy",
+        model: Some(CODEDEPLOY_MODEL),
+        protocol: Protocol::AwsJson {
+            target_prefix: "CodeDeploy_20141006",
+            json_version: "1.1",
+        },
+        answer_model: Some(&CODEDEPLOY_ANSWERS),
+    },
 ];
 
 /// Whether `named` and `asked` name the ONE service.
@@ -651,6 +673,10 @@ pub(super) const CONFIG_MODEL: &str = include_str!(
     "../../../../service-com-amazonaws-configservice-starlingdoveservice/smithy-model/\
      com-amazonaws-configservice-starlingdoveservice.json"
 );
+pub(super) const CODEDEPLOY_MODEL: &str = include_str!(
+    "../../../../service-com-amazonaws-codedeploy-codedeploy-20141006/smithy-model/\
+     com-amazonaws-codedeploy-codedeploy-20141006.json"
+);
 
 /// AWS X-Ray's own model, which a call to it is bound by, embedded exactly as the API
 /// Gateway model below is and for the same reason: the wire facts of its operations are that
@@ -747,6 +773,10 @@ static APPCONFIG_ANSWERS: super::blob_members::ServiceModel = super::blob_member
 };
 static CONFIG_ANSWERS: super::blob_members::ServiceModel = super::blob_members::ServiceModel {
     source: CONFIG_MODEL,
+    plan: ::std::sync::OnceLock::new(),
+};
+static CODEDEPLOY_ANSWERS: super::blob_members::ServiceModel = super::blob_members::ServiceModel {
+    source: CODEDEPLOY_MODEL,
     plan: ::std::sync::OnceLock::new(),
 };
 

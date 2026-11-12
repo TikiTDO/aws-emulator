@@ -43,6 +43,8 @@ mod deployment_group_alarm_counts;
 mod deployment_group_defaults;
 #[path = "all/deployment_group_update.rs"]
 mod deployment_group_update;
+#[path = "all/deployment_in_flight_window.rs"]
+mod deployment_in_flight_window;
 #[path = "all/deployment_progress_refusal_sentences.rs"]
 mod deployment_progress_refusal_sentences;
 #[path = "all/deployment_target_record_readability.rs"]
@@ -67,6 +69,8 @@ mod lambda_traffic_shifting;
 mod lambda_traffic_shift;
 #[path = "all/lifecycle_event_hook_status.rs"]
 mod lifecycle_event_hook_status;
+#[path = "all/lifecycle_hook_validation.rs"]
+mod lifecycle_hook_validation;
 #[path = "all/list_deployment_configs.rs"]
 mod list_deployment_configs;
 #[path = "all/list_deployment_groups.rs"]

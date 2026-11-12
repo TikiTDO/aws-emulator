@@ -32,10 +32,93 @@
 use crate::ops::types::RollbackInfo;
 
 use super::{
-    deployment_completion_due, deployment_start_due, lambda_traffic_shift, revision_key,
-    termination_wait, traffic_shift, ComAmazonawsCodedeployCodedeploy20141006State, Deployment,
-    DEPLOYMENT_CREATOR_ROLLBACK, DEPLOYMENT_STATUS_CREATED,
+    deployment_completion_due, deployment_start_due, lambda_traffic_shift, lifecycle_hook,
+    revision_key, termination_wait, traffic_shift,
+    ComAmazonawsCodedeployCodedeploy20141006State, Deployment, DeploymentGroup,
+    DEPLOYMENT_CREATOR_ROLLBACK, DEPLOYMENT_STATUS_CREATED, DEPLOYMENT_STATUS_FAILED,
 };
+use crate::ops::types::AutoRollbackConfiguration;
+
+/// The `AutoRollbackEvent` that asks for a rollback of a deployment that FAILED
+/// (`smithy_query(query="shape",shape="AutoRollbackEvent")`: DEPLOYMENT_FAILURE |
+/// DEPLOYMENT_STOP_ON_ALARM | DEPLOYMENT_STOP_ON_REQUEST).
+pub const AUTO_ROLLBACK_EVENT_DEPLOYMENT_FAILURE: &str = "DEPLOYMENT_FAILURE";
+
+/// The deployment group `deployment` was created against, when the store still
+/// holds it.
+///
+/// The one lookup from a deployment to its group, so every question asked of a
+/// deployment's group — its alarm configuration, its automatic rollback — is asked
+/// of the same record.
+pub fn group_of<'a>(
+    state: &'a ComAmazonawsCodedeployCodedeploy20141006State,
+    deployment: &Deployment,
+) -> Option<&'a DeploymentGroup> {
+    let group_name = deployment.deployment_group_name.as_deref()?;
+    state
+        .applications
+        .get(&deployment.application_name)?
+        .deployment_groups
+        .get(group_name)
+}
+
+/// The automatic rollback configuration `deployment` runs under: the deployment's
+/// own, else its deployment group's — the same precedence the alarm configuration
+/// is read with ("the alarm configuration that you specify here will override the
+/// alarm configuration at the deployment group level",
+/// `smithy_query(query="doc",shape="CreateDeploymentInput",member="overrideAlarmConfiguration")`).
+pub fn effective_auto_rollback_configuration<'a>(
+    state: &'a ComAmazonawsCodedeployCodedeploy20141006State,
+    deployment: &'a Deployment,
+) -> Option<&'a AutoRollbackConfiguration> {
+    deployment.auto_rollback_configuration.as_ref().or_else(|| {
+        group_of(state, deployment).and_then(|group| group.auto_rollback_configuration.as_ref())
+    })
+}
+
+/// Whether `deployment` is rolled back when `event` happens to it: only an
+/// ENABLED configuration that names that `AutoRollbackEvent` asks for it.
+pub fn rolls_back_on(
+    state: &ComAmazonawsCodedeployCodedeploy20141006State,
+    deployment: &Deployment,
+    event: &str,
+) -> bool {
+    effective_auto_rollback_configuration(state, deployment).is_some_and(|configuration| {
+        configuration.enabled
+            && configuration
+                .events
+                .iter()
+                .flatten()
+                .any(|named| named == event)
+    })
+}
+
+/// Roll `deployment_id` back because it FAILED, when its configuration asks for a
+/// rollback on that event — the one place a deployment failure is turned into a
+/// rollback, so every way a deployment can fail rolls back the same way.
+///
+/// Nothing happens for a deployment that did not fail, one that already carries
+/// rollback information, or one the SERVICE created to roll another one back: a
+/// rollback is CodeDeploy's own remediation, so a rollback never rolls back a
+/// rollback.
+pub fn roll_back_on_failure(
+    state: &mut ComAmazonawsCodedeployCodedeploy20141006State,
+    deployment_id: &str,
+    now_ms: i64,
+) {
+    let rolls_back = state
+        .deployments
+        .get(deployment_id)
+        .is_some_and(|deployment| {
+            deployment.status == DEPLOYMENT_STATUS_FAILED
+                && deployment.creator != DEPLOYMENT_CREATOR_ROLLBACK
+                && deployment.rollback_info.is_none()
+                && rolls_back_on(state, deployment, AUTO_ROLLBACK_EVENT_DEPLOYMENT_FAILURE)
+        });
+    if rolls_back {
+        record_rollback(state, deployment_id, now_ms);
+    }
+}
 
 /// Roll `deployment_id` back: mint the rollback deployment this group has a
 /// revision for, write the `RollbackInfo` onto BOTH records, and answer that
@@ -66,7 +149,7 @@ pub fn record_rollback(
     // A rollback goes to the SAME deployment group, so it resolves the same
     // deployment targets as the deployment it rolls back, and its terminal status
     // follows from them the same way.
-    let targets = deployment.targets.clone();
+    let mut targets = deployment.targets.clone();
 
     // The id of the rollback deployment, minted only when this deployment group
     // has a revision to go back to. A group whose first deployment is being
@@ -116,6 +199,13 @@ pub fn record_rollback(
         // revision reads it: a rollback moves the alias back by re-pointing it,
         // rather than by undoing anything.
         let declared_shift = lambda_traffic_shift::declared_shift(&compute_platform, &revision);
+        // The lifecycle event hooks the revision it REDEPLOYS declares, read
+        // exactly as a client's own deployment of that revision reads them: a
+        // rollback runs the lifecycle events of the revision it puts back.
+        let hook_executions = lifecycle_hook::declared_executions(&compute_platform, &revision);
+        // The rollback deploys the revision it redeploys, so its Lambda target is
+        // the function THAT revision names.
+        super::name_lambda_targets(&mut targets, declared_shift.as_ref());
         state.record_deployment(Deployment {
             deployment_id: rollback_id,
             application_name,
@@ -155,6 +245,7 @@ pub fn record_rollback(
             // against the rollback yet.
             error_information: None,
             lifecycle_hook_executions: Vec::new(),
+            hook_executions,
             targets,
             terminates_original_instances,
             termination_wait_millis,

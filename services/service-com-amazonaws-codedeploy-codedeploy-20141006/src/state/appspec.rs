@@ -45,6 +45,16 @@ const ALIAS_PROPERTY: &str = "Alias";
 const CURRENT_VERSION_PROPERTY: &str = "CurrentVersion";
 /// The property naming the version the alias invokes after the deployment.
 const TARGET_VERSION_PROPERTY: &str = "TargetVersion";
+/// The AppSpec mapping holding the lifecycle event hooks a deployment runs:
+/// "A deployment lifecycle hook is specified in the hooks section of the AppSpec
+/// file"
+/// (`smithy_query(query="doc",shape="PutLifecycleEventHookExecutionStatusInput",member="lifecycleEventHookExecutionId")`).
+///
+/// The key is matched without regard to case: the AppSpec reference spells the
+/// section `Hooks` for the Lambda and Amazon ECS compute platforms and `hooks`
+/// for EC2/on-premises, so a document is read for the section it HAS rather than
+/// for one spelling of it.
+const HOOKS_KEY: &str = "Hooks";
 
 /// The longest revision content this emulator parses an AppSpec out of.
 ///
@@ -123,7 +133,21 @@ pub fn declared_shift(
 /// declares no shift here.
 #[must_use]
 pub fn declared_in_revision(revision: &RevisionLocation) -> Option<LambdaTrafficShift> {
-    let content = revision
+    declared_in_app_spec(revision_content(revision)?)
+}
+
+/// The AppSpec document `revision` CARRIES, or `None` for a revision that keeps
+/// it somewhere this emulator does not read.
+///
+/// Only the revision forms that carry the document — `appSpecContent`, and the
+/// `string` form the model describes as "the location of an Lambda deployment
+/// revision stored as a RawString"
+/// (`smithy_query(query="shape",shape="RevisionLocation")`) — carry it where this
+/// emulator can read it. A revision that names an S3 object or a GitHub commit
+/// keeps the AppSpec in that artifact, which this emulator does not fetch.
+#[must_use]
+pub fn revision_content(revision: &RevisionLocation) -> Option<&str> {
+    revision
         .app_spec_content
         .as_ref()
         .and_then(|content| content.content.as_deref())
@@ -132,8 +156,7 @@ pub fn declared_in_revision(revision: &RevisionLocation) -> Option<LambdaTraffic
                 .string
                 .as_ref()
                 .and_then(|content| content.content.as_deref())
-        })?;
-    declared_in_app_spec(content)
+        })
 }
 
 /// The traffic shift an AppSpec document declares, or `None` for content that
@@ -152,6 +175,90 @@ pub fn declared_in_app_spec(content: &str) -> Option<LambdaTrafficShift> {
         .ok()?
         .iter()
         .find_map(declared_in_document)
+}
+
+/// One lifecycle event hook a revision's AppSpec declares: the lifecycle event,
+/// and the Lambda validation function that runs for it.
+///
+/// "A deployment lifecycle hook is specified in the hooks section of the AppSpec
+/// file"
+/// (`smithy_query(query="doc",shape="PutLifecycleEventHookExecutionStatusInput",member="lifecycleEventHookExecutionId")`),
+/// and what it names for a Lambda or Amazon ECS deployment is the validation
+/// function whose result that event's outcome IS — the function CodeDeploy invokes
+/// with the event, and that reports back through
+/// `PutLifecycleEventHookExecutionStatus`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredHook {
+    /// Which lifecycle event the hook runs for, as the document spells it.
+    pub lifecycle_event_name: String,
+    /// The validation function the document names for it.
+    pub function_name: String,
+}
+
+/// The lifecycle event hooks `revision` declares, in document order.
+///
+/// Read when the deployment is recorded and then held, exactly as the traffic
+/// shift is, so the hooks a deployment runs are fixed by the revision it was
+/// created with.
+#[must_use]
+pub fn declared_hooks_in_revision(revision: &RevisionLocation) -> Vec<DeclaredHook> {
+    revision_content(revision).map_or_else(Vec::new, declared_hooks_in_app_spec)
+}
+
+/// The lifecycle event hooks one AppSpec document declares, in document order;
+/// empty for content that declares none, and for content outside the bounds this
+/// emulator parses a document within ([`declared_in_app_spec`] states them).
+///
+/// Public so a test can hold the reading of a document to this rule without
+/// standing a deployment up for every row.
+#[must_use]
+pub fn declared_hooks_in_app_spec(content: &str) -> Vec<DeclaredHook> {
+    if !within_bounds(content) || !parses_within_depth(content) {
+        return Vec::new();
+    }
+    ::yaml_rust2::YamlLoader::load_from_str(content)
+        .unwrap_or_default()
+        .iter()
+        .flat_map(hooks_in_document)
+        .collect()
+}
+
+/// The hooks one document's `Hooks` section declares.
+///
+/// The section is written as a sequence of single-entry mappings (the form AWS
+/// documents) or as one mapping of event name to function, so both are read.
+fn hooks_in_document(document: &Yaml) -> Vec<DeclaredHook> {
+    let Some(hooks) = mapping_get_ignoring_case(document, HOOKS_KEY) else {
+        return Vec::new();
+    };
+    match hooks {
+        Yaml::Array(entries) => entries.iter().flat_map(hooks_in_entry).collect(),
+        mapping => hooks_in_entry(mapping),
+    }
+}
+
+/// The hooks one entry of that section declares: each key is the lifecycle event
+/// and each value the validation function it runs.
+///
+/// A value that is no scalar names no validation function — an EC2/on-premises
+/// AppSpec's hooks are a sequence of script locations the CodeDeploy agent runs,
+/// not a function this service invokes — so such an entry declares nothing here.
+fn hooks_in_entry(entry: &Yaml) -> Vec<DeclaredHook> {
+    let Yaml::Hash(declared) = entry else {
+        return Vec::new();
+    };
+    declared
+        .iter()
+        .filter_map(|(event, function)| {
+            let lifecycle_event_name = event.as_str()?.trim();
+            let function_name = scalar(function)?;
+            let function_name = function_name.trim();
+            (!lifecycle_event_name.is_empty() && !function_name.is_empty()).then(|| DeclaredHook {
+                lifecycle_event_name: lifecycle_event_name.to_string(),
+                function_name: function_name.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// Whether the content is small enough and flat enough to hand to a parser at
@@ -272,6 +379,17 @@ fn mapping_get<'a>(node: &'a Yaml, key: &str) -> Option<&'a Yaml> {
     mapping
         .iter()
         .find(|(stored, _)| stored.as_str() == Some(key))
+        .map(|(_, value)| value)
+}
+
+/// [`mapping_get`] without regard to the key's case; see [`HOOKS_KEY`].
+fn mapping_get_ignoring_case<'a>(node: &'a Yaml, key: &str) -> Option<&'a Yaml> {
+    let Yaml::Hash(mapping) = node else {
+        return None;
+    };
+    mapping
+        .iter()
+        .find(|(stored, _)| stored.as_str().is_some_and(|stored| stored.eq_ignore_ascii_case(key)))
         .map(|(_, value)| value)
 }
 
@@ -606,6 +724,91 @@ mod tests {
                 read.as_ref(),
                 expected.as_ref(),
                 "case {case:?}: expected the declared shift {expected:?}, got {read:?}"
+            );
+        }
+    }
+
+    /// RULE: the AppSpec's `Hooks` section is what names the validation function
+    /// of each lifecycle event, in either format the content is written in and in
+    /// either spelling of that section — and a hook that names no function (an
+    /// EC2/on-premises AppSpec's script locations, say) declares none.
+    #[test]
+    fn the_app_spec_declares_the_lifecycle_event_hooks() {
+        let both = "version: 0.0\n\
+                    Hooks:\n\
+                    \x20 - BeforeAllowTraffic: \"check-before\"\n\
+                    \x20 - AfterAllowTraffic: \"check-after\"\n";
+        let mapping = "version: 0.0\n\
+                       Hooks:\n\
+                       \x20 BeforeAllowTraffic: check-before\n";
+        let json = r#"{"version": 0.0, "Hooks": [{"AfterAllowTraffic": "check-after"}]}"#;
+        let ecs = "version: 0.0\n\
+                   Hooks:\n\
+                   \x20 - AfterAllowTestTraffic: \"check-test-traffic\"\n";
+        let agent = "version: 0.0\n\
+                     hooks:\n\
+                     \x20 AfterInstall:\n\
+                     \x20   - location: scripts/install.sh\n";
+        let scripts = "version: 0.0\n\
+                       Hooks:\n\
+                       \x20 AfterInstall:\n\
+                       \x20   - location: scripts/install.sh\n";
+        let lower_case = "version: 0.0\n\
+                          hooks:\n\
+                          \x20 - BeforeAllowTraffic: check-before\n";
+
+        let hook = |event: &str, function: &str| DeclaredHook {
+            lifecycle_event_name: event.to_string(),
+            function_name: function.to_string(),
+        };
+        let cases: &[(&str, &str, Vec<DeclaredHook>)] = &[
+            (
+                "both Lambda hooks",
+                both,
+                vec![
+                    hook("BeforeAllowTraffic", "check-before"),
+                    hook("AfterAllowTraffic", "check-after"),
+                ],
+            ),
+            (
+                "a Hooks section written as one mapping",
+                mapping,
+                vec![hook("BeforeAllowTraffic", "check-before")],
+            ),
+            (
+                "a JSON AppSpec",
+                json,
+                vec![hook("AfterAllowTraffic", "check-after")],
+            ),
+            (
+                "an Amazon ECS lifecycle event",
+                ecs,
+                vec![hook("AfterAllowTestTraffic", "check-test-traffic")],
+            ),
+            ("an AppSpec that declares no hook", "version: 0.0", vec![]),
+            (
+                // The AppSpec reference spells the section `hooks` for
+                // EC2/on-premises, so the section is read whichever case it
+                // carries; its ENTRIES here name script locations rather than a
+                // validation function, so they declare none.
+                "a lower-case hooks section naming script locations",
+                agent,
+                vec![],
+            ),
+            (
+                "a lower-case hooks section naming a function",
+                lower_case,
+                vec![hook("BeforeAllowTraffic", "check-before")],
+            ),
+            ("hooks that name script locations", scripts, vec![]),
+            ("content that is no document at all", "\tnot: yaml\n", vec![]),
+        ];
+
+        for (case, content, expected) in cases {
+            let read = declared_hooks_in_app_spec(content);
+            assert_eq!(
+                &read, expected,
+                "case {case:?}: expected the declared hooks {expected:?}, got {read:?}"
             );
         }
     }

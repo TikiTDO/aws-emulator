@@ -49,6 +49,10 @@ service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 # JSON, so one parser reads both forms); yaml-rust2 is the pure-Rust one the
 # other services that read caller-supplied YAML already use.
 yaml-rust2 = { version = "0.10", default-features = false }
+# A deployment's lifecycle event hooks are Lambda VALIDATION FUNCTIONS this
+# service invokes: the invocation is made over AWS Lambda's own modelled `Invoke`
+# through the in-process callback (`state::hook_invocation`).
+aws-sdk-lambda = { version = "1", default-features = false }
 # A deployment group's `triggerConfigurations` are PUBLISHED to the Amazon SNS
 # topics they name, over the in-process callback into this same emulator
 # (`state::trigger_notifications`); `default-features = false` keeps the SDK's own
@@ -62,6 +66,11 @@ emulator-core-build-support = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
+# Writes the .zip deployment package the lifecycle-hook suite uploads for its
+# validation function, the way a caller uploads one, and encodes it as the
+# `ZipFile` member carries it.
+zip = { version = "9", default-features = false, features = ["deflate"] }
+base64 = "0.22"
 # `time` for the test that waits on a clock-owed deployment transition.
 tokio = { workspace = true, features = ["time"] }
 # Percent-encodes the query-protocol form fields the IAM fixture in the shared test

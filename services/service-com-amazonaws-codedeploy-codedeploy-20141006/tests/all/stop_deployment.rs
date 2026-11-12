@@ -12,30 +12,29 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::codedeploy_lifecycle::{
-    error_code, s3_revision, seeded_group, terminal_deployment, Emulator,
+    deployment_id_on_free_group, error_code, s3_revision, seeded_group, terminal_deployment,
+    Emulator,
 };
 
 /// Create a deployment of `revision` on `application`/`group`, answering its id.
+///
+/// A deployment group runs one deployment at a time, so a suite that deploys to
+/// one group twice waits for the first to be terminal, exactly as a client would.
 async fn create_deployment(
     emulator: &Emulator,
     application: &str,
     group: &str,
     revision: &Value,
 ) -> String {
-    let created = emulator
-        .ok(
-            "CreateDeployment",
-            json!({
-                "applicationName": application,
-                "deploymentGroupName": group,
-                "revision": revision,
-            }),
-        )
-        .await;
-    created["deploymentId"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string()
+    deployment_id_on_free_group(
+        emulator,
+        json!({
+            "applicationName": application,
+            "deploymentGroupName": group,
+            "revision": revision,
+        }),
+    )
+    .await
 }
 
 /// The stored `deploymentInfo` of `deployment_id`.

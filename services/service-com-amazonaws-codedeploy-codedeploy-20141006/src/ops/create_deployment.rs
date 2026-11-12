@@ -379,10 +379,32 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             let compute_platform = application.compute_platform.clone();
             let group_config = group.deployment_config_name.clone();
             let group_style = group.deployment_style.clone();
+            let group_id = group.deployment_group_id.clone();
+            // A deployment group runs ONE deployment at a time: while a
+            // deployment of this group has not reached an outcome, a second one
+            // is refused rather than started beside it. `with_state` has brought
+            // every deployment up to the status the clock already owed it, so
+            // this reads the deployments a client would read as active.
+            let active =
+                state.active_deployment_of(&application_name, &deployment_group_name);
+            if let Some(active) = active {
+                let active_id = active.deployment_id.clone();
+                return Err(
+                    CreateDeploymentErrorModeled::DeploymentLimitExceededException(
+                        DeploymentLimitExceededException {
+                            message: Some(crate::state::deployment_already_active(
+                                &deployment_group_name,
+                                &group_id,
+                                &active_id,
+                            )),
+                        },
+                    ),
+                );
+            }
             // The targets this deployment group resolves, which is what decides
             // the terminal status the clock owes the deployment, and what the
             // deployment reports as its targets from here on.
-            let targets = crate::state::deployment_targets(state, group);
+            let mut targets = crate::state::deployment_targets(state, group);
             // What this deployment owes the original environment: a blue/green
             // group that terminates its instances holds the deployment open for
             // the wait it configured.
@@ -497,6 +519,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             let lambda_traffic_shift = declared_shift.filter(|_| {
                 compute_platform == crate::state::lambda_traffic_shift::COMPUTE_PLATFORM_LAMBDA
             });
+            // The lifecycle event hooks this deployment runs: the validation
+            // functions its revision's AppSpec declares for the events its
+            // compute platform runs through one. Each is invoked while the
+            // deployment is in flight, and the result it reports is what lets the
+            // deployment past that event.
+            let hook_executions = crate::state::lifecycle_hook::declared_executions(
+                &compute_platform,
+                &revision,
+            );
+            // A Lambda deployment's one target IS the function its revision names,
+            // so the snapshot is named from the shift that revision declared.
+            crate::state::name_lambda_targets(&mut targets, lambda_traffic_shift.as_ref());
             // `record_deployment` indexes it as the newest and drops the oldest
             // history past the store's retention bound.
             state.record_deployment(crate::state::Deployment {
@@ -535,6 +569,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // yet: both are written as the deployment runs.
                 error_information: None,
                 lifecycle_hook_executions: Vec::new(),
+                hook_executions,
                 targets,
                 terminates_original_instances,
                 termination_wait_millis,

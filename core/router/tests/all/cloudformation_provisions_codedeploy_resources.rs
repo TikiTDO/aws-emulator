@@ -158,6 +158,53 @@ async fn codedeploy(
     (status, payload)
 }
 
+/// Create a deployment on `application`/`group`, waiting out the refusal a deployment group
+/// that is already running one answers with.
+///
+/// A deployment group runs ONE deployment at a time, so a second `CreateDeployment` against
+/// it is refused with `DeploymentLimitExceededException` until the first is terminal — which
+/// a client waits out, and so does this: a stack that declared a `Deployment` leaves one in
+/// flight behind it.
+async fn deployment_on_free_group(
+    router: &MultiServiceRouter,
+    region: &str,
+    application: &str,
+    group: &str,
+    case: &str,
+) -> (u16, Value) {
+    let deadline = std::time::Instant::now() + PAST_DEPLOYMENT_SPAN;
+    loop {
+        let answered = codedeploy(
+            router,
+            region,
+            "CreateDeployment",
+            &json!({
+                "applicationName": application,
+                "deploymentGroupName": group,
+                "revision": {
+                    "revisionType": "S3",
+                    "s3Location": {
+                        "bucket": "release-artifacts",
+                        "key": "later.zip",
+                        "bundleType": "zip",
+                    },
+                },
+            }),
+        )
+        .await;
+        if answered.0 == 200 {
+            return answered;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "case {case:?}: expected the deployment group {group} to take a deployment within \
+             {PAST_DEPLOYMENT_SPAN:?}, last {:?}",
+            answered.1
+        );
+        ::tokio::time::sleep(DEPLOYMENT_POLL).await;
+    }
+}
+
 /// Poll `GetDeployment` until `deployment_id` holds a terminal status.
 ///
 /// The terminal statuses are the members of the model's `DeploymentStatus` enum that no
@@ -907,25 +954,10 @@ async fn a_stack_provisions_the_codedeploy_resources_its_template_declares() {
                 "deploymentGroupInfo",
             );
 
-            // A deployment group a stack created takes a deployment like any other.
-            let (status, deployed) = codedeploy(
-                &router,
-                region,
-                "CreateDeployment",
-                &json!({
-                    "applicationName": &application,
-                    "deploymentGroupName": &name,
-                    "revision": {
-                        "revisionType": "S3",
-                        "s3Location": {
-                            "bucket": "release-artifacts",
-                            "key": "later.zip",
-                            "bundleType": "zip",
-                        },
-                    },
-                }),
-            )
-            .await;
+            // A deployment group a stack created takes a deployment like any other —
+            // once the one the stack itself may have left in flight is terminal.
+            let (status, deployed) =
+                deployment_on_free_group(&router, region, &application, &name, case).await;
             assert_eq!(
                 status, 200,
                 "case {case:?}: expected HTTP 200 from CreateDeployment on the group the stack \

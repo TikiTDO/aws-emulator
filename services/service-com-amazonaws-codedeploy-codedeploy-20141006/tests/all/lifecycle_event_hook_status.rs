@@ -476,7 +476,7 @@ async fn a_completed_deployment_reports_no_further_hook_result() {
 
     // The transition is owed by the clock, not by the poll; wait for it rather
     // than forcing it.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
         let polled: Value = emulator
             .ok("GetDeployment", json!({"deploymentId": deployment_id}))

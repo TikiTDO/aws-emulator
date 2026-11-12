@@ -72,6 +72,36 @@ impl Emulator {
         );
         error_code(&parsed)
     }
+
+    /// Create a deployment, waiting out the refusal a deployment group that is
+    /// already running one answers with.
+    ///
+    /// A deployment group runs ONE deployment at a time, so a client deploying to
+    /// the same group twice is refused with `DeploymentLimitExceededException`
+    /// until the first deployment is terminal — which this waits out exactly as a
+    /// client would. The loop is this suite's own because this suite keeps its own
+    /// harness: the shared one in `codedeploy_lifecycle` is written against that
+    /// suite's `Emulator`, and the rule both wait on is stated there.
+    async fn deploy_when_free(&self, body: Value) -> Value {
+        let deadline_at = Instant::now() + Duration::from_secs(15);
+        loop {
+            let (status, parsed) = self.call("CreateDeployment", body.clone()).await;
+            if status == 200 {
+                return parsed;
+            }
+            assert_eq!(
+                (status, error_code(&parsed).as_str()),
+                (400, "DeploymentLimitExceededException"),
+                "CreateDeployment must succeed or wait for its deployment group, got {status} \
+                 {parsed:?}"
+            );
+            assert!(
+                Instant::now() < deadline_at,
+                "expected the deployment group to be free, got {parsed:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
 }
 
 /// The wire error code of a failure body: awsJson carries it in `__type`, either
@@ -187,7 +217,7 @@ async fn poll_deployment(
     deployment_id: &str,
     ready: impl Fn(&Value) -> bool,
 ) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let read = emulator
             .ok("GetDeployment", json!({"deploymentId": deployment_id}))
@@ -813,14 +843,11 @@ async fn deploying_a_revision_registers_it_and_names_the_group() {
     );
 
     emulator
-        .ok(
-            "CreateDeployment",
-            json!({
-                "applicationName": "deployed-from",
-                "deploymentGroupName": group,
-                "revision": revision,
-            }),
-        )
+        .deploy_when_free(json!({
+            "applicationName": "deployed-from",
+            "deploymentGroupName": group,
+            "revision": revision,
+        }))
         .await;
 
     let read = emulator
@@ -847,14 +874,11 @@ async fn deploying_a_revision_registers_it_and_names_the_group() {
 
     // A second deployment of the SAME revision moves only its last use.
     emulator
-        .ok(
-            "CreateDeployment",
-            json!({
-                "applicationName": "deployed-from",
-                "deploymentGroupName": group,
-                "revision": revision,
-            }),
-        )
+        .deploy_when_free(json!({
+            "applicationName": "deployed-from",
+            "deploymentGroupName": group,
+            "revision": revision,
+        }))
         .await;
     let again = emulator
         .ok(
@@ -877,14 +901,11 @@ async fn deploying_a_revision_registers_it_and_names_the_group() {
     // first revision is no longer any group's target.
     let newer = s3_revision("artifacts", "prod/newer.zip");
     emulator
-        .ok(
-            "CreateDeployment",
-            json!({
-                "applicationName": "deployed-from",
-                "deploymentGroupName": group,
-                "revision": newer,
-            }),
-        )
+        .deploy_when_free(json!({
+            "applicationName": "deployed-from",
+            "deploymentGroupName": group,
+            "revision": newer,
+        }))
         .await;
     let superseded = emulator
         .ok(
