@@ -55,11 +55,17 @@
 //! framework's OWN deserializer and constraint walk, so the wrapper cannot refuse a
 //! different set of requests than the walk that follows it.
 //!
-//! Two clauses are worded by this service rather than by the framework, both in
-//! [`as_stated`] and so in both refusal paths: a `@pattern` is named without the
-//! anchors the model brackets it with, and an enumerated type's admissible set is
-//! listed in the order this service enumerates a set in (the [`enum_value_set`]
-//! module), which follows the values themselves rather than the model's declaration.
+//! The WORDS of that envelope are not this file's: [`constraint_envelope`] delegates
+//! to the shared home for boundary-refusal wording
+//! ([`service_common::validation_message`]) and so to the framework behind it, which
+//! renders the counted envelope and one clause per violation — the member path, the
+//! requirement each constraint class states, and a `@pattern` quoted without the
+//! whole-value anchors the model brackets it with. Both refusal paths go through it,
+//! so they cannot disagree.
+//!
+//! What this service chooses is what an ENUM clause states: no submitted value, and
+//! the admissible values listed in the order this service lists a set in — the
+//! [`enum_value_set`] module, which owns that rule for the class.
 
 mod enum_value_set;
 
@@ -310,52 +316,26 @@ fn validation_exception(
 }
 
 /// The `Message` of a constraint refusal: the AWS validation envelope
-/// (`N validation error(s) detected: `) over one clause per violation, each naming
-/// the rejected value, the member path in lowerCamelCase and the constraint it
-/// failed. `None` when there is nothing to state.
+/// (`N validation error(s) detected: `) over one clause per violation, each naming the
+/// member path in lowerCamelCase, the constraint it failed and — for every class but
+/// one — the rejected value. `None` when there is nothing to state.
 ///
-/// The clauses come from the framework's own renderer, so a constraint class added
-/// upstream cannot arrive with a sentence of its own; [`as_stated`] only names a
-/// `@pattern` and an enumerated type's admissible set the way this service names
-/// them.
+/// The envelope, the clauses and the `@pattern` quoting are the shared home's and the
+/// framework's, so a constraint class added upstream cannot arrive with a sentence of
+/// its own. This service chooses one thing about one class: an enum clause states no
+/// value and lists the admissible values in its own order ([`enum_value_set`]).
 fn constraint_envelope(violations: &[Violation]) -> Option<String> {
-    let stated: Vec<Violation> = violations.iter().map(as_stated).collect();
-    constraints::envelope(&stated)
-}
-
-/// A violation as this service states it: the framework's clause, with a `@pattern`
-/// named without the anchors the model brackets it with, and an enumerated type's
-/// admissible set listed in the order this service enumerates a set in
-/// ([`enum_value_set`]) rather than the order the model declares the type in.
-///
-/// A `@pattern` clause already says the whole member must satisfy the expression, so
-/// the anchors would be restating the sentence. An enum clause states WHICH values
-/// the type admits, and this service enumerates them out of a hash table keyed on the
-/// values themselves, so the order follows the values rather than the declaration —
-/// the same set whichever member, operation or request reached it. Every other clause
-/// is the framework's unchanged.
-fn as_stated(violation: &Violation) -> Violation {
-    match &violation.kind {
-        ViolationKind::Pattern(regex) => Violation {
-            kind: ViolationKind::Pattern(unanchored(regex).to_string()),
-            ..violation.clone()
-        },
-        ViolationKind::EnumValue(declared) => Violation {
-            kind: ViolationKind::EnumValue(enum_value_set::as_enumerated(declared)),
-            ..violation.clone()
-        },
-        _ => violation.clone(),
-    }
-}
-
-/// `regex` without a leading `^` or a trailing `$`. A trailing `$` escaped by a
-/// backslash is a literal dollar in the expression, not an anchor, so it stays.
-fn unanchored(regex: &str) -> &str {
-    let inner = regex.strip_prefix('^').unwrap_or(regex);
-    match inner.strip_suffix('$') {
-        Some(stripped) if !stripped.ends_with('\\') => stripped,
-        _ => inner,
-    }
+    // The order is applied to each violation BEFORE the envelope words it, so only the
+    // values inside an enum clause move and every other violation reaches the shared
+    // renderer exactly as the framework's walk reported it.
+    let stated = Refusal::Invalid(violations.iter().map(enum_value_set::as_stated).collect());
+    Some(
+        service_common::validation_message::aws_validation_refusal_withholding_violations(
+            &stated,
+            enum_value_set::states_no_value,
+        )?
+        .message,
+    )
 }
 
 impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {

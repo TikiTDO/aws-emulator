@@ -361,7 +361,9 @@ async fn several_violations_are_reported_in_one_message() {
     let token_clause = format!(
         "Value '{over_long_token}' at 'clientToken' failed to satisfy constraint: Member must have length less than or equal to 64"
     );
-    let enum_clause = "Value 'NOT_A_SOLUTION_TYPE' at 'primarySolutionType' failed to satisfy constraint: Member must satisfy enum value set: [";
+    // An enum clause states no submitted value (see `tests/all/enum_value_set_order.rs`),
+    // where the length clause above states the token it was sent.
+    let enum_clause = "Value at 'primarySolutionType' failed to satisfy constraint: Member must satisfy enum value set: [";
     assert!(
         message.contains(&token_clause),
         "case {case:?}: the message states the length violation, got {message:?}"

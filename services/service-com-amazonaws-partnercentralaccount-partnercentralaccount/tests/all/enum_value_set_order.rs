@@ -8,7 +8,9 @@
 //! VALUES themselves (it is neither the order the model declares the type in nor the
 //! sorted one), so one enumerated type is listed the same way whichever member,
 //! operation or request reached it, and the listed set is always the modelled set
-//! re-ordered: nothing added, nothing dropped, nothing repeated.
+//! re-ordered: nothing added, nothing dropped, nothing repeated. The clause states NO
+//! submitted value: the requirement is the set a value has to come from, not the one
+//! value that was not in it, so the refusal reads the same whatever a caller sent.
 //!
 //! The rows differ along what the rule generalises over: which enumerated type the
 //! refused value belongs to (five of this model's, of two, five and eight values),
@@ -46,17 +48,18 @@ const INVITATION_STATUS_SET: &str = "EXPIRED, ACCEPTED, PENDING, CANCELED, REJEC
 /// `smithy_query(query="operation",operation="CreatePartner")`).
 const CLIENT_TOKEN_MAX: usize = 64;
 
-/// The requirement clause an enum-constraint violation states for `member_path`.
+/// The requirement clause an enum-constraint violation states for `member_path`, with
+/// the value half the class leaves out.
 fn enum_clause(member_path: &str, value_set: &str) -> String {
     format!(
-        "at '{member_path}' failed to satisfy constraint: Member must satisfy enum value set: \
-         [{value_set}]"
+        "Value at '{member_path}' failed to satisfy constraint: Member must satisfy enum \
+         value set: [{value_set}]"
     )
 }
 
 /// A `CreatePartner` request that is valid but for `PrimarySolutionType`, and — when
 /// `client_token` is given — for that token.
-fn create_partner(solution_type: &str, client_token: &str) -> Value {
+pub(crate) fn create_partner(solution_type: &str, client_token: &str) -> Value {
     json!({
         "Catalog": "Sandbox",
         "ClientToken": client_token,
@@ -96,7 +99,7 @@ async fn a_known_enum_set_is_stated_in_the_order_the_refusals_state_it() {
             "CreatePartner",
             create_partner("NOT_A_SOLUTION_TYPE", "tok-enum"),
             format!(
-                "1 validation error detected: Value 'NOT_A_SOLUTION_TYPE' {}",
+                "1 validation error detected: {}",
                 enum_clause("primarySolutionType", PRIMARY_SOLUTION_TYPE_SET)
             ),
         ),
@@ -107,7 +110,7 @@ async fn a_known_enum_set_is_stated_in_the_order_the_refusals_state_it() {
             format!(
                 "2 validation errors detected: Value '{over_long_token}' at 'clientToken' failed \
                  to satisfy constraint: Member must have length less than or equal to \
-                 {CLIENT_TOKEN_MAX}; Value 'NOT_A_SOLUTION_TYPE' {}",
+                 {CLIENT_TOKEN_MAX}; {}",
                 enum_clause("primarySolutionType", PRIMARY_SOLUTION_TYPE_SET)
             ),
         ),

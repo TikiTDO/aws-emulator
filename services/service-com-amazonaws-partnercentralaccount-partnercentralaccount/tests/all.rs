@@ -15,6 +15,8 @@
 mod connection_lifecycle;
 #[path = "all/email_verification.rs"]
 mod email_verification;
+#[path = "all/enum_refusal_value_half.rs"]
+mod enum_refusal_value_half;
 #[path = "all/enum_value_set_order.rs"]
 mod enum_value_set_order;
 #[path = "all/error_response_fidelity.rs"]

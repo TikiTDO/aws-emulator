@@ -1,79 +1,80 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! The ORDER a constraint refusal lists an enumerated type's admissible values in.
+//! What a constraint refusal of a value outside an enumerated type STATES: which values
+//! that type admits, in which order, and — the half this service leaves out — no submitted
+//! value at all.
 //!
-//! `Member must satisfy enum value set: [ … ]` states WHICH values the type admits,
-//! and the frontend that words it enumerates them out of a hash table keyed on the
-//! value's own text rather than walking the type's declaration: the order is
-//! therefore neither the model's declaration order nor the sorted one, it is a
-//! property of the VALUES alone, and it is the same for every member, operation and
-//! request that reaches one enumerated type.
+//! Two things about such a clause are this service's rather than the framework's, and both
+//! belong to the enum CLASS rather than to a member or an operation:
 //!
-//! The table this reproduces, read off the refusals this service answers:
+//! * the clause names the member and the set and states NO value —
+//!   `Value at '<member path>' failed to satisfy constraint: Member must satisfy enum value
+//!   set: [ … ]` — because the requirement is the set every value of that member has to
+//!   come from and not the one value that was not in it, so the refusal reads the same
+//!   whatever a caller sent. Every other constraint class keeps the value half the
+//!   framework writes for it, which is what a `@length`, a `@range` and a `@pattern`
+//!   refusal of this service state.
+//! * the values are listed in the order the front door's own TABLE of the admissible values
+//!   is walked — the table's buckets in ascending order, each bucket being the low bits of
+//!   the value's own string hash
+//!   ([`service_common::validation_message::in_hashed_enum_order`]) — and not in the order
+//!   the model declares the type's members in. That order is computed from the values
+//!   themselves, so it belongs to the enumerated TYPE: every member of every operation
+//!   targeting one enum is listed alike, at whatever depth and in whatever binding the
+//!   value arrived, and a type the model gains needs nothing added here.
 //!
-//! * [`BUCKETS`] buckets, indexed by the low bits of the value's string hash —
-//!   the 31-polynomial over the value's UTF-16 code units ([`string_hash`]);
-//! * the buckets enumerated in ascending index order;
-//! * a bucket holding more than one value (two values whose hashes agree in those
-//!   low bits) enumerated with the LATER-declared value first, the chain order of a
-//!   table whose entries are pushed onto the head of their bucket.
-//!
-//! Keying on the values means an enumerated type no refusal has been seen stating is
-//! listed by the same rule as one that has, and a model revision that reorders a
-//! type's declaration does not move its stated set — only adding or removing a value
-//! does.
+//! Nothing about the SENTENCE is this module's: the counted envelope, the clause, the
+//! member path, the requirement each constraint class states and the mechanics of dropping
+//! a clause's value half live in the shared home for boundary-refusal wording
+//! ([`service_common::validation_message`]) and in the framework behind it, so this service
+//! cannot word a constraint differently from the services that state the same sentence.
 
-/// How many buckets the admissible set is enumerated out of.
-///
-/// One width fits every set this service's refusals are known to state — they run
-/// from two values up to eight — and the width belongs to the table rather than to
-/// the set, so a wider set is enumerated out of the same buckets, more of which then
-/// hold a chain.
-const BUCKETS: usize = 32;
+use ::service_common::validation_message::in_hashed_enum_order;
+use ::smithy_server_runtime::{Violation, ViolationKind};
 
-/// `declared` — an enumerated type's admissible values, in the order the model
-/// declares them — in the order this service enumerates them in (see the module
-/// docs).
-pub(super) fn as_enumerated<S: AsRef<str>>(declared: &[S]) -> Vec<String> {
-    let mut buckets: Vec<Vec<&str>> = vec![Vec::new(); BUCKETS];
-    for value in declared {
-        let value = value.as_ref();
-        buckets[bucket_of(value)].push(value);
-    }
-    buckets
-        .into_iter()
-        // A chain is read from its head, onto which each value was pushed, so a
-        // bucket states the LATER-declared value first.
-        .flat_map(|bucket| bucket.into_iter().rev())
-        .map(str::to_string)
-        .collect()
+/// One violation as this service states it: an enumerated type's admissible values listed
+/// in the order the table of them is walked, and every other violation unchanged.
+pub(super) fn as_stated(violation: &Violation) -> Violation {
+    in_hashed_enum_order(violation)
 }
 
-/// The bucket `value` falls in: the low bits of its hash, which for a power-of-two
-/// width is the hash modulo that width — in range by construction.
-fn bucket_of(value: &str) -> usize {
-    (string_hash(value) as u32 as usize) % BUCKETS
-}
-
-/// The hash of `value`: the 31-polynomial over its UTF-16 code units, accumulated in
-/// 32 bits with wrapping arithmetic — the hash the string carries where this
-/// enumeration order comes from, and the one the bucket index is read out of.
-fn string_hash(value: &str) -> i32 {
-    value.encode_utf16().fold(0_i32, |hash, unit| {
-        hash.wrapping_mul(31).wrapping_add(i32::from(unit))
-    })
+/// Whether the clause `violation` states names no value: a value outside an enumerated
+/// type's value set, and nothing else.
+pub(super) fn states_no_value(violation: &Violation) -> bool {
+    matches!(violation.kind, ViolationKind::EnumValue(_))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A set is RE-ORDERED, never changed: every value the model declares is stated
+    /// The violation the framework hands over for `value`, outside the enumerated type
+    /// whose admissible values are `declared`.
+    fn enum_violation(declared: &[&str]) -> Violation {
+        Violation {
+            path: "status".to_string(),
+            kind: ViolationKind::EnumValue(
+                declared.iter().map(|value| (*value).to_string()).collect(),
+            ),
+            value: Some("NOT_A_MODELLED_VALUE".to_string()),
+            sensitive: false,
+        }
+    }
+
+    /// The values a clause lists, read back off the restated violation.
+    fn listed(violation: &Violation) -> Vec<String> {
+        match &violation.kind {
+            ViolationKind::EnumValue(values) => values.clone(),
+            other => panic!("expected an enum value set, got {other:?}"),
+        }
+    }
+
+    /// A set is RE-ORDERED, never changed: every value the model declares is listed
     /// exactly once, whatever the set's size. The widest type this model declares
     /// (`IndustrySegment`, 37 values) has more values than the table has buckets, so
     /// several of its buckets hold a chain.
     #[test]
-    fn every_declared_value_is_stated_exactly_once() {
+    fn every_declared_value_is_listed_exactly_once() {
         for declared in [
             crate::ops::types::INDUSTRY_SEGMENT_VALUES,
             crate::ops::types::PRIMARY_SOLUTION_TYPE_VALUES,
@@ -81,7 +82,7 @@ mod tests {
             crate::ops::types::CONNECTION_TYPE_VALUES,
             crate::ops::types::PROFILE_VISIBILITY_VALUES,
         ] {
-            let stated = as_enumerated(declared);
+            let stated = listed(&as_stated(&enum_violation(declared)));
             let mut sorted_stated = stated.clone();
             sorted_stated.sort_unstable();
             let mut sorted_declared: Vec<String> =
@@ -89,17 +90,17 @@ mod tests {
             sorted_declared.sort_unstable();
             assert_eq!(
                 sorted_stated, sorted_declared,
-                "case {declared:?}: the stated set is the declared one re-ordered, got {stated:?}"
+                "case {declared:?}: the listed set is the declared one re-ordered, got {stated:?}"
             );
         }
     }
 
-    /// The two enumerated types this service's refusals are known to state a set for,
-    /// each held to the order those refusals state it in — neither the declaration
-    /// order the rows list nor the sorted one.
+    /// The two enumerated types this service's refusals are known to list a set for, each
+    /// held to the order those refusals list it in — neither the declaration order the rows
+    /// carry nor the sorted one.
     #[test]
-    fn a_known_set_is_stated_in_the_order_the_refusals_state_it() {
-        // (type, declared order, the order a refusal states it in)
+    fn a_known_set_is_listed_in_the_order_the_refusals_list_it() {
+        // (type, declared order, the order a refusal lists it in)
         let rows: &[(&str, &[&str], &[&str])] = &[
             (
                 // `smithy_query(query="shape",shape="PrimarySolutionType")`.
@@ -134,11 +135,38 @@ mod tests {
         ];
 
         for (case, declared, stated) in rows {
+            let got = listed(&as_stated(&enum_violation(declared)));
             assert_eq!(
-                as_enumerated(declared),
-                *stated,
-                "case {case:?}: the set is stated in the order the refusals state it in, got {:?}",
-                as_enumerated(declared)
+                got, *stated,
+                "case {case:?}: the set is listed in the order the refusals list it in, got \
+                 {got:?}"
+            );
+        }
+    }
+
+    /// WHICH clauses state no value: the enum class alone, so every other class keeps the
+    /// framework's value half.
+    #[test]
+    fn only_an_enum_clause_states_no_value() {
+        let stated = enum_violation(crate::ops::types::INVITATION_STATUS_VALUES);
+        assert!(
+            states_no_value(&stated),
+            "an enum clause states no value, got {stated:?}"
+        );
+        for (case, kind) in [
+            ("a length maximum", ViolationKind::MaxLength(64)),
+            ("a length minimum", ViolationKind::MinLength(1)),
+            ("a range maximum", ViolationKind::MaxValue("100".to_string())),
+            (
+                "a pattern",
+                ViolationKind::Pattern("^[a-zA-Z0-9-]+$".to_string()),
+            ),
+            ("an absent required member", ViolationKind::MissingRequiredMember),
+        ] {
+            let other = Violation { kind, ..stated.clone() };
+            assert!(
+                !states_no_value(&other),
+                "case {case:?}: every other class states the value it was sent, got {other:?}"
             );
         }
     }

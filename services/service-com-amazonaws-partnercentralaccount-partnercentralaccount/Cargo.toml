@@ -23,6 +23,10 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 # Opaque list-pagination cursors: the resume key, hex-encoded.
 hex = { workspace = true }
+# `service-common` carries the workspace's ONE wording of a boundary constraint refusal:
+# the counted envelope, each clause, which clauses state no value, and the order an
+# enumerated type's admissible values are listed in.
+service-common = { path = "../common" }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
