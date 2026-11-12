@@ -13,7 +13,11 @@
 //! unstated member left alone) under the one `ResourcePropertyArn` that resource derives,
 //! rather than minting a second record or refusing the write. One call states ONE side of
 //! the integration, so a create stating both sides and a create stating neither are both
-//! refused on the request body alone. The round-trip suite is a
+//! refused on the request body alone. A DELETE of one record is answered from the record
+//! store alone — it resolves no target resource and rejects no resource KIND — so every value
+//! this service reads as an ARN of one of its own resources reaches the lookup, and one no
+//! record is keyed under is the modelled `EntityNotFoundException` carrying the delete's own
+//! record-miss sentence. The round-trip suite is a
 //! table whose rows differ along which side of the integration the properties belong to,
 //! which resource kind the ARN names, how many members the side carries, their length, and
 //! whether the create carried tags.
@@ -40,8 +44,10 @@ const MAX_ROLE_ARN_LENGTH: usize = 128;
 /// (same query).
 const MAX_KMS_ARN_LENGTH: usize = 2048;
 
-/// The ARN of the Glue connection `name`, as this emulator mints a connection's ARN.
-fn connection_arn(name: &str) -> String {
+/// The ARN of the Glue connection `name`, as this emulator mints a connection's ARN. Shared
+/// with [`crate::integration_resource_property_delete_misses`], so both suites address a
+/// resource the one way.
+pub(crate) fn connection_arn(name: &str) -> String {
     format!("arn:aws:glue:{REGION}:{ACCOUNT_ID}:connection/{name}")
 }
 
@@ -429,10 +435,22 @@ const BOTH_SIDES_MESSAGE: &str = "Both source processing properties and target p
 /// integration's TARGET and its miss names that target resource.
 fn read_miss_message(resource_arn: &str, names_the_source: bool) -> String {
     if names_the_source {
-        format!("Failed to find the resource property with arn {resource_arn} in the table")
+        record_miss_message(resource_arn)
     } else {
         format!("The target resource {resource_arn} is not found.")
     }
+}
+
+/// The sentence a miss of the RECORD carries: the lookup this surface makes in the
+/// per-resource namespace it keeps, named as the service names it, around its one variable
+/// part — the ARN the request addressed the record by. It is the whole of what a DELETE
+/// answers for a `ResourceArn` this account holds no record under (the delete resolves no
+/// target to report instead), and the sentence a READ answers for the SOURCE leg.
+/// Written here independently of the handler, so the suites pin the wording and not the code,
+/// and shared with [`crate::integration_resource_property_delete_misses`] so they cannot
+/// disagree about it.
+pub(crate) fn record_miss_message(resource_arn: &str) -> String {
+    format!("Failed to find the resource property with arn {resource_arn} in the table")
 }
 
 /// One call states ONE side of the integration, so a request stating NEITHER
@@ -741,9 +759,7 @@ async fn a_resource_arn_naming_no_connection_or_database_is_refused() {
                     "ValidationException"
                 },
                 if in_glue_namespace {
-                    format!(
-                        "Failed to find the resource property with arn {resource_arn} in the table"
-                    )
+                    record_miss_message(&resource_arn)
                 } else {
                     format!("Encountered invalid resource arn {resource_arn}")
                 },
@@ -1111,9 +1127,7 @@ async fn deleting_an_integration_resource_property_removes_only_the_record_it_na
         );
         let expected = match expected_message {
             Some(prefix) => format!("{prefix} {resource_arn}"),
-            None => {
-                format!("Failed to find the resource property with arn {resource_arn} in the table")
-            }
+            None => record_miss_message(&resource_arn),
         };
         assert_eq!(
             error_message(&body),
@@ -1131,5 +1145,169 @@ async fn deleting_an_integration_resource_property_removes_only_the_record_it_na
             .and_then(Value::as_str),
         Some("arn:aws:iam::000000000000:role/kept"),
         "case the bystander: a delete must leave every other record in place, got {kept}"
+    );
+}
+
+/// An ARN in Glue's own namespace, in this endpoint's Region and account, whose resource
+/// portion is `resource`. The two kinds a record belongs to have their own helpers
+/// ([`connection_arn`], [`database_arn`]); this one addresses every other kind and every
+/// other form the member can carry, through the crate's one local-ARN builder.
+fn local_glue_arn(resource: &str) -> String {
+    crate::resource_tagging::glue_arn(REGION, ACCOUNT_ID, resource)
+}
+
+/// A delete of ONE record is answered from the record store alone: it resolves no target
+/// resource and rejects no resource KIND, so every value this service reads as an ARN of one
+/// of its own resources reaches the lookup, and one no record is keyed under is the modelled
+/// `EntityNotFoundException` carrying the delete's own record-miss sentence — whatever
+/// resource kind the ARN names, and whether or not this account holds that resource.
+///
+/// The rows differ along which Glue resource kind the ARN names, whether that resource is
+/// held, which account, Region and partition the ARN carries, and the form of its resource
+/// portion.
+#[tokio::test]
+async fn a_delete_of_any_glue_arn_with_no_record_is_the_record_miss() {
+    let router = emulator();
+
+    // Resources this account really holds, so the rows naming them are a missing RECORD and
+    // not a missing resource. The table is seeded through the sibling suite's helper, the one
+    // copy both integration-property suites use.
+    create_connection(&router, "held-connection").await;
+    create_database(&router, "held_database").await;
+    crate::integration_table_properties::create_table(&router, "held_database", "orders").await;
+
+    // (case, the value sent in `ResourceArn`). The resource portions are the ARN forms of
+    // Glue's own resource types; only the two legs of an integration carry these properties
+    // — "The connection ARN of the source, or the database ARN of the target"
+    // (`smithy_query shape=CreateIntegrationResourcePropertyRequest member=ResourceArn`) — so
+    // every other kind here is a resource that could never hold one.
+    let rows: Vec<(&str, String)> = vec![
+        // The source leg: the connection is held, its record is not.
+        (
+            "a held connection with no record",
+            connection_arn("held-connection"),
+        ),
+        (
+            "a connection this account does not hold",
+            connection_arn("absent-connection"),
+        ),
+        // The target leg.
+        (
+            "a held database with no record",
+            database_arn("held_database"),
+        ),
+        (
+            "a database this account does not hold",
+            database_arn("absent_database"),
+        ),
+        // Kinds that hold no integration resource property at all. The values the suite's
+        // `a_resource_arn_naming_no_connection_or_database_is_refused` table already sends
+        // for this operation are not repeated here; these are the rest of the kind axis,
+        // plus a table this account really holds.
+        (
+            "a held catalog table",
+            local_glue_arn("table/held_database/orders"),
+        ),
+        ("a trigger", local_glue_arn("trigger/on-demand")),
+        ("a workflow", local_glue_arn("workflow/ingest")),
+        ("a development endpoint", local_glue_arn("devEndpoint/notebook")),
+        ("a schema registry", local_glue_arn("registry/default-registry")),
+        ("a schema set", local_glue_arn("schema/default-registry/payments")),
+        ("a machine learning transform", local_glue_arn("mlTransform/tfm-1")),
+        ("a session", local_glue_arn("session/interactive-1")),
+        ("a blueprint", local_glue_arn("blueprint/starter")),
+        (
+            "a record's own ARN rather than its resource's",
+            local_glue_arn("integrationresourceproperty/connection/held-connection"),
+        ),
+        // The ARN's identity fields are part of the value a record is keyed under, so an ARN
+        // of another estate is one this store holds nothing for either.
+        (
+            "another account's connection",
+            format!("arn:aws:glue:{REGION}:111122223333:connection/elsewhere"),
+        ),
+        (
+            "another Region's database",
+            format!("arn:aws:glue:eu-west-1:{ACCOUNT_ID}:database/elsewhere"),
+        ),
+        (
+            "another partition's connection",
+            format!("arn:aws-cn:glue:cn-north-1:{ACCOUNT_ID}:connection/elsewhere"),
+        ),
+        // Forms of the resource portion a reader might treat specially. The last three are
+        // generalisation rows the recorded corpus does not cover: they follow from reading
+        // the member as a Glue ARN and nothing more, so a future reading of one of those
+        // forms is a change of rule rather than a regression of a recorded answer.
+        (
+            "a resource portion with no type segment",
+            local_glue_arn("not-a-type"),
+        ),
+        (
+            "a colon-separated resource portion",
+            local_glue_arn("connection:held-connection"),
+        ),
+        (
+            "a resource portion of several segments",
+            local_glue_arn("connection/team/held-connection"),
+        ),
+        ("an empty resource portion", local_glue_arn("")),
+    ];
+
+    for (case, resource_arn) in &rows {
+        let (status, body) = call(
+            &router,
+            "DeleteIntegrationResourceProperty",
+            &json!({ "ResourceArn": resource_arn }),
+        )
+        .await;
+        assert_eq!(
+            status, 400,
+            "case {case}: a delete of a record nothing stored must be refused, got {status} \
+             with {body}"
+        );
+        assert!(
+            error_code(&body).ends_with("EntityNotFoundException"),
+            "case {case}: expected EntityNotFoundException for {resource_arn:?}, got {}",
+            error_code(&body)
+        );
+        assert_eq!(
+            error_message(&body),
+            record_miss_message(resource_arn),
+            "case {case}: expected {:?}, got {:?}",
+            record_miss_message(resource_arn),
+            error_message(&body)
+        );
+    }
+
+    // The refusals changed nothing: the resources those rows named are still read back by
+    // their own readers, and a record written afterwards for one of them still reads back —
+    // so the misses are misses and not a lookup that refuses everything.
+    let read = ok(
+        &router,
+        "GetConnection",
+        &json!({ "Name": "held-connection" }),
+    )
+    .await;
+    assert_eq!(
+        read["Connection"]["Name"].as_str(),
+        Some("held-connection"),
+        "case the held connection: the refused deletes must leave it as it was, got {read}"
+    );
+    create_property(
+        &router,
+        &json!({
+            "ResourceArn": connection_arn("held-connection"),
+            "SourceProcessingProperties": { "RoleArn": "arn:aws:iam::000000000000:role/after" },
+        }),
+    )
+    .await;
+    let read = get_property(&router, &connection_arn("held-connection")).await;
+    assert_eq!(
+        read.get("SourceProcessingProperties")
+            .and_then(|side| side.get("RoleArn"))
+            .and_then(Value::as_str),
+        Some("arn:aws:iam::000000000000:role/after"),
+        "case the held connection: a record written after the misses must read back, got \
+         {read}"
     );
 }

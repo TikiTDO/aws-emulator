@@ -16,8 +16,9 @@
 //!   request replicates names an entity on the SOURCE and is held to no such rule.
 //!
 //! The suites that cover the rest of each slice — the round trip, the record misses and the
-//! reading of `ResourceArn` itself — are [`crate::integration_resource_properties`] and
-//! [`crate::integration_table_properties`].
+//! reading of `ResourceArn` itself — are [`crate::integration_resource_properties`],
+//! [`crate::integration_resource_property_delete_misses`] (the misses a delete answers at the
+//! declared length bounds of that member) and [`crate::integration_table_properties`].
 
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;

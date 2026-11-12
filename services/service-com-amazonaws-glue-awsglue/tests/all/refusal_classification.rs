@@ -70,10 +70,22 @@ fn stated_pattern(pattern: &str) -> String {
     ::service_common::validation::unanchored(pattern)
 }
 
+/// The largest value a clause SERVED STRAIGHT OFF THE ROUTING TABLE quotes in full; past it
+/// the request walk quotes a prefix of that many bytes plus `... [<n> bytes]`, which
+/// `service_common::validation::quoted_echo_up_to` renders exactly when handed this ceiling.
+/// The operations this module covers do NOT see it — their refusals are rebuilt by the
+/// service's own catalog-name validation, which restores a submitted value whole (the clauses
+/// below assert that) — so the two ceilings are not in conflict: this one is what an
+/// operation refused by the walk alone carries, which is what
+/// [`crate::integration_resource_property_delete_misses`] asserts. Declared beside
+/// [`one_clause`] so the envelope and the bound on what it quotes live together.
+pub(crate) const MAX_ECHOED_VALUE: usize = 256;
+
 /// The whole message a constraint refusal of ONE member carries: AWS's envelope over the
 /// one clause that fired, naming the value submitted, the member path the API spells and the
-/// requirement the value broke.
-fn one_clause(value: &str, member_path: &str, requirement: &str) -> String {
+/// requirement the value broke. Shared with the suites that assert one such refusal
+/// (`crate::integration_resource_property_delete_misses`), so the envelope has one spelling.
+pub(crate) fn one_clause(value: &str, member_path: &str, requirement: &str) -> String {
     format!(
         "1 validation error detected: Value '{value}' at '{member_path}' failed to satisfy \
          constraint: {requirement}"

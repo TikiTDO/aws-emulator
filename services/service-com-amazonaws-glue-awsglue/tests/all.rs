@@ -209,6 +209,8 @@ mod glossary_updates;
 mod integration_property_validation;
 #[path = "all/integration_resource_properties.rs"]
 mod integration_resource_properties;
+#[path = "all/integration_resource_property_delete_misses.rs"]
+mod integration_resource_property_delete_misses;
 #[path = "all/integration_table_properties.rs"]
 mod integration_table_properties;
 #[path = "all/job_bookmarks.rs"]

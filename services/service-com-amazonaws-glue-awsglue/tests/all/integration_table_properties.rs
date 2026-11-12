@@ -105,8 +105,10 @@ async fn create_database(router: &MultiServiceRouter, name: &str) {
     .await;
 }
 
-/// Register a catalog table inside `database`.
-async fn create_table(router: &MultiServiceRouter, database: &str, table: &str) {
+/// Register a catalog table inside `database`. Shared with
+/// [`crate::integration_resource_properties`], so both integration-property suites seed a
+/// table the one way.
+pub(crate) async fn create_table(router: &MultiServiceRouter, database: &str, table: &str) {
     ok(
         router,
         "CreateTable",
