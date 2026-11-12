@@ -7,6 +7,9 @@
 //! operation computes its response from this state — a create stores a resource
 //! and a later read renders the STORED resource, never the request that made it.
 
+/// The threat-protection event log of a pool's users: the authentication events a
+/// pool with its add-ons switched on records, and the feedback left on one.
+pub mod auth_events;
 /// The CloudWatch series a pool's own authentication and registration traffic publishes:
 /// what one terminated attempt observes, and where that observation is stored.
 pub mod auth_metrics;
@@ -860,10 +863,11 @@ pub const ADVANCED_SECURITY_MODE_AUDIT: &str = "AUDIT";
 /// enabled" (this service's model), which is the state of a pool that carries no
 /// threat-protection surface: "to change threat protection to audit-only or off,
 /// update the value of `UserPoolAddOns` in an `UpdateUserPool` request"
-/// (`SetRiskConfiguration`). The refusal reports that state of the pool and names
-/// nothing the request asked for, so it is the same sentence for every pool and
-/// app client.
-pub const USER_POOL_ADD_ONS_NOT_ENABLED_MESSAGE: &str = "User pool add-ons is not enabled.";
+/// (`SetRiskConfiguration`). The refusal reports that state of the pool, names the
+/// member to change to leave it, and names nothing the request asked for, so it is
+/// the same sentence for every pool and app client.
+pub const USER_POOL_ADD_ONS_NOT_ENABLED_MESSAGE: &str = "This is an add on feature. Please \
+     update AdvancedSecurityMode for your user pool to access this API.";
 
 // ---------------------------------------------------------------------------
 // User pool domains

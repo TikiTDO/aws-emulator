@@ -519,6 +519,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // no passkey MFA preference of its own.
             software_token_registered: false,
             web_authn_mfa_enabled: None,
+            // Nothing has been attempted against this user yet, so its threat
+            // protection history is empty.
+            auth_events: Vec::new(),
         };
         pool.users.insert(key.clone(), user);
 

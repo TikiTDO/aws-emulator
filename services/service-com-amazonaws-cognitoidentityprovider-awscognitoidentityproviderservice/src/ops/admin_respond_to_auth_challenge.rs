@@ -318,17 +318,60 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // belongs to, so the outcome this call publishes is the attempt's: the tokens it
         // completes with, or the refusal that ends it ([`crate::state::auth_metrics`]).
         let (user_pool_id, client_id) = (input.user_pool_id.clone(), input.client_id.clone());
+        // What the pool's threat protection logs about the attempt this call CONTINUES:
+        // the challenge the response answered, and the address the request reported for
+        // the user's device ([`crate::state::auth_events`]).
+        let attempted_for = input
+            .challenge_responses
+            .as_ref()
+            .and_then(|responses| responses.get(USERNAME))
+            .cloned();
+        let challenge = crate::state::auth_events::challenge_of(&input.challenge_name);
+        let answered_session = input.session.clone();
+        let ip_address = input
+            .context_data
+            .as_ref()
+            .map(|context| context.ip_address.clone())
+            .filter(|ip_address| !ip_address.is_empty());
         let answered = self.respond(input, ctx).await;
+        let attempt = crate::state::auth_metrics::attempt_of(&answered, |output| {
+            output.authentication_result.is_some()
+        });
         crate::state::auth_metrics::record(
             &*self.engine,
             crate::state::auth_metrics::Counter::SignIn,
             Some(&user_pool_id),
             &client_id,
-            crate::state::auth_metrics::attempt_of(&answered, |output| {
-                output.authentication_result.is_some()
-            }),
+            attempt,
             ::std::time::SystemTime::now(),
         );
+        // A challenge this emulator has not written yet is refused by the EMULATOR
+        // rather than evaluated by the pool, so the pool logged nothing about it.
+        let served = !matches!(answered, Err(crate::scaffolded::Scaffolded::NotImplemented(_)));
+        if let Some(username) = attempted_for.as_deref().filter(|_| served) {
+            crate::state::auth_events::record(
+                &*self.engine,
+                &crate::state::auth_events::Logged {
+                    user_pool_id: Some(&user_pool_id),
+                    client_id: Some(&client_id),
+                    username,
+                    event_type: crate::state::auth_events::EventType::SignIn,
+                    attempt,
+                    challenge,
+                    ip_address,
+                    // This call CONTINUES the sign-in waiting on the session it
+                    // answered, so it finishes that sign-in's own event rather than
+                    // logging a second one, and leaves it waiting on the next
+                    // challenge's session where the answer carried one.
+                    answered_session,
+                    outstanding_session: answered
+                        .as_ref()
+                        .ok()
+                        .and_then(|output| output.session.clone()),
+                },
+                ::std::time::SystemTime::now(),
+            );
+        }
         answered
     }
 }

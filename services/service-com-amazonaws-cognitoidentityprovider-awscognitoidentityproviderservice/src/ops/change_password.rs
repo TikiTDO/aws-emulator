@@ -178,6 +178,56 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let _ = ctx;
+        // The change is served first and LOGGED after, because what the pool's threat
+        // protection records about it is the outcome this call reached
+        // ([`crate::state::auth_events`]). The user it was attempted for is the one the
+        // access token named, which `change` reports as soon as the token resolves to
+        // one: a refused change is an attempt on THAT user's credential, while a token
+        // that resolves to no user is an attempt on nobody's.
+        let mut attempted_for = None;
+        let answered = self.change(input, &mut attempted_for);
+        if let Some((user_pool_id, username)) = attempted_for {
+            crate::state::auth_events::record(
+                &*self.engine,
+                &crate::state::auth_events::Logged {
+                    user_pool_id: Some(&user_pool_id),
+                    // The token this call is authorized by names the pool and the user;
+                    // this operation models no app client.
+                    client_id: None,
+                    username: &username,
+                    event_type: crate::state::auth_events::EventType::PasswordChange,
+                    // This one call terminates the attempt: it replaces the password or
+                    // it is refused, with no challenge in between.
+                    attempt: crate::state::auth_metrics::attempt_of(&answered, |_| true),
+                    // The previous password this call checks is the user's own
+                    // credential, which is the password challenge of the log.
+                    challenge: Some(crate::state::auth_events::PASSWORD_CHALLENGE),
+                    // This operation models no context data, so the request reports no
+                    // address for the user's device.
+                    ip_address: None,
+                    // This one call is the whole attempt: it answers no challenge
+                    // and leaves none outstanding.
+                    answered_session: None,
+                    outstanding_session: None,
+                },
+                ::std::time::SystemTime::now(),
+            );
+        }
+        answered
+    }
+}
+
+impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> ChangePassword<Eng> {
+    /// Replace the password `input` asks to change: the whole operation but for the event
+    /// its outcome logs, which its caller records once this has answered.
+    ///
+    /// `attempted_for` is written with the pool and the stored username the access token
+    /// named, as soon as it names one.
+    fn change(
+        &self,
+        input: ChangePasswordInput,
+        attempted_for: &mut Option<(String, String)>,
+    ) -> Result<ChangePasswordOutput, ChangePasswordError> {
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(internal_error());
         };
@@ -193,6 +243,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             let (pool, user) = guard
                 .signed_in_user(&input.access_token, now)
                 .map_err(token_rejected)?;
+            // The user the token names, reported before the request is judged: the
+            // event logged for this call belongs to that user whether or not the
+            // password was replaced.
+            *attempted_for = Some((pool.id.clone(), user.username.clone()));
             if !user.enabled {
                 return Err(not_authorized("User is disabled."));
             }

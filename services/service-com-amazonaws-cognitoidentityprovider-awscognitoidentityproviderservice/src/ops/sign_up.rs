@@ -266,14 +266,41 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // after, in the sign-up series of the app client it was made through
         // ([`crate::state::auth_metrics`]).
         let client_id = input.client_id.clone();
+        // What the pool's threat protection LOGS about the registration, read off the
+        // same request ([`crate::state::auth_events`]).
+        let username = input.username.clone();
+        let ip_address = input
+            .user_context_data
+            .as_ref()
+            .and_then(|context| context.ip_address.clone());
         let answered = self.sign_up(input, ctx).await;
+        let attempt = crate::state::auth_metrics::attempt_of(&answered, |_| true);
         crate::state::auth_metrics::record(
             &*self.engine,
             crate::state::auth_metrics::Counter::Registration,
             // This operation models no `UserPoolId`: the app client names the pool.
             None,
             &client_id,
-            crate::state::auth_metrics::attempt_of(&answered, |_| true),
+            attempt,
+            ::std::time::SystemTime::now(),
+        );
+        crate::state::auth_events::record(
+            &*self.engine,
+            &crate::state::auth_events::Logged {
+                user_pool_id: None,
+                client_id: Some(&client_id),
+                username: &username,
+                event_type: crate::state::auth_events::EventType::SignUp,
+                attempt,
+                // A registration answers no challenge: it presents the attributes and
+                // the password the user registers with.
+                challenge: None,
+                ip_address,
+                // This one call is the whole attempt: it answers no challenge and
+                // leaves none outstanding.
+                answered_session: None,
+                outstanding_session: None,
+            },
             ::std::time::SystemTime::now(),
         );
         answered
@@ -536,6 +563,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> SignUp<Eng> {
             // no passkey MFA preference of its own.
             software_token_registered: false,
             web_authn_mfa_enabled: None,
+            // The registration this call logs is appended once the user is
+            // stored, so the history it starts out with is empty.
+            auth_events: Vec::new(),
         };
         let pool = guard
             .pool_mut(&user_pool_id)

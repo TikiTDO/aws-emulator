@@ -227,6 +227,47 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // The resend is served first and LOGGED after, because what the pool's threat
+        // protection records about it is the outcome this call reached
+        // ([`crate::state::auth_events`]).
+        let answered = self.resend_and_deliver(&input, ctx).await;
+        crate::state::auth_events::record(
+            &*self.engine,
+            &crate::state::auth_events::Logged {
+                // This operation models no `UserPoolId`: the app client names the pool.
+                user_pool_id: None,
+                client_id: Some(&input.client_id),
+                username: &input.username,
+                event_type: crate::state::auth_events::EventType::ResendCode,
+                // This one call terminates the attempt: it issues the code or it is
+                // refused, with no challenge in between.
+                attempt: crate::state::auth_metrics::attempt_of(&answered, |_| true),
+                // A resend answers no challenge of its own.
+                challenge: None,
+                ip_address: input
+                    .user_context_data
+                    .as_ref()
+                    .and_then(|context| context.ip_address.clone()),
+                // This one call is the whole attempt: it answers no challenge and
+                // leaves none outstanding.
+                answered_session: None,
+                outstanding_session: None,
+            },
+            ::std::time::SystemTime::now(),
+        );
+        answered
+    }
+}
+
+impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> ResendConfirmationCode<Eng> {
+    /// Resend the code `input` asks for and deliver what that owes: the whole operation
+    /// but for the event its outcome logs, which its caller records once this has
+    /// answered.
+    async fn resend_and_deliver(
+        &self,
+        input: &ResendConfirmationCodeInput,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
+    ) -> Result<ResendConfirmationCodeOutput, ResendConfirmationCodeError> {
         // Request metadata only: the app client in the body names the pool, and
         // `ClientMetadata` is input for the Lambda triggers this action reaches, which
         // for a code-bearing message is the pool's custom email sender.
@@ -236,7 +277,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The code is issued under this service's lock, and that lock is RELEASED before
         // the pool's custom email sender is invoked: nothing else of this service can be
         // served while a function is being waited for.
-        let resent = self.resend(&input)?;
+        let resent = self.resend(input)?;
 
         // A pool that routes its email to a custom sender delivers this code by handing
         // it to that function instead of mailing it, with the app client this request

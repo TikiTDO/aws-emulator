@@ -309,19 +309,90 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // ([`crate::state::auth_metrics`]).
         let counter = crate::state::auth_metrics::Counter::attempted(&input.auth_flow);
         let client_id = input.client_id.clone();
+        // What the pool's threat protection LOGS about this attempt, read off the same
+        // request: who it was attempted for, and the address the request reported for
+        // the user's device ([`crate::state::auth_events`]).
+        let attempted_for = input
+            .auth_parameters
+            .as_ref()
+            .and_then(|parameters| parameters.get("USERNAME"))
+            .cloned();
+        let ip_address = input
+            .user_context_data
+            .as_ref()
+            .and_then(|context| context.ip_address.clone());
+        let auth_flow = input.auth_flow.clone();
         let answered = self.initiate(input, ctx).await;
+        let attempt = crate::state::auth_metrics::attempt_of(&answered, |output| {
+            output.authentication_result.is_some()
+        });
         crate::state::auth_metrics::record(
             &*self.engine,
             counter,
             // This operation models no `UserPoolId`: the app client names the pool.
             None,
             &client_id,
-            crate::state::auth_metrics::attempt_of(&answered, |output| {
-                output.authentication_result.is_some()
-            }),
+            attempt,
             ::std::time::SystemTime::now(),
         );
+        // A refresh-token exchange presents a credential this pool itself issued to a
+        // session it already evaluated, so it is not an authentication event of its own
+        // ([`crate::state::auth_metrics::Counter::risk_operation`]); every other flow
+        // signs a user in, which is one — unless this emulator has not written that flow
+        // yet, in which case the EMULATOR refused the call and the pool evaluated
+        // nothing.
+        let served = !matches!(answered, Err(crate::scaffolded::Scaffolded::NotImplemented(_)));
+        if let (Some(username), Some(event_type)) = (
+            attempted_for.as_deref().filter(|_| served),
+            sign_in_event(counter),
+        ) {
+            crate::state::auth_events::record(
+                &*self.engine,
+                &crate::state::auth_events::Logged {
+                    user_pool_id: None,
+                    client_id: Some(&client_id),
+                    username,
+                    event_type,
+                    attempt,
+                    challenge: password_challenge(&auth_flow),
+                    ip_address,
+                    // This call STARTS the attempt it logs, and the response to the
+                    // challenge it answered with (if any) continues that attempt.
+                    answered_session: None,
+                    outstanding_session: answered
+                        .as_ref()
+                        .ok()
+                        .and_then(|output| output.session.clone()),
+                },
+                ::std::time::SystemTime::now(),
+            );
+        }
         answered
+    }
+}
+
+/// Which event the pool logs for an attempt in `counter`, or `None` for one it logs
+/// no authentication event for.
+fn sign_in_event(
+    counter: crate::state::auth_metrics::Counter,
+) -> Option<crate::state::auth_events::EventType> {
+    match counter {
+        crate::state::auth_metrics::Counter::SignIn => {
+            Some(crate::state::auth_events::EventType::SignIn)
+        }
+        crate::state::auth_metrics::Counter::TokenRefresh
+        | crate::state::auth_metrics::Counter::Registration => None,
+    }
+}
+
+/// The `ChallengeName` a sign-in in `auth_flow` CHECKED in this call, or `None` for
+/// a flow that checks no credential of its own here: the password flow presents the
+/// user's password, while the choice-based flow starts by delivering a one-time
+/// password the caller answers in a later call.
+fn password_challenge(auth_flow: &str) -> Option<&'static str> {
+    match auth_flow {
+        USER_PASSWORD_AUTH => Some(crate::state::auth_events::PASSWORD_CHALLENGE),
+        _ => None,
     }
 }
 

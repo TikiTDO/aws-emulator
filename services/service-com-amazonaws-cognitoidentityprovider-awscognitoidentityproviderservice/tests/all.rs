@@ -271,6 +271,8 @@ mod update_user_pool_domain;
 mod update_user_pool_domain_not_found;
 #[path = "all/user_attribute_verification_code.rs"]
 mod user_attribute_verification_code;
+#[path = "all/user_auth_event_history.rs"]
+mod user_auth_event_history;
 #[path = "all/user_import_job_lifecycle.rs"]
 mod user_import_job_lifecycle;
 #[path = "all/user_pool_auth_metrics.rs"]

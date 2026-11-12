@@ -127,6 +127,14 @@ pub struct User {
     /// user has expressed no preference and the pool's passkey configuration
     /// alone decides ([`User::activates_passkey_mfa`]).
     pub web_authn_mfa_enabled: Option<bool>,
+    /// The authentication events this user's pool LOGGED about it, oldest first:
+    /// the history "of user activity and any risks detected as part of Amazon
+    /// Cognito threat protection" (`AdminListUserAuthEvents` in this service's
+    /// model). A pool whose threat protection is off logs none, the reader serves
+    /// them most recent first ([`User::auth_events_newest_first`]) and the log is
+    /// bounded by [`auth_events::MAX_AUTH_EVENTS_PER_USER`]. It belongs to the
+    /// user, so a deleted user's history is gone with it.
+    pub auth_events: Vec<auth_events::AuthEvent>,
 }
 
 impl User {

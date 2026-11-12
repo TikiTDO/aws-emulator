@@ -312,18 +312,79 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // ([`crate::state::auth_metrics`]).
         let counter = crate::state::auth_metrics::Counter::attempted(&input.auth_flow);
         let (user_pool_id, client_id) = (input.user_pool_id.clone(), input.client_id.clone());
+        let auth_flow = input.auth_flow.clone();
+        // What the pool's threat protection LOGS about this attempt, read off the same
+        // request: who it was attempted for, and the address the request reported for the
+        // user's device ([`crate::state::auth_events`]).
+        let attempted_for = input
+            .auth_parameters
+            .as_ref()
+            .and_then(|parameters| parameters.get("USERNAME"))
+            .cloned();
+        let ip_address = input
+            .context_data
+            .as_ref()
+            .map(|context| context.ip_address.clone())
+            .filter(|ip_address| !ip_address.is_empty());
         let answered = self.initiate(input, ctx).await;
+        let attempt = crate::state::auth_metrics::attempt_of(&answered, |output| {
+            output.authentication_result.is_some()
+        });
         crate::state::auth_metrics::record(
             &*self.engine,
             counter,
             Some(&user_pool_id),
             &client_id,
-            crate::state::auth_metrics::attempt_of(&answered, |output| {
-                output.authentication_result.is_some()
-            }),
+            attempt,
             ::std::time::SystemTime::now(),
         );
+        // The administrative password flows this operation serves present the user's
+        // password, so the attempt is a sign-in event of the pool and the credential it
+        // checked is the password challenge. A refresh-token exchange presents a
+        // credential this pool itself issued to a session it already evaluated, so it is
+        // no event of its own
+        // ([`crate::state::auth_metrics::Counter::risk_operation`]), and a flow this
+        // emulator has not written yet was refused by the EMULATOR rather than evaluated
+        // by the pool, so the pool logged nothing about it either.
+        let signs_in = counter == crate::state::auth_metrics::Counter::SignIn
+            && !matches!(answered, Err(crate::scaffolded::Scaffolded::NotImplemented(_)));
+        if let Some(username) = attempted_for.as_deref().filter(|_| signs_in) {
+            crate::state::auth_events::record(
+                &*self.engine,
+                &crate::state::auth_events::Logged {
+                    user_pool_id: Some(&user_pool_id),
+                    client_id: Some(&client_id),
+                    username,
+                    event_type: crate::state::auth_events::EventType::SignIn,
+                    attempt,
+                    challenge: password_challenge(&auth_flow),
+                    ip_address,
+                    // This call STARTS the attempt it logs, and the response to the
+                    // challenge it answered with (if any) continues that attempt.
+                    answered_session: None,
+                    outstanding_session: answered
+                        .as_ref()
+                        .ok()
+                        .and_then(|output| output.session.clone()),
+                },
+                ::std::time::SystemTime::now(),
+            );
+        }
         answered
+    }
+}
+
+/// The `ChallengeName` a sign-in in `auth_flow` CHECKED in this call, or `None` for a
+/// flow that checks no credential of its own here: the administrative password flows
+/// present the user's password, while a flow that starts from a secure remote password
+/// or a chosen first factor checks that credential in the challenge response that
+/// follows.
+fn password_challenge(auth_flow: &str) -> Option<&'static str> {
+    match auth_flow {
+        "ADMIN_USER_PASSWORD_AUTH" | "ADMIN_NO_SRP_AUTH" => {
+            Some(crate::state::auth_events::PASSWORD_CHALLENGE)
+        }
+        _ => None,
     }
 }
 
