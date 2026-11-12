@@ -27,6 +27,10 @@ hex = { workspace = true }
 # `sqlparser`: a view's `definition` is a SQL query, so it is PARSED with it rather than
 # inspected as text — see `state::view_definition`.
 sqlparser = "0.59"
+# `service-common` carries the workspace's ONE wording of a constraint-violation refusal —
+# the clause, the envelope, the `@pattern` rendering and the order an enumerated type's
+# value set is listed in — which `service::validation` delegates to.
+service-common = { path = "../common" }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -34,6 +38,8 @@ emulator-core-build-support = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
+# Decodes the rpcv2Cbor error envelope a test reads a refusal's message out of.
+aws-smithy-cbor = "0.62.2"
 
 [lints]
 workspace = true

@@ -45,6 +45,11 @@ use smithy_server_runtime::{
 };
 use std::sync::Arc;
 
+/// How this service words the input-constraint refusals the framework hands
+/// back — the one formatter every operation's boundary validation reaches.
+/// Private: it is reached through `override_refusal` below, not by a caller.
+mod validation;
+
 /// The `com-amazonaws-cloudwatchomni-cloudwatchomnifrontend` emulated service: the generated [`ServiceDefinition`] plus
 /// the behavioral seams this file owns.
 ///
@@ -98,15 +103,17 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
     fn override_refusal(&self, refusal: &Refusal) -> Option<Refused> {
         // The centralized walk calls this on a framework-level refusal (an absent
         // required member, or a value outside a declared bound) to let this
-        // service reword it. Returning `None` keeps the framework's default
-        // wording. To state a refusal the way the emulated service states it,
-        // replace this body with a `match refusal { .. }` that returns
-        // `Some(Refused { code, message })` for the cases you reword and `None`
-        // for the rest. Replace BOTH the code and the message: a client branches
-        // on the code, so a message without its matching code is worse than
-        // leaving both alone.
-        let _ = refusal;
-        None
+        // service reword it.
+        //
+        // This service states a constraint violation by naming the member path
+        // and the requirement it violated, and NOT the value the caller sent;
+        // an enumerated member's requirement lists the admitted values in the
+        // order this front door walks its own table of them. Both renderings,
+        // and the envelope around them, are the shared ones in
+        // `service_common::validation_message` — see [`validation`]. Code and
+        // message are replaced together, and the code stays the modelled
+        // `ValidationException` (HTTP 400) a client branches on.
+        validation::refused(refusal)
     }
 
     fn override_routing_error(

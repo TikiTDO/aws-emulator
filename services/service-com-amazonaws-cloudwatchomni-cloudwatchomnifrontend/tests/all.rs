@@ -29,6 +29,8 @@ mod probe;
 mod response_shaping;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/validation_message_wording.rs"]
+mod validation_message_wording;
 #[path = "all/view_definition_diagnosis.rs"]
 mod view_definition_diagnosis;
 #[path = "all/view_lifecycle.rs"]
