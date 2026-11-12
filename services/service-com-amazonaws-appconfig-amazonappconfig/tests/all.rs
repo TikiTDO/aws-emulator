@@ -135,6 +135,8 @@ mod resource_deletes;
 mod resource_tags;
 #[path = "all/rolled_back_deployment_completion_time.rs"]
 mod rolled_back_deployment_completion_time;
+#[path = "all/rollout_advances_over_the_wire.rs"]
+mod rollout_advances_over_the_wire;
 #[path = "all/rollout_percentage_gates_serving.rs"]
 mod rollout_percentage_gates_serving;
 #[path = "all/start_deployment_latest_deployment_number.rs"]
