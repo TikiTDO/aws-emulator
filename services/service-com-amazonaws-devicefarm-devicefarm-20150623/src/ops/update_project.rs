@@ -149,7 +149,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(UpdateProjectErrorModeled::ServiceAccountException(
                 ServiceAccountException {
@@ -166,12 +165,43 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        let mut store = state.lock();
-        let Some(record) = store.projects.get_mut(&input.arn) else {
-            return Err(UpdateProjectErrorModeled::NotFoundException(NotFoundException {
+        let not_found = || {
+            UpdateProjectErrorModeled::NotFoundException(NotFoundException {
                 message: Some(crate::state::project_not_found_message(&input.arn)),
             })
-            .into());
+        };
+        // The project is resolved first — an update of a project the account does not hold
+        // changes nothing whatever else it carries — and the guard is released before the
+        // EC2 reads below, so no other request waits on this one while they run.
+        if !state.lock().projects.contains_key(&input.arn) {
+            return Err(not_found().into());
+        }
+
+        // A `vpcConfig` names EC2's resources, so the EC2 service mounted in THIS emulator
+        // is asked whether they exist before the record is touched: an id it resolves
+        // nothing for names no network to attach the project to, and the update is refused
+        // with that answer, leaving the stored configuration exactly as it was. The ask is
+        // dispatched IN PROCESS by the framework's callback — no connection leaves this
+        // process and no destination comes from the request — so the sentence the refusal
+        // carries is this emulator's own EC2 answer rather than a remote one.
+        if let Some(vpc_config) = &input.vpc_config {
+            // The Region the request was signed for, which is the one its own resources
+            // live in: it selects the state the in-process EC2 service answers from, never
+            // a host to contact.
+            let region = crate::state::request_region(ctx.parts());
+            if let Some(message) =
+                crate::state::unresolved_vpc_config(ctx, &region, vpc_config).await
+            {
+                return Err(UpdateProjectErrorModeled::ArgumentException(ArgumentException {
+                    message: Some(message),
+                })
+                .into());
+            }
+        }
+
+        let mut store = state.lock();
+        let Some(record) = store.projects.get_mut(&input.arn) else {
+            return Err(not_found().into());
         };
 
         // Absent members leave the stored value alone; `arn` and `created` are identity,

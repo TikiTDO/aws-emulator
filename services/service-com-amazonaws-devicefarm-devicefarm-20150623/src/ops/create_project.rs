@@ -159,7 +159,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
+        // The Region the request was signed for, which is the one its own resources live
+        // in: it selects the state the in-process EC2 service answers from below, never a
+        // host to contact.
         let region = crate::state::request_region(ctx.parts());
+
+        // A `vpcConfig` names EC2's resources, so the EC2 service mounted in THIS emulator
+        // is asked whether they exist before anything is minted: an id it resolves nothing
+        // for names no network to attach the project to, and the create is refused with
+        // that answer, having written nothing. The ask is dispatched IN PROCESS by the
+        // framework's callback — no connection leaves this process and no destination comes
+        // from the request — so the sentence the refusal carries is this emulator's own EC2
+        // answer rather than a remote one.
+        if let Some(vpc_config) = &input.vpc_config {
+            if let Some(message) =
+                crate::state::unresolved_vpc_config(ctx, &region, vpc_config).await
+            {
+                return Err(CreateProjectErrorModeled::ArgumentException(ArgumentException {
+                    message: Some(message),
+                })
+                .into());
+            }
+        }
+
         let mut store = state.lock();
         // The store's own bound: refuse rather than let an unbounded number of calls
         // grow the state without end. `LimitExceededException` is what this operation

@@ -51,6 +51,24 @@ impl Emulator {
         Self { router }
     }
 
+    /// As [`Emulator::new`], with Amazon EC2 mounted beside this service on the SAME
+    /// engine, and the in-process callback a suite drives EC2's own operations through.
+    ///
+    /// A project's `vpcConfig` names EC2's resources, so a suite covering it needs the
+    /// owner of those resources answering beside this service — which is why that case
+    /// reaches for this constructor rather than a harness of its own.
+    pub(crate) fn with_ec2() -> (Self, ::smithy_server_runtime::EmbeddedEmulator) {
+        let engine = Arc::new(engine::InMemoryEngine::new());
+        let mut router = MultiServiceRouter::new();
+        router.set_request_authentication(false);
+        router.register_service(EmulatedService::new(Arc::clone(&engine)));
+        router.register_service(service_com_amazonaws_ec2_amazonec2::EmulatedService::new(
+            Arc::clone(&engine),
+        ));
+        let callback = ::smithy_server_runtime::EmbeddedEmulator::from_router(router.clone());
+        (Self { router }, callback)
+    }
+
     /// Call `op` with `body`, signed for `region` (`None` sends it unsigned).
     pub(crate) async fn call(&self, op: &str, region: Option<&str>, body: &Value) -> (u16, Value) {
         let mut builder = ::http::Request::builder()

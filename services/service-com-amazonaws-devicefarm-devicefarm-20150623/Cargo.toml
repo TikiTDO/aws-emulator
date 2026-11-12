@@ -26,6 +26,15 @@ service-common = { path = "../common" }
 # Reads the content PUT for an upload as the archive its upload type names (an APK and an
 # IPA are both zip containers), so the upload's processing outcome is a real judgement.
 zip = { version = "9", default-features = false, features = ["deflate"] }
+# The AWS SDK for EC2, driven over the in-process callback
+# (`OperationContext::callback`): a project's `vpcConfig` names EC2 subnets, security
+# groups and a VPC, so `CreateProject` and `UpdateProject` resolve them with
+# `DescribeSubnets` / `DescribeSecurityGroups` / `DescribeVpcs` before they write. Only
+# the generated client is needed — the emulator supplies the transport.
+aws-sdk-ec2 = { version = "1", default-features = false }
+# `aws-types`: the request id EC2 answered the read with, which the relayed refusal names
+# the call it reports by.
+aws-types = { version = "1", default-features = false }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -33,6 +42,11 @@ emulator-core-build-support = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
+# The OWNER of the resources a `vpcConfig` names, mounted beside this service in the test
+# harness: Amazon EC2 holds the account's VPCs, subnets and security groups, so the
+# resolution can only be driven end to end with it on the same engine.
+# DEV-ONLY: this crate depends on no other service's crate outside its tests.
+service-com-amazonaws-ec2-amazonec2 = { workspace = true }
 
 [lints]
 workspace = true

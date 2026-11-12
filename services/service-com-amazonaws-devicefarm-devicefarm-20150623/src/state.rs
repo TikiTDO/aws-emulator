@@ -14,6 +14,12 @@ use crate::ops::types::{
     DevicePool, EnvironmentVariable, NetworkProfile, Project, Rule, Upload, VpcConfig,
 };
 
+/// The EC2 resources a project's `vpcConfig` names, resolved against EC2 — the one rule
+/// `CreateProject` and `UpdateProject` both apply before they write.
+mod vpc_config;
+
+pub use vpc_config::unresolved_vpc_config;
+
 /// The execution timeout a project gets when `CreateProject` is called without
 /// `defaultJobTimeoutMinutes`.
 ///

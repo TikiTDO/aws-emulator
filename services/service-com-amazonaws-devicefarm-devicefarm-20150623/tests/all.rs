@@ -19,6 +19,8 @@ mod network_profile_lifecycle;
 mod network_profiles;
 #[path = "all/not_found_wording.rs"]
 mod not_found_wording;
+#[path = "all/project_vpc_config.rs"]
+mod project_vpc_config;
 #[path = "all/projects.rs"]
 mod projects;
 #[path = "all/state_roundtrip.rs"]
