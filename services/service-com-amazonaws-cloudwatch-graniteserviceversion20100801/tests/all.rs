@@ -151,6 +151,8 @@ mod log_alarms;
 mod managed_insight_rule_catalog;
 #[path = "all/managed_insight_rule_definition.rs"]
 mod managed_insight_rule_definition;
+#[path = "all/managed_insight_rule_resource_binding.rs"]
+mod managed_insight_rule_resource_binding;
 #[path = "all/managed_insight_rule_service_catalog.rs"]
 mod managed_insight_rule_service_catalog;
 #[path = "all/managed_insight_rules.rs"]
