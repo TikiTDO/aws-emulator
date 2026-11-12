@@ -200,6 +200,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         )
         .await
         .map_err(CreateDBClusterSnapshotError::internal_failure)?;
+        // The SIZE of that copy, measured in the same place and under the same contract as
+        // the copy itself — once, off this worker thread and before the store is locked —
+        // because the copy never changes afterwards: it is what the snapshot reports as
+        // `FullSnapshotSizeInBytes` for the rest of its life.
+        let data_bytes = crate::state::captured_data_bytes(storage.as_ref())
+            .await
+            .map_err(CreateDBClusterSnapshotError::internal_failure)?;
         let mut store = state.lock();
         // The transitions the clock already made due, so the snapshot is taken of the
         // cluster as it really stands.
@@ -297,6 +304,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             !store.cluster_members(cluster).is_empty(),
             &snapshot_key,
             storage,
+            data_bytes,
             tags,
         );
         // The answer is the record this call stored, so a following describe reports the

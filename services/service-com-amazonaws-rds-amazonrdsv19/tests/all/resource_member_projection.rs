@@ -369,7 +369,9 @@ async fn a_cluster_snapshot_projects_the_cluster_it_was_taken_from() {
             "an Aurora MySQL cluster with a member instance",
             "aurora-mysql",
             true,
-            Some("general-public-license"),
+            // An Aurora engine is the licensed product itself, so the cluster's records
+            // report the engine's own name; see `state::cluster_license_model`.
+            Some("aurora-mysql"),
         ),
         ("a DocumentDB cluster with no instance", "docdb", false, None),
     ];

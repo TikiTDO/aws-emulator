@@ -59,6 +59,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use super::{ComAmazonawsRdsAmazonrdsv19State, DbInstanceRecord, RegionalKey};
+use super::snapshot_data_bytes;
 
 pub mod cluster_endpoint;
 pub mod constraint_names;
@@ -390,6 +391,26 @@ pub async fn capture_instance_storage(
         .engine_endpoint(key)
         .map(DbEngineEndpoint::database);
     capture_storage(database, "DB instance").await
+}
+
+/// The full size of the data a captured copy holds, summed OFF the runtime's worker
+/// threads and before the caller takes the store lock — `FullSnapshotSizeInBytes` for the
+/// snapshot that copy belongs to ([`snapshot_data_bytes`]).
+///
+/// Summed exactly once, where the copy is taken: the copy never changes afterwards, so the
+/// snapshot's record keeps the answer and no later read of that snapshot re-reads its data.
+/// It is engine work under the same contract as the capture above — a blocking task, no
+/// state guard held across it — and `Err` carries what went wrong, which the caller answers
+/// as a failure of this emulator rather than storing a size nothing measured.
+pub async fn captured_data_bytes(
+    storage: Option<&Arc<sql_engine::InstanceDatabase>>,
+) -> Result<i64, String> {
+    let Some(storage) = storage.cloned() else {
+        return Ok(0);
+    };
+    ::tokio::task::spawn_blocking(move || snapshot_data_bytes(Some(&storage)))
+        .await
+        .map_err(|error| format!("the size of the snapshot's data could not be read: {error}"))
 }
 
 /// A COPY of the data the DB CLUSTER `key` names holds right now: what a DB cluster

@@ -181,8 +181,10 @@ pub fn exported_tables(
 }
 
 /// The tables `database_name` holds, in name order, read out of the engine's own catalog —
-/// so a table a client created is exported and one it dropped is not.
-fn table_names(database: &InstanceDatabase, database_name: &str) -> Vec<String> {
+/// so a table a client created is exported and one it dropped is not. It is also what the
+/// size of a stored snapshot is summed over
+/// ([`crate::state::snapshot_data_bytes`]), so the two walk the same tables.
+pub fn table_names(database: &InstanceDatabase, database_name: &str) -> Vec<String> {
     let Ok(answer) = database.execute(
         database_name,
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' \

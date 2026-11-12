@@ -299,7 +299,8 @@ pub use storage_encryption_key::*;
 pub use service_principal_call::*;
 pub use master_user_credentials::*;
 pub use data_plane::{
-    capture_cluster_storage, capture_instance_storage, cluster_endpoint::cluster_engine_wire,
+    captured_data_bytes, capture_cluster_storage, capture_instance_storage,
+    cluster_endpoint::cluster_engine_wire,
     engine_wire, open_engine_endpoint, wire_session::SessionTarget, DbEngineEndpoint, EndpointRole,
     EngineEndpointPlan, EngineWire, ServedEndpoint,
 };
@@ -3498,6 +3499,21 @@ pub fn default_storage_throughput(storage_type: &str) -> i32 {
     }
 }
 
+/// The license model a record OF A CLUSTER reports — its snapshots and its automated
+/// backups — for a cluster running `engine`.
+///
+/// `LicenseModel` "doesn't apply to Amazon Aurora", whose engines are not offered under a
+/// community licence at all: the engine IS the licensed product, so the cluster-level
+/// records of an Aurora engine report the ENGINE'S OWN NAME as their license model, exactly
+/// as Amazon Neptune's do ([`default_license_model`]). Every other engine's cluster reports
+/// the licence that engine family publishes, which is the one an instance of it reports too.
+pub fn cluster_license_model(engine: &str) -> Option<String> {
+    if is_aurora(engine) {
+        return Some(engine.to_ascii_lowercase());
+    }
+    default_license_model(engine).map(str::to_string)
+}
+
 /// The license model of an instance the request named none for, or `None` for an engine
 /// whose license model this emulator cannot cite one for.
 ///
@@ -3510,10 +3526,11 @@ pub fn default_storage_throughput(storage_type: &str) -> i32 {
 /// one value it IS the default; where it offers two, the default is the one that engine
 /// can be created with unprepared — a Db2 or Oracle Enterprise Edition instance runs on
 /// a license you bring, while SQL Server and Oracle SE2 include one. The member
-/// "doesn't apply to Amazon Aurora", whose instances RDS reports with the license model
+/// "doesn't apply to Amazon Aurora", whose INSTANCES RDS reports with the license model
 /// of the engine family they run (`aurora-mysql` the MySQL one, `aurora-postgresql` the
 /// PostgreSQL one), so the match is on the engine family rather than on the exact
-/// engine name.
+/// engine name; a record of an Aurora CLUSTER reports the engine's own name instead, which
+/// is what [`cluster_license_model`] answers.
 pub fn default_license_model(engine: &str) -> Option<&'static str> {
     let engine = engine.to_ascii_lowercase();
     if engine.contains("db2") {

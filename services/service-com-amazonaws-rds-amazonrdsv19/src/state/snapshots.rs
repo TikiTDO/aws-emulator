@@ -97,6 +97,15 @@ pub struct DbClusterSnapshotRecord {
     /// [`DB_CLUSTER_SNAPSHOT_QUOTA_PER_REGION`] and [`MAX_REGIONS`], like every other record
     /// here. Deleting the snapshot drops it.
     pub storage: Option<::std::sync::Arc<data_plane::sql_engine::InstanceDatabase>>,
+    /// The full size, in bytes, of the data [`Self::storage`] holds — what
+    /// `FullSnapshotSizeInBytes` reports for a snapshot that has been taken.
+    ///
+    /// Summed ONCE, where the copy was taken ([`snapshot_data_bytes`], called off the
+    /// request's worker thread by [`data_plane::captured_data_bytes`]), because the copy
+    /// never changes afterwards: a read of the snapshot reports this number rather than
+    /// walking its data again. Zero for a snapshot that captured no storage at all and for
+    /// one whose databases were never written to.
+    pub data_bytes: i64,
     pub tags: Vec<Tag>,
 }
 
@@ -113,12 +122,14 @@ impl DbClusterSnapshotRecord {
     /// one".
     /// `storage` is the copy of the cluster's storage the caller took before it locked the
     /// store ([`capture_cluster_storage`]), so the settings the snapshot reports and the
-    /// data it holds are from one instant.
+    /// data it holds are from one instant, and `data_bytes` is the size of that copy as the
+    /// same caller measured it ([`captured_data_bytes`]).
     pub fn from_cluster(
         cluster: &DbClusterRecord,
         cluster_has_instances: bool,
         snapshot_identifier: &str,
         storage: Option<::std::sync::Arc<data_plane::sql_engine::InstanceDatabase>>,
+        data_bytes: i64,
         tags: Vec<Tag>,
     ) -> Self {
         Self {
@@ -154,8 +165,8 @@ impl DbClusterSnapshotRecord {
             storage_encrypted: cluster.storage_encrypted,
             kms_key_id: cluster.kms_key_id.clone(),
             // The license the engine the snapshot was taken from runs under; see
-            // [`default_license_model`] for where each engine's comes from.
-            license_model: default_license_model(&cluster.engine).map(str::to_string),
+            // [`cluster_license_model`] for where a cluster's comes from.
+            license_model: cluster_license_model(&cluster.engine),
             // The cluster settings the snapshot reports members of its own for, copied here
             // with the rest so a later change to the cluster cannot rewrite what the
             // snapshot reports.
@@ -171,6 +182,7 @@ impl DbClusterSnapshotRecord {
             source_snapshot_arn: None,
             restore_attribute: BTreeSet::new(),
             storage,
+            data_bytes,
             tags,
         }
     }
@@ -210,6 +222,17 @@ impl DbClusterSnapshotRecord {
         self.restore_attribute.contains(SNAPSHOT_ATTRIBUTE_ALL)
     }
 
+    /// `StorageEncryptionType`: "the type of encryption used to protect data at rest in the
+    /// DB cluster snapshot".
+    ///
+    /// A snapshot's data at rest is protected exactly as the storage it was copied from is,
+    /// so this is the source cluster's own reading ([`storage_encryption_type`]) over the
+    /// encryption setting and the engine the snapshot copied off it: the two cannot
+    /// disagree, and a snapshot of an encrypted cluster is never reported as unencrypted.
+    pub fn storage_encryption_type(&self) -> &'static str {
+        storage_encryption_type(self.storage_encrypted, &self.engine)
+    }
+
     /// Project the stored record onto the modelled `DBClusterSnapshot` output shape.
     pub fn to_wire(&self) -> DBClusterSnapshot {
         DBClusterSnapshot {
@@ -247,6 +270,22 @@ impl DbClusterSnapshotRecord {
                 0
             }),
             storage_encrypted: Some(self.storage_encrypted),
+            // How the data this snapshot holds is protected at rest — see
+            // [`Self::storage_encryption_type`]. Reported beside `StorageEncrypted`, which
+            // says only whether a KMS key of the caller's was named: a client can tell
+            // none/sse-rds/sse-kms apart only from this member.
+            storage_encryption_type: Some(self.storage_encryption_type().to_string()),
+            // Whether the cluster the snapshot was taken from carried a custom data group,
+            // which is the flag that cluster's own envelope reports
+            // ([`DEFAULT_CUSTOM_DATA_GROUP_PRESENT`]).
+            custom_data_group_present: Some(DEFAULT_CUSTOM_DATA_GROUP_PRESENT),
+            // The size of the data the snapshot holds, which — like the allocated storage
+            // and the progress above — is known only once the snapshot has been TAKEN: a
+            // snapshot still being made reports no size at all. Measured when the copy was
+            // taken ([`Self::data_bytes`]), so a read reports it rather than re-walking the
+            // snapshot's data.
+            full_snapshot_size_in_bytes: (self.status == SNAPSHOT_STATUS_AVAILABLE)
+                .then_some(self.data_bytes),
             kms_key_id: self.kms_key_id.clone(),
             db_cluster_snapshot_arn: Some(self.arn()),
             source_db_cluster_snapshot_arn: self.source_snapshot_arn.clone(),
@@ -260,6 +299,105 @@ impl DbClusterSnapshotRecord {
             ..DBClusterSnapshot::default()
         }
     }
+}
+
+/// How many rows of one table are summed at a time while measuring a snapshot's size.
+///
+/// A page rather than the whole table: [`data_plane::sql_engine::InstanceDatabase::execute`]
+/// refuses a result past its own caps (`MAX_RESULT_ROWS`, `MAX_RESULT_BYTES`), so a table
+/// larger than one answer is summed page by page instead of being dropped from the total.
+const SNAPSHOT_SIZE_PAGE_ROWS: usize = 500;
+
+/// The most VALUES one snapshot's size is summed over, bounding the work the measurement
+/// costs however much data the copy holds.
+///
+/// The copy is itself bounded — [`data_plane::sql_engine::MAX_DATABASES_PER_INSTANCE`]
+/// databases, each under the page ceiling every database of this data plane carries — but
+/// the product of those bounds is large, so the walk carries its own ceiling and says in the
+/// log when it stopped there rather than reading on.
+const SNAPSHOT_SIZE_MAX_VALUES: usize = 1_000_000;
+
+/// The full size, in bytes, of the data a snapshot holds — what
+/// `DBClusterSnapshot$FullSnapshotSizeInBytes` reports.
+///
+/// The member is "the full size of the snapshot, in bytes … the size of all the blocks that
+/// were written to the snapshot" (`DBSnapshot$FullSnapshotSizeInBytes`, the shape where this
+/// checkout's model declares it), so it is the size of the data the snapshot's own copy
+/// carries: every value in every table of every database that copy holds
+/// ([`table_names`], [`data_plane::sql_engine::Cell::byte_cost`]). A snapshot that captured
+/// no storage at all — one of a cluster with no DB instance in it — and one whose databases
+/// were never written to both hold no data, so both report zero rather than nothing.
+///
+/// Bounded three ways, because a caller decides how much data a copy holds:
+/// [`MAX_EXPORTED_TABLES`] tables — the ceiling the export of a snapshot's tables already
+/// carries — [`SNAPSHOT_SIZE_MAX_VALUES`] values, and [`SNAPSHOT_SIZE_PAGE_ROWS`] rows per
+/// statement. Each ceiling reached is logged, so a total that stopped short is visible
+/// rather than silent.
+///
+/// Engine work: the caller runs it on a blocking task, with no state lock held
+/// ([`data_plane::captured_data_bytes`]), and ONCE — the copy never changes after it was
+/// taken, so the snapshot's record keeps the answer ([`DbClusterSnapshotRecord::data_bytes`])
+/// and no later read of that snapshot walks its data again.
+pub fn snapshot_data_bytes(storage: Option<&data_plane::sql_engine::InstanceDatabase>) -> i64 {
+    let Some(storage) = storage else {
+        return 0;
+    };
+    let mut bytes: i64 = 0;
+    let mut values = 0usize;
+    let mut tables = 0usize;
+    for database in storage.database_names() {
+        for table in table_names(storage, &database) {
+            tables += 1;
+            if tables > MAX_EXPORTED_TABLES || values >= SNAPSHOT_SIZE_MAX_VALUES {
+                ::tracing::warn!(
+                    tables,
+                    values,
+                    "the snapshot holds more data than its size is summed over, so the size \
+                     reported is of the data that was summed"
+                );
+                return bytes;
+            }
+            let mut read = 0usize;
+            loop {
+                let page = match storage.execute(
+                    &database,
+                    &format!(
+                        "SELECT * FROM \"{table}\" LIMIT {SNAPSHOT_SIZE_PAGE_ROWS} OFFSET {read}"
+                    ),
+                    &[],
+                ) {
+                    Ok(page) => page,
+                    Err(error) => {
+                        // A table the engine will not read is left out of the total, exactly
+                        // as an export leaves it out of what it writes — and it is logged
+                        // for the same reason.
+                        ::tracing::warn!(
+                            table = ?table,
+                            error = %error.message,
+                            "a table of the snapshot's data could not be read, so its size is \
+                             not part of the total"
+                        );
+                        break;
+                    }
+                };
+                let rows = page.rows.len();
+                for row in &page.rows {
+                    for cell in row {
+                        bytes = bytes
+                            .saturating_add(i64::try_from(cell.byte_cost()).unwrap_or(i64::MAX));
+                    }
+                    values = values.saturating_add(row.len());
+                }
+                read += rows;
+                // The last page of a table is a short one; a copy nothing writes to while
+                // this runs reads its rows in one order, so the pages do not overlap.
+                if rows < SNAPSHOT_SIZE_PAGE_ROWS || values >= SNAPSHOT_SIZE_MAX_VALUES {
+                    break;
+                }
+            }
+        }
+    }
+    bytes
 }
 
 /// The tags a snapshot COPY carries: the ones the request named, plus the source's where

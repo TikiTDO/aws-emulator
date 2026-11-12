@@ -632,6 +632,30 @@ pub const STORAGE_ENCRYPTION_TYPE_SSE_KMS: &str = "sse-kms";
 /// only a Multi-AZ DB cluster created without `StorageEncrypted` reports it.
 pub const STORAGE_ENCRYPTION_TYPE_NONE: &str = "none";
 
+/// How the data at rest of a cluster running `engine` — and of every snapshot taken of it —
+/// is protected, as `StorageEncryptionType` publishes it.
+///
+/// `sse-kms` where the resource was created encrypted, "encrypted using a customer managed
+/// KMS key or Amazon Web Services managed KMS key". Otherwise it follows the cluster TYPE:
+/// Aurora-style storage is encrypted at rest either way, so it reports
+/// [`STORAGE_ENCRYPTION_TYPE_SSE_RDS`], "encrypted using an Amazon Web Services owned KMS
+/// key" (`DBCluster$StorageEncrypted`: "If the DB cluster is encrypted with an Amazon Web
+/// Services owned key, this value is false and StorageEncryptionType is sse-rds"), while a
+/// Multi-AZ DB cluster created without encryption is not encrypted at all and reports
+/// [`STORAGE_ENCRYPTION_TYPE_NONE`] ([`is_multi_az_db_cluster`]).
+///
+/// The ONE reading for every record that reports the member, so a cluster, its automated
+/// backup and its snapshots cannot disagree about how the same data at rest is protected.
+pub fn storage_encryption_type(storage_encrypted: bool, engine: &str) -> &'static str {
+    if storage_encrypted {
+        STORAGE_ENCRYPTION_TYPE_SSE_KMS
+    } else if is_multi_az_db_cluster(engine) {
+        STORAGE_ENCRYPTION_TYPE_NONE
+    } else {
+        STORAGE_ENCRYPTION_TYPE_SSE_RDS
+    }
+}
+
 /// The lifecycle types a global database cluster may be enrolled in, as
 /// `CreateGlobalClusterMessage$EngineLifecycleSupport` publishes them ("Valid Values:
 /// open-source-rds-extended-support | open-source-rds-extended-support-disabled").

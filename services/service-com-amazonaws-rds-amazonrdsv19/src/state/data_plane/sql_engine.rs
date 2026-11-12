@@ -252,8 +252,11 @@ pub enum Cell {
 }
 
 impl Cell {
-    /// What this value costs against [`MAX_RESULT_BYTES`].
-    fn byte_cost(&self) -> usize {
+    /// The bytes this value occupies: what it costs against [`MAX_RESULT_BYTES`] when the
+    /// engine hands it to a client, and what a stored copy of it holds — a NULL is the one
+    /// byte its type code takes, a number the eight its value does, and text or a blob
+    /// exactly its own length.
+    pub fn byte_cost(&self) -> usize {
         match self {
             Self::Null => 1,
             Self::Integer(_) | Self::Real(_) => 8,

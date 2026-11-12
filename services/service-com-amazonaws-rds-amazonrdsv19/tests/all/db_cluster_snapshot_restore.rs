@@ -196,7 +196,10 @@ async fn restore(
 /// The address a client connects to, as a CLUSTER envelope publishes it: a cluster reports
 /// the host it is reached at and the port beside it, where a DB instance reports an
 /// `Endpoint` structure carrying both.
-fn cluster_endpoint(case: &str, envelope: &str) -> (String, u16) {
+///
+/// `pub(crate)` so the snapshot-envelope suite reads an endpoint off a cluster envelope the
+/// same way rather than writing the read again.
+pub(crate) fn cluster_endpoint(case: &str, envelope: &str) -> (String, u16) {
     let port = text(envelope, "Port");
     (
         text(envelope, "Endpoint"),

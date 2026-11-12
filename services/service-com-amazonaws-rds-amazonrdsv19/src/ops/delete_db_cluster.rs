@@ -220,6 +220,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .map_err(DeleteDBClusterError::internal_failure)?,
             None => None,
         };
+        // The SIZE of that copy, measured where the copy is taken — off this worker thread,
+        // before the store is locked and once — because the copy never changes afterwards;
+        // see `crate::state::captured_data_bytes`.
+        let final_snapshot_data_bytes =
+            crate::state::captured_data_bytes(final_snapshot_storage.as_ref())
+                .await
+                .map_err(DeleteDBClusterError::internal_failure)?;
         let mut store = state.lock();
         store.settle_due_transitions(&region);
 
@@ -439,6 +446,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     !live_members.is_empty(),
                     &snapshot_identifier,
                     final_snapshot_storage,
+                    final_snapshot_data_bytes,
                     tags,
                 );
                 store.db_cluster_snapshots.insert(snapshot_key, snapshot);

@@ -312,6 +312,17 @@ pub struct DBParameterGroupQuotaExceededFault {
 #[smithy_macros::smithy(shape = "com.amazonaws.rds#DBClusterSnapshot")]
 #[derive(Debug, Clone, Default)]
 pub struct DBClusterSnapshot {
+    /// Whether the cluster the snapshot was taken from carries a custom data group; added
+    /// to the on-disk model from the recorded AWS responses, like
+    /// [`DBCluster::custom_data_group_present`], which is the same flag on the CLUSTER this
+    /// snapshot copied it from. Projected by
+    /// [`crate::state::DbClusterSnapshotRecord::to_wire`].
+    pub custom_data_group_present: Option<bool>,
+    /// The full size of the data the snapshot holds, in bytes; added to the on-disk model
+    /// from the recorded AWS responses, like [`DBClusterSnapshot::custom_data_group_present`].
+    /// Projected by [`crate::state::DbClusterSnapshotRecord::to_wire`] for a snapshot that
+    /// has been taken, which is where its size is known.
+    pub full_snapshot_size_in_bytes: Option<i64>,
     pub availability_zones: Option<Vec<String>>,
     pub db_cluster_snapshot_identifier: Option<String>,
     pub db_cluster_identifier: Option<String>,

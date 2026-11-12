@@ -442,7 +442,7 @@ impl DbClusterRecord {
             master_username: self.master_username.clone(),
             db_cluster_resource_id: Some(self.resource_id.clone()),
             region: Some(self.region.clone()),
-            license_model: default_license_model(&self.engine).map(str::to_string),
+            license_model: cluster_license_model(&self.engine),
             status: Some(DB_CLUSTER_AUTOMATED_BACKUP_STATUS_ACTIVE.to_string()),
             iam_database_authentication_enabled: Some(self.iam_database_authentication_enabled),
             cluster_create_time: Some(self.cluster_create_time),
@@ -488,24 +488,10 @@ impl DbClusterRecord {
     }
 
     /// `StorageEncryptionType`: "the type of encryption used to protect data at rest in
-    /// the DB cluster".
-    ///
-    /// `sse-kms` when the request asked for encryption — "encrypted using a customer
-    /// managed KMS key or Amazon Web Services managed KMS key". Otherwise it depends on
-    /// the cluster type: Aurora storage is encrypted at rest either way, so an Aurora
-    /// cluster reports `sse-rds`, "encrypted using an Amazon Web Services owned KMS key"
-    /// (the member's own note: "If the DB cluster is encrypted with an Amazon Web Services
-    /// owned key, this value is false and StorageEncryptionType is sse-rds"), while a
-    /// Multi-AZ DB cluster created without encryption is not encrypted at all and reports
-    /// `none`.
+    /// the DB cluster" — the one reading in [`storage_encryption_type`], which the
+    /// snapshots of this cluster report too.
     pub fn storage_encryption_type(&self) -> &'static str {
-        if self.storage_encrypted {
-            STORAGE_ENCRYPTION_TYPE_SSE_KMS
-        } else if is_multi_az_db_cluster(&self.engine) {
-            STORAGE_ENCRYPTION_TYPE_NONE
-        } else {
-            STORAGE_ENCRYPTION_TYPE_SSE_RDS
-        }
+        storage_encryption_type(self.storage_encrypted, &self.engine)
     }
 
     /// Project the stored record onto the modelled `DBCluster` output shape.
