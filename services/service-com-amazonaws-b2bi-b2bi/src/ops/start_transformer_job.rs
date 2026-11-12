@@ -583,48 +583,63 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // and as the job records it.
         let digest = request_digest(&input);
 
-        // PHASE 1, under the lock: answer a replay, enforce the transformer's status
-        // precondition and mint the job id. The run itself takes in-process calls to
-        // Amazon S3, so no state lock may span it.
-        let (transformer, job_id) = {
+        // PHASE 1, under the lock: CLAIM the token. `clientToken` is this operation's
+        // `@idempotencyToken`: a repeat carrying the same token answers with the job the
+        // first call started, and a duplicate sent while that call is still in flight is
+        // the racer AWS refuses with `ConflictException`. The claim is one atomic
+        // check-and-insert ([`crate::state::ComAmazonawsB2biB2biState::claim_idempotency`])
+        // and stands across the whole run, which is where this operation really is in
+        // flight: it reads and writes Amazon S3 with no lock held, so a duplicate meets
+        // the claim rather than slipping between the lookup and the recorded job. Which
+        // answer a duplicate gets depends only on whether the request it duplicates has
+        // finished, never on how long ago it did.
+        //
+        // A SETTLED token used again for a DIFFERENT request is the other conflict a
+        // token can produce, and [`request_digest`] is what tells the two apart — the
+        // same request replays, a different one is refused, exactly as
+        // `CreateTransformer` treats its own token.
+        let idempotency_key = input
+            .client_token
+            .as_deref()
+            .map(|token| crate::state::idempotency_key("transformerJob", token));
+        let mut claim = None;
+        if let Some(key) = idempotency_key {
             let mut state = store.lock();
-
-            // `clientToken` is this operation's `@idempotencyToken`: a repeat carrying the
-            // same token answers with the job the first call started, and a duplicate sent
-            // while that call is still in flight is the racer AWS refuses with
-            // `ConflictException` (see [`crate::state::IDEMPOTENT_CREATE_IN_FLIGHT`]).
-            //
-            // A SETTLED token used again for a DIFFERENT request is the other conflict a
-            // token can produce, and [`request_digest`] is what tells the two apart — the
-            // same request replays, a different one is refused, exactly as
-            // `CreateTransformer` treats its own token.
-            let idempotency_key = input
-                .client_token
-                .as_deref()
-                .map(|token| crate::state::idempotency_key("transformerJob", token));
-            if let Some(key) = idempotency_key.as_deref() {
-                match state.replay(key, ::std::time::Instant::now()) {
-                    Some(crate::state::TokenReplay::InFlight) => {
-                        return Err(StartTransformerJobErrorModeled::ConflictException(
-                            ConflictException {
-                                message: crate::state::CLIENT_TOKEN_IN_FLIGHT.to_string(),
-                            },
-                        )
-                        .into())
-                    }
-                    Some(crate::state::TokenReplay::Completed(started)) => {
-                        if let Some(job) = state.transformer_jobs.get(&started) {
-                            if job.request_digest != digest {
-                                return Err(token_already_used(&started));
-                            }
-                            return Ok(StartTransformerJobOutput {
-                                transformer_job_id: started,
-                            });
-                        }
-                    }
-                    None => {}
+            match state.claim_idempotency(&key) {
+                Some(crate::state::TokenReplay::InFlight) => {
+                    return Err(StartTransformerJobErrorModeled::ConflictException(
+                        ConflictException {
+                            message: crate::state::CLIENT_TOKEN_IN_FLIGHT.to_string(),
+                        },
+                    )
+                    .into())
                 }
+                Some(crate::state::TokenReplay::Completed(started)) => {
+                    if let Some(job) = state.transformer_jobs.get(&started) {
+                        if job.request_digest != digest {
+                            return Err(token_already_used(&started));
+                        }
+                        return Ok(StartTransformerJobOutput {
+                            transformer_job_id: started,
+                        });
+                    }
+                    // The token settled on a job this service no longer remembers, so
+                    // there is nothing to replay: this request takes the token over.
+                    state.reclaim_idempotency(&key);
+                }
+                None => {}
             }
+            drop(state);
+            // Built with the lock released: the claim's `Drop` takes it, and frees the
+            // token on every exit from here that starts no job.
+            claim = Some(crate::state::IdempotencyClaim::held(store.clone(), key));
+        }
+
+        // PHASE 2, under the lock: enforce the transformer's status precondition and mint
+        // the job id. The run itself takes in-process calls to Amazon S3, so no state lock
+        // may span it.
+        let (transformer, job_id) = {
+            let state = store.lock();
 
             // The transformer the job runs has to resolve, and has to be ACTIVE: "for the
             // transformer to be used in a capability, its status must active"
@@ -652,15 +667,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             while state.transformer_jobs.contains_key(&job_id) {
                 job_id = crate::state::new_transformer_job_id();
             }
-            // Remembered before the run, so a duplicate of THIS request is answered with
-            // this job rather than starting a second one.
-            if let Some(key) = idempotency_key {
-                state.record_idempotency(key, &job_id);
-            }
             (transformer, job_id)
         };
 
-        // PHASE 2, with no lock held: both of the job's locations have to be in the Region
+        // PHASE 3, with no lock held: both of the job's locations have to be in the Region
         // this call is signed for, which is the Region of the Amazon S3 endpoint its reads
         // and writes go to. A bucket elsewhere is the caller's mistake and is refused
         // before a byte is read or written, so no job is recorded and nothing is observable
@@ -672,10 +682,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             if location_is_in_region(ctx, &region, location).await {
                 continue;
             }
-            // The reservation the token made above is released: no job exists under it, so
-            // a corrected retry carrying the same `clientToken` is served rather than
-            // answered with the id of a job that was never started.
-            store.lock().forget_idempotency_for(&job_id);
+            // The claim is released by its `Drop` on the way out: no job exists under the
+            // token, so a corrected retry carrying the same `clientToken` is served rather
+            // than refused or answered with the id of a job that was never started.
             return Err(validation(bucket_not_in_region(
                 role,
                 location.bucket_name.as_deref().unwrap_or_default(),
@@ -683,7 +692,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )));
         }
 
-        // PHASE 3, with no lock held: the run. It reads the input file, performs the
+        // PHASE 4, with no lock held: the run. It reads the input file, performs the
         // transformation the transformer is configured for and writes the output file, all
         // through the emulator's own S3 service.
         let outcome = run_job(
@@ -696,18 +705,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         )
         .await;
 
-        // PHASE 4, under the lock again: persist what the run reported. The job reports
-        // `running` until its outcome is due, which is the status AWS answers the start
-        // call with, and the terminal status afterwards.
-        store.lock().record_transformer_job(crate::state::TransformerJob {
-            transformer_job_id: job_id.clone(),
-            transformer_id: input.transformer_id,
-            request_digest: digest,
-            terminal_status: outcome.status.to_string(),
-            output_files: outcome.output_files,
-            message: outcome.message,
-            settles_at: ::std::time::Instant::now() + crate::state::TRANSFORMER_JOB_RUNNING_FOR,
-        });
+        // PHASE 5, under the lock again: persist what the run reported, and settle the
+        // token's claim on the job it started — so the job and the token a later repeat
+        // replays it through become visible together. The job reports `running` until its
+        // outcome is due, which is the status AWS answers the start call with, and the
+        // terminal status afterwards.
+        {
+            let mut state = store.lock();
+            state.record_transformer_job(crate::state::TransformerJob {
+                transformer_job_id: job_id.clone(),
+                transformer_id: input.transformer_id,
+                request_digest: digest,
+                terminal_status: outcome.status.to_string(),
+                output_files: outcome.output_files,
+                message: outcome.message,
+                settles_at: ::std::time::Instant::now() + crate::state::TRANSFORMER_JOB_RUNNING_FOR,
+            });
+            if let Some(claim) = claim.as_mut() {
+                claim.settle(&mut state, &job_id);
+            }
+        }
 
         Ok(StartTransformerJobOutput {
             transformer_job_id: job_id,

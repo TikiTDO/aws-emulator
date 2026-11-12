@@ -490,13 +490,14 @@ async fn a_create_refused_for_mixing_member_styles_leaves_its_client_token_free(
     }
 }
 
-/// RULE: `clientToken` is an `@idempotencyToken`, so one token names ONE request. While
-/// the create that token started is still IN FLIGHT a duplicate is the racer that lost
-/// it, refused with the modelled `ConflictException` (HTTP 409) — so however many calls
-/// race with one token, exactly one transformer is created — and once that create has
-/// settled the same token and the same parameters answer with that one transformer (a
-/// reordered tag list is the same request). A call carrying the token while asking for
-/// something DIFFERENT is `ConflictException` too, rather than a second transformer.
+/// RULE: `clientToken` is an `@idempotencyToken`, so one token names ONE request: however
+/// many calls race under one token exactly one transformer is created — a racer either
+/// wins the claim, replays what the winner created, or is refused with the modelled
+/// `ConflictException` (HTTP 409), never minting a second one — and once the request
+/// holding the token has answered, that token and the same parameters answer with that one
+/// transformer (a reordered tag list is the same request). A call carrying the token while
+/// asking for something DIFFERENT is `ConflictException` too, rather than a second
+/// transformer.
 ///
 /// The two conflict arms are the two the corpus records for this operation (trace
 /// `b2bi.create-transformer-idempotent-token-concurrent-dedup`: "N concurrent calls
@@ -507,14 +508,16 @@ async fn a_create_refused_for_mixing_member_styles_leaves_its_client_token_free(
 /// name, a configuration structure, a tag value, and a member the first request did not
 /// name at all.
 ///
-/// Run on a MULTI-THREADED runtime: on the default current-thread runtime the "racers"
-/// below would be polled one after another and never contend for the state lock, so the
-/// test would pass against a handler that cannot actually serialise concurrent callers.
+/// The racers are SPAWNED on a MULTI-THREADED runtime, so they genuinely contend for the
+/// store instead of being polled one after another on one task; the refusal a racer that
+/// loses gets is asserted on its own, against a held claim, by
+/// `tests/all/idempotent_create_in_flight_window.rs`, since which racer loses is up to the
+/// scheduler and must not be up to the clock.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn one_client_token_yields_one_transformer_however_many_calls_race() {
-    use service_com_amazonaws_b2bi_b2bi::state::IDEMPOTENT_CREATE_IN_FLIGHT;
+    use std::sync::Arc;
 
-    let router = b2bi_router();
+    let router = Arc::new(b2bi_router());
 
     let request = json!({
         "name": "idempotent-transformer",
@@ -524,24 +527,27 @@ async fn one_client_token_yields_one_transformer_however_many_calls_race() {
     });
 
     // Five racers carrying one token and identical parameters, in flight together.
-    let racers = tokio::join!(
-        call(&router, "CreateTransformer", request.clone()),
-        call(&router, "CreateTransformer", request.clone()),
-        call(&router, "CreateTransformer", request.clone()),
-        call(&router, "CreateTransformer", request.clone()),
-        call(&router, "CreateTransformer", request.clone()),
-    );
-    let racers = [racers.0, racers.1, racers.2, racers.3, racers.4];
+    let mut running = Vec::new();
+    for _ in 0..5 {
+        let router = Arc::clone(&router);
+        let request = request.clone();
+        running.push(tokio::spawn(async move {
+            call(&router, "CreateTransformer", request).await
+        }));
+    }
+    let mut racers = Vec::new();
+    for racer in running {
+        racers.push(racer.await.expect("the racer task runs to completion"));
+    }
 
-    // Exactly one of them created the transformer; every racer that lost the race was
-    // refused with ConflictException, and none of them created a second one.
-    let mut minted: Vec<String> = Vec::new();
-    let mut lost = 0usize;
+    // Every racer that was served reports the ONE transformer the token created; every
+    // racer that lost the claim was refused with ConflictException, and none of them
+    // created a second transformer.
+    let mut served: Vec<String> = Vec::new();
     for (index, (status, body)) in racers.iter().enumerate() {
         match status {
-            200 => minted.push(text(body, "transformerId")),
+            200 => served.push(text(body, "transformerId")),
             409 => {
-                lost += 1;
                 assert_eq!(
                     error_code(body),
                     "ConflictException",
@@ -552,24 +558,39 @@ async fn one_client_token_yields_one_transformer_however_many_calls_race() {
             other => panic!("case racer {index}: expected 200 or 409, got {other} {body}"),
         }
     }
-    assert_eq!(
-        minted.len(),
-        1,
-        "case concurrent racers: exactly one racer must create the transformer, got {minted:?}"
+    assert!(
+        !served.is_empty(),
+        "case concurrent racers: at least one racer must be served"
     );
-    assert_eq!(
-        lost,
-        racers.len() - 1,
-        "case concurrent racers: every other racer must lose the race with a 409"
+    let first = served[0].clone();
+    assert!(
+        served.iter().all(|id| *id == first),
+        "case concurrent racers: exactly one transformer must be created, got {served:?}"
     );
-    let first = minted[0].clone();
     assert!(
         is_generated_id(&first, "t"),
         "case concurrent racers: expected a generated t- id, got {first:?}"
     );
+    let (status, listed) = call(&router, "ListTransformers", json!({})).await;
+    assert_eq!(status, 200, "case concurrent racers: ListTransformers failed: {listed}");
+    let created: Vec<&Value> = listed["transformers"]
+        .as_array()
+        .map(|transformers| {
+            transformers
+                .iter()
+                .filter(|transformer| transformer["transformerId"] == json!(first))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        created.len(),
+        1,
+        "case concurrent racers: the store must hold exactly one transformer under that \
+         id, got {listed}"
+    );
 
-    // A replay once that create has settled answers with that same transformer.
-    tokio::time::sleep(IDEMPOTENT_CREATE_IN_FLIGHT).await;
+    // A repeat once that create has answered gets that same transformer, with nothing
+    // waited for in between.
     let (status, body) = call(&router, "CreateTransformer", request.clone()).await;
     assert_eq!(status, 200, "case replay: expected 200, got {status} {body}");
     assert_eq!(

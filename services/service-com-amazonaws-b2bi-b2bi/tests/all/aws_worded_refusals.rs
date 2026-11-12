@@ -304,13 +304,20 @@ async fn an_unresolved_profile_id_is_refused_with_the_template_recorded_for_its_
 ///
 /// The rows differ along what the rule generalises over: which create is duplicated (each
 /// of the three this service offers carries an `@idempotencyToken`), and whether the
-/// duplicate is one call or two concurrent racers.
+/// duplicate is one call or two calls racing each other.
+///
+/// The window the refusal belongs to is the processing of the request that holds the token,
+/// so it is held open here through the claim that request takes — and released again —
+/// rather than by hoping a call is still running: which answer a duplicate gets must not
+/// depend on how loaded the host is.
 #[tokio::test]
 async fn a_duplicate_of_an_in_flight_idempotent_create_is_refused_with_one_sentence() {
+    use crate::idempotent_create_in_flight_window::{hold_token_in_flight, release_token};
+
     let expected = service_com_amazonaws_b2bi_b2bi::state::CLIENT_TOKEN_IN_FLIGHT;
 
     for racers in [1usize, 2] {
-        let router = b2bi_router();
+        let (router, engine) = crate::onboarding_loop::b2bi_router_with_engine();
         let profile_id = given_profile(&router, "in-flight").await;
         let capability_id = given_capability(&router, "in-flight").await;
         let transformer = json!({
@@ -323,11 +330,13 @@ async fn a_duplicate_of_an_in_flight_idempotent_create_is_refused_with_one_sente
             }
         });
 
-        // (case, operation, the request, minus the token every row adds)
-        let rows: Vec<(&str, &str, Value)> = vec![
+        // (case, operation, the resource type the token is scoped by, the request, minus
+        //  the token every row adds)
+        let rows: Vec<(&str, &str, &str, Value)> = vec![
             (
                 "a profile",
                 "CreateProfile",
+                "profile",
                 json!({
                     "name": "in-flight profile",
                     "phone": "555-555-0199",
@@ -338,6 +347,7 @@ async fn a_duplicate_of_an_in_flight_idempotent_create_is_refused_with_one_sente
             (
                 "a partnership",
                 "CreatePartnership",
+                "partnership",
                 json!({
                     "profileId": profile_id.clone(),
                     "name": "in-flight partner",
@@ -345,10 +355,15 @@ async fn a_duplicate_of_an_in_flight_idempotent_create_is_refused_with_one_sente
                     "capabilities": [capability_id.clone()]
                 }),
             ),
-            ("a transformer", "CreateTransformer", transformer),
+            (
+                "a transformer",
+                "CreateTransformer",
+                "transformer",
+                transformer,
+            ),
         ];
 
-        for (case, operation, request) in rows {
+        for (case, operation, resource_type, request) in rows {
             let case = format!("{case} duplicated by {racers} racer(s)");
             let token = format!("token-for-{operation}-{racers}");
             let with_token = |request: &Value| {
@@ -357,16 +372,11 @@ async fn a_duplicate_of_an_in_flight_idempotent_create_is_refused_with_one_sente
                 request
             };
 
-            let (status, first) = call(&router, operation, with_token(&request)).await;
-            assert_eq!(
-                status, 200,
-                "case {case:?}: the first create must be served, got {status} {first}"
-            );
+            // The request that holds the token is in flight: its claim stands, exactly as
+            // it does while that request is being processed.
+            hold_token_in_flight(&engine, resource_type, &token, &case);
 
-            // Every duplicate racing that create — issued before it has settled — is a
-            // racer that lost. The duplicates are issued CONCURRENTLY and immediately, so
-            // they fall inside the span the token reports in flight for
-            // (`IDEMPOTENT_CREATE_IN_FLIGHT`), which is what the racer sees.
+            // Every duplicate that arrives while the claim stands is a racer that lost.
             let answers = match racers {
                 1 => vec![call(&router, operation, with_token(&request)).await],
                 _ => {
@@ -400,17 +410,21 @@ async fn a_duplicate_of_an_in_flight_idempotent_create_is_refused_with_one_sente
                 );
             }
 
-            // The fixed sentence is for a duplicate that RACED the original: once that
-            // create has settled, the same token answers with the resource it minted,
-            // which is the other half of the recorded idempotency behaviour.
-            ::tokio::time::sleep(
-                service_com_amazonaws_b2bi_b2bi::state::IDEMPOTENT_CREATE_IN_FLIGHT,
-            )
-            .await;
+            // The fixed sentence is for a duplicate that RACED the original: once the
+            // request holding the token has answered, the same token answers with the
+            // resource it minted, which is the other half of the recorded idempotency
+            // behaviour.
+            release_token(&engine, resource_type, &token);
+            let (status, created) = call(&router, operation, with_token(&request)).await;
+            assert_eq!(
+                status, 200,
+                "case {case:?}: with no request holding the token the create must be \
+                 served, got {status} {created}"
+            );
             let (status, replayed) = call(&router, operation, with_token(&request)).await;
             assert_eq!(
                 status, 200,
-                "case {case:?}: a repeat issued after the create settled must replay it, \
+                "case {case:?}: a repeat issued after the create answered must replay it, \
                  got {status} {replayed}"
             );
         }

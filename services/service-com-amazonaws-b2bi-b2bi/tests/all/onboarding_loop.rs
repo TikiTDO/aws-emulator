@@ -42,6 +42,13 @@ pub(crate) const ID_HEX_DIGITS: usize = 17;
 /// (and a transformer job writes its output file back) — exactly as the assembled emulator
 /// does.
 pub(crate) fn b2bi_router() -> MultiServiceRouter {
+    b2bi_router_with_engine().0
+}
+
+/// The same router, handed back with the shared engine it serves from — so a test can also
+/// read this service's store (and the claim one `@idempotencyToken` holds) beside driving
+/// the wire.
+pub(crate) fn b2bi_router_with_engine() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     router.register_service(service_com_amazonaws_b2bi_b2bi::EmulatedService::new(Arc::clone(
@@ -53,9 +60,9 @@ pub(crate) fn b2bi_router() -> MultiServiceRouter {
         )),
     );
     router.register_service(service_com_amazonaws_s3_amazons3::EmulatedService::new(
-        engine,
+        Arc::clone(&engine),
     ));
-    router
+    (router, engine)
 }
 
 /// Send one path-style request to the emulator's S3 front door SIGNED FOR `region`,
@@ -1163,15 +1170,15 @@ async fn deleting_a_resource_a_partnership_still_uses_is_a_conflict() {
 }
 
 /// RULE: a create repeated with the same `@idempotencyToken` answers with the resource
-/// the first call created, rather than minting a second one, ONCE that first create has
-/// settled; a repeat sent while it is still in flight is the racer AWS refuses with
-/// `ConflictException` (409). A different token mints a new resource. Rows span all three
-/// creates.
+/// the first call created, rather than minting a second one, as soon as that first create
+/// has ANSWERED; a repeat sent while the request holding the token is still in flight is
+/// the racer AWS refuses with `ConflictException` (409). A different token mints a new
+/// resource. Rows span all three creates.
 #[tokio::test]
 async fn repeating_a_create_with_the_same_client_token_returns_the_same_resource() {
-    use service_com_amazonaws_b2bi_b2bi::state::IDEMPOTENT_CREATE_IN_FLIGHT;
+    use crate::idempotent_create_in_flight_window::{hold_token_in_flight, release_token};
 
-    let router = b2bi_router();
+    let (router, engine) = b2bi_router_with_engine();
     let profile_id = given_profile(&router, "acme").await;
     let capability_id = given_capability(&router, "edi-850").await;
     let transformer_id = given_transformer(&router, "idempotent-transformer").await;
@@ -1203,12 +1210,22 @@ async fn repeating_a_create_with_the_same_client_token_returns_the_same_resource
         })
     };
 
-    // (case, operation, id member, request builder, the list op and its items member)
+    // (case, operation, the resource type its token is scoped by, id member, request
+    //  builder, the list op and its items member)
     #[allow(clippy::type_complexity)]
-    let cases: Vec<(&str, &str, &str, Box<dyn Fn(&str) -> Value>, &str, &str)> = vec![
+    let cases: Vec<(
+        &str,
+        &str,
+        &str,
+        &str,
+        Box<dyn Fn(&str) -> Value>,
+        &str,
+        &str,
+    )> = vec![
         (
             "profile",
             "CreateProfile",
+            "profile",
             "profileId",
             Box::new(profile_request),
             "ListProfiles",
@@ -1217,6 +1234,7 @@ async fn repeating_a_create_with_the_same_client_token_returns_the_same_resource
         (
             "capability",
             "CreateCapability",
+            "capability",
             "capabilityId",
             Box::new(capability_request),
             "ListCapabilities",
@@ -1225,6 +1243,7 @@ async fn repeating_a_create_with_the_same_client_token_returns_the_same_resource
         (
             "partnership",
             "CreatePartnership",
+            "partnership",
             "partnershipId",
             Box::new(partnership_request),
             "ListPartnerships",
@@ -1232,28 +1251,15 @@ async fn repeating_a_create_with_the_same_client_token_returns_the_same_resource
         ),
     ];
 
-    for (case, operation, id_member, request, list_op, items) in &cases {
+    for (case, operation, resource_type, id_member, request, list_op, items) in &cases {
         let (_, before) = call(&router, list_op, json!({})).await;
         let count_before = before[*items].as_array().map(Vec::len).unwrap_or_default();
 
         let (status, first) = call(&router, operation, request("token-alpha")).await;
         assert_eq!(status, 200, "case {case:?}: first create failed: {status} {first}");
 
-        // While that create is still in flight, a duplicate is the racer that lost it.
-        let (status, raced) = call(&router, operation, request("token-alpha")).await;
-        assert_eq!(
-            status, 409,
-            "case {case:?}: a duplicate sent while the create is in flight must be \
-             refused with ConflictException, got {status} {raced}"
-        );
-        assert_eq!(
-            error_code(&raced),
-            "ConflictException",
-            "case {case:?}: expected ConflictException, got {raced}"
-        );
-
-        // Once it has settled, the same token answers with the resource it minted.
-        tokio::time::sleep(IDEMPOTENT_CREATE_IN_FLIGHT).await;
+        // That create has ANSWERED, so the window it was in flight for is over: the same
+        // token answers with the resource it minted, with nothing waited for in between.
         let (status, replay) = call(&router, operation, request("token-alpha")).await;
         assert_eq!(status, 200, "case {case:?}: replay failed: {status} {replay}");
         assert_eq!(
@@ -1265,6 +1271,24 @@ async fn repeating_a_create_with_the_same_client_token_returns_the_same_resource
             replay["createdAt"], first["createdAt"],
             "case {case:?}: the replay must report the stored createdAt"
         );
+
+        // While a request holding a token is still in flight, a duplicate under that token
+        // is the racer that lost it. The claim is held open here the way that request holds
+        // it while it works, and released again, so the refusal is asserted without
+        // depending on how fast either call is served.
+        hold_token_in_flight(&engine, resource_type, "token-in-flight", case);
+        let (status, raced) = call(&router, operation, request("token-in-flight")).await;
+        assert_eq!(
+            status, 409,
+            "case {case:?}: a duplicate sent while the create is in flight must be \
+             refused with ConflictException, got {status} {raced}"
+        );
+        assert_eq!(
+            error_code(&raced),
+            "ConflictException",
+            "case {case:?}: expected ConflictException, got {raced}"
+        );
+        release_token(&engine, resource_type, "token-in-flight");
 
         let (status, other) = call(&router, operation, request("token-beta")).await;
         assert_eq!(status, 200, "case {case:?}: second token failed: {status} {other}");
@@ -1598,11 +1622,13 @@ async fn the_idempotency_map_is_bounded_and_released() {
         ComAmazonawsB2biB2biState, MAX_IDEMPOTENCY_ENTRIES,
     };
 
-    // The ceiling: recording more tokens than the bound evicts the oldest first.
+    // The ceiling: holding more tokens than the bound evicts the oldest first.
     let mut state = ComAmazonawsB2biB2biState::default();
     let overshoot = 16;
     for index in 0..MAX_IDEMPOTENCY_ENTRIES + overshoot {
-        state.record_idempotency(format!("profile#token-{index}"), &format!("p-{index}"));
+        let key = format!("profile#token-{index}");
+        state.claim_idempotency(&key);
+        state.settle_idempotency(&key, &format!("p-{index}"));
     }
     assert_eq!(
         state.idempotency.len(),
@@ -1625,10 +1651,11 @@ async fn the_idempotency_map_is_bounded_and_released() {
         "the newest remembered token must be kept"
     );
 
-    // Recording the same key twice is one entry, not two.
+    // Claiming and settling the same key is one entry, not two or three.
     let mut state = ComAmazonawsB2biB2biState::default();
-    state.record_idempotency("profile#same".to_string(), "p-1");
-    state.record_idempotency("profile#same".to_string(), "p-1");
+    state.claim_idempotency("profile#same");
+    state.settle_idempotency("profile#same", "p-1");
+    state.settle_idempotency("profile#same", "p-1");
     assert_eq!(
         (state.idempotency.len(), state.idempotency_order.len()),
         (1, 1),

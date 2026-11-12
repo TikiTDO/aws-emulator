@@ -361,12 +361,12 @@ impl Drop for ReservedProfileId {
 enum Settled {
     /// The profile was stored; this is its response.
     Stored(CreateProfileOutput),
-    /// A concurrent call carrying the same `clientToken` stored one first, so this
-    /// request answers with THAT profile and stores nothing.
-    Replayed(CreateProfileOutput),
-    /// A concurrent call carrying the same `clientToken` stored a profile for a DIFFERENT
-    /// request, so this one can neither replay it nor store a second profile: one token
-    /// names one request.
+    /// A create carrying the same `clientToken` stored one first, so this request answers
+    /// with THAT profile (and its id, which the token now names) and stores nothing.
+    Replayed(CreateProfileOutput, String),
+    /// A create carrying the same `clientToken` stored a profile for a DIFFERENT request,
+    /// so this one can neither replay it nor store a second profile: one token names one
+    /// request.
     TokenUsed(String),
 }
 
@@ -454,36 +454,54 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .as_deref()
             .map(|token| crate::state::idempotency_key("profile", token));
 
-        // PHASE 1, under the lock: answer a replay, charge the quota, and mint the id —
-        // RESERVING it, because the lock is released before the log group is provisioned
-        // (that is a call into another service, and no state lock may span it). While the
-        // reservation stands no concurrent create can mint the same id or take the
-        // account's last slot; the guard releases it on every exit from this handler.
+        // PHASE 1, under the lock: CLAIM the token. This create provisions a log group
+        // with NO lock held, so the request is in flight across three holds of it, and the
+        // claim is what a duplicate arriving meanwhile meets: one atomic check-and-insert
+        // ([`crate::state::ComAmazonawsB2biB2biState::claim_idempotency`]) grants it to
+        // exactly one of any number of requests sharing a token, so a duplicate is either
+        // the racer that lost — refused with the modelled `ConflictException` (409) — or,
+        // once the request holding it has answered, the replay of the profile it minted.
+        // Which of the two depends only on whether that request has finished, never on how
+        // long ago it did. The claim is released by its `Drop` on every exit that mints
+        // nothing, so a corrected retry carrying the same token is served.
+        let mut claim = None;
+        if let Some(key) = idempotency_key {
+            let mut state = store.lock();
+            match state.claim_idempotency(&key) {
+                Some(crate::state::TokenReplay::InFlight) => {
+                    return Err(CreateProfileErrorModeled::ConflictException(
+                        ConflictException {
+                            message: crate::state::CLIENT_TOKEN_IN_FLIGHT.to_string(),
+                        },
+                    )
+                    .into())
+                }
+                Some(crate::state::TokenReplay::Completed(minted)) => {
+                    if let Some(existing) = state.profiles.get(&minted) {
+                        if existing.request_digest != digest {
+                            return Err(token_already_used(&minted));
+                        }
+                        return Ok(stored_profile_response(existing));
+                    }
+                    // The token settled on a profile this store no longer holds, so there
+                    // is nothing to replay: this request takes the token over.
+                    state.reclaim_idempotency(&key);
+                }
+                None => {}
+            }
+            drop(state);
+            // Built with the state lock released: the claim's `Drop` takes it.
+            claim = Some(crate::state::IdempotencyClaim::held(store.clone(), key));
+        }
+
+        // PHASE 2, under the lock: charge the quota and mint the id — RESERVING it,
+        // because the lock is released before the log group is provisioned (that is a call
+        // into another service, and no state lock may span it). While the reservation
+        // stands no concurrent create can mint the same id or take the account's last
+        // slot; the guard releases it on every exit from this handler.
         let reserved = {
             let profile_id = {
                 let mut state = store.lock();
-                if let Some(key) = idempotency_key.as_deref() {
-                    match state.replay(key, ::std::time::Instant::now()) {
-                        Some(crate::state::TokenReplay::InFlight) => {
-                            return Err(CreateProfileErrorModeled::ConflictException(
-                                ConflictException {
-                                    message: crate::state::CLIENT_TOKEN_IN_FLIGHT.to_string(),
-                                },
-                            )
-                            .into())
-                        }
-                        Some(crate::state::TokenReplay::Completed(minted)) => {
-                            if let Some(existing) = state.profiles.get(&minted) {
-                                if existing.request_digest != digest {
-                                    return Err(token_already_used(&minted));
-                                }
-                                return Ok(stored_profile_response(existing));
-                            }
-                        }
-                        None => {}
-                    }
-                }
-
                 // AWS's documented limit on customer profiles. Checked AFTER the
                 // idempotency replay, so a replay still answers from a full account.
                 if !state.accepts_another_profile() {
@@ -507,7 +525,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         let profile_id = reserved.id().to_string();
 
-        // PHASE 2, with no lock held: with logging ENABLED the service provisions a real
+        // PHASE 3, with no lock held: with logging ENABLED the service provisions a real
         // log group, so the `logGroupName` this profile reports resolves in CloudWatch
         // Logs; with logging DISABLED it provisions none and reports none. The profile
         // is minted only once its logging destination exists.
@@ -524,42 +542,53 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             Err(detail) => return Err(log_group_unavailable(&detail)),
         };
 
-        // PHASE 3, under the lock again: persist the record. The reservation held both
-        // the id and the quota slot, so neither can have been taken; only the idempotency
-        // token can have been answered meanwhile, by a concurrent create carrying the
-        // same one. What was decided is acted on BELOW the lock — so that one bail-out
-        // can still release the group it provisioned, and so the reservation guard (whose
-        // `Drop` takes the state lock) is not dropped while this one is held.
+        // PHASE 4, under the lock again: persist the record. The reservation held both
+        // the id and the quota slot, so neither can have been taken, and the claim held
+        // the token, so no concurrent create can have minted under it — unless this
+        // process claimed [`crate::state::MAX_IDEMPOTENCY_ENTRIES`] other tokens meanwhile
+        // and evicted the claim, which is the one case the replay below still covers.
+        // What was decided is acted on BELOW the lock — so that one bail-out can still
+        // release the log group, which takes an in-process call and therefore no lock, and
+        // so the guards (whose `Drop` takes the state lock) are not dropped while this one
+        // is held.
         let settled = {
             let mut state = store.lock();
             // Release the reservation here, so the account's live count is exact the
             // moment the profile is stored; the guard's `Drop` then finds nothing to do.
             state.reserved_profile_ids.remove(&profile_id);
-            let replayed = idempotency_key
-                .as_deref()
-                .and_then(|key| match state.replay(key, ::std::time::Instant::now()) {
-                    // A concurrent create carrying this token stored a profile while this
-                    // one provisioned its log group: that profile IS this token's result,
-                    // so this request answers with it (and releases the group it made)
-                    // rather than refusing a request it can answer. The in-flight arm is
-                    // for a DUPLICATE that arrives while a create runs, which is the
-                    // check above, not for the create that is already here.
-                    Some(crate::state::TokenReplay::InFlight)
-                    | Some(crate::state::TokenReplay::Completed(_)) => state
-                        .idempotency
-                        .get(key)
-                        .map(|record| record.resource_id.clone()),
-                    None => None,
+            let replayed = claim
+                .as_ref()
+                .and_then(|claim| match state.replay(claim.key()) {
+                    // A create carrying this token stored a profile while this one
+                    // provisioned its log group: that profile IS this token's result, so
+                    // this request answers with it (and releases the group it made) rather
+                    // than refusing a request it can answer.
+                    Some(crate::state::TokenReplay::Completed(minted)) => Some(minted),
+                    // The claim taken in PHASE 1, still this request's: nothing else
+                    // minted under the token.
+                    Some(crate::state::TokenReplay::InFlight) | None => None,
                 })
                 .and_then(|id| state.profiles.get(&id))
                 .map(|existing| {
                     if existing.request_digest == digest {
-                        Settled::Replayed(stored_profile_response(existing))
+                        Settled::Replayed(
+                            stored_profile_response(existing),
+                            existing.profile_id.clone(),
+                        )
                     } else {
                         Settled::TokenUsed(existing.profile_id.clone())
                     }
                 });
             if let Some(settled) = replayed {
+                // The token names that profile, which is what this request now reports or
+                // refuses over: the claim settles on it rather than being released, so a
+                // later repeat still replays it.
+                if let (Some(claim), Settled::Replayed(_, minted) | Settled::TokenUsed(minted)) =
+                    (claim.as_mut(), &settled)
+                {
+                    let minted = minted.clone();
+                    claim.settle(&mut state, &minted);
+                }
                 settled
             } else {
                 let (created_at, modified_at) = crate::state::created_timestamps();
@@ -584,8 +613,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 let response = stored_profile_response(&profile);
                 state.profiles.insert(profile_id.clone(), profile);
                 state.profile_order.push(profile_id.clone());
-                if let Some(key) = idempotency_key {
-                    state.record_idempotency(key, &profile_id);
+                // The claim becomes the profile it minted, under this same hold: the
+                // record and the token a later repeat replays it through become visible
+                // together.
+                if let Some(claim) = claim.as_mut() {
+                    claim.settle(&mut state, &profile_id);
                 }
                 Settled::Stored(response)
             }
@@ -593,7 +625,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         match settled {
             Settled::Stored(response) => Ok(response),
-            Settled::Replayed(response) => {
+            Settled::Replayed(response, _) => {
                 // No profile was stored under the minted id, so a log group THIS call
                 // created for it owns nothing: release it rather than leave it behind. A
                 // group that was already there belongs to whoever created it, and stays.

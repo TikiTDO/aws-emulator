@@ -308,21 +308,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
-        let mut state = store.lock();
-
         // `clientToken` is this operation's `@idempotencyToken`: a repeat carrying the
         // same token answers with the resource the first call created, not a second one —
-        // and, while that first create is still in flight, is the racer AWS refuses with
-        // `ConflictException` (see [`crate::state::IDEMPOTENT_CREATE_IN_FLIGHT`]). A repeat
-        // under a token that already created a DIFFERENT partnership is the other
-        // conflict, which [`request_digest`] is what tells apart.
+        // and, while the request that holds that token has not answered yet, is the racer
+        // AWS refuses with `ConflictException`. A repeat under a token that already
+        // created a DIFFERENT partnership is the other conflict, which [`request_digest`]
+        // is what tells apart.
+        //
+        // PHASE 1, under the lock: CLAIM the token — one atomic check-and-insert
+        // ([`crate::state::ComAmazonawsB2biB2biState::claim_idempotency`]), so of any
+        // number of requests sharing a token exactly one gets it and the rest are answered
+        // rather than minting. Which answer a duplicate gets depends only on whether the
+        // request it duplicates has finished, never on how long ago it did.
         let digest = request_digest(&input);
         let idempotency_key = input
             .client_token
             .as_deref()
             .map(|token| crate::state::idempotency_key("partnership", token));
-        if let Some(key) = idempotency_key.as_deref() {
-            match state.replay(key, ::std::time::Instant::now()) {
+        let mut claim = None;
+        if let Some(key) = idempotency_key {
+            let mut state = store.lock();
+            match state.claim_idempotency(&key) {
                 Some(crate::state::TokenReplay::InFlight) => {
                     return Err(CreatePartnershipErrorModeled::ConflictException(
                         ConflictException {
@@ -338,10 +344,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         }
                         return Ok(stored_partnership_response(existing));
                     }
+                    // The token settled on a partnership this store no longer holds, so
+                    // there is nothing to replay: this request takes the token over.
+                    state.reclaim_idempotency(&key);
                 }
                 None => {}
             }
+            drop(state);
+            // Built with the lock released: the claim's `Drop` takes it, and frees the
+            // token on every exit from here that mints nothing.
+            claim = Some(crate::state::IdempotencyClaim::held(store.clone(), key));
         }
+
+        // PHASE 2, under the lock: judge the request against the store and persist it. The
+        // claim stands across both holds, so a duplicate arriving while this request is
+        // answered is refused rather than minting a second partnership.
+        let mut state = store.lock();
 
         // A partnership is created UNDER a profile and BOUND to a set of capabilities,
         // so every id it names has to resolve in this service's store: an unknown id is
@@ -409,9 +427,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .partnerships
             .insert(partnership_id.clone(), partnership);
         state.partnership_order.push(partnership_id.clone());
-        if let Some(key) = idempotency_key {
-            state.record_idempotency(key, &partnership_id);
+        // The claim becomes the partnership it minted, under this same hold: the record
+        // and the token a later repeat replays it through become visible together.
+        if let Some(claim) = claim.as_mut() {
+            claim.settle(&mut state, &partnership_id);
         }
+        // `state` is dropped before `claim` (it is declared after it), so the claim's
+        // `Drop` does not take a lock this scope still holds.
         Ok(response)
     }
 }

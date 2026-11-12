@@ -453,8 +453,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
-        let mut state = store.lock();
-
         // `clientToken` is this operation's `@idempotencyToken`: a repeat carrying the
         // same token answers with the transformer the first call created, not a second one.
         // The model's prose calls the member "Reserved for future use", but the trait and
@@ -463,14 +461,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // sharing one token yield exactly ONE transformer, the losing racers are refused
         // with `ConflictException`, and a replay issued after the original request
         // completed answers with the original transformerId) both say it dedupes, so the
-        // trait wins. Lookup and insert happen under one hold of the state lock, so
-        // concurrent racers sharing a token cannot each mint one.
+        // trait wins.
         //
-        // The two arms of that recording are the two states a remembered token can be in,
-        // which is what `replay` reports: the create a token started is IN FLIGHT for
-        // [`crate::state::IDEMPOTENT_CREATE_IN_FLIGHT`] — a duplicate inside that span is
-        // the racer that lost, refused with the modelled `ConflictException` (409) — and
-        // settled after it, when a duplicate answers with the transformer it minted.
+        // PHASE 1, under the lock: CLAIM the token. The claim is one atomic
+        // check-and-insert ([`crate::state::ComAmazonawsB2biB2biState::claim_idempotency`]),
+        // so of any number of requests sharing a token exactly one gets it and the rest
+        // are answered rather than minting: the duplicate of a request that has not
+        // answered yet is the racer that lost, refused with the modelled
+        // `ConflictException` (409), and the duplicate of one that HAS answered replays
+        // the transformer it minted. Which of the two a duplicate gets depends only on
+        // whether the request it duplicates has finished — never on how long ago it did.
         //
         // A SETTLED token used again for a DIFFERENT request is the other conflict a token
         // can produce, and the digest below is what tells the two apart: the same request
@@ -480,8 +480,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .client_token
             .as_deref()
             .map(|token| crate::state::idempotency_key("transformer", token));
-        if let Some(key) = idempotency_key.as_deref() {
-            match state.replay(key, ::std::time::Instant::now()) {
+        let mut claim = None;
+        if let Some(key) = idempotency_key {
+            let mut state = store.lock();
+            match state.claim_idempotency(&key) {
                 Some(crate::state::TokenReplay::InFlight) => {
                     return Err(CreateTransformerErrorModeled::ConflictException(
                         ConflictException {
@@ -497,10 +499,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         }
                         return Err(token_already_used(existing));
                     }
+                    // The token settled on a transformer this store no longer holds, so
+                    // there is nothing to replay: this request takes the token over.
+                    state.reclaim_idempotency(&key);
                 }
                 None => {}
             }
+            drop(state);
+            // Built with the lock released: the claim's `Drop` takes it, and frees the
+            // token on every exit from here that mints nothing.
+            claim = Some(crate::state::IdempotencyClaim::held(store.clone(), key));
         }
+
+        // PHASE 2, under the lock: judge the request against the store and persist it. The
+        // claim taken above stands across both holds, so a duplicate that arrives while
+        // this request is being answered is refused rather than minting a second
+        // transformer.
+        let mut state = store.lock();
 
         // Residency bound: this store holds at most `MAX_RECORDS_PER_STORE` transformers,
         // so repeated creates cannot grow the emulator's memory without limit. Checked
@@ -544,9 +559,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .transformers
             .insert(transformer_id.clone(), transformer);
         state.transformer_order.push(transformer_id.clone());
-        if let Some(key) = idempotency_key {
-            state.record_idempotency(key, &transformer_id);
+        // The claim becomes the transformer it minted, under this same hold: the record
+        // and the token a later repeat replays it through become visible together.
+        if let Some(claim) = claim.as_mut() {
+            claim.settle(&mut state, &transformer_id);
         }
+        // `state` is dropped before `claim` (it is declared after it), so the claim's
+        // `Drop` does not take a lock this scope still holds.
         Ok(response)
     }
 }

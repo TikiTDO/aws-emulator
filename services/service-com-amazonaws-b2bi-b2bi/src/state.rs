@@ -106,28 +106,6 @@ pub const MAX_PAGE_SIZE: usize = 100;
 /// and token-resume scans walk at most this many ids).
 pub const MAX_RECORDS_PER_STORE: usize = 1_000;
 
-/// How long the create an `@idempotencyToken` started reports as still IN FLIGHT.
-///
-/// AWS answers a duplicate of an in-flight request with `ConflictException` and replays
-/// the original resource only once that request has completed (recorded for
-/// `CreateTransformer` by trace `b2bi.create-transformer-idempotent-token-concurrent-dedup`:
-/// of N concurrent creates sharing one token exactly one resource is minted, the losing
-/// racers are refused with `ConflictException`, and a replay issued AFTER the original
-/// request completed answers with the id it minted). A create is served here in
-/// microseconds, so "while the first request runs" would be a window no concurrent client
-/// could ever observe: the create a token started therefore reports in flight for this
-/// span, and a caller racing the original sees that transient state.
-///
-/// The span is the one this emulator holds every transient state it owes the clock for, so
-/// a caller acting the instant it has the first answer still observes it — a window shorter
-/// than the gap between two of a client's own calls is no transient state at all, and the
-/// refusal that belongs to it would be served or not depending on how loaded the host is.
-/// The other half of that recording is reached by waiting it out: once the span has passed
-/// the same token replays the resource it minted. Nothing sleeps for it — the due instant
-/// is stored with the remembered token and compared when the next call reads it
-/// ([`ComAmazonawsB2biB2biState::replay`]).
-pub const IDEMPOTENT_CREATE_IN_FLIGHT: Duration = Duration::from_secs(3);
-
 /// How long after `StartTransformerJob` a transformer job reports `running`.
 ///
 /// The job's work is done by the call that started it, but AWS answers that call with a
@@ -141,7 +119,7 @@ pub const TRANSFORMER_JOB_RUNNING_FOR: Duration = Duration::from_millis(250);
 ///
 /// Each distinct caller-chosen `clientToken` adds one entry, so the map is capped and
 /// the oldest entry is evicted first
-/// ([`ComAmazonawsB2biB2biState::record_idempotency`]); deleting a resource also drops
+/// ([`ComAmazonawsB2biB2biState::claim_idempotency`]); deleting a resource also drops
 /// the entries that pointed at it
 /// ([`ComAmazonawsB2biB2biState::forget_idempotency_for`]), so the map has a release
 /// path as well as a ceiling.
@@ -304,23 +282,22 @@ impl TransformerJob {
     }
 }
 
-/// What a remembered `@idempotencyToken` minted, and when that create settled.
-#[derive(Debug, Clone)]
-pub struct IdempotentCreate {
-    /// The id of the resource the first call carrying this token created.
-    pub resource_id: String,
-    /// When the create stops reporting as in flight — see
-    /// [`IDEMPOTENT_CREATE_IN_FLIGHT`].
-    pub settles_at: Instant,
-}
-
-/// What a create carrying an already-remembered `@idempotencyToken` answers.
+/// What a create carrying an already-claimed `@idempotencyToken` answers — the state of
+/// the one request that holds that token.
+///
+/// A token is CLAIMED by the request that first carries it, for exactly as long as that
+/// request is being processed ([`ComAmazonawsB2biB2biState::claim_idempotency`]), and the
+/// claim is then replaced by what it minted
+/// ([`ComAmazonawsB2biB2biState::settle_idempotency`]) or dropped if it minted nothing
+/// ([`ComAmazonawsB2biB2biState::release_idempotency`]). So the two states below are the
+/// two a duplicate can find, and which one it finds depends on whether the request it
+/// duplicates has answered — never on how much time has passed since it did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenReplay {
-    /// The create this token started has not settled: a duplicate is the racer that lost
-    /// it, which AWS refuses with `ConflictException`.
+    /// The request that claimed this token is still in flight: a duplicate is the racer
+    /// that lost it, which AWS refuses with `ConflictException` ([`CLIENT_TOKEN_IN_FLIGHT`]).
     InFlight,
-    /// The create settled, so a duplicate answers with the resource it minted.
+    /// That request completed, so a duplicate answers with the resource it minted.
     Completed(String),
 }
 
@@ -376,10 +353,10 @@ pub struct ComAmazonawsB2biB2biState {
     /// `transformer_jobs` in start order, so the oldest job is the one evicted once the
     /// store is full.
     pub transformer_job_order: VecDeque<String>,
-    /// `@idempotencyToken` replay: [`idempotency_key`] -> what the first call with that
-    /// token created, and when that create settled. Bounded by
-    /// [`MAX_IDEMPOTENCY_ENTRIES`].
-    pub idempotency: HashMap<String, IdempotentCreate>,
+    /// `@idempotencyToken` claims: [`idempotency_key`] -> the state of the ONE request
+    /// holding that token — in flight while it is being processed, then the resource it
+    /// minted. Bounded by [`MAX_IDEMPOTENCY_ENTRIES`].
+    pub idempotency: HashMap<String, TokenReplay>,
     /// The order [`idempotency`](Self::idempotency)'s keys were recorded in, so the
     /// oldest is the one evicted once the map is full.
     pub idempotency_order: VecDeque<String>,
@@ -426,18 +403,61 @@ impl ComAmazonawsB2biB2biState {
             .find(|capability_id| !self.capabilities.contains_key(*capability_id))
     }
 
-    /// Remember that `key` minted `id`, evicting the oldest remembered token once
+    /// CLAIM `key` for the request about to run: ONE atomic check-and-insert, so of any
+    /// number of requests sharing a token exactly one gets the claim.
+    ///
+    /// `None` means the claim is this caller's — nothing held the token, and it now reads
+    /// as [`TokenReplay::InFlight`] until that caller
+    /// [`settle_idempotency`](Self::settle_idempotency)s or
+    /// [`release_idempotency`](Self::release_idempotency)s it. Otherwise the state the
+    /// token is already in is returned, and the caller answers it rather than minting:
+    /// in flight is the racer that lost ([`CLIENT_TOKEN_IN_FLIGHT`]), completed is the
+    /// replay.
+    ///
+    /// Must be called under the same hold of the state lock as the checks and the mint it
+    /// guards, which is what makes a duplicate either see the claim or wait for the lock,
+    /// and never slip between a lookup and an insert.
+    pub fn claim_idempotency(&mut self, key: &str) -> Option<TokenReplay> {
+        if let Some(held) = self.idempotency.get(key) {
+            return Some(held.clone());
+        }
+        self.remember(key.to_string(), TokenReplay::InFlight);
+        None
+    }
+
+    /// What the token `key` reads as, or `None` when nothing holds it.
+    pub fn replay(&self, key: &str) -> Option<TokenReplay> {
+        self.idempotency.get(key).cloned()
+    }
+
+    /// SETTLE the claim on `key`: the request that held it completed, minting `id`, so
+    /// every later call carrying that token replays `id` instead of being refused.
+    pub fn settle_idempotency(&mut self, key: &str, id: &str) {
+        self.remember(key.to_string(), TokenReplay::Completed(id.to_string()));
+    }
+
+    /// RELEASE the claim on `key` without a resource: the request that held it minted
+    /// nothing (it was refused, or interrupted), so the token is free for a corrected
+    /// retry rather than naming a resource that does not exist.
+    pub fn release_idempotency(&mut self, key: &str) {
+        self.idempotency.remove(key);
+        self.idempotency_order.retain(|held| held != key);
+    }
+
+    /// Claim `key` for the request that is here even though the token already settled —
+    /// on a resource this store no longer holds, so there is nothing to replay and the
+    /// request mints afresh. Answers with the claim in the caller's hands, exactly as
+    /// [`claim_idempotency`](Self::claim_idempotency) does for a free token.
+    pub fn reclaim_idempotency(&mut self, key: &str) {
+        self.release_idempotency(key);
+        self.remember(key.to_string(), TokenReplay::InFlight);
+    }
+
+    /// Hold `state` under `key`, evicting the oldest held token once
     /// [`MAX_IDEMPOTENCY_ENTRIES`] are held — so a caller cannot grow this map without
     /// limit by sending a fresh `clientToken` on every request.
-    ///
-    /// The record reports the create as in flight for [`IDEMPOTENT_CREATE_IN_FLIGHT`]
-    /// from here, which is what [`replay`](Self::replay) reads.
-    pub fn record_idempotency(&mut self, key: String, id: &str) {
-        let record = IdempotentCreate {
-            resource_id: id.to_string(),
-            settles_at: Instant::now() + IDEMPOTENT_CREATE_IN_FLIGHT,
-        };
-        if self.idempotency.insert(key.clone(), record).is_none() {
+    fn remember(&mut self, key: String, state: TokenReplay) {
+        if self.idempotency.insert(key.clone(), state).is_none() {
             self.idempotency_order.push_back(key);
         }
         while self.idempotency_order.len() > MAX_IDEMPOTENCY_ENTRIES {
@@ -445,19 +465,6 @@ impl ComAmazonawsB2biB2biState {
                 self.idempotency.remove(&oldest);
             }
         }
-    }
-
-    /// What a create carrying the token `key` answers at `now`: nothing when the token is
-    /// not remembered, [`TokenReplay::InFlight`] while the create it started is still in
-    /// flight, and the id it minted once that create has settled.
-    pub fn replay(&self, key: &str, now: Instant) -> Option<TokenReplay> {
-        self.idempotency.get(key).map(|record| {
-            if now < record.settles_at {
-                TokenReplay::InFlight
-            } else {
-                TokenReplay::Completed(record.resource_id.clone())
-            }
-        })
     }
 
     /// Remember `job` as a run of its transformer, evicting the oldest remembered job
@@ -551,15 +558,84 @@ impl ComAmazonawsB2biB2biState {
     /// deleted: a replay of that token mints a fresh resource anyway, so keeping the
     /// entry would hold memory for a resource that no longer exists.
     pub fn forget_idempotency_for(&mut self, id: &str) {
-        self.idempotency.retain(|_, record| record.resource_id != id);
+        self.idempotency
+            .retain(|_, held| *held != TokenReplay::Completed(id.to_string()));
         let remembered = &self.idempotency;
         self.idempotency_order
             .retain(|key| remembered.contains_key(key));
     }
 }
 
-/// The `ConflictException` message for a create whose `clientToken` names a create that
-/// has not settled yet: the caller is the racer that lost the in-flight race, and the
+/// The claim ONE request holds on an `@idempotencyToken` while it runs, released on drop.
+///
+/// A create that cannot finish under a single hold of the state lock — because it has to
+/// call another service to provision what it is about to persist — would otherwise let a
+/// duplicate carrying the same token in beside it, and two resources would be minted for
+/// one token. The claim closes that: it is taken by the atomic
+/// [`ComAmazonawsB2biB2biState::claim_idempotency`] check-and-insert in the same hold as
+/// the lookup, so a duplicate that arrives while the claim stands is refused with
+/// `ConflictException` ([`CLIENT_TOKEN_IN_FLIGHT`]), and it is replaced by the minted id
+/// through [`settle`](Self::settle).
+///
+/// `Drop` releases an UNSETTLED claim, so the token goes free on every exit that mints
+/// nothing — the refusal, a panic the server contains, and the handler's future being
+/// dropped at an `.await` (a disconnected client) — and a corrected retry carrying the
+/// same token is served rather than refused for good.
+///
+/// `Drop` takes the state lock, so a claim must not be dropped while a
+/// [`::engine::ServiceState::lock`] guard is alive in the same scope.
+pub struct IdempotencyClaim {
+    store: ::engine::ServiceState<ComAmazonawsB2biB2biState>,
+    key: String,
+    settled: bool,
+}
+
+impl ::std::fmt::Debug for IdempotencyClaim {
+    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        formatter
+            .debug_struct("IdempotencyClaim")
+            .field("key", &self.key)
+            .field("settled", &self.settled)
+            .finish_non_exhaustive()
+    }
+}
+
+impl IdempotencyClaim {
+    /// The claim on `key` that [`ComAmazonawsB2biB2biState::claim_idempotency`] just
+    /// granted, which this guard is now responsible for ending.
+    ///
+    /// Built with the state lock ALREADY RELEASED: this guard's `Drop` takes it.
+    pub fn held(store: ::engine::ServiceState<ComAmazonawsB2biB2biState>, key: String) -> Self {
+        Self {
+            store,
+            key,
+            settled: false,
+        }
+    }
+
+    /// The key this claim holds, for the handler that settles it under its own lock hold.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// Replace the claim with the id the request minted, under `state` — the caller's own
+    /// hold of the lock, so the resource and its token become visible together.
+    pub fn settle(&mut self, state: &mut ComAmazonawsB2biB2biState, id: &str) {
+        state.settle_idempotency(&self.key, id);
+        self.settled = true;
+    }
+}
+
+impl Drop for IdempotencyClaim {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.store.lock().release_idempotency(&self.key);
+        }
+    }
+}
+
+/// The `ConflictException` message for a create whose `clientToken` is held by a request
+/// that has not answered yet: the caller is the racer that lost the in-flight race, and the
 /// request it duplicated is the one that mints the resource.
 ///
 /// ONE fixed sentence, the same for every create this service offers and carrying nothing
