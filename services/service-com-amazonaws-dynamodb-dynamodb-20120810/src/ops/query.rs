@@ -728,6 +728,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             index.as_ref(),
             units,
         );
+        // WHICH throughput series these units are counted into is the line of
+        // `ConsumedCapacity` this response bills them to
+        // ([`crate::state::consumed_capacity_metrics`]): a global index's own series when the
+        // query read one, the table's otherwise. Taken as an owned name here, while the index
+        // is still borrowed from the table.
+        let billed_index: Option<String> = index
+            .as_ref()
+            .filter(|index| index.global)
+            .map(|index| index.name.to_string());
         // The read is ADMITTED against the read capacity the table is provisioned for:
         // the units it consumes are the ones this response bills — every item the page
         // read, filtered or not — and a read past that capacity is refused rather than
@@ -737,7 +746,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if let Err(throttle) = store
             .active_table_mut(&region, &name, now)
             .map_err(lift)?
-            .admit_read(units, now)
+            .admit_read_from(billed_index.as_deref(), units, now)
         {
             // The key activity of a read refused for exceeding the table's throughput: the
             // partition the condition pinned was THROTTLED.

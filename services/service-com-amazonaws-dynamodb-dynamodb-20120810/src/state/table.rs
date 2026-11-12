@@ -1441,19 +1441,47 @@ impl Table {
     /// A read the budget cannot cover takes nothing from it, so a throttled read is not
     /// charged for work it was refused.
     pub fn admit_read(&mut self, units: f64, now: SystemTime) -> Result<(), ReadThrottle> {
+        self.admit_read_from(None, units, now)
+    }
+
+    /// [`Self::admit_read`] for a read SERVED FROM a secondary index: `global_index` names the
+    /// GLOBAL secondary index the units were billed to, and is `None` for a read of the table
+    /// itself or of a LOCAL secondary index.
+    ///
+    /// The capacity comes out of the same place either way — an index of a table in this store
+    /// has no budget of its own — but WHICH series the units are counted into follows the line
+    /// of `ConsumedCapacity` that itemised them
+    /// ([`crate::state::consumed_capacity_metrics`]): a global index's units are the index's,
+    /// while a local index draws on the table's throughput and is counted with it.
+    pub fn admit_read_from(
+        &mut self,
+        global_index: Option<&str>,
+        units: f64,
+        now: SystemTime,
+    ) -> Result<(), ReadThrottle> {
         let Some(provisioned) = self.provisioned_read_rate() else {
             // On-demand: there is no capacity to exceed, and the read still consumed the
             // units the response reports, so they are counted either way.
-            self.pending_consumed.charge(Consumed::Read, units, now);
+            self.charge_read(global_index, units, now);
             return Ok(());
         };
         if self.read_budget.take(provisioned, units, now) {
             // See [`Self::admit_write`]: the units a served read consumed are the table's own
             // throughput metric, counted where the capacity is taken.
-            self.pending_consumed.charge(Consumed::Read, units, now);
+            self.charge_read(global_index, units, now);
             Ok(())
         } else {
             Err(ReadThrottle::TableProvisioned)
+        }
+    }
+
+    /// Count the units a served read consumed into the series that read billed them to.
+    fn charge_read(&mut self, global_index: Option<&str>, units: f64, now: SystemTime) {
+        match global_index {
+            Some(index) => self
+                .pending_consumed
+                .charge_global_index(Consumed::Read, index, units, now),
+            None => self.pending_consumed.charge(Consumed::Read, units, now),
         }
     }
 
@@ -1533,11 +1561,12 @@ impl Table {
         }
         self.key_write_budgets
             .take(partition, capacity.table, now);
-        // What a request consumed is what this service publishes as the table's own
-        // throughput metric ([`crate::state::consumed_capacity_metrics`]): counted here,
-        // where the capacity is taken, so every item write this store admits is in the
-        // series whichever operation made it.
-        self.pending_consumed.charge(Consumed::Write, total, now);
+        // What a request consumed is what this service publishes as the table's throughput
+        // metrics ([`crate::state::consumed_capacity_metrics`]): counted here, where the
+        // capacity is taken, so every item write this store admits is in the series whichever
+        // operation made it — the table's own units in the table's series and each global
+        // secondary index's in that index's, exactly as this write itemises them.
+        self.pending_consumed.charge_write(capacity, now);
         Ok(())
     }
 
@@ -1641,7 +1670,7 @@ impl Table {
             .take_borrowing(partition, capacity.table, now);
         // See [`Self::admit_item_write`]: a write served by borrowing consumed its units
         // just the same.
-        self.pending_consumed.charge(Consumed::Write, total, now);
+        self.pending_consumed.charge_write(capacity, now);
         Ok(())
     }
 
