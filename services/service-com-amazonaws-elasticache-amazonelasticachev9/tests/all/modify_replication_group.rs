@@ -245,8 +245,8 @@ async fn a_setting_the_pending_shape_cannot_hold_is_applied_at_once_and_read_bac
             // "You can upgrade to a newer engine version": a group created on an
             // older published version takes a newer one.
             case: "upgraded to a newer engine version",
-            extra: &[("EngineVersion", "6.2.6")],
-            modify: &[("EngineVersion", "7.0.7")],
+            extra: &[("EngineVersion", "6.2")],
+            modify: &[("EngineVersion", "7.0")],
             expected: &[("ReplicationGroup/Engine", "redis")],
         },
         AppliedCase {
@@ -927,7 +927,7 @@ async fn a_request_this_service_cannot_satisfy_is_refused_with_its_modelled_erro
         (
             "an engine version downgrade",
             "plain-rg",
-            &[("EngineVersion", "6.2.6")],
+            &[("EngineVersion", "6.2")],
             400,
             "InvalidParameterCombination",
         ),

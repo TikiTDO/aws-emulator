@@ -10,8 +10,11 @@
 //! change type; a parameter whose value depends on the cache node type is
 //! reported among the cache-node-type-specific parameters with one value per
 //! node type the service publishes; the answer is paged at the `MaxRecords`
-//! window the member documents with a resumable `Marker`; and a family name the
-//! service publishes no catalog for is refused with `InvalidParameterValue`.
+//! window the member documents with a resumable `Marker` — over
+//! `EngineDefaults.Parameters`, which are this operation's paginated items,
+//! while the cache-node-type-specific list comes whole with every page; and a
+//! family name the service publishes no catalog for is refused with
+//! `InvalidParameterValue`.
 //!
 //! Every assertion goes over the wire through the same router the production
 //! emulator mounts, reusing the harness in [`crate::cache_cluster_lifecycle`];
@@ -35,7 +38,7 @@ const FAMILY_CHAINS: [&[&str]; 2] = [
     &["memcached1.4", "memcached1.5", "memcached1.6"],
     &[
         "redis2.6", "redis2.8", "redis3.2", "redis4.0", "redis5.0", "redis6.x", "redis7",
-        "valkey7", "valkey8",
+        "valkey7", "valkey8", "valkey9",
     ],
 ];
 
@@ -83,6 +86,31 @@ fn reported_names(reply: &Reply) -> Vec<String> {
         .collect()
 }
 
+/// The names of `family`'s parameters that the `MaxRecords` window PAGES: the
+/// plain ones, which are the operation's paginated items
+/// (`smithy_query(query="operation",
+/// operation="DescribeEngineDefaultParameters")`: `items
+/// EngineDefaults.Parameters`).
+fn paged_catalog(family: &str) -> BTreeSet<String> {
+    state::family_default_parameters(family)
+        .expect("a published family has a catalog")
+        .values()
+        .filter(|parameter| !parameter.is_node_type_specific())
+        .map(|parameter| parameter.name.clone())
+        .collect()
+}
+
+/// The names of `family`'s parameters that the window does NOT page: the
+/// cache-node-type-specific ones, which every page reports in full.
+fn unpaged_catalog(family: &str) -> Vec<String> {
+    state::family_default_parameters(family)
+        .expect("a published family has a catalog")
+        .values()
+        .filter(|parameter| parameter.is_node_type_specific())
+        .map(|parameter| parameter.name.clone())
+        .collect()
+}
+
 /// The text of `field` on the plain parameter `name`, or `None` when the reply
 /// does not report that field for it (an absent element also reads as `None`:
 /// the empty default of `notify-keyspace-events` carries no text).
@@ -104,7 +132,10 @@ fn plain_field<'a>(reply: &'a Reply, name: &str, field: &str) -> Option<&'a str>
         .map(|(_, text)| text.as_str())
 }
 
-/// The whole catalog of `family`, walked page by page at `page_size`.
+/// The PAGED parameters of `family`, walked page by page at `page_size`.
+///
+/// Every page is also held to the rule that the cache-node-type-specific list
+/// is not paged: it is reported whole beside each window of plain parameters.
 async fn walk(emulator: &Emulator, family: &str, page_size: &str) -> Vec<String> {
     let mut seen: Vec<String> = Vec::new();
     let mut marker: Option<String> = None;
@@ -120,7 +151,14 @@ async fn walk(emulator: &Emulator, family: &str, page_size: &str) -> Vec<String>
             "case {family} page {pages}: must succeed, got {} {}",
             reply.status, reply.body
         );
-        seen.extend(reported_names(&reply));
+        assert_eq!(
+            node_type_specific_names(&reply),
+            unpaged_catalog(family),
+            "case {family}@{page_size} page {pages}: every page reports the whole \
+             cache-node-type-specific list, got {}",
+            reply.body
+        );
+        seen.extend(plain_names(&reply).into_iter().map(str::to_string));
         pages += 1;
         assert!(
             pages <= 20,
@@ -576,11 +614,11 @@ async fn pages_are_bounded_resumable_and_cover_the_whole_catalog() {
     let emulator = Emulator::new();
 
     // `redis7` carries more parameters than the smallest page this service
-    // serves, so it is the family the page window shows on.
+    // serves, so it is the family the page window shows on. The window pages
+    // the PLAIN parameters only — they are this operation's paginated items —
+    // so the total it is held against is their count.
     let family = "redis7";
-    let total = state::family_default_parameters(family)
-        .expect("a published family has a catalog")
-        .len();
+    let total = paged_catalog(family).len();
     assert!(
         total > 20,
         "case {family}: this suite needs a catalog larger than the smallest page, got {total}"
@@ -605,11 +643,20 @@ async fn pages_are_bounded_resumable_and_cover_the_whole_catalog() {
                     "case MaxRecords={max_records}: must be accepted, got {} {}",
                     reply.status, reply.body
                 );
-                let page = reported_names(&reply);
+                let page = plain_names(&reply);
                 assert_eq!(
                     page.len(),
                     expected,
                     "case MaxRecords={max_records}: expected {expected} parameters, got {page:?}"
+                );
+                // The cache-node-type-specific list is not paged: whatever the
+                // window is, it comes whole.
+                assert_eq!(
+                    node_type_specific_names(&reply),
+                    unpaged_catalog(family),
+                    "case MaxRecords={max_records}: the cache-node-type-specific list is not \
+                     paged, got {}",
+                    reply.body
                 );
                 assert_eq!(
                     reply.marker().is_some(),
@@ -658,7 +705,7 @@ async fn pages_are_bounded_resumable_and_cover_the_whole_catalog() {
         .marker()
         .expect("a bounded first page of a larger catalog carries a marker")
         .to_string();
-    for other in ["memcached1.6", "redis2.6", "valkey8"] {
+    for other in ["memcached1.6", "redis2.6", "valkey9"] {
         let crossed = describe_defaults(&emulator, other, &[("Marker", &token)]).await;
         assert_eq!(
             crossed.status, 400,
@@ -685,20 +732,17 @@ async fn pages_are_bounded_resumable_and_cover_the_whole_catalog() {
         resumed.body
     );
 
-    // Walking the pages of a family visits every parameter of its catalog
-    // exactly once, whatever the page size — including the node-type-specific
-    // ones, which share the one `Marker` the output carries.
+    // Walking the pages of a family visits every PAGED parameter of its catalog
+    // exactly once, whatever the page size, while the node-type-specific list —
+    // which the `Marker` does not page — comes whole with every page (asserted
+    // inside the walk).
     for (family, page_size) in [
         ("redis7", "20"),
         ("redis7", "21"),
         ("memcached1.6", "20"),
-        ("valkey8", "20"),
+        ("valkey9", "20"),
     ] {
-        let expected: BTreeSet<String> = state::family_default_parameters(family)
-            .expect("a published family has a catalog")
-            .values()
-            .map(|parameter| parameter.name.clone())
-            .collect();
+        let expected = paged_catalog(family);
         let seen = walk(&emulator, family, page_size).await;
         let unique: BTreeSet<String> = seen.iter().cloned().collect();
         assert_eq!(

@@ -189,28 +189,54 @@ async fn the_published_catalog_is_reported_with_every_member_of_the_shape() {
         );
 
         // `Engine` is "the Elasticache engine to which the update applies" and
-        // `EngineVersion` "the Elasticache engine version".
+        // `EngineVersion` "the Elasticache engine version". A security update
+        // applies to one released version; an end-of-life update applies to a
+        // whole version LINE, reported as the engine and that line.
         assert!(
             state::ENGINES.contains(&update.engine.as_str()),
             "case {case}: {name} must apply to one of {:?}, got {:?}",
             state::ENGINES,
             update.engine
         );
-        assert_eq!(
-            update.engine_version,
-            state::default_engine_version(&update.engine),
-            "case {case}: {name} must apply to the version this service publishes for {}, got {:?}",
-            update.engine,
-            update.engine_version
-        );
+        if update.update_type == state::SERVICE_UPDATE_TYPE {
+            assert_eq!(
+                update.engine_version,
+                state::default_engine_version(&update.engine),
+                "case {case}: {name} must apply to the version this service publishes for {}, \
+                 got {:?}",
+                update.engine,
+                update.engine_version
+            );
+        } else {
+            let line = update
+                .engine_version
+                .strip_prefix(&format!("{} ", update.engine))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "case {case}: {name} must report the engine and the version line it \
+                         applies to, got {:?}",
+                        update.engine_version
+                    )
+                });
+            assert!(
+                state::parameter_group_family(&update.engine, line).is_some(),
+                "case {case}: {name} must apply to a version line this service publishes, got \
+                 {line:?}"
+            );
+        }
 
-        // `ServiceUpdateType` declares exactly one value, and
-        // `ServiceUpdateSeverity` four.
-        assert_eq!(
-            update.update_type,
+        // `ServiceUpdateType` is published in two spellings — the modelled
+        // `security-update` and the end-of-life update beside it — and
+        // `ServiceUpdateSeverity` carries one of four values.
+        assert!(
+            [
+                state::SERVICE_UPDATE_TYPE,
+                state::SERVICE_UPDATE_TYPE_ENGINE_MAJOR_VERSION,
+            ]
+            .contains(&update.update_type.as_str()),
+            "case {case}: {name} must be a {} or {} update, got {:?}",
             state::SERVICE_UPDATE_TYPE,
-            "case {case}: {name} must be a {} update, got {:?}",
-            state::SERVICE_UPDATE_TYPE,
+            state::SERVICE_UPDATE_TYPE_ENGINE_MAJOR_VERSION,
             update.update_type
         );
         assert!(

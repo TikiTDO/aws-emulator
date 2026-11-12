@@ -932,7 +932,14 @@ pub fn default_port(engine: &str) -> i32 {
 /// engine followed by its version line, which is why the line is `<major>` for
 /// Valkey and current Redis OSS, `<major>.<minor>` for Memcached and the older
 /// Redis OSS lines, and `6.x` for Redis OSS 6.
-pub const PARAMETER_GROUP_FAMILIES: [&str; 12] = [
+///
+/// `valkey9` is published beside them: the member's value list above does not
+/// name the current Valkey generation yet, while the default parameter groups
+/// ElastiCache answers `DescribeCacheParameterGroups` with do carry
+/// `default.valkey9` and `default.valkey9.cluster.on`. A family is published
+/// exactly when the engine line behind it is, and [`CACHE_ENGINE_VERSIONS`]
+/// offers that line.
+pub const PARAMETER_GROUP_FAMILIES: [&str; 13] = [
     "memcached1.4",
     "memcached1.5",
     "memcached1.6",
@@ -945,6 +952,7 @@ pub const PARAMETER_GROUP_FAMILIES: [&str; 12] = [
     "redis7",
     "valkey7",
     "valkey8",
+    "valkey9",
 ];
 
 /// The name prefix of the parameter group AWS itself provides for a family:
@@ -2061,6 +2069,15 @@ pub const SERVICE_UPDATE_EXPIRED: &str = "expired";
 /// `security-update`).
 pub const SERVICE_UPDATE_TYPE: &str = "security-update";
 
+/// The type an END-OF-LIFE update carries: the update that asks for an engine
+/// major version to be left before it stops being served.
+///
+/// `ServiceUpdateType`'s enum lists only [`SERVICE_UPDATE_TYPE`], while
+/// ElastiCache publishes this second type beside it; `ServiceUpdate$Type` is a
+/// plain string on the wire, so an update reports the type of its own kind
+/// rather than the one value the enum lists.
+pub const SERVICE_UPDATE_TYPE_ENGINE_MAJOR_VERSION: &str = "engine-major-version-update";
+
 /// The `EstimatedUpdateTime` every published update carries: "The estimated
 /// length of time the service update will take".
 ///
@@ -2128,6 +2145,47 @@ const PUBLISHED_UPDATES: [PublishedUpdate; 2] = [
         auto_update_after_recommended_apply_by_date: false,
     },
 ];
+
+/// The engine major versions ElastiCache publishes an END-OF-LIFE update for,
+/// as `(engine, how that engine is spelled in an update's name, the major
+/// version segment of the name, the engine version LINE the update applies
+/// to)`.
+///
+/// Redis OSS 6 is the line ElastiCache has announced the end of life of; the
+/// engine's name in an update's name is its published product name, which is
+/// why Redis OSS carries the `-oss` of it. A line added here is published the
+/// moment it is announced, one update per [`EOL_RESOURCE_KINDS`] entry, so the
+/// catalog states each end of life once instead of once per resource kind.
+const PUBLISHED_EOL_UPDATES: [(&str, &str, &str, &str); 1] =
+    [(DEFAULT_ENGINE, "redis-oss", "v6", "6.x")];
+
+/// The KINDS of resource an end-of-life update is published for, as the tail of
+/// its `ServiceUpdateName` and as the words its description names them by.
+///
+/// One update per kind, because the resources that run an engine version are
+/// carried onto a later major version by different operations — a cache cluster
+/// by `ModifyCacheCluster` and a replication group by `ModifyReplicationGroup` —
+/// so a client applies the update that names the kind of resource it holds.
+const EOL_RESOURCE_KINDS: [(&str, &str); 2] = [
+    ("cache-clusters", "cache clusters"),
+    ("replication-groups", "replication groups"),
+];
+
+/// The window an end-of-life update is published over, in whole days from the
+/// store's anchor, and the severity it carries.
+///
+/// Longer than a security update's ([`PUBLISHED_UPDATES`]): leaving a major
+/// version is a planned upgrade of the resources that run it rather than a
+/// patch, so the recommended apply-by date and the end date are further out.
+/// Like the security rows, only the DATES hang off the anchor — the names, the
+/// types and the severities are fixed by the catalog.
+const EOL_RELEASED_DAYS_BEFORE: u64 = 60;
+/// See [`EOL_RELEASED_DAYS_BEFORE`].
+const EOL_APPLY_BY_DAYS_AFTER_RELEASE: u64 = 180;
+/// See [`EOL_RELEASED_DAYS_BEFORE`].
+const EOL_END_DAYS_AFTER_RELEASE: u64 = 365;
+/// See [`EOL_RELEASED_DAYS_BEFORE`]; one of `ServiceUpdateSeverity`'s values.
+const EOL_SEVERITY: &str = "important";
 
 /// One published service update, as this emulator holds it.
 ///
@@ -2240,14 +2298,22 @@ pub struct SnapshotCopy {
 
 /// The service-update catalog as of `anchor`, keyed by `ServiceUpdateName`.
 ///
-/// One update per engine per row of [`PUBLISHED_UPDATES`], named
-/// `elasticache-<engine>-<slug>`: the service, the engine the update applies to
-/// and the row's own [`PublishedUpdate::slug`]. The name is FIXED by the
-/// catalog, so a store built at any instant publishes the same set of names and
-/// a name a client holds stays resolvable; only the DATES hang off `anchor`,
-/// which is what keeps the window shape a real account sees. A `BTreeMap` is
-/// what gives `DescribeServiceUpdates` the stable total order its `Marker`
-/// indexes into.
+/// Two kinds of update make it up, which is what gives
+/// `BatchApplyUpdateAction` / `DescribeUpdateActions` the names a client reads
+/// off this catalog:
+///
+/// * a SECURITY update per engine per row of [`PUBLISHED_UPDATES`], named
+///   `elasticache-<engine>-<slug>`: the service, the engine the update applies
+///   to and the row's own [`PublishedUpdate::slug`];
+/// * an END-OF-LIFE update per resource kind per row of
+///   [`PUBLISHED_EOL_UPDATES`], named
+///   `elasticache-<engine-name>-<major>-eol-<resource-kind>`.
+///
+/// Every name is FIXED by the catalog, so a store built at any instant
+/// publishes the same set of names and a name a client holds stays resolvable;
+/// only the DATES hang off `anchor`, which is what keeps the window shape a
+/// real account sees. A `BTreeMap` is what gives `DescribeServiceUpdates` the
+/// stable total order its `Marker` indexes into.
 pub fn published_service_updates(anchor: SystemTime) -> BTreeMap<String, ServiceUpdateRecord> {
     let mut catalog = BTreeMap::new();
     for row in &PUBLISHED_UPDATES {
@@ -2276,6 +2342,43 @@ pub fn published_service_updates(anchor: SystemTime) -> BTreeMap<String, Service
                         + DAY * u32::try_from(row.end_days_after_release).unwrap_or(u32::MAX),
                     auto_update_after_recommended_apply_by_date: row
                         .auto_update_after_recommended_apply_by_date,
+                    estimated_update_time: SERVICE_UPDATE_ESTIMATED_TIME.to_string(),
+                },
+            );
+        }
+    }
+    let eol_release_date = anchor
+        .checked_sub(DAY * u32::try_from(EOL_RELEASED_DAYS_BEFORE).unwrap_or(u32::MAX))
+        .unwrap_or(anchor);
+    for (engine, engine_in_name, major_in_name, version_line) in PUBLISHED_EOL_UPDATES {
+        for (kind_in_name, kind_words) in EOL_RESOURCE_KINDS {
+            let name =
+                format!("{ARN_NAMESPACE}-{engine_in_name}-{major_in_name}-eol-{kind_in_name}");
+            catalog.insert(
+                name.clone(),
+                ServiceUpdateRecord {
+                    service_update_name: name,
+                    engine: engine.to_string(),
+                    // "The Elasticache engine version to which the update
+                    // applies": an end-of-life update applies to a whole
+                    // version LINE rather than to one release, so the version
+                    // it reports is the engine and that line.
+                    engine_version: format!("{engine} {version_line}"),
+                    severity: EOL_SEVERITY.to_string(),
+                    update_type: SERVICE_UPDATE_TYPE_ENGINE_MAJOR_VERSION.to_string(),
+                    description: format!(
+                        "{engine} {version_line} is reaching end of life: upgrade your \
+                         {kind_words} to a later major version."
+                    ),
+                    release_date: eol_release_date,
+                    recommended_apply_by_date: eol_release_date
+                        + DAY * u32::try_from(EOL_APPLY_BY_DAYS_AFTER_RELEASE).unwrap_or(u32::MAX),
+                    end_date: eol_release_date
+                        + DAY * u32::try_from(EOL_END_DAYS_AFTER_RELEASE).unwrap_or(u32::MAX),
+                    // A major version upgrade changes what the resource runs,
+                    // so it is applied when the customer asks for it rather
+                    // than automatically once the apply-by date has passed.
+                    auto_update_after_recommended_apply_by_date: false,
                     estimated_update_time: SERVICE_UPDATE_ESTIMATED_TIME.to_string(),
                 },
             );

@@ -38,15 +38,23 @@ pub(super) const fn engine_version_row(
 /// of the published [`PARAMETER_GROUP_FAMILIES`], which is where its
 /// `CacheParameterGroupFamily` comes from.
 ///
-/// The version numbers themselves are this emulator's published catalog rather
-/// than a claim about what any one AWS region offers today; what the rest of the
-/// service relies on is the SHAPE of it — several version lines per engine,
-/// several versions per line, at least one version per published family, and a
-/// newest version per engine, which is the one [`default_engine_version`] hands
-/// a cluster that names none.
-pub const CACHE_ENGINE_VERSIONS: [PublishedEngineVersion; 32] = [
-    // The oldest Memcached version ElastiCache still offers, and the version
-    // `EngineVersion`'s own documentation uses as its example.
+/// The rows are the engine lines ElastiCache offers, from the oldest Memcached
+/// release it still serves to the current Valkey generation; what the rest of
+/// the service relies on beside them is the SHAPE of the catalog — several
+/// version lines per engine, several versions per line, at least one version per
+/// published family, and a newest version per engine, which is the one
+/// [`default_engine_version`] hands a cluster that names none.
+///
+/// A Memcached version and a Redis OSS version up to 5 are named by their patch
+/// release (`1.6.22`, `5.0.6`), while ElastiCache names a Redis OSS 6 or later
+/// version and every Valkey version by its LINE alone (`6.0`, `6.2`, `7.0`,
+/// `7.1`, `7.2`, `8.0`) — which is also the spelling a create or an upgrade has
+/// to name, so the catalog publishes those lines rather than a patch release
+/// behind them.
+pub const CACHE_ENGINE_VERSIONS: [PublishedEngineVersion; 33] = [
+    // The oldest Memcached version ElastiCache still offers.
+    engine_version_row("memcached", "1.4.5"),
+    // The version `EngineVersion`'s own documentation uses as its example.
     engine_version_row("memcached", "1.4.14"),
     engine_version_row("memcached", "1.4.24"),
     engine_version_row("memcached", "1.4.33"),
@@ -72,13 +80,15 @@ pub const CACHE_ENGINE_VERSIONS: [PublishedEngineVersion; 32] = [
     engine_version_row("redis", "5.0.4"),
     engine_version_row("redis", "5.0.5"),
     engine_version_row("redis", "5.0.6"),
-    engine_version_row("redis", "6.0.5"),
-    engine_version_row("redis", "6.2.5"),
-    engine_version_row("redis", "6.2.6"),
-    engine_version_row("redis", "7.0.7"),
+    engine_version_row("redis", "6.0"),
+    engine_version_row("redis", "6.2"),
+    engine_version_row("redis", "7.0"),
     engine_version_row("redis", "7.1"),
     engine_version_row("valkey", "7.2"),
     engine_version_row("valkey", "8.0"),
+    // The current Valkey generation, whose family is `valkey9` (see
+    // `PARAMETER_GROUP_FAMILIES`).
+    engine_version_row("valkey", "9.0"),
 ];
 
 /// How a published version's engine is described
@@ -131,8 +141,8 @@ pub fn engine_version_key(engine: &str, engine_version: &str) -> String {
 }
 
 /// True when `version` is a version the filter value `filter` asks for: the same
-/// version, or one in the version line it names (`6.2` names `6.2.5` and
-/// `6.2.6`).
+/// version, or one in the version line it names (`5.0` names `5.0.5` and
+/// `5.0.6`).
 ///
 /// `EngineVersion` is "the cache engine version to return" with the example
 /// `1.4.14`, and `DefaultOnly` speaks of "the specified engine or engine and
@@ -157,8 +167,8 @@ pub(super) fn latest_published_version(engine: &str) -> Option<&'static str> {
 
 /// True when the published catalog OFFERS `engine_version` for `engine`.
 ///
-/// A request may name a published version itself, or the version LINE one belongs to (`6.2`
-/// names `6.2.5` and `6.2.6`) — the same reading [`version_matches`] gives the describe's
+/// A request may name a published version itself, or the version LINE one belongs to (`5.0`
+/// names `5.0.5` and `5.0.6`) — the same reading [`version_matches`] gives the describe's
 /// own filter, so what a client may create on is exactly what
 /// `DescribeCacheEngineVersions` offers it. A version of ANOTHER engine, or one past what
 /// this engine publishes, is offered by nothing.

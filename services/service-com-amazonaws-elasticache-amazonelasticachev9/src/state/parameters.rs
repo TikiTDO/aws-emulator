@@ -81,8 +81,8 @@ pub(super) const ANY_MINOR: i32 = i32::MAX;
 /// catalog the family draws on. The version is the HIGHEST engine version the
 /// family's line covers, because a family carries every parameter any version on
 /// its line introduced: `redis6.x` covers Redis OSS 6.0 through 6.2, and
-/// `redis7` / `valkey7` / `valkey8` cover every minor of their major — see
-/// [`ANY_MINOR`].
+/// `redis7` / `valkey7` / `valkey8` / `valkey9` cover every minor of their
+/// major — see [`ANY_MINOR`].
 ///
 /// The family names are [`PARAMETER_GROUP_FAMILIES`], this service's published
 /// set; this table says what each of them MEANS to the parameter catalog.
@@ -99,6 +99,7 @@ pub const FAMILY_LINES: [(&str, &str, (i32, i32)); PARAMETER_GROUP_FAMILIES.len(
     ("redis7", PARAMETER_ENGINE_REDIS, (7, ANY_MINOR)),
     ("valkey7", PARAMETER_ENGINE_REDIS, (7, ANY_MINOR)),
     ("valkey8", PARAMETER_ENGINE_REDIS, (8, ANY_MINOR)),
+    ("valkey9", PARAMETER_ENGINE_REDIS, (9, ANY_MINOR)),
 ];
 
 /// The parameter catalog `family` draws on and the version its parameters are

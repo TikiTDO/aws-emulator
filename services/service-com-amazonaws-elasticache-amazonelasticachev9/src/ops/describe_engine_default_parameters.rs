@@ -225,13 +225,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             None => None,
         };
 
-        // `EngineDefaults` carries two parameter lists and ONE `Marker`, so a
-        // page is a window over both: the stored key order runs the plain
-        // parameters first and the node-type-specific ones after (see
-        // `state::ParameterRecord::page_key`), and each record of the page lands
-        // in the list its own kind belongs to.
+        // `EngineDefaults` carries two parameter lists and ONE `Marker`, and the
+        // `Marker` pages ONE of them: the operation is paginated on
+        // `EngineDefaults.Parameters` as its items
+        // (`smithy_query(query="operation",
+        // operation="DescribeEngineDefaultParameters")`: `paginated {inputToken
+        // Marker, outputToken EngineDefaults.Marker, items
+        // EngineDefaults.Parameters}`). So `MaxRecords` bounds the plain
+        // parameters, and the cache-node-type-specific ones are not paged at
+        // all: every page reports the family's whole node-type-specific list
+        // beside its window of parameters, because a client that reads a
+        // bounded page still has to learn what a node type fixes.
+        let page_node_type_specific: Vec<CacheNodeTypeSpecificParameter> = parameters
+            .values()
+            .filter(|parameter| parameter.is_node_type_specific())
+            .map(crate::state::ParameterRecord::to_node_type_specific)
+            .collect();
         let mut page_plain: Vec<Parameter> = Vec::new();
-        let mut page_node_type_specific: Vec<CacheNodeTypeSpecificParameter> = Vec::new();
         let mut marker = None;
         // A `Marker` carries the inclusive start key of its page, so the page is
         // a RANGE of the stored order rather than a scan of all of it.
@@ -240,17 +250,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             None => ::std::ops::Bound::Unbounded,
         };
         for (key, parameter) in parameters.range::<str, _>((start, ::std::ops::Bound::Unbounded)) {
-            if page_plain.len() + page_node_type_specific.len() == page_size {
+            if parameter.is_node_type_specific() {
+                continue;
+            }
+            if page_plain.len() == page_size {
                 // More records exist than `MaxRecords`, so the response carries
                 // the marker the next call resumes from.
                 marker = Some(crate::state::encode_marker(&marker_key(&family, key)));
                 break;
             }
-            if parameter.is_node_type_specific() {
-                page_node_type_specific.push(parameter.to_node_type_specific());
-            } else {
-                page_plain.push(parameter.to_modeled());
-            }
+            page_plain.push(parameter.to_modeled());
         }
 
         Ok(DescribeEngineDefaultParametersOutput {

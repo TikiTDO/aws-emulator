@@ -267,12 +267,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         // `CacheParameterGroupDetails` carries two parameter lists and ONE
-        // `Marker`, so a page is a window over both: the stored key order runs
-        // the plain parameters first and the node-type-specific ones after (see
-        // `state::ParameterRecord::page_key`), and each record of the page lands
-        // in the list its own kind belongs to.
+        // `Marker`, and the `Marker` pages ONE of them: the operation is
+        // paginated on `Parameters` as its items
+        // (`smithy_query(query="operation", operation="DescribeCacheParameters")`:
+        // `paginated {inputToken Marker, outputToken Marker, items
+        // Parameters}`). So `MaxRecords` bounds the plain parameters, and the
+        // cache-node-type-specific ones are not paged at all: every page
+        // reports the group's whole node-type-specific list beside its window of
+        // parameters, because a client that reads a bounded page still has to
+        // learn what a node type fixes.
+        //
+        // Whether this group reports the customer's value for a parameter or the
+        // engine's own is exactly what `Source` selects on, so the filter is
+        // applied to the source the GROUP reports it under rather than to the
+        // catalog row — in both lists.
+        let selected = |parameter: &crate::state::ParameterRecord| {
+            let set_value = group.set_value(&parameter.name);
+            source_filter.is_none_or(|source| source == parameter.source_in_group(set_value))
+        };
+        let page_node_type_specific: Vec<CacheNodeTypeSpecificParameter> = parameters
+            .values()
+            .filter(|parameter| parameter.is_node_type_specific() && selected(parameter))
+            .map(crate::state::ParameterRecord::to_node_type_specific)
+            .collect();
         let mut page_plain: Vec<Parameter> = Vec::new();
-        let mut page_node_type_specific: Vec<CacheNodeTypeSpecificParameter> = Vec::new();
         let mut marker = None;
         // A `Marker` carries the inclusive start key of its page, so the page is
         // a RANGE of the stored order rather than a scan of all of it.
@@ -281,25 +299,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             None => ::std::ops::Bound::Unbounded,
         };
         for (key, parameter) in parameters.range::<str, _>((start, ::std::ops::Bound::Unbounded)) {
-            // Whether this group reports the customer's value for a parameter or
-            // the engine's own is exactly what `Source` selects on, so the
-            // filter is applied to the source the GROUP reports it under rather
-            // than to the catalog row.
-            let set_value = group.set_value(&parameter.name);
-            if source_filter.is_some_and(|source| source != parameter.source_in_group(set_value)) {
+            if parameter.is_node_type_specific() || !selected(parameter) {
                 continue;
             }
-            if page_plain.len() + page_node_type_specific.len() == page_size {
+            if page_plain.len() == page_size {
                 // More records exist than `MaxRecords`, so the response carries
                 // the marker the next call resumes from.
                 marker = Some(crate::state::encode_marker(&marker_key(&group.name, key)));
                 break;
             }
-            if parameter.is_node_type_specific() {
-                page_node_type_specific.push(parameter.to_node_type_specific());
-            } else {
-                page_plain.push(parameter.to_modeled_in_group(set_value));
-            }
+            page_plain.push(parameter.to_modeled_in_group(group.set_value(&parameter.name)));
         }
 
         Ok(DescribeCacheParametersOutput {

@@ -55,12 +55,11 @@ const ENGINE_NAMING: [(&str, &str, &str); 3] = [
 /// One catalog-floor row: the engine, the oldest version the service offers for
 /// it, and a version it does not offer at all.
 ///
-/// Source: the engine lines ElastiCache publishes — Memcached starts at 1.4.14
-/// (the version `DescribeCacheEngineVersions$EngineVersion`'s own documentation
-/// uses as its example), Redis OSS at 2.6.13 and Valkey at 7.2 — so a lower
-/// version of the same line (1.4.5, 2.6.0, 7.0) is one no entry reports.
+/// Source: the engine lines ElastiCache publishes — Memcached starts at 1.4.5,
+/// Redis OSS at 2.6.13 and Valkey at 7.2 — so a lower version of the same line
+/// (1.4.4, 2.6.0, 7.0) is one no entry reports.
 const CATALOG_FLOOR: [(&str, &str, &str); 3] = [
-    ("memcached", "1.4.14", "1.4.5"),
+    ("memcached", "1.4.5", "1.4.4"),
     ("redis", "2.6.13", "2.6.0"),
     ("valkey", "7.2", "7.0"),
 ];
@@ -74,7 +73,7 @@ const CATALOG_FLOOR: [(&str, &str, &str); 3] = [
 /// CacheParameterGroupName=default.redis3.2.cluster.on"), so the families from
 /// that line onward publish one and the Memcached and pre-3.2 families — which
 /// cannot run cluster mode at all — do not.
-const CLUSTER_MODE_BY_FAMILY: [(&str, bool); 12] = [
+const CLUSTER_MODE_BY_FAMILY: [(&str, bool); 13] = [
     ("memcached1.4", false),
     ("memcached1.5", false),
     ("memcached1.6", false),
@@ -87,6 +86,7 @@ const CLUSTER_MODE_BY_FAMILY: [(&str, bool); 12] = [
     ("redis7", true),
     ("valkey7", true),
     ("valkey8", true),
+    ("valkey9", true),
 ];
 
 /// Every `CacheEngineVersion` a reply reports, as `(engine, version,

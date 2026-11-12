@@ -43,9 +43,11 @@ const REGION: &str = "us-east-1";
 /// (`smithy_query(query="doc", shape="CreateCacheParameterGroupMessage",
 /// member="CacheParameterGroupFamily")`: "Valid values are: valkey8 | valkey7 |
 /// memcached1.4 | memcached1.5 | memcached1.6 | redis2.6 | redis2.8 | redis3.2
-/// | redis4.0 | redis5.0 | redis6.x | redis7"), in the sorted order a describe
-/// reports them in.
-const FAMILIES: [&str; 12] = [
+/// | redis4.0 | redis5.0 | redis6.x | redis7"), plus `valkey9` — the family of
+/// the current Valkey generation, which that value list does not name yet while
+/// the default groups ElastiCache publishes do carry it — in the sorted order a
+/// describe reports them in.
+const FAMILIES: [&str; 13] = [
     "memcached1.4",
     "memcached1.5",
     "memcached1.6",
@@ -58,6 +60,7 @@ const FAMILIES: [&str; 12] = [
     "redis7",
     "valkey7",
     "valkey8",
+    "valkey9",
 ];
 
 /// The families whose default parameter group comes in BOTH forms: the plain
@@ -70,8 +73,8 @@ const FAMILIES: [&str; 12] = [
 /// CacheParameterGroupName=default.redis3.2.cluster.on"), so every family from
 /// that line onward publishes one and the Memcached and pre-3.2 families — which
 /// cannot run cluster mode at all — publish only the plain default.
-const CLUSTER_MODE_FAMILIES: [&str; 7] = [
-    "redis3.2", "redis4.0", "redis5.0", "redis6.x", "redis7", "valkey7", "valkey8",
+const CLUSTER_MODE_FAMILIES: [&str; 8] = [
+    "redis3.2", "redis4.0", "redis5.0", "redis6.x", "redis7", "valkey7", "valkey8", "valkey9",
 ];
 
 /// Every default parameter group this service publishes, in the sorted order a
@@ -693,7 +696,7 @@ async fn a_create_is_refused_without_persisting_anything() {
         (
             "a valkey line that is no family",
             "bad-family",
-            "valkey9",
+            "valkey10",
             400,
             "InvalidParameterValue",
         ),

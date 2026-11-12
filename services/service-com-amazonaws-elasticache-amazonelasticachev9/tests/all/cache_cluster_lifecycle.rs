@@ -194,10 +194,10 @@ async fn a_created_cluster_is_read_back_from_persisted_state() {
             extra: &[("Engine", "valkey"), ("Port", "7000")],
             stored_id: "valkey-cluster",
             engine: "valkey",
-            engine_version: "8.0",
+            engine_version: "9.0",
             port: "7000",
             num_cache_nodes: 1,
-            parameter_group: "default.valkey8",
+            parameter_group: "default.valkey9",
         },
     ];
 

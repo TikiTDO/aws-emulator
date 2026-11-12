@@ -8,7 +8,9 @@
 //! `Parameter$Source` `user` when the group holds a value for it and `system`
 //! when it reports the engine's own; the `Source` member selects the parameters
 //! of one source; the answer is paged at the `MaxRecords` window the member
-//! documents with a resumable `Marker`; and a group name the account does not
+//! documents with a resumable `Marker` — over the plain `Parameters`, which are
+//! this operation's paginated items, while the cache-node-type-specific list
+//! comes whole with every page; and a group name the account does not
 //! hold is refused with the modelled 404 `CacheParameterGroupNotFound`.
 //!
 //! Every assertion goes over the wire through the same router the production
@@ -103,6 +105,27 @@ pub(crate) fn names(reply: &Reply) -> Vec<String> {
         .collect()
 }
 
+/// The names in the PAGED list — the plain `Parameters`, which are this
+/// operation's paginated items (`smithy_query(query="operation",
+/// operation="DescribeCacheParameters")`: `items Parameters`).
+pub(crate) fn paged_names(reply: &Reply) -> Vec<String> {
+    reported(reply)
+        .into_iter()
+        .filter(|parameter| !parameter.node_type_specific)
+        .map(|parameter| parameter.name)
+        .collect()
+}
+
+/// The names in the list the `MaxRecords` window does NOT page: the
+/// cache-node-type-specific parameters, which every page carries in full.
+pub(crate) fn unpaged_names(reply: &Reply) -> Vec<String> {
+    reported(reply)
+        .into_iter()
+        .filter(|parameter| parameter.node_type_specific)
+        .map(|parameter| parameter.name)
+        .collect()
+}
+
 /// The parameter `name` as `reply` reports it.
 pub(crate) fn one(reply: &Reply, case: &str, name: &str) -> Reported {
     reported(reply)
@@ -179,25 +202,46 @@ fn catalog_names(family: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// The whole parameter list of `group`, walked page by page at `page_size`,
-/// with how many pages it took.
+/// The PAGED parameters of `group`, walked page by page at `page_size`, with
+/// how many pages it took.
+///
+/// Every page is also held to the rule that the cache-node-type-specific list is
+/// not paged: it comes whole beside each window of plain parameters.
 async fn walk(emulator: &Emulator, group: &str, page_size: &str) -> (Vec<String>, usize) {
     let window: usize = page_size.parse().expect("a page size");
     let mut seen: Vec<String> = Vec::new();
     let mut marker: Option<String> = None;
     let mut pages = 0;
+    let mut unpaged: Option<Vec<String>> = None;
     loop {
         let mut extra: Vec<(&str, &str)> = vec![("MaxRecords", page_size)];
         if let Some(token) = marker.as_deref() {
             extra.push(("Marker", token));
         }
         let reply = describe_ok(emulator, group, &extra).await;
-        let page = names(&reply);
+        let page = paged_names(&reply);
         pages += 1;
         assert!(
             pages <= 50,
             "case {group} at {page_size} per page: the walk must terminate, got {pages} pages"
         );
+        let on_this_page = unpaged_names(&reply);
+        match unpaged.as_ref() {
+            Some(expected) => assert_eq!(
+                &on_this_page, expected,
+                "case {group} page {pages}: every page reports the whole \
+                 cache-node-type-specific list, got {on_this_page:?}"
+            ),
+            None => {
+                assert!(
+                    !on_this_page.is_empty(),
+                    "case {group} page {pages}: the family publishes node-type-specific \
+                     parameters, so a page reports them, got {}",
+                    reply.body
+                );
+                unpaged = Some(on_this_page);
+            }
+        }
         let token = reply.marker().map(str::to_string);
         if token.is_some() {
             assert_eq!(
@@ -745,7 +789,7 @@ async fn the_source_member_selects_the_parameters_of_that_source() {
 async fn the_answer_is_paged_at_the_window_max_records_documents() {
     let emulator = Emulator::new();
     create_group(&emulator, CUSTOM_GROUP, "redis7").await;
-    let full = names(&describe_ok(&emulator, CUSTOM_GROUP, &[]).await);
+    let full = paged_names(&describe_ok(&emulator, CUSTOM_GROUP, &[]).await);
     // The smallest page the member allows has to be smaller than the list, or
     // nothing below pages at all.
     assert!(
@@ -832,7 +876,7 @@ async fn the_answer_is_paged_at_the_window_max_records_documents() {
     // The group's OWN marker resumes the walk where its page ended.
     let second = describe_ok(&emulator, CUSTOM_GROUP, &[("Marker", &token)]).await;
     assert_eq!(
-        names(&second),
+        paged_names(&second),
         full[20..].to_vec(),
         "the group's own marker must resume at the record after its page"
     );

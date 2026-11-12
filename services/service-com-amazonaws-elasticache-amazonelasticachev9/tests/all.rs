@@ -276,6 +276,12 @@ mod auth_token_refusal_wording;
 #[path = "all/serverless_cache_snapshot_export.rs"]
 mod serverless_cache_snapshot_export;
 
+// Appended for the same reason: the suite about the INVENTORY the read-only
+// reference catalogs publish (engine versions and their families, the default
+// parameter groups, the offering grid, both kinds of service update) and about
+// which of the two parameter lists a page bounds.
+#[path = "all/reference_catalog_inventory.rs"]
+mod reference_catalog_inventory;
 // Appended for the same reason: the cluster event-notification suite, which reads the
 // notifications a cluster's events are delivered as back through Amazon SNS, the service
 // that owns topics and their deliveries.

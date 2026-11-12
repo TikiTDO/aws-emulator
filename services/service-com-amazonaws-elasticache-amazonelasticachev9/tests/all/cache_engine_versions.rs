@@ -26,7 +26,7 @@ use crate::harness::{params, Emulator, Reply};
 /// Read through that constant rather than copied here, so the engine-version
 /// catalog and the parameter groups cannot be asserted against two different
 /// lists.
-const DOCUMENTED_FAMILIES: [&str; 12] = state::PARAMETER_GROUP_FAMILIES;
+const DOCUMENTED_FAMILIES: [&str; 13] = state::PARAMETER_GROUP_FAMILIES;
 
 /// One `CacheEngineVersion` element of a response, as the wire reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,8 +138,8 @@ impl FilterCase {
 /// The rule, restated here rather than borrowed from the implementation: a
 /// filter keeps a version whose engine and family equal the value it names
 /// (ignoring case, the engine being stored lowercase), and whose version is the
-/// one `EngineVersion` names or lies in the version line it names (`6.2` names
-/// `6.2.5` and `6.2.6`).
+/// one `EngineVersion` names or lies in the version line it names (`5.0` names
+/// `5.0.5` and `5.0.6`).
 fn selects(case: &FilterCase, row: &WireVersion) -> bool {
     case.engine
         .is_none_or(|engine| row.engine.eq_ignore_ascii_case(engine))
@@ -205,7 +205,7 @@ const FILTER_CASES: [FilterCase; 12] = [
         engine: None,
         family: Some("redis6.x"),
         engine_version: None,
-        must_report: &["6.0.5", "6.2.6"],
+        must_report: &["6.0", "6.2"],
         must_be_empty: false,
     },
     FilterCase {
@@ -244,8 +244,8 @@ const FILTER_CASES: [FilterCase; 12] = [
         name: "a whole version line",
         engine: None,
         family: None,
-        engine_version: Some("6.2"),
-        must_report: &["6.2.5", "6.2.6"],
+        engine_version: Some("5.0"),
+        must_report: &["5.0.5", "5.0.6"],
         must_be_empty: false,
     },
     FilterCase {
