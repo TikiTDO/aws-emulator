@@ -10398,6 +10398,7 @@ dependencies = [
  "service-com-amazonaws-cloudwatchlogs-logs-20140328",
  "service-com-amazonaws-kms-trentservice",
  "service-com-amazonaws-s3-amazons3",
+ "service-com-amazonaws-sfn-awsstepfunctions",
  "service-com-amazonaws-sns-amazonsimplenotificationservice",
  "service-common",
  "sha2 0.10.9",

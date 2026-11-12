@@ -93,6 +93,10 @@ base64 = "0.22"
 aws-sdk-s3 = { version = "1", default-features = false }
 # Gunzips a delivered log file, which is a gzip stream.
 flate2 = "1"
+# Serves calls of ANOTHER service of the account beside this one, so a suite can assert that
+# a logging trail delivers the records of every service's management calls and not only of
+# CloudTrail's own (`tests/all/trail_log_file_delivery_of_other_services.rs`).
+service-com-amazonaws-sfn-awsstepfunctions = { workspace = true }
 
 [lints]
 workspace = true
