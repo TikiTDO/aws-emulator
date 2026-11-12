@@ -13,6 +13,8 @@
 // points it into `tests/all/`.
 #[path = "all/device_pools.rs"]
 mod device_pools;
+#[path = "all/network_profile_lifecycle.rs"]
+mod network_profile_lifecycle;
 #[path = "all/network_profiles.rs"]
 mod network_profiles;
 #[path = "all/not_found_wording.rs"]

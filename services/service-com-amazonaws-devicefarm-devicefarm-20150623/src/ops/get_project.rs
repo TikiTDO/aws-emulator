@@ -161,10 +161,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 project: Some(record.to_project()),
             }),
             None => Err(GetProjectErrorModeled::NotFoundException(NotFoundException {
-                message: Some(crate::state::arn_not_found_message(
-                    crate::state::PROJECT_ENTITY,
-                    &input.arn,
-                )),
+                message: Some(crate::state::project_not_found_message(&input.arn)),
             })
             .into()),
         }

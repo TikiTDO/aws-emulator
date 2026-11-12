@@ -167,10 +167,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             let Some(record) = store.projects.get(arn) else {
                 return Err(ListProjectsErrorModeled::NotFoundException(NotFoundException {
-                    message: Some(crate::state::arn_not_found_message(
-                        crate::state::PROJECT_ENTITY,
-                        arn,
-                    )),
+                    message: Some(crate::state::project_not_found_message(arn)),
                 })
                 .into());
             };

@@ -195,10 +195,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // store does not hold.
         if !store.projects.contains_key(&input.project_arn) {
             return Err(CreateUploadErrorModeled::NotFoundException(NotFoundException {
-                message: Some(crate::state::arn_not_found_message(
-                    crate::state::PROJECT_ENTITY,
-                    &input.project_arn,
-                )),
+                message: Some(crate::state::project_not_found_message(&input.project_arn)),
             })
             .into());
         }

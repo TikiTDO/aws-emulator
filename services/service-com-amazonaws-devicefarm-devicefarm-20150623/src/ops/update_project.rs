@@ -169,10 +169,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut store = state.lock();
         let Some(record) = store.projects.get_mut(&input.arn) else {
             return Err(UpdateProjectErrorModeled::NotFoundException(NotFoundException {
-                message: Some(crate::state::arn_not_found_message(
-                    crate::state::PROJECT_ENTITY,
-                    &input.arn,
-                )),
+                message: Some(crate::state::project_not_found_message(&input.arn)),
             })
             .into());
         };

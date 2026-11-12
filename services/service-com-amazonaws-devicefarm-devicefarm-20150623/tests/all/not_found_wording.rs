@@ -5,11 +5,14 @@
 //!
 //! The rule under test: an operation whose input carries an ARN naming the resource type
 //! that member expects, and that resolves to no such resource, answers HTTP 400
-//! `NotFoundException` whose message is `No <resource in words> was found for arn <arn>` —
-//! fixed text around two variable parts, the resource named in words and the ARN echoed
-//! byte for byte from the request's own ARN member. The sentence belongs to the SERVICE,
-//! not to the individual handler, so no handler may word it its own way, and none may
-//! normalise, re-case or re-order the ARN on the way into it.
+//! `NotFoundException` whose message is that resource type's own fixed text followed by
+//! the ARN echoed byte for byte from the request's own ARN member. Device Farm words that
+//! sentence PER RESOURCE TYPE — `No networkprofile found for arn <arn>` and `No upload
+//! found for arn <arn>` name the type by the very token its ARN carries, while a project
+//! is worded `No project was found for arn <arn>` — so the wording belongs to the resource
+//! type and not to the individual handler: every operation that reports the same type
+//! missing words it identically, and none may normalise, re-case or re-order the ARN on
+//! the way into it.
 //!
 //! The templates are spelled out here as literals, deliberately: this suite is what pins
 //! them, so it may not ask the implementation (or a helper the implementation shares) what
@@ -46,17 +49,32 @@ const ARN_MAX_LENGTH: usize = 1011;
 /// The resource type a device-pool ARN carries.
 const DEVICE_POOL_TYPE: &str = "devicepool";
 
+/// The resource type an upload ARN carries.
+const UPLOAD_TYPE: &str = "upload";
+
 /// One operation addressed by a Device Farm ARN: which member carries it, which resource
-/// type that member names, how that resource is worded in the refusal, and the other
+/// type that member names, the fixed text the refusal puts before the ARN, and the other
 /// members the request must carry so the ARN is the only thing that can refuse it.
 struct ArnCall {
     op: &'static str,
     member: &'static str,
     resource_type: &'static str,
-    /// The resource as the refusal names it in words.
-    entity: &'static str,
+    /// Everything the refusal's message says before the ARN, as a literal.
+    absence_prefix: &'static str,
     extra: &'static [(&'static str, &'static str)],
 }
+
+/// The fixed text Device Farm puts before the ARN when a project ARN resolves to nothing.
+const PROJECT_ABSENCE: &str = "No project was found for arn ";
+
+/// The same, for a network profile: the ARN's own resource-type token, and no `was`.
+const NETWORK_PROFILE_ABSENCE: &str = "No networkprofile found for arn ";
+
+/// The same, for a device pool.
+const DEVICE_POOL_ABSENCE: &str = "No devicepool found for arn ";
+
+/// The same, for an upload.
+const UPLOAD_ABSENCE: &str = "No upload found for arn ";
 
 /// Every implemented operation of this service whose input carries an ARN member and that
 /// models `NotFoundException` (`OPERATIONS.md`, the members typed `AmazonResourceName`).
@@ -68,59 +86,78 @@ const ARN_CALLS: &[ArnCall] = &[
         op: "GetProject",
         member: "arn",
         resource_type: PROJECT_TYPE,
-        entity: "project",
+        absence_prefix: PROJECT_ABSENCE,
         extra: &[],
     },
     ArnCall {
         op: "ListProjects",
         member: "arn",
         resource_type: PROJECT_TYPE,
-        entity: "project",
+        absence_prefix: PROJECT_ABSENCE,
         extra: &[],
     },
     ArnCall {
         op: "UpdateProject",
         member: "arn",
         resource_type: PROJECT_TYPE,
-        entity: "project",
+        absence_prefix: PROJECT_ABSENCE,
         extra: &[("name", "renamed-by-the-refusal-row")],
     },
     ArnCall {
         op: "DeleteProject",
         member: "arn",
         resource_type: PROJECT_TYPE,
-        entity: "project",
+        absence_prefix: PROJECT_ABSENCE,
         extra: &[],
     },
     ArnCall {
         op: "CreateNetworkProfile",
         member: "projectArn",
         resource_type: PROJECT_TYPE,
-        entity: "project",
+        absence_prefix: PROJECT_ABSENCE,
         extra: &[("name", "profile-for-an-absent-project")],
     },
     ArnCall {
         op: "GetNetworkProfile",
         member: "arn",
         resource_type: NETWORK_PROFILE_TYPE,
-        entity: "network profile",
+        absence_prefix: NETWORK_PROFILE_ABSENCE,
+        extra: &[],
+    },
+    ArnCall {
+        op: "UpdateNetworkProfile",
+        member: "arn",
+        resource_type: NETWORK_PROFILE_TYPE,
+        absence_prefix: NETWORK_PROFILE_ABSENCE,
+        extra: &[("name", "renamed-by-the-refusal-row")],
+    },
+    ArnCall {
+        op: "DeleteNetworkProfile",
+        member: "arn",
+        resource_type: NETWORK_PROFILE_TYPE,
+        absence_prefix: NETWORK_PROFILE_ABSENCE,
         extra: &[],
     },
     ArnCall {
         op: "GetDevicePool",
         member: "arn",
         resource_type: DEVICE_POOL_TYPE,
-        entity: "device pool",
+        absence_prefix: DEVICE_POOL_ABSENCE,
+        extra: &[],
+    },
+    ArnCall {
+        op: "GetUpload",
+        member: "arn",
+        resource_type: UPLOAD_TYPE,
+        absence_prefix: UPLOAD_ABSENCE,
         extra: &[],
     },
 ];
 
-/// Device Farm's `NotFoundException` message for an ARN that resolves to no resource.
-///
-/// A literal on purpose (see the module docs): the fixed text is the requirement, and the
-/// only variable parts are the resource in words and the ARN the request supplied.
-fn expected_absence_message(entity: &str, arn: &str) -> String {
-    format!("No {entity} was found for arn {arn}")
+/// Device Farm's `NotFoundException` message for an ARN that resolves to no resource: the
+/// resource type's own fixed text with the ARN the request supplied appended.
+fn expected_absence_message(absence_prefix: &str, arn: &str) -> String {
+    format!("{absence_prefix}{arn}")
 }
 
 /// A Device Farm ARN of `resource_type` whose resource id is `id`, in `region` under
@@ -186,9 +223,9 @@ fn absent_arns(resource_type: &str) -> Vec<(String, String)> {
     rows
 }
 
-/// Every ARN-addressed operation words a resolvable-to-nothing ARN the one Device Farm
-/// way, over every form of ARN the model lets reach a handler — including an ARN this
-/// emulator minted and then released.
+/// Every ARN-addressed operation words a resolvable-to-nothing ARN the way Device Farm
+/// words that resource type's absence, over every form of ARN the model lets reach a
+/// handler — including an ARN this emulator minted and then released.
 #[tokio::test]
 async fn absent_arns_are_refused_with_the_device_farm_not_found_sentence() {
     let emu = Emulator::new();
@@ -251,7 +288,7 @@ async fn absent_arns_are_refused_with_the_device_farm_not_found_sentence() {
                 "NotFoundException",
                 "case {case:?}: expected NotFoundException, got {response}"
             );
-            let expected = expected_absence_message(call.entity, arn);
+            let expected = expected_absence_message(call.absence_prefix, arn);
             assert_eq!(
                 response["message"].as_str(),
                 Some(expected.as_str()),

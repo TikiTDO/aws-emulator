@@ -165,7 +165,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }),
             None => Err(GetDevicePoolErrorModeled::NotFoundException(NotFoundException {
                 message: Some(crate::state::arn_not_found_message(
-                    crate::state::DEVICE_POOL_ENTITY,
+                    crate::state::DEVICE_POOL_RESOURCE_TYPE,
                     &input.arn,
                 )),
             })

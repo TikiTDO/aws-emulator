@@ -588,28 +588,28 @@ pub fn is_devicefarm_arn_of_type(arn: &str, resource_type: &str) -> bool {
     devicefarm_resource_id(arn, resource_type).is_some()
 }
 
-/// How a project is named in the prose of a message about one.
-pub const PROJECT_ENTITY: &str = "project";
-
-/// How a network profile is named in the prose of a message about one.
-pub const NETWORK_PROFILE_ENTITY: &str = "network profile";
-
-/// How a device pool is named in the prose of a message about one.
-pub const DEVICE_POOL_ENTITY: &str = "device pool";
-
-/// How an upload is named in the prose of a message about one.
-pub const UPLOAD_ENTITY: &str = "upload";
-
 /// The message a Device Farm `NotFoundException` carries when the ARN a request supplied
 /// resolves to no resource of the type that member names.
 ///
-/// Device Farm words that absence `No <entity> was found for arn <arn>`: the text around
-/// the two variable parts is fixed, `entity` is the resource named in words (see
-/// [`PROJECT_ENTITY`] and [`NETWORK_PROFILE_ENTITY`]), and `arn` is echoed verbatim from
-/// the request's own ARN member rather than re-derived from the store. Every handler that
-/// reports a missing resource goes through here, so the whole service words it one way.
-pub fn arn_not_found_message(entity: &str, arn: &str) -> String {
-    format!("No {entity} was found for arn {arn}")
+/// Device Farm words that absence `No <resource type> found for arn <arn>`: the text around
+/// the two variable parts is fixed, the resource is named by the very token its own ARN
+/// carries in the resource field (`networkprofile`, `upload`, `devicepool` — one word, as
+/// the ARN spells it, never the English phrase), and `arn` is echoed verbatim from the
+/// request's own ARN member rather than re-derived from the store. A project is the one
+/// type the service words differently ([`project_not_found_message`]), so pass a resource
+/// type here and never a phrase of this crate's own making.
+pub fn arn_not_found_message(resource_type: &str, arn: &str) -> String {
+    format!("No {resource_type} found for arn {arn}")
+}
+
+/// The message a Device Farm `NotFoundException` carries for an ARN that resolves to no
+/// project.
+///
+/// The service words a missing project `No project was found for arn <arn>` — the same
+/// sentence as [`arn_not_found_message`] with `was` in it, which is why a project does not
+/// go through that one.
+pub fn project_not_found_message(arn: &str) -> String {
+    format!("No {PROJECT_RESOURCE_TYPE} was found for arn {arn}")
 }
 
 /// Whether `arn` names a project.

@@ -171,7 +171,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             None => Err(GetUploadErrorModeled::NotFoundException(NotFoundException {
                 message: Some(crate::state::arn_not_found_message(
-                    crate::state::UPLOAD_ENTITY,
+                    crate::state::UPLOAD_RESOURCE_TYPE,
                     &input.arn,
                 )),
             })

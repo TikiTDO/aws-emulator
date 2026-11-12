@@ -2,8 +2,8 @@
 
 //! @op GetNetworkProfile
 //!
-//! Reports the network profile the store holds under the requested ARN, exactly as
-//! `CreateNetworkProfile` persisted it.
+//! Reports the network profile the store holds under the requested ARN, as the last
+//! `CreateNetworkProfile` or `UpdateNetworkProfile` left it.
 //!
 //! ## Shape of an operation
 //!
@@ -165,7 +165,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             None => Err(GetNetworkProfileErrorModeled::NotFoundException(
                 NotFoundException {
                     message: Some(crate::state::arn_not_found_message(
-                        crate::state::NETWORK_PROFILE_ENTITY,
+                        crate::state::NETWORK_PROFILE_RESOURCE_TYPE,
                         &input.arn,
                     )),
                 },
