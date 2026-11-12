@@ -4,17 +4,19 @@
 //!
 //! Assigns tags to the resource its `resourceArn` names.
 //!
-//! The ARN is read with [`crate::state::parse_tagged_resource_arn`] — an `RsiArn` names a
-//! virtual cluster or a resource under one — and each pair of the request's `tags` is
-//! written into the ONE tag set that resource's own record holds: a key the resource does
-//! not carry is added, a key it already carries takes the new value, and every key the
-//! request does not name is left as it was, so the next read of the resource (through
-//! `DescribeVirtualCluster` or `DescribeJobRun`) reports the merged set. An ARN whose
-//! resource path is not one the model declares is refused with the modelled
-//! `ValidationException`; a well-formed one naming no stored resource with
-//! `ResourceNotFoundException`; and a merge that would leave the resource holding more
-//! than [`crate::state::MAX_RESOURCE_TAGS`] tags with `ValidationException`, writing
-//! nothing.
+//! The ARN is read with [`crate::state::endpoint_tagged_resource`] — an `RsiArn` this
+//! endpoint mints names a virtual cluster or a resource under one — and each pair of the
+//! request's `tags` is written into the ONE tag set that resource's own record holds: a key
+//! the resource does not carry is added, a key it already carries takes the new value, and
+//! every key the request does not name is left as it was, so the next read of the resource
+//! (through `DescribeVirtualCluster` or `DescribeJobRun`) reports the merged set. A
+//! `resourceArn` that does not resolve to a resource this endpoint holds — outside the
+//! modelled `RsiArn` constraint, naming another partition, account or region, naming a
+//! resource path the model does not declare, or naming a resource that is not stored — is
+//! refused with the modelled `ValidationException` carrying
+//! [`crate::state::INVALID_RESOURCE_ARN_MESSAGE`]; and a merge that would leave the resource
+//! holding more than [`crate::state::MAX_RESOURCE_TAGS`] tags with `ValidationException`,
+//! writing nothing.
 //!
 //! ## Shape of an operation
 //!
@@ -114,6 +116,20 @@ impl From<TagResourceErrorModeled> for TagResourceError {
     }
 }
 
+/// This operation's ONE refusal of a `resourceArn` that does not resolve to a resource this
+/// endpoint holds — an ARN it does not mint, or one it does whose resource is not stored.
+///
+/// The modelled `ValidationException` carrying the class's own fixed sentence
+/// ([`crate::state::INVALID_RESOURCE_ARN_MESSAGE`]), so the two places this handler refuses
+/// a reference, and the boundary's own refusal of one outside the `RsiArn` constraint
+/// ([`crate::state::resource_arn_refusal`]), cannot drift into different wordings.
+fn invalid_resource_arn() -> TagResourceError {
+    TagResourceErrorModeled::ValidationException(ValidationException {
+        message: Some(crate::state::INVALID_RESOURCE_ARN_MESSAGE.to_string()),
+    })
+    .into()
+}
+
 /// The `TagResource` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -158,24 +174,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })
         })?;
 
+        let region = crate::state::request_region(ctx);
+
         // `resourceArn`'s length and pattern, and every `tags` key's and value's own
-        // length and pattern, are refused at the boundary BEFORE this handler runs. What
-        // is left to judge about the ARN is whether its resource path names a resource
-        // this service models at all: `RsiArn`'s pattern ends in `/virtualclusters/.+`,
-        // which admits paths no resource of this service ever has.
-        let Some(resource) = crate::state::parse_tagged_resource_arn(&input.resource_arn) else {
-            return Err(TagResourceErrorModeled::ValidationException(
-                ValidationException {
-                    message: Some(format!(
-                        "{} is not the ARN of an EMR on EKS resource",
-                        input.resource_arn
-                    )),
-                },
-            )
-            .into());
+        // length and pattern, are refused at the boundary BEFORE this handler runs — a
+        // reference outside the modelled constraint with the same sentence as the two
+        // refusals below ([`crate::state::resource_arn_refusal`]). What is left to judge
+        // about the ARN is whether it resolves to a resource this endpoint holds:
+        // `RsiArn`'s pattern admits any partition, account and region, and a
+        // `/virtualclusters/.+` path no resource of this service ever has.
+        let Some(resource) = crate::state::endpoint_tagged_resource(&region, &input.resource_arn)
+        else {
+            return Err(invalid_resource_arn());
         };
 
-        let region = crate::state::request_region(ctx);
         let mut state = store.lock();
         // Mutating, but it materialises what the clock already owed first, so the record
         // this call edits is the settled one rather than a stale copy of it.
@@ -184,15 +196,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Resolved in the region this request is signed for: an ARN that names a resource
         // of another region is not this endpoint's to tag.
         let Some(tags) = state.resource_tags_mut(&region, &resource, &input.resource_arn) else {
-            return Err(TagResourceErrorModeled::ResourceNotFoundException(
-                ResourceNotFoundException {
-                    // The one not-found wording of this service
-                    // ([`crate::state::ResourceKind`]), reporting the resource the ARN's
-                    // path names rather than echoing the whole ARN.
-                    message: Some(resource.not_found_message()),
-                },
-            )
-            .into());
+            return Err(invalid_resource_arn());
         };
 
         // How big the merged set would be: the keys the resource already holds that this

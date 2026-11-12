@@ -218,12 +218,16 @@ struct ReadCase {
     /// Whether the answer carries the resource's own `arn`, which has to name the region
     /// the resource was created in.
     carries_arn: bool,
+    /// The error class the OTHER region's endpoint refuses this read with.
+    code: &'static str,
 }
 
 /// RULE, reading: a resource is described only at the endpoint of the region that created
 /// it, the ARN it reports names that region, and offering its id to another region's
 /// endpoint is the modelled `ResourceNotFoundException` (HTTP 400) — the answer for a
-/// resource that is not there.
+/// resource that is not there. A read that names the resource by its ARN is refused there
+/// as an invalid resource reference instead, because an ARN of another region is not one
+/// that endpoint mints at all ([`crate::tagging_resource_arn_form`] pins that class).
 ///
 /// The rows span every resource class that has a reader, including `ListTagsForResource`,
 /// which resolves an ARN rather than an id.
@@ -238,6 +242,7 @@ async fn a_resource_is_read_only_at_the_endpoint_of_the_region_that_created_it()
                 path: format!("/virtualclusters/{}", fixture.cluster),
                 pointer: "/virtualCluster",
                 carries_arn: true,
+                code: "ResourceNotFoundException",
             },
             ReadCase {
                 label: "DescribeJobRun",
@@ -247,6 +252,7 @@ async fn a_resource_is_read_only_at_the_endpoint_of_the_region_that_created_it()
                 ),
                 pointer: "/jobRun",
                 carries_arn: true,
+                code: "ResourceNotFoundException",
             },
             ReadCase {
                 label: "DescribeManagedEndpoint",
@@ -256,24 +262,28 @@ async fn a_resource_is_read_only_at_the_endpoint_of_the_region_that_created_it()
                 ),
                 pointer: "/endpoint",
                 carries_arn: true,
+                code: "ResourceNotFoundException",
             },
             ReadCase {
                 label: "DescribeJobTemplate",
                 path: format!("/jobtemplates/{}", fixture.template),
                 pointer: "/jobTemplate",
                 carries_arn: true,
+                code: "ResourceNotFoundException",
             },
             ReadCase {
                 label: "DescribeSecurityConfiguration",
                 path: format!("/securityconfigurations/{}", fixture.configuration),
                 pointer: "/securityConfiguration",
                 carries_arn: true,
+                code: "ResourceNotFoundException",
             },
             ReadCase {
                 label: "ListTagsForResource",
                 path: format!("/tags/{}", encoded(&fixture.cluster_arn(home))),
                 pointer: "/tags",
                 carries_arn: false,
+                code: "ValidationException",
             },
         ];
 
@@ -291,7 +301,7 @@ async fn a_resource_is_read_only_at_the_endpoint_of_the_region_that_created_it()
 
             emr.send_in(other, "GET", &case.path, None)
                 .await
-                .refused(&label, 400, "ResourceNotFoundException");
+                .refused(&label, 400, case.code);
 
             // The refused cross-region read changed nothing the owning region sees.
             let again = emr.send_in(home, "GET", &case.path, None).await;
@@ -405,8 +415,10 @@ struct MutateCase {
 }
 
 /// RULE, mutating: a mutate names a resource of the region it is signed for, so a request
-/// offering another region's id (or ARN) is refused with the error that operation models
-/// for a resource that is not there, and the resource it named is left exactly as it was.
+/// offering another region's id is refused with the error that operation models for a
+/// resource that is not there — and one offering another region's ARN with the error that
+/// operation models for a resource reference it cannot resolve at all — and the resource it
+/// named is left exactly as it was.
 ///
 /// The rows span every mutate this service implements: the teardown, the update, the
 /// cancellation, the two deletes, the two creates that reference a parent cluster, and the
@@ -476,14 +488,17 @@ async fn a_cross_region_mutate_is_refused_and_leaves_the_resource_as_it_was() {
                 method: "POST",
                 path: format!("/tags/{}", encoded(&arn)),
                 body: Some(json!({"tags": {"team": "stolen"}})),
-                code: "ResourceNotFoundException",
+                // An ARN of another region is not one this endpoint mints, which is an
+                // invalid resource reference rather than a resource that is missing here
+                // ([`crate::tagging_resource_arn_form`] pins that class).
+                code: "ValidationException",
             },
             MutateCase {
                 label: "UntagResource",
                 method: "DELETE",
                 path: format!("/tags/{}?tagKeys=team", encoded(&arn)),
                 body: None,
-                code: "ResourceNotFoundException",
+                code: "ValidationException",
             },
         ];
 

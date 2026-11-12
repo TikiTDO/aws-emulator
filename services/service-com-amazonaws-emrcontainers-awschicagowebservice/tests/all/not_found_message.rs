@@ -18,15 +18,16 @@
 //! The tables span what that rule generalises over: which resource is missing (a virtual
 //! cluster, a job run, a managed endpoint, a job template, a security configuration),
 //! which operation reports it (a read, a write, a delete, a create that resolves a
-//! reference), how the request named it (a bare id, the resource's own ARN, an ARN in a
-//! tagging call), and the form of the identifier (both published length bounds of
-//! `ResourceIdString`, an all-digit value, a plausible minted one, and the id of a resource
-//! that was deleted).
+//! reference), how the request named it (a bare id, the resource's own ARN), and the form
+//! of the identifier (both published length bounds of `ResourceIdString`, an all-digit
+//! value, a plausible minted one, and the id of a resource that was deleted).
 //!
 //! It also pins the rule's BOUNDARY: a resource that exists but cannot take the request is
-//! not reported as one that does not exist. An operation that resolves NO resource is
-//! outside the rule altogether — the two listings scoped to a virtual cluster by a path
-//! label answer an empty page for an id that names none, which
+//! not reported as one that does not exist, and the three tagging operations — which
+//! validate the resource REFERENCE their `resourceArn` carries — are the other class
+//! altogether ([`crate::tagging_resource_arn_form`]). An operation that resolves NO
+//! resource is outside the rule too — the two listings scoped to a virtual cluster by a
+//! path label answer an empty page for an id that names none, which
 //! [`crate::cluster_scoped_listing_scope`] holds.
 
 use serde_json::{json, Value};
@@ -407,14 +408,16 @@ async fn a_deleted_resource_is_reported_as_one_that_does_not_exist() {
     }
 }
 
-/// THE RULE where the request names the resource by its own ARN: a tagging call whose
-/// `resourceArn` is well formed but names no stored resource is refused for the resource
-/// that ARN's path names, in the same wording.
+/// The rule's OTHER boundary, where the request names the resource by its own ARN rather
+/// than by an id: the three `/tags/{resourceArn}` operations validate the REFERENCE, so one
+/// that resolves to no resource of this endpoint is refused as an invalid reference — one
+/// fixed sentence naming nothing of the request ([`crate::tagging_resource_arn_form`] pins
+/// that class) — and never with the identifier-bearing wording this file holds.
 ///
 /// The rows span the three resource ARNs an `RsiArn` admits — a virtual cluster, a job run
 /// under one, a managed endpoint under one — across all three tagging operations.
 #[tokio::test]
-async fn an_arn_naming_no_stored_resource_is_refused_in_the_same_wording() {
+async fn an_arn_naming_no_stored_resource_is_not_refused_in_this_wording() {
     let emr = Emr::new();
     let host = emr.cluster("nf-arn-host", "tok-nf-arn-host").await;
     let absent = "doesnotexist2";
@@ -432,37 +435,43 @@ async fn an_arn_naming_no_stored_resource_is_refused_in_the_same_wording() {
 
     for (label, resource_type, arn) in &targets {
         let path = format!("/tags/{}", encoded(arn));
-        let probes = vec![
-            probe(
+        let calls = [
+            (
                 format!("ListTagsForResource for {label}"),
-                resource_type,
-                absent,
                 "GET",
                 path.clone(),
                 None,
-                NOT_FOUND,
             ),
-            probe(
+            (
                 format!("TagResource for {label}"),
-                resource_type,
-                absent,
                 "POST",
                 path.clone(),
                 Some(json!({"tags": {"team": "data"}})),
-                NOT_FOUND,
             ),
-            probe(
+            (
                 format!("UntagResource for {label}"),
-                resource_type,
-                absent,
                 "DELETE",
                 format!("{path}?tagKeys=team"),
                 None,
-                NOT_FOUND,
             ),
         ];
-        for current in &probes {
-            assert_not_found(&emr, current).await;
+        for (case, method, path, body) in calls {
+            let answer: Answer = emr.send(method, &path, body).await;
+            answer.refused(&case, 400, INVALID_REQUEST);
+            let reported = text(&answer.body, "/message", &case);
+            for identifier in [absent, arn.as_str()] {
+                assert_ne!(
+                    reported,
+                    expected_message(resource_type, identifier),
+                    "case {case:?}: a tagging call must not report an unresolvable \
+                     reference in the identifier-bearing wording"
+                );
+                assert!(
+                    !reported.contains(identifier),
+                    "case {case:?}: expected a sentence naming nothing of the request, got \
+                     {reported:?}"
+                );
+            }
         }
     }
 

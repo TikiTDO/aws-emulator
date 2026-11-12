@@ -12,11 +12,10 @@
 //! The rule under test: `TagResource` MERGES the pairs its `tags` names into the ONE tag
 //! set held by the record of the resource its `resourceArn` names — a key the resource
 //! does not carry is added, a key it already carries takes the new value, and every key
-//! the request does not name is left alone — leaving every other resource untouched; an
-//! `RsiArn` whose resource path is none of the forms this service's resource ARNs declare
-//! is refused with the modelled `ValidationException`, a well-formed one naming no stored
-//! resource with `ResourceNotFoundException`, and a merge that would push the resource
-//! past `TagMap`'s own maximum entry count with `ValidationException`, writing nothing.
+//! the request does not name is left alone — leaving every other resource untouched; a
+//! `resourceArn` that does not resolve to a resource this endpoint holds is refused with
+//! the modelled `ValidationException`, and so is a merge that would push the resource past
+//! `TagMap`'s own maximum entry count, writing nothing.
 //!
 //! The tables span what that rule generalises over: how many pairs are written, whether a
 //! key is new or already held, the key's and value's form (ASCII, Unicode, case, the
@@ -369,9 +368,12 @@ struct ArnCase {
     code: &'static str,
 }
 
-/// RULE: an `RsiArn` whose resource path is none of the forms this service's resource ARNs
-/// declare is an invalid request; a well-formed ARN naming no stored resource is a missing
-/// resource. Both are HTTP 400, and neither writes anything.
+/// RULE: a `resourceArn` that does not resolve to a resource this endpoint holds — outside
+/// the modelled `RsiArn` constraint, naming another partition, account or region, naming a
+/// resource path none of the forms this service's resource ARNs declare, or naming a
+/// resource that is not stored — is an invalid resource reference: HTTP 400 with the
+/// modelled `ValidationException`, writing nothing
+/// ([`crate::tagging_resource_arn_form`] pins its wording).
 #[tokio::test]
 async fn a_tag_call_on_an_arn_that_names_no_resource_is_refused() {
     let emr = Emr::new();
@@ -388,34 +390,34 @@ async fn a_tag_call_on_an_arn_that_names_no_resource_is_refused() {
         ArnCase {
             case: "a virtual cluster ARN naming no cluster",
             resource_arn: state::virtual_cluster_arn(REGION, unknown),
-            code: "ResourceNotFoundException",
+            code: "ValidationException",
         },
         ArnCase {
             case: "a job run ARN naming no run under a real cluster",
             resource_arn: state::job_run_arn(REGION, &cluster, unknown),
-            code: "ResourceNotFoundException",
+            code: "ValidationException",
         },
         ArnCase {
             case: "a real job run id under a cluster that does not exist",
             resource_arn: state::job_run_arn(REGION, unknown, &run),
-            code: "ResourceNotFoundException",
+            code: "ValidationException",
         },
         ArnCase {
             case: "a managed endpoint ARN, a resource form nothing stores yet",
             resource_arn: state::managed_endpoint_arn(REGION, &cluster, unknown),
-            code: "ResourceNotFoundException",
+            code: "ValidationException",
         },
         ArnCase {
             case: "the cluster's own id in another region",
             resource_arn: state::virtual_cluster_arn("eu-west-1", &cluster),
-            code: "ResourceNotFoundException",
+            code: "ValidationException",
         },
         ArnCase {
             case: "the cluster's own id in another account",
             resource_arn: format!(
                 "arn:aws:emr-containers:{REGION}:111122223333:/virtualclusters/{cluster}"
             ),
-            code: "ResourceNotFoundException",
+            code: "ValidationException",
         },
         ArnCase {
             case: "the cluster's own id in another partition",
@@ -423,7 +425,7 @@ async fn a_tag_call_on_an_arn_that_names_no_resource_is_refused() {
                 "arn:aws-us-gov:emr-containers:{REGION}:{}:/virtualclusters/{cluster}",
                 engine::emulator_account_id()
             ),
-            code: "ResourceNotFoundException",
+            code: "ValidationException",
         },
         ArnCase {
             case: "a sub-resource type this service does not model",

@@ -955,31 +955,42 @@ fn is_arn_id_segment(segment: &str) -> bool {
 }
 
 impl TaggedResource {
-    /// Which kind of resource the ARN's path names.
-    pub fn kind(&self) -> ResourceKind {
+    /// The ARN this service mints for this resource at `region`'s endpoint — the one the
+    /// resource's own record carries, built by the same builders that stamped it
+    /// ([`virtual_cluster_arn`], [`job_run_arn`], [`managed_endpoint_arn`]).
+    pub fn arn(&self, region: &str) -> String {
         match self {
-            Self::VirtualCluster { .. } => ResourceKind::VirtualCluster,
-            Self::JobRun { .. } => ResourceKind::JobRun,
-            Self::ManagedEndpoint { .. } => ResourceKind::ManagedEndpoint,
+            Self::VirtualCluster { id } => virtual_cluster_arn(region, id),
+            Self::JobRun {
+                virtual_cluster_id,
+                id,
+            } => job_run_arn(region, virtual_cluster_id, id),
+            Self::ManagedEndpoint {
+                virtual_cluster_id,
+                id,
+            } => managed_endpoint_arn(region, virtual_cluster_id, id),
         }
     }
+}
 
-    /// The id the ARN names that resource by — the LAST id of its path, which is the
-    /// resource the call is about rather than the cluster it lives under.
-    pub fn id(&self) -> &str {
-        match self {
-            Self::VirtualCluster { id }
-            | Self::JobRun { id, .. }
-            | Self::ManagedEndpoint { id, .. } => id,
-        }
-    }
-
-    /// The `message` a refusal carries when the ARN is well formed but names no stored
-    /// resource: the one not-found wording of this service ([`ResourceKind`]), reporting
-    /// the resource the ARN's path names rather than the whole ARN.
-    pub fn not_found_message(&self) -> String {
-        self.kind().not_found_message(self.id())
-    }
+/// The resource a tagging call's `resourceArn` names at the endpoint the request reached,
+/// for a request signed for `region`.
+///
+/// A resource reference is one this endpoint can act on only when it is an ARN THIS service
+/// mints here: the `aws` partition, the `emr-containers` service, this account, the region
+/// the request is signed for, and a resource path of one of the three forms this service's
+/// resource ARNs take ([`TaggedResource::arn`]). An ARN of another partition, another
+/// account or another region names a resource some other endpoint holds, which this one
+/// could never have minted and can never resolve — so it is an invalid resource reference
+/// rather than a resource that happens to be missing, exactly as a path naming no resource
+/// form this service models is ([`parse_tagged_resource_arn`]).
+///
+/// `None` is one half of the invalid-reference class the three tagging operations refuse
+/// with [`INVALID_RESOURCE_ARN_MESSAGE`]; `Some` leaves the other half to the store, whether
+/// the resource this reference names is stored at all.
+pub fn endpoint_tagged_resource(region: &str, arn: &str) -> Option<TaggedResource> {
+    let resource = parse_tagged_resource_arn(arn)?;
+    (resource.arn(region) == arn).then_some(resource)
 }
 
 /// The resource an `RsiArn` names, read out of the ARN's resource path.
@@ -1017,6 +1028,64 @@ pub fn parse_tagged_resource_arn(arn: &str) -> Option<TaggedResource> {
         }
         _ => None,
     }
+}
+
+/// The input member a tagging call names the resource by.
+///
+/// `TagResource`, `UntagResource` and `ListTagsForResource` are the only operations of this
+/// service whose input declares one (smithy_query: digest), and on all three it is a
+/// top-level `@httpLabel` string — so this is also the whole dotted path a boundary
+/// violation about it reports.
+pub const RESOURCE_ARN_MEMBER: &str = "resourceArn";
+
+/// The `message` a refusal carries when a tagging call's `resourceArn` does not resolve to
+/// a resource this endpoint holds — whichever way it fails to: it breaks the `RsiArn`
+/// length or pattern the model declares (refused at the boundary, before any handler runs),
+/// or it is not an ARN this service mints here, because its partition, account or region is
+/// another endpoint's or its resource path is none of the forms this service's resource ARNs
+/// take ([`endpoint_tagged_resource`]), or it is one this endpoint does mint and the
+/// resource it names is not stored.
+///
+/// The three `/tags/{resourceArn}` operations report that whole class as ONE refusal: the
+/// resource reference is what they validate, and a reference that resolves to nothing is an
+/// unusable reference rather than a resource the caller may wait for. That is why it is the
+/// class's own sentence of FIXED text, with nothing of the request interpolated into it, and
+/// not the identifier-bearing wording an operation that names its resource by ID answers
+/// with ([`ResourceKind::not_found_message`]).
+pub const INVALID_RESOURCE_ARN_MESSAGE: &str = "Invalid input resource arn";
+
+/// The error class an unusable `resourceArn` is refused in: the modelled
+/// `ValidationException` all three tagging operations declare (smithy_query: operations
+/// `TagResource`, `UntagResource`, `ListTagsForResource`), at HTTP 400.
+const VALIDATION_EXCEPTION: &str = "ValidationException";
+
+/// How this service words a refusal the framework raised before any handler ran, for the
+/// one member it words itself: a tagging call's `resourceArn`.
+///
+/// `RsiArn`'s `@length` 60..500 and its `@pattern` are enforced at the boundary, so a
+/// `resourceArn` that is not even shaped like one of this service's resource ARNs never
+/// reaches a handler — and the framework's own envelope would report it as a generic
+/// constraint violation naming the member, the bound and the value. This service reports an
+/// unusable resource reference as [`INVALID_RESOURCE_ARN_MESSAGE`] instead, so the boundary
+/// refusal and the handlers' own ([`endpoint_tagged_resource`]) are the same sentence in the
+/// same error class however the reference failed.
+///
+/// `None` for every other refusal, which keeps the framework's wording.
+pub fn resource_arn_refusal(
+    refusal: &::smithy_server_runtime::Refusal,
+) -> Option<::smithy_server_runtime::Refused> {
+    let ::smithy_server_runtime::Refusal::Invalid(violations) = refusal else {
+        return None;
+    };
+    // The resource the call is about is read before anything else about the request, so a
+    // refusal that names the `resourceArn` at all is a refusal of the reference.
+    violations
+        .iter()
+        .any(|violation| violation.path == RESOURCE_ARN_MEMBER)
+        .then(|| ::smithy_server_runtime::Refused {
+            code: VALIDATION_EXCEPTION.to_string(),
+            message: INVALID_RESOURCE_ARN_MESSAGE.to_string(),
+        })
 }
 
 /// Whether a request-supplied identifier is written as an ARN rather than as a bare id.

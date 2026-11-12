@@ -81,6 +81,8 @@ mod start_job_run_required_members;
 mod state_roundtrip;
 #[path = "all/state_transition_refusal_wording.rs"]
 mod state_transition_refusal_wording;
+#[path = "all/tagging_resource_arn_form.rs"]
+mod tagging_resource_arn_form;
 #[path = "all/virtual_cluster_job_run_loop.rs"]
 mod virtual_cluster_job_run_loop;
 #[path = "all/virtual_cluster_listing.rs"]

@@ -99,14 +99,17 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // The centralized walk calls this on a framework-level refusal (an absent
         // required member, or a value outside a declared bound) to let this
         // service reword it. Returning `None` keeps the framework's default
-        // wording. To state a refusal the way the emulated service states it,
-        // replace this body with a `match refusal { .. }` that returns
-        // `Some(Refused { code, message })` for the cases you reword and `None`
-        // for the rest. Replace BOTH the code and the message: a client branches
-        // on the code, so a message without its matching code is worse than
-        // leaving both alone.
-        let _ = refusal;
-        None
+        // wording.
+        //
+        // The one refusal this service words itself is an unusable `resourceArn`: the three
+        // tagging operations' `RsiArn` label is held to its modelled length and pattern
+        // here, before any handler runs, and this service reports a resource reference it
+        // cannot resolve as one fixed sentence in its modelled `ValidationException` — the
+        // same answer the handlers give a reference whose envelope is right but which names
+        // no resource they hold, so the boundary and the handlers cannot drift apart. Both
+        // the code and the message come from there: a client branches on the code, so a
+        // message without its matching code would be worse than leaving both alone.
+        crate::state::resource_arn_refusal(refusal)
     }
 
     fn override_routing_error(
