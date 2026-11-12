@@ -27,7 +27,11 @@
 //! The assume is decided at LAUNCH, by the same pass the image fetch is decided in and ahead
 //! of it ([`settle_task_launches`]): Amazon ECS pulls an image AS the execution role, so a
 //! task whose role it could not assume never reaches the registry, which is why such a task
-//! records no pull instants.
+//! records no pull instants. Ahead of it FOR EACH TASK, not merely earlier in the pass: the
+//! fetch is attempted only for a task this step has already been taken for
+//! ([`TaskRecord::launch_roles_assumed`]), so a task placed while this step was deciding
+//! another launch — by the scheduler, on another caller's clock pass — waits for the next
+//! pass instead of being fetched for and started with its roles never put to IAM.
 //!
 //! The decision is what the START of a task waits for, not the other way round: until this
 //! pass has run for a task, no clock pass reports it `RUNNING`
@@ -99,6 +103,12 @@ pub fn advance_task_clock<Eng: Send + Sync + 'static>(engine: &Eng, now: SystemT
 /// Attempt the role assumes of every task that has just been launched, and record the stop a
 /// task whose role Amazon ECS cannot assume earns.
 ///
+/// Every task the pass was MADE for is recorded as assumed
+/// ([`TaskRecord::launch_roles_assumed`]), not only the ones it refused: that is what the
+/// step that follows it waits for, so a task placed after this pass collected its launches
+/// is left to the next pass rather than fetched for on the strength of carrying no refusal
+/// yet.
+///
 /// Nothing is recorded for a launch nothing can be shown about (see the module docs), and
 /// nothing is decided twice: a task that already carries a launch failure is past the
 /// question, and one that has started has already been launched.
@@ -110,26 +120,37 @@ pub fn evaluate_launch_role_assumptions<Eng: Send + Sync + 'static>(engine: &Eng
     if launches.is_empty() {
         return;
     }
-    // An engine carrying no IAM store says nothing about any role, so it refuses nothing.
-    let Some(iam) =
-        ::service_com_amazonaws_iam_awsidentitymanagementv20100508::state::service_state(engine)
-    else {
-        return;
-    };
-    // Under the IAM store's lock alone, and in one pass: the lock is taken once however many
-    // tasks were launched, and only owned sentences leave it.
-    let refusals: Vec<(String, String)> = {
-        let store = iam.lock();
-        launches
-            .into_iter()
-            .filter(|(_, role_arn)| role_withholds_assumption(&store, role_arn))
-            .map(|(task_arn, role_arn)| (task_arn, unable_to_assume_role_message(&role_arn)))
-            .collect()
-    };
-    if refusals.is_empty() {
-        return;
-    }
-    state.lock().record_unassumable_role_refusals(&refusals);
+    let verdicts: Vec<(String, Option<String>)> =
+        match ::service_com_amazonaws_iam_awsidentitymanagementv20100508::state::service_state(
+            engine,
+        ) {
+            // Under the IAM store's lock alone, and in one pass: the lock is taken once
+            // however many tasks were launched, and only owned sentences leave it. The FIRST
+            // role the launch resolved that withholds the assume is the one it stops with,
+            // which is why the roles are judged in the order they are listed in.
+            Some(iam) => {
+                let store = iam.lock();
+                launches
+                    .iter()
+                    .map(|launch| {
+                        let refusal = launch
+                            .role_arns
+                            .iter()
+                            .find(|role_arn| role_withholds_assumption(&store, role_arn))
+                            .map(|role_arn| unable_to_assume_role_message(role_arn));
+                        (launch.task_arn.clone(), refusal)
+                    })
+                    .collect()
+            }
+            // An engine carrying no IAM store says nothing about any role, so it refuses
+            // nothing — and the step has still been taken for these launches, which is what
+            // lets them go on to their image fetch.
+            None => launches
+                .iter()
+                .map(|launch| (launch.task_arn.clone(), None))
+                .collect(),
+        };
+    state.lock().record_launch_role_assumptions(&verdicts);
 }
 
 impl TaskRecord {
@@ -142,9 +163,11 @@ impl TaskRecord {
     /// cannot drift. The fetch is the LAST of them and it stamps the instants it took on
     /// every task it was made for, whether or not it succeeded
     /// ([`ComAmazonawsEcsAmazonec2containerservicev20141113State::record_image_pulls`]); a
-    /// launch the pass refused carries the reason instead ([`TaskRecord::launch_failure`]),
+    /// launch either step refused carries the reason instead ([`TaskRecord::launch_failure`]),
     /// which is why the fetch was not attempted for it. So either one is the pass having run
-    /// for this task.
+    /// for this task — the fetch only together with the assume it follows
+    /// ([`TaskRecord::launch_roles_assumed`]), since an agent may report pull instants of its
+    /// own (`SubmitTaskStateChange`) and a report about a fetch is not an assume.
     ///
     /// A task that has only just been PLACED carries neither, because the pass that places a
     /// task holds none of the facts these steps are decided against: they are read out of the
@@ -153,38 +176,57 @@ impl TaskRecord {
     /// one whose containers have started, which cannot have happened before the steps that
     /// decide whether they may.
     pub fn launch_steps_taken(&self) -> bool {
-        self.launch_failure.is_some() || self.pull_started_at.is_some()
+        self.launch_failure.is_some()
+            || (self.launch_roles_assumed && self.pull_started_at.is_some())
     }
 }
 
+/// The roles ONE launch has Amazon ECS assume, in the order it assumes them.
+///
+/// Collected from the stored tasks under this service's lock
+/// ([`ComAmazonawsEcsAmazonec2containerservicev20141113State::launches_awaiting_role_assumption`])
+/// and answered against the IAM store under that store's own, so no two locks are ever held
+/// at once. A launch that resolved NO role carries an empty list and is still one the pass was
+/// made for: there was nothing to refuse it by.
+#[derive(Debug, Clone)]
+pub struct LaunchRoles {
+    /// The task the verdict belongs to.
+    pub task_arn: String,
+    /// The roles the launch resolved: its execution role, then its task role.
+    pub role_arns: Vec<String>,
+}
+
 impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
-    /// Every role the launch of a task that is still coming up has Amazon ECS assume, as
-    /// `(task ARN, role ARN)` pairs: for each task on its way UP (its `desiredStatus` is
-    /// `RUNNING` and it has not started) that carries no launch failure already, its
-    /// execution role and then its task role.
+    /// Every task on its way UP whose launch roles have not been put to the account's IAM
+    /// records yet: one whose `desiredStatus` is `RUNNING` that has not started, that carries
+    /// no launch failure already and that this step has not been taken for
+    /// ([`TaskRecord::launch_roles_assumed`]), with the roles its launch resolved.
     ///
     /// The execution role comes first because Amazon ECS acts as it before the containers are
     /// given the task role, so a launch that names two roles it cannot assume stops with the
     /// first of them. A launch that names neither has no role to assume, so the step decides
-    /// nothing for it.
-    pub fn launches_awaiting_role_assumption(&self) -> Vec<(String, String)> {
-        let mut launches = Vec::new();
-        for task in self.tasks.values() {
-            if task.launch_failure.is_some()
-                || task.desired_status != STATUS_RUNNING
-                || !task.is_pending()
-            {
-                continue;
-            }
-            let roles = [
-                task.execution_role_arn.clone(),
-                self.launched_task_role_arn(task),
-            ];
-            for role_arn in roles.into_iter().flatten() {
-                launches.push((task.task_arn.clone(), role_arn));
-            }
-        }
-        launches
+    /// nothing for it — and is still listed, because what the step RECORDS is that it has been
+    /// taken.
+    pub fn launches_awaiting_role_assumption(&self) -> Vec<LaunchRoles> {
+        self.tasks
+            .values()
+            .filter(|task| {
+                task.launch_failure.is_none()
+                    && !task.launch_roles_assumed
+                    && task.desired_status == STATUS_RUNNING
+                    && task.is_pending()
+            })
+            .map(|task| LaunchRoles {
+                task_arn: task.task_arn.clone(),
+                role_arns: [
+                    task.execution_role_arn.clone(),
+                    self.launched_task_role_arn(task),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
+            })
+            .collect()
     }
 
     /// The TASK role the launch of `task` resolved: the one its own overrides name, and the
@@ -200,22 +242,26 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
         resolved_task_role_arn(task.overrides.as_ref(), definition).map(ToString::to_string)
     }
 
-    /// Record why Amazon ECS could not launch each named task: the `stoppedReason` the stop
-    /// the clock then owes carries ([`TaskRecord::fail_launch`]).
+    /// Record that the roles each named launch resolved have been put to the account's IAM
+    /// records, and why Amazon ECS could not launch the ones they refuse: the `stoppedReason`
+    /// the stop the clock then owes carries ([`TaskRecord::fail_launch`]).
     ///
     /// The FIRST refusal a task carries is the one it stops with, which is why nothing
-    /// overwrites a failure already recorded. No image was fetched for such a task — the
+    /// overwrites a failure already recorded. No image is fetched for a refused task — the
     /// fetch is made as the role that could not be assumed — so no pull instants are recorded
-    /// with it. Only a task that is still on its way UP takes the failure: one that has
-    /// started was launched after all, and one that is stopping is on its way out either way.
-    pub fn record_unassumable_role_refusals(&mut self, refusals: &[(String, String)]) {
-        for (task_arn, reason) in refusals {
+    /// with it, which is what the fetch's own pass withholds it by
+    /// ([`Self::launches_awaiting_image_pull`]). Only a task that is still on its way UP takes
+    /// the verdict: one that has started was launched after all, and one that is stopping is on
+    /// its way out either way.
+    pub fn record_launch_role_assumptions(&mut self, verdicts: &[(String, Option<String>)]) {
+        for (task_arn, refusal) in verdicts {
             if let Some(task) = self.tasks.get_mut(task_arn) {
-                if task.launch_failure.is_none()
-                    && task.desired_status == STATUS_RUNNING
-                    && task.is_pending()
-                {
-                    task.launch_failure = Some(reason.clone());
+                if task.desired_status != STATUS_RUNNING || !task.is_pending() {
+                    continue;
+                }
+                task.launch_roles_assumed = true;
+                if task.launch_failure.is_none() {
+                    task.launch_failure = refusal.clone();
                 }
             }
         }

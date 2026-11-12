@@ -80,9 +80,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// margin for a loaded test machine.
 const POLL_BUDGET: Duration = Duration::from_secs(10);
 
-/// How long a row waits before asserting that something did NOT happen: long enough that it
-/// would have by now.
-const QUIET_BUDGET: Duration = Duration::from_secs(2);
+/// How many tasks of the service below have to have stopped before the second test is
+/// satisfied: the one `CreateService` placed, and at least one the SCHEDULER placed in its
+/// stead — a launch no call was there to decide, held to the same rule.
+const REPLACED_AT_LEAST: usize = 2;
 
 /// A router carrying Amazon ECS, IAM — which holds the role whose trust policy decides the
 /// assume — and CloudWatch Logs, which a container's output would be delivered to, over ONE
@@ -731,42 +732,68 @@ async fn the_scheduler_launches_no_task_under_a_role_ecs_may_not_assume() {
     }
 
     // And it stays that way: nothing the scheduler replaces the failed task with reaches
-    // `RUNNING` either, because the role it would run under is the same one.
-    tokio::time::sleep(QUIET_BUDGET).await;
-    let described = ok(
-        &router,
-        "DescribeServices",
-        json!({ "cluster": cluster, "services": ["trustservice"] }),
-        case,
-    )
-    .await;
-    let service = described["services"]
-        .as_array()
-        .and_then(|services| services.first().cloned())
-        .unwrap_or_else(|| panic!("case {case:?}: expected the service back, got {described}"));
-    assert_eq!(
-        service["runningCount"].as_i64().unwrap_or_default(),
-        0,
-        "case {case:?}: expected a service whose tasks cannot be launched to run none, got \
-         {service}"
-    );
-    let running = ok(
-        &router,
-        "ListTasks",
-        json!({ "cluster": cluster, "desiredStatus": RUNNING }),
-        case,
-    )
-    .await;
-    let still_wanted = list(&running, "taskArns", case);
-    for task_arn in &still_wanted {
-        let task_arn = task_arn
-            .as_str()
-            .unwrap_or_else(|| panic!("case {case:?}: expected a task ARN, got {running}"));
-        let task = describe(&router, cluster, task_arn, case).await;
-        assert_ne!(
-            string(&task, "lastStatus", case),
-            RUNNING,
-            "case {case:?}: expected no task of the service to be running, got {task}"
+    // `RUNNING` either, because the role it would run under is the same one. Waited for by
+    // the SIGNAL the scheduler raises — another stopped task, which is the replacement having
+    // been placed, judged and stopped in its turn — rather than for a stretch of the clock,
+    // with the count asserted on every read along the way.
+    let deadline = Instant::now() + POLL_BUDGET;
+    loop {
+        let described = ok(
+            &router,
+            "DescribeServices",
+            json!({ "cluster": cluster, "services": ["trustservice"] }),
+            case,
+        )
+        .await;
+        let service = described["services"]
+            .as_array()
+            .and_then(|services| services.first().cloned())
+            .unwrap_or_else(|| panic!("case {case:?}: expected the service back, got {described}"));
+        assert_eq!(
+            service["runningCount"].as_i64().unwrap_or_default(),
+            0,
+            "case {case:?}: expected a service whose tasks cannot be launched to run none, got \
+             {service}"
         );
+        let running = ok(
+            &router,
+            "ListTasks",
+            json!({ "cluster": cluster, "desiredStatus": RUNNING }),
+            case,
+        )
+        .await;
+        let still_wanted = list(&running, "taskArns", case);
+        for task_arn in &still_wanted {
+            let task_arn = task_arn
+                .as_str()
+                .unwrap_or_else(|| panic!("case {case:?}: expected a task ARN, got {running}"));
+            let task = describe(&router, cluster, task_arn, case).await;
+            assert_ne!(
+                string(&task, "lastStatus", case),
+                RUNNING,
+                "case {case:?}: expected no task of the service to be running, got {task}"
+            );
+        }
+        // The replacements themselves: once the scheduler has lost more than the one task
+        // `CreateService` placed, the launches this has held to the rule include the ones the
+        // CLOCK placed, which is what makes the "stays that way" an observation rather than a
+        // wait.
+        let stopped = ok(
+            &router,
+            "ListTasks",
+            json!({ "cluster": cluster, "desiredStatus": STOPPED }),
+            case,
+        )
+        .await;
+        if list(&stopped, "taskArns", case).len() >= REPLACED_AT_LEAST {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "case {case:?}: expected the scheduler to have replaced the task it cannot launch \
+             at least {} times over, got {stopped}",
+            REPLACED_AT_LEAST - 1
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
 }

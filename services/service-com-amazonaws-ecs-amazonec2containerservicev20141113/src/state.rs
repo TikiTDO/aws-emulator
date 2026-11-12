@@ -3652,6 +3652,19 @@ pub struct TaskRecord {
     /// Amazon ECS stops the task with at the instant it would otherwise have started
     /// ([`TaskRecord::fail_launch`]), and `None` for a task nothing is known to block.
     pub launch_failure: Option<String>,
+    /// Whether the roles THIS launch resolved have been put to the account's IAM records
+    /// already ([`evaluate_launch_role_assumptions`]) — `false` for a task that has only
+    /// just been placed, whoever placed it.
+    ///
+    /// Recorded on the task rather than inferred from what the step left behind, because the
+    /// step that follows it is decided for whichever tasks the store holds when IT starts: a
+    /// task placed after the assume's pass had collected its launches carries no refusal yet,
+    /// and that is not the same thing as having been assumed. The image fetch waits for this
+    /// ([`ComAmazonawsEcsAmazonec2containerservicev20141113State::launches_awaiting_image_pull`])
+    /// and so, through it, does the task's start ([`TaskRecord::launch_steps_taken`]): Amazon
+    /// ECS pulls an image AS the execution role, so nothing is fetched for a launch whose
+    /// roles it has not assumed.
+    pub launch_roles_assumed: bool,
     /// The task execution role this task's image pull is made as — the one the placement
     /// resolved ([`resolved_execution_role_arn`]) — and `None` for a task whose revision
     /// and overrides name none.

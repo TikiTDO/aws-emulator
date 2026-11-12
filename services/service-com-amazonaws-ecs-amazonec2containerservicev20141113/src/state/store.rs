@@ -3387,6 +3387,10 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
             // placement is the launching call's to decide, with this store's guard
             // dropped ([`crate::state::evaluate_image_pulls`]).
             launch_failure: None,
+            // Nothing has put the roles this placement resolved to the account's IAM
+            // records yet: that is the launching pass's to do, with this store's guard
+            // dropped ([`crate::state::evaluate_launch_role_assumptions`]).
+            launch_roles_assumed: false,
             // The task execution role the revision this placement runs declares, which is
             // the principal its image pull is made as. A service's placement carries no
             // overrides, so the revision's own value is the resolved one.

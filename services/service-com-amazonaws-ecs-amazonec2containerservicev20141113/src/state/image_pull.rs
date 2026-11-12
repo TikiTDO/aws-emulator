@@ -50,7 +50,9 @@
 //! are recorded on the task (`Task$pullStartedAt`/`pullStoppedAt`) and a failure with them
 //! ([`TaskRecord::launch_failure`]); the clock then stops the task at the instant it would
 //! otherwise have started ([`TaskRecord::fail_launch`]), so a caller reading in between
-//! still sees the task come up. The attempt is made once per task: a task that already
+//! still sees the task come up. It is attempted only for a task whose launch roles have
+//! already been put to IAM ([`TaskRecord::launch_roles_assumed`]), because the pull is made
+//! AS the execution role. The attempt is made once per task: a task that already
 //! carries its pull instants is not pulled again, so a later placement by another call
 //! re-decides nothing and imports nothing twice.
 //!
@@ -444,9 +446,15 @@ fn effective_route_table<'store>(
 
 impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
     /// Every task whose image fetch has not been attempted yet: one that is on its way UP
-    /// (its `desiredStatus` is `RUNNING` and it has not started) and that carries no pull
-    /// instants, with the placement it was launched into, the images its containers run and
-    /// the execution role the pull is made as.
+    /// (its `desiredStatus` is `RUNNING` and it has not started), whose launch roles have
+    /// already been put to the account's IAM records ([`TaskRecord::launch_roles_assumed`])
+    /// and that carries no pull instants, with the placement it was launched into, the
+    /// images its containers run and the execution role the pull is made as.
+    ///
+    /// The fetch is made AS the execution role, so a launch whose roles Amazon ECS has not
+    /// assumed yet has nothing to fetch with: such a task is left to the pass that follows
+    /// the assume rather than fetched for here — which is also what keeps its start withheld
+    /// ([`TaskRecord::launch_steps_taken`]).
     ///
     /// A task that shares the networking of the host that runs it carries no placement of
     /// its own, so the PATH half decides nothing for it: the path it fetches an image over
@@ -457,6 +465,7 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
             .values()
             .filter(|task| {
                 task.launch_failure.is_none()
+                    && task.launch_roles_assumed
                     && task.pull_started_at.is_none()
                     && task.desired_status == STATUS_RUNNING
                     && task.is_pending()

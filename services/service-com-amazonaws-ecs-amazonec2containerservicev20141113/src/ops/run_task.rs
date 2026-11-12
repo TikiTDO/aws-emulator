@@ -774,6 +774,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // are decided below with the guard dropped — either answer is what this
                 // field carries ([`crate::state::settle_task_launches`]).
                 launch_failure: None,
+                // Nothing has put the roles this launch resolved to the account's IAM
+                // records yet: that happens below, with the guard dropped
+                // ([`crate::state::evaluate_launch_role_assumptions`]).
+                launch_roles_assumed: false,
                 // The task execution role this run resolved — the one its `overrides`
                 // name, else the revision's own — which is the principal the image pull
                 // of this task is made as
