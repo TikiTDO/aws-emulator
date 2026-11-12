@@ -6,10 +6,15 @@
 //! which values are legal is a property of the SERVICE whose resource sends them rather than
 //! of the member — the `logType` member's own catalogue lists them per service — so a
 //! `PutDeliverySource` naming a type that resource's service does not send is refused 400
-//! `ValidationException` stating the options that service DOES support, and nothing is
-//! stored; a type that service sends is accepted and reported back. A resource of a service
-//! this emulator publishes no list for is no basis to refuse a type, so its `logType` is
-//! stored as given.
+//! `ValidationException` and nothing is stored; a type that service sends is accepted and
+//! reported back. A resource of a service this emulator publishes no list for is no basis to
+//! refuse a type, so its `logType` is stored as given.
+//!
+//! Which sentence the refusal carries turns on whether the type names a log source at all:
+//! a type SOME service in the catalogue sends is a log source this sending service is not
+//! allowed for, and the refusal says exactly that and nothing more; a type no service sends
+//! is no log source, and the refusal says the provided type is not valid and lists the
+//! options that service does support.
 //!
 //! Every case drives the service the way a client does — `POST /` with
 //! `X-Amz-Target: Logs_20140328.<Operation>` through the router that mounts it — so a
@@ -159,13 +164,44 @@ fn senders() -> Vec<Sender> {
 const UNCATALOGUED_ARN: &str =
     "arn:aws:mediapackage:eu-west-2:123456789012:channels/vended";
 
-/// The whole message a `logType` the sending service does not send is refused with: the fixed
-/// sentence, and the options that service does support as its one variable part.
-fn unsupported_message(supported: &[&str]) -> String {
+/// The whole message a type that is NO log source of this catalogue is refused with: the fixed
+/// sentence, and the options the sending service does support as its one variable part.
+fn invalid_log_type_message(supported: &[&str]) -> String {
     format!(
         "Provided LogType is not valid. Supported options are [{}].",
         supported.join(", ")
     )
+}
+
+/// The whole message a log type ANOTHER service sends is refused with: entirely fixed, naming
+/// neither the type, nor the resource, nor the service, nor the options.
+const SERVICE_NOT_ALLOWED_MESSAGE: &str = "This service is not allowed for this LogSource.";
+
+/// Log types the `logType` member's catalogue names for a sender this suite's table does NOT
+/// hold a row for, so each is a log source of the delivery plane that no sender below sends.
+/// Source: the `logType` member of `PutDeliverySourceRequest`
+/// (`smithy_query(query="doc",shape="PutDeliverySourceRequest",member="logType")`) — "For
+/// Amazon Web Services Shield Advanced, the valid value is FLOW_LOGS", "For Route 53 Global
+/// Resolver, the valid value is GLOBAL_RESOLVER_LOGS", "For PCS, the valid values are
+/// PCS_SCHEDULER_LOGS [...]", "For Amazon ECS, the valid value is ACTION_LOGS".
+const LOG_TYPES_OF_OTHER_SENDERS: [&str; 4] = [
+    "FLOW_LOGS",
+    "GLOBAL_RESOLVER_LOGS",
+    "PCS_SCHEDULER_LOGS",
+    "ACTION_LOGS",
+];
+
+/// Values that name no log source of this catalogue at all, at and inside the published bounds
+/// of `LogType` (`@length` 1..255, `@pattern ^[\w]*$`).
+fn values_that_are_no_log_source(a_legal_type: &str) -> Vec<String> {
+    vec![
+        "NOT_A_LOG_TYPE".to_string(),
+        // A log type is matched exactly, so one differing from a legal one only in case names
+        // no log source either.
+        a_legal_type.to_lowercase(),
+        "L".to_string(),
+        "L".repeat(255),
+    ]
 }
 
 /// The `deliverySource` a response carries.
@@ -209,31 +245,42 @@ async fn every_log_type_the_sending_service_sends_is_stored() {
     }
 }
 
-/// A `logType` the sending resource's service does NOT send is refused, with the sentence
-/// naming the options that service supports — and the refusal stores nothing, so the name is
-/// still free afterwards.
+/// A `logType` the sending resource's service does NOT send is refused — with the sentence
+/// that names the service/log-source mismatch when the type is a log source some other sender
+/// sends, and with the sentence that lists the options that service supports when it is no log
+/// source at all — and the refusal stores nothing, so the name is still free afterwards.
 #[tokio::test]
 async fn a_log_type_the_sending_service_does_not_send_is_refused() {
     let logs = Logs::new();
     let senders = senders();
 
     for (index, sender) in senders.iter().enumerate() {
-        // The types to try: every type ANOTHER catalogued service sends and this one does
-        // not, one no service in the catalogue sends at all, and one differing from a legal
-        // type only in case — a log type is matched exactly.
-        let mut rejected: Vec<String> = senders
+        // The types to try: every type ANOTHER catalogued service sends and this one does not
+        // (each a log source, so the service is what is refused), every log type of a sender
+        // outside this table, and the values that name no log source at all (so the type is
+        // what is refused).
+        let mut from_other_senders: Vec<String> = senders
             .iter()
             .flat_map(|other| other.log_types.iter())
+            .chain(LOG_TYPES_OF_OTHER_SENDERS.iter())
             .filter(|log_type| !sender.log_types.contains(*log_type))
             .map(|log_type| (*log_type).to_string())
             .collect();
-        rejected.sort_unstable();
-        rejected.dedup();
-        rejected.push("NOT_A_LOG_TYPE".to_string());
-        rejected.push(sender.log_types[0].to_lowercase());
+        from_other_senders.sort_unstable();
+        from_other_senders.dedup();
 
-        let expected = unsupported_message(sender.log_types);
-        for (type_index, log_type) in rejected.iter().enumerate() {
+        let not_valid = invalid_log_type_message(sender.log_types);
+        let rejected: Vec<(String, &str)> = from_other_senders
+            .into_iter()
+            .map(|log_type| (log_type, SERVICE_NOT_ALLOWED_MESSAGE))
+            .chain(
+                values_that_are_no_log_source(sender.log_types[0])
+                    .into_iter()
+                    .map(|log_type| (log_type, not_valid.as_str())),
+            )
+            .collect();
+
+        for (type_index, (log_type, expected)) in rejected.iter().enumerate() {
             let case = (sender.label, log_type.as_str());
             let name = format!("refused-{index}-{type_index}");
             let (code, message) = logs
@@ -252,7 +299,7 @@ async fn a_log_type_the_sending_service_does_not_send_is_refused() {
                 "case {case:?}: expected {VALIDATION}, got {code} {message:?}"
             );
             assert_eq!(
-                message, expected,
+                &message, expected,
                 "case {case:?}: expected {expected:?}, got {message:?}"
             );
 

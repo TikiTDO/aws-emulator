@@ -9,7 +9,11 @@
 //!
 //! A source is identified by the pairing of its name with the resource it represents, so a
 //! put that keeps the name and names a DIFFERENT resource is refused with the
-//! `ConflictException` this operation models rather than re-pointing the stored source.
+//! `ConflictException` this operation models rather than re-pointing the stored source. The
+//! pairing of the RESOURCE with the log type it sends is likewise held by one source only, so
+//! a put that would represent under another name a (resource, log type) pairing an existing
+//! source already represents is refused with the same error
+//! ([`crate::state::DELIVERY_SOURCE_RESOURCE_IN_USE_MESSAGE`]) and stores nothing.
 //!
 //! The resource must also be one this endpoint serves: a resource of a global service is
 //! reached through its partition's single global endpoint, so a put naming one from any other
@@ -19,8 +23,11 @@
 //!
 //! The log type must also be one the sending resource's service sends: the `logType` member's
 //! own catalogue lists the valid values per service, so a put naming any other type for that
-//! resource is refused with `ValidationException`, stating the options that service does
-//! support ([`crate::state::unsupported_log_type_message`]).
+//! resource is refused with `ValidationException` — stating that the SERVICE is not allowed
+//! for the log source when the type is one some other service sends, and otherwise that the
+//! type is not valid, with the options that service does support
+//! ([`crate::state::unsupported_log_type_message`]).
+
 //!
 //! ## Shape of an operation
 //!
@@ -287,6 +294,32 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         "an account can have up to {} delivery sources",
                         crate::state::MAX_DELIVERY_SOURCES
                     )),
+                },
+            )
+            .into());
+        }
+
+        // The pairing of the RESOURCE with the log type it sends is what a delivery addresses
+        // a sender's logs by, so one such pairing is represented by at most one delivery
+        // source: a put that would represent, under another name, a (resource, log type)
+        // pairing an existing source already represents is refused as the conflict it is
+        // ("This operation attempted to create a resource that already exists") and stores
+        // nothing. The same resource sending a DIFFERENT log type is a different pairing, so
+        // that put is a create like any other.
+        if store
+            .delivery_source_representing(
+                &region,
+                &input.name,
+                &input.resource_arn,
+                &input.log_type,
+            )
+            .is_some()
+        {
+            return Err(PutDeliverySourceErrorModeled::ConflictException(
+                ConflictException {
+                    message: Some(
+                        crate::state::DELIVERY_SOURCE_RESOURCE_IN_USE_MESSAGE.to_string(),
+                    ),
                 },
             )
             .into());

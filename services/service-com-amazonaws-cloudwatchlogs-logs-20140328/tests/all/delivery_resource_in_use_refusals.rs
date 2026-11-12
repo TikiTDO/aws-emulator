@@ -231,14 +231,16 @@ async fn an_in_use_delivery_destination_is_refused_with_the_services_fixed_text(
         let destination_arn = put_destination(&logs, &name, resource_arn).await;
 
         // Each delivery pairs this destination with a source of its own, so the destination is
-        // referenced `fan_out` times over.
+        // referenced `fan_out` times over. A (resource, log type) pairing is represented by ONE
+        // delivery source, so each of those sources represents its own resource of the vendor
+        // the row names — the resource segment of its ARN carries the source's own name.
         let mut ids: Vec<String> = Vec::new();
         let mut sources: Vec<String> = Vec::new();
         for index in 0..fan_out {
             let (sender, sender_arn, log_type) = SOURCE_RESOURCES[index % SOURCE_RESOURCES.len()];
             let source = format!("{name}-src-{index}-{sender}");
             let source = source[source.len().saturating_sub(MAX_NAME_LENGTH)..].to_string();
-            put_source(&logs, &source, sender_arn, log_type).await;
+            put_source(&logs, &source, &format!("{sender_arn}-{source}"), log_type).await;
             ids.push(create_delivery(&logs, &source, &destination_arn).await);
             sources.push(source);
         }

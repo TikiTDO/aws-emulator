@@ -289,12 +289,14 @@ fn cases() -> Vec<Case> {
             "logs",
         )
         .with_configuration(&[(longest_key.as_str(), longest_value.as_str())]),
+        // One (resource, log type) pairing is represented by ONE source, so this row — which
+        // is about the name's upper bound — names a pairing no row above holds.
         Case::of(
             "the longest name the model admits",
             &"z".repeat(60),
-            BUCKET_ARN,
-            "S3_SERVER_ACCESS_LOGS",
-            "s3",
+            AGENTCORE_ARN,
+            "USAGE_LOGS",
+            "bedrock-agentcore",
         ),
     ]
 }
@@ -862,8 +864,14 @@ async fn a_resource_that_pins_no_region_is_accepted_from_every_region() {
 async fn the_published_name_bounds_are_accepted_and_one_past_each_is_refused() {
     let logs = Logs::new();
 
-    for name in ["n", &"n".repeat(60)] {
-        let body = json!({"name": name, "resourceArn": BUCKET_ARN, "logType": "S3_SERVER_ACCESS_LOGS"});
+    // One (resource, log type) pairing is represented by ONE source, so each bound names its
+    // own pairing: what varies across these two rows is the name's length.
+    for (name, resource_arn, log_type) in [
+        ("n".to_string(), BUCKET_ARN, "S3_SERVER_ACCESS_LOGS"),
+        ("n".repeat(60), WORKMAIL_ARN, "ACCESS_CONTROL_LOGS"),
+    ] {
+        let name = name.as_str();
+        let body = json!({"name": name, "resourceArn": resource_arn, "logType": log_type});
         let response = logs.ok(PUT, &body).await;
         let put_reported = reported(PUT, &body, &response);
         assert_eq!(

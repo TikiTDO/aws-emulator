@@ -716,11 +716,16 @@ async fn a_token_is_a_position_within_one_filtered_enumeration() {
         );
     }
 
-    // A token another paginated operation minted is not a position in this enumeration.
-    for name in ["source-one", "source-two"] {
+    // A token another paginated operation minted is not a position in this enumeration. One
+    // (resource, log type) pairing is represented by one delivery source, so the two sources
+    // this pages name log types the sending service both sends.
+    for (name, log_type) in [
+        ("source-one", "ACCESS_CONTROL_LOGS"),
+        ("source-two", "AUTHENTICATION_LOGS"),
+    ] {
         logs.ok(
             PUT_SOURCE,
-            &json!({"name": name, "resourceArn": WORKMAIL_ARN, "logType": "ACCESS_CONTROL_LOGS"}),
+            &json!({"name": name, "resourceArn": WORKMAIL_ARN, "logType": log_type}),
         )
         .await;
     }

@@ -587,6 +587,33 @@ impl ComAmazonawsCloudwatchlogsLogs20140328State {
             .map(|(_key, record)| record)
     }
 
+    /// The delivery source — if any — that already represents `resource_arn` for `log_type`
+    /// under a name OTHER than `name`.
+    ///
+    /// `DeliverySource$resourceArns` holds "the ARN of the Amazon Web Services resource that
+    /// sends logs and is represented by this delivery source" and `DeliverySource$logType` "the
+    /// type of log that the source is sending", so the pairing of the two is what a delivery
+    /// addresses a sender's logs by: a second source over the same pairing would make the
+    /// wiring of those logs ambiguous. A put under the name that ALREADY represents the pairing
+    /// re-states its own source and is an update, which is why the source stored under `name`
+    /// is never the answer.
+    pub fn delivery_source_representing(
+        &self,
+        region: &str,
+        name: &str,
+        resource_arn: &str,
+        log_type: &str,
+    ) -> Option<&DeliverySourceRecord> {
+        self.delivery_sources_in(region).find(|stored| {
+            stored.name != name
+                && stored.log_type == log_type
+                && stored
+                    .resource_arns
+                    .iter()
+                    .any(|stored_arn| stored_arn == resource_arn)
+        })
+    }
+
     /// The delivery destination `region`'s endpoint holds under `name`, if any. See
     /// [`Self::delivery_source`]: a destination belongs to the Region it was created in too.
     pub fn delivery_destination(
@@ -1648,16 +1675,122 @@ pub fn delivery_source_log_types(resource_arn: &str) -> Option<Vec<&'static str>
     (!published.is_empty()).then_some(published)
 }
 
+/// Every log type the vended-log catalogue names, ACROSS every sending service: the log
+/// sources this delivery plane knows of at all, whichever service sends each of them.
+///
+/// Source: the `logType` member of `PutDeliverySourceRequest`
+/// (`smithy_query(query="doc",shape="PutDeliverySourceRequest",member="logType")`), read as
+/// one list rather than per service — "For Amazon EventBridge Event Bus (Custom), the valid
+/// values are INFO_LOGS and ERROR_LOGS", "For Amazon Web Services Shield Advanced, the valid
+/// value is FLOW_LOGS", and so on for every row — in the order that catalogue states them and
+/// without repeating a type two of its rows share.
+pub const VENDED_LOG_TYPES: &[&str] = &[
+    "ACCESS_LOGS",
+    "WAF_LOGS",
+    "ALB_ACCESS_LOGS",
+    "ALB_CONNECTION_LOGS",
+    "ALB_HEALTH_CHECK_LOGS",
+    "APPLICATION_LOGS",
+    "TRACES",
+    "USAGE_LOGS",
+    "EVENT_LOGS",
+    "INSIGHTS_QUERY_LOGS",
+    "AUTO_MODE_BLOCK_STORAGE_LOGS",
+    "AUTO_MODE_COMPUTE_LOGS",
+    "AUTO_MODE_IPAM_LOGS",
+    "AUTO_MODE_LOAD_BALANCING_LOGS",
+    "EKS_CAPABILITY_ACK_LOGS",
+    "EKS_CAPABILITY_ARGOCD_APPLICATION_LOGS",
+    "EKS_CAPABILITY_ARGOCD_APPLICATIONSET_LOGS",
+    "EKS_CAPABILITY_ARGOCD_COMMITSERVER_LOGS",
+    "EKS_CAPABILITY_ARGOCD_REPOSERVER_LOGS",
+    "EKS_CAPABILITY_ARGOCD_SERVER_LOGS",
+    "EKS_CAPABILITY_KRO_LOGS",
+    "EGRESS_ACCESS_LOGS",
+    "INGRESS_ACCESS_LOGS",
+    "AD_DECISION_SERVER_LOGS",
+    "MANIFEST_SERVICE_LOGS",
+    "TRANSCODE_LOGS",
+    "ACTION_LOGS",
+    "WORKFLOW_LOGS",
+    "INFO_LOGS",
+    "ERROR_LOGS",
+    "ALERT_LOGS",
+    "ALLOW_LOGS",
+    "DENY_LOGS",
+    "NLB_ACCESS_LOGS",
+    "PCS_SCHEDULER_LOGS",
+    "PCS_JOBCOMP_LOGS",
+    "PCS_SCHEDULER_AUDIT_LOGS",
+    "PCS_SCALING_LOGS",
+    "SYNC_JOB_LOGS",
+    "AGENT_HOURS_LOGS",
+    "AGENT_METADATA_LOGS",
+    "CHAT_LOGS",
+    "DLP_LOGS",
+    "FEEDBACK_LOGS",
+    "INDEX_USAGE_LOGS",
+    "KB_FILE_SYNC_LOGS",
+    "GLOBAL_RESOLVER_LOGS",
+    "S3_SERVER_ACCESS_LOGS",
+    "SECURITY_FINDING_LOGS",
+    "TRAFFIC_POLICY_DEBUG_LOGS",
+    "FLOW_LOGS",
+    "ACCESS_CONTROL_LOGS",
+    "AUTHENTICATION_LOGS",
+    "WORKMAIL_AVAILABILITY_PROVIDER_LOGS",
+    "WORKMAIL_MAILBOX_ACCESS_LOGS",
+    "WORKMAIL_PERSONAL_ACCESS_TOKEN_LOGS",
+];
+
+/// Whether `log_type` names a log source this delivery plane knows at all — one some service
+/// sends, whether or not it is the service of the resource a put names.
+///
+/// Both catalogues this service publishes answer it: the per-service lists of
+/// [`VENDED_LOG_TYPES`], and the configuration-template rows
+/// ([`CONFIGURATION_TEMPLATE_SOURCES`]), which carry a type for a sender the `logType` member's
+/// prose does not name.
+pub fn is_vended_log_type(log_type: &str) -> bool {
+    VENDED_LOG_TYPES.contains(&log_type)
+        || CONFIGURATION_TEMPLATE_SOURCES.iter().any(|source| {
+            source
+                .log_types
+                .iter()
+                .any(|entry| entry.log_type == log_type)
+        })
+}
+
+/// The refusal a put naming a log source whose logs the named resource's service does not send
+/// is answered with: the type IS a log source ([`is_vended_log_type`]) — some other service
+/// sends it — so what is wrong is the pairing, and the sentence states exactly that.
+///
+/// Entirely FIXED text for that error class: it names neither the type, nor the resource, nor
+/// the service, nor the types that service does send, so every mismatched pairing is refused
+/// identically.
+pub const LOG_TYPE_SERVICE_NOT_ALLOWED_MESSAGE: &str =
+    "This service is not allowed for this LogSource.";
+
 /// The refusal for a `logType` the resource named by `resource_arn` does not send
 /// ([`delivery_source_log_types`]), or `None` when it is one of them — or when this service
 /// publishes no list for that resource's service, which is no basis to refuse one.
 ///
-/// The fixed text states that the provided log type is not valid and then the options that ARE
-/// supported, which is the one variable part: the log types the named resource's service sends,
-/// in the order the catalogue lists them.
+/// Which of the two sentences the class is refused with turns on whether the type names a log
+/// source at all ([`is_vended_log_type`]):
+///
+/// * a type SOME service sends is a log source this pairing is not allowed for, so the refusal
+///   is the fixed [`LOG_TYPE_SERVICE_NOT_ALLOWED_MESSAGE`] — the type is valid, the sending
+///   service is the part that is not;
+/// * a type no service sends is no log source at all, so the refusal states that the provided
+///   log type is not valid and then the options that ARE, which is its one variable part: the
+///   log types the named resource's service sends, in the order the catalogue lists them.
 pub fn unsupported_log_type_message(resource_arn: &str, log_type: &str) -> Option<String> {
     let supported = delivery_source_log_types(resource_arn)?;
-    (!supported.contains(&log_type)).then(|| {
+    if supported.contains(&log_type) {
+        return None;
+    }
+    Some(if is_vended_log_type(log_type) {
+        LOG_TYPE_SERVICE_NOT_ALLOWED_MESSAGE.to_string()
+    } else {
         format!(
             "Provided LogType is not valid. Supported options are [{}].",
             supported.join(", ")

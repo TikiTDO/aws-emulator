@@ -67,6 +67,8 @@ mod delivery_resource_in_use_refusals;
 mod delivery_source_log_types;
 #[path = "all/delivery_source_region_support.rs"]
 mod delivery_source_region_support;
+#[path = "all/delivery_source_resource_pairings.rs"]
+mod delivery_source_resource_pairings;
 #[path = "all/delivery_sources.rs"]
 mod delivery_sources;
 #[path = "all/destination_access_authorization.rs"]

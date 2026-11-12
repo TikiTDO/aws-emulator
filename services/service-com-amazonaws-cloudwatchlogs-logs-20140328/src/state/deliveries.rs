@@ -211,6 +211,16 @@ pub const MAX_DELIVERIES: usize = 1_000;
 /// account does not hold is refused identically.
 pub const DELIVERY_NOT_FOUND_MESSAGE: &str = "Requested Delivery does not exist in this account.";
 
+/// The refusal CloudWatch Logs answers a `PutDeliverySource` with when the resource it names
+/// is already represented for that same log type by ANOTHER delivery source of the account
+/// ([`crate::state::ComAmazonawsCloudwatchlogsLogs20140328State::delivery_source_representing`]).
+///
+/// The sentence is FIXED for that error class: it names neither the resource, nor the log type,
+/// nor the source that already represents the pairing, so every such put is refused
+/// identically, and it points the caller at the resource id it re-used.
+pub const DELIVERY_SOURCE_RESOURCE_IN_USE_MESSAGE: &str =
+    "This ResourceId has already been used in another Delivery Source in this account.";
+
 /// The refusal the vended-log delivery ENUMERATIONS answer a `nextToken` they cannot resume
 /// from with — one this service never minted, one whose payload it cannot decode, and one
 /// minted for a different enumeration than the request carrying it describes.
