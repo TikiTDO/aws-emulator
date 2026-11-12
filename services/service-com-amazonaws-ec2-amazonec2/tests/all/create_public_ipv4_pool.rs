@@ -217,7 +217,16 @@ async fn create_public_ipv4_pool_persists_an_empty_pool_the_describe_reports() {
                  {described}"
             );
         }
-        for absent in ["firstAddress", "lastAddress", "addressCount", "description"] {
+        // A pool created without a description holds the EMPTY one, which the describe
+        // reports as a present element: `CreatePublicIpv4Pool` carries no description member
+        // for a caller to set.
+        assert_eq!(
+            element(&described, "description").as_deref(),
+            Some(""),
+            "case {case:?}: expected an empty description on a freshly created pool, got \
+             {described}"
+        );
+        for absent in ["firstAddress", "lastAddress", "addressCount"] {
             assert_eq!(
                 element(&described, absent),
                 None,

@@ -58,8 +58,14 @@ const REGION: &str = "us-west-2";
 /// `ec2::state::LOCAL_ZONE_NETWORK_BORDER_GROUPS` lists for this Region.
 const LOCAL_ZONE_GROUP: &str = "us-west-2-lax-1";
 
-/// EC2's error code for a public IPv4 pool id the account holds no pool for.
+/// EC2's error code for a public IPv4 pool id the account holds no pool for, as a request
+/// that ACTS on the pool is refused with.
 const NOT_FOUND: &str = "InvalidPublicIpv4Pool.NotFound";
+
+/// The code the READ of the pools answers for that same absent pool: the two paths of this
+/// resource carry different codes for it, so a delete read back through
+/// `DescribePublicIpv4Pools` is refused under this one.
+const READ_NOT_FOUND: &str = "InvalidPublicIpv4PoolID.NotFound";
 
 /// EC2's error code for a member the operation needs that reached the handler empty.
 const MISSING_PARAMETER: &str = "MissingParameter";
@@ -190,8 +196,8 @@ async fn assert_gone(router: &MultiServiceRouter, case: &str, pool_id: &str) {
     );
     assert_eq!(
         error_code(&body),
-        NOT_FOUND,
-        "case {case:?}: expected {NOT_FOUND} for a deleted pool, got {body}"
+        READ_NOT_FOUND,
+        "case {case:?}: expected {READ_NOT_FOUND} for a deleted pool, got {body}"
     );
 }
 

@@ -15,6 +15,14 @@
 // exactly that. The lines above are the file header, which no landing edits.
 #[path = "all/prefix_lists.rs"]
 mod prefix_lists;
+// The RECORDED response elements a reported shape carries that this checkout's model
+// declares no member for — a VPC's `dhcpOptionsSource` and a Verified Access instance's
+// transit-gateway attachment set — beside the state those same reads depend on: a created
+// VPC reaching `available`, and the description every public IPv4 pool holds. Declared
+// beside `prefix_lists` for the reason the note above gives: the sorted neighbourhood and
+// the tail of this file are where every new ec2 suite inserts its lines.
+#[path = "all/recorded_response_members.rs"]
+mod recorded_response_members;
 // The ONE projection of a network ACL's rule table: every reader reports the ACL's stored
 // rules egress-first by ascending rule number, each carrying the port range and the ICMP type
 // and code as present-but-empty members where the protocol has no use for them. Declared

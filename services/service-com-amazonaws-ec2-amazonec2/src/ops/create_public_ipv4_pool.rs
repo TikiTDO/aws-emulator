@@ -175,8 +175,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // a CIDR to a public IPv4 pool" is `ProvisionPublicIpv4PoolCidr`, a separate request
         // — so it starts with no address range, and its counts are derived from that empty
         // list by the store's own projection rather than written here. No member of this
-        // request carries a description either, so the pool has none until something sets
-        // one.
+        // request carries a description either, so the pool holds the EMPTY one the store
+        // gives a pool created without a description.
         let spec = PublicIpv4PoolSpec {
             description: None,
             network_border_group: border_group,

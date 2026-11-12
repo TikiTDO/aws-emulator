@@ -231,11 +231,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // "The IDs of the address pools" (`$PoolIds`): an id that names no pool of the
         // account is an error, not an absent row. A set, so narrowing below costs one lookup
         // per pool rather than a scan of the asked-for list.
+        //
+        // The code is the READ path's `InvalidPublicIpv4PoolID.NotFound`, which is not the
+        // `InvalidPublicIpv4Pool.NotFound` a request that ACTS on the pool is refused with
+        // (`DeletePublicIpv4Pool`, `DeprovisionPublicIpv4PoolCidr`): the two paths answer
+        // different codes for the same absent pool, and the message they share is why the
+        // code is the one thing that tells a client which of them refused it.
         if let Some(unknown) = requested
             .iter()
             .find(|id| !store.public_ipv4_pools.contains_key(id.as_str()))
         {
-            return Err(crate::state::invalid_public_ipv4_pool_not_found(unknown));
+            return Err(crate::state::invalid_public_ipv4_pool_id_not_found(unknown));
         }
         let wanted: HashSet<&str> = requested.iter().map(String::as_str).collect();
 

@@ -241,6 +241,24 @@ pub(super) const MAX_PRIVATE_IP_PROBES: u32 = 1 << 16;
 /// nothing sleeps for it.
 pub const TRANSITION_DELAY: Duration = Duration::from_millis(500);
 
+/// How long after the call that creates it a VPC's `pending` -> `available` move falls due:
+/// NO span at all, the move being owed from the instant that call returns.
+///
+/// A VPC is provisioned WITHIN the call that creates it. `CreateVpc` answers the transient
+/// `pending` the VPC was minted in — that answer is the one place the real service reports
+/// it, and the one place this store does — and the recorded `DescribeVpcs` that follows that
+/// call with nothing in between already reports `available`. So there is no window in which
+/// a SECOND call sees `pending`: the create's own response is the whole of it, and a client
+/// waiting for `available` before using the VPC is never left waiting.
+///
+/// That is what makes this a different duration from [`TRANSITION_DELAY`], which spans a
+/// wait a caller has to sit through — an instance coming up, an attachment settling — and
+/// which recorded reads of those resources do observe in the non-terminal state. Neither is
+/// slept for: the due instant is stored beside the record and
+/// [`ComAmazonawsEc2Amazonec2State::materialize_due_transitions`] applies the move, so the
+/// create still answers off the record as it stored it.
+pub const VPC_PROVISIONING_DELAY: Duration = Duration::ZERO;
+
 /// The `DescribeInstances` filter names this slice resolves.
 ///
 /// Source: the `Filters` member documentation of

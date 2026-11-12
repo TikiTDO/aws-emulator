@@ -1330,18 +1330,19 @@ impl ComAmazonawsEc2Amazonec2State {
     /// subnet in every Availability Zone of THAT Region, and the VPC's default security
     /// group — so a created default VPC cannot differ from a seeded one in anything but the
     /// state the clock owes it. Unlike the seeded one this VPC is answered in the
-    /// non-terminal `pending` state, because the caller just asked for it: a request made
-    /// straight after this one still sees `pending` and the state errors that go with it.
+    /// non-terminal `pending` state, because the caller just asked for it: that is the state
+    /// this call ANSWERS, and the move to `available` is owed from the instant it returns
+    /// ([`VPC_PROVISIONING_DELAY`]).
     ///
     /// `None` on exactly the terms [`Self::insert_default_network`] gives: `region` is not a
     /// Region of the catalog, or the store has no room for the WHOLE network, in which case
     /// nothing at all is written.
     pub fn create_default_network(&mut self, region: &str) -> Option<String> {
         let vpc_id = self.insert_default_network(region, VPC_STATE_PENDING)?;
-        // What the clock now owes this VPC: `available`, one TRANSITION_DELAY from now —
-        // the same span, off the same monotonic clock, as a `CreateVpc` pending move.
+        // What the clock now owes this VPC: `available`, one VPC_PROVISIONING_DELAY from
+        // now — the same span, off the same monotonic clock, as a `CreateVpc` pending move.
         self.vpc_available_at
-            .insert(vpc_id.clone(), Instant::now() + TRANSITION_DELAY);
+            .insert(vpc_id.clone(), Instant::now() + VPC_PROVISIONING_DELAY);
         Some(vpc_id)
     }
 

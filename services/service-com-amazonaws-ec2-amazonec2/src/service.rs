@@ -21,7 +21,9 @@
 //!   ec2Query protocol plus the parts of EC2's response envelope the Smithy
 //!   protocol definition does not describe: the `<return>` success flag, the
 //!   `<RequestID>` element of a refusal, the media type's `charset`
-//!   parameter, and the decimal form every floating-point member is written in.
+//!   parameter, the decimal form every floating-point member is written in, and
+//!   the elements the live wire renders on a reported shape that this checkout's
+//!   model declares no member for ([`recorded_response_members`]).
 //!   It reaches every response this service renders and none of the
 //!   ones the framework renders in front of it; see `RESPONSE_CONTENT_TYPE` for
 //!   exactly where the line falls.
@@ -78,6 +80,11 @@ pub mod authorization;
 /// fact of the request's CREDENTIAL and of the instant it arrived rather than of any one
 /// operation's input.
 pub mod injected_faults;
+
+/// The response elements the live EC2 wire renders that this checkout's model does not
+/// declare, written beside each reported shape's modelled members by
+/// [`Ec2QueryEnvelope::serialize_output`].
+pub mod recorded_response_members;
 
 /// The `com-amazonaws-ec2-amazonec2` emulated service: the generated [`ServiceDefinition`] plus
 /// the behavioral seams this file owns.
@@ -550,8 +557,15 @@ impl ServerProtocol for Ec2QueryEnvelope {
         // [`service_common::query_decimal_floats`]). This is the one place a success body of
         // this service is written, so the rule reaches every operation and every depth
         // rather than being restated per shape; nothing else about the walk changes.
+        //
+        // The same seam writes the elements the live EC2 wire renders on a reported shape
+        // that this checkout's model declares no member for
+        // ([`recorded_response_members`]): an element the model does not carry cannot be a
+        // field of a generated shape, so it is written here, where the shape is, for every
+        // operation that reports it.
+        let recorded = recorded_response_members::RecordedMembersRef(body);
         let mut response = self.inner.serialize_output(
-            &DecimalFloatsRef(body),
+            &DecimalFloatsRef(&recorded),
             output_schema,
             operation_name,
             success_status,

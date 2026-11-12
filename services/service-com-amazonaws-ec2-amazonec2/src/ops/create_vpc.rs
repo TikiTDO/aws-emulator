@@ -378,11 +378,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // caller can launch into without creating anything else. Its ARN names the Region
         // this request was signed for.
         store.insert_default_security_group(&vpc_id, &region);
-        // What the clock now owes this VPC: `available`, one TRANSITION_DELAY from now —
-        // the same span, off the same monotonic clock, as an instance's pending move.
+        // What the clock now owes this VPC: `available`, one VPC_PROVISIONING_DELAY from
+        // now — a VPC is provisioned inside this call, so the transient state is what this
+        // call ANSWERS and the move is owed from the instant it returns. The IPv6
+        // association below comes up on that same instant, the block being associated as
+        // part of the same provision.
         store
             .vpc_available_at
-            .insert(vpc_id.clone(), Instant::now() + state::TRANSITION_DELAY);
+            .insert(vpc_id.clone(), Instant::now() + state::VPC_PROVISIONING_DELAY);
 
         // The IPv6 association, when the request asked for one. Its state starts at
         // `associating`: like the VPC's own, the clock owes it `associated`.

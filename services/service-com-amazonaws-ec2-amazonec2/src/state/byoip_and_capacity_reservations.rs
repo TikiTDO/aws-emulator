@@ -1200,22 +1200,50 @@ pub const MAX_ASN_ASSOCIATIONS_PER_BYOIP_CIDR: usize = 25;
 /// reader of this section does not have to go through the family to find it.
 pub const PUBLIC_IPV4_POOL_RESOURCE_TYPE: &str = "ipv4pool-ec2";
 
-/// EC2's error code for a public IPv4 pool id the request named that the account holds no
-/// pool for, so there is no pool to act on.
+/// EC2's error code for a public IPv4 pool id a request that ACTS on the pool named that
+/// the account holds no pool for, so there is no pool to act on.
 pub const INVALID_PUBLIC_IPV4_POOL_NOT_FOUND: &str = "InvalidPublicIpv4Pool.NotFound";
 
-/// Refuse a request that named a public IPv4 pool this account does not hold: HTTP 400
+/// EC2's error code for the same absent pool named by a request that READS the pools.
+///
+/// The read and the mutations of this resource answer DIFFERENT codes for the same missing
+/// pool — recorded behaviour, this operation declaring no modelled errors: a
+/// `DescribePublicIpv4Pools` naming an absent pool is refused
+/// `InvalidPublicIpv4PoolID.NotFound` where a `DeletePublicIpv4Pool` on the same id is
+/// refused [`INVALID_PUBLIC_IPV4_POOL_NOT_FOUND`]. Both carry the same message, so the code
+/// is the one thing that tells a client which path refused it.
+pub const INVALID_PUBLIC_IPV4_POOL_ID_NOT_FOUND: &str = "InvalidPublicIpv4PoolID.NotFound";
+
+/// The message every refusal of an absent public IPv4 pool carries, whichever code it is
+/// refused under: fixed text around the pool id the REQUEST sent, so the caller can tell
+/// which of several ids was not found from the text alone.
+fn public_ipv4_pool_not_found_message(pool_id: &str) -> String {
+    format!("The pool ID '{pool_id}' does not exist.")
+}
+
+/// Refuse a request that ACTS on a public IPv4 pool this account does not hold: HTTP 400
 /// `InvalidPublicIpv4Pool.NotFound`.
 ///
 /// A code of its own rather than the `InvalidPoolID.NotFound` the customer-owned pools are
 /// refused with ([`invalid_pool_id_not_found`]): the two are different resources, and a
-/// client branches on the code. The message names the pool id the REQUEST sent, so the
-/// caller can tell which of several ids was not found from the text alone.
+/// client branches on the code. A request that READS the pools is refused
+/// [`invalid_public_ipv4_pool_id_not_found`] instead.
 pub fn invalid_public_ipv4_pool_not_found<E>(pool_id: &str) -> Scaffolded<E> {
     Scaffolded::service_error(
         INVALID_PUBLIC_IPV4_POOL_NOT_FOUND,
         400,
-        format!("The pool ID '{pool_id}' does not exist."),
+        public_ipv4_pool_not_found_message(pool_id),
+    )
+}
+
+/// Refuse a request that READS the public IPv4 pools and named one this account does not
+/// hold: HTTP 400 `InvalidPublicIpv4PoolID.NotFound`, with the same message the mutation
+/// path's refusal carries.
+pub fn invalid_public_ipv4_pool_id_not_found<E>(pool_id: &str) -> Scaffolded<E> {
+    Scaffolded::service_error(
+        INVALID_PUBLIC_IPV4_POOL_ID_NOT_FOUND,
+        400,
+        public_ipv4_pool_not_found_message(pool_id),
     )
 }
 
@@ -1311,6 +1339,13 @@ impl ComAmazonawsEc2Amazonec2State {
     /// exactly as [`Self::insert_coip_pool`] does for a customer-owned pool. The ranges are
     /// canonicalised on the way in, so a writer cannot create a range no lookup can name.
     ///
+    /// Every pool holds a description — "A description of the address pool"
+    /// (`PublicIpv4Pool$Description`): the one the create gave it, and the EMPTY one when the
+    /// create carried no description to give (`CreatePublicIpv4Pool` has no description
+    /// member at all). So a describe reports the member for every pool rather than leaving
+    /// it out of a pool nobody described, which is what a client that echoes a pool's
+    /// description reads.
+    ///
     /// `None`, with NOTHING written, when a range of the spec is not an IPv4 CIDR block at
     /// all — a pool created without the range it was asked to hold is not the pool the
     /// caller asked for — when the store is at [`MAX_STORED_RECORDS_PER_STORE`], or when the
@@ -1325,7 +1360,7 @@ impl ComAmazonawsEc2Amazonec2State {
             // Minted after the ceilings below would be asked, so a refused create does not
             // burn an id; `next_id` is the only source of one.
             pool_id: String::new(),
-            description: spec.description,
+            description: Some(spec.description.unwrap_or_default()),
             network_border_group: Some(spec.network_border_group),
             tags: spec.tags,
             cidrs,

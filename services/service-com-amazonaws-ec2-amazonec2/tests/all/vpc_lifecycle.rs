@@ -19,7 +19,6 @@
 //! ([`super::describe_vpcs`]); this suite reads it only to prove the round trip.
 
 use std::collections::BTreeSet;
-use std::time::Duration;
 
 use service_com_amazonaws_ec2_amazonec2 as ec2;
 use smithy_server_runtime::MultiServiceRouter;
@@ -743,10 +742,13 @@ async fn a_dry_run_answers_dry_run_operation_and_changes_nothing() {
 // The clock-owed transition
 // ---------------------------------------------------------------------------
 
-/// The rule: a VPC is reported in the non-terminal state it was created in until the
-/// instant its transition falls due, and `available` from then on — and the IPv6 CIDR block
-/// association created with it moves `associating` -> `associated` at the same instant.
-/// Nothing the caller does drives the transition.
+/// The rule: `CreateVpc` answers the non-terminal state the VPC was minted in, and every
+/// call that follows the create reports it `available` — a VPC is provisioned inside the
+/// call that creates it, so the move is owed from the instant that call returns
+/// (`VPC_PROVISIONING_DELAY`) and no second call is told `pending`. The IPv6 CIDR block
+/// association created with it moves `associating` -> `associated` on that same instant.
+/// Nothing the caller does drives either move: the clock owes them, and a read only
+/// materialises what was already due.
 #[tokio::test]
 async fn a_vpc_becomes_available_once_the_clock_owes_the_transition() {
     let router = emulator();
@@ -782,27 +784,19 @@ async fn a_vpc_becomes_available_once_the_clock_owes_the_transition() {
     let plain_id = member("IPv4 only", &plain, "vpcId");
     let dual_id = member("with IPv6", &dual, "vpcId");
 
-    // Read again straight away: the state is a property of the clock, not of being read.
+    // Read again: the state is a property of the clock, not of being read — the move was
+    // owed from the instant the create returned, so the first call after it reports the
+    // settled state and so does every later one.
     for (case, vpc_id) in [("IPv4 only", &plain_id), ("with IPv6", &dual_id)] {
-        let read = describe_ok(case, &router, &[param("VpcId.1", vpc_id)]).await;
-        assert_eq!(
-            member(case, &read, "state"),
-            "pending",
-            "case {case:?}: a read before the transition is due must not bring it forward, \
-             got {read}"
-        );
-    }
-
-    tokio::time::sleep(Duration::from_millis(900)).await;
-
-    for (case, vpc_id) in [("IPv4 only", &plain_id), ("with IPv6", &dual_id)] {
-        let read = describe_ok(case, &router, &[param("VpcId.1", vpc_id)]).await;
-        assert_eq!(
-            member(case, &read, "state"),
-            "available",
-            "case {case:?}: a VPC becomes available on its own once the transition is due, \
-             got {read}"
-        );
+        for nth in 0..2 {
+            let read = describe_ok(case, &router, &[param("VpcId.1", vpc_id)]).await;
+            assert_eq!(
+                member(case, &read, "state"),
+                "available",
+                "case {case:?}: read {nth}: a VPC becomes available on its own once the \
+                 transition is due, got {read}"
+            );
+        }
     }
     let read = describe_ok("with IPv6", &router, &[param("VpcId.1", &dual_id)]).await;
     assert_eq!(
