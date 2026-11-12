@@ -44,7 +44,10 @@
 //!
 //! * `ConflictException` (HTTP 409) — the name is already held by an alias of
 //!   another store, or by an alias awaiting deletion.
-//! * `ResourceNotFoundException` (HTTP 404) — no policy store has that ID.
+//! * `ResourceNotFoundException` (HTTP 404) — no policy store has that ID. The
+//!   store is the resource this request REFERENCES, so it is resolved before any
+//!   of the request's own payload is read and this answer outranks the refusals
+//!   below.
 //! * `ServiceQuotaExceededException` (HTTP 402) — the account is at
 //!   [`crate::state::MAX_POLICY_STORE_ALIASES`] aliases.
 //! * `ValidationException` (HTTP 400) — the name does not carry the documented
@@ -160,15 +163,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })
         };
 
-        // The documented prefix is a rule the model's `pattern` cannot express —
-        // it admits any `[a-zA-Z0-9-/_]*` — and a name without it could never be
-        // referenced through a `policyStoreId` member, so the request is refused
-        // rather than persisted as unreachable. The check is the one every
-        // operation taking this member shares.
-        if let Some(invalid) = crate::ops::invalid_alias_name(&input.alias_name) {
-            return Err(CreatePolicyStoreAliasErrorModeled::ValidationException(invalid).into());
-        }
-
         // An alias name is scoped to the account AND Region, so the Region the
         // request was signed for is part of the alias's identity: it keys the
         // record, decides which names collide, and names the Region in the ARN.
@@ -177,6 +171,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let state = crate::state::service_state(&*self.engine).ok_or_else(unavailable)?;
         let mut state = state.lock();
 
+        // The policy store is the resource this request REFERENCES, so it is
+        // resolved BEFORE any of the request's own payload is read: a reference
+        // that names no store answers `ResourceNotFoundException` whatever else
+        // the request got wrong. Resolving is a READ, so a request refused below
+        // still changes nothing.
+        //
         // `policyStoreId` is documented as an ID here too — "The alias name
         // cannot be used" — so it goes through the ID-only lookup instead of
         // `resolve_store_id`, which would also accept an alias reference.
@@ -190,6 +190,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
                 .into(),
             );
+        }
+
+        // Only once the referenced store has resolved is the request's own
+        // payload read. The documented prefix is a rule the model's `pattern`
+        // cannot express — it admits any `[a-zA-Z0-9-/_]*` — and a name without
+        // it could never be referenced through a `policyStoreId` member, so the
+        // request is refused rather than persisted as unreachable. The check is
+        // the one every operation taking this member shares.
+        if let Some(invalid) = crate::ops::invalid_alias_name(&input.alias_name) {
+            return Err(CreatePolicyStoreAliasErrorModeled::ValidationException(invalid).into());
         }
 
         // The name is unique in the account and Region: a duplicate of the SAME

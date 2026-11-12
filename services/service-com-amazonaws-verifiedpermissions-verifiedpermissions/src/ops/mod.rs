@@ -187,11 +187,17 @@ pub fn schema_validation_exception(
 /// The prefix is a rule the member's `pattern` cannot express — it admits any
 /// `[a-zA-Z0-9-/_]*` — and it is documented on the member itself, for every
 /// operation that takes one, so every one of them refuses an unprefixed value
-/// here instead of letting it reach [`crate::state`], whose alias table is keyed
+/// rather than looking it up in [`crate::state`], whose alias table is keyed
 /// by the Region and the FULL name and could only ever report such a value as a
 /// resource that does not exist. Keeping the check in one place keeps the status, the error
 /// code and the `fieldList` entry naming [`paths::ALIAS_NAME`] identical
 /// whichever operation read the member.
+///
+/// This is a refusal of the request's own PAYLOAD, so an operation that also
+/// takes a reference to another resource (`CreatePolicyStoreAlias`, whose
+/// `policyStoreId` names the store the alias is associated with) resolves that
+/// reference first: a reference naming nothing answers the modelled 404 whatever
+/// else the request got wrong.
 pub fn invalid_alias_name(alias_name: &str) -> Option<types::ValidationException> {
     if alias_name.starts_with(crate::state::ALIAS_PREFIX) {
         return None;

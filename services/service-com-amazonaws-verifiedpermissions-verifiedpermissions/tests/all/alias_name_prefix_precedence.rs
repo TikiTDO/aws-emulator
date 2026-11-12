@@ -8,10 +8,15 @@
 //! code and `fieldList`) over the ways a name can miss the prefix. This suite pins
 //! its PRECEDENCE: the same refusal comes back whatever state holds — whether the
 //! prefixed name of the same shape is absent, `Active`, `PendingDeletion` or
-//! already hard-deleted, whichever Region the request was signed for, and whether
-//! the store a creation names exists — and no state-dependent answer (the
-//! idempotent delete success, the read's not-found, the creation's not-found) is
+//! already hard-deleted, and whichever Region the request was signed for — and no
+//! state-dependent answer (the idempotent delete success, the read's not-found) is
 //! ever given in its place.
+//!
+//! What the refusal DOES come after is the resolution of a resource the request
+//! REFERENCES: `CreatePolicyStoreAlias`'s `policyStoreId` names the store the
+//! alias is associated with, so a creation naming no store answers that 404 and
+//! not this 400. `tests/all/not_found_precedes_payload_refusal.rs` pins that
+//! precedence, so every creation row here names a store that exists.
 //!
 //! Every assertion goes over the wire through the shared [`crate::harness`], so
 //! what a refused request did NOT write is visibly absent from the next request's
@@ -200,17 +205,18 @@ async fn the_prefix_refusal_precedes_every_state_dependent_answer() {
     }
 }
 
-/// RULE (the same one, on the two other things the answer must not depend on): the
+/// RULE (the same one, on the other thing the answer must not depend on): the
 /// malformed-member refusal is independent of the Region the request was signed
-/// for — the scope an alias name is unique in — and, for a creation, of whether the
-/// `policyStoreId` it names exists, so the member is refused rather than the store
-/// being reported as not found.
+/// for — the scope an alias name is unique in — so the member is refused with the
+/// same status, code and `fieldList` in every Region, including a request that
+/// names none.
 ///
 /// The rows differ along the signing Region, including a request that names none at
-/// all, crossed with what the creation's store reference names: a store that exists
-/// in that Region and an id no store carries.
+/// all, and along the operation and `deletionMode` that read the member. The
+/// creation rows name the Region's own store, the reference every creation
+/// resolves before its payload is read.
 #[tokio::test]
-async fn the_prefix_refusal_does_not_depend_on_the_region_or_the_store_named() {
+async fn the_prefix_refusal_does_not_depend_on_the_region() {
     // The empty string sends no credential scope at all, which is how a request
     // that names no Region reaches the service.
     let regions: &[&str] = &["us-east-1", "eu-west-2", "ap-southeast-1", ""];
@@ -218,25 +224,14 @@ async fn the_prefix_refusal_does_not_depend_on_the_region_or_the_store_named() {
     for region in regions {
         let router = router();
         let store_id = store_with_validation_off_in(&router, region).await;
-        // An id no store in this emulator carries, so a creation naming it would
-        // answer the store not-found if the member were not refused first.
-        let unknown_store = "PS-no-such-store";
-        let stores: &[(&str, &str)] = &[
-            ("a store that exists", store_id.as_str()),
-            ("a store id that names nothing", unknown_store),
-        ];
 
-        for (store_case, named_store) in stores {
-            for (operation, request) in requests_naming(SUFFIX, named_store) {
-                let case = format!(
-                    "region {:?}, {store_case}, request {request}",
-                    if region.is_empty() { "unsigned" } else { region }
-                );
-                assert_refused_as_malformed_alias_name(
-                    &router, region, &case, operation, &request,
-                )
+        for (operation, request) in requests_naming(SUFFIX, &store_id) {
+            let case = format!(
+                "region {:?}, request {request}",
+                if region.is_empty() { "unsigned" } else { region }
+            );
+            assert_refused_as_malformed_alias_name(&router, region, &case, operation, &request)
                 .await;
-            }
         }
 
         // The well-formed name the refusals talked about still names nothing in
