@@ -156,6 +156,27 @@ fn passes_stream_filter(
         .any(|stream| channel.sources_stream(&stream.stream_arn, stream.stream_creation_timestamp))
 }
 
+/// The modelled refusal for a `NextToken` that names no page, under the error class the
+/// reason it names none belongs to: a token this service never issued for this listing is a
+/// parameter that "can't be used" (`InvalidArgumentException`), and only one it issued whose
+/// lifetime has elapsed is the expiry.
+fn next_token_refusal(refusal: crate::state::NextTokenRefusal) -> ListChannelsError {
+    match refusal {
+        crate::state::NextTokenRefusal::NotIssued => {
+            ListChannelsErrorModeled::InvalidArgumentException(InvalidArgumentException {
+                message: Some(crate::state::INVALID_NEXT_TOKEN_MESSAGE.to_string()),
+            })
+            .into()
+        }
+        crate::state::NextTokenRefusal::Expired => {
+            ListChannelsErrorModeled::ExpiredNextTokenException(ExpiredNextTokenException {
+                message: Some(crate::state::next_token_expired_message()),
+            })
+            .into()
+        }
+    }
+}
+
 impl<Eng> ListChannels<Eng> {
     /// Construct the operation from the shared engine. INFALLIBLE — the engine is a
     /// construction-time dependency, so engine access is guaranteed by the time any
@@ -211,24 +232,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "The pagination token returned by a previous call. Specify this token to retrieve
         // the next page of results" (`ListChannelsInput$NextToken`): a token this service
-        // never issued, one past its lifetime or one minted for another region names no page
-        // of this listing. The filter is NOT carried in the token — a paginating client
-        // resends it — so it is applied to every page from the request itself.
+        // never issued, one minted for another region and one past its lifetime all name no
+        // page of this listing, under the two DIFFERENT modelled refusals
+        // `crate::state::NextTokenRefusal` tells apart. The filter is NOT carried in the
+        // token — a paginating client resends it — so it is applied to every page from the
+        // request itself.
         let resume_at = match input.next_token.as_deref() {
             None => None,
             Some(token) => {
-                let resume = crate::state::RegionalPageToken::decode(
+                let resume = crate::state::RegionalPageToken::resume(
                     crate::state::RegionalListing::Channels,
+                    &region,
                     token,
+                    now,
                 )
-                .filter(|resume| !resume.is_expired(now) && resume.region == region)
-                .ok_or_else(|| {
-                    ListChannelsError::from(ListChannelsErrorModeled::ExpiredNextTokenException(
-                        ExpiredNextTokenException {
-                            message: Some(crate::state::next_token_expired_message()),
-                        },
-                    ))
-                })?;
+                .map_err(next_token_refusal)?;
                 // The token names the first channel the earlier page did NOT return, so the
                 // page that resumes it starts AT that channel.
                 Some(resume.next_name)

@@ -12,8 +12,11 @@
 //! ordered by name whatever order they were created in, a page holds at most `MaxResults` of
 //! them (100 by default, and at most 100), and a `NextToken` is handed back exactly when the
 //! region holds a channel past the page, which resumes precisely where the page stopped and is
-//! refused with `ExpiredNextTokenException` once it is past its lifetime, was never issued, or
-//! was minted for another region. A `StreamFilter` keeps only the channels one of whose source
+//! refused once it no longer names a page — with `InvalidArgumentException` and "Invalid
+//! NextToken." when it is not a cursor this listing issued (it does not decode and verify, or it
+//! was minted for another listing or another region), and with `ExpiredNextTokenException` only
+//! when a cursor it DID issue is outside its lifetime. A `StreamFilter` keeps only the channels
+//! one of whose source
 //! streams it names, and the listing is scoped to the region the request was signed for.
 //!
 //! The recorded flow this was derived from creates ONE channel and lists it, which is one row
@@ -32,7 +35,7 @@ use std::time::{Duration, SystemTime};
 use serde_json::{json, Value};
 use service_com_amazonaws_kinesis_kinesis_20131202::state::{
     channel_arn, next_token_expired_message, RegionalListing, RegionalPageToken,
-    MAX_LIST_CHANNELS_LIMIT, PAGE_TOKEN_TTL,
+    INVALID_NEXT_TOKEN_MESSAGE, MAX_LIST_CHANNELS_LIMIT, PAGE_TOKEN_TTL,
 };
 
 use crate::channel_lifecycle::{
@@ -595,6 +598,10 @@ async fn a_listing_is_scoped_to_the_region_it_was_signed_for() {
 struct RefusalRow {
     case: &'static str,
     token: String,
+    /// The modelled error code the reason this cursor names no page belongs to.
+    expected_code: &'static str,
+    /// The sentence that error class is worded with.
+    expected_message: String,
 }
 
 // 5. A cursor this listing never issued, or one past its lifetime, names no page
@@ -610,6 +617,8 @@ async fn a_listing_refuses_a_cursor_it_never_issued() {
         RefusalRow {
             case: "a NextToken this service never issued",
             token: "not-a-token".to_string(),
+            expected_code: "InvalidArgumentException",
+            expected_message: INVALID_NEXT_TOKEN_MESSAGE.to_string(),
         },
         RefusalRow {
             case: "a NextToken past its documented lifetime",
@@ -620,6 +629,8 @@ async fn a_listing_refuses_a_cursor_it_never_issued() {
                 SystemTime::now() - PAGE_TOKEN_TTL - Duration::from_secs(1),
             )
             .encode(),
+            expected_code: "ExpiredNextTokenException",
+            expected_message: next_token_expired_message(),
         },
         RefusalRow {
             case: "a NextToken minted at an instant that has not arrived",
@@ -630,6 +641,8 @@ async fn a_listing_refuses_a_cursor_it_never_issued() {
                 SystemTime::now() + Duration::from_secs(3_600),
             )
             .encode(),
+            expected_code: "ExpiredNextTokenException",
+            expected_message: next_token_expired_message(),
         },
         RefusalRow {
             case: "a NextToken minted for another region",
@@ -640,6 +653,8 @@ async fn a_listing_refuses_a_cursor_it_never_issued() {
                 SystemTime::now(),
             )
             .encode(),
+            expected_code: "InvalidArgumentException",
+            expected_message: INVALID_NEXT_TOKEN_MESSAGE.to_string(),
         },
         RefusalRow {
             // A cursor of ANOTHER listing of this service names no page of this one, even
@@ -652,6 +667,8 @@ async fn a_listing_refuses_a_cursor_it_never_issued() {
                 SystemTime::now(),
             )
             .encode(),
+            expected_code: "InvalidArgumentException",
+            expected_message: INVALID_NEXT_TOKEN_MESSAGE.to_string(),
         },
     ];
 
@@ -667,15 +684,17 @@ async fn a_listing_refuses_a_cursor_it_never_issued() {
         );
         assert_eq!(
             error_code(&response),
-            "ExpiredNextTokenException",
-            "case {}: expected ExpiredNextTokenException, got {response}",
-            row.case
+            row.expected_code,
+            "case {}: expected {}, got {response}",
+            row.case,
+            row.expected_code
         );
         assert_eq!(
             error_message(&response),
-            next_token_expired_message(),
-            "case {}: expected the published refusal wording, got {response}",
-            row.case
+            row.expected_message,
+            "case {}: expected the published refusal wording {:?}, got {response}",
+            row.case,
+            row.expected_message
         );
     }
 

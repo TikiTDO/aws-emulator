@@ -3785,6 +3785,62 @@ pub fn put_records_data_path(position: usize) -> String {
     ])
 }
 
+/// How many bytes of the digest a sealed handle carries beside its payload. Eight is enough
+/// that altering a handle's bytes is not read as another handle, and keeps the hex form
+/// short.
+const TOKEN_DIGEST_BYTES: usize = 8;
+
+/// The opaque wire form of `payload`: its bytes with a digest of them appended, hex encoded.
+///
+/// The digest is what makes a handle VERIFIABLE. A client passes back the handle it was
+/// handed rather than constructing one, so a string whose bytes have been altered —
+/// corrupted in transit, truncated, or built by the caller — has to fail to verify instead
+/// of decoding as a cursor into some other page. Nothing here authenticates anything; the
+/// digest only tells an altered handle apart from one this service minted.
+fn seal_token(payload: &str) -> String {
+    let digest = <::sha2::Sha256 as ::sha2::Digest>::digest(payload.as_bytes());
+    let mut sealed = payload.as_bytes().to_vec();
+    sealed.extend_from_slice(&digest[..TOKEN_DIGEST_BYTES]);
+    ::hex::encode(sealed)
+}
+
+/// The payload `token` seals, or `None` when `token` is not a handle this service minted: it
+/// is not the hex of a sealed byte string, the digest it carries does not verify those bytes,
+/// or the bytes are not text.
+fn unseal_token(token: &str) -> Option<String> {
+    let sealed = ::hex::decode(token).ok()?;
+    let split = sealed.len().checked_sub(TOKEN_DIGEST_BYTES)?;
+    let (payload, carried) = sealed.split_at(split);
+    let digest = <::sha2::Sha256 as ::sha2::Digest>::digest(payload);
+    if digest[..TOKEN_DIGEST_BYTES] != *carried {
+        return None;
+    }
+    String::from_utf8(payload.to_vec()).ok()
+}
+
+/// Why a `NextToken` a request carries names no page of the listing it was handed to.
+///
+/// The two are DISJOINT, and the modelled refusals they map to are too: a token that does not
+/// decode and verify is not one this service ever issued, which is a parameter that "can't be
+/// used" (`InvalidArgumentException`), while a token that decodes and verifies but whose mint
+/// instant is past the cursor lifetime is the one `ExpiredNextTokenException` publishes ("The
+/// pagination token passed to the operation is expired"). Deciding the first before the
+/// second is what keeps a corrupt cursor from being reported as a stale one — the two carry
+/// opposite advice to a paginating client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NextTokenRefusal {
+    /// Not a token this service issued for this listing: it does not decode, its digest does
+    /// not verify it, it is tagged for another listing, or it names another region.
+    NotIssued,
+    /// A token this service issued whose lifetime has elapsed ([`PAGE_TOKEN_TTL`]).
+    Expired,
+}
+
+/// How a listing refuses a `NextToken` that is not one it issued: the sentence Kinesis
+/// answers for that error class, whose text is fixed — the token itself is opaque, so there
+/// is no part of it a refusal could name.
+pub const INVALID_NEXT_TOKEN_MESSAGE: &str = "Invalid NextToken.";
+
 /// Which listing of ONE stream's members a cursor belongs to, which is what it is tagged
 /// with: a string this service never issued, and one minted for ANOTHER listing, both name
 /// no page of the listing being asked.
@@ -3810,9 +3866,9 @@ impl StreamListing {
 /// instant it was minted, the instant the stream was created, the member the next page
 /// starts at, and the stream's ARN.
 ///
-/// Opaque (hex of a tagged byte string) because the model gives `NextToken` no structure: a
-/// client passes back what it was handed rather than constructing one. Two hex characters
-/// per byte keeps it far inside the modelled length 1..1048576.
+/// Opaque (hex of a sealed byte string, [`seal_token`]) because the model gives `NextToken`
+/// no structure: a client passes back what it was handed rather than constructing one. Two
+/// hex characters per byte keeps it far inside the modelled length 1..1048576.
 fn encode_stream_page(
     listing: StreamListing,
     issued_at_millis: u128,
@@ -3820,7 +3876,7 @@ fn encode_stream_page(
     next_name: &str,
     stream_arn: &str,
 ) -> String {
-    hex::encode(format!(
+    seal_token(&format!(
         "{}:{issued_at_millis}:{stream_created_at_millis}:{next_name}:{stream_arn}",
         listing.tag()
     ))
@@ -3833,7 +3889,7 @@ fn decode_stream_page(
     listing: StreamListing,
     token: &str,
 ) -> Option<(u128, u128, String, String)> {
-    let decoded = String::from_utf8(hex::decode(token).ok()?).ok()?;
+    let decoded = unseal_token(token)?;
     // The ARN carries colons of its own, so it is the LAST field: the tag, the two
     // instants and the member's name (whose `@pattern` admits no colon) are taken first.
     let mut fields = decoded.splitn(5, ':');
@@ -3940,6 +3996,18 @@ impl ShardPageToken {
     pub fn is_expired(&self, now: SystemTime) -> bool {
         is_past_token_lifetime(self.issued_at_millis, now)
     }
+
+    /// Where `token` resumes this listing at `now`, or why it names no page.
+    ///
+    /// Decode and verification come FIRST, so the two refusals stay disjoint: see
+    /// [`NextTokenRefusal`].
+    pub fn resume(token: &str, now: SystemTime) -> Result<Self, NextTokenRefusal> {
+        let decoded = Self::decode(token).ok_or(NextTokenRefusal::NotIssued)?;
+        if decoded.is_expired(now) {
+            return Err(NextTokenRefusal::Expired);
+        }
+        Ok(decoded)
+    }
 }
 
 /// Where a truncated `ListStreamConsumers` page continues, which stream's consumers it
@@ -4021,6 +4089,18 @@ impl ConsumerPageToken {
     pub fn is_expired(&self, now: SystemTime) -> bool {
         is_past_token_lifetime(self.issued_at_millis, now)
     }
+
+    /// Where `token` resumes this listing at `now`, or why it names no page.
+    ///
+    /// Decode and verification come FIRST, so the two refusals stay disjoint: see
+    /// [`NextTokenRefusal`].
+    pub fn resume(token: &str, now: SystemTime) -> Result<Self, NextTokenRefusal> {
+        let decoded = Self::decode(token).ok_or(NextTokenRefusal::NotIssued)?;
+        if decoded.is_expired(now) {
+            return Err(NextTokenRefusal::Expired);
+        }
+        Ok(decoded)
+    }
 }
 
 /// Which listing a regional cursor belongs to, which is what it is tagged with: a string
@@ -4083,11 +4163,12 @@ impl RegionalPageToken {
 
     /// This token as the opaque `NextToken` a client is handed.
     ///
-    /// Opaque (hex of a tagged byte string) because the model gives `NextToken` no
-    /// structure: a client passes back what it was handed rather than constructing one. Two
-    /// hex characters per byte keeps it far inside the modelled length 1..1048576.
+    /// Opaque (hex of a sealed byte string, [`seal_token`]) because the model gives
+    /// `NextToken` no structure: a client passes back what it was handed rather than
+    /// constructing one. Two hex characters per byte keeps it far inside the modelled length
+    /// 1..1048576.
     pub fn encode(&self) -> String {
-        hex::encode(format!(
+        seal_token(&format!(
             "{}:{}:{}:{}",
             self.listing.tag(),
             self.issued_at_millis,
@@ -4099,7 +4180,7 @@ impl RegionalPageToken {
     /// The token `token` carries for `listing`, or `None` when it is not one this service
     /// issued for that listing.
     pub fn decode(listing: RegionalListing, token: &str) -> Option<Self> {
-        let decoded = String::from_utf8(hex::decode(token).ok()?).ok()?;
+        let decoded = unseal_token(token)?;
         let mut fields = decoded.splitn(4, ':');
         if fields.next()? != listing.tag() {
             return None;
@@ -4125,6 +4206,27 @@ impl RegionalPageToken {
     /// its lifetime rather than reaching the store.
     pub fn is_expired(&self, now: SystemTime) -> bool {
         is_past_token_lifetime(self.issued_at_millis, now)
+    }
+
+    /// Where `token` resumes `listing` over `region` at `now`, or why it names no page.
+    ///
+    /// Decode and verification come FIRST, so the two refusals stay disjoint: see
+    /// [`NextTokenRefusal`]. A cursor whose region is not the one the request was signed for
+    /// resumes another region's listing, so it is not a token THIS listing issued either.
+    pub fn resume(
+        listing: RegionalListing,
+        region: &str,
+        token: &str,
+        now: SystemTime,
+    ) -> Result<Self, NextTokenRefusal> {
+        let decoded = Self::decode(listing, token).ok_or(NextTokenRefusal::NotIssued)?;
+        if decoded.region != region {
+            return Err(NextTokenRefusal::NotIssued);
+        }
+        if decoded.is_expired(now) {
+            return Err(NextTokenRefusal::Expired);
+        }
+        Ok(decoded)
     }
 }
 
@@ -4430,14 +4532,15 @@ pub fn next_token_conflict_message(member: &str) -> String {
     )
 }
 
-/// How a read refuses a `NextToken` that is past its lifetime, or one this service never
-/// issued: the rule `ExpiredNextTokenException` publishes ("The pagination token passed to
-/// the operation is expired") together with the lifetime a cursor of this service carries
-/// ([`PAGE_TOKEN_TTL`]).
+/// How a read refuses a `NextToken` that is past its lifetime: the rule
+/// `ExpiredNextTokenException` publishes ("The pagination token passed to the operation is
+/// expired") together with the lifetime a cursor of this service carries
+/// ([`PAGE_TOKEN_TTL`]). A token this service never issued is NOT this refusal — it is
+/// [`INVALID_NEXT_TOKEN_MESSAGE`].
 pub fn next_token_expired_message() -> String {
     format!(
-        "the pagination token is expired or was not issued by this service; a NextToken is \
-         usable for {} seconds after the page that returned it",
+        "the pagination token passed to the operation is expired; a NextToken is usable for \
+         {} seconds after the page that returned it",
         PAGE_TOKEN_TTL.as_secs()
     )
 }

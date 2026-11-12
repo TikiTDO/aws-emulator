@@ -383,6 +383,24 @@ fn not_found(identifier: &str) -> ListShardsError {
     .into()
 }
 
+/// The modelled refusal for a `NextToken` that names no page, under the error class the
+/// reason it names none belongs to: a token this service never issued for this listing is a
+/// parameter that "can't be used", and only one it issued whose lifetime has elapsed is the
+/// expiry.
+fn next_token_refusal(refusal: crate::state::NextTokenRefusal) -> ListShardsError {
+    match refusal {
+        crate::state::NextTokenRefusal::NotIssued => {
+            invalid_argument(crate::state::INVALID_NEXT_TOKEN_MESSAGE.to_string())
+        }
+        crate::state::NextTokenRefusal::Expired => {
+            ListShardsErrorModeled::ExpiredNextTokenException(ExpiredNextTokenException {
+                message: Some(crate::state::next_token_expired_message()),
+            })
+            .into()
+        }
+    }
+}
+
 impl<Eng> ListShards<Eng> {
     /// Construct the operation from the shared engine. INFALLIBLE — the engine is a
     /// construction-time dependency, so engine access is guaranteed by the time any
@@ -462,19 +480,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     }
                 }
                 // A token this service never issued names no page, and one past its
-                // lifetime names no page any more: both are the modelled expiry refusal,
-                // which is what keeps a caller from constructing a cursor of its own.
-                let resume = crate::state::ShardPageToken::decode(token)
-                    .filter(|resume| !resume.is_expired(now))
-                    .ok_or_else(|| {
-                        ListShardsError::from(
-                            ListShardsErrorModeled::ExpiredNextTokenException(
-                                ExpiredNextTokenException {
-                                    message: Some(crate::state::next_token_expired_message()),
-                                },
-                            ),
-                        )
-                    })?;
+                // lifetime names no page any more — two DIFFERENT modelled refusals, told
+                // apart by whether the token decodes and verifies at all
+                // (`crate::state::NextTokenRefusal`).
+                let resume = crate::state::ShardPageToken::resume(token, now)
+                    .map_err(next_token_refusal)?;
                 // A `StreamARN` the request carries beside the token has to name the
                 // stream the token names, or the two name different streams.
                 if input

@@ -12,9 +12,11 @@
 //! disagrees with the `ConsumerDescription` a `DescribeStreamConsumer` of the same consumer
 //! answers with. A page holds at most `MaxResults` of them (100 by default, and at most 100),
 //! and a `NextToken` is handed back exactly when the stream carries a consumer past the page;
-//! that cursor resumes precisely where the page stopped and is refused with
-//! `ExpiredNextTokenException` once it is past its lifetime, was never issued, or was minted
-//! for another listing or another incarnation of the stream. The listing is scoped to the one
+//! that cursor resumes precisely where the page stopped and is refused once it no longer names
+//! a page — with `InvalidArgumentException` and "Invalid NextToken." when it is not a cursor
+//! this listing issued (it does not decode and verify, or it was minted for another listing),
+//! and with `ExpiredNextTokenException` only when a cursor it DID issue is outside its
+//! lifetime. The listing is scoped to the one
 //! stream the request names — a `StreamARN` this account and region hold no stream under is
 //! `ResourceNotFoundException`, as is a `StreamCreationTimestamp` that is not that stream's,
 //! and a stream whose create or removal is still due is `ResourceInUseException`.
@@ -38,8 +40,9 @@ use serde_json::{json, Value};
 use service_com_amazonaws_kinesis_kinesis_20131202::state::{
     next_token_conflict_message, next_token_expired_message, stream_not_active_message,
     stream_not_found_message, ConsumerPageToken, ShardPageToken, CONSUMER_ACTIVATION_DELAY,
-    CONSUMER_ACTIVE, CONSUMER_CREATING, MAX_CONSUMERS_CREATING, MAX_LIST_STREAM_CONSUMERS_LIMIT,
-    NEXT_TOKEN_STREAM_MISMATCH_MESSAGE, PAGE_TOKEN_TTL, STREAM_CREATING,
+    CONSUMER_ACTIVE, CONSUMER_CREATING, INVALID_NEXT_TOKEN_MESSAGE, MAX_CONSUMERS_CREATING,
+    MAX_LIST_STREAM_CONSUMERS_LIMIT, NEXT_TOKEN_STREAM_MISMATCH_MESSAGE, PAGE_TOKEN_TTL,
+    STREAM_CREATING,
 };
 
 use crate::stream_tags::{
@@ -582,14 +585,14 @@ async fn a_next_token_that_names_no_page_is_refused() {
         RefusalCase {
             case: "a NextToken this service never issued".to_string(),
             body: json!({ "StreamARN": arn, "NextToken": "not-a-token-this-service-issued" }),
-            expected_code: "ExpiredNextTokenException",
-            expected_message: Some(next_token_expired_message()),
+            expected_code: "InvalidArgumentException",
+            expected_message: Some(INVALID_NEXT_TOKEN_MESSAGE.to_string()),
         },
         RefusalCase {
             case: "a NextToken minted for another listing".to_string(),
             body: json!({ "StreamARN": arn, "NextToken": other_listing }),
-            expected_code: "ExpiredNextTokenException",
-            expected_message: Some(next_token_expired_message()),
+            expected_code: "InvalidArgumentException",
+            expected_message: Some(INVALID_NEXT_TOKEN_MESSAGE.to_string()),
         },
         RefusalCase {
             case: "a NextToken naming another incarnation of the stream".to_string(),

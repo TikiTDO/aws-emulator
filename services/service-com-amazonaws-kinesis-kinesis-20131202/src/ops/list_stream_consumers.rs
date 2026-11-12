@@ -178,13 +178,23 @@ fn not_found(identifier: &str) -> ListStreamConsumersError {
     .into()
 }
 
-/// The modelled refusal for a `NextToken` this service never issued for this listing, or
-/// one past its lifetime: either way it names no page any more.
-fn expired_next_token() -> ListStreamConsumersError {
-    ListStreamConsumersErrorModeled::ExpiredNextTokenException(ExpiredNextTokenException {
-        message: Some(crate::state::next_token_expired_message()),
-    })
-    .into()
+/// The modelled refusal for a `NextToken` that names no page, under the error class the
+/// reason it names none belongs to: a token this service never issued is a parameter that
+/// "can't be used", and only one it issued whose lifetime has elapsed is the expiry.
+fn next_token_refusal(refusal: crate::state::NextTokenRefusal) -> ListStreamConsumersError {
+    match refusal {
+        crate::state::NextTokenRefusal::NotIssued => {
+            invalid_argument(crate::state::INVALID_NEXT_TOKEN_MESSAGE.to_string())
+        }
+        crate::state::NextTokenRefusal::Expired => {
+            ListStreamConsumersErrorModeled::ExpiredNextTokenException(
+                ExpiredNextTokenException {
+                    message: Some(crate::state::next_token_expired_message()),
+                },
+            )
+            .into()
+        }
+    }
 }
 
 /// The modelled refusal for a request whose `StreamARN` names no stream of this account and
@@ -269,11 +279,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     ));
                 }
                 // A token this service never issued names no page, and one past its
-                // lifetime names no page any more: both are the modelled expiry refusal,
-                // which is what keeps a caller from constructing a cursor of its own.
-                let resume = crate::state::ConsumerPageToken::decode(token)
-                    .filter(|resume| !resume.is_expired(now))
-                    .ok_or_else(expired_next_token)?;
+                // lifetime names no page any more — two DIFFERENT modelled refusals, told
+                // apart by whether the token decodes and verifies at all
+                // (`crate::state::NextTokenRefusal`).
+                let resume = crate::state::ConsumerPageToken::resume(token, now)
+                    .map_err(next_token_refusal)?;
                 // `StreamARN` is `@required`, so a resumed request carries one too: it has
                 // to name the stream the token names, or the two name different streams.
                 if input.stream_arn != resume.stream_arn {

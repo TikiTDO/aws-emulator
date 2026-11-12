@@ -16,8 +16,9 @@
 //! `ResourceNotFoundException`, one naming no stream at all (or two different streams) is
 //! `InvalidArgumentException`, one against a stream that is not `ACTIVE` yet is
 //! `ResourceInUseException`, a filter property its own type does not admit is
-//! `InvalidArgumentException`, and a `NextToken` this service never issued or that is past
-//! its documented lifetime is `ExpiredNextTokenException`.
+//! `InvalidArgumentException`, a `NextToken` this service never issued is
+//! `InvalidArgumentException` with "Invalid NextToken.", and one it DID issue that is past its
+//! documented lifetime is `ExpiredNextTokenException`.
 //!
 //! The recorded flow this was derived from lists the shards of ONE stream once it is active
 //! (`list_shards(StreamName=…)["Shards"]`) and is one row of the tables below. The rows
@@ -40,9 +41,9 @@ use serde_json::{json, Value};
 use service_com_amazonaws_kinesis_kinesis_20131202::state::{
     next_token_expired_message, shard_id, stream_not_active_message, stream_not_found_message,
     ComAmazonawsKinesisKinesis20131202State, ShardPageToken, ACTIVATION_DELAY,
-    DEFAULT_LIST_SHARDS_LIMIT, LIST_SHARDS_TOKEN_TTL, MAX_LIST_SHARDS_LIMIT, STREAM_CREATING,
-    STREAM_IDENTIFIER_MISMATCH_MESSAGE, STREAM_IDENTIFIER_REQUIRED_MESSAGE,
-    STREAM_MODE_ON_DEMAND, STREAM_MODE_PROVISIONED,
+    DEFAULT_LIST_SHARDS_LIMIT, INVALID_NEXT_TOKEN_MESSAGE, LIST_SHARDS_TOKEN_TTL,
+    MAX_LIST_SHARDS_LIMIT, STREAM_CREATING, STREAM_IDENTIFIER_MISMATCH_MESSAGE,
+    STREAM_IDENTIFIER_REQUIRED_MESSAGE, STREAM_MODE_ON_DEMAND, STREAM_MODE_PROVISIONED,
 };
 use service_com_amazonaws_kinesis_kinesis_20131202::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
@@ -803,8 +804,8 @@ async fn list_shards_refuses_what_it_cannot_serve() {
         RefusalCase {
             label: "a NextToken this service never issued",
             body: json!({ "NextToken": "not-a-token" }),
-            expected_code: "ExpiredNextTokenException",
-            expected_message: Some(next_token_expired_message()),
+            expected_code: "InvalidArgumentException",
+            expected_message: Some(INVALID_NEXT_TOKEN_MESSAGE.to_string()),
         },
         RefusalCase {
             label: "a NextToken past its documented lifetime",

@@ -306,7 +306,7 @@ async fn a_cursor_no_page_of_this_listing_was_handed_out_for_is_refused() {
         (
             "a token this service never issued",
             json!({"NextToken": "not-a-token"}),
-            "ExpiredNextTokenException",
+            "InvalidArgumentException",
         ),
         (
             "a token past its lifetime",
@@ -316,7 +316,7 @@ async fn a_cursor_no_page_of_this_listing_was_handed_out_for_is_refused() {
         (
             "a token minted for another region",
             json!({"NextToken": other_region}),
-            "ExpiredNextTokenException",
+            "InvalidArgumentException",
         ),
         (
             "a token beside the member it replaces",
@@ -336,17 +336,25 @@ async fn a_cursor_no_page_of_this_listing_was_handed_out_for_is_refused() {
         );
     }
 
+    let expired_again = RegionalPageToken::new(
+        RegionalListing::Streams,
+        REGION,
+        "cursor-beta",
+        SystemTime::now() - PAGE_TOKEN_TTL - Duration::from_secs(1),
+    )
+    .encode();
     let (_, message) = refused(
         &emulator,
         "the expiry sentence",
         "ListStreams",
-        &json!({"NextToken": "not-a-token"}),
+        &json!({"NextToken": expired_again}),
     )
     .await;
     assert_eq!(
         message,
         next_token_expired_message(),
-        "an unusable cursor is refused with the service's one pagination-expiry sentence"
+        "a cursor past its lifetime is refused with the service's one pagination-expiry \
+         sentence"
     );
 }
 

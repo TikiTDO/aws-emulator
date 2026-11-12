@@ -150,6 +150,24 @@ fn invalid_argument(message: String) -> ListStreamsError {
     .into()
 }
 
+/// The modelled refusal for a `NextToken` that names no page, under the error class the
+/// reason it names none belongs to: a token this service never issued for this listing is a
+/// parameter that "can't be used", and only one it issued whose lifetime has elapsed is the
+/// expiry.
+fn next_token_refusal(refusal: crate::state::NextTokenRefusal) -> ListStreamsError {
+    match refusal {
+        crate::state::NextTokenRefusal::NotIssued => {
+            invalid_argument(crate::state::INVALID_NEXT_TOKEN_MESSAGE.to_string())
+        }
+        crate::state::NextTokenRefusal::Expired => {
+            ListStreamsErrorModeled::ExpiredNextTokenException(ExpiredNextTokenException {
+                message: Some(crate::state::next_token_expired_message()),
+            })
+            .into()
+        }
+    }
+}
+
 impl<Eng> ListStreams<Eng> {
     /// Construct the operation from the shared engine. INFALLIBLE — the engine is a
     /// construction-time dependency, so engine access is guaranteed by the time any
@@ -206,8 +224,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // more streams by using the name of the last stream returned by the ListStreams
         // request in the ExclusiveStartStreamName parameter" (`ListStreams`), and a
         // `NextToken` names that same place itself — so a request carrying the token names
-        // no starting stream of its own, and a token this service never issued, one past
-        // its lifetime or one minted for another region names no page of this listing.
+        // no starting stream of its own. A token this service never issued, one minted for
+        // another region and one past its lifetime all name no page of this listing, under
+        // the two DIFFERENT modelled refusals `crate::state::NextTokenRefusal` tells apart.
         let resume_after = match input.next_token.as_deref() {
             None => input.exclusive_start_stream_name.clone(),
             Some(token) => {
@@ -216,18 +235,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         crate::state::next_token_conflict_message("ExclusiveStartStreamName"),
                     ));
                 }
-                let resume = crate::state::RegionalPageToken::decode(
+                let resume = crate::state::RegionalPageToken::resume(
                     crate::state::RegionalListing::Streams,
+                    &region,
                     token,
+                    now,
                 )
-                .filter(|resume| !resume.is_expired(now) && resume.region == region)
-                .ok_or_else(|| {
-                    ListStreamsError::from(ListStreamsErrorModeled::ExpiredNextTokenException(
-                        ExpiredNextTokenException {
-                            message: Some(crate::state::next_token_expired_message()),
-                        },
-                    ))
-                })?;
+                .map_err(next_token_refusal)?;
                 // The token names the first stream the earlier page did NOT return, so the
                 // page that resumes it starts AT that stream rather than after it.
                 Some(resume.next_name)

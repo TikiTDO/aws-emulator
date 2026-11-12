@@ -47,6 +47,8 @@ mod manual_resharding;
 mod max_record_size;
 #[path = "all/merge_adjacency.rs"]
 mod merge_adjacency;
+#[path = "all/pagination_token_classification.rs"]
+mod pagination_token_classification;
 #[path = "all/record_flow.rs"]
 mod record_flow;
 #[path = "all/resource_policies.rs"]
