@@ -17,6 +17,8 @@ mod admission_bounds;
 mod agentic_rft_job_lifecycle;
 #[path = "all/ai_benchmark_job_lifecycle.rs"]
 mod ai_benchmark_job_lifecycle;
+#[path = "all/ai_benchmark_job_release.rs"]
+mod ai_benchmark_job_release;
 #[path = "all/ai_recommendation_job_lifecycle.rs"]
 mod ai_recommendation_job_lifecycle;
 #[path = "all/ai_recommendation_job_stop.rs"]
@@ -35,6 +37,8 @@ mod artifact_lineage;
 mod artifact_update_visibility;
 #[path = "all/artifact_updates.rs"]
 mod artifact_updates;
+#[path = "all/automl_job_v2_execution.rs"]
+mod automl_job_v2_execution;
 #[path = "all/automl_job_v2_lifecycle.rs"]
 mod automl_job_v2_lifecycle;
 #[path = "all/batch_describe_model_packages.rs"]

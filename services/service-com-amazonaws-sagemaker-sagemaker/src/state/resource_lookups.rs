@@ -62,7 +62,7 @@ impl ComAmazonawsSagemakerSagemakerState {
     /// A partner AI app runs a third party's licensed application: the account subscribes
     /// to it in AWS Marketplace, which is a purchase outside SageMaker's API surface — no
     /// operation this service models adds to this set. So an account that has subscribed to
-    /// nothing holds none, and every type is refused ([`partner_app_not_subscribed`]) until
+    /// nothing holds none, and every type is refused ([`PARTNER_APP_NOT_SUBSCRIBED`]) until
     /// a subscription for it is held.
     pub fn subscribed_to_partner_app(&self, app_type: &str) -> bool {
         self.partner_app_subscriptions.contains(app_type)

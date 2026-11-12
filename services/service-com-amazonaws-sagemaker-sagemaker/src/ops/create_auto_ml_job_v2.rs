@@ -5,11 +5,14 @@
 //! `DescribeAutoMLJobV2` replays exactly what this call stored.
 //!
 //! The job is accepted in the non-terminal `InProgress`/`Starting` status, and the clock
-//! owes it a terminal transition ([`crate::state::AUTO_ML_JOB_TERMINAL_AFTER`]). That
-//! transition is to `Failed`: Autopilot's work is model training, which this emulator
-//! does not run, so the job reports
-//! [`crate::state::AUTO_ML_NOT_TRAINED_FAILURE_REASON`] rather than a `Completed` status,
-//! a best candidate or notebook artifacts that no training produced.
+//! owes it each stage of its work and then its terminal transition
+//! ([`crate::state::AUTO_ML_JOB_PHASE_SPAN`], [`crate::state::AUTO_ML_JOB_TERMINAL_AFTER`]).
+//! The work itself is performed here, by this emulator's own Autopilot run
+//! ([`crate::state::run_auto_ml_job_v2`]): it reads the dataset the channels name, resolves
+//! the problem type and objective metric, fits and measures its model candidates, writes
+//! their artifacts and the job's notebooks to the output location, and reports the best
+//! candidate. The terminal status is the RUN's — `Completed` with what it produced, or
+//! `Failed` with the condition that stopped it — never a status for work nothing performed.
 //!
 //! ## Shape of an operation
 //!
@@ -320,76 +323,145 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let arn = crate::state::resource_arn(&region, "automl-job", &input.auto_ml_job_name);
         let key = crate::state::entity_key(&input.auto_ml_job_name);
 
-        let mut store = state.lock();
-        // `AutoMLJobName`'s doc: "The name must be unique to your account and is case
-        // insensitive" — so a name differing only in case names the SAME job, and a
-        // second create is the modelled `ResourceInUse` rather than a second job.
-        //
-        // Identity is resolved BEFORE the store bound: a create that collides with a job
-        // already held asks for no new capacity, so the name is what refuses it however
-        // full the store is.
-        //
-        // The V1 `CreateAutoMLJob` shares that account-level name space on AWS; it is
-        // still a scaffold answering 501 here (its own stub issue), so this one store
-        // holds every AutoML job that can exist and is the whole name space to check.
-        if let Some(existing) = store.auto_ml_jobs_v2.get(&key) {
-            return Err(CreateAutoMLJobV2ErrorModeled::ResourceInUse(ResourceInUse {
-                message: Some(format!(
-                    "An AutoML job already exists with the name {}: AutoMLJobName must be \
-                     unique to your account and is case insensitive.",
-                    existing.name
-                )),
-            })
-            .into());
-        }
-        // The store is bounded, so a caller varying `AutoMLJobName` cannot grow it
-        // without end. `ResourceLimitExceeded` is the limit failure this operation
-        // models.
-        if !store.auto_ml_jobs_v2_below_quota() {
-            return Err(CreateAutoMLJobV2ErrorModeled::ResourceLimitExceeded(
-                ResourceLimitExceeded {
+        let now = ::std::time::SystemTime::now();
+        {
+            let mut store = state.lock();
+            // `AutoMLJobName`'s doc: "The name must be unique to your account and is case
+            // insensitive" — so a name differing only in case names the SAME job, and a
+            // second create is the modelled `ResourceInUse` rather than a second job.
+            //
+            // Identity is resolved BEFORE the store bound: a create that collides with a job
+            // already held asks for no new capacity, so the name is what refuses it however
+            // full the store is.
+            //
+            // The V1 `CreateAutoMLJob` shares that account-level name space on AWS; it is
+            // still a scaffold answering 501 here (its own stub issue), so this one store
+            // holds every AutoML job that can exist and is the whole name space to check.
+            if let Some(existing) = store.auto_ml_jobs_v2.get(&key) {
+                return Err(CreateAutoMLJobV2ErrorModeled::ResourceInUse(ResourceInUse {
                     message: Some(format!(
-                        "The account-level service limit for AutoML jobs is {}, with current \
-                         utilization of {} and a request delta of 1.",
-                        crate::state::AUTO_ML_JOB_QUOTA,
-                        store.auto_ml_jobs_v2.len()
+                        "An AutoML job already exists with the name {}: AutoMLJobName must be \
+                         unique to your account and is case insensitive.",
+                        existing.name
                     )),
+                })
+                .into());
+            }
+            // The store is bounded, so a caller varying `AutoMLJobName` cannot grow it
+            // without end. `ResourceLimitExceeded` is the limit failure this operation
+            // models.
+            if !store.auto_ml_jobs_v2_below_quota() {
+                return Err(CreateAutoMLJobV2ErrorModeled::ResourceLimitExceeded(
+                    ResourceLimitExceeded {
+                        message: Some(format!(
+                            "The account-level service limit for AutoML jobs is {}, with current \
+                             utilization of {} and a request delta of 1.",
+                            crate::state::AUTO_ML_JOB_QUOTA,
+                            store.auto_ml_jobs_v2.len()
+                        )),
+                    },
+                )
+                .into());
+            }
+
+            store.auto_ml_jobs_v2.insert(
+                key.clone(),
+                crate::state::AutoMLJobV2 {
+                    name: input.auto_ml_job_name.clone(),
+                    arn: arn.clone(),
+                    input_data_config: input.auto_ml_job_input_data_config.clone(),
+                    output_data_config: input.output_data_config.clone(),
+                    problem_type_config: input.auto_ml_problem_type_config.clone(),
+                    role_arn: input.role_arn.clone(),
+                    objective: input.auto_ml_job_objective.clone(),
+                    model_deploy_config: input.model_deploy_config.clone(),
+                    data_split_config: input.data_split_config.clone(),
+                    security_config: input.security_config.clone(),
+                    compute_config: input.auto_ml_compute_config.clone(),
+                    tags: input.tags.clone().unwrap_or_default(),
+                    status: crate::state::AUTO_ML_STATUS_IN_PROGRESS.to_string(),
+                    secondary_status: crate::state::AUTO_ML_SECONDARY_STATUS_STARTING.to_string(),
+                    failure_reason: None,
+                    creation_time: now,
+                    last_modified_time: now,
+                    end_time: None,
+                    terminal_at: now + crate::state::AUTO_ML_JOB_TERMINAL_AFTER,
+                    // Filled in by the run below, once it has reported.
+                    run: None,
+                    // The job is accepted in `Starting` and enters the stages of its work as
+                    // its run reports them (`crate::state::AutoMLJobV2::record_run`).
+                    phases: vec![crate::state::AutoMLPhase {
+                        status: crate::state::AUTO_ML_SECONDARY_STATUS_STARTING.to_string(),
+                        starts_at: now,
+                    }],
+                    entered: 1,
                 },
-            )
-            .into());
+            );
         }
 
-        let now = ::std::time::SystemTime::now();
-        store.auto_ml_jobs_v2.insert(
-            key,
-            crate::state::AutoMLJobV2 {
-                name: input.auto_ml_job_name,
-                arn: arn.clone(),
-                input_data_config: input.auto_ml_job_input_data_config,
-                output_data_config: input.output_data_config,
-                problem_type_config: input.auto_ml_problem_type_config,
-                role_arn: input.role_arn,
-                objective: input.auto_ml_job_objective,
-                model_deploy_config: input.model_deploy_config,
-                data_split_config: input.data_split_config,
-                security_config: input.security_config,
-                compute_config: input.auto_ml_compute_config,
-                tags: input.tags.unwrap_or_default(),
-                status: crate::state::AUTO_ML_STATUS_IN_PROGRESS.to_string(),
-                secondary_status: crate::state::AUTO_ML_SECONDARY_STATUS_STARTING.to_string(),
-                failure_reason: None,
-                creation_time: now,
-                last_modified_time: now,
-                end_time: None,
-                terminal_at: now + crate::state::AUTO_ML_JOB_TERMINAL_AFTER,
-            },
-        );
-        drop(store);
+        // From here on the job exists, so whatever its run does — including this handler
+        // never getting to report it — is recorded against the record by the recorder's
+        // `Drop`. The outcome is RECORDED, not revealed: the terminal status is owed by the
+        // clock, which `AutoMLJobV2::settle_status` materialises once the run has reported one
+        // and the span is over.
+        let mut recorder = RunOutcomeRecorder {
+            store: state.clone(),
+            job_key: key,
+            reported: false,
+        };
+        let outcome =
+            crate::state::run_auto_ml_job_v2(ctx, &region, &input.auto_ml_job_name, &input).await;
+        recorder.report(outcome);
+        drop(recorder);
 
         crate::state::record_state_change(Self::NAME, &arn, ctx);
         Ok(CreateAutoMLJobV2Output {
             auto_ml_job_arn: arn,
         })
+    }
+}
+
+/// Records what the job's RUN reported onto the stored job, whatever happens to the request
+/// that started it.
+///
+/// The run belongs to the JOB, not to the create: once the record exists, the outcome has to
+/// reach it even if this handler is dropped mid-run (a cancelled request, a panic), because a
+/// job whose run never reported has no terminal status for the clock to materialise at all
+/// (`crate::state::AutoMLJobV2::settle_status`) and would stay `InProgress` for the life of
+/// the process. A run nothing reported for is the server's own failure
+/// (`crate::state::AUTO_ML_INTERNAL_FAILURE_REASON`), written through this guard's `Drop`
+/// rather than by a line the unwinding path could skip.
+struct RunOutcomeRecorder {
+    store: ::engine::ServiceState<crate::state::ComAmazonawsSagemakerSagemakerState>,
+    job_key: String,
+    reported: bool,
+}
+
+impl RunOutcomeRecorder {
+    /// Write `outcome` onto the stored job, and remember that it has been written.
+    fn report(&mut self, outcome: crate::state::AutoMLRunOutcome) {
+        self.reported = true;
+        self.record(outcome);
+    }
+
+    /// Write one outcome onto the stored job, at the instant it is reported, so the clock owes
+    /// the job's terminal status no earlier than the end of its own work.
+    fn record(&self, outcome: crate::state::AutoMLRunOutcome) {
+        if let Some(job) = self.store.lock().auto_ml_jobs_v2.get_mut(&self.job_key) {
+            job.record_run(outcome, ::std::time::SystemTime::now());
+        }
+    }
+}
+
+impl ::std::ops::Drop for RunOutcomeRecorder {
+    fn drop(&mut self) {
+        if self.reported {
+            return;
+        }
+        self.record(crate::state::AutoMLRunOutcome::failed_in(
+            Vec::new(),
+            crate::state::AUTO_ML_INTERNAL_FAILURE_REASON,
+        ));
     }
 }
 

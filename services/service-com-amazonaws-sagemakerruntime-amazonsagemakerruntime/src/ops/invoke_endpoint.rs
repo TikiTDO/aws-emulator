@@ -10,10 +10,10 @@
 //! endpoint, an endpoint that is not yet `InService`, a `TargetVariant` the endpoint
 //! does not host, `EnableExplanations` on an endpoint with no explainer configuration or
 //! a `SessionId` naming no stateful session — then, once that addressing has resolved,
-//! a `Body` past the maximum the model declares for it — and answers an otherwise valid
-//! invocation with the modelled 424 `ModelError`, because a model container is
-//! customer-provided code in a container image and this emulator runs none, so no
-//! inference is performed.
+//! a `Body` past the maximum the model declares for it — and finally SERVES the inference
+//! from the model deployed behind the variant the call routes to
+//! (`sagemaker::state::model_serving`), answering the modelled 424 `ModelError` naming the
+//! condition when there is nothing to compute from.
 //! Every call is logged in [`crate::state`]. This is the ONLY file to touch for this
 //! operation.
 //!
@@ -26,16 +26,23 @@
 //! [`crate::service::error_envelope`], which also renders every refusal raised before
 //! this handler runs.
 //!
-//! ## Why the answer to a resolved invocation is `ModelError`
+//! ## What answers the inference
 //!
 //! A SageMaker model is a CONTAINER IMAGE of customer code, which a generated emulator
-//! cannot run (see `service_com_amazonaws_sagemaker_sagemaker::state`'s
-//! `TRANSFORM_NOT_RUN_FAILURE`, where the batch-transform path answers the same
-//! limitation in its own modelled failure state). So nothing computes a prediction, and
-//! the answer is the modelled error for an invocation the model did not serve rather
-//! than a synthesised `Body`. Of the six errors the operation models, `ModelError` (424)
-//! is the one that says exactly that: the model behind the endpoint did not return an
-//! inference. The retryable ones would be false — `ModelNotReadyException` (429) and
+//! cannot run. What this emulator CAN serve is a model it fitted itself: a training job or
+//! an AutoML job run here writes its fitted parameters into the `model.tar.gz` under the
+//! job's output location, `CreateModel` deploys that artifact as a container's
+//! `ModelDataUrl`, and this operation reads the parameters back out of it and computes the
+//! prediction for the payload the caller sent. So the body answered is a MEASUREMENT over
+//! the caller's own request, from a model trained on the caller's own data.
+//!
+//! Where there is nothing to compute from — a variant whose model names no artifact, an
+//! artifact that cannot be read, one this emulator's own runs did not produce, or a payload
+//! holding no record the model applies to — nothing computed a prediction, and the answer
+//! is the modelled error for an invocation the model did not serve rather than a
+//! synthesised `Body`. Of the six errors the operation models, `ModelError` (424) is the
+//! one that says exactly that: the model behind the endpoint did not return an inference.
+//! The retryable ones would be false — `ModelNotReadyException` (429) and
 //! `ServiceUnavailable` (503) both promise that waiting and retrying helps, and nothing
 //! here ever becomes ready — and `ValidationError` (400) would blame a request that is
 //! valid.
@@ -451,25 +458,78 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         }
 
-        // Everything the control plane owns resolved; what is left is the inference
-        // itself. A model container is customer-provided code in a container image, and
-        // a generated emulator runs no container, so NOTHING computed a prediction: the
-        // answer is the modelled error for an invocation the model did not serve, never a
-        // synthesised `Body` claiming an inference that never ran, and never a capture
-        // record written to the endpoint's `DataCaptureConfig` destination for it.
-        record(crate::state::InvocationOutcome::NoInferenceContainer);
-        Err(InvokeEndpointErrorModeled::ModelError(ModelError {
-            message: Some(format!(
-                "This emulator runs no model inference container, so endpoint {} returned \
-                 no inference for this request.",
-                input.endpoint_name
-            )),
-            // Nothing answered, so there is no container status code, no container
-            // message and no container log stream to report.
-            original_status_code: None,
-            original_message: None,
-            log_stream_arn: None,
+        // Everything the control plane owns resolved; what is left is the inference itself.
+        //
+        // An endpoint's work is to answer what the model behind the variant computes for the
+        // payload, so that is what happens here: the variant is resolved through the
+        // endpoint's own configuration, its model's `ModelDataUrl` is read out of this
+        // emulator's Amazon S3, and the prediction is COMPUTED from the parameters a training
+        // or AutoML run of this emulator fitted and wrote into that artifact
+        // (`sagemaker::state::model_serving`).
+        //
+        // Where there is nothing to compute from — a variant whose model names no artifact, an
+        // artifact that cannot be read, one no run of this emulator produced (a model that
+        // would need its container image run, which this emulator does not do), or a payload
+        // holding no record the model applies to — NOTHING computed a prediction, and the
+        // answer is the modelled error for an invocation the model did not serve, naming the
+        // condition that stopped it. Never a synthesised `Body`.
+        let region = sagemaker::state::request_region(ctx);
+        let variants = crate::state::serving_variants(&*self.engine, &input.endpoint_name);
+        // Without `TargetVariant` the real service distributes the request across the
+        // endpoint's variants by their weights; the first variant the configuration listed is
+        // the one taken here, so one request routes to one deployed model deterministically.
+        let serving = match input.target_variant.as_deref() {
+            Some(target) => variants
+                .iter()
+                .find(|variant| variant.variant_name == target),
+            None => variants.first(),
+        };
+        let served = match serving {
+            Some(variant) => {
+                match sagemaker::state::load_served_model(ctx, &region, variant).await {
+                    Ok(model) => sagemaker::state::serve_inference(
+                        &model,
+                        &input.body,
+                        input.accept.as_deref(),
+                    )
+                    .map(|served| (variant.variant_name.clone(), served)),
+                    Err(refusal) => Err(refusal),
+                }
+            }
+            // The endpoint hosts no variant with a model behind it, so there is nothing
+            // deployed to route to at all.
+            None => Err(sagemaker::state::ServingRefusal::NoModelArtifact {
+                model_name: input.endpoint_name.clone(),
+            }),
+        };
+        let (variant_name, answer) = match served {
+            Ok(answer) => answer,
+            Err(refusal) => {
+                record(crate::state::InvocationOutcome::NoInferenceContainer);
+                return Err(InvokeEndpointErrorModeled::ModelError(ModelError {
+                    message: Some(refusal.message()),
+                    // Nothing answered, so there is no container status code, no container
+                    // message and no container log stream to report.
+                    original_status_code: None,
+                    original_message: None,
+                    log_stream_arn: None,
+                })
+                .into());
+            }
+        };
+        record(crate::state::InvocationOutcome::Served);
+        Ok(InvokeEndpointOutput {
+            body: answer.body,
+            content_type: Some(answer.content_type),
+            // "Identifies the production variant that was invoked"
+            // (`InvokeEndpointOutput$InvokedProductionVariant`): the one this call routed to.
+            invoked_production_variant: Some(variant_name),
+            // A model sets `CustomAttributes` and closes or opens a stateful session; the
+            // model here is a set of fitted parameters rather than a container that could do
+            // either, so none of the three is claimed.
+            custom_attributes: None,
+            new_session_id: None,
+            closed_session_id: None,
         })
-        .into())
     }
 }

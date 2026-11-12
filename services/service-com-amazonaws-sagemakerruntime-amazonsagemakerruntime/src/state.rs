@@ -142,6 +142,9 @@ pub enum InvocationOutcome {
     PayloadOverMaximum,
     /// Everything about the request resolved; the submission was queued.
     Queued,
+    /// Everything about the request resolved and the model behind the endpoint computed the
+    /// inference this call answered with.
+    Served,
     /// Everything about the request resolved; no container ran the inference.
     NoInferenceContainer,
 }
@@ -161,6 +164,7 @@ impl InvocationOutcome {
             Self::OutputLocationInvalid => "OutputLocationInvalid",
             Self::PayloadOverMaximum => "PayloadOverMaximum",
             Self::Queued => "Queued",
+            Self::Served => "Served",
             Self::NoInferenceContainer => "NoInferenceContainer",
         }
     }
@@ -400,6 +404,24 @@ pub fn resolve_endpoint<Eng: Send + Sync + 'static>(
             }),
         settled,
     })
+}
+
+/// The variants `endpoint_name` serves, each with the model deployed behind it and that
+/// model's artifact, read out of the SageMaker CONTROL PLANE's own stores.
+///
+/// The endpoint, its configuration and the models behind it are all the control plane's
+/// resources, so the reading of them lives there
+/// (`sagemaker::state::endpoint_serving_variants`) and this is only the lock around it: this
+/// service keeps no second copy of any of them.
+pub fn serving_variants<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    endpoint_name: &str,
+) -> Vec<sagemaker::state::ServingVariant> {
+    let Some(control_plane) = sagemaker::state::service_state(engine) else {
+        return Vec::new();
+    };
+    let store = control_plane.lock();
+    sagemaker::state::endpoint_serving_variants(&store, endpoint_name)
 }
 
 /// Per-service state for com-amazonaws-sagemakerruntime-amazonsagemakerruntime. A handler reaches it through [`service_state`].

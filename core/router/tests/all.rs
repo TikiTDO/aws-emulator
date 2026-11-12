@@ -24,6 +24,12 @@ mod cloudformation_fifo_resource_generated_names;
 #[path = "all/workmailmessageflow_resolves_an_s3_object.rs"]
 mod workmailmessageflow_resolves_an_s3_object;
 // Declared here, in this same head region, for the reason the entry above records: what a
+// client is answered by an endpoint serving a model SageMaker trained spans IAM, Amazon S3,
+// the SageMaker control plane and the SageMaker runtime at once, so neither SageMaker
+// crate's own test target can train a model and then invoke what it deployed.
+#[path = "all/sagemaker_endpoint_serves_a_trained_model.rs"]
+mod sagemaker_endpoint_serves_a_trained_model;
+// Declared here, in this same head region, for the reason the entry above records: what a
 // configuration set's Kinesis Data Firehose event destination does with a message's events
 // spans SESv2, IAM, Firehose and Amazon S3 at once, so no single service's test target can
 // follow a published event to the object it lands in.

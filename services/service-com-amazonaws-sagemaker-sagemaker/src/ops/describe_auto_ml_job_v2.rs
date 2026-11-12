@@ -209,6 +209,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // a poller terminates and no caller's read changes the outcome.
         let settled = job.settle_status(::std::time::SystemTime::now());
         let job_arn = job.arn.clone();
+        // What the job's own RUN produced, once the clock has materialised its terminal
+        // status: the candidate the objective metric picked, the notebooks the run wrote and
+        // the attributes its analysis resolved. A job still running, or one whose run failed,
+        // holds no result, so every one of these members stays absent for it.
+        let result = job.result().cloned();
+        let best_candidate = result
+            .as_ref()
+            .and_then(|result| crate::state::best_candidate_report(job, result));
+        let auto_ml_job_artifacts = result.as_ref().map(|result| AutoMLJobArtifacts {
+            candidate_definition_notebook_location: Some(
+                result.candidate_definition_notebook.clone(),
+            ),
+            data_exploration_notebook_location: Some(result.data_exploration_notebook.clone()),
+        });
+        let resolved_attributes = result
+            .as_ref()
+            .map(|result| crate::state::resolved_attributes_report(job, result));
 
         let output = DescribeAutoMLJobV2Output {
             auto_ml_job_name: job.name.clone(),
@@ -228,17 +245,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             end_time: job.end_time.map(crate::state::timestamp),
             last_modified_time: crate::state::timestamp(job.last_modified_time),
             failure_reason: job.failure_reason.clone(),
-            // No training ran, so there is no candidate to report, no leaderboard, no
-            // notebook written to the output path, no resolved attribute that only data
-            // analysis could resolve, and no deployed endpoint: every one of these would
-            // claim work this emulator did not do. `FailureReason` above says so.
+            // "A list of reasons for partial failures within an AutoML job"
+            // (`PartialFailureReasons`): the run reports no partial failure of its own — a
+            // leg it could not perform fails the whole job — so the member stays absent.
             partial_failure_reasons: None,
-            best_candidate: None,
+            best_candidate,
             auto_ml_job_status: job.status.clone(),
             auto_ml_job_secondary_status: job.secondary_status.clone(),
-            auto_ml_job_artifacts: None,
-            resolved_attributes: None,
+            auto_ml_job_artifacts,
+            resolved_attributes,
             model_deploy_config: job.model_deploy_config.clone(),
+            // "Provides information about endpoint for the model deployment"
+            // (`ModelDeployResult`): nothing here deploys the best candidate to an endpoint
+            // on the job's behalf, so no endpoint is claimed for it.
             model_deploy_result: None,
             data_split_config: job.data_split_config.clone(),
             security_config: job.security_config.clone(),

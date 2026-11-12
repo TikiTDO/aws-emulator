@@ -195,7 +195,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `ValidationException`, and nothing is persisted.
         if !store.subscribed_to_partner_app(&input.r#type) {
             return Err(crate::scaffolded::Scaffolded::validation(
-                crate::state::partner_app_not_subscribed(&input.r#type),
+                crate::state::PARTNER_APP_NOT_SUBSCRIBED,
             ));
         }
         // `Name` is the one identity the caller chooses (the id and the ARN are

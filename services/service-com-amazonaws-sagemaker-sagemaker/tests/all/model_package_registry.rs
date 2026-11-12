@@ -523,6 +523,100 @@ async fn a_name_already_in_use_is_refused_with_validation_exception() {
     }
 }
 
+/// RULE: the refusal of a registration under an identifier already registered names the
+/// ALREADY-EXISTING package by its ARN — the one the earlier create minted and the registry
+/// still holds — so a client that parses the message can address the colliding resource.
+///
+/// The rows differ along what the rule generalises over: the shape of the name (one
+/// character, a hyphenated name, mixed case, the modelled 63-character maximum) and the
+/// Region the package was registered in, which is the Region its ARN carries.
+#[tokio::test]
+async fn a_duplicate_registration_is_refused_by_the_existing_packages_arn() {
+    let longest = "m".repeat(63);
+    let rows: Vec<(&str, &str)> = vec![
+        ("a", "us-east-1"),
+        ("duplicate-package", "us-east-1"),
+        ("Mixed-Case-9", "eu-west-2"),
+        (longest.as_str(), "ap-southeast-1"),
+    ];
+    for (name, region) in rows {
+        let case = format!("duplicate {name:?} in {region}");
+        let emulator = Emulator::new();
+        let (status, first) = emulator
+            .call_in(
+                region,
+                "CreateModelPackage",
+                &json!({"ModelPackageName": name, "ModelPackageDescription": "first"}),
+            )
+            .await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: the first registration must be accepted, got {status} with {first}"
+        );
+        let existing = str_field(&first, "ModelPackageArn");
+
+        let (status, refused) = emulator
+            .call_in(
+                region,
+                "CreateModelPackage",
+                &json!({"ModelPackageName": name, "ModelPackageDescription": "second"}),
+            )
+            .await;
+        assert_eq!(
+            (status, error_code(&refused).as_str()),
+            (400, "ValidationException"),
+            "case {case:?}: a duplicate must be refused 400 ValidationException, got {status} \
+             with {refused}"
+        );
+        assert_eq!(
+            message(&refused),
+            format!("ModelPackage already exists: {existing}"),
+            "case {case:?}: the refusal must carry the existing package's ARN, got {:?}",
+            message(&refused)
+        );
+        // The ARN in the message is the one the registry answers for that identifier, so it
+        // addresses the colliding resource.
+        let described = emulator
+            .ok(
+                &case,
+                "DescribeModelPackage",
+                &json!({"ModelPackageName": existing.clone()}),
+            )
+            .await;
+        assert_eq!(
+            (
+                str_field(&described, "ModelPackageArn"),
+                str_field(&described, "ModelPackageDescription"),
+            ),
+            (existing.clone(), "first".to_string()),
+            "case {case:?}: the ARN the refusal named must describe the stored package, got \
+             {described}"
+        );
+
+        // A DIFFERENT name is not in use, so it still gets its own ARN. Built by replacing
+        // the name's last character, so it stays inside the modelled 63-character maximum
+        // however long the row's own name is.
+        let other = format!("{}z", &name[..name.len() - 1]);
+        let (status, accepted) = emulator
+            .call_in(
+                region,
+                "CreateModelPackage",
+                &json!({"ModelPackageName": other}),
+            )
+            .await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: a different name must still be registrable, got {status} with \
+             {accepted}"
+        );
+        assert_ne!(
+            str_field(&accepted, "ModelPackageArn"),
+            existing,
+            "case {case:?}: a different name gets its own ARN, got {accepted}"
+        );
+    }
+}
+
 /// RULE: exactly one of the two kind-selecting members names the package to create —
 /// `ModelPackageName` for an unversioned one, `ModelPackageGroupName` for a version —
 /// so a request carrying neither or both is refused 400 `ValidationException`.

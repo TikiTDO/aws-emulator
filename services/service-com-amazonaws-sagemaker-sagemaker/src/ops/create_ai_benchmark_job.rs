@@ -9,7 +9,10 @@
 //!
 //! The job RUNS AS the `RoleArn` the request names, so a role this account's IAM answers
 //! SageMaker cannot assume is refused with 400 `ValidationException` and nothing is stored
-//! (see [`crate::state::admission`]).
+//! (see [`crate::state::admission`]). The `BenchmarkTarget`'s endpoint is resolved the same
+//! way, before anything is stored: a benchmark drives traffic at that endpoint, so a target
+//! naming one the account does not hold is refused rather than accepted
+//! ([`crate::state::benchmark_endpoint_not_found`]).
 //!
 //! The run itself is not performed: a benchmark drives traffic at a live inference
 //! endpoint, which this emulator does not serve, so the accepted job starts in the
@@ -224,6 +227,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )),
             })
             .into());
+        }
+        // A benchmark job drives traffic at the endpoint its `BenchmarkTarget` names, so a
+        // target naming an endpoint this account does not hold backs no run at all: the
+        // reference is resolved against the endpoint store BEFORE any job state is
+        // written, and a create that cannot resolve it is refused rather than accepted
+        // into a job that could never reach a target. The identifier is "the name or
+        // Amazon Resource Name (ARN) of the SageMaker endpoint", and the endpoint store is
+        // keyed by `EndpointName`, so an ARN is reduced to the name it carries. The model
+        // gives this operation no error for an unresolvable ENDPOINT — `ResourceNotFound`
+        // is what the AI-benchmarking family's own entities are refused with — so this is
+        // a 400 `ValidationException`.
+        let target_endpoint = crate::state::benchmark_target_endpoint(&input.benchmark_target);
+        if !store
+            .endpoints
+            .contains_key(crate::state::name_from_arn_or_name(target_endpoint))
+        {
+            return Err(crate::scaffolded::Scaffolded::validation(
+                crate::state::benchmark_endpoint_not_found(target_endpoint),
+            ));
         }
         // The store is bounded, so a caller varying `AIBenchmarkJobName` cannot grow it
         // without end. `ResourceLimitExceeded` is the limit failure this operation models.

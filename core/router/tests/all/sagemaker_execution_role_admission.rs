@@ -51,6 +51,11 @@ const PAST_IMAGE_SETTLE_DUE: Duration = Duration::from_millis(500);
 /// cannot be the missing-reference one instead.
 const WORKLOAD_CONFIG: &str = "rolebenchconfig";
 
+/// The inference endpoint the `CreateAIBenchmarkJob` row's `BenchmarkTarget` names: that
+/// create resolves the target against the endpoint store, so the endpoint is seeded with the
+/// workload configuration.
+const BENCHMARK_ENDPOINT: &str = "rolebenchendpoint";
+
 /// One role value the creates are driven with, and what this account's IAM answers about
 /// it.
 struct RoleRow {
@@ -305,7 +310,7 @@ fn creates_under_a_role() -> Vec<RoleCreate> {
                     "AIBenchmarkJobName": name,
                     "AIWorkloadConfigIdentifier": WORKLOAD_CONFIG,
                     "RoleArn": role,
-                    "BenchmarkTarget": { "Endpoint": { "Identifier": "llama-endpoint" } },
+                    "BenchmarkTarget": { "Endpoint": { "Identifier": BENCHMARK_ENDPOINT } },
                     "OutputConfig": { "S3OutputLocation": "s3://bucket/benchmarks/" },
                 })
             },
@@ -410,8 +415,8 @@ fn creates_under_a_role() -> Vec<RoleCreate> {
     ]
 }
 
-/// Hold every role the table names in IAM, and seed the AI workload configuration the
-/// benchmark job references.
+/// Hold every role the table names in IAM, and seed the AI workload configuration and the
+/// inference endpoint the benchmark job references.
 fn seed(router: &smithy_server_runtime::MultiServiceRouter, runtime: &tokio::runtime::Runtime) {
     for row in role_rows() {
         let Some(fixture) = row.fixture else { continue };
@@ -439,6 +444,47 @@ fn seed(router: &smithy_server_runtime::MultiServiceRouter, runtime: &tokio::run
         status == 200,
         "setup: CreateAIWorkloadConfig: expected 200, got {status} {body}"
     );
+    // `CreateAIBenchmarkJob` resolves its `BenchmarkTarget` against the endpoint store before
+    // it writes anything, so the endpoint the row names is stood up here: what this suite
+    // asserts is the ROLE rule, which a target the account does not hold would mask.
+    let assumable_role = format!("arn:aws:iam::{ACCOUNT}:role/sagemaker-exec");
+    for (operation, body) in [
+        (
+            "CreateModel",
+            json!({
+                "ModelName": format!("{BENCHMARK_ENDPOINT}-model"),
+                "PrimaryContainer": {
+                    "Image": format!("{ACCOUNT}.dkr.ecr.us-east-1.amazonaws.com/infer:1"),
+                },
+                "ExecutionRoleArn": assumable_role,
+            }),
+        ),
+        (
+            "CreateEndpointConfig",
+            json!({
+                "EndpointConfigName": format!("{BENCHMARK_ENDPOINT}-config"),
+                "ProductionVariants": [{
+                    "VariantName": "AllTraffic",
+                    "ModelName": format!("{BENCHMARK_ENDPOINT}-model"),
+                    "InstanceType": "ml.m5.large",
+                    "InitialInstanceCount": 1,
+                }],
+            }),
+        ),
+        (
+            "CreateEndpoint",
+            json!({
+                "EndpointName": BENCHMARK_ENDPOINT,
+                "EndpointConfigName": format!("{BENCHMARK_ENDPOINT}-config"),
+            }),
+        ),
+    ] {
+        let (status, answered) = sagemaker(router, runtime, operation, &body);
+        assert!(
+            status == 200,
+            "setup: {operation}: expected 200, got {status} {answered}"
+        );
+    }
 }
 
 /// RULE: a create whose resource runs as a caller-supplied role is accepted only where this

@@ -62,19 +62,15 @@ pub fn mint_partner_app_id() -> String {
 pub const PARTNER_APP_NOT_FOUND: &str = "App entity does not exist.";
 
 /// How `CreatePartnerApp` refuses a `Type` this account holds no partner-application
-/// subscription for: the type asked for, and what the caller has to do about it.
+/// subscription for.
 ///
 /// A partner AI app runs a third party's application, which is licensed to the account
 /// through AWS Marketplace rather than through this API — so a type the account has not
-/// subscribed to cannot be provisioned, and the refusal names the subscription that is
-/// missing. See [`ComAmazonawsSagemakerSagemakerState::subscribed_to_partner_app`].
-pub fn partner_app_not_subscribed(app_type: &str) -> String {
-    format!(
-        "This account does not have an active AWS Marketplace subscription for the \
-         SageMaker Partner AI App type {app_type}. Subscribe to the partner application \
-         in AWS Marketplace before creating the app."
-    )
-}
+/// subscribed to cannot be provisioned. The sentence is FIXED text carrying nothing from
+/// the request: the service states that the caller holds no entitlement, not which
+/// offering was asked for, so the refusal does not echo the `Type` back. See
+/// [`ComAmazonawsSagemakerSagemakerState::subscribed_to_partner_app`].
+pub const PARTNER_APP_NOT_SUBSCRIBED: &str = "Caller is not subscribed to the marketplace offering.";
 
 /// The configuration one partner AI app carries: everything `CreatePartnerApp` is given
 /// about HOW the app runs, as opposed to the identity SageMaker mints for it.

@@ -22,7 +22,9 @@ use serde_json::{json, Value};
 // The crate's wire-test harness, exposed `pub(crate)` by the suite that introduced it so
 // every sibling module in this one test binary shares one emulator, one request builder
 // and one set of body accessors.
-use crate::inference_deployment_lifecycle::{error_code, str_field, Emulator, ACCOUNT};
+use crate::inference_deployment_lifecycle::{
+    error_code, one_variant_config, primary_container, str_field, Emulator, ACCOUNT,
+};
 
 /// Long enough to pass `state::AI_BENCHMARK_JOB_ENDS_AFTER` (400 ms).
 const PAST_JOB_END_DUE: Duration = Duration::from_millis(700);
@@ -34,6 +36,11 @@ const ROLE_ARN: &str = "arn:aws:iam::000000000000:role/SageMakerBenchmarkRole";
 
 /// The workload configuration every job below benchmarks against.
 const WORKLOAD_CONFIG: &str = "bench-workload-config";
+
+/// The inference endpoint every job below targets. `CreateAIBenchmarkJob` resolves its
+/// `BenchmarkTarget` against the endpoint store, so the endpoint is seeded beside the
+/// workload configuration.
+const TARGET_ENDPOINT: &str = "llama-endpoint";
 
 /// `Tags` with `count` distinct key/value pairs.
 fn tags(count: usize) -> Value {
@@ -212,7 +219,8 @@ fn create_body(name: &str, members: &Value) -> Value {
     body
 }
 
-/// Create the workload configuration every job here references, in `region`.
+/// Create the workload configuration every job here references, in `region`, beside the
+/// endpoint their `BenchmarkTarget` names.
 async fn seed_workload_config(emulator: &Emulator, region: &str) {
     let (status, body) = emulator
         .call_in(
@@ -226,6 +234,37 @@ async fn seed_workload_config(emulator: &Emulator, region: &str) {
         "case setup region={region}: expected CreateAIWorkloadConfig to answer 200, \
          got {status} with {body:?}"
     );
+    seed_target_endpoint(emulator, region, TARGET_ENDPOINT).await;
+}
+
+/// Create the endpoint `name` in `region` (with the model and configuration it needs), so a
+/// `BenchmarkTarget` naming it resolves.
+pub(crate) async fn seed_target_endpoint(emulator: &Emulator, region: &str, name: &str) {    let model = format!("{name}-model");
+    let config = format!("{name}-config");
+    for (operation, body) in [
+        (
+            "CreateModel",
+            json!({
+                "ModelName": model,
+                "PrimaryContainer": primary_container(
+                    "000000000000.dkr.ecr.us-east-1.amazonaws.com/ranker:1",
+                ),
+                "ExecutionRoleArn": ROLE_ARN,
+            }),
+        ),
+        ("CreateEndpointConfig", one_variant_config(&config, &model)),
+        (
+            "CreateEndpoint",
+            json!({ "EndpointName": name, "EndpointConfigName": config }),
+        ),
+    ] {
+        let (status, answered) = emulator.call_in(region, operation, &body).await;
+        assert_eq!(
+            status, 200,
+            "case setup region={region}: expected {operation} to answer 200, got {status} \
+             with {answered:?}"
+        );
+    }
 }
 
 /// `DescribeAIBenchmarkJob` for `name`, as the raw (status, body) pair, so a test can
@@ -454,6 +493,9 @@ async fn minted_arns_carry_the_signed_region_and_the_stored_name() {
         "case unsigned setup: expected CreateAIWorkloadConfig to answer 200, got {status} \
          with {body:?}"
     );
+    // The endpoint store is keyed by `EndpointName` alone, so the target seeded here
+    // resolves for the unsigned create too.
+    seed_target_endpoint(&emulator, "us-east-1", TARGET_ENDPOINT).await;
     let (status, body) = emulator
         .call_unsigned(
             "CreateAIBenchmarkJob",

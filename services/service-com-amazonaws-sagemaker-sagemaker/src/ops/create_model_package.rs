@@ -391,9 +391,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // as a REQUEST defect — 400 `ValidationException`, the same class as any other
         // unusable input — rather than as the retryable `ConflictException` this operation
         // also models, so a client branching on the code is told "do not retry this".
-        if store.model_packages.contains_key(&key) {
+        //
+        // The refusal names the ALREADY-EXISTING package by the ARN the store holds for
+        // it, not by the identifier this request presented: that is the resource the
+        // caller has to describe or reuse to recover, so the message carries a value it
+        // can address the resource by.
+        if let Some(existing) = store.model_packages.get(&key) {
+            let existing_arn = existing.arn.clone();
             return Err(crate::scaffolded::Scaffolded::validation(format!(
-                "Cannot create already existing model package \"{key}\"."
+                "ModelPackage already exists: {existing_arn}"
             )));
         }
         let arn = crate::state::resource_arn(&region, crate::state::MODEL_PACKAGE_KIND, &key);

@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use crate::ai_benchmark_job_lifecycle::seed_target_endpoint;
 use crate::inference_deployment_lifecycle::{str_field, Emulator, ACCOUNT};
 
 /// Long enough to pass `state::IMAGE_CREATED_AFTER` (300 ms), so the image's settled status
@@ -35,6 +36,11 @@ const PAST_IMAGE_SETTLE_DUE: Duration = Duration::from_millis(500);
 
 /// The AI workload configuration the benchmark job below is driven against.
 const WORKLOAD_CONFIG: &str = "roleprobeconfig";
+
+/// The endpoint the `CreateAIBenchmarkJob` row below targets: that create resolves its
+/// `BenchmarkTarget` against the endpoint store, so the endpoint is seeded with the
+/// workload configuration.
+const TARGET_ENDPOINT: &str = "roleprobeendpoint";
 
 /// A syntactically valid account id that is not the one this emulator serves.
 const OTHER_ACCOUNT: &str = "123456789012";
@@ -90,7 +96,7 @@ fn creates() -> Vec<Create> {
                     "AIBenchmarkJobName": name,
                     "AIWorkloadConfigIdentifier": WORKLOAD_CONFIG,
                     "RoleArn": role,
-                    "BenchmarkTarget": { "Endpoint": { "Identifier": "llama-endpoint" } },
+                    "BenchmarkTarget": { "Endpoint": { "Identifier": TARGET_ENDPOINT } },
                     "OutputConfig": { "S3OutputLocation": "s3://bucket/benchmarks/" },
                 })
             },
@@ -154,6 +160,7 @@ async fn a_create_refuses_no_role_when_no_iam_answers_about_it() {
         status, 200,
         "setup: CreateAIWorkloadConfig must be accepted, got {status} with {seeded}"
     );
+    seed_target_endpoint(&emulator, "us-east-1", TARGET_ENDPOINT).await;
 
     for (index, (case, role)) in role_values().iter().enumerate() {
         for create in creates() {

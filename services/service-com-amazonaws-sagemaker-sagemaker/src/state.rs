@@ -59,12 +59,18 @@ use std::time::{Duration, SystemTime};
 /// The AutoML job V2 slice: the record, its clock and its constants. Re-exported below,
 /// so a handler names them as `crate::state::…` like every other slice.
 pub mod auto_ml_job_v2;
-pub use auto_ml_job_v2::{
-    auto_ml_problem_type_config_name, AutoMLJobV2, AUTO_ML_JOB_KIND_LABEL, AUTO_ML_JOB_QUOTA,
-    AUTO_ML_JOB_TERMINAL_AFTER, AUTO_ML_NOT_TRAINED_FAILURE_REASON,
-    AUTO_ML_SECONDARY_STATUS_FAILED, AUTO_ML_SECONDARY_STATUS_STARTING, AUTO_ML_STATUS_FAILED,
-    AUTO_ML_STATUS_IN_PROGRESS,
-};
+pub use auto_ml_job_v2::*;
+
+/// The AutoML job V2's own RUN: the dataset it analyses, the candidates it fits and
+/// measures, the artifacts it writes. See `state/auto_ml_run.rs`.
+pub mod auto_ml_run;
+pub use auto_ml_run::*;
+
+/// SERVING an inference from a model this emulator's own training produced: the variant an
+/// invocation routes to, the artifact behind it, and the prediction it computes. See
+/// `state/model_serving.rs`.
+pub mod model_serving;
+pub use model_serving::*;
 
 use crate::ops::types::{
     AdditionalInferenceSpecificationDefinition, AppSpecification, ArtifactSource,

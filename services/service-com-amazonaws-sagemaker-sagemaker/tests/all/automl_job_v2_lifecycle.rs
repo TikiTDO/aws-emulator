@@ -21,8 +21,8 @@ use serde_json::{json, Value};
 
 use crate::inference_deployment_lifecycle::{error_code, str_field, Emulator, ACCOUNT};
 
-/// Long enough to pass `state::AUTO_ML_JOB_TERMINAL_AFTER` (700 ms).
-const PAST_TERMINAL_DUE: Duration = Duration::from_millis(1_400);
+/// Long enough to pass `state::AUTO_ML_JOB_TERMINAL_AFTER` (5 x 700 ms).
+const PAST_TERMINAL_DUE: Duration = Duration::from_millis(6_000);
 
 /// A `RoleArn` satisfying the modelled pattern
 /// `^arn:aws[a-z\-]*:iam::\d{12}:role/?[a-zA-Z_0-9+=,.@\-_/]+$`.
@@ -447,13 +447,16 @@ async fn describing_an_absent_job_is_refused_with_resource_not_found() {
 
 /// RULE: a job is accepted in `InProgress`/`Starting`, and the terminal transition the
 /// clock owes it becomes visible once its span has elapsed — without any call having to
-/// make it happen, and stably thereafter. This emulator runs no model training, so that
-/// terminal status is `Failed` with the reason saying so, never `Completed`.
+/// make it happen, and stably thereafter. The terminal status is the one the job's own RUN
+/// reported: these jobs name an Amazon S3 location nothing holds an object under, so the
+/// run's data-download leg fails and the job ends `Failed` with the condition that stopped
+/// it, never `Completed` (the completed path, over data Amazon S3 really holds, is
+/// `automl_job_v2_execution`).
 #[tokio::test]
 async fn a_job_leaves_in_progress_once_the_clock_owes_it_and_reports_why_it_failed() {
     let emulator = Emulator::new();
-    // Rows: every problem type — none of them is trained, so all of them end the same
-    // way.
+    // Rows: every problem type — none of them has data to read, so all of them end the
+    // same way.
     for (case, _, config) in problem_type_configs() {
         let name = format!("t-{case}");
         let name = &name[..name.len().min(32)];
@@ -483,9 +486,9 @@ async fn a_job_leaves_in_progress_once_the_clock_owes_it_and_reports_why_it_fail
         );
         let reason = str_field(&settled, "FailureReason");
         assert!(
-            reason.contains("does not run Autopilot model training"),
-            "case {case} after-the-due-span: FailureReason must say no training ran, \
-             got {reason:?}"
+            reason.starts_with("ClientError:") && reason.contains("autopilot-input"),
+            "case {case} after-the-due-span: FailureReason must name the leg of the run \
+             that failed and the location it failed on, got {reason:?}"
         );
         assert!(
             settled.get("BestCandidate").is_none()

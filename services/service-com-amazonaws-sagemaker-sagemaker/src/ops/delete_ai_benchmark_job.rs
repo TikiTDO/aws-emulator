@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteAIBenchmarkJob
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteAIBenchmarkJob`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteAIBenchmarkJob::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Releases the benchmark job the request names from the one store
+//! `CreateAIBenchmarkJob` writes and `DescribeAIBenchmarkJob` replays, and answers the ARN
+//! that job actually carried. This is the ONLY file to touch for this operation.
+//!
+//! Two things stand in the way of a release, both weighed before anything is removed:
+//!
+//! * a name this account holds no job under — refused with the modelled
+//!   `ResourceNotFound`, so a caller is never told a job it never created was released;
+//! * a job whose run has not finished — refused with a 400 `ValidationException`
+//!   ([`crate::state::ai_benchmark_job_not_deletable`]), because a running job is still
+//!   holding the work the caller asked for. The job SURVIVES that refusal, so a later read
+//!   still replays it, and once the clock has ended the run the same delete succeeds.
 //!
 //! ## Shape of an operation
 //!
@@ -138,18 +142,48 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteAIBenchmarkJob` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteAIBenchmarkJobErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteAIBenchmarkJob"))
+        let state = crate::state::service_state(&*self.engine)
+            .ok_or_else(|| crate::scaffolded::Scaffolded::validation(crate::state::NO_STATE))?;
+
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+        // A name nothing created names no job, so the delete is REFUSED with the not-found
+        // failure this operation models rather than answered 200: a caller reading a 200
+        // here would be told a job it never created had just been released. The refusal
+        // relays the inner service's own rendering of it, the way this family's other
+        // delete does, and quotes the name the request presented because there is no
+        // stored record to report anything else from.
+        let Some(job) = store.ai_benchmark_jobs.get_mut(&input.ai_benchmark_job_name) else {
+            return Err(DeleteAIBenchmarkJobErrorModeled::ResourceNotFound(ResourceNotFound {
+                message: Some(crate::state::ai_entity_not_found_relayed(
+                    crate::state::AI_BENCHMARK_JOB_ENTITY,
+                    &input.ai_benchmark_job_name,
+                )),
+            })
+            .into());
+        };
+        // The move out of `InProgress` the clock already owed is materialised before the
+        // deletion is weighed, so a job whose run has ended is deletable here even though
+        // no read has reported it yet: it was due at that instant whether or not anybody
+        // called.
+        job.settle_status(now);
+        // A job is released once its run has FINISHED. While it is still running the
+        // delete is refused and the job is left intact — the non-terminal status is
+        // observable (the span is never zero), so this refusal is reachable, and a caller
+        // that waits for the terminal status gets the release it asked for.
+        if !job.is_terminal() {
+            let refusal = crate::state::ai_benchmark_job_not_deletable(&job.status);
+            return Err(crate::scaffolded::Scaffolded::validation(refusal));
+        }
+        // The ARN the create minted and stored, so the delete reports the identity the
+        // resource actually carried rather than one rebuilt from this request.
+        let arn = job.arn.clone();
+        store.ai_benchmark_jobs.remove(&input.ai_benchmark_job_name);
+        drop(store);
+
+        crate::state::record_state_change(Self::NAME, &arn, ctx);
+        Ok(DeleteAIBenchmarkJobOutput {
+            ai_benchmark_job_arn: Some(arn),
+        })
     }
 }

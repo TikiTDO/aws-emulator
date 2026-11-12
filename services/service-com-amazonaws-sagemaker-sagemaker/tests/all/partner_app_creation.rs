@@ -315,9 +315,10 @@ async fn an_unsubscribed_type_is_refused_and_persists_nothing() {
                 );
                 assert_eq!(
                     message(&refused),
-                    sm::partner_app_not_subscribed(app_type),
-                    "case {case}/{attempt}: the refusal must name the missing AWS \
-                     Marketplace subscription for {app_type}, got {refused}"
+                    sm::PARTNER_APP_NOT_SUBSCRIBED,
+                    "case {case}/{attempt}: the refusal must state the missing AWS \
+                     Marketplace entitlement in the service's own fixed wording, got \
+                     {refused}"
                 );
                 assert!(
                     refused.get("Arn").is_none(),
@@ -795,7 +796,7 @@ async fn a_store_at_its_bound_refuses_a_further_create() {
     );
     assert_eq!(
         message(&refused),
-        sm::partner_app_not_subscribed("fiddler"),
+        sm::PARTNER_APP_NOT_SUBSCRIBED,
         "case an unsubscribed type on a full store: the refusal must be the subscription \
          one, got {refused}"
     );

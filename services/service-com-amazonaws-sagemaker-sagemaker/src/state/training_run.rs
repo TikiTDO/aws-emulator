@@ -80,7 +80,7 @@
 
 use super::*;
 
-use crate::ops::types::{Channel, CreateTrainingJobInput, MetricData, S3DataSource};
+use crate::ops::types::{CreateTrainingJobInput, MetricData};
 
 /// The most bytes the run reads out of ONE object.
 ///
@@ -130,7 +130,7 @@ pub const MODEL_ARCHIVE_OBJECT: &str = "model.tar.gz";
 /// list of object keys that you want SageMaker to use for model training"
 /// (`S3DataSource$S3DataType`). Every other value identifies a key name prefix, which is how
 /// the run reads it.
-const MANIFEST_FILE: &str = "ManifestFile";
+pub const MANIFEST_FILE: &str = "ManifestFile";
 
 // The IAM actions an Amazon S3 read or write is authorized under, the partition an Amazon S3
 // ARN carries and the location an `s3://` URI names are this service's ONE reading of an
@@ -244,29 +244,29 @@ pub fn model_upload_failed(uri: &str, detail: &str) -> String {
 /// One record of a training channel: the target variable the first column carries, and the
 /// features the remaining columns carry.
 #[derive(Debug, Clone)]
-struct Record {
-    target: f64,
-    features: Vec<f64>,
+pub struct Record {
+    pub target: f64,
+    pub features: Vec<f64>,
 }
 
 /// What one channel contributed to the run.
 #[derive(Debug, Clone)]
-struct ChannelData {
+pub struct ChannelData {
     /// The channel's own name, which the metric it is measured over is named after.
-    name: String,
+    pub name: String,
     /// The location its records were read from, which a failure about it names.
-    uri_read: String,
+    pub uri_read: String,
     /// How many objects of its location were read.
-    objects: usize,
+    pub objects: usize,
     /// The records read from them.
-    records: Vec<Record>,
+    pub records: Vec<Record>,
     /// The rows that held no record of the channel's form, which the artifact reports.
-    skipped: usize,
+    pub skipped: usize,
 }
 
 impl ChannelData {
     /// One channel's read, before anything has been read into it.
-    fn new(name: &str, uri_read: String) -> Self {
+    pub fn new(name: &str, uri_read: String) -> Self {
         Self {
             name: name.to_string(),
             uri_read,
@@ -280,16 +280,16 @@ impl ChannelData {
 /// A fitted linear model: `prediction = intercept + weights · features`, in the caller's own
 /// scale.
 #[derive(Debug, Clone)]
-struct LinearModel {
-    intercept: f64,
-    weights: Vec<f64>,
+pub struct LinearModel {
+    pub intercept: f64,
+    pub weights: Vec<f64>,
     /// How many passes over the data the descent took, which the artifact reports.
-    epochs: usize,
+    pub epochs: usize,
 }
 
 impl LinearModel {
     /// What this model predicts for one record's features.
-    fn predict(&self, features: &[f64]) -> f64 {
+    pub fn predict(&self, features: &[f64]) -> f64 {
         self.intercept
             + self
                 .weights
@@ -301,7 +301,7 @@ impl LinearModel {
 
     /// The root-mean-square error of this model over `records` — a MEASUREMENT over real
     /// predictions, which is what the run reports as its final metric.
-    fn rmse(&self, records: &[Record]) -> f64 {
+    pub fn rmse(&self, records: &[Record]) -> f64 {
         if records.is_empty() {
             return 0.0;
         }
@@ -443,8 +443,9 @@ pub async fn run_training_job(
             region,
             &request.role_arn,
             &partition,
-            channel,
-            source,
+            channel.channel_name.as_str(),
+            source.s3_data_type.as_str(),
+            source.s3_uri.as_str(),
             &mut remaining_bytes,
         )
         .await
@@ -569,27 +570,36 @@ fn artifact_location(output: &S3Location, job_name: &str) -> S3Location {
 /// `Err` is the job's `FailureReason`: the download leg failed, which is the job's own
 /// failure rather than the request's.
 #[allow(clippy::too_many_arguments)]
-async fn read_channel(
+pub async fn read_channel(
     ctx: &smithy_server_runtime::OperationContext<'_>,
     client: &::aws_sdk_s3::Client,
     region: &str,
     role_arn: &str,
     partition: &str,
-    channel: &Channel,
-    source: &S3DataSource,
+    name: &str,
+    s3_data_type: &str,
+    s3_uri: &str,
     remaining_bytes: &mut usize,
 ) -> Result<ChannelData, String> {
-    let name = channel.channel_name.as_str();
-    let Some(location) = S3Location::parse(&source.s3_uri) else {
+    let Some(location) = S3Location::parse(s3_uri) else {
         return Err(data_download_failed(
             name,
-            &source.s3_uri,
+            s3_uri,
             "the channel names no Amazon S3 bucket",
         ));
     };
     let mut read = ChannelData::new(name, location.uri());
-    let objects =
-        channel_objects(ctx, client, region, role_arn, partition, name, source, &location).await?;
+    let objects = channel_objects(
+        ctx,
+        client,
+        region,
+        role_arn,
+        partition,
+        name,
+        s3_data_type,
+        &location,
+    )
+    .await?;
     if objects.is_empty() {
         return Err(data_download_failed(name, &location.uri(), NO_OBJECT_DETAIL));
     }
@@ -642,10 +652,10 @@ async fn channel_objects(
     role_arn: &str,
     partition: &str,
     channel: &str,
-    source: &S3DataSource,
+    s3_data_type: &str,
     location: &S3Location,
 ) -> Result<Vec<S3Location>, String> {
-    if source.s3_data_type == MANIFEST_FILE {
+    if s3_data_type == MANIFEST_FILE {
         if ::service_common::iam_role::role_withholds_action(
             ctx,
             region,
@@ -734,7 +744,7 @@ fn manifest_objects(bytes: &[u8], held_in: &S3Location) -> Vec<S3Location> {
 /// The bytes of one object, up to `ceiling`.
 ///
 /// `Err` is what Amazon S3 answered, as a failure reason's detail names it.
-async fn read_object(
+pub async fn read_object(
     client: &::aws_sdk_s3::Client,
     object: &S3Location,
     ceiling: usize,
@@ -774,7 +784,7 @@ async fn read_object(
 }
 
 /// Write the model archive as one object, or answer what Amazon S3 answered.
-async fn write_object(
+pub async fn write_object(
     client: &::aws_sdk_s3::Client,
     object: &S3Location,
     document: Vec<u8>,
@@ -809,7 +819,7 @@ async fn write_object(
 /// count differs from the first record's, is COUNTED as skipped rather than guessed at: the
 /// channel's form is the one the built-in algorithms document, and a row that is not of that
 /// form is not a record of it.
-fn read_records(bytes: &[u8], read: &mut ChannelData) {
+pub fn read_records(bytes: &[u8], read: &mut ChannelData) {
     let expected = read.records.first().map(|record| record.features.len());
     let mut reader = ::csv::ReaderBuilder::new()
         // "SageMaker requires that a CSV file doesn't have a header record"
@@ -860,7 +870,7 @@ fn read_records(bytes: &[u8], read: &mut ChannelData) {
 /// deviation, so one step is comparable across columns whatever units they carry — and the
 /// fitted weights are returned in the CALLER's scale, so the model predicts from the data as
 /// it was given. A column that does not vary has no scale to divide by and takes no part.
-fn fit(records: &[Record], epochs: usize) -> LinearModel {
+pub fn fit(records: &[Record], epochs: usize) -> LinearModel {
     let columns = records.first().map_or(0, |record| record.features.len());
     let count = records.len().max(1) as f64;
     // The column sums and the squared deviations are accumulated by WALKING each record, so
@@ -997,7 +1007,7 @@ fn model_document(
 /// The `model.tar.gz` bytes for `document`: a gzip-compressed tar holding the single
 /// [`MODEL_ARCHIVE_ENTRY`] file, which is the form `ModelArtifacts` documents ("uploaded to
 /// your Amazon S3 bucket as compressed files").
-fn model_archive(document: &::serde_json::Value) -> ::std::io::Result<Vec<u8>> {
+pub fn model_archive(document: &::serde_json::Value) -> ::std::io::Result<Vec<u8>> {
     use ::std::io::Write;
 
     let body = ::serde_json::to_vec_pretty(document)?;
@@ -1020,6 +1030,65 @@ fn model_archive(document: &::serde_json::Value) -> ::std::io::Result<Vec<u8>> {
 // An Amazon S3 client over the in-process callback into this same emulator lives in
 // `super::s3_access`, the one place this service builds one, and is reached here through
 // `use super::*`.
+
+/// The most bytes [`model_from_archive`] reads out of a model artifact AFTER decompression.
+///
+/// The ceilings on a read bound the COMPRESSED bytes only ([`MAX_OBJECT_BYTES`]), and a gzip
+/// member expands by orders of magnitude, so the inflated side is bounded here too: the
+/// decompressing stream and the entry read from it are both cut off at this many bytes, and an
+/// archive that does not fit answers "no model" rather than growing the process. The budget is
+/// generous against a model document this emulator writes — which is a few numbers per feature
+/// column — and far below what the host would notice.
+pub const MAX_INFLATED_ARCHIVE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The fitted model a `model.tar.gz` this emulator wrote holds, read back out of the archive.
+///
+/// The inverse of [`model_archive`]: the one reading of a model artifact, so whatever serves
+/// an inference from a trained model reads the same parameters the fit measured instead of
+/// deciding again how the archive is laid out. `None` for bytes that are not an archive this
+/// emulator's own run produced — nothing is guessed for them.
+///
+/// The bytes are a caller's own object, so the DECOMPRESSED side is bounded as explicitly as
+/// the download was: see [`MAX_INFLATED_ARCHIVE_BYTES`].
+#[must_use]
+pub fn model_from_archive(bytes: &[u8]) -> Option<LinearModel> {
+    use ::std::io::Read;
+
+    // The whole inflated stream is cut off at the budget, so no archive — however many
+    // entries it declares and however large each says it is — can inflate past it.
+    let decoder = ::flate2::read::GzDecoder::new(bytes).take(MAX_INFLATED_ARCHIVE_BYTES);
+    let mut archive = ::tar::Archive::new(decoder);
+    let mut document: Option<::serde_json::Value> = None;
+    for entry in archive.entries().ok()? {
+        let entry = entry.ok()?;
+        let named = entry
+            .path()
+            .ok()
+            .is_some_and(|path| path.as_os_str() == MODEL_ARCHIVE_ENTRY);
+        if !named {
+            continue;
+        }
+        // And the one entry the reading wants is cut off at the same budget, so the parse
+        // that consumes it cannot be fed more than that either.
+        document = ::serde_json::from_reader(entry.take(MAX_INFLATED_ARCHIVE_BYTES)).ok();
+        break;
+    }
+    let model = document?.get("model")?.clone();
+    let weights: Vec<f64> = model
+        .get("weights")?
+        .as_array()?
+        .iter()
+        .map(::serde_json::Value::as_f64)
+        .collect::<Option<Vec<f64>>>()?;
+    Some(LinearModel {
+        intercept: model.get("intercept")?.as_f64()?,
+        weights,
+        epochs: model
+            .get("epochs")
+            .and_then(::serde_json::Value::as_u64)
+            .unwrap_or(0) as usize,
+    })
+}
 
 #[cfg(test)]
 mod tests {

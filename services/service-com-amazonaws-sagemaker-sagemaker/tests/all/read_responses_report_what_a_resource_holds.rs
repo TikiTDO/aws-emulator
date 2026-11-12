@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 
 // The crate's wire-test harness, exposed `pub(crate)` by the suite that introduced it so
 // every sibling module in this one test binary shares one emulator and one request builder.
-use crate::inference_deployment_lifecycle::{str_field, Emulator};
+use crate::inference_deployment_lifecycle::{one_variant_config, primary_container, str_field, Emulator};
 
 /// A `RoleArn` matching the modelled pattern
 /// `^arn:aws[a-z\-]*:iam::\d{12}:role/?[a-zA-Z_0-9+=,.@\-_/]+$`
@@ -376,6 +376,29 @@ async fn an_entitys_own_collection_is_reported_as_the_empty_one_rather_than_omit
                 (
                     "CreateAIWorkloadConfig",
                     json!({ "AIWorkloadConfigName": "workload-for-benchmark" }),
+                ),
+                // `CreateAIBenchmarkJob` resolves its `BenchmarkTarget` against the
+                // endpoint store, so the endpoint it names is stood up first.
+                (
+                    "CreateModel",
+                    json!({
+                        "ModelName": "bench-endpoint-model",
+                        "PrimaryContainer": primary_container(
+                            "000000000000.dkr.ecr.us-east-1.amazonaws.com/infer:1",
+                        ),
+                        "ExecutionRoleArn": ROLE_ARN,
+                    }),
+                ),
+                (
+                    "CreateEndpointConfig",
+                    one_variant_config("bench-endpoint-config", "bench-endpoint-model"),
+                ),
+                (
+                    "CreateEndpoint",
+                    json!({
+                        "EndpointName": "bench-endpoint",
+                        "EndpointConfigName": "bench-endpoint-config",
+                    }),
                 ),
                 (
                     "CreateAIBenchmarkJob",
