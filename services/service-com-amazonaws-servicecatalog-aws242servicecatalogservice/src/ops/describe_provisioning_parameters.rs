@@ -98,7 +98,7 @@ use super::types::*;
 
 // The shared reading of the id-or-name pair every resource this request names is
 // addressed by, and the sentences this service refuses an unresolved one with.
-use crate::state::{Addressed, KIND_LAUNCH_PATH, KIND_PROVISIONING_ARTIFACT};
+use crate::state::{Addressed, KIND_PROVISIONING_ARTIFACT};
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -277,11 +277,9 @@ fn resolve(
     };
 
     // A launch path is the product's relationship with a portfolio it can be launched
-    // through, so a product that sits in no portfolio — and a product id or name
-    // nothing stored carries, which resolves no path either — has no launch to describe
-    // the configuration of, and the request is refused as a not-found resource naming
-    // the product. This is NOT a parameter error about the optional `PathId`/`PathName`:
-    // no path can be named for a product that has none.
+    // through, so the paths a request's `PathId`/`PathName` is validated against are the
+    // product's stored portfolio associations — and a product id or name nothing stored
+    // carries resolves none of them.
     let paths: Vec<(String, String)> = product
         .map(|product| {
             state
@@ -291,47 +289,35 @@ fn resolve(
                 .collect()
         })
         .unwrap_or_default();
-    let product = match product.filter(|_| !paths.is_empty()) {
-        Some(product) => product,
-        None => {
-            return Err(not_found_resource(crate::state::no_launch_paths_message(
-                addressed_product.identifier(),
-            )))
-        }
-    };
 
-    // The path this launch goes through: the one the request names, or the product's
-    // default path. `PathId` "is optional if the product has a default path, and
-    // required if the product has more than one path", and a product reachable through
-    // exactly one portfolio needs no disambiguation — the same derivation
-    // `ProductViewSummary$HasDefaultPath` reports.
-    let path_id = match crate::state::addressed(
+    // The path this launch goes through, as the request addresses it: "you must provide
+    // the name or ID, but not both".
+    let addressed_path = crate::state::addressed(
         input.path_id.as_deref(),
         input.path_name.as_deref(),
         "PathId",
         "PathName",
     )
-    .map_err(invalid_parameters)?
-    {
-        Some(addressed_path) => {
-            let found = paths.iter().find(|(id, name)| match addressed_path {
-                Addressed::Id(path_id) => id == path_id,
-                Addressed::Name(path_name) => name == path_name,
-            });
-            match found {
-                Some((id, _)) => id.clone(),
-                None => {
-                    return Err(not_found_resource(crate::state::not_found_message(
-                        KIND_LAUNCH_PATH,
-                        addressed_path.identifier(),
-                    )))
-                }
-            }
-        }
-        None => match paths.as_slice() {
-            [(id, _)] => id.clone(),
-            _ => return Err(invalid_parameters(crate::state::PATH_REQUIRED.to_string())),
-        },
+    .map_err(invalid_parameters)?;
+
+    // The launch path is a PARAMETER of this read, and it is validated before anything
+    // is reported about the product: a request that names neither member when no
+    // default path can be inferred, and one that names a member that identifies none of
+    // the product's launch paths, are both refused as the parameter error they are —
+    // whether the product has several paths, has none, or is not stored here at all.
+    // `PathId` "is optional if the product has a default path, and required if the
+    // product has more than one path", and a product reachable through exactly one
+    // portfolio needs no disambiguation: the same derivation
+    // `ProductViewSummary$HasDefaultPath` reports.
+    let path_id = resolve_path(&paths, addressed_path).map_err(invalid_parameters)?;
+
+    // A path resolved out of the product's own paths, and a product that does not
+    // resolve has none, so this is the product that path belongs to. (The refusal is
+    // unreachable for that reason, and it is the pair's refusal rather than a not-found
+    // because the path members are what the request got wrong.)
+    let product = match product {
+        Some(product) => product,
+        None => return Err(invalid_parameters(crate::state::PATH_REQUIRED.to_string())),
     };
 
     // The version whose configuration this is, addressed by id or by name the same way
@@ -386,6 +372,40 @@ fn resolve(
         tag_options: tag_option_summaries(state, &path_id, &product.id),
         preferences: stack_set_preferences(&constraints),
     })
+}
+
+/// The id of the launch path this request goes through, or the sentence the request is
+/// refused with.
+///
+/// The one reading of the `PathId`/`PathName` pair this operation makes: the pair is a
+/// PARAMETER, so a request that names a path identifying none of `paths` and one that
+/// names neither member where no default path can be inferred are both wrong requests
+/// rather than reads of a missing resource. `paths` is the (id, portfolio name) pair of
+/// every launch path the product resolves, which is empty for a product that resolves
+/// none at all.
+fn resolve_path(
+    paths: &[(String, String)],
+    addressed_path: Option<Addressed<'_>>,
+) -> Result<String, String> {
+    match addressed_path {
+        Some(addressed_path) => paths
+            .iter()
+            .find(|(id, name)| match addressed_path {
+                Addressed::Id(path_id) => id == path_id,
+                Addressed::Name(path_name) => name == path_name,
+            })
+            .map(|(id, _)| id.clone())
+            .ok_or_else(|| match addressed_path {
+                Addressed::Id(id) => crate::state::invalid_path_message("PathId", id),
+                Addressed::Name(name) => crate::state::invalid_path_message("PathName", name),
+            }),
+        // The product's one path is its default path; anything else leaves the pair
+        // required.
+        None => match paths {
+            [(id, _)] => Ok(id.clone()),
+            _ => Err(crate::state::PATH_REQUIRED.to_string()),
+        },
+    }
 }
 
 /// Where the version's template is, read from the `Info` map the version was created

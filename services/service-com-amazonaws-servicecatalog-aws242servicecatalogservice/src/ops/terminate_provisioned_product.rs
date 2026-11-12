@@ -1,16 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op TerminateProvisionedProduct
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `TerminateProvisionedProduct`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`TerminateProvisionedProduct::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
-//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -89,6 +79,12 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+// The shared reading of the id-or-name pair a provisioned product is addressed by, the
+// kind its not-found names, and the `RecordType` this termination is recorded as.
+use crate::state::{
+    Addressed, KIND_PROVISIONED_PRODUCT, RECORD_TYPE_TERMINATE_PROVISIONED_PRODUCT,
+};
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -157,18 +153,118 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `TerminateProvisionedProduct` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(TerminateProvisionedProductErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine)
+            .ok_or_else(crate::state::state_unavailable)?;
+        let mut state = state.lock();
+        let now = std::time::SystemTime::now();
+
+        // A provisioned product whose termination the clock has already settled stopped
+        // existing at that instant, so its entry is dropped before anything is
+        // resolved: nothing below can address a resource that no longer exists.
+        state.forget_terminated_provisioned_products(now);
+
+        // "You cannot specify both ProvisionedProductName and ProvisionedProductId" —
+        // the provisioned product is addressed by one of the two, and a request that
+        // addresses it by neither names nothing to terminate.
+        let addressed = crate::state::addressed(
+            input.provisioned_product_id.as_deref(),
+            input.provisioned_product_name.as_deref(),
+            "ProvisionedProductId",
+            "ProvisionedProductName",
+        )
+        .map_err(not_found)?
+        .ok_or_else(|| {
+            not_found(crate::state::either_required(
+                "ProvisionedProductId",
+                "ProvisionedProductName",
+            ))
+        })?;
+        let provisioned = match addressed {
+            Addressed::Id(id) => state.provisioned_product(id, now),
+            // `ProvisionedProductName` is a `ProvisionedProductNameOrArn`, so the value
+            // addresses the provisioned product by its name or by its ARN.
+            Addressed::Name(name) => state.provisioned_product_by_name_or_arn(name, now),
+        }
+        .ok_or_else(|| {
+            not_found(crate::state::not_found_message(
+                KIND_PROVISIONED_PRODUCT,
+                addressed.identifier(),
+            ))
+        })?;
+
+        // A provisioned product is terminated ONCE. `TerminateToken` "is only valid
+        // during the termination process", and a provisioned product has at most one
+        // termination in flight, so a repeat of the request while that termination is
+        // still owed answers the record it started rather than minting a second one —
+        // and once the termination settles the provisioned product is gone, so a later
+        // request takes the not-found above whatever token it carries.
+        if provisioned.terminated_at.is_some() {
+            let record_detail = state
+                .termination_record(provisioned)
+                .map(|record| record.detail(now));
+            return Ok(TerminateProvisionedProductOutput { record_detail });
+        }
+
+        // What the record of this termination carries about the provisioned product it
+        // terminates, read before the store is written to.
+        let provisioned_product_id = provisioned.id.clone();
+        let provisioned_product_name = provisioned.name.clone();
+        let provisioned_product_type = provisioned.r#type.clone();
+        let product_id = provisioned.product_id.clone();
+        let provisioning_artifact_id = provisioned.provisioning_artifact_id.clone();
+        let path_id = provisioned.path_id.clone();
+        let tags = provisioned.tags.clone();
+
+        // The termination this request starts is not instantaneous: the record is
+        // answered in the non-terminal status and the clock owes its completion, so a
+        // caller acting straight after this call still sees the provisioned product
+        // `UNDER_CHANGE`, and sees it stop existing once that completion falls due.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("TerminateProvisionedProduct"))
+        // `IgnoreErrors` and `RetainPhysicalResources` both govern what becomes of the
+        // resources BEHIND the provisioned product — the stack and what it stood up —
+        // and no launch in this emulator has stood any up, so neither changes what this
+        // termination does to the provisioned product itself.
+        let completed_at = now + crate::state::PROVISIONING_COMPLETES_AFTER;
+        let record_id = state.next_record_id();
+        let record = crate::state::Record {
+            id: record_id.clone(),
+            record_type: RECORD_TYPE_TERMINATE_PROVISIONED_PRODUCT.to_string(),
+            provisioned_product_id: provisioned_product_id.clone(),
+            provisioned_product_name,
+            provisioned_product_type,
+            product_id,
+            provisioning_artifact_id,
+            path_id,
+            created_time: now,
+            completed_at,
+            // The record's `RecordTags` are the tags of the provisioned product this
+            // request operates on, which is what it carries into its history.
+            tags,
+        };
+
+        let record_detail = record.detail(now);
+        state.remember_record(record);
+        if let Some(provisioned) = state.provisioned_products.get_mut(&provisioned_product_id) {
+            provisioned.record_ids.push(record_id);
+            provisioned.terminated_at = Some(completed_at);
+        }
+
+        Ok(TerminateProvisionedProductOutput {
+            record_detail: Some(record_detail),
+        })
     }
+}
+
+/// This operation's only modelled failure, carrying `message`.
+///
+/// Every refusal this operation can answer is that one error — the model declares no
+/// other for it — so a request that addresses no provisioned product, by naming both
+/// members, by naming neither, or by naming one nothing resolves, is refused as the
+/// resource it failed to address.
+fn not_found(message: String) -> TerminateProvisionedProductError {
+    TerminateProvisionedProductErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+        message: Some(message),
+    })
+    .into()
 }

@@ -144,7 +144,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // A pure read: this operation reports the provisioned product
         // `ProvisionProduct` stored and writes nothing, so a later caller sees exactly
         // what this one saw. The status it reports is derived from the stored record of
-        // the last operation and the clock, never advanced by being read.
+        // the last operation and the clock, never advanced by being read, and a
+        // provisioned product whose termination the clock has settled resolves to
+        // nothing here for the same reason.
         let state = state.lock();
         let now = std::time::SystemTime::now();
 
@@ -156,11 +158,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             input.name.as_deref().filter(|name| !name.is_empty()),
         ) {
             (Some(id), None) => state
-                .provisioned_products
-                .get(id)
+                .provisioned_product(id, now)
                 .ok_or_else(|| id.to_string()),
             (None, Some(name)) => state
-                .provisioned_product_by_name(name)
+                .provisioned_product_by_name(name, now)
                 .ok_or_else(|| name.to_string()),
             (None, None) => {
                 return Err(
@@ -197,10 +198,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // The refusal names the KIND of resource that did not resolve and
                 // echoes the identifier the request addressed it by — the one variable
                 // part — rather than a sentence that also asserts an access failure.
+                // A provisioned product that was terminated no longer exists, so it
+                // does not resolve either and takes exactly this refusal.
                 return Err(
                     DescribeProvisionedProductErrorModeled::ResourceNotFoundException(
                         ResourceNotFoundException {
-                            message: Some(format!("Provisioned product not found: {identifier}")),
+                            message: Some(crate::state::not_found_message(
+                                crate::state::KIND_PROVISIONED_PRODUCT,
+                                &identifier,
+                            )),
                         },
                     )
                     .into(),

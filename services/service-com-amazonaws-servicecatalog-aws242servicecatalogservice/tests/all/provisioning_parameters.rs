@@ -1080,33 +1080,52 @@ fn refusals() -> Vec<Refusal> {
             }),
         },
         Refusal {
-            case: "a product that sits in no portfolio, so it has no launch path",
+            case: "a path named for a product that sits in no portfolio",
+            request: Box::new(|seed| {
+                json!({
+                    "ProductId": seed.unreachable_product,
+                    "ProvisioningArtifactId": seed.version,
+                    // A path is NAMED, and a product in no portfolio has no launch path
+                    // for it to identify.
+                    "PathId": seed.path,
+                })
+            }),
+            code: "InvalidParametersException",
+            message: Box::new(|seed| format!("Invalid PathId: {}", seed.path)),
+        },
+        Refusal {
+            case: "a path named for a product id nothing stored carries",
+            request: Box::new(|seed| {
+                json!({
+                    "ProductId": "prod-000000000000",
+                    "ProvisioningArtifactId": seed.version,
+                    "PathId": seed.path,
+                })
+            }),
+            code: "InvalidParametersException",
+            message: Box::new(|seed| format!("Invalid PathId: {}", seed.path)),
+        },
+        Refusal {
+            case: "no path named for a product that sits in no portfolio",
             request: Box::new(|seed| {
                 json!({
                     "ProductId": seed.unreachable_product,
                     "ProvisioningArtifactId": seed.version,
                 })
             }),
-            code: "ResourceNotFoundException",
-            message: Box::new(|seed| {
-                format!(
-                    "No launch paths found for resource: {}",
-                    seed.unreachable_product
-                )
-            }),
+            code: "InvalidParametersException",
+            message: Box::new(|_| "Either Path Id or Path Name needs to be specified".to_string()),
         },
         Refusal {
-            case: "a product id nothing stored carries",
+            case: "no path named for a product id nothing stored carries",
             request: Box::new(|seed| {
                 json!({
                     "ProductId": "prod-000000000000",
                     "ProvisioningArtifactId": seed.version,
                 })
             }),
-            code: "ResourceNotFoundException",
-            message: Box::new(|_| {
-                "No launch paths found for resource: prod-000000000000".to_string()
-            }),
+            code: "InvalidParametersException",
+            message: Box::new(|_| "Either Path Id or Path Name needs to be specified".to_string()),
         },
         Refusal {
             case: "a path that is not one of the product's",
@@ -1117,8 +1136,20 @@ fn refusals() -> Vec<Refusal> {
                     "PathId": seed.second_path,
                 })
             }),
-            code: "ResourceNotFoundException",
-            message: Box::new(|seed| format!("Launch path not found: {}", seed.second_path)),
+            code: "InvalidParametersException",
+            message: Box::new(|seed| format!("Invalid PathId: {}", seed.second_path)),
+        },
+        Refusal {
+            case: "a path NAME that is not one of the product's",
+            request: Box::new(|seed| {
+                json!({
+                    "ProductId": seed.product,
+                    "ProvisioningArtifactId": seed.version,
+                    "PathName": "second portfolio",
+                })
+            }),
+            code: "InvalidParametersException",
+            message: Box::new(|_| "Invalid PathName: second portfolio".to_string()),
         },
         Refusal {
             case: "a version of another product",
@@ -1142,11 +1173,7 @@ fn refusals() -> Vec<Refusal> {
                 })
             }),
             code: "InvalidParametersException",
-            message: Box::new(|_| {
-                "A path is required when the product has more than one path. To list the paths \
-                 for a product, use ListLaunchPaths."
-                    .to_string()
-            }),
+            message: Box::new(|_| "Either Path Id or Path Name needs to be specified".to_string()),
         },
     ]
 }

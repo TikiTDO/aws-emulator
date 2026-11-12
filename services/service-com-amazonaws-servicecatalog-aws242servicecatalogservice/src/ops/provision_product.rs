@@ -176,12 +176,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut state = state.lock();
         let now = std::time::SystemTime::now();
 
+        // A provisioned product whose termination the clock has settled stopped
+        // existing at that instant: its entry is dropped before anything is resolved,
+        // so neither the replay below nor the uniqueness check further down can see a
+        // provisioned product that no longer exists.
+        state.forget_terminated_provisioned_products(now);
+
         // `ProvisionToken` is `@idempotencyToken`: "an idempotency token that uniquely
         // identifies the provisioning request", so a token already seen REPLAYS the
         // record its request minted rather than provisioning a second product. The
         // replay keys on the TOKEN ALONE: this operation models no mismatch error for a
         // token reused with different members.
-        if let Some(record) = state.replayed_provision_record(&input.provision_token) {
+        if let Some(record) = state.replayed_provision_record(&input.provision_token, now) {
             return Ok(ProvisionProductOutput {
                 record_detail: Some(record.detail(now)),
             });
@@ -212,7 +218,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         };
 
-        // Provisioning resolves the product's launch paths first: a path is the
+        // Provisioning resolves the product's launch paths FIRST: a path is the
         // product's relationship with a portfolio it can be launched through, so a
         // product that sits in no portfolio — and a product id or name nothing stored
         // carries, which resolves no path either — has no path to launch through, and
@@ -237,7 +243,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // default path. `PathId` "is optional if the product has a default path, and
         // required if the product has more than one path", and a product reachable
         // through exactly one portfolio needs no disambiguation — the same derivation
-        // `ProductViewSummary$HasDefaultPath` reports.
+        // `ProductViewSummary$HasDefaultPath` reports. A request that names neither
+        // member for a product with several paths names no path this service can
+        // infer, which is the parameter error the shared sentence states.
         let path_id = match crate::state::addressed(
             input.path_id.as_deref(),
             input.path_name.as_deref(),
@@ -298,7 +306,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // account already holds is a duplicate rather than a second provisioning under
         // that name.
         if state
-            .provisioned_product_by_name(&input.provisioned_product_name)
+            .provisioned_product_by_name(&input.provisioned_product_name, now)
             .is_some()
         {
             return Err(ProvisionProductErrorModeled::DuplicateResourceException(
@@ -377,10 +385,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             provision_token: input.provision_token.clone(),
             tags,
             record_ids: vec![record_id.clone()],
+            // Nothing has terminated this provisioned product: it is provisioned here
+            // and stops existing only once a termination's completion falls due.
+            terminated_at: None,
         };
 
         let record_detail = record.detail(now);
-        state.records.insert(record_id.clone(), record);
+        state.remember_record(record);
         state
             .provisioned_products
             .insert(provisioned_product_id, provisioned);

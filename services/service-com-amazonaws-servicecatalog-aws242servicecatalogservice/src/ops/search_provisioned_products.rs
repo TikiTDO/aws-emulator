@@ -253,13 +253,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // nothing. The stored set is read into the modelled shapes under the lock and
         // the guard is dropped before any matching or sorting runs, so a caller's own
         // search never holds up another request. The set is bounded by the account's
-        // provisioned-product quota.
+        // provisioned-product quota, and a provisioned product whose termination the
+        // clock has settled is not part of it: it no longer exists.
         let mut matched: Vec<ProvisionedProductAttribute> = {
             let state = state.lock();
             let now = std::time::SystemTime::now();
             state
-                .provisioned_products
-                .values()
+                .live_provisioned_products(now)
                 .map(|provisioned| state.provisioned_product_attribute(provisioned, now))
                 .collect()
         };

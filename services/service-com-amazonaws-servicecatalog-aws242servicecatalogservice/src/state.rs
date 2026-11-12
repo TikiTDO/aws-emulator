@@ -78,7 +78,7 @@ impl Portfolio {
             arn: Some(self.arn.clone()),
             display_name: Some(self.display_name.clone()),
             description: self.description.clone(),
-            created_time: Some(::aws_smithy_types::DateTime::from(self.created_time)),
+            created_time: Some(reported_time(self.created_time)),
             provider_name: Some(self.provider_name.clone()),
         }
     }
@@ -93,7 +93,7 @@ impl Portfolio {
             arn: Some(self.arn.clone()),
             name: Some(self.display_name.clone()),
             description: self.description.clone(),
-            created_time: Some(::aws_smithy_types::DateTime::from(self.created_time)),
+            created_time: Some(reported_time(self.created_time)),
         }
     }
 
@@ -116,6 +116,29 @@ impl Portfolio {
         associations
     }
 }
+
+/// One stored instant as the timestamp a response carries.
+///
+/// This service's protocol is awsJson1_1, so a timestamp goes on the wire as epoch
+/// seconds, and the finest resolution the protocol's `Timestamp` carries there is the
+/// MILLISECOND: an instant is reported truncated to whole milliseconds, so a stored
+/// value read from the host clock — which resolves finer than that — is reported at the
+/// resolution the service reports rather than at the one the host happens to keep.
+/// Truncation is monotone, so a later instant never reports as an earlier one and two
+/// members of one record keep their order.
+///
+/// Every timestamp this service reports goes through this one function, so two reporters
+/// of one stored instant cannot report it two different ways.
+pub fn reported_time(instant: SystemTime) -> ::aws_smithy_types::DateTime {
+    let stamp = ::aws_smithy_types::DateTime::from(instant);
+    ::aws_smithy_types::DateTime::from_secs_and_nanos(
+        stamp.secs(),
+        stamp.subsec_nanos() / NANOS_PER_MILLI * NANOS_PER_MILLI,
+    )
+}
+
+/// The nanoseconds in one millisecond, which [`reported_time`] truncates to.
+const NANOS_PER_MILLI: u32 = 1_000_000;
 
 /// A tag map as the modelled `Tags` list, in key order: every operation that
 /// reports a resource's tags renders them through this one function, so they read
@@ -201,15 +224,36 @@ pub fn not_found_message(kind: &str, identifier: &str) -> String {
 /// The resource kind a launch path is, as its not-found names it.
 pub const KIND_LAUNCH_PATH: &str = "Launch path";
 
+/// The prefix every ARN carries, which is what tells a member that takes a name OR an
+/// ARN which of the two it was given.
+pub const ARN_PREFIX: &str = "arn:";
+
+/// The resource kind a provisioned product is, as its not-found names it.
+pub const KIND_PROVISIONED_PRODUCT: &str = "Provisioned product";
+
 /// The resource kind a product version is, as its not-found names it.
 pub const KIND_PROVISIONING_ARTIFACT: &str = "Provisioning artifact";
 
-/// The refusal for a request that names no path for a product that has several, which
-/// is when `PathId`/`PathName` stops being optional: "This value is optional if the
-/// product has a default path, and required if the product has more than one path. To
-/// list the paths for a product, use ListLaunchPaths."
-pub const PATH_REQUIRED: &str = "A path is required when the product has more than one path. To \
-                                 list the paths for a product, use ListLaunchPaths.";
+/// The refusal for a request that names NEITHER `PathId` nor `PathName` for a product
+/// whose launch path cannot be inferred — "this value is optional if the product has a
+/// default path, and required if the product has more than one path", so a product that
+/// resolves anything other than exactly one path leaves the pair required.
+///
+/// AWS's own sentence for that refusal, which is all fixed text: it names the two
+/// members and carries no value from the request or from stored state. Shared by every
+/// operation that resolves a launch, so one request cannot be refused two ways.
+pub const PATH_REQUIRED: &str = "Either Path Id or Path Name needs to be specified";
+
+/// The refusal for a request whose `PathId` or `PathName` identifies none of the launch
+/// paths it is read against — including every path of a product that resolves none.
+///
+/// AWS words this error class by naming the member the request used and echoing the
+/// value it carried, which is the one variable part: the launch path is a parameter of
+/// the request, so a value that identifies no launch path is a wrong parameter rather
+/// than a resource the caller may wait for.
+pub fn invalid_path_message(member: &str, identifier: &str) -> String {
+    format!("Invalid {member}: {identifier}")
+}
 
 /// A persisted constraint — the record `CreateConstraint` mints and
 /// `DescribeConstraint` reports.
@@ -399,7 +443,7 @@ impl Product {
             product_view_summary: Some(self.view_summary()),
             status: Some(self.status(now).to_string()),
             product_arn: Some(self.arn.clone()),
-            created_time: Some(::aws_smithy_types::DateTime::from(self.created_time)),
+            created_time: Some(reported_time(self.created_time)),
             source_connection: self.source_connection.clone(),
         }
     }
@@ -414,7 +458,7 @@ impl Product {
             arn: Some(self.arn.clone()),
             name: Some(self.name.clone()),
             description: self.short_description.clone(),
-            created_time: Some(::aws_smithy_types::DateTime::from(self.created_time)),
+            created_time: Some(reported_time(self.created_time)),
         }
     }
 
@@ -491,7 +535,7 @@ impl ProvisioningArtifact {
             name: self.name.clone(),
             description: self.description.clone(),
             r#type: self.r#type.clone(),
-            created_time: Some(::aws_smithy_types::DateTime::from(self.created_time)),
+            created_time: Some(reported_time(self.created_time)),
             active: Some(self.active),
             guidance: Some(self.guidance.clone()),
             // A source revision exists only for an artifact a connection sync created,
@@ -506,7 +550,7 @@ impl ProvisioningArtifact {
             id: Some(self.id.clone()),
             name: self.name.clone(),
             description: self.description.clone(),
-            created_time: Some(::aws_smithy_types::DateTime::from(self.created_time)),
+            created_time: Some(reported_time(self.created_time)),
             provisioning_artifact_metadata: self.metadata(),
         }
     }
@@ -543,7 +587,7 @@ impl ProvisioningArtifact {
             id: Some(self.id.clone()),
             name: self.name.clone(),
             description: self.description.clone(),
-            created_time: Some(::aws_smithy_types::DateTime::from(self.created_time)),
+            created_time: Some(reported_time(self.created_time)),
             guidance: Some(self.guidance.clone()),
         }
     }
@@ -642,6 +686,28 @@ pub struct ProvisionedProduct {
     /// first: the one stored history every `Last*RecordId` member is derived from,
     /// so two responses cannot disagree about which record was last.
     pub record_ids: Vec<String>,
+    /// The instant the termination of this provisioned product settles, for one a
+    /// `TerminateProvisionedProduct` has been accepted for; `None` for one that has
+    /// not been terminated.
+    ///
+    /// A termination is not instantaneous either: until that instant the provisioned
+    /// product still exists, with the termination's record in flight; from it on it
+    /// exists no longer, which is the clock's doing and not any caller's
+    /// ([`ProvisionedProduct::is_terminated`]).
+    pub terminated_at: Option<SystemTime>,
+}
+
+impl ProvisionedProduct {
+    /// Whether this provisioned product has stopped existing at `now`: its
+    /// termination was accepted AND the clock owes that termination's completion.
+    ///
+    /// A terminated provisioned product is gone — "after the provisioned product is
+    /// terminated, subsequent requests to terminate the same provisioned product
+    /// always return ResourceNotFound" — so every lookup over the store skips it and
+    /// its name is free for a later provisioning.
+    pub fn is_terminated(&self, now: SystemTime) -> bool {
+        self.terminated_at.is_some_and(|settled| now >= settled)
+    }
 }
 
 /// A persisted record — "information about a request operation", which
@@ -676,6 +742,10 @@ pub struct Record {
 /// `TERMINATE_PROVISIONED_PRODUCT`).
 pub const RECORD_TYPE_PROVISION_PRODUCT: &str = "PROVISION_PRODUCT";
 
+/// The `RecordType` of a record `TerminateProvisionedProduct` creates; see
+/// [`RECORD_TYPE_PROVISION_PRODUCT`] for the three values the member documents.
+pub const RECORD_TYPE_TERMINATE_PROVISIONED_PRODUCT: &str = "TERMINATE_PROVISIONED_PRODUCT";
+
 /// The record types `ProvisionedProductDetail$LastProvisioningRecordId` counts as a
 /// provisioning request: its documentation names ProvisionProduct,
 /// UpdateProvisionedProduct, ExecuteProvisionedProductPlan and
@@ -684,7 +754,7 @@ pub const RECORD_TYPE_PROVISION_PRODUCT: &str = "PROVISION_PRODUCT";
 pub const PROVISIONING_RECORD_TYPES: &[&str] = &[
     RECORD_TYPE_PROVISION_PRODUCT,
     "UPDATE_PROVISIONED_PRODUCT",
-    "TERMINATE_PROVISIONED_PRODUCT",
+    RECORD_TYPE_TERMINATE_PROVISIONED_PRODUCT,
 ];
 
 /// `RecordStatus`'s non-terminal first value, which the model documents as "the
@@ -770,8 +840,8 @@ impl Record {
             record_id: Some(self.id.clone()),
             provisioned_product_name: Some(self.provisioned_product_name.clone()),
             status: Some(self.status(now).to_string()),
-            created_time: Some(::aws_smithy_types::DateTime::from(self.created_time)),
-            updated_time: Some(::aws_smithy_types::DateTime::from(self.updated_time(now))),
+            created_time: Some(reported_time(self.created_time)),
+            updated_time: Some(reported_time(self.updated_time(now))),
             provisioned_product_type: Some(self.provisioned_product_type.clone()),
             record_type: Some(self.record_type.clone()),
             provisioned_product_id: Some(self.provisioned_product_id.clone()),
@@ -937,6 +1007,18 @@ pub const MAX_PROVISIONING_ARTIFACTS_PER_PRODUCT: usize = 100;
 /// it, so bounding the count bounds all three.
 pub const MAX_PROVISIONED_PRODUCTS: usize = 500;
 
+/// The most records this store keeps, which bounds it.
+///
+/// A record OUTLIVES the provisioned product it describes — terminating one "does not
+/// delete any records associated with the provisioned product" — so a caller that
+/// provisions and terminates repeatedly would otherwise grow this map without bound,
+/// however few provisioned products the account holds at once. As with
+/// [`MAX_PRODUCT_COPIES`] the figure is the emulator's own bound, not a quoted AWS one:
+/// a record stored past it evicts the OLDEST record of a provisioned product the store
+/// no longer holds, and the records of the provisioned products it does hold are kept
+/// ([`ComAmazonawsServicecatalogAws242servicecatalogserviceState::remember_record`]).
+pub const MAX_RECORDS: usize = 1000;
+
 /// The most self-service actions this account can hold, which also bounds this store.
 ///
 /// `CreateServiceAction` models `LimitExceededException` for a create past the account's
@@ -973,14 +1055,19 @@ pub struct ComAmazonawsServicecatalogAws242servicecatalogserviceState {
     pub products: BTreeMap<String, Product>,
     /// Every created, not-yet-deleted self-service action, keyed by action id.
     pub service_actions: BTreeMap<String, ServiceAction>,
-    /// Every provisioned, not-yet-terminated provisioned product, keyed by
-    /// provisioned-product id. A `BTreeMap` so every walk over the set has one
-    /// stable order.
+    /// Every provisioned provisioned product, keyed by provisioned-product id. A
+    /// `BTreeMap` so every walk over the set has one stable order.
+    ///
+    /// An entry whose termination the clock has settled no longer exists for any
+    /// caller: read the set through [`Self::live_provisioned_products`],
+    /// [`Self::provisioned_product`] or [`Self::provisioned_product_by_name`], which
+    /// skip it, rather than over this map directly.
     pub provisioned_products: BTreeMap<String, ProvisionedProduct>,
     /// The record of every operation performed on a provisioned product, keyed by
     /// record id. Each provisioned product names its own records in
     /// [`ProvisionedProduct::record_ids`], so this map is the one place a record is
-    /// stored.
+    /// stored. Written through [`Self::remember_record`], which bounds it by
+    /// [`MAX_RECORDS`]: a record outlives the provisioned product it describes.
     pub records: BTreeMap<String, Record>,
     /// Every created, not-yet-deleted TagOption, keyed by TagOption id.
     pub tag_options: BTreeMap<String, TagOption>,
@@ -1149,18 +1236,29 @@ impl ComAmazonawsServicecatalogAws242servicecatalogserviceState {
     }
 
     /// The record a provisioning request carrying `token` already made, if that
-    /// record is still stored. `None` for an unseen token, which is no longer a
-    /// replay.
-    pub fn replayed_provision_record(&self, token: &str) -> Option<&Record> {
-        self.records.get(self.provision_idempotency.get(token)?)
+    /// record's provisioned product still resolves at `now`. `None` for an unseen
+    /// token, or one whose provisioned product has been terminated — which is no
+    /// longer a replay, exactly as a create token whose resource was deleted is not
+    /// ([`Self::replayed_portfolio`]): the token can no longer answer with a
+    /// provisioned product that exists.
+    pub fn replayed_provision_record(&self, token: &str, now: SystemTime) -> Option<&Record> {
+        let record = self.records.get(self.provision_idempotency.get(token)?)?;
+        self.provisioned_product(&record.provisioned_product_id, now)
+            .map(|_| record)
     }
 
     /// Remember a `ProvisionToken` so a repeat replays `record_id`, bounded exactly
-    /// as [`Self::remember_portfolio_token`] is.
+    /// as [`Self::remember_portfolio_token`] is: every entry whose record names a
+    /// provisioned product the store no longer holds is dropped first, so the map
+    /// holds at most one entry per stored provisioned product.
     pub fn remember_provision_token(&mut self, token: String, record_id: String) {
         let records = &self.records;
-        self.provision_idempotency
-            .retain(|_, id| records.contains_key(id));
+        let provisioned = &self.provisioned_products;
+        self.provision_idempotency.retain(|_, id| {
+            records
+                .get(id)
+                .is_some_and(|record| provisioned.contains_key(&record.provisioned_product_id))
+        });
         self.provision_idempotency.insert(token, record_id);
     }
 
@@ -1188,11 +1286,103 @@ impl ComAmazonawsServicecatalogAws242servicecatalogserviceState {
     }
 
     /// The provisioned product `name` addresses, which the model makes unique for the
-    /// account, or `None` when this account holds none by that name.
-    pub fn provisioned_product_by_name(&self, name: &str) -> Option<&ProvisionedProduct> {
+    /// account, or `None` when this account holds none by that name at `now`.
+    pub fn provisioned_product_by_name(
+        &self,
+        name: &str,
+        now: SystemTime,
+    ) -> Option<&ProvisionedProduct> {
+        self.live_provisioned_products(now)
+            .find(|provisioned| provisioned.name == name)
+    }
+
+    /// The provisioned product `id` addresses, or `None` when this account holds none
+    /// by that id at `now`.
+    pub fn provisioned_product(&self, id: &str, now: SystemTime) -> Option<&ProvisionedProduct> {
+        self.provisioned_products
+            .get(id)
+            .filter(|provisioned| !provisioned.is_terminated(now))
+    }
+
+    /// The provisioned product a `ProvisionedProductNameOrArn` addresses.
+    ///
+    /// That member takes "the name of the provisioned product" or its ARN — its
+    /// modelled pattern admits a name and an `arn:…` value alike — so a value of the
+    /// ARN form resolves against the stored ARN and every other value against the
+    /// stored name.
+    pub fn provisioned_product_by_name_or_arn(
+        &self,
+        name_or_arn: &str,
+        now: SystemTime,
+    ) -> Option<&ProvisionedProduct> {
+        if name_or_arn.starts_with(ARN_PREFIX) {
+            return self
+                .live_provisioned_products(now)
+                .find(|provisioned| provisioned.arn == name_or_arn);
+        }
+        self.provisioned_product_by_name(name_or_arn, now)
+    }
+
+    /// Every provisioned product this account holds at `now`, in stored (id) order.
+    ///
+    /// One that has been terminated and whose termination the clock has settled is NOT
+    /// one of them: it stopped existing when that termination fell due, so no read
+    /// reports it and no uniqueness check counts its name. The record of its
+    /// termination stays stored — terminating a provisioned product "does not delete
+    /// any records associated with the provisioned product" — and
+    /// [`Self::forget_terminated_provisioned_products`] is what drops the entry itself.
+    pub fn live_provisioned_products(
+        &self,
+        now: SystemTime,
+    ) -> impl DoubleEndedIterator<Item = &ProvisionedProduct> {
         self.provisioned_products
             .values()
-            .find(|provisioned| provisioned.name == name)
+            .filter(move |provisioned| !provisioned.is_terminated(now))
+    }
+
+    /// Drop every provisioned product whose termination the clock has settled by `now`,
+    /// materialising a removal that was owed at that instant whether or not anybody
+    /// asked — so the store does not keep an entry for a resource that no longer
+    /// exists. Called by the operations that WRITE the store; a read reports the same
+    /// set without it ([`Self::live_provisioned_products`]).
+    pub fn forget_terminated_provisioned_products(&mut self, now: SystemTime) {
+        self.provisioned_products
+            .retain(|_, provisioned| !provisioned.is_terminated(now));
+    }
+
+    /// Store the record of one request operation, keeping the map at [`MAX_RECORDS`].
+    ///
+    /// Every record goes through here, so the one place a record is stored is also the
+    /// one place the store is bounded: the record that is evicted to make room is the
+    /// oldest one whose provisioned product the store no longer holds, which is why a
+    /// caller who provisions and terminates repeatedly cannot grow this map while every
+    /// record of a provisioned product that still exists stays readable.
+    pub fn remember_record(&mut self, record: Record) {
+        while self.records.len() >= MAX_RECORDS {
+            let evictable = self
+                .records
+                .values()
+                .filter(|stored| {
+                    !self
+                        .provisioned_products
+                        .contains_key(&stored.provisioned_product_id)
+                })
+                .min_by(|left, right| {
+                    left.created_time
+                        .cmp(&right.created_time)
+                        .then_with(|| left.id.cmp(&right.id))
+                })
+                .map(|stored| stored.id.clone());
+            match evictable {
+                Some(id) => {
+                    self.records.remove(&id);
+                }
+                // Every stored record belongs to a provisioned product the store still
+                // holds, and those are bounded by [`MAX_PROVISIONED_PRODUCTS`].
+                None => break,
+            }
+        }
+        self.records.insert(record.id.clone(), record);
     }
 
     /// The records of the operations performed on `provisioned`, oldest first.
@@ -1204,6 +1394,20 @@ impl ComAmazonawsServicecatalogAws242servicecatalogserviceState {
             .record_ids
             .iter()
             .filter_map(|record_id| self.records.get(record_id))
+    }
+
+    /// The record of the termination already accepted for `provisioned`, or `None` for
+    /// one no termination has been accepted for.
+    ///
+    /// A provisioned product is terminated once: the request is answered with the
+    /// record of the termination it started, and a repeat of it while that termination
+    /// is in flight is the same termination rather than a second one.
+    pub fn termination_record<'a>(
+        &'a self,
+        provisioned: &'a ProvisionedProduct,
+    ) -> Option<&'a Record> {
+        self.provisioned_product_records(provisioned)
+            .rfind(|record| record.record_type == RECORD_TYPE_TERMINATE_PROVISIONED_PRODUCT)
     }
 
     /// `provisioned`'s `ProvisionedProductStatus` at `now`: the transitive one while
@@ -1242,7 +1446,7 @@ impl ComAmazonawsServicecatalogAws242servicecatalogserviceState {
             // product last said, and nothing in this emulator has launched any, so
             // there is no message rather than an invented one.
             status_message: None,
-            created_time: Some(::aws_smithy_types::DateTime::from(provisioned.created_time)),
+            created_time: Some(reported_time(provisioned.created_time)),
             idempotency_token: Some(provisioned.provision_token.clone()),
             last_record_id: provisioned.record_ids.last().cloned(),
             last_provisioning_record_id: self
