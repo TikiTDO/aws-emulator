@@ -26,7 +26,12 @@
 //! and a non-ASCII one).
 //!
 //! `CreateVpcConnection` is outside this rule: its target is decided by
-//! authorization before anything parses it (`vpc_connection_admission.rs`).
+//! authorization before anything parses it (`vpc_connection_admission.rs`). So is
+//! the TOPIC surface, whose calls are authorized under the cluster's data-plane
+//! action on the ARN as submitted, and refuse an ARN that names no cluster of
+//! this account as unauthorized rather than as unparsable
+//! (`topic_cluster_arn_authorization.rs`); what those operations answer a value
+//! that is not an ARN at all is in `topic_lifecycle.rs`.
 
 use std::collections::BTreeSet;
 
@@ -277,14 +282,6 @@ fn operations() -> Vec<Operation> {
             name: "ListScramSecrets",
             method: "GET",
             carrier: cluster("/scram-secrets"),
-            body: None,
-            member: CLUSTER_ARN_MEMBER,
-            message: BAD_REQUEST_MESSAGE,
-        },
-        Operation {
-            name: "ListTopics",
-            method: "GET",
-            carrier: cluster("/topics"),
             body: None,
             member: CLUSTER_ARN_MEMBER,
             message: BAD_REQUEST_MESSAGE,

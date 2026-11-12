@@ -51,15 +51,37 @@ use ::service_com_amazonaws_iam_awsidentitymanagementv20100508::state as iam_sto
 use ::service_com_amazonaws_sts_awssecuritytokenservicev20110615::state as sts_store;
 use ::service_common::iam_authorization::{self as iam, Decision};
 
+/// The principal the REQUEST's credential speaks for, as `sts:GetCallerIdentity`
+/// reports it — the identity an authorization refusal blames.
+///
+/// Resolved from the same two stores the decision below reads, so a refusal names
+/// the session or the user that signed the call rather than the account's own
+/// published principal; a credential neither store knows is that published
+/// principal, which is the identity such a request speaks for.
+pub fn calling_principal<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+) -> String {
+    let caller = caller(engine, ctx);
+    if caller.arn.is_empty() {
+        return crate::state::authorization::caller_principal();
+    }
+    caller.arn
+}
+
 /// The refusal an operation returns for a request the calling principal's identity
 /// policies explicitly deny, and `None` for every request no readable document
-/// denies: the one call an implemented handler makes.
+/// denies: the one call the shared authorization gate
+/// ([`crate::state::authorization::authorize_action`]) makes, so every operation
+/// that authorizes a target takes this decision first.
 ///
-/// `operation` is the operation's own `Operation::NAME`, so the action asked about
-/// is `kafka:<ApiName>` ([`crate::state::authorization::control_plane_action`]), and
-/// `resource` is the ARN the request NAMES — passed as submitted, before anything is
-/// resolved, so the decision does not depend on whether that resource exists and a
-/// refused call tells an unauthorized caller nothing about whether it does.
+/// `action` is the fully qualified IAM action the call asks for — `kafka:<ApiName>`
+/// for a control-plane call ([`crate::state::authorization::control_plane_action`]),
+/// the data-plane action for a call that reaches a cluster's Apache Kafka plane —
+/// and `resource` is the ARN the request NAMES, passed as submitted, before
+/// anything is resolved, so the decision does not depend on whether that resource
+/// exists and a refused call tells an unauthorized caller nothing about whether it
+/// does.
 ///
 /// Generic over the operation's own modelled error enum because the refusal is none
 /// of them: it leaves through the error channel's unmodelled variant, with the code
@@ -67,32 +89,30 @@ use ::service_common::iam_authorization::{self as iam, Decision};
 pub fn denied<Eng: Send + Sync + 'static, E>(
     engine: &Eng,
     ctx: &::smithy_server_runtime::OperationContext<'_>,
-    operation: &str,
+    action: &str,
     resource: &str,
 ) -> Option<crate::scaffolded::Scaffolded<E>> {
-    explicit_deny(engine, ctx, operation, resource)
-        .map(crate::state::authorization::access_denied)
+    explicit_deny(engine, ctx, action, resource).map(crate::state::authorization::access_denied)
 }
 
 /// `Some(message)` when the calling principal's identity policies explicitly deny
-/// the control-plane action of `operation` on `resource` — the sentence the refusal
-/// carries — and `None` when no readable document denies it.
+/// `action` on `resource` — the sentence the refusal carries — and `None` when no
+/// readable document denies it.
 fn explicit_deny<Eng: Send + Sync + 'static>(
     engine: &Eng,
     ctx: &::smithy_server_runtime::OperationContext<'_>,
-    operation: &str,
+    action: &str,
     resource: &str,
 ) -> Option<String> {
     let caller = caller(engine, ctx);
     if caller.documents.is_empty() {
         return None;
     }
-    let action = crate::state::authorization::control_plane_action(operation);
     // An identity-based document states no `Principal` element, so the decision
     // rests on the action and the resource the request addressed.
-    let request = iam::Request::new(&action, resource, &[]);
+    let request = iam::Request::new(action, resource, &[]);
     (iam::identity_decision(&caller.documents, &request) == Decision::Denied)
-        .then(|| not_authorized_by_explicit_deny(&caller.arn, &action, resource))
+        .then(|| not_authorized_by_explicit_deny(&caller.arn, action, resource))
 }
 
 /// The sentence IAM states an explicit-deny decision with: the principal, the action

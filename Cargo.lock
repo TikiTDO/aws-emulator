@@ -5004,6 +5004,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "java-properties"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37bf6f484471c451f2b51eabd9e66b3fa7274550c5ec4b6c3d6070840945117f"
+dependencies = [
+ "encoding_rs",
+ "lazy_static",
+ "regex",
+]
+
+[[package]]
 name = "jiff"
 version = "0.2.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14123,6 +14134,7 @@ dependencies = [
  "aws-smithy-types",
  "bytes",
  "http",
+ "java-properties",
  "regex",
  "serde_json",
  "service-com-amazonaws-iam-awsidentitymanagementv20100508",

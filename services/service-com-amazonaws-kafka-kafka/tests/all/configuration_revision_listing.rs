@@ -114,7 +114,11 @@ fn update_rows() -> Vec<UpdateRow> {
             description: Some("raw bytes"),
             // The body is a blob, so a revision may hold bytes that are not
             // UTF-8 anywhere; the listing must still report its revision.
-            server_properties: vec![0x00, 0xFF, 0xFE, b'=', 0x80],
+            server_properties: [
+                b"compression.type=".as_slice(),
+                &[0x00, 0xFF, 0xFE, 0x80],
+            ]
+            .concat(),
         },
         UpdateRow {
             case: "empty-body",

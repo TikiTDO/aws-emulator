@@ -71,6 +71,8 @@ mod configuration_revision_properties;
 mod configuration_revision_refusal;
 #[path = "all/configuration_revisions.rs"]
 mod configuration_revisions;
+#[path = "all/configuration_server_properties.rs"]
+mod configuration_server_properties;
 #[path = "all/configuration_state_reporting.rs"]
 mod configuration_state_reporting;
 #[path = "all/connectivity_update.rs"]
@@ -81,6 +83,8 @@ mod create_and_update_input_gates;
 mod create_cluster_v2;
 #[path = "all/describe_cluster_v2.rs"]
 mod describe_cluster_v2;
+#[path = "all/identity_policy_gate.rs"]
+mod identity_policy_gate;
 #[path = "all/iso8601_timestamps.rs"]
 mod iso8601_timestamps;
 #[path = "all/kafka_harness.rs"]
@@ -135,6 +139,8 @@ mod state_roundtrip;
 mod storage_updates;
 #[path = "all/topic_apis_serverless_gate.rs"]
 mod topic_apis_serverless_gate;
+#[path = "all/topic_cluster_arn_authorization.rs"]
+mod topic_cluster_arn_authorization;
 #[path = "all/topic_lifecycle.rs"]
 mod topic_lifecycle;
 #[path = "all/topic_lookup_miss_refusal.rs"]

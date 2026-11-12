@@ -418,35 +418,38 @@ async fn delete_rejects_an_unknown_cluster_or_topic() {
         "arn:aws:kafka:us-east-1:{ACCOUNT}:cluster/present/11111111-2222-4333-8444-555555555555-1"
     );
 
-    // `(cluster ARN, topic name, expected status, expected error code)`. Rows: one
-    // per way the ARN grammar can fail, then a well-formed ARN no cluster answers
-    // for (absent, and belonging to another region), then the cluster that does
-    // exist with a topic it does not hold.
+    // `(cluster ARN, topic name, expected status, expected error code)`. Rows: a
+    // value that is not an ARN at all (the mistyped path segment, a parameter
+    // problem), then the ARN-shaped values that name no cluster of this account —
+    // which no resource-scoped permission can be matched against, so the
+    // data-plane authorization gate refuses them before any lookup — then a
+    // well-formed ARN no cluster answers for (absent, and belonging to another
+    // region), then the cluster that does exist with a topic it does not hold.
     let rows: Vec<(String, &str, u16, &str)> = vec![
         ("not-an-arn".to_string(), "kept", 400, "BadRequestException"),
         (
             format!("arn:aws:s3:{REGION}:{ACCOUNT}:cluster/present/abc-1"),
             "kept",
-            400,
-            "BadRequestException",
+            403,
+            "AccessDeniedException",
         ),
         (
             format!("arn:aws:kafka:{REGION}:{ACCOUNT}:configuration/present/abc"),
             "kept",
-            400,
-            "BadRequestException",
+            403,
+            "AccessDeniedException",
         ),
         (
             format!("arn:aws:kafka:{REGION}:{ACCOUNT}:cluster/present/abc/extra"),
             "kept",
-            400,
-            "BadRequestException",
+            403,
+            "AccessDeniedException",
         ),
         (
             format!("arn:aws:kafka::{ACCOUNT}:cluster/present/abc-1"),
             "kept",
-            400,
-            "BadRequestException",
+            403,
+            "AccessDeniedException",
         ),
         (absent.clone(), "kept", 404, "NotFoundException"),
         (other_region, "kept", 404, "NotFoundException"),
@@ -854,8 +857,11 @@ async fn every_topic_operation_resolves_the_cluster_first() {
 
     // Rows: well-formed cluster ARNs no live cluster answers for (absent name,
     // another region, another partition), the one whose account makes it a cluster
-    // the caller may not reach at all, then one row per way the ARN grammar itself
-    // can fail.
+    // the caller may not reach at all, the value that is not an ARN at all (the
+    // mistyped path segment, a parameter problem), then the ARN-shaped values that
+    // name no cluster of this account, which no resource-scoped permission can be
+    // matched against and which the data-plane authorization gate therefore
+    // refuses before any lookup.
     let rows: Vec<(&str, String, u16, &str)> = vec![
         (
             "absent cluster",
@@ -897,26 +903,26 @@ async fn every_topic_operation_resolves_the_cluster_first() {
         (
             "wrong service",
             format!("arn:aws:s3:{REGION}:{ACCOUNT}:cluster/c/abc-1"),
-            400,
-            "BadRequestException",
+            403,
+            "AccessDeniedException",
         ),
         (
             "wrong resource type",
             format!("arn:aws:kafka:{REGION}:{ACCOUNT}:configuration/c/abc-1"),
-            400,
-            "BadRequestException",
+            403,
+            "AccessDeniedException",
         ),
         (
             "resource without an id",
             format!("arn:aws:kafka:{REGION}:{ACCOUNT}:cluster/c"),
-            400,
-            "BadRequestException",
+            403,
+            "AccessDeniedException",
         ),
         (
             "empty account",
             format!("arn:aws:kafka:{REGION}::cluster/c/abc-1"),
-            400,
-            "BadRequestException",
+            403,
+            "AccessDeniedException",
         ),
     ];
 

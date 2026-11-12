@@ -21,6 +21,12 @@ bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# Reads a submitted `server.properties` body the way a Java properties file is read
+# (ISO-8859-1 bytes, `name=value`/`name:value`/whitespace separators, comments,
+# continued lines, escapes), which is the format an MSK configuration IS: the
+# configuration writers validate the properties a body declares
+# (`src/state/server_properties.rs`) rather than re-implementing that grammar.
+java-properties = "2.0"
 # Matches a replication flow's TopicsToReplicate / TopicsToExclude patterns, which
 # the model documents as regular expressions, against a source cluster's topics.
 regex = "1.13"

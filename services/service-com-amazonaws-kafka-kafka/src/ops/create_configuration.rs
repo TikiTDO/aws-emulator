@@ -17,6 +17,13 @@
 //! publishes is refused with the modelled `BadRequestException`, before anything
 //! is stored.
 //!
+//! The submitted body is a `server.properties` document, and Amazon MSK configures
+//! a published set of broker properties: a body declaring a property outside that
+//! set configures no broker, so it is refused with the modelled
+//! `BadRequestException` naming each offending declaration
+//! ([`crate::state::server_properties`]) and nothing is stored. A property's VALUE
+//! is never judged — it is stored as submitted.
+//!
 //! `Description` is optional, and an EMPTY description is no description: a
 //! request that names none and a request that names `""` store the same thing, so
 //! the readers whose own member is optional report both by omitting the member.
@@ -173,6 +180,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // Decided FIRST, before anything the request carries is read: AWS
+        // authorizes at the IAM layer ahead of the service, so a caller whose own
+        // identity policies deny `kafka:CreateConfiguration` is told it is not
+        // authorized rather than told what is wrong with its body. This create
+        // names no resource for the decision to be scoped to — the configuration
+        // does not exist yet — so it is taken over every resource, which is what
+        // a policy stating the action must then match. See
+        // [`crate::state::authorization`].
+        crate::state::authorization::authorize_caller_action(
+            &*self.engine,
+            ctx,
+            &crate::state::authorization::control_plane_action(Self::NAME),
+            crate::state::authorization::ANY_RESOURCE,
+        )?;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(
                 CreateConfigurationErrorModeled::InternalServerErrorException(
@@ -230,7 +251,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if crate::state::server_properties_too_large(&input.server_properties) {
             return Err(
                 CreateConfigurationErrorModeled::BadRequestException(BadRequestException {
-                    invalid_parameter: Some("serverProperties".to_string()),
+                    invalid_parameter: Some(
+                        crate::state::server_properties::SERVER_PROPERTIES_MEMBER.to_string(),
+                    ),
                     message: Some(format!(
                         "ServerProperties must be at most {} bytes.",
                         crate::state::MAX_SERVER_PROPERTIES_BYTES
@@ -261,6 +284,64 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 })
                 .into(),
             );
+        }
+
+        // A configuration IS a `server.properties` file, and MSK configures a
+        // published set of broker properties: a body declaring a property outside
+        // that set — a name that is no broker property, or one MSK manages itself
+        // — declares something no cluster could be given, so it is refused per
+        // offending declaration, naming each one and the value the body gave it.
+        // A VALUE is never judged: it is stored as submitted. Checked before the
+        // lock is taken, and so before anything is stored: a refused create
+        // registers nothing and the name stays free. See
+        // [`crate::state::server_properties`].
+        //
+        // The refusal this builds is BOUNDED at both its factors, so no body can
+        // amplify itself into a large response: the declarations reported are at
+        // most `MAX_REPORTED_PROPERTIES` (the `take` below, which the reading
+        // applies too), and the versions each of them names are chosen from the
+        // versions this service publishes — the ones this configuration names,
+        // where it names any, and the whole published catalogue otherwise — so
+        // that list is at most `catalogued_kafka_versions().len()` long whatever
+        // the request carried. The body itself was bounded by the stored-body
+        // ceiling above before any of this read it.
+        let checked_versions: Vec<String> =
+            crate::state::server_properties::checked_versions(
+                &input.kafka_versions.clone().unwrap_or_default(),
+            )
+            .into_iter()
+            .take(crate::state::catalogued_kafka_versions().len())
+            .collect();
+        let Some(unconfigurable) =
+            crate::state::server_properties::unconfigurable_declarations(&input.server_properties)
+        else {
+            return Err(CreateConfigurationErrorModeled::BadRequestException(
+                crate::state::parameter_refusal(
+                    crate::state::server_properties::SERVER_PROPERTIES_MEMBER,
+                    crate::state::BAD_REQUEST_MESSAGE,
+                ),
+            )
+            .into());
+        };
+        let reported: Vec<_> = unconfigurable
+            .into_iter()
+            .take(crate::state::server_properties::MAX_REPORTED_PROPERTIES)
+            .collect();
+        if !reported.is_empty() {
+            return Err(CreateConfigurationErrorModeled::BadRequestException(
+                BadRequestException {
+                    invalid_parameter: Some(
+                        crate::state::server_properties::SERVER_PROPERTIES_MEMBER.to_string(),
+                    ),
+                    message: Some(
+                        crate::state::server_properties::unsupported_properties_message(
+                            &reported,
+                            &checked_versions,
+                        ),
+                    ),
+                },
+            )
+            .into());
         }
 
         let mut state = state.lock();

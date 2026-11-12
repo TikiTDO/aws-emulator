@@ -16,6 +16,12 @@
 //! all answers [`crate::state::CONFIGURATION_ARN_NOT_FOUND_MESSAGE`]. The two
 //! messages are what tell a state-machine refusal apart from a lookup miss.
 //!
+//! The submitted body is admitted on exactly the terms the create's is: a
+//! `server.properties` document declaring only broker properties Amazon MSK
+//! configures ([`crate::state::server_properties`]). A body declaring any other
+//! property is refused with the modelled `BadRequestException` naming each
+//! offending declaration, and appends nothing.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -169,6 +175,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx.parts());
         let now = std::time::SystemTime::now();
 
+        // A configuration IS a `server.properties` file, and MSK configures a
+        // published set of broker properties, so the body this update appends is
+        // admitted on exactly the terms the create's is
+        // ([`crate::state::server_properties`]): a declaration whose NAME is
+        // outside that set is refused, naming each offending declaration and the
+        // value the body gave it, and a value is never judged. A refused update
+        // appends nothing, leaving the revision the configuration already reports
+        // as its latest.
+        //
+        // The body is READ here, before the registry lock below is taken, and
+        // only when it is inside the one ceiling both writers apply to a stored
+        // body (the append path enforces it, so an oversized body is refused
+        // there): the work this reading does is bounded by that ceiling, and none
+        // of it happens while the lock is held. What the reading FOUND is answered
+        // after the configuration has been resolved, so both body refusals sit on
+        // the same side of the lookup and an unresolvable `Arn` is answered as
+        // such whatever the body carried.
+        let admission = if crate::state::server_properties_too_large(&input.server_properties) {
+            Some(Vec::new())
+        } else {
+            crate::state::server_properties::unconfigurable_declarations(&input.server_properties)
+        };
+
         let mut state = state.lock();
         // ONE condition, one refusal: an `Arn` that resolves to no configuration
         // of this endpoint's region — malformed, never minted, deleted and gone,
@@ -192,6 +221,51 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if !accepted.contains(&configuration.state.as_str()) {
             return Err(UpdateConfigurationErrorModeled::BadRequestException(
                 crate::state::configuration_not_in_accepted_state(&accepted),
+            )
+            .into());
+        }
+
+        // What the reading of the body found, answered now that the configuration
+        // it would be appended to has resolved: a body that is no properties
+        // document at all is the parameter refusal, and one declaring a property
+        // MSK does not configure names each offending declaration and the versions
+        // this configuration's own record has them checked against.
+        let Some(unconfigurable) = admission else {
+            return Err(UpdateConfigurationErrorModeled::BadRequestException(
+                crate::state::parameter_refusal(
+                    crate::state::server_properties::SERVER_PROPERTIES_MEMBER,
+                    crate::state::BAD_REQUEST_MESSAGE,
+                ),
+            )
+            .into());
+        };
+        // BOUNDED at both factors, as the create's refusal is: at most
+        // `MAX_REPORTED_PROPERTIES` declarations are reported, and the versions
+        // each names are chosen from the versions this service publishes, so that
+        // list is at most `catalogued_kafka_versions().len()` long whatever the
+        // request or the record carried.
+        let reported: Vec<_> = unconfigurable
+            .into_iter()
+            .take(crate::state::server_properties::MAX_REPORTED_PROPERTIES)
+            .collect();
+        if !reported.is_empty() {
+            let checked_versions: Vec<String> =
+                crate::state::server_properties::checked_versions(&configuration.kafka_versions)
+                    .into_iter()
+                    .take(crate::state::catalogued_kafka_versions().len())
+                    .collect();
+            return Err(UpdateConfigurationErrorModeled::BadRequestException(
+                BadRequestException {
+                    invalid_parameter: Some(
+                        crate::state::server_properties::SERVER_PROPERTIES_MEMBER.to_string(),
+                    ),
+                    message: Some(
+                        crate::state::server_properties::unsupported_properties_message(
+                            &reported,
+                            &checked_versions,
+                        ),
+                    ),
+                },
             )
             .into());
         }

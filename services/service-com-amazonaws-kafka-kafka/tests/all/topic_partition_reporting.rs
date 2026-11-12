@@ -562,10 +562,13 @@ async fn an_unresolvable_cluster_or_topic_is_refused() {
     // other topic reader resolves it.
     let unresolvable: Vec<(&str, String, u16, &str)> = vec![
         (
+            // An ARN this account holds no cluster resource under: the
+            // authorization gate refuses it ahead of any lookup, because no
+            // resource-scoped permission can be matched against it.
             "an ARN of another service",
             format!("arn:aws:sqs:{REGION}:{ACCOUNT}:queue-not-a-cluster"),
-            400,
-            "BadRequestException",
+            403,
+            "AccessDeniedException",
         ),
         (
             "a value that is no ARN at all",

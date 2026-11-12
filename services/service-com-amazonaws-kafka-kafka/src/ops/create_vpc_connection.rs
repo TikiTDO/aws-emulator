@@ -172,12 +172,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         // Decided FIRST, on the target cluster's ARN as submitted and from the
-        // request alone: `kafka:CreateVpcConnection` applies to a CLUSTER, so a
-        // request naming a cluster of another account — or naming no cluster of
-        // this one at all — reaches no grant, and is refused rather than answered
-        // out of what this registry happens to hold under that ARN or told which
-        // of its members looks wrong. See [`crate::state::authorization`].
+        // request alone: the calling principal's own identity policies, then the
+        // resource-scoped decision. `kafka:CreateVpcConnection` applies to a
+        // CLUSTER, so a request naming a cluster of another account — or naming no
+        // cluster of this one at all — reaches no grant, and is refused rather
+        // than answered out of what this registry happens to hold under that ARN
+        // or told which of its members looks wrong. See
+        // [`crate::state::authorization`].
         crate::state::authorization::authorize_target_cluster(
+            &*self.engine,
+            ctx,
             Self::NAME,
             &input.target_cluster_arn,
         )?;

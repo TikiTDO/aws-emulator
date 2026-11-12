@@ -13,10 +13,13 @@
 // suite uses is not dead code — it is this harness's surface.
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Map, Value};
+use service_com_amazonaws_iam_awsidentitymanagementv20100508::state as iam;
+use service_com_amazonaws_sts_awssecuritytokenservicev20110615::state as sts;
 use service_com_amazonaws_kafka_kafka::state::state_gate::{
     not_in_accepted_state_message, CLUSTER_ARN_PARAMETER,
     CLUSTER_STATES_A_CHANGE_IS_ACCEPTED_FROM,
@@ -1192,9 +1195,16 @@ pub fn configuration_rows() -> Vec<ConfigurationRequest> {
         ConfigurationRequest {
             description: Some("héllo — ünicode".to_string()),
             kafka_versions: vec!["3.6.0".to_string()],
-            // Bytes that are not valid UTF-8: a blob is a byte string, so the
-            // round trip must not go through a string conversion.
-            server_properties: vec![0x00, 0xff, 0xfe, 0x10, 0x80],
+            // A property whose VALUE carries bytes that are not valid UTF-8: a
+            // blob is a byte string, so the round trip must not go through a
+            // string conversion. (The body is still a properties document — the
+            // line declares a property — because that is what this service
+            // stores a configuration from.)
+            server_properties: [
+                b"compression.type=".as_slice(),
+                &[0x00, 0xff, 0xfe, 0x10, 0x80],
+            ]
+            .concat(),
             ..ConfigurationRequest::named("binary_properties-1")
         },
         ConfigurationRequest {
@@ -1330,4 +1340,95 @@ pub fn kafka_version_release(version: &str) -> Vec<u32> {
             Err(_) => None,
         })
         .collect()
+}
+
+/// How long an assumed-role session this harness registers lasts: long enough that
+/// none expires while a suite runs.
+const SESSION_SECONDS: i32 = 3_600;
+
+/// Record `role` and the assumed-role session `access_key_id` speaks for, exactly
+/// as `iam:CreateRole` and `sts:AssumeRole` record them, and hand back the session
+/// principal's ARN — the identity `sts:GetCallerIdentity` reports for that
+/// credential, and the one an authorization refusal names.
+///
+/// The IAM and STS stores are those services' own, reached through their state
+/// accessors on the SAME engine this service is mounted on, which is where the
+/// authorization gate reads them.
+pub fn given_assumed_role_session(
+    engine: &Arc<engine::InMemoryEngine>,
+    role: &str,
+    session: &str,
+    access_key_id: &str,
+) -> String {
+    let role_arn = format!("arn:aws:iam::{ACCOUNT}:role/{role}");
+    let session_arn = format!("arn:aws:sts::{ACCOUNT}:assumed-role/{role}/{session}");
+    let iam_store =
+        iam::service_state(&**engine).expect("the in-memory engine carries IAM's store");
+    iam_store.lock().roles.insert(
+        iam::name_key(role),
+        ::service_com_amazonaws_iam_awsidentitymanagementv20100508::ops::types::Role {
+            path: "/".to_string(),
+            role_name: role.to_string(),
+            role_id: ::service_common::caller_principal::aws_unique_id("AROA", &role_arn),
+            arn: role_arn.clone(),
+            create_date: ::aws_smithy_types::DateTime::from_secs(0),
+            assume_role_policy_document: None,
+            description: None,
+            max_session_duration: None,
+            permissions_boundary: None,
+            tags: None,
+            role_last_used: None,
+            source_role_template: None,
+        },
+    );
+    let vend = sts::NewSession {
+        role_arn: Some(role_arn.clone()),
+        ..sts::NewSession::new(
+            sts::Identity {
+                user_id: sts::role_id(&role_arn),
+                account: ACCOUNT.to_string(),
+                arn: session_arn.clone(),
+            },
+            sts::SessionKind::AssumedRole,
+            SESSION_SECONDS,
+        )
+    };
+    let sts_store =
+        sts::service_state(&**engine).expect("the in-memory engine carries STS's store");
+    sts_store
+        .lock()
+        .insert(vend.into_session(access_key_id, SystemTime::now()))
+        .expect("the session registry has room for one session");
+    session_arn
+}
+
+/// Attach `document` to `role` as its inline policy, replacing whatever it carried
+/// — what `iam:PutRolePolicy` does. `None` takes every policy off it, as
+/// `iam:DeleteRolePolicy` does.
+pub fn given_role_inline_policy(
+    engine: &Arc<engine::InMemoryEngine>,
+    role: &str,
+    document: Option<&Value>,
+) {
+    /// The name the inline policy is held under, which no rule depends on.
+    const POLICY_NAME: &str = "kafka-suite-inline-policy";
+    let store = iam::service_state(&**engine).expect("the in-memory engine carries IAM's store");
+    let mut store = store.lock();
+    match document {
+        None => {
+            store.role_inline_policies.remove(&iam::name_key(role));
+        }
+        Some(document) => {
+            store.role_inline_policies.insert(
+                iam::name_key(role),
+                BTreeMap::from([(
+                    iam::name_key(POLICY_NAME),
+                    iam::InlinePolicy {
+                        policy_name: POLICY_NAME.to_string(),
+                        policy_document: document.to_string(),
+                    },
+                )]),
+            );
+        }
+    }
 }

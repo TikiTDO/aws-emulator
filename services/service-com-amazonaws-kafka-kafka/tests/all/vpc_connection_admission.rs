@@ -791,8 +791,9 @@ async fn a_target_that_names_no_cluster_of_this_account_is_an_authorization_refu
     // account: not an ARN at all (free text, empty, a truncated ARN, a very long
     // opaque value, a non-ASCII one), an ARN of another vendor, an ARN of another
     // resource kind of this service, and a cluster ARN missing its id segment.
-    // The resource the refusal names is the value where the value is an ARN, and
-    // the wildcard where it is not.
+    // The resource the refusal names is the value where the value is an ARN —
+    // which IAM matched against the caller's statements and none covered — and the
+    // wildcard where it is not, where there was nothing to match at all.
     let wildcard = "*";
     let long = format!("not-a-cluster-arn-{}", "x".repeat(200));
     let configuration = format!(
@@ -821,12 +822,24 @@ async fn a_target_that_names_no_cluster_of_this_account_is_an_authorization_refu
     ];
 
     for (case, value, resource) in &rows {
+        // A value that READS as an ARN is a resource the decision was taken over
+        // and nothing granted, which IAM's default-deny clause says; one that
+        // reads as no resource was decided over the wildcard, where no document
+        // was reached to be named.
+        let expected = if *resource == wildcard {
+            not_authorized(action, resource)
+        } else {
+            format!(
+                "{} because no identity-based policy allows the {action} action",
+                not_authorized(action, resource)
+            )
+        };
         let request = ConnectionRequest {
             target_cluster_arn: value.clone(),
             ..ConnectionRequest::to("")
         };
         let reply = emulator.create_vpc_connection(&request).await;
-        assert_access_denied(&reply, case, &not_authorized(action, resource));
+        assert_access_denied(&reply, case, &expected);
 
         // The decision precedes the body, so the same refusal comes back for a
         // request whose other members are unusable too.
@@ -839,11 +852,7 @@ async fn a_target_that_names_no_cluster_of_this_account_is_an_authorization_refu
             ..ConnectionRequest::to("")
         };
         let reply = emulator.create_vpc_connection(&unusable).await;
-        assert_access_denied(
-            &reply,
-            &format!("{case} with an unusable body"),
-            &not_authorized(action, resource),
-        );
+        assert_access_denied(&reply, &format!("{case} with an unusable body"), &expected);
     }
 
     // A cluster ARN of ANOTHER account does name a resource, and the account that

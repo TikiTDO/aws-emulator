@@ -157,7 +157,11 @@ async fn an_update_lands_the_named_revision_once_the_clock_owes_it() {
         .create_configuration_row_ok_in(
             REGION,
             &ConfigurationRequest {
-                server_properties: vec![0x00, 0xff, 0xfe, 0x10, 0x80],
+                server_properties: [
+                    b"compression.type=".as_slice(),
+                    &[0x00, 0xff, 0xfe, 0x10, 0x80],
+                ]
+                .concat(),
                 ..ConfigurationRequest::named("binary-properties")
             },
         )

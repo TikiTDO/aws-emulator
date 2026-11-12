@@ -173,6 +173,11 @@ pub mod vpc_connection_admission;
 /// this one rather than in it.
 pub mod scram_secret_admission;
 
+/// Whether a submitted `server.properties` body is a document this service can
+/// store as a revision. A function of the submitted bytes alone, so it sits
+/// beside this module rather than in it.
+pub mod server_properties;
+
 /// The state precondition a call that CHANGES a resource applies, and the one
 /// sentence the service refuses it with when the resource is in some other state.
 /// It is a function of the accepted-state set and nothing this module holds, which
@@ -4648,7 +4653,7 @@ pub const UNRESOLVED_REFERENCE_MESSAGE: &str = BAD_REQUEST_MESSAGE;
 /// service's fixed sentences, so the two refusals above cannot drift apart on
 /// how a parameter is named or on the fact that the message carries nothing of
 /// the request.
-fn parameter_refusal(member: &str, message: &str) -> BadRequestException {
+pub(crate) fn parameter_refusal(member: &str, message: &str) -> BadRequestException {
     BadRequestException {
         invalid_parameter: Some(member.to_string()),
         message: Some(message.to_string()),

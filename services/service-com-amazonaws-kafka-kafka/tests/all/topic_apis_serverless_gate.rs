@@ -329,10 +329,13 @@ async fn the_same_calls_serve_a_provisioned_cluster() {
     // serverless refusal, because neither names a cluster with a kind.
     let unresolvable: Vec<(&str, String, u16, &str)> = vec![
         (
+            // An ARN this account holds no cluster resource under: no
+            // resource-scoped permission can be matched against it, so the topic
+            // surface's authorization gate refuses it ahead of any lookup.
             "an ARN of another service",
             format!("arn:aws:sqs:{REGION}:{ACCOUNT}:queue-not-a-cluster"),
-            400,
-            "BadRequestException",
+            403,
+            "AccessDeniedException",
         ),
         (
             "an absent cluster",

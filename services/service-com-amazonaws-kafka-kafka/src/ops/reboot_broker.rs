@@ -159,22 +159,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // AWS authorizes at the IAM layer BEFORE the service evaluates the
-        // resource, so the calling principal's own identity policies decide first,
-        // on the ARN as submitted: a caller they deny is told it is not authorized
-        // rather than told whether this registry holds a cluster for that ARN.
-        if let Some(refusal) = crate::state::identity_authorization::denied(
+        // Decided FIRST, on the ARN as submitted and from the request alone: the
+        // calling principal's own identity policies, then the resource-scoped
+        // decision every cluster-scoped operation takes — a caller either of them
+        // refuses is told it is not authorized rather than told whether this
+        // registry holds a cluster for that ARN. See
+        // [`crate::state::authorization`].
+        crate::state::authorization::authorize_caller_operation(
             &*self.engine,
             ctx,
             Self::NAME,
             &input.cluster_arn,
-        ) {
-            return Err(refusal);
-        }
-        // Then the resource-scoped decision every cluster-scoped operation takes,
-        // also from the request alone: the caller holds no resource-based policy
-        // over a cluster of another account. See [`crate::state::authorization`].
-        crate::state::authorization::authorize_operation(Self::NAME, &input.cluster_arn)?;
+        )?;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(RebootBrokerErrorModeled::InternalServerErrorException(
                 InternalServerErrorException {

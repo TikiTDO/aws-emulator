@@ -79,12 +79,12 @@ fn rows() -> Vec<PropertyRow> {
         },
         PropertyRow {
             case: "long-fraction",
-            key: "min.cleanable.dirty.ratio",
+            key: "log.cleaner.min.cleanable.ratio",
             value: "0.50000000000000000001",
         },
         PropertyRow {
             case: "trailing-zeros-after-point",
-            key: "min.cleanable.dirty.ratio",
+            key: "log.cleaner.min.cleanable.ratio",
             value: "0.5000",
         },
         PropertyRow {

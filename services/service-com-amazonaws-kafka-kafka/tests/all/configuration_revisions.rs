@@ -125,9 +125,14 @@ fn rows() -> Vec<RevisionRow> {
         RevisionRow {
             case: "not-utf8-at-all",
             description: Some("raw bytes"),
-            // 0xFF/0xFE are not valid UTF-8 anywhere, and a NUL byte must
-            // survive too: the member is a blob.
-            server_properties: vec![0x00, 0xFF, 0xFE, b'=', 0x80, b'\n', 0xC3],
+            // A property whose VALUE carries bytes that are not valid UTF-8
+            // anywhere (0xFF/0xFE), a NUL included: the member is a blob, so
+            // they must survive the round trip.
+            server_properties: [
+                b"compression.type=".as_slice(),
+                &[0x00, 0xFF, 0xFE, 0x80, 0xC3, b'\n'],
+            ]
+            .concat(),
         },
         RevisionRow {
             case: "empty-body",
@@ -138,7 +143,7 @@ fn rows() -> Vec<RevisionRow> {
             case: "long-body",
             description: Some("many properties"),
             server_properties: (0..512)
-                .map(|index| format!("custom.property.{index}=value-{index}\n"))
+                .map(|index| format!("log.retention.ms={index}\n"))
                 .collect::<String>()
                 .into_bytes(),
         },
