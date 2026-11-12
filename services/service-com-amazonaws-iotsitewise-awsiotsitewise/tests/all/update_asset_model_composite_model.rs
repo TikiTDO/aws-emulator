@@ -360,21 +360,27 @@ async fn an_updated_composite_model_reads_back_the_definition_the_request_carrie
             Some(model_id.as_str()),
             "case {name:?}: the update must report the asset model it wrote to, got {updated}"
         );
-        // A top-level composite model's path is the composite model alone.
+        // A top-level composite model's path is the asset model root followed by
+        // the composite model itself.
         assert_eq!(
             updated["assetModelCompositeModelPath"]
                 .as_array()
                 .map(Vec::len),
-            Some(1),
-            "case {name:?}: expected a one-segment path, got {updated}"
+            Some(2),
+            "case {name:?}: expected the model root plus one segment, got {updated}"
         );
         assert_eq!(
             updated["assetModelCompositeModelPath"][0]["id"].as_str(),
+            Some(model_id.as_str()),
+            "case {name:?}: the path must start at the asset model itself, got {updated}"
+        );
+        assert_eq!(
+            updated["assetModelCompositeModelPath"][1]["id"].as_str(),
             Some(composite_id.as_str()),
             "case {name:?}: the path must end at the composite model itself, got {updated}"
         );
         assert_eq!(
-            updated["assetModelCompositeModelPath"][0]["name"].as_str(),
+            updated["assetModelCompositeModelPath"][1]["name"].as_str(),
             Some(case.name),
             "case {name:?}: the path must carry the NEW name, got {updated}"
         );

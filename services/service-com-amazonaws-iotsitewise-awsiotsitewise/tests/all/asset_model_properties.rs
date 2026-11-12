@@ -343,13 +343,17 @@ async fn every_summary_member_comes_from_the_stored_definition() {
         );
 
         // `path` is the structured path from the root of the asset model: the
-        // containing composite model, when there is one, then the property itself.
+        // model itself, the containing composite model when there is one, then the
+        // property.
         let path = summary["path"]
             .as_array()
             .unwrap_or_else(|| panic!("case {name:?}: no path in {summary}"));
-        let expected_path: Vec<Value> = composite_id
-            .map(|id| json!({"id": id, "name": "HighTemp"}))
-            .into_iter()
+        let expected_path: Vec<Value> = std::iter::once(json!({"id": &model_id, "name": "Boiler"}))
+            .chain(
+                composite_id
+                    .map(|id| json!({"id": id, "name": "HighTemp"}))
+                    .into_iter(),
+            )
             .chain(std::iter::once(json!({"id": stored["id"], "name": name})))
             .collect();
         assert_eq!(
@@ -655,6 +659,10 @@ struct Contributor {
     /// Whether this composite model is one the asset model holds DIRECTLY, and so
     /// one `DescribeAssetModel` reports.
     top_level: bool,
+    /// Whether its type is a BUILT-IN one, in which case `DescribeAssetModel`
+    /// reports it in `assetModelCompositeModels` rather than among the custom
+    /// summaries.
+    built_in: bool,
 }
 
 /// Create a `COMPONENT_MODEL` carrying `properties` and return its id — the model
@@ -798,6 +806,7 @@ async fn contributing_fixture(router: &MultiServiceRouter) -> (String, Vec<Contr
             path: vec![(inline.clone(), "Inline")],
             properties: vec!["Setpoint"],
             top_level: true,
+            built_in: false,
         },
         Contributor {
             case: "a reused component model's definitions",
@@ -805,6 +814,7 @@ async fn contributing_fixture(router: &MultiServiceRouter) -> (String, Vec<Contr
             path: vec![(reused, "Reused")],
             properties: vec!["Flow", "Serial"],
             top_level: true,
+            built_in: false,
         },
         Contributor {
             case: "a reused component model, nested inside another composite model",
@@ -812,6 +822,7 @@ async fn contributing_fixture(router: &MultiServiceRouter) -> (String, Vec<Contr
             path: vec![(inline, "Inline"), (nested, "NestedReused")],
             properties: vec!["Flow", "Serial"],
             top_level: false,
+            built_in: false,
         },
         Contributor {
             case: "a reused component model that holds no definitions",
@@ -819,6 +830,7 @@ async fn contributing_fixture(router: &MultiServiceRouter) -> (String, Vec<Contr
             path: vec![(reused_bare, "ReusedBare")],
             properties: Vec::new(),
             top_level: true,
+            built_in: false,
         },
         Contributor {
             case: "no definitions at all",
@@ -826,6 +838,7 @@ async fn contributing_fixture(router: &MultiServiceRouter) -> (String, Vec<Contr
             path: vec![(bare, "Bare")],
             properties: Vec::new(),
             top_level: true,
+            built_in: true,
         },
     ];
     (model_id, contributors)
@@ -936,15 +949,18 @@ async fn the_all_filter_reports_what_every_composite_model_contributes() {
                 );
             }
             // `path` is "the structured path to the property from the root of the
-            // asset model": the composite models it sits inside, outermost first,
-            // then the property itself.
-            let expected_path: Vec<Value> = path
-                .iter()
-                .map(|(id, name)| json!({"id": id, "name": name}))
-                .chain(std::iter::once(
-                    json!({"id": stored["id"], "name": stored["name"]}),
-                ))
-                .collect();
+            // asset model": the model itself, the composite models the property
+            // sits inside, outermost first, then the property.
+            let expected_path: Vec<Value> =
+                std::iter::once(json!({"id": &model_id, "name": "Plant"}))
+                    .chain(
+                        path.iter()
+                            .map(|(id, name)| json!({"id": id, "name": name})),
+                    )
+                    .chain(std::iter::once(
+                        json!({"id": stored["id"], "name": stored["name"]}),
+                    ))
+                    .collect();
             assert_eq!(
                 summary["path"].as_array(),
                 Some(&expected_path),
@@ -1024,17 +1040,52 @@ async fn describe_asset_model_reports_what_each_composite_model_contributes() {
         .as_array()
         .cloned()
         .unwrap_or_default();
+    let summarised: Vec<&str> = described["assetModelCompositeModelSummaries"]
+        .as_array()
+        .map(|list| list.iter().filter_map(|entry| entry["id"].as_str()).collect())
+        .unwrap_or_default();
     for contributor in contributors.iter().filter(|row| row.top_level) {
         let case = contributor.case;
-        let entry = composites
-            .iter()
-            .find(|composite| composite["id"] == json!(contributor.id))
-            .unwrap_or_else(|| panic!("case {case:?}: not reported in {described}"));
+        if contributor.built_in {
+            // A built-in composite model is the one `assetModelCompositeModels`
+            // reports, with what it contributes.
+            let entry = composites
+                .iter()
+                .find(|composite| composite["id"] == json!(contributor.id))
+                .unwrap_or_else(|| panic!("case {case:?}: not reported in {described}"));
+            assert_eq!(
+                names_of(&entry["properties"]),
+                contributor.properties,
+                "case {case:?}: the model description must report what the composite model \
+                 contributes, got {entry}"
+            );
+            continue;
+        }
+        // A custom one is reported ONCE, as a summary; what it contributes is the
+        // composite-model read's own answer.
+        assert!(
+            summarised.contains(&contributor.id.as_str()),
+            "case {case:?}: a custom immediate child must be summarised, got {described}"
+        );
+        let (status, composite_read) = call(
+            &router,
+            "GET",
+            &format!(
+                "/asset-models/{model_id}/composite-models/{}",
+                contributor.id
+            ),
+            None,
+        )
+        .await;
         assert_eq!(
-            names_of(&entry["properties"]),
+            status, 200,
+            "case {case:?}: DescribeAssetModelCompositeModel got {status} {composite_read}"
+        );
+        assert_eq!(
+            names_of(&composite_read["assetModelCompositeModelProperties"]),
             contributor.properties,
-            "case {case:?}: the model description must report what the composite model \
-             contributes, got {entry}"
+            "case {case:?}: the composite-model read must report what it contributes, got \
+             {composite_read}"
         );
     }
 

@@ -220,14 +220,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut summaries: Vec<AssetModelPropertySummary> = record
             .properties
             .iter()
-            .map(|property| summarize(property, None, &[], &interfaces))
+            .map(|property| summarize(record, property, None, &interfaces))
             .collect();
         if include_composite {
             // `composite_models` is the FLAT list of every composite model this
             // model holds, at any nesting depth — a nested one is linked to its
             // parent through `composite_model_links` rather than held inside it —
             // so walking it once reaches every composite model's properties, and
-            // the path prefix below carries the whole chain each sits in.
+            // the path each summary carries names the whole chain it sits in.
             for composite in &record.composite_models {
                 // A composite model carries an id in every stored record: a create
                 // either takes the caller's id or mints one, and a record without
@@ -236,7 +236,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 let Some(composite_id) = composite.id.as_deref() else {
                     continue;
                 };
-                let prefix = record.composite_model_path(composite_id);
                 // What a composite model contributes comes from the one shared
                 // resolver, so this listing, the asset-level listing of the same
                 // composite model and the describes of it cannot disagree: its own
@@ -245,9 +244,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // model it reuses.
                 for property in store.composite_model_properties(record, composite_id) {
                     summaries.push(summarize(
+                        record,
                         &property,
                         Some(composite_id),
-                        &prefix,
                         &interfaces,
                     ));
                 }
@@ -290,32 +289,22 @@ const FILTER_ALL: &str = "ALL";
 /// One stored property definition as a `ListAssetModelProperties` summary.
 ///
 /// `composite_id` is the composite model the property is contributed by, or `None`
-/// for one of the model's own (base) properties; `prefix` is that composite model's
-/// path from the root of the asset model, empty for a base property; `interfaces`
+/// for one of the model's own (base) properties; `interfaces`
 /// is what every property of this model answers for under the applied interfaces,
 /// as [`crate::state::ComAmazonawsIotsitewiseAwsiotsitewiseState::interface_properties_by_asset_model_property`]
 /// reads it.
 fn summarize(
+    record: &crate::state::AssetModelRecord,
     property: &AssetModelProperty,
     composite_id: Option<&str>,
-    prefix: &[AssetModelCompositeModelPathSegment],
     interfaces: &HashMap<String, Vec<MappedInterfaceProperty>>,
 ) -> AssetModelPropertySummary {
     // `path` is "the structured path to the property from the root of the asset
-    // model": the composite models the property sits inside, outermost first, then
-    // the property itself. Derived from the same stored records the summary's other
-    // members come from, so the two cannot disagree.
-    let mut path: Vec<AssetModelPropertyPathSegment> = prefix
-        .iter()
-        .map(|segment| AssetModelPropertyPathSegment {
-            id: segment.id.clone(),
-            name: segment.name.clone(),
-        })
-        .collect();
-    path.push(AssetModelPropertyPathSegment {
-        id: property.id.clone(),
-        name: Some(property.name.clone()),
-    });
+    // model": the asset model itself, then the composite models the property sits
+    // inside, outermost first, then the property. Derived by the shared
+    // projection, so this listing and every describe of the same definition
+    // report one path.
+    let path = record.property_path(composite_id, property);
 
     AssetModelPropertySummary {
         id: property.id.clone(),

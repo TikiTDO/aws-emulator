@@ -321,11 +321,19 @@ async fn every_summary_member_comes_from_the_stored_asset_property() {
              the property, got {summary}"
         );
 
-        // `path` is the structured path from the root of the asset: the composite
-        // models the property sits inside, outermost first, then the property.
-        let expected_path: Vec<Value> = composite_id
-            .map(|id| json!({"id": id, "name": COMPOSITE_NAME}))
-            .into_iter()
+        // `path` is the structured path from the root of the asset: the asset
+        // itself, the composite models the property sits inside, outermost first,
+        // then the property.
+        let asset_root = json!({
+            "id": described["assetId"].clone(),
+            "name": described["assetName"].clone(),
+        });
+        let expected_path: Vec<Value> = std::iter::once(asset_root)
+            .chain(
+                composite_id
+                    .map(|id| json!({"id": id, "name": COMPOSITE_NAME}))
+                    .into_iter(),
+            )
             .chain(std::iter::once(json!({"id": stored["id"], "name": name})))
             .collect();
         assert_eq!(
@@ -508,21 +516,25 @@ async fn the_all_filter_reaches_a_composite_model_nested_inside_another() {
         .unwrap_or_else(|| panic!("case \"nested composite model\": no path in {deep}"));
     assert_eq!(
         path.len(),
-        3,
-        "case \"nested composite model\": the path must run outer composite, nested composite, \
-         property, got {deep}"
+        4,
+        "case \"nested composite model\": the path must run asset root, outer composite, \
+         nested composite, property, got {deep}"
     );
     assert_eq!(
         path.first().map(|segment| segment["id"].clone()),
-        Some(json!(COMPOSITE_ID)),
-        "case \"nested composite model\": the path must start at the outermost composite model, \
-         got {deep}"
+        Some(json!(asset_id)),
+        "case \"nested composite model\": the path must start at the asset itself, got {deep}"
     );
     assert_eq!(
         path.get(1).map(|segment| segment["id"].clone()),
+        Some(json!(COMPOSITE_ID)),
+        "case \"nested composite model\": the outermost composite model follows the asset \
+         root, got {deep}"
+    );
+    assert_eq!(
+        path.get(2).map(|segment| segment["id"].clone()),
         Some(json!(nested_id)),
-        "case \"nested composite model\": the path's second segment must be the nested composite \
-         model, got {deep}"
+        "case \"nested composite model\": the nested composite model follows it, got {deep}"
     );
 }
 

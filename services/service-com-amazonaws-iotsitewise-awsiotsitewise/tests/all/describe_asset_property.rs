@@ -190,15 +190,35 @@ async fn describe_asset_property_reports_the_stored_property_of_every_catalog_ty
             unit,
             "case {case:?}: expected unit {unit:?}, got {property}"
         );
-        // A freshly created asset's property carries neither an alias nor a
-        // notification until `UpdateAssetProperty` writes them.
+        // A freshly created asset's property carries no alias until
+        // `UpdateAssetProperty` writes one, while its notification block is
+        // reported regardless: the derived topic, in the default DISABLED state.
         assert!(
             property.get("alias").is_none_or(Value::is_null),
             "case {case:?}: expected no alias, got {property}"
         );
-        assert!(
-            property.get("notification").is_none_or(Value::is_null),
-            "case {case:?}: expected no notification, got {property}"
+        assert_eq!(
+            property["notification"]["state"].as_str(),
+            Some("DISABLED"),
+            "case {case:?}: expected the default notification state, got {property}"
+        );
+        assert_eq!(
+            property["notification"]["topic"].as_str(),
+            Some(expected_topic(&model_id, &asset_id, &id).as_str()),
+            "case {case:?}: unexpected notification topic in {property}"
+        );
+        // "The structured path to the property from the root of the asset": a
+        // property of the asset's own definitions sits inside no composite model,
+        // so the path is the asset and then the property.
+        assert_eq!(
+            property["path"]
+                .as_array()
+                .map(|path| path
+                    .iter()
+                    .map(|segment| segment["id"].as_str().unwrap_or_default())
+                    .collect::<Vec<&str>>()),
+            Some(vec![asset_id.as_str(), id.as_str()]),
+            "case {case:?}: expected the asset root and the property, got {property}"
         );
 
         // The property type comes from the model definition, and a definition
@@ -459,12 +479,20 @@ async fn a_property_of_a_composite_model_is_reported_as_a_composite_model_proper
     let asset_id = create_asset(&router, "CompositeDescribeBoiler-1", &model_id).await;
 
     // The composite models as the model reports them: the test reads the ids it
-    // addresses from the service rather than assuming any.
+    // addresses from the service rather than assuming any. Each immediate child is
+    // reported ONCE — a built-in composite model in `assetModelCompositeModels`, a
+    // custom one among the summaries — so the lookup spans both members.
     let model = describe_model(&router, &model_id).await;
-    let composites = model["assetModelCompositeModels"]
+    let mut composites = model["assetModelCompositeModels"]
         .as_array()
-        .unwrap_or_else(|| panic!("no composite models in {model}"))
-        .clone();
+        .cloned()
+        .unwrap_or_default();
+    composites.extend(
+        model["assetModelCompositeModelSummaries"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default(),
+    );
     let composite_by_name = |name: &str| -> Value {
         composites
             .iter()
@@ -511,7 +539,18 @@ async fn a_property_of_a_composite_model_is_reported_as_a_composite_model_proper
         rows
     {
         let composite = composite_by_name(composite_name);
-        let id = property_id(&composite["properties"], name);
+        // The definitions a composite model contributes are the composite-model
+        // read's own answer, whichever member of the model view named it.
+        let composite_read = describe_model_composite(
+            &router,
+            &model_id,
+            composite["id"].as_str().unwrap_or_default(),
+        )
+        .await;
+        let id = property_id(
+            &composite_read["assetModelCompositeModelProperties"],
+            name,
+        );
         let (status, body) = describe_property(&router, &asset_id, &id).await;
         assert_eq!(
             status, 200,

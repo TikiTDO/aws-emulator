@@ -145,9 +145,13 @@ use crate::ops::types::{
 //   import, export and enrichment job records.
 // * `property_formulas` — what a write holds a property definition to before
 //   anything is stored: its name, its variables, its formula and its window.
+// * `paths` — the structured `path` a read reports for a property or a composite
+//   model, the notification block a reported asset property carries, and which
+//   of a model's composite models are built-in.
 mod asset_records;
 mod computation_models;
 mod jobs;
+mod paths;
 mod pipeline_task_records;
 mod property_formulas;
 mod storage_configuration;
@@ -157,6 +161,7 @@ mod workspace_records;
 pub use asset_records::*;
 pub use computation_models::*;
 pub use jobs::*;
+pub use paths::*;
 pub use pipeline_task_records::*;
 pub use property_formulas::*;
 pub use storage_configuration::*;
@@ -2557,11 +2562,14 @@ fn materialise_one(
         return;
     };
     let first = seen.insert(property.id.clone());
-    // `path` is "the structured path to the property from the root of the
-    // asset": the composite models the property sits inside, outermost first,
-    // then the property itself. A property of the asset's own definitions sits
-    // inside none, so it carries no path — which is also what tells the two
-    // apart wherever a response has to (see [`composite_model_of_property`]).
+    // The STORED path is the chain WITHIN the asset: the composite models the
+    // property sits inside, outermost first, then the property itself. A
+    // property of the asset's own definitions sits inside none, so it carries no
+    // stored path — which is also what tells the two apart wherever a response
+    // has to (see [`composite_model_of_property`]). The asset's own hop, which
+    // every read puts at the head of the path it reports, is NOT stored: these
+    // properties are materialised once per asset model, for every asset of it
+    // alike, so the hop is added by [`AssetRecord::property_path`].
     if let Some(prefix) = prefix {
         let mut path = prefix.to_vec();
         path.push(AssetPropertyPathSegment {
@@ -2584,11 +2592,15 @@ fn materialise_one(
 /// `property` to the asset carrying it, or `None` for one of the asset's own
 /// (base) properties.
 ///
-/// Read off the property's own `path` — "the structured path to the property
-/// from the root of the asset", whose last segment is the property and whose
-/// segment before it is the composite model that holds it — so the membership
-/// and the path a response reports come from ONE stored value and cannot drift
-/// apart. A base property carries no path.
+/// Read off the property's own STORED path — the chain within the asset, whose
+/// last segment is the property and whose segment before it is the composite
+/// model that holds it — so the membership and the path a response reports come
+/// from ONE stored value and cannot drift apart. A base property carries no
+/// stored path.
+///
+/// Asked of a STORED property, never of the projection a read reports
+/// ([`AssetRecord::reported_property`]), whose path carries the asset's own hop
+/// at its head as well.
 pub fn composite_model_of_property(property: &AssetProperty) -> Option<&str> {
     let path = property.path.as_deref()?;
     let holder = path.len().checked_sub(2)?;

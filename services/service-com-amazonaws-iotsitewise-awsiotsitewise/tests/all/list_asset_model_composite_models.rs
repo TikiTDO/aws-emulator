@@ -43,7 +43,8 @@ struct Row {
     id: &'static str,
     /// Its name.
     name: &'static str,
-    /// The expected `path`, as the ids from the outermost ancestor down to it.
+    /// The expected `path` BELOW the asset model root, as the ids from the
+    /// outermost ancestor down to it.
     path: Vec<&'static str>,
 }
 
@@ -261,17 +262,20 @@ async fn the_listing_reports_every_stored_composite_model_whatever_its_shape() {
         );
 
         // `path` is "the path that includes all the pieces that make up the
-        // composite model": the chain from the outermost ancestor down to it.
+        // composite model": the asset model root, then the chain from the
+        // outermost ancestor down to it.
         let path: Vec<Value> = summary["path"]
             .as_array()
             .unwrap_or_else(|| panic!("case {case:?}: no path in {summary}"))
             .iter()
             .map(|segment| segment["id"].clone())
             .collect();
-        let expected: Vec<Value> = row.path.iter().map(|id| json!(id)).collect();
+        let expected: Vec<Value> = std::iter::once(json!(&model_id))
+            .chain(row.path.iter().map(|id| json!(id)))
+            .collect();
         assert_eq!(
             path, expected,
-            "case {case:?}: the path must run from the outermost ancestor down, got {summary}"
+            "case {case:?}: the path must run from the asset model root down, got {summary}"
         );
     }
 }

@@ -276,23 +276,32 @@ async fn deleting_a_composite_model_removes_it_and_everything_nested_in_it() {
         }
 
         // The asset model's own view agrees: it reports exactly the surviving
-        // composite models it holds directly, in creation order.
+        // composite models it holds directly, in creation order — the built-in
+        // ones under `assetModelCompositeModels`, the custom ones among the
+        // summaries.
         let (status, model_after) =
             call(&router, "GET", &format!("/asset-models/{model_id}"), None).await;
         assert_eq!(
             status, 200,
             "case {name:?}: DescribeAssetModel got {status} {model_after}"
         );
-        let expected_top: Vec<&str> = creates
-            .iter()
-            .enumerate()
-            .filter(|(at, (_, parent))| parent.is_none() && !gone.contains(at))
-            .map(|(at, _)| ids[at].as_str())
-            .collect();
-        for member in [
-            "assetModelCompositeModels",
-            "assetModelCompositeModelSummaries",
+        let surviving_top = |built_in: bool| -> Vec<&str> {
+            creates
+                .iter()
+                .enumerate()
+                .filter(|(at, (body, parent))| {
+                    parent.is_none()
+                        && !gone.contains(at)
+                        && (body["assetModelCompositeModelType"] != json!("CUSTOM")) == built_in
+                })
+                .map(|(at, _)| ids[at].as_str())
+                .collect()
+        };
+        for (member, built_in) in [
+            ("assetModelCompositeModels", true),
+            ("assetModelCompositeModelSummaries", false),
         ] {
+            let expected_top = surviving_top(built_in);
             let reported: Vec<&str> = model_after[member]
                 .as_array()
                 .map(|list| list.iter().filter_map(|entry| entry["id"].as_str()).collect())

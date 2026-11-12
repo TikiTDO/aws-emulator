@@ -32,6 +32,12 @@
 #[path = "all/asset_model_definition_validation.rs"]
 mod asset_model_definition_validation;
 
+// `property_paths_and_notifications` is declared HERE, beside the suite above,
+// for the reason the notes above give: the sorted list and the END of this file
+// are both stretches every concurrent iotsitewise change puts a declaration of
+// its own in. Fold it into the list once the churn settles.
+#[path = "all/property_paths_and_notifications.rs"]
+mod property_paths_and_notifications;
 // `asset_delete_reference_cleanup` is declared HERE, beside the suite above, for
 // the reason the notes above give: the sorted list and the END of this file are
 // both stretches every concurrent iotsitewise change puts a declaration of its

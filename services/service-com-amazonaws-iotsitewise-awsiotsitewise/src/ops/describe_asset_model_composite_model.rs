@@ -232,9 +232,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // model's stored record rather than copied at create time. That rule is
         // the shared `composite_model_properties`, so every view of a composite
         // model's properties — this one and an asset's instance of it — answers
-        // from the same place.
+        // from the same place. Each definition carries the path that addresses it
+        // from the root of the asset model: this model, this composite model (and
+        // the ones it is nested in), then the property.
         let composed = record.composed_asset_model_id(&composite_model_id);
-        let properties = store.composite_model_properties(record, &composite_model_id);
+        let properties = record.reported_properties(
+            Some(&composite_model_id),
+            &store.composite_model_properties(record, &composite_model_id),
+        );
         // The composition relationship this composite model was created with, which
         // only a component-model-based one has.
         let composition_details = composed.map(|composed| CompositionDetails {

@@ -5,8 +5,9 @@
 //!
 //! The rule these suites pin: an asset instantiated from an asset model carries
 //! an INSTANCE of every composite model that model holds, so each composite
-//! model is reported on the asset (`assetCompositeModelSummaries` and
-//! `assetCompositeModels`) and the properties it contributes are materialised on
+//! model is reported on the asset — a custom one in
+//! `assetCompositeModelSummaries`, a built-in one in `assetCompositeModels` —
+//! and the properties it contributes are materialised on
 //! the asset — addressable by property id exactly as the model's own top-level
 //! definitions are (ingestible, readable, describable), each under the `path`
 //! that reaches it from the root of the asset, and kept OUT of the asset's base
@@ -285,28 +286,27 @@ async fn an_asset_reports_and_materialises_every_composite_model_of_its_model() 
 
         // A composite model nested inside another is reported by the composite
         // model it sits in, not at the top of the asset; a top-level one is
-        // reported by both members of the asset itself.
+        // reported ONCE by the asset itself — a built-in composite model (an
+        // alarm, an anomaly detector) in `assetCompositeModels`, a custom one in
+        // `assetCompositeModelSummaries`.
         let summary = summaries
             .iter()
             .find(|summary| summary["id"] == json!(composite_id));
         let composite = composites
             .iter()
             .find(|composite| composite["id"] == json!(composite_id));
+        let built_in = row.body["assetModelCompositeModelType"] != json!("CUSTOM");
         if row.nested {
             assert!(
                 summary.is_none() && composite.is_none(),
                 "case {case:?}: a nested composite model is not an immediate child of the \
                  asset, got {asset}"
             );
-        } else {
-            let summary = summary.unwrap_or_else(|| {
-                panic!("case {case:?}: no assetCompositeModelSummaries entry in {asset}")
-            });
-            assert_eq!(
-                summary["path"].as_array().map(Vec::len),
-                Some(1),
-                "case {case:?}: a top-level composite model's path is the composite model \
-                 alone, got {summary}"
+        } else if built_in {
+            assert!(
+                summary.is_none(),
+                "case {case:?}: a built-in composite model is reported in \
+                 assetCompositeModels, not among the custom summaries, got {asset}"
             );
             let composite = composite.unwrap_or_else(|| {
                 panic!("case {case:?}: no assetCompositeModels entry in {asset}")
@@ -317,10 +317,25 @@ async fn an_asset_reports_and_materialises_every_composite_model_of_its_model() 
                 "case {case:?}: the asset's instance must carry what the composite model \
                  contributes, got {composite}"
             );
+        } else {
+            assert!(
+                composite.is_none(),
+                "case {case:?}: assetCompositeModels carries the built-in composite models \
+                 only, so a custom one must not be reported twice, got {asset}"
+            );
+            let summary = summary.unwrap_or_else(|| {
+                panic!("case {case:?}: no assetCompositeModelSummaries entry in {asset}")
+            });
             assert_eq!(
-                composite["name"], summary["name"],
-                "case {case:?}: the two views of one composite model must agree, got \
-                 {composite} and {summary}"
+                summary["path"].as_array().map(Vec::len),
+                Some(2),
+                "case {case:?}: a top-level composite model's path is the asset root and the \
+                 composite model, got {summary}"
+            );
+            assert_eq!(
+                summary["path"][0]["id"],
+                json!(asset_id),
+                "case {case:?}: the path must start at the asset itself, got {summary}"
             );
         }
 
@@ -487,11 +502,19 @@ async fn exclude_properties_blanks_a_composite_models_properties_but_keeps_the_s
     ] {
         let (status, asset) = describe_asset(&router, &asset_id, query).await;
         assert_eq!(status, 200, "case {case:?}: DescribeAsset got {status} {asset}");
-        let top_level = rows.iter().filter(|(row, _)| !row.nested).count();
+        // Every immediate child is summarised bar the built-in ones, which
+        // `assetCompositeModels` reports instead.
+        let custom_top_level = rows
+            .iter()
+            .filter(|(row, _)| {
+                !row.nested && row.body["assetModelCompositeModelType"] == json!("CUSTOM")
+            })
+            .count();
         assert_eq!(
             asset["assetCompositeModelSummaries"].as_array().map(Vec::len),
-            Some(top_level),
-            "case {case:?}: every immediate child composite model is summarised, got {asset}"
+            Some(custom_top_level),
+            "case {case:?}: every immediate child custom composite model is summarised, got \
+             {asset}"
         );
         for composite in asset["assetCompositeModels"]
             .as_array()
@@ -542,10 +565,14 @@ async fn a_composite_model_added_to_or_removed_from_the_model_reaches_its_assets
 
     let (status, before) = describe_asset(&router, &asset_id, "").await;
     assert_eq!(status, 200, "DescribeAsset(before): got {status} {before}");
-    assert!(
-        before.get("assetCompositeModels").is_none_or(Value::is_null),
-        "an asset of a model holding no composite model reports none, got {before}"
-    );
+    for member in ["assetCompositeModels", "assetCompositeModelSummaries"] {
+        assert_eq!(
+            before[member].as_array().map(Vec::len),
+            Some(0),
+            "an asset of a model holding no composite model reports {member} as an empty \
+             list rather than omitting it, got {before}"
+        );
+    }
 
     let (status, composite) = create_composite(
         &router,
@@ -585,16 +612,19 @@ async fn a_composite_model_added_to_or_removed_from_the_model_reaches_its_assets
         "the composite model added to the model must reach the asset already created from \
          it, got {after}"
     );
-    let instance = after["assetCompositeModels"]
-        .as_array()
-        .and_then(|list| list.first().cloned())
-        .unwrap_or(Value::Null);
+    // The composite model is a CUSTOM one, so the asset reports it as a summary;
+    // what its instance CARRIES is read through the asset-side view of it.
+    let (status, instance) = describe_asset_composite(&router, &asset_id, &composite_id).await;
     assert_eq!(
-        names_of(&instance["properties"]),
-        vec!["Threshold"],
-        "the propagated composite model must bring its properties with it, got {after}"
+        status, 200,
+        "DescribeAssetCompositeModel: got {status} {instance}"
     );
-    let property_id = instance["properties"][0]["id"]
+    assert_eq!(
+        names_of(&instance["assetCompositeModelProperties"]),
+        vec!["Threshold"],
+        "the propagated composite model must bring its properties with it, got {instance}"
+    );
+    let property_id = instance["assetCompositeModelProperties"][0]["id"]
         .as_str()
         .unwrap_or_default()
         .to_string();
@@ -641,10 +671,14 @@ async fn a_composite_model_added_to_or_removed_from_the_model_reaches_its_assets
 
     let (status, gone) = describe_asset(&router, &asset_id, "").await;
     assert_eq!(status, 200, "DescribeAsset(gone): got {status} {gone}");
-    assert!(
-        gone.get("assetCompositeModels").is_none_or(Value::is_null),
-        "the removed composite model must be gone from the asset, got {gone}"
-    );
+    for member in ["assetCompositeModels", "assetCompositeModelSummaries"] {
+        assert_eq!(
+            gone[member].as_array().map(Vec::len),
+            Some(0),
+            "the removed composite model must be gone from the asset, leaving {member} an \
+             empty list, got {gone}"
+        );
+    }
     let (status, missing) = call(
         &router,
         "GET",

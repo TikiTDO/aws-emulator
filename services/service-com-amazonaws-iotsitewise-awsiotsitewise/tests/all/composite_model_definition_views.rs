@@ -6,8 +6,9 @@
 //! The rule under test: the property definitions a composite model contributes are
 //! read from ONE place — its own inline definitions, or, when it reuses a
 //! `COMPONENT_MODEL`, that model's stored properties — so the list
-//! `DescribeAssetModel` reports for it under `assetModelCompositeModels` and the
-//! list `DescribeAssetModelCompositeModel` reports for the same composite model are
+//! `DescribeAssetModel` reports for a BUILT-IN composite model under
+//! `assetModelCompositeModels` and the list `DescribeAssetModelCompositeModel`
+//! reports for the same composite model are
 //! the same definitions, member for member and in the same order, however the
 //! composite model came by them and whenever its source last changed.
 //!
@@ -62,8 +63,11 @@ struct Row {
     /// The names both views must report, in order.
     expected: Vec<String>,
     /// Whether the asset model holds this composite model DIRECTLY, and so reports
-    /// it in `assetModelCompositeModels`.
+    /// it in one of its two composite-model members.
     top_level: bool,
+    /// Whether its type is a BUILT-IN one, which decides WHICH of those two
+    /// members reports it.
+    built_in: bool,
 }
 
 /// Create an asset model from `body` and answer its id.
@@ -318,18 +322,21 @@ async fn fixture(router: &MultiServiceRouter) -> (String, Vec<Row>, Components) 
             id: inline_one,
             expected: vec!["Setpoint".to_string()],
             top_level: true,
+            built_in: false,
         },
         Row {
             case: "inline definitions, several of them",
             id: inline_several,
             expected: vec!["Low".to_string(), "High".to_string(), "Label".to_string()],
             top_level: true,
+            built_in: false,
         },
         Row {
             case: "a reused component model with one definition",
             id: reused_one,
             expected: vec!["Flow".to_string()],
             top_level: true,
+            built_in: false,
         },
         Row {
             case: "a reused component model with several definitions",
@@ -340,24 +347,28 @@ async fn fixture(router: &MultiServiceRouter) -> (String, Vec<Row>, Components) 
                 "Temperature".to_string(),
             ],
             top_level: true,
+            built_in: false,
         },
         Row {
             case: "a reused component model with no definitions",
             id: reused_bare,
             expected: Vec::new(),
             top_level: true,
+            built_in: false,
         },
         Row {
             case: "a component model reused by its externalId label",
             id: reused_by_label,
             expected: vec!["Torque".to_string()],
             top_level: true,
+            built_in: false,
         },
         Row {
             case: "no definitions at all",
             id: without_definitions,
             expected: Vec::new(),
             top_level: true,
+            built_in: true,
         },
         Row {
             case: "a reused component model nested inside another composite model",
@@ -368,6 +379,7 @@ async fn fixture(router: &MultiServiceRouter) -> (String, Vec<Row>, Components) 
                 "Temperature".to_string(),
             ],
             top_level: false,
+            built_in: false,
         },
     ];
     (
@@ -412,6 +424,10 @@ async fn assert_views_agree(
              definitions the composite model contributes, got {composite_view}"
         );
 
+        // `assetModelCompositeModels` is "the list of built-in composite models
+        // for the asset model", so a CUSTOM composite model is not reported there
+        // at all: its own view is the one above, and `DescribeAssetModel` names it
+        // among the custom summaries.
         let entry = described["assetModelCompositeModels"]
             .as_array()
             .cloned()
@@ -420,16 +436,16 @@ async fn assert_views_agree(
             .find(|composite| composite["id"] == json!(row.id));
         let Some(entry) = entry else {
             assert!(
-                !row.top_level,
-                "phase {phase:?}, case {case:?}: a composite model the asset model holds \
-                 directly must be reported in assetModelCompositeModels, got {described}"
+                !(row.top_level && row.built_in),
+                "phase {phase:?}, case {case:?}: a built-in composite model the asset model \
+                 holds directly must be reported in assetModelCompositeModels, got {described}"
             );
             continue;
         };
         assert!(
-            row.top_level,
-            "phase {phase:?}, case {case:?}: a nested composite model is not an immediate \
-             child of the asset model, so it must not be reported there, got {entry}"
+            row.top_level && row.built_in,
+            "phase {phase:?}, case {case:?}: only a built-in composite model the asset model \
+             holds directly belongs there, got {entry}"
         );
         assert_eq!(
             definitions(&entry["properties"]),
@@ -451,10 +467,10 @@ async fn the_two_model_side_views_of_a_composite_model_report_the_same_definitio
     assert_views_agree(&router, &model_id, &rows, "as created").await;
 }
 
-/// RULE (the same one, from the other side): the asset model reports the composite
-/// models it holds DIRECTLY in both `assetModelCompositeModels` and
-/// `assetModelCompositeModelSummaries`, so the two lists name the same composite
-/// models and neither names a nested one.
+/// RULE (the same one, from the other side): the asset model reports each
+/// composite model it holds DIRECTLY exactly ONCE — a built-in one in
+/// `assetModelCompositeModels`, a custom one in
+/// `assetModelCompositeModelSummaries` — and neither member names a nested one.
 #[tokio::test]
 async fn both_composite_model_members_report_the_immediate_children() {
     let router = router();
@@ -464,17 +480,20 @@ async fn both_composite_model_members_report_the_immediate_children() {
         call(&router, "GET", &format!("/asset-models/{model_id}"), None).await;
     assert_eq!(status, 200, "DescribeAssetModel: got {status} {described}");
 
-    let expected: Vec<String> = rows
-        .iter()
-        .filter(|row| row.top_level)
-        .map(|row| row.id.clone())
-        .collect();
-    for member in ["assetModelCompositeModels", "assetModelCompositeModelSummaries"] {
+    for (member, built_in) in [
+        ("assetModelCompositeModels", true),
+        ("assetModelCompositeModelSummaries", false),
+    ] {
+        let expected: Vec<String> = rows
+            .iter()
+            .filter(|row| row.top_level && row.built_in == built_in)
+            .map(|row| row.id.clone())
+            .collect();
         assert_eq!(
             reported_ids(&described, member),
             expected,
-            "case {member:?}: the member must name every composite model the asset model \
-             holds directly, and only those, got {described}"
+            "case {member:?}: the member must name every composite model of its kind the \
+             asset model holds directly, and only those, got {described}"
         );
     }
 }

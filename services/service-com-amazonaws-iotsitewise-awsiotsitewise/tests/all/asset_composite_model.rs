@@ -73,8 +73,9 @@ struct Case {
     external_id: Option<&'static str>,
     /// How many asset properties the read must report.
     properties: usize,
-    /// How many segments the composite model's path must carry: one per
-    /// composite model from the outermost ancestor down to itself.
+    /// How deep in the composite-model chain this composite model sits: one per
+    /// composite model from the outermost ancestor down to itself, BESIDE the
+    /// asset root hop every reported path starts with.
     path_depth: usize,
     /// The ids of the composite models nested directly inside it.
     children: Vec<String>,
@@ -291,16 +292,25 @@ async fn an_assets_composite_model_is_the_instance_of_its_models_composite_model
             case.external_id
         );
 
-        // The path is the chain of composite models from the outermost ancestor
-        // down to this one, so it ends at the composite model itself.
+        // The path is the ASSET itself followed by the chain of composite models
+        // from the outermost ancestor down to this one, so it starts at the asset
+        // root ("one level between a composite model and the root of the asset")
+        // and ends at the composite model.
         let path = described["assetCompositeModelPath"]
             .as_array()
             .unwrap_or_else(|| panic!("case {name:?}: no assetCompositeModelPath in {described}"));
         assert_eq!(
             path.len(),
-            case.path_depth,
-            "case {name:?}: expected a {}-segment path, got {described}",
+            case.path_depth + 1,
+            "case {name:?}: expected a {}-segment path (the asset root plus {} composite \
+             hops), got {described}",
+            case.path_depth + 1,
             case.path_depth
+        );
+        assert_eq!(
+            path.first().and_then(|segment| segment["id"].as_str()),
+            Some(asset_id.as_str()),
+            "case {name:?}: the path must start at the asset itself, got {described}"
         );
         assert_eq!(
             path.last().and_then(|segment| segment["id"].as_str()),
@@ -329,15 +339,15 @@ async fn an_assets_composite_model_is_the_instance_of_its_models_composite_model
                 "case {name:?}: every asset property carries a modelled id, got {property}"
             );
             // "The structured path to the property from the root of the asset":
-            // the composite models it sits inside, then the property itself.
+            // the asset, the composite models it sits inside, then the property.
             let property_path = property["path"].as_array().unwrap_or_else(|| {
                 panic!("case {name:?}: property {property} reports no path in {described}")
             });
             assert_eq!(
                 property_path.len(),
-                case.path_depth + 1,
+                case.path_depth + 2,
                 "case {name:?}: expected {} path segments on {property}",
-                case.path_depth + 1
+                case.path_depth + 2
             );
             assert_eq!(
                 property_path.last().and_then(|segment| segment["id"].as_str()),

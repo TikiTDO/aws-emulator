@@ -530,33 +530,6 @@ impl AssetModelRecord {
             .collect()
     }
 
-    /// The `AssetModelCompositeModelPath` of composite model `id`: one segment
-    /// per composite model from the outermost ancestor down to `id` itself, so
-    /// the path of a top-level composite model is the composite model alone.
-    pub fn composite_model_path(&self, id: &str) -> Vec<AssetModelCompositeModelPathSegment> {
-        let mut path = Vec::new();
-        let mut at = Some(id.to_string());
-        // Bounded by the number of stored composite models, so a link that
-        // somehow pointed into a cycle cannot spin here.
-        while let Some(current) = at.take() {
-            let Some(composite) = self.composite_model(&current) else {
-                break;
-            };
-            path.push(AssetModelCompositeModelPathSegment {
-                id: Some(current.clone()),
-                name: Some(composite.name.clone()),
-            });
-            if path.len() >= self.composite_models.len() {
-                break;
-            }
-            at = self
-                .composite_model_parent(&current)
-                .map(ToString::to_string);
-        }
-        path.reverse();
-        path
-    }
-
     /// Resolve a `CustomID` label — a raw id or `externalId:<externalId>` — to
     /// the id of a property THIS model declares.
     ///
@@ -599,7 +572,8 @@ impl AssetModelRecord {
 
     /// Composite model `id` as the summary both `DescribeAssetModel` and
     /// `DescribeAssetModelCompositeModel` report it as, so the two views of one
-    /// stored composite model cannot disagree.
+    /// stored composite model cannot disagree. The path it carries is the one
+    /// rooted at this asset model ([`Self::composite_model_path`]).
     pub fn composite_model_summary(&self, id: &str) -> Option<AssetModelCompositeModelSummary> {
         let composite = self.composite_model(id)?;
         Some(AssetModelCompositeModelSummary {
@@ -609,40 +583,6 @@ impl AssetModelRecord {
             r#type: composite.r#type.clone(),
             description: composite.description.clone(),
             path: Some(self.composite_model_path(id)),
-        })
-    }
-
-    /// The [`Self::composite_model_path`] of composite model `id`, as the
-    /// ASSET-side path segment shape reports it.
-    ///
-    /// An asset composite model is an instance of a composite model of this
-    /// model, so the chain of composite models it sits in is the same chain —
-    /// only the shape the two views carry it in differs.
-    pub fn asset_composite_model_path(&self, id: &str) -> Vec<AssetCompositeModelPathSegment> {
-        self.composite_model_path(id)
-            .into_iter()
-            .map(|segment| AssetCompositeModelPathSegment {
-                id: segment.id,
-                name: segment.name,
-            })
-            .collect()
-    }
-
-    /// Composite model `id` as the ASSET-side summary an asset instantiated from
-    /// this model reports it as, derived from [`Self::composite_model_summary`]
-    /// so the model view and the asset view of one stored composite model cannot
-    /// disagree. The asset-side summary states its description and path
-    /// unconditionally, and carries the path in the asset-side segment shape,
-    /// which is the only difference.
-    pub fn asset_composite_model_summary(&self, id: &str) -> Option<AssetCompositeModelSummary> {
-        let summary = self.composite_model_summary(id)?;
-        Some(AssetCompositeModelSummary {
-            id: summary.id,
-            external_id: summary.external_id,
-            name: summary.name,
-            r#type: summary.r#type,
-            description: summary.description.unwrap_or_default(),
-            path: self.asset_composite_model_path(id),
         })
     }
 }
@@ -691,8 +631,12 @@ pub struct MappedInterfaceProperty {
 /// property definitions at create time, so property writes and reads resolve.
 /// It is ONE flat list holding the asset's own (base) properties and the ones
 /// each composite model of that model contributes, the latter carrying the
-/// `path` that addresses them from the root of the asset; see
+/// `path` WITHIN the asset that addresses them — the composite models they sit
+/// inside, then the property; see
 /// [`ComAmazonawsIotsitewiseAwsiotsitewiseState::materialise_asset_properties`].
+/// The asset's own hop, which a read puts at the head of that path, is added by
+/// [`AssetRecord::property_path`] rather than stored, because it differs per
+/// asset and moves when the asset is renamed.
 #[derive(Debug, Clone)]
 pub struct AssetRecord {
     pub id: String,
@@ -763,27 +707,30 @@ impl AssetRecord {
         self.properties.get(self.property_position(label)?)
     }
 
-    /// The asset's own (BASE) properties: the ones materialised from its model's
-    /// top-level property definitions.
+    /// The asset's own (BASE) properties, as a read reports them.
     ///
-    /// What `DescribeAsset` reports in `assetProperties`, which "doesn't include
-    /// properties that you define in composite models", and what
-    /// `ListAssetProperties` enumerates under its default `BASE` filter.
+    /// The ones materialised from its model's top-level property definitions:
+    /// what `DescribeAsset` reports in `assetProperties`, which "doesn't include
+    /// properties that you define in composite models", and the ones
+    /// `ListAssetProperties` enumerates under its default `BASE` filter. Each is
+    /// projected through [`Self::reported_property`], so it carries the path that
+    /// addresses it from the root of the asset and its notification block.
     pub fn base_properties(&self) -> Vec<AssetProperty> {
         self.properties
             .iter()
             .filter(|property| composite_model_of_property(property).is_none())
-            .cloned()
+            .map(|property| self.reported_property(property))
             .collect()
     }
 
     /// The properties this asset's instance of composite model `composite_id`
-    /// carries, in the order they were materialised.
+    /// carries, in the order they were materialised, as a read reports them (see
+    /// [`Self::base_properties`]).
     pub fn composite_properties(&self, composite_id: &str) -> Vec<AssetProperty> {
         self.properties
             .iter()
             .filter(|property| composite_model_of_property(property) == Some(composite_id))
-            .cloned()
+            .map(|property| self.reported_property(property))
             .collect()
     }
 

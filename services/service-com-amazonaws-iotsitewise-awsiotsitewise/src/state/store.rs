@@ -535,7 +535,7 @@ impl ComAmazonawsIotsitewiseAwsiotsitewiseState {
                 continue;
             };
             let prefix: Vec<AssetPropertyPathSegment> = model
-                .asset_composite_model_path(composite_id)
+                .composite_model_chain(composite_id)
                 .into_iter()
                 .map(|segment| AssetPropertyPathSegment {
                     id: segment.id,

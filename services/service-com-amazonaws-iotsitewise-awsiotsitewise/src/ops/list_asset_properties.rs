@@ -188,7 +188,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .filter(|property| {
                 include_composite || crate::state::composite_model_of_property(property).is_none()
             })
-            .map(summarize)
+            .map(|property| summarize(asset, property))
             .collect();
 
         // This enumeration's resume point is a summary's [`page_key`], and the page
@@ -225,33 +225,27 @@ const DEFAULT_FILTER: &str = "BASE";
 const FILTER_ALL: &str = "ALL";
 
 /// One stored asset property as a `ListAssetProperties` summary.
-fn summarize(property: &AssetProperty) -> AssetPropertySummary {
+fn summarize(asset: &crate::state::AssetRecord, property: &AssetProperty) -> AssetPropertySummary {
     // `path` is "the structured path to the property from the root of the asset":
-    // the composite models the property sits inside, outermost first, then the
-    // property itself. A composite model's property carries that path as it was
-    // materialised; one of the asset's own sits inside no composite model, so its
-    // path is the property alone.
-    let path = property.path.clone().unwrap_or_else(|| {
-        vec![AssetPropertyPathSegment {
-            id: Some(property.id.clone()),
-            name: Some(property.name.clone()),
-        }]
-    });
+    // the asset itself, then the composite models the property sits inside,
+    // outermost first, then the property. Derived by the shared projection, so
+    // this listing and every describe of the same property report one path.
+    let reported = asset.reported_property(property);
 
     AssetPropertySummary {
-        id: property.id.clone(),
-        external_id: property.external_id.clone(),
-        // The alias and the notification are set per asset property, by
+        id: reported.id,
+        external_id: reported.external_id,
+        // The alias and the notification STATE are set per asset property, by
         // `UpdateAssetProperty`, so they are reported from the stored property
         // rather than from the definition it was materialised from — for a
         // composite model's property exactly as for one of the asset's own, since
         // both are materialised on the asset and both are addressable by id.
-        alias: property.alias.clone(),
-        unit: property.unit.clone(),
-        notification: property.notification.clone(),
+        alias: reported.alias,
+        unit: reported.unit,
+        notification: reported.notification,
         asset_composite_model_id: crate::state::composite_model_of_property(property)
             .map(ToString::to_string),
-        path: Some(path),
+        path: reported.path,
     }
 }
 

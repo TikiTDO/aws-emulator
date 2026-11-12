@@ -233,20 +233,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // them by the composite-model route.
         //
         // Both views report the composite models this asset model holds DIRECTLY —
-        // the ones nested inside no other composite model. That is what the
-        // summaries member documents: "The list of the immediate child custom
-        // composite model summaries for the asset model"
-        // (`smithy_query(query="doc", shape="DescribeAssetModelResponse",
-        // member="assetModelCompositeModelSummaries")`). `assetModelCompositeModels`
-        // is documented only as "The list of composite asset models for the asset
-        // model", so holding it to the same depth is this emulator's CHOICE: the
-        // two views of one stored list then agree, and a nested composite model is
-        // reported by the composite model it sits in, through
+        // the ones nested inside no other composite model. A nested composite
+        // model is reported by the composite model it sits in, through
         // `DescribeAssetModelCompositeModel`, which is the only operation whose
         // output carries the nesting.
+        //
+        // They report DIFFERENT composite models of that depth:
+        // `assetModelCompositeModels` is "the list of BUILT-IN composite models
+        // for the asset model, such as those with those of type AWS/ALARMS", and
+        // `assetModelCompositeModelSummaries` is "the list of the immediate child
+        // CUSTOM composite model summaries for the asset model"
+        // (`smithy_query(query="doc", shape="DescribeAssetModelResponse",
+        // member="assetModelCompositeModels")` and the same for the summaries), so
+        // a custom composite model is reported once, as a summary, rather than
+        // twice. BOTH members are serialized whether or not the model holds any
+        // of that kind, so a client can tell "none" from "not reported".
         let top_level = record.top_level_composite_model_ids();
-        let composite_models = (!top_level.is_empty()).then(|| {
-            top_level
+        let composite_models = Some(
+            record
+                .built_in_composite_model_ids(&top_level)
                 .iter()
                 .filter_map(|id| record.composite_model(id))
                 .map(|composite| AssetModelCompositeModel {
@@ -259,31 +264,36 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         // definitions, or, for a component-model-based composite
                         // model, the properties of the component model it reuses. A
                         // composite model that contributes none keeps the stored
-                        // member as it arrived — absent stays absent.
-                        let contributed = composite
-                            .id
-                            .as_deref()
+                        // member as it arrived — absent stays absent. Each
+                        // definition carries the path that addresses it from the
+                        // model root, as every view of a definition reports it.
+                        let composite_id = composite.id.as_deref();
+                        let contributed = composite_id
                             .map(|id| store.composite_model_properties(record, id))
                             .unwrap_or_default();
                         if contributed.is_empty() {
-                            composite.properties.clone()
+                            composite.properties.as_deref().map(|stored| {
+                                record.reported_properties(composite_id, stored)
+                            })
                         } else {
-                            Some(contributed)
+                            Some(record.reported_properties(composite_id, &contributed))
                         }
                     },
                     ..composite.clone()
                 })
-                .collect()
-        });
-        // The summaries are the SAME stored composite models, viewed by id/name/type
-        // and their path from the model root. Derived through the shared helper
-        // rather than withheld, so the two views of one stored list cannot disagree.
-        let composite_model_summaries = (!top_level.is_empty()).then(|| {
+                .collect(),
+        );
+        // The summaries are the model's CUSTOM immediate children, viewed by
+        // id/name/type and their path from the model root. Derived through the
+        // shared helper rather than withheld, so this view and every other view of
+        // one stored composite model cannot disagree.
+        let composite_model_summaries = Some(
             top_level
                 .iter()
+                .filter(|id| !record.is_built_in_composite_model(id))
                 .filter_map(|id| record.composite_model_summary(id))
-                .collect()
-        });
+                .collect(),
+        );
 
         Ok(DescribeAssetModelOutput {
             asset_model_id: record.id.clone(),
@@ -293,10 +303,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             asset_model_type: Some(record.model_type.clone()),
             asset_model_description: record.description.clone().unwrap_or_default(),
             // `excludeProperties` asks for the model without its property definitions.
+            // Each reported definition carries the path that addresses it from the
+            // root of the asset model, which the shared projection derives.
             asset_model_properties: if input.exclude_properties {
                 Vec::new()
             } else {
-                record.properties.clone()
+                record.reported_properties(None, &record.properties)
             },
             asset_model_hierarchies: record.hierarchies.clone(),
             asset_model_composite_models: composite_models,

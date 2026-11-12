@@ -233,14 +233,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 asset_model_id: asset.asset_model_id.clone(),
                 asset_property: match composite {
                     Some(_) => None,
-                    None => Some(property_of(stored, definition.as_ref())),
+                    None => Some(property_of(asset, stored, definition.as_ref())),
                 },
                 composite_model: composite.map(|composite| CompositeModelProperty {
                     name: composite.name.clone(),
                     r#type: composite.r#type.clone(),
                     id: composite.id.clone(),
                     external_id: composite.external_id.clone(),
-                    asset_property: property_of(stored, definition.as_ref()),
+                    asset_property: property_of(asset, stored, definition.as_ref()),
                 }),
             });
         }
@@ -252,20 +252,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     }
 }
 
-/// The `Property` a stored asset property reports: its own members, plus the
-/// property type from the asset model definition it was materialised from
-/// (absent when the model no longer declares it).
-fn property_of(stored: &AssetProperty, definition: Option<&AssetModelProperty>) -> Property {
+/// The `Property` a stored asset property reports: its own members, the property
+/// type from the asset model definition it was materialised from (absent when the
+/// model no longer declares it), and the two members the owning asset derives —
+/// the `path` that addresses the property from the root of that asset and the
+/// notification block of the MQTT topic its value updates publish to.
+fn property_of(
+    asset: &crate::state::AssetRecord,
+    stored: &AssetProperty,
+    definition: Option<&AssetModelProperty>,
+) -> Property {
+    let reported = asset.reported_property(stored);
     Property {
-        id: stored.id.clone(),
-        external_id: stored.external_id.clone(),
-        name: stored.name.clone(),
-        alias: stored.alias.clone(),
-        notification: stored.notification.clone(),
-        data_type: stored.data_type.clone(),
-        unit: stored.unit.clone(),
+        id: reported.id,
+        external_id: reported.external_id,
+        name: reported.name,
+        alias: reported.alias,
+        notification: reported.notification,
+        data_type: reported.data_type,
+        unit: reported.unit,
         r#type: definition.map(|definition| definition.r#type.clone()),
-        path: stored.path.clone(),
+        path: reported.path,
     }
 }
 

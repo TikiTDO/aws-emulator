@@ -250,9 +250,27 @@ async fn update_asset_property_overwrites_alias_notification_state_and_unit() {
         untouched.get("alias").is_none_or(Value::is_null),
         "an unaddressed property must carry no alias, got {untouched}"
     );
-    assert!(
-        untouched.get("notification").is_none_or(Value::is_null),
-        "an unaddressed property must carry no notification, got {untouched}"
+    // The notification block is reported for EVERY asset property, so an
+    // unaddressed one carries the derived topic in the default DISABLED state
+    // rather than nothing.
+    assert_eq!(
+        untouched["notification"]["state"].as_str(),
+        Some("DISABLED"),
+        "an unaddressed property's notification state is the documented default, got \
+         {untouched}"
+    );
+    assert_eq!(
+        untouched["notification"]["topic"].as_str(),
+        Some(
+            expected_topic(
+                &model_id,
+                &asset_id,
+                untouched["id"].as_str().unwrap_or_default()
+            )
+            .as_str()
+        ),
+        "an unaddressed property must still report the topic its updates publish to, got \
+         {untouched}"
     );
 
     // The alias each earlier row replaced stopped addressing anything.
@@ -612,8 +630,9 @@ async fn a_label_that_names_no_stored_property_is_a_modelled_refusal() {
         &describe_asset(&router, &asset_id).await["assetProperties"],
         "Temperature",
     );
-    assert!(
-        property.get("notification").is_none_or(Value::is_null),
-        "a refused update must write nothing, got {property}"
+    assert_eq!(
+        property["notification"]["state"].as_str(),
+        Some("DISABLED"),
+        "a refused update must write nothing, so the state stays the default, got {property}"
     );
 }

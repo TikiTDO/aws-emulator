@@ -275,16 +275,22 @@ async fn a_created_composite_model_reads_back_whatever_its_type_or_shape() {
             Some(model_id.as_str()),
             "case {name:?}: the create must report the asset model it wrote to, got {created}"
         );
-        // A top-level composite model's path is the composite model alone.
+        // A top-level composite model's path is the asset model root followed by
+        // the composite model itself.
         assert_eq!(
             created["assetModelCompositeModelPath"]
                 .as_array()
                 .map(Vec::len),
-            Some(1),
-            "case {name:?}: expected a one-segment path, got {created}"
+            Some(2),
+            "case {name:?}: expected the model root plus one segment, got {created}"
         );
         assert_eq!(
             created["assetModelCompositeModelPath"][0]["id"].as_str(),
+            Some(model_id.as_str()),
+            "case {name:?}: the path must start at the asset model itself, got {created}"
+        );
+        assert_eq!(
+            created["assetModelCompositeModelPath"][1]["id"].as_str(),
             Some(composite_id.as_str()),
             "case {name:?}: the path must end at the composite model itself, got {created}"
         );
@@ -366,18 +372,26 @@ async fn a_created_composite_model_reads_back_whatever_its_type_or_shape() {
         }
     }
 
-    // Every one of them is on the asset model, reported by both of
-    // `DescribeAssetModel`'s views.
+    // Every one of them is on the asset model, reported ONCE: a built-in
+    // composite model in `assetModelCompositeModels`, a custom one among the
+    // summaries.
     let (status, model) = call(&router, "GET", &format!("/asset-models/{model_id}"), None).await;
     assert_eq!(status, 200, "DescribeAssetModel: got {status} {model}");
-    for member in [
-        "assetModelCompositeModels",
-        "assetModelCompositeModelSummaries",
+    let built_in = cases
+        .iter()
+        .filter(|case| case.body["assetModelCompositeModelType"] != json!("CUSTOM"))
+        .count();
+    for (member, expected) in [
+        ("assetModelCompositeModels", built_in),
+        (
+            "assetModelCompositeModelSummaries",
+            cases.len() - built_in,
+        ),
     ] {
         assert_eq!(
             model[member].as_array().map(Vec::len),
-            Some(cases.len()),
-            "case {member:?}: every created composite model must be reported, got {model}"
+            Some(expected),
+            "case {member:?}: every created composite model must be reported once, got {model}"
         );
     }
 }
@@ -461,19 +475,27 @@ async fn a_nested_composite_model_reports_the_path_from_the_outermost_ancestor()
             .cloned()
             .unwrap_or_default();
         chain.push((id.clone(), name.clone()));
+        // The asset model root, then one segment per composite model from the
+        // outermost ancestor down to this one.
         assert_eq!(
             path.len(),
-            chain.len(),
-            "case depth {depth}: the path must carry one segment per ancestor, got {created}"
+            chain.len() + 1,
+            "case depth {depth}: the path must carry the model root plus one segment per \
+             ancestor, got {created}"
+        );
+        assert_eq!(
+            path[0]["id"].as_str(),
+            Some(model_id.as_str()),
+            "case depth {depth}: the path must start at the asset model itself in {created}"
         );
         for (at, (expected_id, expected_name)) in chain.iter().enumerate() {
             assert_eq!(
-                path[at]["id"].as_str(),
+                path[at + 1]["id"].as_str(),
                 Some(expected_id.as_str()),
                 "case depth {depth}: segment {at} is the wrong composite model in {created}"
             );
             assert_eq!(
-                path[at]["name"].as_str(),
+                path[at + 1]["name"].as_str(),
                 Some(expected_name.as_str()),
                 "case depth {depth}: segment {at} carries the wrong name in {created}"
             );
@@ -514,29 +536,33 @@ async fn a_nested_composite_model_reports_the_path_from_the_outermost_ancestor()
             );
             assert_eq!(
                 summaries[0]["path"].as_array().map(Vec::len),
-                Some(at + 2),
-                "case {at}: a nested summary carries its full path, got {described}"
+                Some(at + 3),
+                "case {at}: a nested summary carries its full path from the model root, got \
+                 {described}"
             );
         }
     }
 
-    // And the asset model itself reports only what it holds directly.
+    // And the asset model itself reports only what it holds directly: the chain's
+    // outermost composite model, which is CUSTOM and so is summarised.
     let (status, model) = call(&router, "GET", &format!("/asset-models/{model_id}"), None).await;
     assert_eq!(status, 200, "DescribeAssetModel: got {status} {model}");
-    for member in [
-        "assetModelCompositeModels",
-        "assetModelCompositeModelSummaries",
+    for (member, expected) in [
+        ("assetModelCompositeModels", 0),
+        ("assetModelCompositeModelSummaries", 1),
     ] {
         assert_eq!(
             model[member].as_array().map(Vec::len),
-            Some(1),
+            Some(expected),
             "case {member:?}: only the top-level composite model is the model's own, got {model}"
         );
-        assert_eq!(
-            model[member][0]["id"].as_str(),
-            Some(chain[0].0.as_str()),
-            "case {member:?}: the wrong composite model is reported in {model}"
-        );
+        if expected > 0 {
+            assert_eq!(
+                model[member][0]["id"].as_str(),
+                Some(chain[0].0.as_str()),
+                "case {member:?}: the wrong composite model is reported in {model}"
+            );
+        }
     }
 }
 

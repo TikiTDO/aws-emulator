@@ -210,7 +210,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .composite_model(&composite_model_id)
             .ok_or_else(|| composite_not_found(&input.asset_composite_model_id))?;
 
-        let path = model.asset_composite_model_path(&composite_model_id);
+        let path = asset.composite_model_path(model, &composite_model_id);
         // The properties this asset carries for the composite model are the ones
         // materialised onto it when it was created from the model (and
         // re-materialised whenever that model's definitions changed), so each one
@@ -237,7 +237,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             asset_composite_model_summaries: model
                 .composite_model_children(&composite_model_id)
                 .iter()
-                .filter_map(|child| model.asset_composite_model_summary(child))
+                .filter_map(|child| asset.composite_model_summary(model, child))
                 .collect(),
             // No action is stored against a composite model, so none is reported:
             // `ExecuteAction` and `ListActions` are not implemented yet.

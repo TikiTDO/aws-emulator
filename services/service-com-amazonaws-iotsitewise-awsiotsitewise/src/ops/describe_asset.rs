@@ -211,43 +211,62 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `DescribeAssetCompositeModel`, whose output is the only one that carries
         // the nesting; `DescribeAssetModel` reports the model side of the same
         // list at the same depth.
+        //
+        // They report DIFFERENT composite models of that depth:
+        // `assetCompositeModels` carries the BUILT-IN ones (an alarm, an anomaly
+        // detector), as the asset-model counterpart of the member states ("The
+        // list of built-in composite models for the asset model, such as those
+        // with those of type AWS/ALARMS"), and the summaries carry the custom
+        // ones. BOTH are serialized whether or not the asset has any of that
+        // kind, so a client can tell "none" from "not reported".
         let model = store.asset_models.get(&record.asset_model_id);
         let top_level = model
             .map(crate::state::AssetModelRecord::top_level_composite_model_ids)
             .unwrap_or_default();
-        let asset_composite_models = model.filter(|_| !top_level.is_empty()).map(|model| {
-            top_level
-                .iter()
-                .filter_map(|composite_id| {
-                    let composite = model.composite_model(composite_id)?;
-                    Some(AssetCompositeModel {
-                        id: Some(composite_id.clone()),
-                        external_id: composite.external_id.clone(),
-                        name: composite.name.clone(),
-                        description: composite.description.clone(),
-                        r#type: composite.r#type.clone(),
-                        // `excludeProperties` asks for the asset without its
-                        // property list, so it blanks a composite model's
-                        // properties as well as the top-level ones: a caller that
-                        // asked not to be sent properties must not receive them by
-                        // the composite-model route.
-                        properties: if input.exclude_properties {
-                            Vec::new()
-                        } else {
-                            record.composite_properties(composite_id)
-                        },
-                    })
+        let asset_composite_models = Some(
+            model
+                .map(|model| {
+                    model
+                        .built_in_composite_model_ids(&top_level)
+                        .iter()
+                        .filter_map(|composite_id| {
+                            let composite = model.composite_model(composite_id)?;
+                            Some(AssetCompositeModel {
+                                id: Some(composite_id.clone()),
+                                external_id: composite.external_id.clone(),
+                                name: composite.name.clone(),
+                                description: composite.description.clone(),
+                                r#type: composite.r#type.clone(),
+                                // `excludeProperties` asks for the asset without
+                                // its property list, so it blanks a composite
+                                // model's properties as well as the top-level
+                                // ones: a caller that asked not to be sent
+                                // properties must not receive them by the
+                                // composite-model route.
+                                properties: if input.exclude_properties {
+                                    Vec::new()
+                                } else {
+                                    record.composite_properties(composite_id)
+                                },
+                            })
+                        })
+                        .collect()
                 })
-                .collect()
-        });
-        let asset_composite_model_summaries = model
-            .filter(|_| !top_level.is_empty())
-            .map(|model| {
-                top_level
-                    .iter()
-                    .filter_map(|composite_id| model.asset_composite_model_summary(composite_id))
-                    .collect()
-            });
+                .unwrap_or_default(),
+        );
+        let asset_composite_model_summaries = Some(
+            model
+                .map(|model| {
+                    top_level
+                        .iter()
+                        .filter(|composite_id| !model.is_built_in_composite_model(composite_id))
+                        .filter_map(|composite_id| {
+                            record.composite_model_summary(model, composite_id)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        );
 
         Ok(DescribeAssetOutput {
             asset_id: record.id.clone(),

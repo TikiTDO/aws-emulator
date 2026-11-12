@@ -1471,7 +1471,7 @@ async fn assets_cannot_be_created_from_a_component_or_interface_model() {
 }
 
 #[tokio::test]
-async fn a_composite_model_is_reported_as_both_a_model_and_a_summary() {
+async fn a_composite_model_is_reported_once_as_a_model_or_as_a_summary() {
     let router = router();
     let (status, created) = call(
         &router,
@@ -1489,6 +1489,15 @@ async fn a_composite_model_is_reported_as_both_a_model_and_a_summary() {
                     "dataTypeSpec": "AWS/ALARM_STATE",
                     "type": {"measurement": {}},
                 }],
+            }, {
+                "name": "Setpoints",
+                "type": "CUSTOM",
+                "description": "the operator's setpoints",
+                "properties": [{
+                    "name": "Target",
+                    "dataType": "DOUBLE",
+                    "type": {"attribute": {"defaultValue": "20"}},
+                }],
             }],
         })),
     )
@@ -1504,35 +1513,50 @@ async fn a_composite_model_is_reported_as_both_a_model_and_a_summary() {
     let summaries = described["assetModelCompositeModelSummaries"]
         .as_array()
         .unwrap_or_else(|| panic!("no assetModelCompositeModelSummaries in {described}"));
+    // Each immediate child is reported ONCE: `assetModelCompositeModels` is "the
+    // list of built-in composite models for the asset model, such as those with
+    // those of type AWS/ALARMS", the summaries "the list of the immediate child
+    // custom composite model summaries".
     assert_eq!(
         (models.len(), summaries.len()),
         (1, 1),
-        "the two views of one stored composite model must agree in length: {described}"
+        "the built-in composite model belongs to assetModelCompositeModels and the custom \
+         one to the summaries: {described}"
+    );
+    assert_eq!(
+        (models[0]["name"].as_str(), summaries[0]["name"].as_str()),
+        (Some("HighTemp"), Some("Setpoints")),
+        "each composite model must be reported by the member its type belongs to: {described}"
     );
     let id = models[0]["id"].as_str().unwrap_or("");
     assert!(
         is_modelled_id(id),
         "the composite model must carry a minted UUID id, got {id:?}"
     );
-    // Each row is one member the two views share; they must not disagree.
-    for member in ["id", "name", "type", "description", "externalId"] {
-        assert_eq!(
-            models[0].get(member),
-            summaries[0].get(member),
-            "case {member:?}: the model and its summary disagree in {described}"
-        );
-    }
+    let custom_id = summaries[0]["id"].as_str().unwrap_or("");
+    assert!(
+        is_modelled_id(custom_id),
+        "the custom composite model must carry a minted UUID id, got {custom_id:?}"
+    );
+    // The summary's path starts at the ROOT of the asset model and ends at the
+    // composite model: "the path that includes all the pieces that make up the
+    // composite model".
+    let path = summaries[0]["path"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no path on the summary in {described}"));
     assert_eq!(
-        summaries[0]["path"][0]["id"].as_str().unwrap_or(""),
-        id,
-        "the summary's path must start at the composite model itself: {described}"
+        path.iter()
+            .map(|segment| segment["id"].as_str().unwrap_or(""))
+            .collect::<Vec<&str>>(),
+        vec![model_id.as_str(), custom_id],
+        "the summary's path must run from the asset model root to the composite model: \
+         {described}"
     );
     assert_eq!(
         models[0]["properties"][0]["dataTypeSpec"], "AWS/ALARM_STATE",
         "the stored composite property is not reported in {described}"
     );
 
-    // A model with no composite models reports neither view.
     // `excludeProperties=true` withholds property definitions by EVERY route: the
     // top-level list and each composite model's own properties.
     let (status, bare) = call(
@@ -1563,6 +1587,8 @@ async fn a_composite_model_is_reported_as_both_a_model_and_a_summary() {
         "DescribeAssetModel(excludeProperties): the composite model itself is still reported: {bare}"
     );
 
+    // A model with no composite models reports both collections as present and
+    // EMPTY, so a client can tell "none" from "not reported".
     let plain_id = create_model(&router, "Plain", json!([])).await;
     let (status, plain) = call(&router, "GET", &format!("/asset-models/{plain_id}"), None).await;
     assert_eq!(status, 200, "DescribeAssetModel(plain): got {status} {plain}");
@@ -1570,9 +1596,11 @@ async fn a_composite_model_is_reported_as_both_a_model_and_a_summary() {
         "assetModelCompositeModels",
         "assetModelCompositeModelSummaries",
     ] {
-        assert!(
-            plain.get(member).is_none_or(Value::is_null),
-            "case {member:?}: a model with no composite models must report none, got {plain}"
+        assert_eq!(
+            plain[member].as_array().map(Vec::len),
+            Some(0),
+            "case {member:?}: a model with no composite models must report an empty list, \
+             got {plain}"
         );
     }
 }

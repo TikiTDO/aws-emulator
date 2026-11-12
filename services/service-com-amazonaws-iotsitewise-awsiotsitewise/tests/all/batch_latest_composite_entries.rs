@@ -285,10 +285,10 @@ async fn an_entry_a_previous_page_processed_is_skipped_with_the_status_it_resolv
 
     // The id of the composite model declared with the asset model, read back
     // from the service rather than assumed: the create answers only the model's
-    // id and status.
+    // id and status. A CUSTOM composite model is the one the summaries name.
     let (status, model) = call(&router, "GET", &format!("/asset-models/{model_id}"), None).await;
     assert_eq!(status, 200, "DescribeAssetModel: got {status} {model}");
-    let declared_id = model["assetModelCompositeModels"]
+    let declared_id = model["assetModelCompositeModelSummaries"]
         .as_array()
         .unwrap_or_else(|| panic!("no composite models in {model}"))
         .iter()
