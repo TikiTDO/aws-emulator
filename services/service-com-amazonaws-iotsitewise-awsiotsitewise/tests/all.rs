@@ -32,6 +32,13 @@
 #[path = "all/asset_model_definition_validation.rs"]
 mod asset_model_definition_validation;
 
+// `asset_delete_reference_cleanup` is declared HERE, beside the suite above, for
+// the reason the notes above give: the sorted list and the END of this file are
+// both stretches every concurrent iotsitewise change puts a declaration of its
+// own in. Fold it into the list once the churn settles.
+#[path = "all/asset_delete_reference_cleanup.rs"]
+mod asset_delete_reference_cleanup;
+
 // `dataset_export_job_token_scope` is declared HERE, beside the suite above, for
 // the reason the notes above give: the sorted list and the END of this file are
 // both stretches every concurrent iotsitewise change puts a declaration of its

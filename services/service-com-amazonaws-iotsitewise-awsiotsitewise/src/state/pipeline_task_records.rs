@@ -699,6 +699,13 @@ impl ExecutionRecord {
         target_resource_addresses(&self.target_resource, resource_type, resource_id)
     }
 
+    /// `true` when this execution NAMES the asset `asset_id` — through its
+    /// target resource or through the resource it resolves to, as
+    /// [`references_asset`] states it for the action it runs too.
+    pub fn references_asset(&self, asset_id: &str) -> bool {
+        references_asset(&self.target_resource, self.resolve_to.as_ref(), asset_id)
+    }
+
     /// This execution's status at `now`: the state [`Self::state`] derives, which
     /// is the one member the modelled status carries.
     ///

@@ -269,7 +269,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // The asset and everything keyed off it (its property series, its aliases, its
-        // hierarchy associations) go away, so no later read can still see it.
+        // hierarchy associations, its project memberships, and the actions and
+        // executions that name it) go away, so no later read can still see it.
         store.forget_asset(&id);
 
         // The token is spent only now that the delete has succeeded: a refused

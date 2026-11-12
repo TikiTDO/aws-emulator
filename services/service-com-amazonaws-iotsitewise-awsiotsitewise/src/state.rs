@@ -1268,6 +1268,24 @@ pub fn target_resource_addresses(
     addressed == Some(resource_id)
 }
 
+/// `true` when either reference an action or an execution carries to a resource
+/// of this service — the resource it was taken ON (`targetResource`) and the
+/// detailed resource it RESOLVES TO (`resolveTo`) — names the asset `asset_id`.
+///
+/// One place, so the records that name one asset are the same set wherever that
+/// question is asked: a `TargetResource` names an asset or a computation model,
+/// and a record of either kind may in addition resolve to one asset, so an asset
+/// is named in two places and a record naming it in either of them is a record
+/// OF that asset.
+pub fn references_asset(
+    target_resource: &TargetResource,
+    resolve_to: Option<&ResolveTo>,
+    asset_id: &str,
+) -> bool {
+    target_resource_addresses(target_resource, TARGET_RESOURCE_TYPE_ASSET, asset_id)
+        || resolve_to.is_some_and(|resolve_to| resolve_to.asset_id == asset_id)
+}
+
 /// One action taken on a target resource: what `ListActions` summarises, keyed
 /// by its own `actionId` in
 /// [`ComAmazonawsIotsitewiseAwsiotsitewiseState::actions`].
@@ -1306,6 +1324,13 @@ impl ActionRecord {
     /// target resource — the pairing `ListActions` scopes its listing by.
     pub fn targets(&self, resource_type: &str, resource_id: &str) -> bool {
         target_resource_addresses(&self.target_resource, resource_type, resource_id)
+    }
+
+    /// `true` when this action NAMES the asset `asset_id` — through its target
+    /// resource or through the resource it resolves to, as
+    /// [`references_asset`] states it.
+    pub fn references_asset(&self, asset_id: &str) -> bool {
+        references_asset(&self.target_resource, self.resolve_to.as_ref(), asset_id)
     }
 
     /// This action as the summary a listing reports for it.

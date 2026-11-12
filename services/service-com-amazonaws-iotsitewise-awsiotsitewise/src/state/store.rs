@@ -1973,8 +1973,9 @@ impl ComAmazonawsIotsitewiseAwsiotsitewiseState {
     }
 
     /// Forget an asset and everything keyed off it: its external-id entry, its
-    /// property series, its property aliases, its hierarchy associations and its
-    /// membership of every IoT SiteWise Monitor project.
+    /// property series, its property aliases, its hierarchy associations, its
+    /// membership of every IoT SiteWise Monitor project, and the actions and
+    /// executions that name it.
     pub fn forget_asset(&mut self, asset_id: &str) -> Option<AssetRecord> {
         let record = self.assets.remove(asset_id)?;
         if let Some(external) = record.external_id.as_deref() {
@@ -1998,6 +1999,19 @@ impl ComAmazonawsIotsitewiseAwsiotsitewiseState {
         for project in self.projects.values_mut() {
             project.asset_ids.remove(asset_id);
         }
+        // An action and its execution each NAME the asset they were taken on or
+        // the one they resolved to, and the write that records them resolves
+        // both references against this store first, so an asset this service no
+        // longer holds can leave neither record behind for a read or a listing
+        // to report, or for the [`MAX_ACTIONS`] budget to count. The reference
+        // both sides are recognised by is the one [`references_asset`] states,
+        // so what goes with the asset is exactly what was reported for it — the
+        // cleanup [`Self::forget_computation_model`] does for the other kind of
+        // resource those same records name.
+        self.actions
+            .retain(|_, action| !action.references_asset(asset_id));
+        self.executions
+            .retain(|_, execution| !execution.references_asset(asset_id));
         Some(record)
     }
 
