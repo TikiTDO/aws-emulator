@@ -180,13 +180,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(app_not_found(&input.app_arn));
         }
 
-        // Publishing freezes what the draft holds, so a draft holding nothing has
-        // nothing to publish. `app_version` answers `None` for a draft nobody has
-        // written to yet, which is the same emptiness as a draft whose contents were
-        // all removed again.
+        // Publishing freezes what the draft's app template maps, and an app
+        // template is publishable only once it maps at least one RESOURCE: the
+        // Application Components a draft holds only group resources, so a draft
+        // with none describes no application to address or assess. `app_version`
+        // answers `None` for a draft nobody has written to yet, which maps no
+        // resource just as a draft whose resources were all removed again does.
         let draft = store
             .app_version(&input.app_arn, crate::state::DRAFT_APP_VERSION)
-            .filter(|draft| !draft.is_empty())
+            .filter(|draft| draft.maps_a_resource())
             .cloned();
         let Some(draft) = draft else {
             return Err(empty_draft_conflict());
@@ -248,11 +250,12 @@ fn app_not_found(app_arn: &str) -> PublishAppVersionError {
     .into()
 }
 
-/// A 409 `ConflictException` for a draft with nothing to publish: the publish is
-/// refused rather than minting an empty version a later read would report.
+/// A 409 `ConflictException` for a draft whose app template maps no resource: the
+/// publish is refused rather than minting a version a later read would report as an
+/// application made of nothing.
 ///
 /// The refusal names the TEMPLATE requirement the request fails to meet — an app
-/// template is publishable only once it carries something — and carries no part of
+/// template is publishable only once it maps a resource — and carries no part of
 /// the request: the wording is the same for every application, so a client matching
 /// it reads this conflict apart from the other conflicts this operation models.
 fn empty_draft_conflict() -> PublishAppVersionError {

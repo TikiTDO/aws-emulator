@@ -257,16 +257,20 @@ struct Breakdown {
     unmapped: &'static [&'static str],
 }
 
-/// The table. The rows differ along what the rule generalises over: how many
-/// disruption types the policy states objectives for and which, how much the
-/// published version maps, how many of its components have nothing to recover them
-/// (so the compliance component's outstanding count runs 0, 1, 2, 3), and whether
-/// there is a policy to judge the application against at all.
+/// The table. The rows differ along what the rule generalises over: which disruption
+/// types the policy states objectives for beyond the three every policy has to state,
+/// how much the published version maps, how many of its components have nothing to
+/// recover them (so the compliance component's outstanding count runs 0, 1, 2, 3),
+/// and whether there is a policy to judge the application against at all.
 fn breakdown_table() -> Vec<Breakdown> {
     vec![
         Breakdown {
-            label: "one objective, every component mapped",
-            objectives: Some(json!({"AZ": {"rtoInSecs": 3600, "rpoInSecs": 3600}})),
+            label: "the required objectives, every component mapped",
+            objectives: Some(json!({
+                "Software": {"rtoInSecs": 3600, "rpoInSecs": 3600},
+                "Hardware": {"rtoInSecs": 3600, "rpoInSecs": 3600},
+                "AZ": {"rtoInSecs": 3600, "rpoInSecs": 3600},
+            })),
             mapped: &["compute-tier"],
             unmapped: &[],
         },
@@ -282,28 +286,37 @@ fn breakdown_table() -> Vec<Breakdown> {
             unmapped: &[],
         },
         Breakdown {
-            label: "one objective, one component with nothing mapped to it",
-            objectives: Some(json!({"Region": {"rtoInSecs": 86400, "rpoInSecs": 3600}})),
+            label: "the multi-Region objective beside the required three, one component \
+                    with nothing mapped to it",
+            objectives: Some(json!({
+                "Software": {"rtoInSecs": 86400, "rpoInSecs": 3600},
+                "Hardware": {"rtoInSecs": 86400, "rpoInSecs": 3600},
+                "AZ": {"rtoInSecs": 86400, "rpoInSecs": 3600},
+                "Region": {"rtoInSecs": 86400, "rpoInSecs": 3600},
+            })),
             mapped: &["compute-tier"],
             unmapped: &["empty-tier"],
         },
         Breakdown {
-            label: "two objectives, two components with nothing mapped to them",
+            label: "the required objectives, two components with nothing mapped to them",
             objectives: Some(json!({
                 "Software": {"rtoInSecs": 120, "rpoInSecs": 60},
-                "Region": {"rtoInSecs": 86400, "rpoInSecs": 3600},
+                "Hardware": {"rtoInSecs": 600, "rpoInSecs": 300},
+                "AZ": {"rtoInSecs": 86400, "rpoInSecs": 3600},
             })),
             mapped: &["compute-tier"],
             unmapped: &["empty-tier", "other-empty-tier"],
         },
         Breakdown {
-            label: "three objectives, nothing mapped to any of three components",
+            label: "three objectives, three of four components with nothing mapped to them",
             objectives: Some(json!({
                 "Software": {"rtoInSecs": 0, "rpoInSecs": 0},
                 "Hardware": {"rtoInSecs": 300, "rpoInSecs": 150},
                 "AZ": {"rtoInSecs": 1800, "rpoInSecs": 900},
             })),
-            mapped: &[],
+            // An app template is publishable only once it maps a resource, so even
+            // the row whose point is unmapped components maps one.
+            mapped: &["compute-tier"],
             unmapped: &["empty-tier", "other-empty-tier", "third-empty-tier"],
         },
         Breakdown {

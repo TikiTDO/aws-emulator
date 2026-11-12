@@ -195,6 +195,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
+        // `type` has to name an Application Component type: the component is what
+        // groups the application's resources into a tier the service assesses, so a
+        // value naming no tier of its own — an AWS resource type, say — is refused
+        // rather than stored, before the component becomes part of the draft.
+        if !crate::state::is_app_component_type(&input.r#type) {
+            return Err(invalid_request(
+                crate::state::invalid_app_component_type_message(&input.r#type),
+            ));
+        }
+
         let mut store = state.lock();
 
         // The Application Component belongs to an application, so the application

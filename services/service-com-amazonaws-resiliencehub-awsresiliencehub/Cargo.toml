@@ -36,6 +36,16 @@ uuid = { version = "1", features = ["v4"] }
 # edge of this package in Cargo.lock (which does not distinguish a dev dependency), so
 # moving it out of [dev-dependencies] leaves the lock file untouched.
 sha2 = { workspace = true }
+# The owning-service reads `state::mapped_resources` resolves a mapping's physical
+# resource through, over the emulator's own in-process callback: the object store's
+# bucket listing, the queue's url, the topic's attributes, the table's and the
+# function's description. Each is that service's own read, so a mapping is refused
+# only where the component owning the resource says it holds none.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-sqs = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-sns = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-dynamodb = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-lambda = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

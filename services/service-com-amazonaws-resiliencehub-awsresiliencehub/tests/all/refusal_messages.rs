@@ -26,7 +26,7 @@
 
 use serde_json::{json, Value};
 
-use super::application_lifecycle::{create_a_policy, emulator, post, Reply, ACCOUNT, REGION};
+use super::application_lifecycle::{create_a_policy, emulator, post, required_objectives, Reply, ACCOUNT, REGION};
 use smithy_server_runtime::MultiServiceRouter;
 
 /// The `@pattern` of the `Arn` shape, transcribed from the model
@@ -176,7 +176,7 @@ async fn a_value_outside_a_modelled_pattern_is_refused_with_the_constraint_repor
             body: json!({
                 "policyName": "policy!name",
                 "tier": "Important",
-                "policy": {"AZ": {"rtoInSecs": 3600, "rpoInSecs": 3600}},
+                "policy": required_objectives(3600),
             }),
             pattern: ENTITY_NAME_PATTERN,
             value: "policy!name".to_string(),

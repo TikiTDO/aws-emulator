@@ -181,28 +181,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The boundary constraint validator already refused every modeled
         // constraint on this input, INCLUDING each enum member's value set and
         // `FailurePolicy`'s `@range(min: 0)` on rtoInSecs/rpoInSecs. What it does
-        // NOT walk is a map's KEY, so `DisruptionPolicy`'s `DisruptionType` keys are
-        // checked here.
-        // NOT the model's: `DisruptionPolicy` carries no `@length(min: 1)`, so this
-        // is the service's own rule — a resiliency policy that names no disruption
-        // type states no objective at all.
-        if input.policy.is_empty() {
-            return Err(invalid(
-                "policy: a resiliency policy must carry a failure policy for at least one \
-                 disruption type",
-            ));
-        }
-        // Sorted, so the refusal a request earns does not depend on hash order.
-        let mut disruption_types: Vec<&String> = input.policy.keys().collect();
-        disruption_types.sort();
-        for disruption_type in disruption_types {
-            if let Some(message) = crate::state::enum_violation(
-                &format!("policy.{disruption_type}"),
-                disruption_type,
-                DISRUPTION_TYPE_VALUES,
-            ) {
-                return Err(invalid(message));
-            }
+        // NOT walk is a map's KEY, so `DisruptionPolicy`'s `DisruptionType` keys —
+        // and the service's own rule that a policy states at least one objective —
+        // are judged by the shared rule both writers of a disruption set use.
+        if let Some(message) = crate::state::disruption_policy_violation(&input.policy) {
+            return Err(invalid(message));
         }
 
         let region = crate::state::request_region(ctx.parts());

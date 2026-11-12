@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 use service_com_amazonaws_resiliencehub_awsresiliencehub::ops::types::{
-    APP_ASSESSMENT_SCHEDULE_TYPE_VALUES, DATA_LOCATION_CONSTRAINT_VALUES, DISRUPTION_TYPE_VALUES,
-    EVENT_TYPE_VALUES, PERMISSION_MODEL_TYPE_VALUES, RESILIENCY_POLICY_TIER_VALUES,
+    APP_ASSESSMENT_SCHEDULE_TYPE_VALUES, DATA_LOCATION_CONSTRAINT_VALUES, EVENT_TYPE_VALUES,
+    PERMISSION_MODEL_TYPE_VALUES, RESILIENCY_POLICY_TIER_VALUES,
 };
 use service_com_amazonaws_resiliencehub_awsresiliencehub::state::{
     ComAmazonawsResiliencehubAwsresiliencehubState, MAX_APPS, MAX_IDEMPOTENCY_TOKENS,
@@ -136,6 +136,30 @@ pub(crate) async fn delete(router: &MultiServiceRouter, target: &str) -> Reply {
     call(router, REGION, "DELETE", target, None).await
 }
 
+/// The failure types every resiliency policy has to state an objective for, as the
+/// modelled `DisruptionType` enum names them: the application (`Software`),
+/// infrastructure (`Hardware`) and Availability Zone objectives. `Region`, the
+/// fourth value that enum carries, is the multi-Region objective a policy states
+/// only when it has one.
+const REQUIRED_DISRUPTIONS: [&str; 3] = ["Software", "Hardware", "AZ"];
+
+/// The `policy` map a suite that is not about the disruption set itself submits:
+/// an objective for each failure type a resiliency policy has to state — the
+/// application (`Software`), infrastructure (`Hardware`) and Availability Zone
+/// objectives the service requires of every policy — each with `seconds` as its
+/// RTO and its RPO.
+///
+/// The multi-Region objective (`Region`, the fourth value the modelled
+/// `DisruptionType` enum carries) is stated only by a policy that has one, so it is
+/// not here; a row that is about the disruption set adds it itself.
+pub(crate) fn required_objectives(seconds: i64) -> Value {
+    json!({
+        "Software": {"rtoInSecs": seconds, "rpoInSecs": seconds},
+        "Hardware": {"rtoInSecs": seconds, "rpoInSecs": seconds},
+        "AZ": {"rtoInSecs": seconds, "rpoInSecs": seconds},
+    })
+}
+
 /// A resiliency policy to point applications at, and its ARN.
 pub(crate) async fn create_a_policy(router: &MultiServiceRouter, policy_name: &str) -> String {
     let reply = post(
@@ -144,7 +168,7 @@ pub(crate) async fn create_a_policy(router: &MultiServiceRouter, policy_name: &s
         &json!({
             "policyName": policy_name,
             "tier": "Important",
-            "policy": {"AZ": {"rtoInSecs": 3600, "rpoInSecs": 3600}},
+            "policy": required_objectives(3600),
         }),
     )
     .await;
@@ -660,16 +684,23 @@ async fn resiliency_policies_round_trip_for_every_modeled_enum_value() {
     // `ops::types::shared_types::*_VALUES`.
     for (index, tier) in RESILIENCY_POLICY_TIER_VALUES.iter().enumerate() {
         let constraint = DATA_LOCATION_CONSTRAINT_VALUES[index % DATA_LOCATION_CONSTRAINT_VALUES.len()];
-        // A different-sized slice of the disruption catalogue per row.
-        let disruptions = &DISRUPTION_TYPE_VALUES[..=(index % DISRUPTION_TYPE_VALUES.len())];
+        // Every policy states the three failure types the service requires; the
+        // rows differ in whether the multi-Region objective is stated beside them.
         let mut policy = serde_json::Map::new();
-        for (offset, disruption) in disruptions.iter().enumerate() {
+        for (offset, disruption) in REQUIRED_DISRUPTIONS.iter().enumerate() {
             policy.insert(
                 (*disruption).to_string(),
                 json!({"rtoInSecs": 60 * (offset as i64 + 1), "rpoInSecs": 30 * (offset as i64 + 1)}),
             );
         }
-        let case = format!("tier {tier}, {} disruption types", disruptions.len());
+        let states_region = index % 2 == 1;
+        if states_region {
+            policy.insert(
+                "Region".to_string(),
+                json!({"rtoInSecs": 86_400, "rpoInSecs": 3_600}),
+            );
+        }
+        let case = format!("tier {tier}, {} disruption types", policy.len());
         let request = json!({
             "policyName": format!("policy-{}", tier.to_lowercase()),
             "policyDescription": format!("the {tier} tier"),
@@ -814,7 +845,7 @@ async fn an_enum_value_outside_the_modeled_set_is_refused() {
             json!({
                 "policyName": "enum-bad-tier",
                 "tier": "Platinum",
-                "policy": {"AZ": {"rtoInSecs": 1, "rpoInSecs": 1}},
+                "policy": required_objectives(1),
             }),
             Some("Value 'Platinum' at 'tier' failed to satisfy constraint"),
         ),
@@ -825,7 +856,7 @@ async fn an_enum_value_outside_the_modeled_set_is_refused() {
                 "policyName": "enum-bad-locality",
                 "tier": "Critical",
                 "dataLocationConstraint": "SameRack",
-                "policy": {"AZ": {"rtoInSecs": 1, "rpoInSecs": 1}},
+                "policy": required_objectives(1),
             }),
             Some("Value 'SameRack' at 'dataLocationConstraint' failed to satisfy constraint"),
         ),
@@ -837,13 +868,13 @@ async fn an_enum_value_outside_the_modeled_set_is_refused() {
                 "tier": "Critical",
                 "policy": {"Meteorite": {"rtoInSecs": 1, "rpoInSecs": 1}},
             }),
-            Some("Value 'Meteorite' at 'policy.Meteorite' failed to satisfy constraint"),
+            Some("FailureType Meteorite does not exist"),
         ),
         (
             "CreateResiliencyPolicy empty policy",
             "/create-resiliency-policy",
             json!({"policyName": "enum-empty-policy", "tier": "Critical", "policy": {}}),
-            Some("policy: a resiliency policy must carry a failure policy for at least one"),
+            Some("FailureType SOFTWARE does not exist"),
         ),
         (
             "CreateResiliencyPolicy negative rtoInSecs",
@@ -1002,13 +1033,13 @@ async fn a_replayed_client_token_returns_the_first_resource() {
             json!({
                 "policyName": "idem-policy",
                 "tier": "Critical",
-                "policy": {"AZ": {"rtoInSecs": 10, "rpoInSecs": 10}},
+                "policy": required_objectives(10),
                 "clientToken": "token-policy-1",
             }),
             json!({
                 "policyName": "idem-policy",
                 "tier": "NonCritical",
-                "policy": {"AZ": {"rtoInSecs": 10, "rpoInSecs": 10}},
+                "policy": required_objectives(10),
                 "clientToken": "token-policy-1",
             }),
             "policy",
@@ -1115,7 +1146,7 @@ async fn a_replayed_client_token_returns_the_first_resource() {
         "policyDescription": "the first call",
         "tier": "Critical",
         "dataLocationConstraint": "AnyLocation",
-        "policy": {"AZ": {"rtoInSecs": 10, "rpoInSecs": 10}},
+        "policy": required_objectives(10),
         "tags": {"env": "test"},
         "clientToken": "token-policy-members",
     });
@@ -1132,7 +1163,12 @@ async fn a_replayed_client_token_returns_the_first_resource() {
         (
             "policy",
             "policy",
-            json!({"AZ": {"rtoInSecs": 10, "rpoInSecs": 10}, "Region": {"rtoInSecs": 60, "rpoInSecs": 60}}),
+            json!({
+                "Software": {"rtoInSecs": 10, "rpoInSecs": 10},
+                "Hardware": {"rtoInSecs": 10, "rpoInSecs": 10},
+                "AZ": {"rtoInSecs": 10, "rpoInSecs": 10},
+                "Region": {"rtoInSecs": 60, "rpoInSecs": 60},
+            }),
         ),
         ("tags", "tags", json!({"env": "prod"})),
     ] {
@@ -1219,7 +1255,7 @@ async fn a_minted_arn_carries_a_region_the_model_accepts() {
             Some(&json!({
                 "policyName": format!("region-policy-{index}"),
                 "tier": "Critical",
-                "policy": {"AZ": {"rtoInSecs": 1, "rpoInSecs": 1}},
+                "policy": required_objectives(1),
             })),
         )
         .await;
@@ -1284,7 +1320,7 @@ async fn each_caller_driven_store_is_bounded() {
             &json!({
                 "policyName": format!("cap-policy-{index}"),
                 "tier": "Critical",
-                "policy": {"AZ": {"rtoInSecs": 1, "rpoInSecs": 1}},
+                "policy": required_objectives(1),
             }),
         )
         .await
@@ -1296,7 +1332,7 @@ async fn each_caller_driven_store_is_bounded() {
         &json!({
             "policyName": "cap-policy-overflow",
             "tier": "Critical",
-            "policy": {"AZ": {"rtoInSecs": 1, "rpoInSecs": 1}},
+            "policy": required_objectives(1),
         }),
     )
     .await

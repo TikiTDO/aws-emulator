@@ -185,35 +185,30 @@ struct PolicyCase {
 /// Catalogue sources: `DisruptionType`'s values in the order the model declares them
 /// (`smithy_query query="shape" shape="DisruptionType"`: Software, Hardware, AZ,
 /// Region — ascending in the redundancy recovering from that scope needs) and
-/// `EstimatedCostTier`'s (L1..L4, ascending in cost). The rows differ along what the
-/// rule generalises over: which scopes the policy names, how many, whether the
-/// optional members are present, and how tight the objectives are.
+/// `EstimatedCostTier`'s (L1..L4, ascending in cost). Every policy states the three
+/// failure types a policy has to carry, so the rows differ along the rest of what the
+/// rule generalises over: whether the multi-Region objective is stated as well,
+/// whether the optional members are present, and how tight the objectives are.
 #[tokio::test]
 async fn a_policy_reports_its_constraint_cost_tier_and_tags() {
     let router = emulator();
 
     let table = [
         PolicyCase {
-            label: "a software objective alone, nothing optional",
-            policy: || json!({"Software": {"rtoInSecs": 86400, "rpoInSecs": 86400}}),
-            constraint: None,
-            tags: None,
-            expected_cost_tier: "L1",
-        },
-        PolicyCase {
-            label: "software and hardware",
+            label: "the required objectives, nothing optional",
             policy: || {
                 json!({
-                    "Software": {"rtoInSecs": 600, "rpoInSecs": 300},
-                    "Hardware": {"rtoInSecs": 1200, "rpoInSecs": 600},
+                    "Software": {"rtoInSecs": 86400, "rpoInSecs": 86400},
+                    "Hardware": {"rtoInSecs": 86400, "rpoInSecs": 86400},
+                    "AZ": {"rtoInSecs": 86400, "rpoInSecs": 86400},
                 })
             },
             constraint: None,
             tags: None,
-            expected_cost_tier: "L2",
+            expected_cost_tier: "L3",
         },
         PolicyCase {
-            label: "software, hardware and AZ, with a constraint and tags",
+            label: "the required objectives, with a constraint and tags",
             policy: || {
                 json!({
                     "Software": {"rtoInSecs": 600, "rpoInSecs": 300},
@@ -240,15 +235,15 @@ async fn a_policy_reports_its_constraint_cost_tier_and_tags() {
             expected_cost_tier: "L4",
         },
         PolicyCase {
-            label: "an AZ objective alone, the cheaper scopes unstated",
-            policy: || json!({"AZ": {"rtoInSecs": 60, "rpoInSecs": 30}}),
-            constraint: Some("AnyLocation"),
-            tags: None,
-            expected_cost_tier: "L3",
-        },
-        PolicyCase {
-            label: "a region objective alone, at the bottom of the modelled range",
-            policy: || json!({"Region": {"rtoInSecs": 0, "rpoInSecs": 0}}),
+            label: "every disruption type at the bottom of the modelled range",
+            policy: || {
+                json!({
+                    "Software": {"rtoInSecs": 0, "rpoInSecs": 0},
+                    "Hardware": {"rtoInSecs": 0, "rpoInSecs": 0},
+                    "AZ": {"rtoInSecs": 0, "rpoInSecs": 0},
+                    "Region": {"rtoInSecs": 0, "rpoInSecs": 0},
+                })
+            },
             constraint: None,
             tags: Some(|| json!({"only": "tag"})),
             expected_cost_tier: "L4",
@@ -323,21 +318,26 @@ async fn a_policy_reports_its_constraint_cost_tier_and_tags() {
 
 /// The cost tier follows the policy's broadest disruption scope, not how tight its
 /// objectives are: one disruption set answers one tier whether its RTO/RPO values
-/// are seconds or a day apart.
+/// are seconds or a day apart. The two sets a policy can state differ in the one
+/// scope that is optional, so they must earn DIFFERENT tiers while each set earns
+/// one tier across both magnitudes.
 #[tokio::test]
 async fn the_cost_tier_follows_the_disruption_scope_not_the_objective_magnitude() {
     let router = emulator();
 
     // Each row: the disruption types the policy states objectives for, paired with
-    // the two magnitudes the same set is submitted at.
-    let scope_sets: [&[&str]; 4] = [
-        &["Software"],
-        &["Software", "Hardware"],
-        &["Hardware", "AZ"],
-        &["AZ", "Region"],
+    // the two magnitudes the same set is submitted at. Every set states the three
+    // failure types a policy has to carry (the application, infrastructure and
+    // Availability Zone objectives), so the rows differ in whether the multi-Region
+    // objective is stated beside them.
+    let scope_sets: [&[&str]; 2] = [
+        &["Software", "Hardware", "AZ"],
+        &["Software", "Hardware", "AZ", "Region"],
     ];
     let magnitudes = [(1, 0), (86400, 43200)];
 
+    // The tier each set earned, so the two sets can be compared at the end.
+    let mut earned: Vec<String> = Vec::new();
     for (index, scopes) in scope_sets.iter().enumerate() {
         let mut tiers: Vec<String> = Vec::new();
         for (magnitude_index, (rto, rpo)) in magnitudes.iter().enumerate() {
@@ -379,11 +379,22 @@ async fn the_cost_tier_follows_the_disruption_scope_not_the_objective_magnitude(
             "case {scopes:?}: one disruption set must earn one cost tier whatever the \
              objectives, got {tiers:?}"
         );
+        earned.push(tiers.remove(0));
     }
+    // Not vacuous: the set that states the optional scope earns a different tier from
+    // the one that does not, so the equalities above are not one fixed answer.
+    assert_ne!(
+        earned[0], earned[1],
+        "the broader disruption set must earn a different cost tier, got {earned:?}"
+    );
 }
 
-/// Add one Application Component to `app_arn`'s draft, so there is something to
-/// publish.
+/// Add one Application Component to `app_arn`'s draft and map one physical
+/// resource into it, so the draft's app template maps the resource a publish
+/// requires.
+///
+/// The resource is bound to the AppCommon Application Component every app version
+/// already carries, so this adds no component other than `id`.
 async fn add_a_component(router: &MultiServiceRouter, app_arn: &str, id: &str) {
     let reply = post(
         router,
@@ -393,6 +404,19 @@ async fn add_a_component(router: &MultiServiceRouter, app_arn: &str, id: &str) {
             "id": id,
             "name": id,
             "type": "AWS::ResilienceHub::ComputeAppComponent",
+        }),
+    )
+    .await;
+    reply.ok(id);
+    let reply = post(
+        router,
+        "/create-app-version-resource",
+        &json!({
+            "appArn": app_arn,
+            "logicalResourceId": {"identifier": format!("{id}-resource")},
+            "physicalResourceId": format!("{id}-queue"),
+            "resourceType": "AWS::SQS::Queue",
+            "appComponents": ["appcommon"],
         }),
     )
     .await;

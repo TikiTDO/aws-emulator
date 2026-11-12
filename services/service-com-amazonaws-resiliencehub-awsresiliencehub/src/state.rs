@@ -2,9 +2,11 @@
 
 //! Engine state for the com-amazonaws-resiliencehub-awsresiliencehub service.
 
+pub mod mapped_resources;
+
 use crate::ops::types::{
     App, AppAssessment, AppComponent, FailurePolicy, LogicalResourceId, PhysicalResource,
-    ResiliencyPolicy, ESTIMATED_COST_TIER_VALUES,
+    ResiliencyPolicy, DISRUPTION_TYPE_VALUES, ESTIMATED_COST_TIER_VALUES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -238,14 +240,15 @@ pub struct AppVersionContents {
 }
 
 impl AppVersionContents {
-    /// Whether this app version holds nothing — the question
-    /// `PublishAppVersion` asks of a draft before freezing it.
+    /// Whether this app version's template maps at least one physical resource —
+    /// the precondition `PublishAppVersion` applies to a draft before freezing
+    /// it.
     ///
-    /// Every member a draft writer persists is counted here, so adding one (a
-    /// resource, an app template body) means adding it to this test rather than
-    /// to each caller of it.
-    pub fn is_empty(&self) -> bool {
-        self.app_components.is_empty() && self.resources.is_empty()
+    /// An app template describes the RESOURCES an application is made of; its
+    /// Application Components only GROUP those resources, so a version holding
+    /// components and no resource maps nothing to assess.
+    pub fn maps_a_resource(&self) -> bool {
+        !self.resources.is_empty()
     }
 
     /// The resource this version holds under `logical` — the exact
@@ -968,8 +971,9 @@ const TAG_KEY_PATTERN: &str = r#"^[^\x00-\x1f\x22]+$"#;
 /// `@pattern` — `None` when every key of `keys` is within both.
 ///
 /// The boundary constraint validator walks a map's VALUE target but not its KEY
-/// target (the same gap [`enum_violation`] covers), so a `TagMap` key reaches the
-/// handler unchecked and this is where that member's constraints are enforced.
+/// target (the same gap [`disruption_policy_violation`] covers), so a `TagMap` key
+/// reaches the handler unchecked and this is where that member's constraints are
+/// enforced.
 /// The sentence is NOT written here: it is built from the framework's own
 /// [`::smithy_server_runtime::Violation`] and rendered by
 /// `aws_smithy_schema_server::constraints::envelope`, so a handler refusal and a
@@ -1273,10 +1277,9 @@ fn mint_resource_id() -> String {
 ///
 /// The sentence is NOT written here: it is built from the framework's own
 /// [`::smithy_server_runtime::Violation`] and rendered by
-/// `aws_smithy_schema_server::constraints::envelope`, exactly as for
-/// [`enum_violation`], so a handler refusal and a boundary refusal read
-/// identically — including the `<n> items` form the framework displays a
-/// collection's length with.
+/// `aws_smithy_schema_server::constraints::envelope`, so a handler refusal and a
+/// boundary refusal read identically — including the `<n> items` form the
+/// framework displays a collection's length with.
 pub fn additional_info_violation(
     member: &str,
     additional_info: &HashMap<String, Vec<String>>,
@@ -1342,33 +1345,218 @@ pub fn mint_assessment_arn(region: &str) -> String {
     )
 }
 
-/// The refusal message for `value`, when the model's enum for `member` does not
-/// list it — `None` when it does.
+/// The namespace every Resilience Hub Application Component type is published
+/// under.
 ///
-/// The boundary constraint validator already walks every enum MEMBER of an input
-/// shape, so a handler never has to re-check one. What it does not walk is a
-/// map's KEY: `DisruptionPolicy`'s key targets the `DisruptionType` enum, and an
-/// unknown key reaches the handler. The sentence is NOT written here — it is built
-/// from the framework's own [`::smithy_server_runtime::Violation`] and rendered by
-/// `aws_smithy_schema_server::constraints::envelope`, the one place that wording
-/// lives, so a handler refusal and a boundary refusal read identically.
-pub fn enum_violation(member: &str, value: &str, allowed: &[&str]) -> Option<String> {
-    if allowed.contains(&value) {
-        return None;
-    }
-    let violation = ::smithy_server_runtime::Violation {
-        // Elided like the value: for a map KEY the path embeds caller-supplied
-        // text, so it is the same amplification vector.
-        path: elided(member),
-        kind: ::smithy_server_runtime::ViolationKind::EnumValue(
-            allowed.iter().map(|allowed| (*allowed).to_string()).collect(),
-        ),
-        // `Violation::value` must arrive ALREADY elided: the message interpolates
-        // it verbatim, and this one is a caller-supplied string of any length.
-        value: Some(elided(value)),
-        sensitive: false,
+/// `AppComponent$type` is a free-form `String255` in the model (`smithy_query
+/// query="shape" shape="AppComponent"` gives it no value set), and the types the
+/// service recognises are published instead: the Resilience Hub user guide's
+/// "Grouping resources in an AppComponent" names one type per tier — compute,
+/// database, storage, networking, message queue and the application-wide
+/// [`APP_COMMON_COMPONENT_TYPE`] — and every one of them is this namespace, a
+/// tier name, and [`APP_COMPONENT_TYPE_SUFFIX`]. The tier list grows as the
+/// service recognises more tiers, so what is checked is the type NAMESPACE the
+/// service publishes its own component types in: a type outside it — an AWS
+/// resource type, or a word of the caller's own — names no Application
+/// Component type at all.
+const APP_COMPONENT_TYPE_NAMESPACE: &str = "AWS::ResilienceHub::";
+
+/// The suffix every type in that namespace ends in; see
+/// [`APP_COMPONENT_TYPE_NAMESPACE`].
+const APP_COMPONENT_TYPE_SUFFIX: &str = "AppComponent";
+
+/// Whether `candidate` names a Resilience Hub Application Component type — the
+/// question `CreateAppVersionAppComponent` asks of the `type` it is handed, and
+/// the one every writer of an `AppComponent$type` has to ask.
+pub fn is_app_component_type(candidate: &str) -> bool {
+    let Some(tier) = candidate.strip_prefix(APP_COMPONENT_TYPE_NAMESPACE) else {
+        return false;
     };
-    ::aws_smithy_schema_server::constraints::envelope(std::slice::from_ref(&violation))
+    let Some(tier) = tier.strip_suffix(APP_COMPONENT_TYPE_SUFFIX) else {
+        return false;
+    };
+    // A tier name, and nothing else: no empty tier, and no further namespace
+    // segment hiding inside one.
+    !tier.is_empty() && tier.chars().all(|character| character.is_ascii_alphanumeric())
+}
+
+/// The `ValidationException` message for a `type` that names no Application
+/// Component type, naming the value the request carried.
+pub fn invalid_app_component_type_message(candidate: &str) -> String {
+    format!("Invalid AppComponent type: {}.", elided(candidate))
+}
+
+/// The resource types Resilience Hub supports — the catalogue a `resourceType`
+/// has to name.
+///
+/// `CreateAppVersionResource$resourceType` is a free-form `String255` in the
+/// model (`smithy_query query="operation"
+/// operation="CreateAppVersionResource"`), so the set of types is published
+/// rather than modelled: these are the CloudFormation type names of the
+/// resources the Resilience Hub user guide's "Supported resources" lists, one
+/// per supported resource of each service it assesses. A type outside the
+/// catalogue names nothing this service can assess, which is why
+/// `ListUnsupportedAppVersionResources` exists for the ones a resource
+/// DISCOVERY finds — while a mapping a caller states explicitly is refused.
+pub const SUPPORTED_RESOURCE_TYPES: &[&str] = &[
+    "AWS::ApiGateway::RestApi",
+    "AWS::ApiGatewayV2::Api",
+    "AWS::AutoScaling::AutoScalingGroup",
+    "AWS::DocDB::DBCluster",
+    "AWS::DocDB::DBInstance",
+    "AWS::DocDB::DBSubnetGroup",
+    "AWS::DynamoDB::GlobalTable",
+    "AWS::DynamoDB::Table",
+    "AWS::EC2::EC2Fleet",
+    "AWS::EC2::Instance",
+    "AWS::EC2::NatGateway",
+    "AWS::EC2::Volume",
+    "AWS::ECS::Cluster",
+    "AWS::ECS::Service",
+    "AWS::EFS::FileSystem",
+    "AWS::EKS::Cluster",
+    "AWS::ElastiCache::CacheCluster",
+    "AWS::ElastiCache::ReplicationGroup",
+    "AWS::ElasticLoadBalancing::LoadBalancer",
+    "AWS::ElasticLoadBalancingV2::LoadBalancer",
+    "AWS::FSx::FileSystem",
+    "AWS::Lambda::Function",
+    "AWS::RDS::DBCluster",
+    "AWS::RDS::DBInstance",
+    "AWS::Route53::RecordSet",
+    "AWS::S3::Bucket",
+    "AWS::SNS::Topic",
+    "AWS::SQS::Queue",
+    "AWS::StepFunctions::StateMachine",
+];
+
+/// Whether `candidate` names one of the resource types this service supports;
+/// see [`SUPPORTED_RESOURCE_TYPES`].
+pub fn is_supported_resource_type(candidate: &str) -> bool {
+    SUPPORTED_RESOURCE_TYPES.contains(&candidate)
+}
+
+/// The `ValidationException` message for a `resourceType` outside
+/// [`SUPPORTED_RESOURCE_TYPES`], naming the value the request carried.
+pub fn invalid_resource_type_message(candidate: &str) -> String {
+    format!("Invalid resource type: {}", elided(candidate))
+}
+
+/// The `ValidationException` message for a mapping whose physical resource the
+/// service owning it says does not exist, naming the type and the identifier the
+/// request carried.
+///
+/// A mapping is a statement that the application depends on a resource that is
+/// REALLY there ([`mapped_resources`] is what asks its owner), so the refusal names
+/// what could not be resolved rather than only that the request was invalid.
+pub fn absent_resource_mapping_message(resource_type: &str, identifier: &str) -> String {
+    format!(
+        "Invalid resource mapping. The given resource does not exist. Resource Type: {}, \
+         Resource Id: {}",
+        elided(resource_type),
+        elided(identifier)
+    )
+}
+
+/// The failure types a resiliency policy has to state an objective for.
+///
+/// A resiliency policy is the application's recovery objective per FAILURE TYPE,
+/// and the service requires one for each of the three that every application is
+/// exposed to — an application (software) fault, an infrastructure (hardware)
+/// fault, and the loss of an Availability Zone. `Region`, the fourth value the
+/// modelled `DisruptionType` enum carries, is the multi-Region objective and is
+/// stated only by a policy that has one.
+///
+/// Listed in the order the model declares the values in, which is also the order
+/// the refusal reports a missing one in, so a policy missing several earns the same
+/// refusal every time.
+const REQUIRED_DISRUPTION_TYPES: [&str; 3] = ["Software", "Hardware", "AZ"];
+
+/// The longest an RTO or an RPO objective can be: thirty days, in seconds.
+///
+/// The model bounds a `FailurePolicy`'s objectives only from below
+/// (`smithy_query query="shape" shape="FailurePolicy"`: `rtoInSecs` and `rpoInSecs`
+/// are `@range(min: 0)` integers), so the ceiling is the service's own — the
+/// longest recovery objective Resilience Hub accepts for a failure type. One second
+/// past it is refused.
+const MAX_OBJECTIVE_SECONDS: i32 = 30 * 24 * 60 * 60;
+
+/// The refusal message for a `DisruptionPolicy` this service will not store —
+/// `None` for one it will.
+///
+/// The ONE place both writers of a disruption set (`CreateResiliencyPolicy` and
+/// `UpdateResiliencyPolicy`) ask that question, so neither can word it
+/// differently. Three rules, in the order they are judged:
+///
+/// * a map KEY outside the modelled `DisruptionType` names a failure type that
+///   does not exist — the keys are CASE-SENSITIVE, and the boundary constraint
+///   validator walks a map's VALUE target but not its KEY target, so this is
+///   where that member's value set is enforced;
+/// * a policy that states no objective for one of [`REQUIRED_DISRUPTION_TYPES`]
+///   has no failure policy for that failure type, which is the same refusal: the
+///   failure type the policy was asked for is not in it;
+/// * an objective past [`MAX_OBJECTIVE_SECONDS`] is not a recovery objective this
+///   service will hold, and the refusal names the failure type, which objective of
+///   it, and the value the request carried.
+///
+/// A missing failure type and an objective's failure type are named as the
+/// service's own `FailureType` vocabulary spells them — upper case — rather than as
+/// the `DisruptionType` key they were sent under; a key the request carried is
+/// named as it was sent.
+pub fn disruption_policy_violation(policy: &HashMap<String, FailurePolicy>) -> Option<String> {
+    // Sorted, so the refusal a request earns does not depend on hash order.
+    let mut disruption_types: Vec<&String> = policy.keys().collect();
+    disruption_types.sort();
+    if let Some(unknown) = disruption_types
+        .into_iter()
+        .find(|disruption_type| !DISRUPTION_TYPE_VALUES.contains(&disruption_type.as_str()))
+    {
+        return Some(unknown_failure_type_message(unknown));
+    }
+    if let Some(missing) = REQUIRED_DISRUPTION_TYPES
+        .iter()
+        .find(|required| !policy.contains_key(**required))
+    {
+        return Some(unknown_failure_type_message(&missing.to_ascii_uppercase()));
+    }
+    // In the order the model declares the disruption types in, so a policy with
+    // several objectives out of range earns the same refusal every time.
+    DISRUPTION_SCOPE_LADDER.iter().find_map(|disruption_type| {
+        let stated = policy.get(*disruption_type)?;
+        [
+            (OBJECTIVE_RTO, stated.rto_in_secs),
+            (OBJECTIVE_RPO, stated.rpo_in_secs),
+        ]
+        .into_iter()
+        .find(|(_, seconds)| *seconds > MAX_OBJECTIVE_SECONDS)
+        .map(|(objective, seconds)| {
+            invalid_objective_message(disruption_type, objective, seconds)
+        })
+    })
+}
+
+/// The two objectives a `FailurePolicy` states, as the service's own `FailureType`
+/// vocabulary abbreviates them in a refusal: the recovery TIME objective and the
+/// recovery POINT objective.
+const OBJECTIVE_RTO: &str = "RTO";
+/// See [`OBJECTIVE_RTO`].
+const OBJECTIVE_RPO: &str = "RPO";
+
+/// The `ValidationException` message for an objective outside the range one can
+/// carry, naming the failure type, which of its two objectives, and the value the
+/// request carried.
+pub fn invalid_objective_message(disruption_type: &str, objective: &str, seconds: i32) -> String {
+    format!(
+        "FailureType {} {objective} {seconds} seconds is invalid",
+        disruption_type.to_ascii_uppercase()
+    )
+}
+
+/// The `ValidationException` message for a failure type the submitted policy has no
+/// failure policy for: a key that names no failure type, or a required failure type
+/// the policy does not state an objective for.
+pub fn unknown_failure_type_message(disruption_type: &str) -> String {
+    format!("FailureType {} does not exist", elided(disruption_type))
 }
 
 /// The longest caller-supplied text a refusal message echoes, pinned to the
@@ -1514,9 +1702,9 @@ pub const VALIDATION_EXCEPTION_CODE: &str = "ValidationException";
 ///
 /// Only the pattern class is reworded. A violation of any OTHER modelled
 /// constraint keeps the framework's own wording, which is also what this service's
-/// handler-side refusals state (see [`enum_violation`] and
-/// [`additional_info_violation`]), so a request that breaks a non-pattern rule
-/// reads the same whichever layer judged it.
+/// handler-side refusals of a modelled constraint state (see
+/// [`additional_info_violation`] and [`tag_key_violation`]), so a request that
+/// breaks a non-pattern rule reads the same whichever layer judged it.
 pub fn pattern_constraint_report(violations: &[::smithy_server_runtime::Violation]) -> Option<String> {
     ::service_common::validation_message::pattern_constraint_report(violations)
 }

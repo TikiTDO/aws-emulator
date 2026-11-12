@@ -175,7 +175,9 @@ async fn each_resiliencehub_service_serves_its_own_path_space() {
                 uri: "https://emulator.local/create-resiliency-policy",
                 headers: &[("content-type", "application/json")],
                 body: "{\"policyName\":\"routing-check-policy\",\"tier\":\"Important\",\
-                       \"policy\":{\"AZ\":{\"rtoInSecs\":3600,\"rpoInSecs\":3600}}}",
+                       \"policy\":{\"Software\":{\"rtoInSecs\":3600,\"rpoInSecs\":3600},\
+                       \"Hardware\":{\"rtoInSecs\":3600,\"rpoInSecs\":3600},\
+                       \"AZ\":{\"rtoInSecs\":3600,\"rpoInSecs\":3600}}}",
             },
             200,
             None,

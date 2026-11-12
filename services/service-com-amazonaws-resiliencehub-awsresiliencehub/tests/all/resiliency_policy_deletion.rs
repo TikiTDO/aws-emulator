@@ -15,7 +15,9 @@
 
 use serde_json::{json, Value};
 
-use super::application_lifecycle::{create_a_policy, emulator, post, Reply, ACCOUNT, REGION};
+use super::application_lifecycle::{
+    create_a_policy, emulator, post, required_objectives, Reply, ACCOUNT, REGION,
+};
 use smithy_server_runtime::MultiServiceRouter;
 
 /// The widest `message` a `ConflictException` carries: the member targets
@@ -342,7 +344,7 @@ async fn deleting_a_policy_releases_the_client_token_its_create_recorded() {
         "clientToken": "token-reused-after-a-delete",
         "policyName": "token-policy",
         "tier": "CoreServices",
-        "policy": {"AZ": {"rtoInSecs": 60, "rpoInSecs": 60}},
+        "policy": required_objectives(60),
     });
 
     let first = post(&router, "/create-resiliency-policy", &body).await;

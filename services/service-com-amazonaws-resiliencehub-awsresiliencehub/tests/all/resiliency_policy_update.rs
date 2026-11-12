@@ -210,10 +210,14 @@ fn update_table(policy_arn: &str) -> Vec<(&'static str, Value)> {
             }),
         ),
         (
-            "a narrower disruption set, the broadest scope dropped",
+            "a narrower disruption set, the multi-Region objective dropped",
             json!({
                 "policyArn": policy_arn,
-                "policy": {"Software": {"rtoInSecs": 45, "rpoInSecs": 15}},
+                "policy": {
+                    "Software": {"rtoInSecs": 45, "rpoInSecs": 15},
+                    "Hardware": {"rtoInSecs": 90, "rpoInSecs": 30},
+                    "AZ": {"rtoInSecs": 135, "rpoInSecs": 45},
+                },
             }),
         ),
         (
@@ -232,7 +236,12 @@ fn update_table(policy_arn: &str) -> Vec<(&'static str, Value)> {
             "objectives of zero, the bottom of the modelled range",
             json!({
                 "policyArn": policy_arn,
-                "policy": {"Region": {"rtoInSecs": 0, "rpoInSecs": 0}},
+                "policy": {
+                    "Software": {"rtoInSecs": 0, "rpoInSecs": 0},
+                    "Hardware": {"rtoInSecs": 0, "rpoInSecs": 0},
+                    "AZ": {"rtoInSecs": 0, "rpoInSecs": 0},
+                    "Region": {"rtoInSecs": 0, "rpoInSecs": 0},
+                },
             }),
         ),
         (
@@ -365,7 +374,12 @@ async fn an_update_touches_only_the_policy_it_names() {
             "policyArn": target_arn,
             "policyName": "target-policy-renamed",
             "tier": "Critical",
-            "policy": {"Region": {"rtoInSecs": 10, "rpoInSecs": 5}},
+            "policy": {
+                "Software": {"rtoInSecs": 10, "rpoInSecs": 5},
+                "Hardware": {"rtoInSecs": 10, "rpoInSecs": 5},
+                "AZ": {"rtoInSecs": 10, "rpoInSecs": 5},
+                "Region": {"rtoInSecs": 10, "rpoInSecs": 5},
+            },
         }),
     )
     .await
@@ -448,10 +462,12 @@ async fn updating_a_policy_that_does_not_exist_is_a_resource_not_found() {
 /// A refused update changes nothing: the stored policy stays the one the create left.
 ///
 /// The rows are the ways a `DisruptionPolicy` the request supplies is not one this
-/// service will store — an empty entry set states no objective at all, and a key outside
-/// `DisruptionType` (whose values the model declares as Software, Hardware, AZ, Region;
-/// `smithy_query query="shape" shape="DisruptionType"`) names no disruption scope. A
-/// map's KEY is not walked by the boundary validator, so these reach the handler.
+/// service will store — a key outside `DisruptionType` (whose values the model declares
+/// as Software, Hardware, AZ, Region; `smithy_query query="shape"
+/// shape="DisruptionType"`) names no failure type, and a set that leaves out one of the
+/// failure types every policy has to state (the application, infrastructure and
+/// Availability Zone objectives) has no failure policy for it. A map's KEY is not walked
+/// by the boundary validator, so these reach the handler.
 #[tokio::test]
 async fn an_update_this_service_refuses_persists_nothing() {
     let table: Vec<(&str, Value)> = vec![
@@ -470,6 +486,17 @@ async fn an_update_this_service_refuses_persists_nothing() {
                 "Software": {"rtoInSecs": 60, "rpoInSecs": 30},
                 "Continent": {"rtoInSecs": 60, "rpoInSecs": 30},
             }),
+        ),
+        (
+            "a required failure type left out",
+            json!({
+                "Software": {"rtoInSecs": 60, "rpoInSecs": 30},
+                "AZ": {"rtoInSecs": 60, "rpoInSecs": 30},
+            }),
+        ),
+        (
+            "only the multi-Region objective",
+            json!({"Region": {"rtoInSecs": 60, "rpoInSecs": 30}}),
         ),
     ];
 

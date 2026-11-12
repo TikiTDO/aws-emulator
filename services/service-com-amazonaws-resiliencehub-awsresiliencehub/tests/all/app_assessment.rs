@@ -36,6 +36,18 @@ const REGION: &str = "us-east-1";
 /// The account id `engine::mock_account_id` mints every ARN under.
 const ACCOUNT: &str = "000000000000";
 
+/// The `policy` map a case that is not about the disruption set itself submits: an
+/// objective for each failure type a resiliency policy has to state — the
+/// application (`Software`), infrastructure (`Hardware`) and Availability Zone
+/// objectives — each with `seconds` as its RTO and its RPO.
+fn required_objectives(seconds: i64) -> Value {
+    json!({
+        "Software": {"rtoInSecs": seconds, "rpoInSecs": seconds},
+        "Hardware": {"rtoInSecs": seconds, "rpoInSecs": seconds},
+        "AZ": {"rtoInSecs": seconds, "rpoInSecs": seconds},
+    })
+}
+
 /// The `ComplianceStatus` values this suite asserts, from the enum the model gives
 /// `AppAssessment$complianceStatus` (`smithy_query query="shape"
 /// shape="ComplianceStatus"`: PolicyBreached | PolicyMet | NotApplicable |
@@ -345,15 +357,19 @@ struct Verdict {
     unmapped: &'static [&'static str],
 }
 
-/// The table. The rows differ along what the rule generalises over: how many
-/// disruption types the policy states objectives for and which, the RTO/RPO targets
-/// those objectives carry, how much the published version maps, and whether every
-/// component of it has something to recover.
+/// The table. The rows differ along what the rule generalises over: which disruption
+/// types the policy states objectives for beyond the three every policy has to state,
+/// the RTO/RPO targets those objectives carry, how much the published version maps,
+/// and whether every component of it has something to recover.
 fn verdict_table() -> Vec<Verdict> {
     vec![
         Verdict {
-            label: "one objective, every component mapped",
-            objectives: Some(json!({"AZ": {"rtoInSecs": 3600, "rpoInSecs": 3600}})),
+            label: "the required objectives, every component mapped",
+            objectives: Some(json!({
+                "Software": {"rtoInSecs": 3600, "rpoInSecs": 3600},
+                "Hardware": {"rtoInSecs": 3600, "rpoInSecs": 3600},
+                "AZ": {"rtoInSecs": 3600, "rpoInSecs": 3600},
+            })),
             mapped: &["compute-tier"],
             unmapped: &[],
         },
@@ -379,16 +395,23 @@ fn verdict_table() -> Vec<Verdict> {
             unmapped: &[],
         },
         Verdict {
-            label: "one objective, one component with nothing mapped to it",
-            objectives: Some(json!({"Region": {"rtoInSecs": 86400, "rpoInSecs": 3600}})),
+            label: "the multi-Region objective beside the required three, one component \
+                    with nothing mapped to it",
+            objectives: Some(json!({
+                "Software": {"rtoInSecs": 86400, "rpoInSecs": 3600},
+                "Hardware": {"rtoInSecs": 86400, "rpoInSecs": 3600},
+                "AZ": {"rtoInSecs": 86400, "rpoInSecs": 3600},
+                "Region": {"rtoInSecs": 86400, "rpoInSecs": 3600},
+            })),
             mapped: &["compute-tier"],
             unmapped: &["empty-tier"],
         },
         Verdict {
-            label: "two objectives, two components with nothing mapped to them",
+            label: "the required objectives, two components with nothing mapped to them",
             objectives: Some(json!({
                 "Software": {"rtoInSecs": 120, "rpoInSecs": 60},
-                "Region": {"rtoInSecs": 86400, "rpoInSecs": 3600},
+                "Hardware": {"rtoInSecs": 600, "rpoInSecs": 300},
+                "AZ": {"rtoInSecs": 86400, "rpoInSecs": 3600},
             })),
             mapped: &["compute-tier"],
             unmapped: &["empty-tier", "other-empty-tier"],
@@ -566,7 +589,7 @@ async fn an_assessment_reports_no_verdict_until_it_has_finished() {
     let policy_arn = create_a_policy(
         &router,
         "pending-policy",
-        &json!({"AZ": {"rtoInSecs": 3600, "rpoInSecs": 3600}}),
+        &required_objectives(3600),
     )
     .await;
     let app_arn = create_an_app(&router, "pending-app", Some(&policy_arn)).await;
@@ -666,7 +689,7 @@ async fn an_assessment_pins_the_published_version_it_graded() {
     let policy_arn = create_a_policy(
         &router,
         "pinning-policy",
-        &json!({"AZ": {"rtoInSecs": 3600, "rpoInSecs": 3600}}),
+        &required_objectives(3600),
     )
     .await;
     let app_arn = create_an_app(&router, "pinning-app", Some(&policy_arn)).await;
@@ -739,7 +762,7 @@ async fn only_the_current_release_is_assessable() {
     let policy_arn = create_a_policy(
         &router,
         "refusal-policy",
-        &json!({"AZ": {"rtoInSecs": 3600, "rpoInSecs": 3600}}),
+        &required_objectives(3600),
     )
     .await;
 
@@ -826,7 +849,7 @@ async fn the_application_reports_its_newest_finished_assessment() {
     let policy_arn = create_a_policy(
         &router,
         "rollup-policy",
-        &json!({"AZ": {"rtoInSecs": 3600, "rpoInSecs": 3600}}),
+        &required_objectives(3600),
     )
     .await;
     let app_arn = create_an_app(&router, "rollup-app", Some(&policy_arn)).await;
@@ -928,7 +951,7 @@ async fn assessments_are_listed_filtered_and_paged() {
     let policy_arn = create_a_policy(
         &router,
         "listing-policy",
-        &json!({"AZ": {"rtoInSecs": 3600, "rpoInSecs": 3600}}),
+        &required_objectives(3600),
     )
     .await;
     let app_arn = create_an_app(&router, "listing-app", Some(&policy_arn)).await;
@@ -1134,7 +1157,7 @@ async fn a_replayed_client_token_answers_the_first_assessment() {
     let policy_arn = create_a_policy(
         &router,
         "token-policy",
-        &json!({"AZ": {"rtoInSecs": 3600, "rpoInSecs": 3600}}),
+        &required_objectives(3600),
     )
     .await;
     let app_arn = create_an_app(&router, "token-app", Some(&policy_arn)).await;

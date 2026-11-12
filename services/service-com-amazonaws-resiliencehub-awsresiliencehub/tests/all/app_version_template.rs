@@ -697,7 +697,18 @@ async fn an_unknown_version_is_refused_and_an_untouched_draft_is_empty() {
             .refused(case, 404, "ResourceNotFoundException", "AppVersion");
     }
 
-    // Once published, the alias resolves and the number still does not.
+    // Once published, the alias resolves and the number still does not. The draft's
+    // template has to map a resource to be publishable at all, so one is mapped
+    // first.
+    add_a_resource(
+        &router,
+        &app_arn,
+        "published-bucket",
+        "storage",
+        "AWS::S3::Bucket",
+        &json!({}),
+    )
+    .await;
     publish(&router, &app_arn, None).await;
     template(&router, &app_arn, RELEASE_APP_VERSION).await;
     read_template(&router, &app_arn, "1").await.refused(

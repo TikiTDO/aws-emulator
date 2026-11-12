@@ -210,6 +210,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
+        // `resourceType` has to name a resource type this service supports: the
+        // mapping says what KIND of resource the application depends on, and a type
+        // the service cannot assess names no resource at all. Judged BEFORE the
+        // draft is consulted, so an unsupported type is reported as the
+        // non-retryable validation failure it is rather than as whichever
+        // conflicting condition the draft happens to hold.
+        if !crate::state::is_supported_resource_type(&input.resource_type) {
+            return Err(invalid_request(crate::state::invalid_resource_type_message(
+                &input.resource_type,
+            )));
+        }
+
         // `physicalResourceId` arrives as a `String2048` and is stored as
         // `PhysicalResourceId$identifier`, a `String255`: a longer one has no
         // representation in the resource this call would persist, so it is refused
@@ -232,20 +244,53 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(too_many_named_app_components(input.app_components.len()));
         }
 
-        let mut store = state.lock();
+        let region = crate::state::request_region(ctx.parts());
 
         // The resource belongs to an application, so the application has to exist:
         // storing it under an unknown `appArn` would make a later read report a
-        // resource of an application that was never created.
+        // resource of an application that was never created. Resolved FIRST, and in
+        // a scope of its own, because the physical resource below is resolved
+        // against another service over the in-process callback, which no store
+        // guard is held across.
+        {
+            if !state.lock().apps.contains_key(&input.app_arn) {
+                return Err(app_not_found(&input.app_arn));
+            }
+        }
+
+        // The mapping states that the application depends on a resource that EXISTS,
+        // so the physical identifier is resolved against the service that owns a
+        // resource of this type: a mapping its owner says it holds nothing for would
+        // put a resource under assessment that is not there. Only the owner's own
+        // "no such resource" refuses the mapping; see
+        // `crate::state::mapped_resources`.
+        if crate::state::mapped_resources::physical_resource_is_absent(
+            ctx.callback(),
+            &region,
+            &input.resource_type,
+            &input.physical_resource_id,
+        )
+        .await
+        {
+            return Err(invalid_request(
+                crate::state::absent_resource_mapping_message(
+                    &input.resource_type,
+                    &input.physical_resource_id,
+                ),
+            ));
+        }
+
+        let mut store = state.lock();
+
+        // The application was there when this request started and is resolved again
+        // now: nothing is stored under an application that was deleted while the
+        // mapping's resource was being resolved.
         if !store.apps.contains_key(&input.app_arn) {
             return Err(app_not_found(&input.app_arn));
         }
 
-        let physical_resource_id = physical_identifier(
-            &input,
-            &crate::state::request_region(ctx.parts()),
-            ::engine::emulator_account_id(),
-        );
+        let physical_resource_id =
+            physical_identifier(&input, &region, ::engine::emulator_account_id());
         let resource_key = crate::state::logical_resource_key(&input.logical_resource_id);
         let draft = store.app_version(&input.app_arn, crate::state::DRAFT_APP_VERSION);
         let resource_name = resolved_resource_name(&input, draft, &resource_key);

@@ -900,6 +900,8 @@ mod rds_shared_query_surface_routing;
 mod rds_shared_signing_name_routing;
 #[path = "all/rds_signing_name_routing.rs"]
 mod rds_signing_name_routing;
+#[path = "all/resiliencehub_resource_mapping_existence.rs"]
+mod resiliencehub_resource_mapping_existence;
 #[path = "all/resiliencehub_signing_name_routing.rs"]
 mod resiliencehub_signing_name_routing;
 // Declared HERE, in the sorted list at its own name, rather than appended at the end of

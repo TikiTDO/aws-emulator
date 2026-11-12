@@ -132,9 +132,13 @@ async fn create_an_app(router: &MultiServiceRouter, name: &str) -> (String, Valu
     )
 }
 
-/// Add one Application Component with `id` to `app_arn`'s draft version, so the
-/// draft has something to publish.
-async fn add_a_component(router: &MultiServiceRouter, app_arn: &str, id: &str) {
+/// Add one Application Component with `id` to `app_arn`'s draft version, and map
+/// one physical resource into the draft beside it, so the draft's app template
+/// maps the resource a publish requires.
+///
+/// The resource is bound to the AppCommon Application Component every app version
+/// already carries, so filling the draft adds no component other than `id`.
+async fn add_a_component_and_a_resource(router: &MultiServiceRouter, app_arn: &str, id: &str) {
     let reply = post(
         router,
         "/create-app-version-app-component",
@@ -143,6 +147,19 @@ async fn add_a_component(router: &MultiServiceRouter, app_arn: &str, id: &str) {
             "id": id,
             "name": id,
             "type": "AWS::ResilienceHub::ComputeAppComponent",
+        }),
+    )
+    .await;
+    reply.ok(id);
+    let reply = post(
+        router,
+        "/create-app-version-resource",
+        &json!({
+            "appArn": app_arn,
+            "logicalResourceId": {"identifier": format!("{id}-resource")},
+            "physicalResourceId": format!("{id}-queue"),
+            "resourceType": "AWS::SQS::Queue",
+            "appComponents": ["appcommon"],
         }),
     )
     .await;
@@ -285,7 +302,7 @@ async fn lists_the_draft_and_then_every_published_version() {
     for (index, row) in publish_table().into_iter().enumerate() {
         let case = row.label;
         for id in row.adds {
-            add_a_component(&router, &app_arn, id).await;
+            add_a_component_and_a_resource(&router, &app_arn, id).await;
         }
         let minted = publish(&router, &app_arn, row.version_name.as_deref()).await;
         let sequence = index as i64 + 1;
@@ -379,7 +396,7 @@ async fn lists_the_draft_and_then_every_published_version() {
 async fn pages_through_the_versions_with_every_page_size() {
     let router = emulator();
     let (app_arn, _) = create_an_app(&router, "list-versions-pages").await;
-    add_a_component(&router, &app_arn, "compute-tier").await;
+    add_a_component_and_a_resource(&router, &app_arn, "compute-tier").await;
     const PUBLISHES: usize = 6;
     for index in 0..PUBLISHES {
         publish(&router, &app_arn, Some(&format!("v{index}"))).await;
@@ -454,7 +471,7 @@ async fn pages_through_the_versions_with_every_page_size() {
 async fn filters_the_versions_by_their_creation_time() {
     let router = emulator();
     let (app_arn, _) = create_an_app(&router, "list-versions-range").await;
-    add_a_component(&router, &app_arn, "compute-tier").await;
+    add_a_component_and_a_resource(&router, &app_arn, "compute-tier").await;
     // Spaced out, so each version's creation instant is separable on the wire.
     for index in 0..3 {
         std::thread::sleep(CLOCK_GAP);
@@ -589,8 +606,8 @@ async fn lists_only_the_addressed_application_and_refuses_an_unknown_one() {
     let router = emulator();
     let (first, _) = create_an_app(&router, "list-versions-app-a").await;
     let (second, _) = create_an_app(&router, "list-versions-app-b").await;
-    add_a_component(&router, &first, "first-tier").await;
-    add_a_component(&router, &second, "second-tier").await;
+    add_a_component_and_a_resource(&router, &first, "first-tier").await;
+    add_a_component_and_a_resource(&router, &second, "second-tier").await;
     for _ in 0..3 {
         publish(&router, &first, None).await;
     }

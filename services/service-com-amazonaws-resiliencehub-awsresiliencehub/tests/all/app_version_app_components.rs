@@ -140,10 +140,11 @@ fn component_table() -> Vec<Component> {
             request: || {
                 json!({
                     "name": "compute-tier",
-                    // The types the Resilience Hub user guide's "Grouping
-                    // resources in an AppComponent" lists; the member itself is
-                    // free-form `String255` in the model, so the service stores
-                    // whatever it is handed.
+                    // One of the Application Component types the Resilience Hub
+                    // user guide's "Grouping resources in an AppComponent" lists:
+                    // the member is free-form `String255` in the model, and the
+                    // service's own component-type namespace is what a value has to
+                    // name.
                     "type": "AWS::ResilienceHub::ComputeAppComponent",
                 })
             },
@@ -169,12 +170,12 @@ fn component_table() -> Vec<Component> {
             },
         },
         Component {
-            label: "a type outside the documented set (the model constrains only its length)",
+            label: "an id carrying punctuation the EntityName pattern does not admit",
             request: || {
                 json!({
                     "id": "custom.tier/1",
                     "name": "a custom tier",
-                    "type": "my-own-component-type",
+                    "type": "AWS::ResilienceHub::MessageQueueAppComponent",
                 })
             },
         },

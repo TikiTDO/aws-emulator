@@ -182,30 +182,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // constraint on this input, `tier`'s and `dataLocationConstraint`'s value
         // sets and `FailurePolicy`'s `@range(min: 0)` included. What it does NOT
         // walk is a map's KEY, so `DisruptionPolicy`'s `DisruptionType` keys are
-        // checked here — the same check `CreateResiliencyPolicy` makes, because a
-        // disruption set reaches the store through either operation.
+        // judged by the shared rule — the same one `CreateResiliencyPolicy`
+        // applies, because a disruption set reaches the store through either
+        // operation.
         if let Some(disruption_policy) = input.policy.as_ref() {
-            // NOT the model's: `DisruptionPolicy` carries no `@length(min: 1)`, so
-            // this is the service's own rule — a resiliency policy that names no
-            // disruption type states no objective at all, so an update cannot leave
-            // one holding an empty set either.
-            if disruption_policy.is_empty() {
-                return Err(invalid(
-                    "policy: a resiliency policy must carry a failure policy for at least one \
-                     disruption type",
-                ));
-            }
-            // Sorted, so the refusal a request earns does not depend on hash order.
-            let mut disruption_types: Vec<&String> = disruption_policy.keys().collect();
-            disruption_types.sort();
-            for disruption_type in disruption_types {
-                if let Some(message) = crate::state::enum_violation(
-                    &format!("policy.{disruption_type}"),
-                    disruption_type,
-                    DISRUPTION_TYPE_VALUES,
-                ) {
-                    return Err(invalid(message));
-                }
+            if let Some(message) = crate::state::disruption_policy_violation(disruption_policy) {
+                return Err(invalid(message));
             }
         }
 

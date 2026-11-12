@@ -11,9 +11,9 @@
 //! publish sequence number — separately — as the `identifier` long, echoing the
 //! `versionName` the request named; the snapshot a publish supersedes stays readable
 //! under its own sequence number; the draft stays as it was, so a later write to it
-//! cannot change what was published; and a draft holding nothing to publish is
-//! refused with the modelled 409 `ConflictException` while an application that does
-//! not exist is refused with the modelled 404.
+//! cannot change what was published; and a draft whose app template maps no
+//! resource is refused with the modelled 409 `ConflictException` while an
+//! application that does not exist is refused with the modelled 404.
 
 use std::sync::Arc;
 
@@ -30,9 +30,9 @@ const REGION: &str = "us-east-1";
 /// The account id `engine::mock_account_id` mints every ARN under.
 const ACCOUNT: &str = "000000000000";
 
-/// The refusal a publish of a draft with nothing to publish earns: FIXED text,
-/// naming the template requirement the request fails to meet and carrying no part
-/// of the request.
+/// The refusal a publish of a draft whose template maps no resource earns: FIXED
+/// text, naming the template requirement the request fails to meet and carrying no
+/// part of the request.
 const EMPTY_TEMPLATE_MESSAGE: &str =
     "Invalid app template. App template must have at least 1 resource";
 
@@ -128,8 +128,7 @@ async fn create_an_app(router: &MultiServiceRouter, name: &str) -> String {
         .to_string()
 }
 
-/// Add one Application Component with `id` to `app_arn`'s draft version, so the
-/// draft has something to publish.
+/// Add one Application Component with `id` to `app_arn`'s draft version.
 async fn add_a_component(router: &MultiServiceRouter, app_arn: &str, id: &str) {
     let reply = post(
         router,
@@ -143,6 +142,28 @@ async fn add_a_component(router: &MultiServiceRouter, app_arn: &str, id: &str) {
     )
     .await;
     reply.ok(id);
+}
+
+/// Map one physical resource named `label` into `app_arn`'s draft version, so the
+/// draft's app template maps the resource a publish requires.
+///
+/// The resource is bound to the AppCommon Application Component every app version
+/// already carries, so mapping it adds no Application Component of its own and the
+/// component set each publish freezes stays the one the table built.
+async fn map_a_resource(router: &MultiServiceRouter, app_arn: &str, label: &str) {
+    let reply = post(
+        router,
+        "/create-app-version-resource",
+        &json!({
+            "appArn": app_arn,
+            "logicalResourceId": {"identifier": format!("{label}-resource")},
+            "physicalResourceId": format!("{label}-queue"),
+            "resourceType": "AWS::SQS::Queue",
+            "appComponents": ["appcommon"],
+        }),
+    )
+    .await;
+    reply.ok(label);
 }
 
 /// Whether `app_version` of `app_arn` holds the component `id`, as the implemented
@@ -231,6 +252,9 @@ fn publish_table() -> Vec<Publish> {
 async fn each_publish_freezes_the_draft_as_the_current_release() {
     let router = emulator();
     let app_arn = create_an_app(&router, "publish-sequence").await;
+    // The draft's template maps a resource throughout, which is what makes it
+    // publishable at all; the table below varies its COMPONENTS.
+    map_a_resource(&router, &app_arn, "published").await;
 
     // What the draft held at each published version, in publish order, with the
     // sequence number that publish was minted with.
@@ -326,6 +350,8 @@ async fn publish_sequence_numbers_are_per_application() {
     let second = create_an_app(&router, "publish-sequence-b").await;
     add_a_component(&router, &first, "first-tier").await;
     add_a_component(&router, &second, "second-tier").await;
+    map_a_resource(&router, &first, "first").await;
+    map_a_resource(&router, &second, "second").await;
 
     // The first application publishes twice, the second once in between.
     for (case, app_arn, expected) in [
@@ -387,9 +413,9 @@ async fn publish_sequence_numbers_are_per_application() {
     }
 }
 
-/// A draft with nothing to publish is refused with the modelled 409, and nothing is
-/// minted — whatever the request's `versionName`, and whichever OTHER application
-/// already has published versions.
+/// A draft whose app template maps no resource is refused with the modelled 409,
+/// and nothing is minted — whatever the request's `versionName`, and whichever
+/// OTHER application already has published versions.
 #[tokio::test]
 async fn publishing_an_empty_draft_is_refused_with_a_conflict() {
     let router = emulator();
@@ -398,6 +424,7 @@ async fn publishing_an_empty_draft_is_refused_with_a_conflict() {
     // about the addressed application's own draft.
     let published_elsewhere = create_an_app(&router, "empty-draft-neighbour").await;
     add_a_component(&router, &published_elsewhere, "neighbour-tier").await;
+    map_a_resource(&router, &published_elsewhere, "neighbour").await;
     post(
         &router,
         "/publish-app-version",
@@ -444,9 +471,22 @@ async fn publishing_an_empty_draft_is_refused_with_a_conflict() {
             "case {case:?}: a refused publish must mint no version"
         );
 
-        // And once the draft has something, the same request succeeds as version 1 —
-        // the refusal was about emptiness, not about the application.
+        // And once the draft's template maps a resource, the same request succeeds
+        // as version 1 — the refusal was about the template, not about the
+        // application. An Application Component on its own does not lift it: the
+        // component only GROUPS resources, so the publish is still refused until a
+        // resource is mapped.
         add_a_component(&router, &app_arn, "compute-tier").await;
+        let still_refused = post(&router, "/publish-app-version", &request).await;
+        still_refused.refused(case, 409, "ConflictException");
+        assert_eq!(
+            still_refused.body["message"].as_str(),
+            Some(EMPTY_TEMPLATE_MESSAGE),
+            "case {case:?}: a draft holding only Application Components maps no resource, \
+             so it earns the same refusal, got {:?}",
+            still_refused.body
+        );
+        map_a_resource(&router, &app_arn, "compute").await;
         let published = post(&router, "/publish-app-version", &request).await;
         let published = published.ok(case).clone();
         assert_eq!(

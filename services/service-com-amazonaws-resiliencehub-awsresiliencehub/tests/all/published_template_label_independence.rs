@@ -258,12 +258,22 @@ struct Contents {
 fn contents_table() -> Vec<Contents> {
     vec![
         Contents {
-            label: "one component and no resources",
+            label: "one component and one resource",
             app_name: "doc-bare-component",
-            edits: &[Edit::Component {
-                name: "storage",
-                kind: "AWS::ResilienceHub::StorageAppComponent",
-            }],
+            edits: &[
+                Edit::Component {
+                    name: "storage",
+                    kind: "AWS::ResilienceHub::StorageAppComponent",
+                },
+                // An app template is publishable only once it maps a resource, so
+                // the smallest row maps one.
+                Edit::Resource {
+                    name: "only-bucket",
+                    component: "storage",
+                    resource_type: "AWS::S3::Bucket",
+                    extra: "{}",
+                },
+            ],
             same_contents_as: None,
         },
         Contents {
@@ -349,7 +359,7 @@ fn contents_table() -> Vec<Contents> {
             same_contents_as: Some("one component and two resources"),
         },
         Contents {
-            label: "a component whose only resource was deleted from the draft",
+            label: "a component whose extra resource was deleted from the draft",
             app_name: "doc-emptied-component",
             edits: &[
                 Edit::Component {
@@ -362,9 +372,17 @@ fn contents_table() -> Vec<Contents> {
                     resource_type: "AWS::S3::Bucket",
                     extra: "{}",
                 },
-                Edit::DeleteResource { name: "only-bucket" },
+                Edit::Resource {
+                    name: "extra-bucket",
+                    component: "storage",
+                    resource_type: "AWS::S3::Bucket",
+                    extra: "{}",
+                },
+                Edit::DeleteResource {
+                    name: "extra-bucket",
+                },
             ],
-            same_contents_as: Some("one component and no resources"),
+            same_contents_as: Some("one component and one resource"),
         },
     ]
 }
