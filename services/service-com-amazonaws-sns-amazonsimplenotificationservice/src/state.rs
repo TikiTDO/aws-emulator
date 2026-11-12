@@ -34,6 +34,10 @@ pub mod retry_policy_bounds;
 /// What a topic configured with delivery-status feedback roles LOGS about each delivery
 /// it attempted.
 pub mod delivery_status;
+mod message_structure;
+/// How a message published under a `MessageStructure` is read, and which text of it one
+/// delivery protocol receives.
+pub use message_structure::*;
 
 /// The service principal Amazon SNS performs a DELIVERY as.
 ///
@@ -1052,9 +1056,16 @@ impl ConfiguredRetryPolicy {
                 ));
             }
         }
-        let phases = self.num_no_delay_retries.unwrap_or(0)
-            + self.num_min_delay_retries.unwrap_or(0)
-            + self.num_max_delay_retries.unwrap_or(0);
+        // Saturating, because each phase count is a caller's number taken verbatim from
+        // the document and this sum is reached before any per-member bound has run: three
+        // values near the type's ceiling would otherwise overflow the addition. A sum that
+        // saturates is still greater than any retry count the rule compares it against, so
+        // the comparison below answers the same thing.
+        let phases = self
+            .num_no_delay_retries
+            .unwrap_or(0)
+            .saturating_add(self.num_min_delay_retries.unwrap_or(0))
+            .saturating_add(self.num_max_delay_retries.unwrap_or(0));
         if let Some(retries) = self.num_retries {
             if phases > retries {
                 return Some(format!(
@@ -2334,94 +2345,6 @@ pub fn ordering_id_refusal(member: &str) -> String {
         "Invalid parameter: The {member} parameter can only include alphanumeric and \
          punctuation characters. 1 to {MAX_ORDERING_ID_CHARS} in length"
     )
-}
-
-/// Whether a `MessageStructure: json` body is one SNS can READ: a JSON object, which is
-/// the document the structure declares ("use a JSON object for the Message parameter",
-/// `PublishInput$Message` doc).
-///
-/// The other rule the member documents — "contain at least a top-level JSON key of
-/// \"default\"" (`PublishInput$MessageStructure` doc) — is judged by
-/// [`default_branch_body`], because a `default` member and a `default` member that names
-/// a message are the same requirement: see [`NO_DEFAULT_ENTRY_REFUSAL`].
-fn is_json_message_document(message: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(message)
-        .is_ok_and(|parsed| parsed.is_object())
-}
-
-/// The body a PROTOCOL-keyed branch of a structured message names, or `None` when it
-/// names none.
-///
-/// A protocol's branch carries the message that protocol's subscribers receive, and the
-/// member documents what such a branch may be: the keys "must have simple JSON string
-/// values" and "Non-string values will cause the key to be ignored"
-/// (`PublishInput$Message` doc). A branch that is anything but a string therefore names
-/// no body, and its protocol receives what it would have received had the branch not been
-/// there at all.
-fn protocol_branch_body(value: &serde_json::Value) -> Option<String> {
-    value.as_str().map(str::to_string)
-}
-
-/// The body the `default` member names, or `None` when it names none.
-///
-/// The `default` member is not a protocol branch: it is the message every protocol no
-/// branch names receives, so a document naming no default body names no message at all
-/// ([`NO_DEFAULT_ENTRY_REFUSAL`]) rather than leaving one protocol without a branch. It
-/// is read as TEXT — a string is the body itself and any other SCALAR is the body written
-/// out as SNS writes that value, which is what the recording shows being served where
-/// this emulator refused a `default` that was not a string. A composite value (an object
-/// or a list) is no message, so it names no body.
-fn default_body(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(text) => Some(text.clone()),
-        serde_json::Value::Number(number) => Some(number.to_string()),
-        serde_json::Value::Bool(flag) => Some(flag.to_string()),
-        serde_json::Value::Null => Some("null".to_string()),
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
-    }
-}
-
-/// The body the `default` member of a structured message names, or `None` when it names
-/// none — which is what makes a structured publish one with no message in it.
-fn default_branch_body(message: &str) -> Option<String> {
-    json_object(message)?
-        .get(DEFAULT_JSON_KEY)
-        .and_then(default_body)
-}
-
-/// The body a subscriber over `protocol` receives of a published message.
-///
-/// A message published with `MessageStructure` of `json` carries ONE body per delivery
-/// protocol: "You can define other top-level keys that define the message you want to
-/// send to a specific transport protocol" (`PublishInput$MessageStructure` doc), so the
-/// member named for the protocol is the body that protocol's subscribers receive and the
-/// `default` member is the body for every protocol no member names. A branch that names
-/// no body is IGNORED (see [`protocol_branch_body`]), so its protocol falls back to
-/// `default` exactly as if the branch were absent.
-///
-/// A message published with no `MessageStructure` is one body for every protocol, and is
-/// delivered as it was published. So is one whose structure names nothing SNS reads: the
-/// document is then the message rather than a set of branches.
-pub fn structured_message_body(
-    message: &str,
-    message_structure: Option<&str>,
-    protocol: &str,
-) -> String {
-    if !message_structure.is_some_and(is_json_message_structure) {
-        return message.to_string();
-    }
-    let Some(members) = json_object(message) else {
-        return message.to_string();
-    };
-    members
-        .get(protocol)
-        .and_then(protocol_branch_body)
-        // A structured message SNS accepted has a `default` naming a body, so this is
-        // the body of every protocol no branch names rather than a fallback: a message
-        // whose `default` names none is refused by [`message_refusal`] before it is
-        // ever published.
-        .or_else(|| members.get(DEFAULT_JSON_KEY).and_then(default_body))
-        .unwrap_or_else(|| message.to_string())
 }
 
 /// One message as a caller supplied it: the members `PublishInput` and

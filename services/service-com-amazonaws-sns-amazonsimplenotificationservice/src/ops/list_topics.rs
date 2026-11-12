@@ -142,6 +142,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // Authorization, before the store is consulted: AWS decides whether the caller may
+        // perform the action at all ahead of the service reading anything, and this call
+        // addresses no resource of its own — so the account's whole SNS resource is what it
+        // is judged on.
+        if let Some(message) =
+            crate::state::authorization::account_refusal(&*self.engine, ctx, Self::NAME)
+        {
+            return Err(ListTopicsErrorModeled::AuthorizationErrorException(
+                AuthorizationErrorException {
+                    message: Some(message),
+                },
+            )
+            .into());
+        }
+
         let region = state::request_region(ctx.parts());
         let Some(store) = crate::state::service_state(&*self.engine) else {
             return Err(ListTopicsErrorModeled::InternalErrorException(

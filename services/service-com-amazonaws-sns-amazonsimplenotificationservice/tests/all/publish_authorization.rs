@@ -35,11 +35,11 @@ use crate::sqs_subscription_delivery::grant_to_sns;
 use crate::topics_subscriptions_publish::{percent_encode, text_of};
 
 /// The Region every call below is signed for.
-const REGION: &str = "us-east-1";
+pub(crate) const REGION: &str = "us-east-1";
 
 /// The access key id of the credential this emulator publishes at start, which no IAM record
 /// names: the account's own, the one every in-process call between services is signed with.
-const AMBIENT_KEY: &str = "AKIDTESTTESTTEST";
+pub(crate) const AMBIENT_KEY: &str = "AKIDTESTTESTTEST";
 
 /// The action a publish is authorized under, as SNS's own policy actions and its refusals
 /// spell it.
@@ -49,11 +49,11 @@ const PUBLISH_ACTION: &str = "SNS:Publish";
 /// holding the caller's identity-based policies, the STS store that resolves which principal
 /// the request's access key id speaks for, and SQS, whose queue is where a delivery the
 /// publish owed is observed.
-struct Emulator {
+pub(crate) struct Emulator {
     router: MultiServiceRouter,
 }
 
-fn emulator() -> Emulator {
+pub(crate) fn emulator() -> Emulator {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
@@ -130,7 +130,7 @@ fn params(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 }
 
 /// One SNS call signed with `access_key_id`, with whatever status it answered.
-async fn sns_as(
+pub(crate) async fn sns_as(
     emulator: &Emulator,
     access_key_id: &str,
     action: &str,
@@ -159,7 +159,7 @@ async fn sns(emulator: &Emulator, action: &str, pairs: &[(&str, &str)]) -> Strin
 }
 
 /// One IAM call that must succeed.
-async fn iam(emulator: &Emulator, action: &str, pairs: &[(&str, &str)]) -> String {
+pub(crate) async fn iam(emulator: &Emulator, action: &str, pairs: &[(&str, &str)]) -> String {
     let (status, body) = query(
         emulator,
         "iam",
@@ -267,7 +267,7 @@ async fn given_topic_with_a_subscribed_queue(emulator: &Emulator, name: &str) ->
 
 /// An IAM user with an access key: its ARN, and the key id a request signs with to speak for
 /// it.
-async fn given_user(emulator: &Emulator, name: &str) -> (String, String) {
+pub(crate) async fn given_user(emulator: &Emulator, name: &str) -> (String, String) {
     let created = iam(emulator, "CreateUser", &[("UserName", name)]).await;
     let arn = text_of(&created, "Arn");
     assert!(
@@ -346,7 +346,7 @@ async fn depth(emulator: &Emulator, url: &str) -> usize {
 }
 
 /// One document around one statement.
-fn policy(statement: Value) -> String {
+pub(crate) fn policy(statement: Value) -> String {
     json!({"Version": "2012-10-17", "Statement": [statement]}).to_string()
 }
 

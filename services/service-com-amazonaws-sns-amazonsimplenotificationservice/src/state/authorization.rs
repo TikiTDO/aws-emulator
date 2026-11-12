@@ -1,14 +1,25 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! Whether IAM lets a signed request perform the action it asks for on the TOPIC it
+//! Whether IAM lets a signed request perform the action it asks for on the RESOURCE it
 //! addresses — the decision an operation takes before it reads or writes anything.
 //!
 //! Every operation of this service is signed, so every call is made by a principal, and a
-//! principal may perform an action on a topic only when the documents in force allow it.
-//! Two documents are in force on such a call, and AWS evaluates them together: the calling
-//! principal's own identity-based policies, and the topic's access policy (its `Policy`
-//! attribute, the resource-based policy SNS generates for a topic whose owner has set
-//! none). An explicit `Deny` in either refuses, an `Allow` from either grants, and with
+//! principal may perform an action only when the documents in force allow it. Which
+//! documents those are follows from what the call addresses, and this module answers both
+//! questions the same way:
+//!
+//! * a call that addresses a TOPIC ([`topic_refusal`]) is decided by two documents, which
+//!   AWS evaluates together: the calling principal's own identity-based policies, and the
+//!   topic's access policy (its `Policy` attribute, the resource-based policy SNS generates
+//!   for a topic whose owner has set none);
+//! * a call that addresses NO resource of its own ([`account_refusal`]) — the account's own
+//!   listings, its SMS settings and its SMS-sandbox membership, whose IAM actions support no
+//!   resource-level permissions — is decided by the identity-based documents alone, over the
+//!   resource that names every resource of this service in the account and Region the
+//!   request reached ([`account_wide_resource`]); there is no resource-based policy in force
+//!   on such a call.
+//!
+//! An explicit `Deny` in either document refuses, an `Allow` from either grants, and with
 //! neither the request falls to IAM's default deny — answered with the error this service
 //! declares for an unauthorized call, `AuthorizationErrorException` (HTTP 403, wire code
 //! `AuthorizationError`).
@@ -81,6 +92,27 @@
 use ::service_com_amazonaws_iam_awsidentitymanagementv20100508::state as iam_store;
 use ::service_common::iam_authorization::{self as iam, Decision, PreparedDocument};
 
+/// This service's IAM action prefix: an SNS action is `SNS:<OperationName>` ("Actions
+/// defined by Amazon Simple Notification Service", IAM Service Authorization Reference),
+/// which is how every constant below spells one and how a refusal names the action it
+/// withheld.
+const ACTION_PREFIX: &str = "SNS";
+
+/// The ARN namespace of this service's resources.
+const ARN_NAMESPACE: &str = "sns";
+
+/// The resource part of the ARN that names EVERY resource of this service in one Region of
+/// one account.
+const EVERY_RESOURCE: &str = "*";
+
+/// The IAM action the operation named `operation` performs.
+///
+/// Built from the operation's own name rather than listed per operation, because that IS the
+/// rule the action namespace follows.
+fn action_of(operation: &str) -> String {
+    format!("{ACTION_PREFIX}:{operation}")
+}
+
 /// The IAM action `Publish` performs, and the one `PublishBatch` performs too: the batch
 /// call publishes messages, and the SNS action namespace publishes no action of its own for
 /// it ("Actions defined by Amazon Simple Notification Service", IAM Service Authorization
@@ -141,6 +173,44 @@ pub fn topic_refusal<Eng: Send + Sync + 'static>(
         topic_arn,
         policy.as_deref(),
     )
+}
+
+/// The refusal an ACCOUNT-WIDE call earns from the documents in force on its caller, or
+/// `None` when IAM permits it (and for every caller this gate does not bound, see the module
+/// docs).
+///
+/// `operation` is the operation's own name, from which the action it performs is built
+/// ([`action_of`]). The resource is the one IAM judges such a call on
+/// ([`account_wide_resource`]): the call addresses no resource of its own, so there is
+/// nothing of the request to resolve and no resource-based policy in force on it — the
+/// decision rests on the caller's identity-based documents and the boundary that caps them.
+///
+/// Call it with this service's own store NOT locked: the IAM store is read here.
+#[must_use]
+pub fn account_refusal<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+    operation: &str,
+) -> Option<String> {
+    let resource = account_wide_resource(&super::request_region(ctx.parts()));
+    refusal(
+        &caller(engine, ctx),
+        &action_of(operation),
+        &resource,
+        None,
+    )
+}
+
+/// The resource an SNS call that addresses no resource of its own is judged on: every
+/// resource of this service in the account and Region the request reached,
+/// `arn:<partition>:sns:<region>:<account>:*`.
+///
+/// A statement grants such a call only by covering that whole set, which is why a policy
+/// scoped to one topic's ARN grants nothing account-wide; and it is the resource AWS names in
+/// the refusal of such a call. The Region is the one the REQUEST addressed, because that is
+/// the endpoint whose resources the call is about.
+fn account_wide_resource(region: &str) -> String {
+    ::emulator_server::emulator_arn(ARN_NAMESPACE, region, EVERY_RESOURCE)
 }
 
 /// The access policy of the topic `topic_arn`, as it reports it — the document its owner set
@@ -548,6 +618,96 @@ mod tests {
                     refused, None,
                     "case {case:?} asking {action}: expected the call to be allowed, got \
                      {refused:?}"
+                );
+            }
+        }
+    }
+
+    /// The operations whose IAM action supports no resource-level permissions, so that each
+    /// is judged over the account's whole SNS resource: the account's own listings, its SMS
+    /// settings and its SMS-sandbox membership. Source: these are the operations of
+    /// `smithy_query(query="digest")` whose input carries no ARN member, so there is no
+    /// resource of the request to judge the call on.
+    const ACCOUNT_WIDE_OPERATIONS: &[&str] = &[
+        "GetSMSSandboxAccountStatus",
+        "ListTopics",
+        "ListSubscriptions",
+        "GetSMSAttributes",
+        "SetSMSAttributes",
+        "ListPhoneNumbersOptedOut",
+        "VerifySMSSandboxPhoneNumber",
+    ];
+
+    /// RULE: a call that addresses no resource of its own is judged on the ARN naming every
+    /// SNS resource of the account and Region it reached, and an explicit `Deny` for its
+    /// action overrides any `Allow` beside it.
+    #[test]
+    fn an_account_wide_call_is_judged_on_the_accounts_own_sns_resource() {
+        for region in ["us-east-1", "us-west-2", "eu-west-1"] {
+            let resource = account_wide_resource(region);
+            assert_eq!(
+                resource,
+                format!(
+                    "arn:aws:sns:{region}:{}:*",
+                    super::super::owner_account_id()
+                ),
+                "region {region:?}: expected the account's whole SNS resource, got {resource:?}"
+            );
+        }
+        let region = "us-west-2";
+        let resource = account_wide_resource(region);
+        for operation in ACCOUNT_WIDE_OPERATIONS {
+            let action = action_of(operation);
+            let allow =
+                format!(r#"{{"Statement":[{{"Effect":"Allow","Action":"sns:{operation}","Resource":"*"}}]}}"#);
+            let deny =
+                format!(r#"{{"Statement":[{{"Effect":"Deny","Action":"sns:{operation}","Resource":"*"}}]}}"#);
+            let other = r#"{"Statement":[{"Effect":"Allow","Action":"sns:Publish",
+                "Resource":"*"}]}"#
+                .to_string();
+            let topic_scoped = format!(
+                r#"{{"Statement":[{{"Effect":"Allow","Action":"sns:{operation}",
+                "Resource":"{}"}}]}}"#,
+                super::super::topic_arn(region, "one-topic")
+            );
+            // (case, the caller's identity documents, the refusal expected of them)
+            let rows: &[(&str, &[&str], Option<String>)] = &[
+                (
+                    "no document at all",
+                    &[],
+                    Some(iam::no_identity_policy_allows(&action)),
+                ),
+                ("a grant for this action", &[&allow], None),
+                (
+                    "an explicit deny beside the grant",
+                    &[&allow, &deny],
+                    Some(iam::IDENTITY_POLICY_EXPLICIT_DENY.to_string()),
+                ),
+                (
+                    "a grant for another action only",
+                    &[&other],
+                    Some(iam::no_identity_policy_allows(&action)),
+                ),
+                (
+                    "a grant scoped to one topic's ARN",
+                    &[&topic_scoped],
+                    Some(iam::no_identity_policy_allows(&action)),
+                ),
+            ];
+            for (case, documents, reason) in rows {
+                let caller = user(documents);
+                let refused = refusal(&caller, &action, &resource, None);
+                let expected = reason.as_deref().map(|reason| {
+                    iam::not_authorized_by_identity_policy(
+                        &caller.arn,
+                        &action,
+                        &resource,
+                        reason,
+                    )
+                });
+                assert_eq!(
+                    refused, expected,
+                    "case {case:?} asking {action}: unexpected answer"
                 );
             }
         }

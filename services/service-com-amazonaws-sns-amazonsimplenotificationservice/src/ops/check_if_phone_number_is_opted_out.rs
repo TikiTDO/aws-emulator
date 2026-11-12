@@ -159,8 +159,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // Authorization, before the store is consulted: AWS decides whether the caller may
+        // perform the action at all ahead of the service reading anything, and this call
+        // addresses no resource of its own — so the account's whole SNS resource is what it
+        // is judged on.
+        if let Some(message) =
+            crate::state::authorization::account_refusal(&*self.engine, ctx, Self::NAME)
+        {
+            return Err(
+                CheckIfPhoneNumberIsOptedOutErrorModeled::AuthorizationErrorException(
+                    AuthorizationErrorException {
+                        message: Some(message),
+                    },
+                )
+                .into(),
+            );
+        }
+
         if let Some(message) = state::phone_number_refusal(&input.phone_number) {
             return Err(invalid_parameter(message));
         }

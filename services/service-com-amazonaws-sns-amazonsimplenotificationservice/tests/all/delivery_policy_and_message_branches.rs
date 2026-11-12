@@ -16,9 +16,11 @@
 //! 3. A message published with `MessageStructure` of `json` carries one body per delivery
 //!    protocol: "You can define other top-level keys that define the message you want to
 //!    send to a specific transport protocol" (`PublishInput$MessageStructure` doc), so the
-//!    member named for the subscriber's protocol is the body it receives — and only a
-//!    simple JSON string is such a body, because "Non-string values will cause the key to
-//!    be ignored" (`PublishInput$Message` doc), leaving that protocol the `default` body.
+//!    member named for the subscriber's protocol is the body it receives — delivered as
+//!    that value's own JSON text, so a branch naming a number arrives as its decimal text
+//!    and one naming a boolean as `true` or `false`. A branch that names no message at all
+//!    — an object, a list or `null` — is ignored ("Non-string values will cause the key to
+//!    be ignored", `PublishInput$Message` doc), leaving that protocol the `default` body.
 //!    The `default` member is not a branch but the message every protocol no branch
 //!    names receives, read as the text of its value; a document naming no default body is
 //!    refused. A structure value naming nothing SNS reads leaves the body one message for
@@ -499,27 +501,35 @@ async fn a_structured_message_delivers_the_branch_its_protocol_selects() {
             r#"{"default":"d","email":"e"}"#,
             "d",
         ),
-        // A protocol's branch must be a simple JSON string: "Non-string values will
-        // cause the key to be ignored" (`PublishInput$Message` doc), so the protocol
-        // receives what it would have received with no branch at all.
+        // A protocol's branch is delivered as its own JSON TEXT: a scalar that is not a
+        // string names the body SNS writes that value out as, which is what the recorded
+        // service delivers for a number-valued branch.
         (
             "a whole-number branch",
             "json",
             r#"{"default":"d","sqs":7}"#,
-            "d",
+            "7",
+        ),
+        (
+            "a negative-number branch",
+            "json",
+            r#"{"default":"d","sqs":-12}"#,
+            "-12",
         ),
         (
             "a fractional branch",
             "json",
             r#"{"default":"d","sqs":1.5}"#,
-            "d",
+            "1.5",
         ),
         (
             "a boolean branch",
             "json",
             r#"{"default":"d","sqs":true}"#,
-            "d",
+            "true",
         ),
+        // A branch that names NO message is ignored, so its protocol receives what it
+        // would have received with no branch at all.
         (
             "an object branch",
             "json",
@@ -541,7 +551,7 @@ async fn a_structured_message_delivers_the_branch_its_protocol_selects() {
         (
             "an ignored branch for this protocol beside a used one for another",
             "json",
-            r#"{"default":"d","email":"e","sqs":7}"#,
+            r#"{"default":"d","email":"e","sqs":{"k":"v"}}"#,
             "d",
         ),
         (
