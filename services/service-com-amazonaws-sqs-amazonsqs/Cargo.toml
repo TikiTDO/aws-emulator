@@ -16,8 +16,10 @@ emulator-server = { workspace = true }
 emulator-telemetry = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }
 aws-smithy-types = { workspace = true }
-# `time` is needed for ReceiveMessage long polling (WaitTimeSeconds).
-tokio = { workspace = true, features = ["time"] }
+# `time` is needed for ReceiveMessage long polling (WaitTimeSeconds), and `rt` for the one
+# bounded in-process task that keeps publishing a queue's backlog while it has one
+# (`state::queue_depth_metrics`).
+tokio = { workspace = true, features = ["time", "rt"] }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
@@ -45,6 +47,11 @@ service-com-amazonaws-kms-trentservice = { workspace = true }
 # with, and the two a KMS key policy delegating to IAM is decided with.
 service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+# The CloudWatch metric store is where a queue's `AWS/SQS` backlog series live: the depth
+# samples this service publishes are appended to that service's OWN series — the ones
+# `GetMetricStatistics`, `ListMetrics` and the alarm evaluation read — rather than to a second
+# copy of them (`state::queue_depth_metrics`).
+service-com-amazonaws-cloudwatch-graniteserviceversion20100801 = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

@@ -65,7 +65,7 @@ pub struct EmulatedService<Eng: Send + Sync + 'static> {
     /// Every other request's modelled operation, served through the wrapper that completes
     /// this service's error envelope ([`QueryCompatibleErrors`]), held here for the same
     /// reason.
-    query_compatible: QueryCompatibleErrors,
+    query_compatible: QueryCompatibleErrors<Eng>,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -74,9 +74,9 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// operation's behaviour lives in that operation's own `impl Operation`.
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
-            entry: crate::ServiceDefinition::new(engine),
+            entry: crate::ServiceDefinition::new(Arc::clone(&engine)),
             oversized: RequestEntityTooLarge,
-            query_compatible: QueryCompatibleErrors,
+            query_compatible: QueryCompatibleErrors { engine },
         }
     }
 
@@ -438,10 +438,21 @@ fn reporting_the_query_error(
 /// message it answers with. The same wrapper serves EVERY operation, so a refusal raised
 /// while ANY of them was being served — which the framework renders outside that sequence,
 /// and so without the report — passes through one place that can complete it.
+///
+/// Being that one place, it is also where each queue's own `AWS/SQS` series are published:
+/// the reading of its depth when one is due, and the counters the request contributed to
+/// ([`crate::state::publish_queue_metrics`]), off the answer rather than in front of it. The
+/// clock that keeps sampling the queues without a call is started from here
+/// ([`crate::state::drive_queue_metric_clock`]).
 #[derive(Debug)]
-struct QueryCompatibleErrors;
+struct QueryCompatibleErrors<Eng: Send + Sync + 'static> {
+    /// The SAME shared engine the generated entry threads into every operation, so the
+    /// depths published are the ones this process's one store holds and they land in the one
+    /// CloudWatch store beside it.
+    engine: Arc<Eng>,
+}
 
-impl ErasedOperation for QueryCompatibleErrors {
+impl<Eng: Send + Sync + 'static> ErasedOperation for QueryCompatibleErrors<Eng> {
     fn run<'r>(
         &'r self,
         svc: &'r dyn Service,
@@ -470,7 +481,13 @@ impl ErasedOperation for QueryCompatibleErrors {
                 // claimed the key.
                 None => svc.definition().routing_error_response(req),
             };
-            completing_the_envelope(req, response)
+            let answered = completing_the_envelope(req, response);
+            // The request has been answered; what it left the queues holding, and what it
+            // contributed to their counters, is published now, with no store lock held, and
+            // the clock that keeps sampling them is (re)started.
+            crate::state::publish_queue_metrics(&*self.engine);
+            crate::state::drive_queue_metric_clock(&self.engine);
+            answered
         })
     }
 

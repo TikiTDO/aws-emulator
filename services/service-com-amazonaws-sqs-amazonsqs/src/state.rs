@@ -137,6 +137,18 @@
 //! replaced by an uploaded `SetQueueAttributes` policy, because there is only ever one
 //! policy.
 //!
+//! # The backlog a client watches
+//!
+//! Those same three counts are also a published measurement: [`queue_depth_metrics`] samples
+//! each queue's `(visible, in flight, delayed)` split, and the age of the oldest message it
+//! can deliver, into the CloudWatch metric store as the `AWS/SQS` series dimensioned by the
+//! queue's name, so a queue-depth dashboard and a backlog alarm read the depth this store
+//! really holds. Beside them it counts what the data plane DID — the messages sent, received
+//! and deleted, and the polls that got nothing ([`Queue::count_traffic`]). Both are published
+//! off the answer by the one seam every request passes through, and the readings are taken by
+//! the clock as well, because a delay or a visibility timeout lapsing moves a message between
+//! two of those series with nobody calling.
+//!
 //! Everything a caller can make this in-memory store hold is bounded — see the
 //! "Store bounds" section — and a bound is REFUSED rather than enforced by eviction,
 //! because dropping a message a client was told had been accepted would lose it.
@@ -165,11 +177,16 @@ mod message_attributes;
 /// The bounds a queue policy is held to, and the wording of every refusal a grant or a
 /// revoke answers with.
 mod permissions;
+/// The `AWS/SQS` series a queue publishes about itself: the backlog gauges it is sampled into
+/// and the counters its data-plane calls are counted into, with the clock that keeps taking
+/// those readings.
+pub mod queue_depth_metrics;
 /// The two redrive attributes a queue carries, and what each document has to look like to
 /// be stored at all.
 mod redrive;
 pub use message_attributes::*;
 pub use permissions::*;
+pub use queue_depth_metrics::*;
 pub use redrive::*;
 
 /// The region an ARN carries when the request names none (an unsigned call, which
@@ -1095,6 +1112,18 @@ pub struct ComAmazonawsSqsAmazonsqsState {
     /// queue was deleted. Entries lapse with that interval and are bounded by
     /// [`MAX_RECENTLY_DELETED_NAMES`].
     pub recently_deleted: BTreeMap<(String, String), SystemTime>,
+    /// When each queue was last READ for its gauges, keyed by the same `(region, QueueName)`
+    /// pair the queue itself is held under: one reading per queue per minute, which is what
+    /// decides whether it owes another ([`queue_depth_metrics::publish_queue_metrics`]). An
+    /// entry goes with its queue, so this map never holds more than [`queues`](Self::queues)
+    /// does.
+    pub last_sampled_at: BTreeMap<(String, String), SystemTime>,
+    /// Until when the one queue-depth clock running over this store holds its claim, or `None`
+    /// when no clock holds one — see [`queue_depth_metrics::drive_queue_metric_clock`].
+    pub depth_clock_until: Option<SystemTime>,
+    /// The task of that clock, so it can be stopped: a clock that outlives its claim is
+    /// aborted when the next one takes it over.
+    pub depth_clock: Option<::tokio::task::JoinHandle<()>>,
 }
 
 /// A stored queue: the state the reported `Attributes` map is rebuilt from, plus the
@@ -1180,6 +1209,10 @@ pub struct Queue {
     /// where the next receive's walk over the eligible groups starts (see
     /// [`Queue::delivery_order`]). `None` until a receive has handed anything over.
     pub group_cursor: Option<String>,
+    /// What this queue's data-plane calls have contributed to the `AWS/SQS` counters and
+    /// this service has not published yet — see [`Queue::count_traffic`]. Drained by the
+    /// seam every request passes through, and bounded there.
+    pub counted_traffic: Vec<CountedTraffic>,
 }
 
 impl Queue {
@@ -1229,6 +1262,9 @@ impl Queue {
             // No receive has handed anything over yet, so the first FIFO receive starts
             // its walk at the oldest message group.
             group_cursor: None,
+            // Nothing has been sent to, received from or deleted out of this queue yet, so
+            // its counters have nothing to publish.
+            counted_traffic: Vec::new(),
         }
     }
 
@@ -1649,6 +1685,12 @@ impl Queue {
             // re-receiving cannot accumulate handles.
             self.record_receipt_handle(delivered.receipt_handle.clone(), &delivered.message_id);
         }
+        // Every one of them is a message this queue's consumers were handed, which is what the
+        // `AWS/SQS` received counter counts. Counted HERE, the one path every delivery takes,
+        // so a poller another service runs over this queue is counted like this service's own
+        // receive.
+        let delivered = handed.len();
+        self.count_traffic(QueueTraffic::MessagesReceived, count_as_f64(delivered), now);
         handed
     }
 

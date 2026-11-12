@@ -554,6 +554,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     },
                 );
             }
+            // One more message added to this queue, of the size Amazon SQS measures a
+            // message at: what the `AWS/SQS` sent counters count (`sqs::QueueTraffic`). An
+            // entry the batch refused added none, and a resend the deduplication token
+            // suppressed added none either — both left this loop before here.
+            queue.count_sent(prepared.size, now);
 
             successful.push(SendMessageBatchResultEntry {
                 id: prepared.id,
@@ -677,6 +682,9 @@ struct Prepared {
     deduplication_id: Option<String>,
     delay: i64,
     bytes: usize,
+    /// What this entry's message weighs as Amazon SQS measures a message — its body and its
+    /// message attributes — which is what the `AWS/SQS` sent-size counter reports.
+    size: usize,
 }
 
 /// Judge one entry against `queue` by the rules `SendMessage` applies to one message,
@@ -859,6 +867,7 @@ fn prepare(
         deduplication_id,
         delay,
         bytes: retained,
+        size: bytes,
     })
 }
 

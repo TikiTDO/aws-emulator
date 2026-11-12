@@ -67,6 +67,8 @@ mod policy_statement_limit;
 mod purge_queue;
 #[path = "all/queue_configuration.rs"]
 mod queue_configuration;
+#[path = "all/queue_depth_metrics.rs"]
+mod queue_depth_metrics;
 #[path = "all/queue_does_not_exist.rs"]
 mod queue_does_not_exist;
 #[path = "all/queue_encryption.rs"]

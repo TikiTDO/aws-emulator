@@ -233,6 +233,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // The message goes for good, so the lapsing visibility timeout cannot
                 // bring it back; every other handle minted for it goes with it.
                 queue.remove_message(&message_id);
+                // One message deleted out of this queue by a consumer, which is what the
+                // `AWS/SQS` deleted counter counts. A repeat of a delete that already
+                // succeeded deletes nothing, so it counts nothing: the arm below leaves it
+                // uncounted.
+                queue.count_traffic(sqs::QueueTraffic::MessagesDeleted, 1.0, now);
             }
             Err(_) if queue.deleted_handle(&input.receipt_handle) => {}
             // A handle whose lease a later receive took is refused as the parameter value

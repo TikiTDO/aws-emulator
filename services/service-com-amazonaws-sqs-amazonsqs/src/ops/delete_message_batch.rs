@@ -304,6 +304,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     // cannot bring it back; every other handle minted for it goes with
                     // it.
                     queue.remove_message(&message_id);
+                    // One more message deleted out of this queue by a consumer, which is
+                    // what the `AWS/SQS` deleted counter counts. An entry repeating a
+                    // delete that already succeeded deletes nothing, so the arm below
+                    // leaves it uncounted.
+                    queue.count_traffic(sqs::QueueTraffic::MessagesDeleted, 1.0, now);
                     successful.push(DeleteMessageBatchResultEntry {
                         id: entry.id.clone(),
                     });

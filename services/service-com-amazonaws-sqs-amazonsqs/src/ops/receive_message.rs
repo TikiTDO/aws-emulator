@@ -576,11 +576,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                                 .collect(),
                         },
                     );
+                    // A retry hands the same messages over again: no further delivery of
+                    // them is counted against the messages themselves, but the consumer was
+                    // handed them, which is what the `AWS/SQS` received counter counts.
+                    queue.count_traffic(
+                        sqs::QueueTraffic::MessagesReceived,
+                        sqs::count_as_f64(delivered.len()),
+                        now,
+                    );
                     return Ok(ReceiveMessageOutput {
                         messages: Some(delivered),
                     });
                 }
-
                 // The delivery itself — which messages are handed over, how each one's
                 // delivery counts and visibility move, and the receipt handle minted for
                 // it — is the queue's own bookkeeping, shared with every other consumer of
@@ -637,7 +644,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             let elapsed = now.duration_since(started).unwrap_or_default();
             if elapsed >= wait {
                 // An empty queue is an empty success, not an error: the output simply
-                // carries no `Messages` member.
+                // carries no `Messages` member. It is still a poll that got nothing, which
+                // is what the `AWS/SQS` empty-receive counter counts.
+                if let Some(queue) = store.lock().queue_by_url_mut(&region, &input.queue_url) {
+                    queue.count_traffic(sqs::QueueTraffic::EmptyReceives, 1.0, now);
+                }
                 return Ok(ReceiveMessageOutput { messages: None });
             }
             tokio::time::sleep((wait - elapsed).min(POLL_INTERVAL)).await;
