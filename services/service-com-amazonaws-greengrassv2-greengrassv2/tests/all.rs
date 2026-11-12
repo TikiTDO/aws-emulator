@@ -21,6 +21,8 @@ mod component_versions_and_resolution;
 mod core_device_data_plane_authorization;
 #[path = "all/deployment_cancellation.rs"]
 mod deployment_cancellation;
+#[path = "all/not_found_refusal_class_per_route.rs"]
+mod not_found_refusal_class_per_route;
 #[path = "all/resource_tag_writes.rs"]
 mod resource_tag_writes;
 #[path = "all/resource_tags.rs"]
