@@ -20,6 +20,12 @@
 //! The rows differ along what the rule generalises over: which operation accepted the
 //! invocation, what the event carried, which qualifier the call addressed (the unpublished
 //! version, a published version, an alias), and what the function's runtime is.
+//!
+//! Every wait here is for a CONDITION, looked at again until it holds or a generous deadline
+//! passes — the function reporting `Active`, the delivery attempt having settled — and every
+//! limit no row is about (the `Timeout` a handler is given, the ceiling on a row's own wait)
+//! is set far above what the work takes. So how fast the host runs decides nothing a row
+//! asserts: a slow host is waited for, and only a delivery that never arrives fails a row.
 
 use std::io::Write as _;
 use std::sync::Arc;
@@ -30,10 +36,15 @@ use serde_json::json;
 use service_com_amazonaws_lambda_awsgirapiservice::state::execution::FUNCTION_ERROR_UNHANDLED;
 use service_com_amazonaws_lambda_awsgirapiservice::state::{
     AsyncInvocationOutcome, AsyncInvocationRecord, ComAmazonawsLambdaAwsgirapiserviceState,
-    ACTIVATION_DELAY,
 };
 use service_com_amazonaws_lambda_awsgirapiservice::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
+
+// Waiting for a function to report `Active` is the same wait every suite over the invoke
+// planes makes, so this one makes it with the helper those suites publish rather than with a
+// sleep of its own: it looks at `GetFunctionConfiguration` until the state the clock owes is
+// the one reported.
+use crate::event_source_poll_authorization::wait_until_active;
 
 /// Where `CreateFunction` is bound.
 const FUNCTIONS_URI: &str = "/2015-03-31/functions";
@@ -47,14 +58,24 @@ const AUTHORIZATION: &str = "AWS4-HMAC-SHA256 \
 /// A well-formed execution role ARN, satisfying the model's `RoleArn` pattern.
 const ROLE: &str = "arn:aws:iam::000000000000:role/service-role/lambda-exec";
 
-/// How long past a due instant this suite waits before calling. The transition is owed by
-/// the CLOCK, so nothing here sleeps on the emulator's behalf.
-const SLACK: Duration = Duration::from_millis(100);
+/// How long a row waits for the delivery attempt it accepted to settle.
+///
+/// A ceiling, never a span anything here counts on: an attempt that errored is made again
+/// after a wait of its own, so a row whose handler raises settles only once the attempts the
+/// retry policy has for it are spent — each of them an engine built, a package loaded and a
+/// handler run. So this is far longer than those attempts take on any host, which is what
+/// keeps the host's speed out of the outcome: only a delivery that never settles at all
+/// fails a row here.
+const DELIVERY_BUDGET: Duration = Duration::from_secs(300);
 
-/// How long a row waits for the delivery attempt it accepted to settle. The attempt is due a
-/// quarter of a second after the accepting call, so this is many times that span and still
-/// bounds the test.
-const DELIVERY_BUDGET: Duration = Duration::from_secs(30);
+/// The `Timeout` every function below is created with: the longest a handler of it may run.
+///
+/// Generous on purpose, because no row here is about the timeout: a handler stopped at this
+/// deadline is reported as a run that ERRORED, so a tight value would turn a slow host into
+/// a `FunctionError` the handler never raised. Minutes for handlers that return in
+/// milliseconds, and well inside the range the model allows the member
+/// (`smithy_query(query="shape", shape="Timeout")`: 1 to 5400).
+const GENEROUS_TIMEOUT_SECONDS: u32 = 300;
 
 /// How often a row looks at the entry while it waits for the attempt.
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -165,7 +186,7 @@ async fn create_function(
             "Runtime": runtime,
             "Handler": handler,
             "Publish": true,
-            "Timeout": 5,
+            "Timeout": GENEROUS_TIMEOUT_SECONDS,
             "Code": {
                 "ZipFile": base64::engine::general_purpose::STANDARD
                     .encode(package(entry, source)),
@@ -198,7 +219,10 @@ async fn create_function(
         alias.status,
         alias.text()
     );
-    tokio::time::sleep(ACTIVATION_DELAY + SLACK).await;
+    // The function is invocable once it reports `Active`, which the clock owes shortly after
+    // the create. That CONDITION is what a row waits for — not a span of time — so a host
+    // that takes longer to get there is waited for rather than failed.
+    wait_until_active(router, name, name).await;
 }
 
 /// How the invocation this row accepts is submitted.
@@ -526,7 +550,7 @@ async fn an_event_whose_function_cannot_run_records_why_rather_than_a_result() {
             created.status,
             created.text()
         );
-        tokio::time::sleep(ACTIVATION_DELAY + SLACK).await;
+        wait_until_active(&router, case, &name).await;
 
         let accepted =
             accept_invocation(&router, Accept::InvokeEvent, &name, br#"{"event":true}"#).await;
