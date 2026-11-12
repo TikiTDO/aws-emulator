@@ -11,18 +11,46 @@
 //! while any warning is active and `passed` when none is, and both the version the
 //! evaluation reports and the warnings themselves come from the stored plan record.
 //!
+//! Every plan here is performed as a role the account HOLDS, so the evaluation under test
+//! is the one about the workflows; the warning a plan's own `executionRole` raises is
+//! [`crate::plan_execution_role_evaluation`]'s subject.
+//!
 //! The request/response helpers are shared with [`crate::plan_lifecycle`]: both suites
 //! drive the emulator through the same `MultiServiceRouter::dispatch` the router serves
 //! on a socket (`awsJson1_0`, `POST /`, `X-Amz-Target: ArcRegionSwitch.<Operation>`).
+
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 use service_com_amazonaws_arcregionswitch_arcregionswitch::state::{
     EVALUATION_ACTION_REQUIRED, EVALUATION_PASSED, WARNING_STATUS_ACTIVE,
 };
+use smithy_server_runtime::multi_service_router::MultiServiceRouter;
 
-use crate::plan_lifecycle::{
-    call, create_request, default_workflows, error_code, router, ACCOUNT,
-};
+use crate::plan_lifecycle::{call, create_request, default_workflows, error_code, ACCOUNT};
+use crate::switch_support::given_role;
+
+/// The role every plan in this suite names as its `executionRole`
+/// ([`crate::plan_lifecycle::create_request`]). It is recorded in IAM before any plan is
+/// created, because a plan whose `executionRole` resolves to no role of the account is
+/// `actionRequired` on that ground alone — which is
+/// [`crate::plan_execution_role_evaluation`]'s subject, not this suite's: here the
+/// evaluation under test is the one about the WORKFLOWS.
+const EXECUTION_ROLE: &str = "ArcRegionSwitchRole";
+
+/// A router carrying this service, with [`EXECUTION_ROLE`] already recorded in the IAM
+/// store of the same shared engine.
+fn router() -> MultiServiceRouter {
+    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+    given_role(&engine, EXECUTION_ROLE);
+    let mut router = MultiServiceRouter::new();
+    // This suite exercises operation behaviour, not request signing.
+    router.set_request_authentication(false);
+    router.register_service(
+        service_com_amazonaws_arcregionswitch_arcregionswitch::EmulatedService::new(engine),
+    );
+    router
+}
 
 /// Every Region any case below names. A warning's Region is read back out of its message
 /// against this catalog, so a case states which Region each warning is about without the

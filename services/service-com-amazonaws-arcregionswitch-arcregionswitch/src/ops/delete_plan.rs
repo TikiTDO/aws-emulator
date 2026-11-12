@@ -154,12 +154,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         });
         if let Some(holder) = holder {
             // The refusal names what is holding the plan: the plan the request named, and
-            // the Region and id of the execution still running against it.
+            // the Region and id of the execution still running against it. An
+            // `ExecutionId` is `<region>/<id>` on the wire, so the pair is rendered from
+            // its two parts — the Region once, and the BARE id a caller can feed straight
+            // back to `GetPlanExecution` or `CancelPlanExecution`.
+            let (region, execution_id) = crate::state::execution_id_parts(&holder.execution_id);
             return Err(DeletePlanErrorModeled::IllegalStateException(
                 IllegalStateException {
                     message: format!(
-                        "Active executions found for {}: {}: {}",
-                        input.arn, holder.execution_region, holder.execution_id
+                        "Active executions found for {}: {region}: {execution_id}",
+                        input.arn
                     ),
                 },
             )

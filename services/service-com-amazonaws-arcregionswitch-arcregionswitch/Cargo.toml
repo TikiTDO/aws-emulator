@@ -8,6 +8,25 @@ build = "build.rs"
 
 [dependencies]
 engine = { workspace = true }
+# `service-common` carries three readers this crate needs.
+# `iam_authorization`: the shared evaluation of IAM policy documents against an action on
+# a resource, so this service's authorization gate (`src/service/authorization.rs`) reads
+# a document exactly as every other service does.
+# `iam_role`: which IAM entity a principal ARN names.
+# `eventbridge_client`: the ONE construction of the in-process EventBridge client a
+# service publishing an event drives, which is how a plan execution's event reaches the
+# account's default bus (`src/state/execution_events.rs`).
+service-common = { path = "../common" }
+# The STS store, for the identity an access key id speaks for: the principal
+# `sts:GetCallerIdentity` answers for the credentials a request signed with.
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+# The IAM store, for the identity-based policy documents in force on that principal, and
+# for the role a plan's `executionRole` names, which the plan evaluation resolves.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+# The AWS SDK for EventBridge, driven over the in-process callback: the entry type a plan
+# execution's event is published as. Only the generated client is needed — the emulator
+# supplies the transport.
+aws-sdk-eventbridge = { version = "1", default-features = false }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }
 aws-smithy-schema-server = { workspace = true }
@@ -28,6 +47,14 @@ emulator-core-build-support = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
+# Mounted BESIDE this one in `tests/all/`: the IAM and STS services, whose stores hold the
+# roles and sessions the authorization gate reads; EventBridge and Amazon SQS, which carry
+# the plan-execution event a rule delivers to its target. DEV-ONLY for the event path —
+# `src/` reaches EventBridge through the SDK client above.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+service-com-amazonaws-eventbridge-awsevents = { workspace = true }
+service-com-amazonaws-sqs-amazonsqs = { workspace = true }
 
 [lints]
 workspace = true

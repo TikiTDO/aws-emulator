@@ -263,6 +263,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // IAM decides before the resource's state is looked at, so a caller no
+        // identity-based policy allows is told only that it is not authorized.
+        crate::service::authorization::authorize(&*self.engine, ctx, Self::NAME, &input.arn)
+            .map_err(ListRoute53HealthChecksInRegionErrorModeled::AccessDeniedException)?;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(
                 ListRoute53HealthChecksInRegionErrorModeled::InternalServerException(

@@ -313,49 +313,49 @@ async fn the_clock_moves_an_execution_to_the_state_its_next_step_decides() {
             steps: || vec![approval_step("Approve", 60)],
             state: "pendingManualApproval",
             step_statuses: &["pendingApproval"],
-            events: &["executionPending", "stepPendingApproval"],
+            events: &["executionPending", "executionStarted", "stepPendingApproval"],
         },
         Progression {
             case: "two manual approvals: only the first is reached",
             steps: || vec![approval_step("Approve", 60), approval_step("Confirm", 15)],
             state: "pendingManualApproval",
             step_statuses: &["pendingApproval", "notStarted"],
-            events: &["executionPending", "stepPendingApproval"],
+            events: &["executionPending", "executionStarted", "stepPendingApproval"],
         },
         Progression {
             case: "a Lambda block this emulator cannot run",
             steps: || vec![lambda_step("Invoke")],
             state: "failed",
             step_statuses: &["failed"],
-            events: &["executionPending", "executionFailed"],
+            events: &["executionPending", "executionStarted", "executionFailed"],
         },
         Progression {
             case: "an ARC routing control block this emulator cannot run",
             steps: || vec![routing_control_step("Flip")],
             state: "failed",
             step_statuses: &["failed"],
-            events: &["executionPending", "executionFailed"],
+            events: &["executionPending", "executionStarted", "executionFailed"],
         },
         Progression {
             case: "a parallel block, whose nested steps this emulator cannot run",
             steps: || vec![parallel_step("Both", vec![approval_step("Approve", 60)])],
             state: "failed",
             step_statuses: &["failed"],
-            events: &["executionPending", "executionFailed"],
+            events: &["executionPending", "executionStarted", "executionFailed"],
         },
         Progression {
             case: "an approval behind a block this emulator cannot run",
             steps: || vec![lambda_step("Invoke"), approval_step("Approve", 60)],
             state: "failed",
             step_statuses: &["failed", "notStarted"],
-            events: &["executionPending", "executionFailed"],
+            events: &["executionPending", "executionStarted", "executionFailed"],
         },
         Progression {
             case: "a workflow that configures no execution block at all",
             steps: Vec::new,
             state: "completed",
             step_statuses: &[],
-            events: &["executionPending", "executionSucceeded"],
+            events: &["executionPending", "executionStarted", "executionSucceeded"],
         },
     ];
 
@@ -557,8 +557,9 @@ async fn approving_each_step_in_turn_walks_the_workflow_to_completed() {
     }
 }
 
-/// RULE 2: declining the step an execution is waiting on cancels the execution, leaves
-/// the steps behind it unreached, and releases the plan.
+/// RULE 2: declining the step an execution is waiting on cancels the execution, FAILS
+/// that step — its own negative outcome, which `canceled` does not say — leaves the steps
+/// behind it unreached, and releases the plan.
 #[tokio::test]
 async fn declining_a_step_cancels_the_execution_and_releases_the_plan() {
     let case = "decline the first of two approvals";
@@ -599,8 +600,8 @@ async fn declining_a_step_cancels_the_execution_and_releases_the_plan() {
     );
     assert_eq!(
         after["stepStates"][0]["status"],
-        json!("canceled"),
-        "case {case:?}: expected the declined step canceled, got {}",
+        json!("failed"),
+        "case {case:?}: expected the declined step failed, got {}",
         after["stepStates"][0]
     );
     assert_eq!(
@@ -613,7 +614,12 @@ async fn declining_a_step_cancels_the_execution_and_releases_the_plan() {
     let events = event_types(&emulator, &plan_arn, &execution_id).await;
     assert_eq!(
         events,
-        vec!["executionPending", "stepPendingApproval", "executionCanceled"],
+        vec![
+            "executionPending",
+            "executionStarted",
+            "stepPendingApproval",
+            "executionCanceled"
+        ],
         "case {case:?}: expected the recorded timeline, got {events:?}"
     );
 
@@ -801,9 +807,15 @@ async fn a_plan_an_execution_still_holds_refuses_a_second_start_and_a_delete() {
             "IllegalStateException",
             "case {case:?}: expected IllegalStateException, got {refused_delete}"
         );
+        // An `ExecutionId` is `<region>/<id>` on the wire, and the refusal names the
+        // Region and the BARE id once each — a pair a client can feed straight back.
+        let bare_execution_id = execution_id
+            .split_once('/')
+            .map(|(_, id)| id.to_string())
+            .unwrap_or_else(|| execution_id.clone());
         assert_eq!(
             error_message(&refused_delete),
-            format!("Active executions found for {plan_arn}: us-west-2: {execution_id}"),
+            format!("Active executions found for {plan_arn}: us-west-2: {bare_execution_id}"),
             "case {case:?}: expected the active-execution refusal, got {refused_delete}"
         );
 
@@ -905,7 +917,8 @@ async fn a_plan_this_emulator_holds_no_plan_for_is_one_message_built_from_the_ar
 }
 
 /// RULE 5: a plan's two Regions are two DIFFERENT Regions, so a pair that names one
-/// Region twice is refused and nothing is stored.
+/// Region twice is refused — with the service's own FIXED text, which quotes no Region
+/// back — and nothing is stored.
 #[tokio::test]
 async fn create_plan_refuses_a_region_pair_that_names_one_region_twice() {
     // Regions drawn from `Region`'s own pattern `^[a-z]{2}-[a-z-]+-\d+$`
@@ -930,9 +943,10 @@ async fn create_plan_refuses_a_region_pair_that_names_one_region_twice() {
             "ValidationException",
             "case {case:?}: expected ValidationException, got {body}"
         );
-        assert!(
-            error_message(&body).contains(region),
-            "case {case:?}: expected the refusal to name the Region, got {body}"
+        assert_eq!(
+            error_message(&body),
+            state::DUPLICATE_REGIONS_MESSAGE,
+            "case {case:?}: expected the service's fixed duplicate-region text, got {body}"
         );
 
         // Nothing was stored: the store is still empty.

@@ -29,6 +29,11 @@
 //!
 //! [`settle`]: ComAmazonawsArcregionswitchArcregionswitchState::settle
 
+/// The EventBridge event a plan execution publishes when it starts.
+pub mod execution_events;
+/// Whether the role a plan's `executionRole` names is one a plan execution could act as.
+pub mod execution_role;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
@@ -139,11 +144,12 @@ pub const STEP_PENDING_APPROVAL: &str = "pendingApproval";
 /// The `StepStatus` of a step that is done: a manual approval that was approved.
 pub const STEP_COMPLETED: &str = "completed";
 
-/// The `StepStatus` of a step this emulator could not perform.
+/// The `StepStatus` of a step that reached a negative outcome of its own: one this
+/// emulator could not perform, and one whose manual approval was DECLINED.
 pub const STEP_FAILED: &str = "failed";
 
-/// The `StepStatus` of a step that never ran because it was declined, or because its
-/// approval window closed first.
+/// The `StepStatus` of a step stopped from outside itself rather than by an outcome of its
+/// own: its approval window closed before anybody decided it.
 pub const STEP_CANCELED: &str = "canceled";
 
 /// The `ExecutionEventType` recorded when an execution is created.
@@ -170,9 +176,11 @@ pub const EVENT_EXECUTION_CANCELED: &str = "executionCanceled";
 /// The `ExecutionEventType` recorded when a caller pauses an execution.
 pub const EVENT_EXECUTION_PAUSED: &str = "executionPaused";
 
-/// The `ExecutionEventType` recorded when a paused execution is resumed: the clock is
-/// driving it again. The model's `ExecutionEventType` enum declares no resumed member, so
-/// this is the nearest it has.
+/// The `ExecutionEventType` recorded when the clock STARTS an execution: it leaves
+/// [`PENDING`] and the workflow is being driven, which is also what a `resume` of a paused
+/// execution does. One event type for both, because both are the same fact about the
+/// execution — it is running now — and it is the only start event the timeline exposes, so
+/// a caller reconstructing an execution's span reads it as the instant work began.
 pub const EVENT_EXECUTION_STARTED: &str = "executionStarted";
 
 /// The `ExecutionEventType` recorded when an execution is switched to [`MODE_GRACEFUL`].
@@ -314,15 +322,88 @@ pub const TERMINAL_EXECUTION_STATES: &[&str] = &[
 /// refuses any other count before a handler runs) and an execution shifts traffic from
 /// one of them to the other, which the same Region twice describes no such shift of.
 ///
-/// `Some(message)` is the refusal, naming the member and the value, for a handler that
-/// takes a plan's Region pair — today `CreatePlan`, and `UpdatePlan` once it is written.
+/// `Some(message)` is the refusal for a handler that takes a plan's Region pair — today
+/// `CreatePlan`, and `UpdatePlan` once it is written.
+///
+/// The sentence is the service's own, and it is FIXED text: it states what is wrong with
+/// the plan and what to do about it, and interpolates nothing — the Region named twice is
+/// in the request the caller sent, so the refusal quotes no value back.
 pub fn region_pair_violation(regions: &[String]) -> Option<String> {
     let mut seen: BTreeSet<&String> = BTreeSet::new();
-    let duplicate = regions.iter().find(|region| !seen.insert(region))?;
+    regions.iter().find(|region| !seen.insert(region))?;
+    Some(DUPLICATE_REGIONS_MESSAGE.to_string())
+}
+
+/// What a request naming the same Region twice in a plan's `regions` is refused with.
+///
+/// Fixed text, trailing space included: that is the sentence the service emits, and a
+/// client that branches on it or localizes it matches it exactly.
+pub const DUPLICATE_REGIONS_MESSAGE: &str =
+    "There are duplicate regions defined in the plan. Please remove the duplicated regions. ";
+
+/// Why the `recoveryExecutionId` of a `postRecovery` execution of the plan `plan_arn` is
+/// not usable, or `None` when the request carries one in the documented form (and for
+/// every other action, which needs none).
+///
+/// `recoveryExecutionId` is documented "Required when starting a post-recovery execution"
+/// and `RecoveryExecutionId` is `region/executionId` (pattern
+/// `^[a-z]{2}(-[a-z]+)+-[0-9]+/[0-9a-fA-F]{16}$`), so a post-recovery execution that
+/// names none and one that names a value of another form are the SAME refusal: the id the
+/// request has to carry is not there. One sentence for both, naming the plan the request
+/// addressed and the form to supply.
+pub fn recovery_execution_id_rejection(
+    plan_arn: &str,
+    action: &str,
+    recovery_execution_id: Option<&str>,
+) -> Option<String> {
+    if action != ACTION_POST_RECOVERY {
+        return None;
+    }
+    if recovery_execution_id.is_some_and(is_recovery_execution_id) {
+        return None;
+    }
     Some(format!(
-        "regions must name two different Amazon Web Services Regions, but {duplicate} is \
-         named twice"
+        "The recoveryExecutionId is missing or incorrectly formatted for the {plan_arn}. \
+         Please provide the recoveryExecutionId in the format 'region/executionId' for Post \
+         Recovery execution."
     ))
+}
+
+/// The `ExecutionAction` that follows a recovery execution, from the model's
+/// `ExecutionAction` enum
+/// (`smithy_query(query="shape", shape="ExecutionAction", model_path="services/service-com-amazonaws-arcregionswitch-arcregionswitch/smithy-model/com-amazonaws-arcregionswitch-arcregionswitch.json")`).
+pub const ACTION_POST_RECOVERY: &str = "postRecovery";
+
+/// Whether `value` is a `RecoveryExecutionId`: `region/executionId`, as the shape's
+/// pattern `^[a-z]{2}(-[a-z]+)+-[0-9]+/[0-9a-fA-F]{16}$` spells it — a Region label
+/// followed by a 16-digit hexadecimal execution id.
+fn is_recovery_execution_id(value: &str) -> bool {
+    let Some((region, id)) = value.split_once('/') else {
+        return false;
+    };
+    id.len() == 16 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) && is_region_label(region)
+}
+
+/// Whether `value` is a Region label of the form `RecoveryExecutionId`'s pattern requires:
+/// two lowercase letters, one or more lowercase-letter segments, and a trailing number.
+fn is_region_label(value: &str) -> bool {
+    let mut segments = value.split('-');
+    let Some(first) = segments.next() else {
+        return false;
+    };
+    if first.len() != 2 || !first.bytes().all(|byte| byte.is_ascii_lowercase()) {
+        return false;
+    }
+    let rest: Vec<&str> = segments.collect();
+    let Some((number, middle)) = rest.split_last() else {
+        return false;
+    };
+    !middle.is_empty()
+        && middle
+            .iter()
+            .all(|segment| !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_lowercase()))
+        && !number.is_empty()
+        && number.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// The `ResourceNotFoundException` message for a plan ARN this emulator cannot resolve a
@@ -430,20 +511,24 @@ impl StoredPlan {
     /// Region) triple any `Route53HealthCheck` execution block of its workflows names,
     /// deduplicated and in ascending order of that triple so paging over them is stable.
     ///
-    /// The triples come from the stored `Route53HealthCheckConfiguration`s: the block's
-    /// `hostedZoneId` and `recordName`, with the `region` of each of its `recordSets`.
-    /// `region` is a required member of `Route53HealthCheck`, and a record set's
-    /// `region` is the only Region the stored configuration names, so a block whose
-    /// record sets name none contributes nothing — this emulator does not read the
-    /// hosted zone from Route 53 to discover the record sets a configuration left out.
+    /// The hosted zone and the record name come from the block's own `hostedZoneId` and
+    /// `recordName`. The REGIONS are the Regions the block's `recordSets` name — and when
+    /// it names none, the plan's own two Regions: `region` is a required member of
+    /// `Route53HealthCheck`, a Region switch shifts traffic between both of the plan's
+    /// Regions, and the record the block names is reached in each of them, so a block that
+    /// singles out no record set configures a health check for that record in each Region
+    /// the plan covers. A plan whose workflows carry no such block configures none.
     ///
     /// `healthCheckId` is absent and `status` is [`HEALTH_CHECK_STATUS_UNKNOWN`]: no
-    /// Route 53 health check was created for the record, and nothing probed it.
+    /// Route 53 health check resource was created for the record — the id a caller would
+    /// read back from Route 53 is Route 53's to mint, and this emulator reports none it
+    /// does not hold — and nothing probed the record's endpoint.
     pub fn route53_health_checks(&self) -> Vec<Route53HealthCheck> {
         let mut found: BTreeSet<(String, String, String)> = BTreeSet::new();
         for workflow in &self.plan.workflows {
             collect_route53_health_checks(
                 workflow.steps.as_deref().unwrap_or_default(),
+                &self.plan.regions,
                 &mut found,
             );
         }
@@ -462,9 +547,18 @@ impl StoredPlan {
     }
 
     /// The plan's current evaluation warnings, as `GetPlanEvaluationStatus` reports them:
-    /// one active [`ResourceWarning`] for every workflow step whose execution block leaves
-    /// one of the plan's Regions unconfigured, and one for every regional resource it
-    /// configures in a Region the plan does not cover.
+    /// one active [`ResourceWarning`] for the plan's `executionRole` when that role cannot
+    /// be acted as, one for every workflow step whose execution block leaves one of the
+    /// plan's Regions unconfigured, and one for every regional resource it configures in a
+    /// Region the plan does not cover.
+    ///
+    /// `execution_role_refusal` is why the plan's `executionRole` cannot be acted as, from
+    /// [`execution_role::execution_role_refusal`] — the caller resolves it, because the
+    /// role lives in ANOTHER service's store and this projection reads only the plan. A
+    /// plan execution performs its workflows as that role, so a plan whose role does not
+    /// resolve cannot execute at all, which is the first thing an evaluation has to say
+    /// about it. That warning is about the PLAN rather than about one step, so it names
+    /// neither a workflow nor a step and carries the role's ARN as its `resourceArn`.
     ///
     /// A plan covers exactly two Regions (`regions` is `@length(min: 2, max: 2)`) and a
     /// switch shifts traffic between them in either direction, so a step that drives
@@ -482,12 +576,26 @@ impl StoredPlan {
     /// of the record: [`ResourceWarning::version`] is the plan version they were derived
     /// from and `warningUpdatedTime` is when that version was written, which is when the
     /// configuration last changed.
-    pub fn evaluation_warnings(&self) -> Vec<ResourceWarning> {
+    pub fn evaluation_warnings(
+        &self,
+        execution_role_refusal: Option<String>,
+    ) -> Vec<ResourceWarning> {
         let version = self.version();
         let updated_at = self.plan.updated_at.unwrap_or(DateTime::from_secs(0));
         let covered: BTreeSet<&str> = self.plan.regions.iter().map(String::as_str).collect();
         let regions = self.plan.regions.join(", ");
         let mut warnings = Vec::new();
+        if let Some(warning_message) = execution_role_refusal {
+            warnings.push(ResourceWarning {
+                workflow: None,
+                version: version.clone(),
+                step_name: None,
+                resource_arn: Some(self.plan.execution_role.clone()),
+                warning_status: WARNING_STATUS_ACTIVE.to_string(),
+                warning_updated_time: updated_at,
+                warning_message,
+            });
+        }
         for workflow in &self.plan.workflows {
             // A stored workflow carries no `name` member, so the warning names it the only
             // two ways the record can: the action it performs and its own description.
@@ -747,10 +855,19 @@ fn flattened_steps(steps: &[Step]) -> Vec<&Step> {
 /// blocks reachable from `steps` name, descending into the steps a `Parallel` block
 /// nests.
 ///
+/// A block that singles out no record set is taken to configure the record it names in
+/// each of `plan_regions`, the Regions the plan covers: `region` is required on the
+/// reported health check, and a switch moves the record's traffic between exactly those
+/// Regions.
+///
 /// The walk keeps its own stack rather than recursing: how deeply `parallelConfig`
 /// nests is chosen by whoever created the plan, so recursion would let one request
 /// grow the call stack.
-fn collect_route53_health_checks(steps: &[Step], found: &mut BTreeSet<(String, String, String)>) {
+fn collect_route53_health_checks(
+    steps: &[Step],
+    plan_regions: &[String],
+    found: &mut BTreeSet<(String, String, String)>,
+) {
     let mut pending: Vec<&Step> = steps.iter().collect();
     while let Some(step) = pending.pop() {
         match &step.execution_block_configuration {
@@ -758,14 +875,23 @@ fn collect_route53_health_checks(steps: &[Step], found: &mut BTreeSet<(String, S
                 pending.extend(nested.steps.iter());
             }
             ExecutionBlockConfiguration::route53HealthCheckConfig(config) => {
-                for record_set in config.record_sets.iter().flatten() {
-                    if let Some(region) = record_set.region.as_ref() {
-                        found.insert((
-                            config.hosted_zone_id.clone(),
-                            config.record_name.clone(),
-                            region.clone(),
-                        ));
-                    }
+                let named: Vec<&String> = config
+                    .record_sets
+                    .iter()
+                    .flatten()
+                    .filter_map(|record_set| record_set.region.as_ref())
+                    .collect();
+                let regions: Vec<&String> = if named.is_empty() {
+                    plan_regions.iter().collect()
+                } else {
+                    named
+                };
+                for region in regions {
+                    found.insert((
+                        config.hosted_zone_id.clone(),
+                        config.record_name.clone(),
+                        region.clone(),
+                    ));
                 }
             }
             _ => {}
@@ -1087,7 +1213,13 @@ impl ComAmazonawsArcregionswitchArcregionswitchState {
 
     /// Apply the ONE transition the clock owed `key` at `due`.
     ///
-    /// The step the execution stands on decides which it is:
+    /// An execution the clock reaches while it is still [`PENDING`] is STARTING: the
+    /// workflow is being driven from here on, so an [`EVENT_EXECUTION_STARTED`] event
+    /// anchors the timeline before the first event of the step this transition reaches.
+    /// Once — a resume of an execution paused before it ever started has already recorded
+    /// that the execution is running, and an execution starts only the one time.
+    ///
+    /// The step the execution stands on decides which transition it is:
     ///
     /// * a step waiting for a manual approval whose window has closed →
     ///   [`PLAN_EXECUTION_TIMED_OUT`];
@@ -1101,6 +1233,11 @@ impl ComAmazonawsArcregionswitchArcregionswitchState {
         let Some(execution) = self.executions.get(key) else {
             return;
         };
+        let starting = execution.execution_state == PENDING
+            && !execution
+                .events
+                .iter()
+                .any(|event| event.r#type.as_deref() == Some(EVENT_EXECUTION_STARTED));
         let next = if execution.is_terminal() {
             // Nothing is owed to an execution that has reached a state it never leaves;
             // reaching here means a stale deadline outlived it, so it is dropped rather
@@ -1124,6 +1261,12 @@ impl ComAmazonawsArcregionswitchArcregionswitchState {
             // outcome is claimed for work nothing ran, because no work is left.
             Advance::WorkflowDone
         };
+
+        // The execution was pending and the clock has now reached it: it is running, and
+        // the event that says so precedes every event of the work this transition does.
+        if starting {
+            self.push_event(key, EVENT_EXECUTION_STARTED, None, at);
+        }
 
         match next {
             Advance::HoldForApproval { index, window } => {
@@ -1192,8 +1335,10 @@ impl ComAmazonawsArcregionswitchArcregionswitchState {
     /// Approving releases the step — it reports [`STEP_COMPLETED`], the execution
     /// [`IN_PROGRESS`], and the clock owes the next step after [`EXECUTION_START_SPAN`],
     /// so a caller reading straight after the approval still sees the execution between
-    /// steps. Declining stops the execution: the step is [`STEP_CANCELED`], the execution
-    /// [`CANCELED`], and the plan is released.
+    /// steps. Declining stops the execution: the step reached a negative outcome OF ITS
+    /// OWN, so it reports [`STEP_FAILED`] while the execution reports [`CANCELED`], and
+    /// the plan is released. [`STEP_CANCELED`] stays what it says — a step stopped from
+    /// outside itself, which is what the approval window closing undecided does to one.
     pub fn apply_approval(
         &mut self,
         key: &(String, String),
@@ -1241,7 +1386,11 @@ impl ComAmazonawsArcregionswitchArcregionswitchState {
             self.push_detailed_event(key, EVENT_STEP_SUCCEEDED, name, comment, None, at);
             self.schedule(key, Some(now + EXECUTION_START_SPAN));
         } else {
-            let name = self.mark_step(key, index, STEP_CANCELED, at, true);
+            // The decline is the step's OWN negative outcome: the step failed, and the
+            // execution it was holding is canceled. Two distinct modelled `StepStatus`
+            // values, so a caller reading `stepStates` can tell the step that ended the
+            // execution by an operator's decline from one an external cancel stopped.
+            let name = self.mark_step(key, index, STEP_FAILED, at, true);
             if let Some(execution) = self.executions.get_mut(key) {
                 execution.execution_state = CANCELED.to_string();
                 execution.updated_at = at;
@@ -1645,6 +1794,17 @@ pub fn execution_id(region: &str, seed: u64) -> String {
         "{region}/{:016x}",
         seed.wrapping_mul(EXECUTION_ID_MULTIPLIER)
     )
+}
+
+/// The two parts of an `ExecutionId`: the Region it ran in and the BARE id after it.
+///
+/// An `ExecutionId` is `<region>/<id>` ([`execution_id`], the form
+/// `RecoveryExecutionId`'s pattern spells), so anything that reports the two separately —
+/// the `DeletePlan` refusal that names the execution holding the plan — renders each part
+/// once instead of repeating the Region inside the id. A value carrying no separator is
+/// all id and names no Region.
+pub fn execution_id_parts(execution_id: &str) -> (&str, &str) {
+    execution_id.split_once('/').unwrap_or(("", execution_id))
 }
 
 /// This service's store in the shared engine: call it with a handler's `&*self.engine`.

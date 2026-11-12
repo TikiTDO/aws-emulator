@@ -40,6 +40,11 @@
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
 
+/// Whether IAM lets a request perform the action it asks for: the decision every
+/// operation whose model declares `AccessDeniedException` takes before it reads or writes
+/// anything.
+pub mod authorization;
+
 use smithy_server_runtime::{
     http, ErasedOperation, Refusal, Refused, Service,
 };

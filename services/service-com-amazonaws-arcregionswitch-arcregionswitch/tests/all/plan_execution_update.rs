@@ -817,6 +817,7 @@ async fn a_mode_switch_re_points_the_steps_the_clock_has_not_reached() {
         vec![
             "executionPending",
             "executionBehaviorChangedToUngraceful",
+            "executionStarted",
             "stepPendingApproval",
             "executionBehaviorChangedToGraceful",
         ],

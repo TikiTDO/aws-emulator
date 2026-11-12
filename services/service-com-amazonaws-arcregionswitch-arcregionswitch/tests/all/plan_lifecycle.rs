@@ -105,6 +105,52 @@ pub(crate) fn error_code(body: &Value) -> String {
         .to_string()
 }
 
+/// How long a case polls for a transition the clock owes before it gives up.
+///
+/// Generous on purpose: it bounds a POLL LOOP that ends as soon as the condition holds, so
+/// a fast machine never waits for it and a loaded one is not failed by it.
+const SETTLE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long such a loop waits between looks.
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Poll `GetPlanExecution` until the execution reports one of `states`, or
+/// [`SETTLE_DEADLINE`] passes.
+///
+/// Waits for the CONDITION the clock owes rather than for a duration, so nothing about the
+/// case depends on how fast the host runs.
+async fn poll_until_execution_state(
+    router: &MultiServiceRouter,
+    case: &str,
+    plan_arn: &str,
+    execution_id: &str,
+    states: &[&str],
+) {
+    let deadline = std::time::Instant::now() + SETTLE_DEADLINE;
+    loop {
+        let (status, execution) = call(
+            router,
+            "GetPlanExecution",
+            &json!({"planArn": plan_arn, "executionId": execution_id}),
+        )
+        .await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: GetPlanExecution expected 200, got {status} with {execution}"
+        );
+        let state = execution["executionState"].as_str().unwrap_or_default();
+        if states.contains(&state) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "case {case:?}: expected the execution to reach one of {states:?}, it reports \
+             {state:?}"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
 /// The `message` of an error response.
 pub(crate) fn error_message(body: &Value) -> String {
     body.get("message")
@@ -1265,7 +1311,16 @@ async fn list_plan_execution_events_reports_the_timeline_the_execution_recorded(
          {opening_types:?}"
     );
 
-    tokio::time::sleep(EXECUTION_START_SPAN + Duration::from_millis(250)).await;
+    // Wait for the CONDITION the clock owes — the execution reaching the state its
+    // unperformable step decides — rather than for a duration.
+    poll_until_execution_state(
+        &router,
+        "the timeline once the outcome came due",
+        &plan_arn,
+        &execution_id,
+        &["failed"],
+    )
+    .await;
 
     // Page the whole timeline, one event at a time and all at once.
     for page_size in [None, Some(1usize), Some(100)] {
@@ -1313,7 +1368,7 @@ async fn list_plan_execution_events_reports_the_timeline_the_execution_recorded(
         );
         assert_eq!(
             seen,
-            vec!["executionPending", "executionFailed"],
+            vec!["executionPending", "executionStarted", "executionFailed"],
             "case {case}: expected the recorded timeline in order, got {seen:?}"
         );
         let unique: BTreeSet<&String> = ids.iter().collect();

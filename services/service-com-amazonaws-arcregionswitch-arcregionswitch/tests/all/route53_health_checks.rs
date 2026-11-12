@@ -5,9 +5,10 @@
 //! The rule under test: the operation reports one health check per
 //! `(hostedZoneId, recordName, region)` triple that a `Route53HealthCheck` execution
 //! block of the named plan's workflows configures — the block's `hostedZoneId` and
-//! `recordName` with the `region` of each of its `recordSets` — deduplicated, in
-//! ascending order of that triple, narrowed by the request's `hostedZoneId` and
-//! `recordName` filters, and paged by `maxResults`/`nextToken`.
+//! `recordName` with the `region` of each of its `recordSets`, or with each Region the
+//! plan covers when the block singles out none — deduplicated, in ascending order of that
+//! triple, narrowed by the request's `hostedZoneId` and `recordName` filters, and paged by
+//! `maxResults`/`nextToken`.
 //!
 //! Every case drives the emulator through the same `MultiServiceRouter::dispatch` the
 //! router serves on a socket, so what these tests observe is what an SDK observes:
@@ -375,7 +376,13 @@ async fn health_checks_are_the_triples_the_plan_configures() {
                 "regionless.example.com",
                 json!([{"recordSetIdentifier": "only-an-identifier"}]),
             )],
-            vec![],
+            // The block singles out no Region, so the record it names is checked in each
+            // Region the plan covers.
+            vec![(
+                "Z4REGIONLESSZONEID",
+                "regionless.example.com",
+                &["us-east-1", "us-west-2"],
+            )],
         ),
         (
             "a block carrying no record sets at all",
@@ -385,7 +392,11 @@ async fn health_checks_are_the_triples_the_plan_configures() {
                 "setless.example.com",
                 json!([]),
             )],
-            vec![],
+            vec![(
+                "Z5SETLESSZONEID",
+                "setless.example.com",
+                &["us-east-1", "us-west-2"],
+            )],
         ),
     ];
 

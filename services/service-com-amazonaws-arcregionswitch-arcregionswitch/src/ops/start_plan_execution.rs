@@ -34,6 +34,18 @@
 //! guard it hands back. `ctx` ([`smithy_server_runtime::OperationContext`]) carries
 //! request metadata only; the engine is NOT reached through `ctx`.
 //!
+//! ## What a caller has to be allowed to do, and what else observes the start
+//!
+//! IAM decides FIRST: this operation declares `AccessDeniedException`, and AWS evaluates
+//! authorization ahead of any precondition about the plan's own state, so a caller no
+//! identity-based policy allows `arc-region-switch:StartPlanExecution` for is refused 403
+//! by [`crate::service::authorization`] before the plan is even read.
+//!
+//! A started execution is also PUBLISHED: the event
+//! [`crate::state::execution_events::PlanExecutionEvent`] renders goes onto the account's
+//! default EventBridge bus in the execution's Region, so a rule matching this service's
+//! source and detail-type delivers it to that rule's targets.
+//!
 //! Shared types live in `super::types`; the error channel in `crate::scaffolded`.
 //!
 //! ---
@@ -108,10 +120,12 @@
 #[allow(unused_imports)]
 use super::types::*;
 
-/// The `ExecutionAction` values, as the model's `ExecutionAction` enum declares them.
+/// The `ExecutionAction` values that shift traffic, as the model's `ExecutionAction` enum
+/// declares them. The third, `postRecovery`, shifts none and is named where the rule about
+/// its `recoveryExecutionId` is written
+/// ([`crate::state::ACTION_POST_RECOVERY`]).
 const ACTION_ACTIVATE: &str = "activate";
 const ACTION_DEACTIVATE: &str = "deactivate";
-const ACTION_POST_RECOVERY: &str = "postRecovery";
 
 /// The request parameters a `clientToken` is bound to, excluding the token itself.
 ///
@@ -226,7 +240,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
+        // IAM decides before any precondition about the plan or its executions: a caller
+        // no identity-based policy allows is refused here, whatever state the plan is in.
+        crate::service::authorization::authorize(&*self.engine, ctx, Self::NAME, &input.plan_arn)
+            .map_err(StartPlanExecutionErrorModeled::AccessDeniedException)?;
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(StartPlanExecutionErrorModeled::InternalServerException(
                 InternalServerException {
@@ -237,206 +255,228 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let now = ::std::time::SystemTime::now();
-        let mut store = state.lock();
-        store.settle(now);
+        // The whole synchronous half runs in this block, so the store guard is RELEASED at
+        // its end: what follows is an in-process call this emulator serves, which must not
+        // run under this service's lock.
+        let (output, event) = {
+            let mut store = state.lock();
+            store.settle(now);
 
-        // A repeated `clientToken` answers with the execution its first use started; the
-        // same token with different parameters is the modelled client-token conflict.
-        let fingerprint = request_fingerprint(&input);
-        if let Some(token) = input.client_token.as_deref() {
-            if let Some(record) = store.client_tokens.get(token) {
-                let key = (record.plan_arn.clone(), record.execution_id.clone());
-                if record.fingerprint != fingerprint {
-                    return Err(StartPlanExecutionErrorModeled::ConflictException(
-                        ConflictException {
-                            message: format!(
-                                "The client token {token} was already used with different request \
-                                 parameters"
-                            ),
-                            resource_id: Some(key.1),
-                            resource_type: Some("PlanExecution".to_string()),
-                        },
-                    )
-                    .into());
+            // A repeated `clientToken` answers with the execution its first use started;
+            // the same token with different parameters is the modelled client-token
+            // conflict.
+            let fingerprint = request_fingerprint(&input);
+            if let Some(token) = input.client_token.as_deref() {
+                if let Some(record) = store.client_tokens.get(token) {
+                    let key = (record.plan_arn.clone(), record.execution_id.clone());
+                    if record.fingerprint != fingerprint {
+                        return Err(StartPlanExecutionErrorModeled::ConflictException(
+                            ConflictException {
+                                message: format!(
+                                    "The client token {token} was already used with different \
+                                     request parameters"
+                                ),
+                                resource_id: Some(key.1),
+                                resource_type: Some("PlanExecution".to_string()),
+                            },
+                        )
+                        .into());
+                    }
+                    let Some(existing) = store.executions.get(&key) else {
+                        return Err(StartPlanExecutionErrorModeled::InternalServerException(
+                            InternalServerException {
+                                message: format!(
+                                    "the execution {} recorded for client token {token} is \
+                                     missing",
+                                    key.1
+                                ),
+                            },
+                        )
+                        .into());
+                    };
+                    // Nothing started, so nothing is published: the replay answers with
+                    // the execution the FIRST use of the token started.
+                    return Ok(execution_output(existing));
                 }
-                let Some(existing) = store.executions.get(&key) else {
-                    return Err(StartPlanExecutionErrorModeled::InternalServerException(
-                        InternalServerException {
-                            message: format!(
-                                "the execution {} recorded for client token {token} is missing",
-                                key.1
-                            ),
-                        },
-                    )
-                    .into());
-                };
-                return Ok(execution_output(existing));
             }
-        }
 
-        let Some(plan) = store.plans.get(&input.plan_arn) else {
-            return Err(StartPlanExecutionErrorModeled::ResourceNotFoundException(
-                ResourceNotFoundException {
-                    message: crate::state::plan_not_found_message(&input.plan_arn),
-                },
-            )
-            .into());
-        };
-        let plan_version = plan.version();
-        let plan_regions = plan.plan.regions.clone();
-        let counterpart_region = plan.counterpart_region(&input.target_region);
-        let active_execution = plan.active_execution.clone();
-        let workflows = plan.plan.workflows.clone();
+            let Some(plan) = store.plans.get(&input.plan_arn) else {
+                return Err(StartPlanExecutionErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: crate::state::plan_not_found_message(&input.plan_arn),
+                    },
+                )
+                .into());
+            };
+            let plan_version = plan.version();
+            let plan_regions = plan.plan.regions.clone();
+            let counterpart_region = plan.counterpart_region(&input.target_region);
+            let active_execution = plan.active_execution.clone();
+            let workflows = plan.plan.workflows.clone();
 
-        // A plan names exactly two Regions and an execution shifts traffic between them,
-        // so a target outside the plan's Regions is an invalid argument.
-        if !plan_regions.contains(&input.target_region) {
-            return Err(StartPlanExecutionErrorModeled::IllegalArgumentException(
-                IllegalArgumentException {
-                    message: format!(
-                        "targetRegion {} is not one of the plan's Regions ({})",
-                        input.target_region,
-                        plan_regions.join(", ")
-                    ),
-                },
-            )
-            .into());
-        }
+            // A plan names exactly two Regions and an execution shifts traffic between
+            // them, so a target outside the plan's Regions is an invalid argument.
+            if !plan_regions.contains(&input.target_region) {
+                return Err(StartPlanExecutionErrorModeled::IllegalArgumentException(
+                    IllegalArgumentException {
+                        message: format!(
+                            "targetRegion {} is not one of the plan's Regions ({})",
+                            input.target_region,
+                            plan_regions.join(", ")
+                        ),
+                    },
+                )
+                .into());
+            }
 
-        // `recoveryExecutionId` is documented "Required when starting a post-recovery
-        // execution".
-        if input.action == ACTION_POST_RECOVERY && input.recovery_execution_id.is_none() {
-            return Err(StartPlanExecutionErrorModeled::IllegalArgumentException(
-                IllegalArgumentException {
-                    message: format!(
-                        "recoveryExecutionId is required when action is {ACTION_POST_RECOVERY}"
-                    ),
-                },
-            )
-            .into());
-        }
+            // `recoveryExecutionId` is documented "Required when starting a post-recovery
+            // execution", in the `region/executionId` form its shape's pattern spells;
+            // one reading of that rule, which answers the same sentence for an id that is
+            // missing and for one of another form.
+            if let Some(rejection) = crate::state::recovery_execution_id_rejection(
+                &input.plan_arn,
+                &input.action,
+                input.recovery_execution_id.as_deref(),
+            ) {
+                return Err(StartPlanExecutionErrorModeled::IllegalArgumentException(
+                    IllegalArgumentException { message: rejection },
+                )
+                .into());
+            }
 
-        // One execution holds the plan until it reaches a state it never leaves.
-        let holder = active_execution.filter(|id| {
-            store
-                .executions
-                .get(&(input.plan_arn.clone(), id.clone()))
-                .is_some_and(|execution| !execution.is_terminal())
-        });
-        if holder.is_some() {
-            return Err(StartPlanExecutionErrorModeled::IllegalStateException(
-                IllegalStateException {
-                    message: format!(
-                        "There is already an execution ongoing for plan {}",
-                        input.plan_arn
-                    ),
-                },
-            )
-            .into());
-        }
-
-        // The execution history this plan keeps is bounded: at the ceiling, the oldest
-        // execution that has reached a state it never leaves is dropped, and if none has
-        // there is no room for another.
-        if !store.room_for_execution(&input.plan_arn) {
-            return Err(StartPlanExecutionErrorModeled::IllegalStateException(
-                IllegalStateException {
-                    message: format!(
-                        "The plan {} already holds the maximum of {} recorded executions, \
-                         none of which has finished",
-                        input.plan_arn,
-                        crate::state::MAX_EXECUTIONS_PER_PLAN
-                    ),
-                },
-            )
-            .into());
-        }
-
-        let (activate_region, deactivate_region) = match input.action.as_str() {
-            ACTION_ACTIVATE => (
-                Some(input.target_region.clone()),
-                counterpart_region.clone(),
-            ),
-            ACTION_DEACTIVATE => (
-                counterpart_region.clone(),
-                Some(input.target_region.clone()),
-            ),
-            // `postRecovery` is the clean-up that follows a recovery: it shifts no
-            // traffic, so it neither activates nor deactivates a Region.
-            _ => (None, None),
-        };
-
-        // The steps of the workflow this action runs, in order and none of them reached
-        // yet: the clock, not this call, is what starts the first one. `step_states` is
-        // the modelled projection the API reports; `planned_steps` is what the clock
-        // needs to decide each transition, captured now so a later edit of the plan
-        // cannot change what this execution does.
-        let steps: Vec<&Step> = workflows
-            .iter()
-            .filter(|workflow| workflow.workflow_target_action == input.action)
-            .flat_map(|workflow| workflow.steps.iter().flatten())
-            .collect();
-        let mut step_states: Vec<StepState> = Vec::with_capacity(steps.len());
-        let mut planned_steps: Vec<crate::state::PlannedStep> = Vec::with_capacity(steps.len());
-        for step in steps {
-            step_states.push(StepState {
-                name: Some(step.name.clone()),
-                status: Some(crate::state::STEP_NOT_STARTED.to_string()),
-                start_time: None,
-                end_time: None,
-                step_mode: Some(input.mode.clone()),
+            // One execution holds the plan until it reaches a state it never leaves.
+            let holder = active_execution.filter(|id| {
+                store
+                    .executions
+                    .get(&(input.plan_arn.clone(), id.clone()))
+                    .is_some_and(|execution| !execution.is_terminal())
             });
-            planned_steps.push(crate::state::PlannedStep::of(step));
-        }
+            if holder.is_some() {
+                return Err(StartPlanExecutionErrorModeled::IllegalStateException(
+                    IllegalStateException {
+                        message: format!(
+                            "There is already an execution ongoing for plan {}",
+                            input.plan_arn
+                        ),
+                    },
+                )
+                .into());
+            }
 
-        let seed = store.next_seed();
-        let execution_id = crate::state::execution_id(&input.target_region, seed);
-        let started_at = ::aws_smithy_types::DateTime::from(now);
-        let record = crate::state::StoredExecution {
-            plan_arn: input.plan_arn.clone(),
-            execution_id: execution_id.clone(),
-            plan_version,
-            comment: input.comment,
-            mode: input.mode,
-            action: input.action,
-            execution_state: crate::state::PENDING.to_string(),
-            execution_region: input.target_region,
-            activate_region,
-            deactivate_region,
-            recovery_execution_id: input.recovery_execution_id,
-            start_time: started_at,
-            end_time: None,
-            updated_at: started_at,
-            step_states,
-            planned_steps,
-            events: Vec::new(),
-            outcome_due_at: Some(now + crate::state::EXECUTION_START_SPAN),
-            // Nothing has paused it, so there is no state to put it back into and no
-            // remainder to serve: both are what `UpdatePlanExecution`'s `pause` records.
-            resumes_to: None,
-            owed_on_resume: None,
-        };
+            // The execution history this plan keeps is bounded: at the ceiling, the oldest
+            // execution that has reached a state it never leaves is dropped, and if none
+            // has there is no room for another.
+            if !store.room_for_execution(&input.plan_arn) {
+                return Err(StartPlanExecutionErrorModeled::IllegalStateException(
+                    IllegalStateException {
+                        message: format!(
+                            "The plan {} already holds the maximum of {} recorded executions, \
+                             none of which has finished",
+                            input.plan_arn,
+                            crate::state::MAX_EXECUTIONS_PER_PLAN
+                        ),
+                    },
+                )
+                .into());
+            }
 
-        let key = (input.plan_arn.clone(), execution_id.clone());
-        // One entry point for the write, so the plan's execution list, the active-execution
-        // link and the clock-owed-transition index cannot drift apart.
-        store.insert_execution(record);
-        if let Some(token) = input.client_token {
-            store.record_client_token(token, fingerprint, key.0.clone(), key.1.clone());
-        }
+            let (activate_region, deactivate_region) = match input.action.as_str() {
+                ACTION_ACTIVATE => (
+                    Some(input.target_region.clone()),
+                    counterpart_region.clone(),
+                ),
+                ACTION_DEACTIVATE => (
+                    counterpart_region.clone(),
+                    Some(input.target_region.clone()),
+                ),
+                // `postRecovery` is the clean-up that follows a recovery: it shifts no
+                // traffic, so it neither activates nor deactivates a Region.
+                _ => (None, None),
+            };
 
-        // Project the response from the STORED record.
-        let Some(started) = store.executions.get(&key) else {
-            return Err(StartPlanExecutionErrorModeled::InternalServerException(
-                InternalServerException {
-                    message: format!(
-                        "the execution {} could not be read back after it was stored",
-                        key.1
-                    ),
-                },
+            // The steps of the workflow this action runs, in order and none of them
+            // reached yet: the clock, not this call, is what starts the first one.
+            // `step_states` is the modelled projection the API reports; `planned_steps` is
+            // what the clock needs to decide each transition, captured now so a later edit
+            // of the plan cannot change what this execution does.
+            let steps: Vec<&Step> = workflows
+                .iter()
+                .filter(|workflow| workflow.workflow_target_action == input.action)
+                .flat_map(|workflow| workflow.steps.iter().flatten())
+                .collect();
+            let mut step_states: Vec<StepState> = Vec::with_capacity(steps.len());
+            let mut planned_steps: Vec<crate::state::PlannedStep> =
+                Vec::with_capacity(steps.len());
+            for step in steps {
+                step_states.push(StepState {
+                    name: Some(step.name.clone()),
+                    status: Some(crate::state::STEP_NOT_STARTED.to_string()),
+                    start_time: None,
+                    end_time: None,
+                    step_mode: Some(input.mode.clone()),
+                });
+                planned_steps.push(crate::state::PlannedStep::of(step));
+            }
+
+            let seed = store.next_seed();
+            let execution_id = crate::state::execution_id(&input.target_region, seed);
+            let started_at = ::aws_smithy_types::DateTime::from(now);
+            let record = crate::state::StoredExecution {
+                plan_arn: input.plan_arn.clone(),
+                execution_id: execution_id.clone(),
+                plan_version,
+                comment: input.comment,
+                mode: input.mode,
+                action: input.action,
+                execution_state: crate::state::PENDING.to_string(),
+                execution_region: input.target_region,
+                activate_region,
+                deactivate_region,
+                recovery_execution_id: input.recovery_execution_id,
+                start_time: started_at,
+                end_time: None,
+                updated_at: started_at,
+                step_states,
+                planned_steps,
+                events: Vec::new(),
+                outcome_due_at: Some(now + crate::state::EXECUTION_START_SPAN),
+                // Nothing has paused it, so there is no state to put it back into and no
+                // remainder to serve: both are what `UpdatePlanExecution`'s `pause`
+                // records.
+                resumes_to: None,
+                owed_on_resume: None,
+            };
+
+            let key = (input.plan_arn.clone(), execution_id.clone());
+            // One entry point for the write, so the plan's execution list, the
+            // active-execution link and the clock-owed-transition index cannot drift
+            // apart.
+            store.insert_execution(record);
+            if let Some(token) = input.client_token {
+                store.record_client_token(token, fingerprint, key.0.clone(), key.1.clone());
+            }
+
+            // Project the response from the STORED record.
+            let Some(started) = store.executions.get(&key) else {
+                return Err(StartPlanExecutionErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: format!(
+                            "the execution {} could not be read back after it was stored",
+                            key.1
+                        ),
+                    },
+                )
+                .into());
+            };
+            // Starting a switch is published onto the account's default event bus, so a
+            // rule matching this service's events delivers it to that rule's targets.
+            // Rendered from the stored record, published once the guard is gone.
+            (
+                execution_output(started),
+                crate::state::execution_events::PlanExecutionEvent::of(started),
             )
-            .into());
         };
-        Ok(execution_output(started))
+        event.publish(ctx.callback()).await;
+        Ok(output)
     }
 }

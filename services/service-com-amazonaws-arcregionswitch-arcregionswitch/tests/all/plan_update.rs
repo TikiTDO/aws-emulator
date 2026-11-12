@@ -7,7 +7,8 @@
 //! `arn`, each `@cfnMutability: full`, so an omitted optional member leaves the plan
 //! without that configuration — leaves every member the request does not carry as it
 //! was, and makes a new server-owned `version` and `updatedAt`; an ARN no plan is stored
-//! under is refused with the modelled `ResourceNotFoundException` (HTTP 404) and writes
+//! under is refused with the modelled `ResourceNotFoundException` (HTTP 404), carrying the
+//! service's own plan-not-found message built from the ARN the request named, and writes
 //! nothing.
 //!
 //! The request/response helpers are shared with [`crate::plan_lifecycle`]: both suites
@@ -17,7 +18,7 @@
 use serde_json::{json, Value};
 
 use crate::plan_lifecycle::{
-    call, create_plan, default_workflows, error_code, router, workflow, ACCOUNT,
+    call, create_plan, default_workflows, error_code, error_message, router, workflow, ACCOUNT,
 };
 
 /// The `Plan` members `UpdatePlan` writes: every member of `UpdatePlanRequest` other than
@@ -252,6 +253,13 @@ async fn update_plan_for_an_unknown_arn_is_resource_not_found_and_writes_nothing
             error_code(&body),
             "ResourceNotFoundException",
             "case {case:?}: expected ResourceNotFoundException, got {body}"
+        );
+        // The service's single plan-not-found sentence, built from the ARN the REQUEST
+        // carried: every operation that resolves a plan by ARN words it the same way.
+        assert_eq!(
+            error_message(&body),
+            format!("Plan not found for ARN: {arn}"),
+            "case {case:?}: expected the request-derived not-found message, got {body}"
         );
 
         // The refusal wrote nothing: the plan the store holds is still at its creation

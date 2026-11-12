@@ -4,14 +4,22 @@
 //!
 //! ## What this operation reports
 //!
-//! The evaluation of the plan the request names, derived from the stored plan record:
-//! [`crate::state::StoredPlan::evaluation_warnings`] raises one active warning for every
-//! workflow step whose execution block leaves one of the plan's two Regions unconfigured,
-//! or configures a resource in a Region the plan does not cover, and
+//! The evaluation of the plan the request names, derived from the stored plan record and
+//! from the role that record names: [`crate::state::StoredPlan::evaluation_warnings`]
+//! raises one active warning when the plan's `executionRole` resolves to no role of the
+//! account (a plan execution performs its workflows as that role, so one that cannot be
+//! acted as cannot run —
+//! [`crate::state::execution_role::execution_role_refusal`] is what resolves it), one for
+//! every workflow step whose execution block leaves one of the plan's two Regions
+//! unconfigured, or configures a resource in a Region the plan does not cover, and
 //! [`crate::state::evaluation_state`] turns the whole warning set into the reported
 //! `EvaluationStatus`. The evaluation is of the stored configuration, so the version it
 //! reports is the plan's current version and the time it reports is when that version was
 //! written.
+//!
+//! IAM authorization comes FIRST: this operation declares `AccessDeniedException`, so a
+//! caller no identity-based policy allows is refused by
+//! [`crate::service::authorization`] before the plan is read at all.
 //!
 //! ## Shape of an operation
 //!
@@ -165,6 +173,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // IAM decides before the resource is looked at, so an unauthorized caller is told
+        // only that it is not authorized.
+        crate::service::authorization::authorize(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &input.plan_arn,
+        )
+        .map_err(GetPlanEvaluationStatusErrorModeled::AccessDeniedException)?;
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             // This operation models no server fault, so a store that is not there is a
             // refusal rather than a fabricated evaluation.
@@ -209,10 +227,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         };
 
+        // The plan's `executionRole` lives in IAM's store, not in this one: a plan
+        // execution performs its workflows AS that role, so an evaluation says whether
+        // the role resolves at all. Read with this store's guard held — this service's
+        // own store first, IAM's second — so the verdict is about the plan as just read.
+        let execution_role_refusal = crate::state::execution_role::execution_role_refusal(
+            &*self.engine,
+            &record.plan.execution_role,
+        );
+
         // The WHOLE warning set decides the evaluation state; the page decides only what
         // this response carries, so a caller reading the second page is told the same
         // state as one reading the first.
-        let warnings = record.evaluation_warnings();
+        let warnings = record.evaluation_warnings(execution_role_refusal);
         let evaluation_state = crate::state::evaluation_state(&warnings);
         let total = warnings.len();
         if offset >= total.max(1) {

@@ -171,7 +171,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(record) = store.plans.get_mut(&input.arn) else {
             return Err(UpdatePlanErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
-                    message: format!("No plan found for arn {}", input.arn),
+                    // The crate's single plan-not-found sentence, so every operation that
+                    // resolves a plan by ARN words that refusal identically.
+                    message: crate::state::plan_not_found_message(&input.arn),
                 },
             )
             .into());

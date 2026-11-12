@@ -135,7 +135,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(record) = store.plans.get_mut(&input.arn) else {
             return Err(UntagResourceErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
-                    message: format!("No plan found for arn {}", input.arn),
+                    message: crate::state::plan_not_found_message(&input.arn),
                 },
             )
             .into());
