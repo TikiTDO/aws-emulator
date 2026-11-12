@@ -44,6 +44,12 @@ pub mod tagging;
 /// `InvokeBlueprintOptimizationAsync`.
 pub mod data_automation_profile;
 
+/// The data automation library ingestion job record, its clock-owed status and the two
+/// projections a read and a listing serve. Used by
+/// `InvokeDataAutomationLibraryIngestionJob`, `GetDataAutomationLibraryIngestionJob` and
+/// `ListDataAutomationLibraryIngestionJobs`.
+pub mod library_ingestion;
+
 /// The `blueprintStage` a blueprint takes when `CreateBlueprint` names none.
 ///
 /// `CreateBlueprintRequest$blueprintStage` is OPTIONAL and targets the enum
@@ -849,6 +855,24 @@ pub struct ComAmazonawsBedrockdataautomationAmazonbedrockkeystonebuildtimeservic
     /// `CreateDataAutomationLibrary` `clientToken` -> the ARN that call created, so
     /// an `@idempotencyToken` replay returns the original library.
     pub library_create_idempotency: HashMap<String, String>,
+    /// Every data automation library ingestion job
+    /// `InvokeDataAutomationLibraryIngestionJob` has accepted, keyed by the `jobArn` it
+    /// minted for it, and read back by `GetDataAutomationLibraryIngestionJob` and
+    /// `ListDataAutomationLibraryIngestionJobs`. Each record names the library it was
+    /// submitted against, which is what scopes a listing to one library. Bounded at
+    /// [`library_ingestion::INGESTION_JOB_QUOTA`] by the submission, which refuses rather
+    /// than inserting past it.
+    pub ingestion_jobs:
+        HashMap<String, library_ingestion::DataAutomationLibraryIngestionJobRecord>,
+    /// `InvokeDataAutomationLibraryIngestionJob` `clientToken` -> the `jobArn` that call
+    /// minted, so an `@idempotencyToken` replay answers about the job the first call
+    /// accepted rather than accepting a second one.
+    ///
+    /// Bounded by [`library_ingestion::INGESTION_JOB_QUOTA`] with the map above: an
+    /// accepted submission inserts at most one token entry beside the one job it minted,
+    /// and the quota is checked before either insert — so a caller submitting under fresh
+    /// tokens cannot grow this map past the job count.
+    pub ingestion_job_idempotency: HashMap<String, String>,
     /// Every blueprint-optimization job `InvokeBlueprintOptimizationAsync` has
     /// accepted, keyed by the `invocationArn` it minted for it, and read back by
     /// `GetBlueprintOptimizationStatus`. Bounded at [`OPTIMIZATION_JOB_QUOTA`] by the

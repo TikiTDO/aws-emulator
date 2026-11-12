@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetDataAutomationLibraryIngestionJob
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetDataAutomationLibraryIngestionJob`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetDataAutomationLibraryIngestionJob::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the ingestion job the (`libraryArn`, `jobArn`) pair names, with the status the
+//! clock has made due. A REPORTING operation: it projects the record
+//! `InvokeDataAutomationLibraryIngestionJob` stored and writes nothing.
 //!
 //! ## Shape of an operation
 //!
@@ -153,18 +148,53 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetDataAutomationLibraryIngestionJob` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetDataAutomationLibraryIngestionJobErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetDataAutomationLibraryIngestionJob"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            GetDataAutomationLibraryIngestionJobError::Modeled(
+                GetDataAutomationLibraryIngestionJobErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: Some(
+                            "the Bedrock Data Automation store is unavailable".to_string(),
+                        ),
+                    },
+                ),
+            )
+        })?;
+        // A read: it only projects what is already stored.
+        let store = state.lock();
+
+        // The request addresses a job THROUGH its library, so the library has to resolve
+        // first: an unresolved `libraryArn` is refused with the service's fixed sentence
+        // for it, whichever operation was handed it.
+        if !store.libraries.contains_key(&input.library_arn) {
+            return Err(
+                GetDataAutomationLibraryIngestionJobErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: Some(crate::state::LIBRARY_ARN_NOT_FOUND_MESSAGE.to_string()),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // A job belongs to one library, so the pair resolves only when the stored job was
+        // submitted against the library addressed; a job of another library is as absent
+        // here as one that was never minted.
+        let record = store
+            .library_ingestion_job(&input.library_arn, &input.job_arn)
+            .ok_or_else(|| {
+                GetDataAutomationLibraryIngestionJobErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: Some(
+                            crate::state::library_ingestion::INGESTION_JOB_ARN_NOT_FOUND_MESSAGE
+                                .to_string(),
+                        ),
+                    },
+                )
+            })?;
+
+        Ok(GetDataAutomationLibraryIngestionJobOutput {
+            job: Some(record.to_job(::std::time::SystemTime::now())),
+        })
     }
 }

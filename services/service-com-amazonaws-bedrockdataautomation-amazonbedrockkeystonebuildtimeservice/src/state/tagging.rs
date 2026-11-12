@@ -166,9 +166,10 @@ impl ServiceState {
         if let Some(library) = self.libraries.get(resource_arn) {
             return Some(&library.tags);
         }
-        self.optimization_jobs
-            .get(resource_arn)
-            .map(|job| &job.tags)
+        if let Some(job) = self.optimization_jobs.get(resource_arn) {
+            return Some(&job.tags);
+        }
+        self.ingestion_jobs.get(resource_arn).map(|job| &job.tags)
     }
 
     /// [`Self::resource_tags`] for a call that CHANGES the tags: the same lookup over the
@@ -183,7 +184,10 @@ impl ServiceState {
         if let Some(library) = self.libraries.get_mut(resource_arn) {
             return Some(&mut library.tags);
         }
-        self.optimization_jobs
+        if let Some(job) = self.optimization_jobs.get_mut(resource_arn) {
+            return Some(&mut job.tags);
+        }
+        self.ingestion_jobs
             .get_mut(resource_arn)
             .map(|job| &mut job.tags)
     }

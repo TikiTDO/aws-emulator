@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op InvokeDataAutomationLibraryIngestionJob
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `InvokeDataAutomationLibraryIngestionJob`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`InvokeDataAutomationLibraryIngestionJob::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Accepts an ingestion job against ONE DataAutomationLibrary and answers the `jobArn` it
+//! minted for it. A MUTATION the model states: the submission creates the job resource
+//! `GetDataAutomationLibraryIngestionJob` reads back and
+//! `ListDataAutomationLibraryIngestionJobs` enumerates. The job is accepted in flight and
+//! completes when the clock makes that transition due (`crate::state::library_ingestion`).
 //!
 //! ## Shape of an operation
 //!
@@ -170,18 +167,143 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `InvokeDataAutomationLibraryIngestionJob` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(InvokeDataAutomationLibraryIngestionJobErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            InvokeDataAutomationLibraryIngestionJobError::Modeled(
+                InvokeDataAutomationLibraryIngestionJobErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: Some(
+                            "the Bedrock Data Automation store is unavailable".to_string(),
+                        ),
+                    },
+                ),
+            )
+        })?;
+        let mut store = state.lock();
+
+        // A job is a resource OF the library its `libraryArn` names — it ingests entities
+        // into that library — so an ARN this store holds no library under names no library
+        // to ingest into. Refused with the service's FIXED sentence for an unresolved
+        // library, single-homed in `crate::state`, BEFORE anything is minted: a refused
+        // submission leaves no record behind.
+        if !store.libraries.contains_key(&input.library_arn) {
+            return Err(
+                InvokeDataAutomationLibraryIngestionJobErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: Some(crate::state::LIBRARY_ARN_NOT_FOUND_MESSAGE.to_string()),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // The modelled `InputConfiguration` makes both of its members optional, so the
+        // constraint walk that runs before this handler cannot refuse a configuration that
+        // names NEITHER source — and such a submission describes nothing to ingest.
+        if input.input_configuration.s3_object.is_none()
+            && input.input_configuration.inline_payload.is_none()
+        {
+            return Err(
+                InvokeDataAutomationLibraryIngestionJobErrorModeled::ValidationException(
+                    ValidationException {
+                        message: Some(
+                            crate::state::library_ingestion::MISSING_INGESTION_INPUT_MESSAGE
+                                .to_string(),
+                        ),
+                        field_list: Some(vec![ValidationExceptionField {
+                            name: "inputConfiguration".to_string(),
+                            message: crate::state::library_ingestion::
+                                MISSING_INGESTION_INPUT_MESSAGE
+                                .to_string(),
+                        }]),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // An `@idempotencyToken` replay answers about the job the first call accepted
+        // rather than accepting a second one, and answers with the ARN that is STORED.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("InvokeDataAutomationLibraryIngestionJob"))
+        // Consulted AFTER the request's own references are resolved, so a replay naming a
+        // library this store does not hold, or carrying an input configuration that names
+        // no source, is refused exactly as a first call carrying it would be — a token
+        // cannot buy a success for a request the service would otherwise refuse. Scoped to
+        // the library addressed for the same reason a read is: a job is a resource of one
+        // library, so a token resolving to a job of another library is no replay of this
+        // submission.
+        if let Some(token) = input.client_token.as_deref() {
+            if let Some(job_arn) = store.ingestion_job_idempotency.get(token).cloned() {
+                if let Some(record) = store.library_ingestion_job(&input.library_arn, &job_arn) {
+                    return Ok(InvokeDataAutomationLibraryIngestionJobOutput {
+                        job_arn: Some(record.job_arn.clone()),
+                    });
+                }
+            }
+        }
+
+        // The store is bounded: past the quota a submission is refused rather than allowed
+        // to grow the state without end.
+        if store.ingestion_jobs.len() >= crate::state::library_ingestion::INGESTION_JOB_QUOTA {
+            return Err(
+                InvokeDataAutomationLibraryIngestionJobErrorModeled::ServiceQuotaExceededException(
+                    ServiceQuotaExceededException {
+                        message: Some(crate::state::library_ingestion::quota_message()),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // ONE clock read backs both the job's `creationTime` and the instant its
+        // completion falls due, so the two cannot come from two different reads.
+        let (submitted_at, submitted_at_timestamp) = crate::state::now_pair();
+        let completes_at = submitted_at + crate::state::library_ingestion::INGESTION_JOB_SPAN;
+        let sequence = store.take_arn_sequence();
+        let job_arn = crate::state::library_ingestion::mint_ingestion_job_arn(
+            &crate::state::request_region(ctx),
+            submitted_at_timestamp,
+            sequence,
+        );
+        let record = crate::state::library_ingestion::DataAutomationLibraryIngestionJobRecord {
+            job_arn: job_arn.clone(),
+            library_arn: input.library_arn,
+            entity_type: input.entity_type,
+            operation_type: input.operation_type,
+            input_configuration: input.input_configuration,
+            output_configuration: input.output_configuration,
+            notification_configuration: input.notification_configuration,
+            creation_time: submitted_at_timestamp,
+            completes_at,
+            completion_time: ::aws_smithy_types::DateTime::from(completes_at),
+            tags: input.tags.unwrap_or_default(),
+        };
+        if let Some(token) = input.client_token {
+            store.ingestion_job_idempotency.insert(token, job_arn.clone());
+        }
+        store.ingestion_jobs.insert(job_arn.clone(), record);
+
+        // Answer with the identity of the job that is now PERSISTED, read back out of the
+        // store rather than from the value just built: a later
+        // `GetDataAutomationLibraryIngestionJob` must resolve exactly this ARN.
+        let stored_arn = store
+            .ingestion_jobs
+            .get(&job_arn)
+            .map(|record| record.job_arn.clone())
+            .ok_or_else(|| {
+                InvokeDataAutomationLibraryIngestionJobError::Modeled(
+                    InvokeDataAutomationLibraryIngestionJobErrorModeled::InternalServerException(
+                        InternalServerException {
+                            message: Some(
+                                "the data automation library ingestion job could not be read \
+                                 back after it was stored"
+                                    .to_string(),
+                            ),
+                        },
+                    ),
+                )
+            })?;
+        Ok(InvokeDataAutomationLibraryIngestionJobOutput {
+            job_arn: Some(stored_arn),
+        })
     }
 }

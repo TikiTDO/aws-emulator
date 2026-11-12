@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListDataAutomationLibraryIngestionJobs
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListDataAutomationLibraryIngestionJobs`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListDataAutomationLibraryIngestionJobs::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Enumerates the ingestion jobs of ONE DataAutomationLibrary, in this service's listing
+//! order (`creationTime`, then ARN), one modelled page at a time. A REPORTING operation:
+//! it projects the records `InvokeDataAutomationLibraryIngestionJob` stored and writes
+//! nothing.
 //!
 //! ## Shape of an operation
 //!
@@ -155,18 +151,88 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListDataAutomationLibraryIngestionJobs` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListDataAutomationLibraryIngestionJobsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListDataAutomationLibraryIngestionJobs"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            ListDataAutomationLibraryIngestionJobsError::Modeled(
+                ListDataAutomationLibraryIngestionJobsErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: Some(
+                            "the Bedrock Data Automation store is unavailable".to_string(),
+                        ),
+                    },
+                ),
+            )
+        })?;
+        // A read: it only projects what is already stored.
+        let store = state.lock();
+
+        // The listing is OF one library, named by the request's required `libraryArn`, so
+        // an ARN this store holds no library under has no job collection to enumerate:
+        // refused with the service's fixed sentence for an unresolved library (this
+        // operation models `ResourceNotFoundException`, unlike the store-wide
+        // `ListDataAutomationLibraries`, exactly because its listing is scoped to a
+        // resource that can fail to resolve).
+        if !store.libraries.contains_key(&input.library_arn) {
+            return Err(
+                ListDataAutomationLibraryIngestionJobsErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: Some(crate::state::LIBRARY_ARN_NOT_FOUND_MESSAGE.to_string()),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        let cursor = match input.next_token.as_deref() {
+            None => None,
+            Some(token) => Some(crate::state::PageCursor::from_token(token).ok_or_else(|| {
+                ListDataAutomationLibraryIngestionJobsErrorModeled::ValidationException(
+                    ValidationException {
+                        message: Some(
+                            "nextToken is not a token this service issued".to_string(),
+                        ),
+                        field_list: Some(vec![ValidationExceptionField {
+                            name: "nextToken".to_string(),
+                            message: "must be a nextToken returned by a previous \
+                                      ListDataAutomationLibraryIngestionJobs call"
+                                .to_string(),
+                        }]),
+                    },
+                )
+            })?),
+        };
+
+        let matching: Vec<&crate::state::library_ingestion::DataAutomationLibraryIngestionJobRecord> =
+            store
+                .library_ingestion_jobs_in_order(&input.library_arn)
+                .into_iter()
+                .filter(|record| cursor.as_ref().is_none_or(|c| c.precedes(*record)))
+                .collect();
+
+        // `maxResults` caps the page; absent, the server's own page limit does, so a
+        // listing never serialises more than one modeled-maximum page. The modeled range is
+        // 1..1000, so a value reaching this handler is in range; clamping to 1 at the bottom
+        // keeps a page honest if that ever changes.
+        let limit = input
+            .max_results
+            .unwrap_or(crate::state::library_ingestion::INGESTION_JOB_PAGE_LIMIT)
+            .clamp(1, crate::state::library_ingestion::INGESTION_JOB_PAGE_LIMIT)
+            as usize;
+        let page = &matching[..limit.min(matching.len())];
+
+        // A token is handed back only when something is left AFTER this page, so the last
+        // page of a listing never carries one.
+        let next_token = page
+            .last()
+            .filter(|_| matching.len() > page.len())
+            .map(|record| crate::state::PageCursor::after(*record).to_token());
+
+        // ONE clock read for the whole page, so two items of one page cannot be reported
+        // as of two different instants.
+        let now = ::std::time::SystemTime::now();
+        Ok(ListDataAutomationLibraryIngestionJobsOutput {
+            jobs: Some(page.iter().map(|record| record.to_summary(now)).collect()),
+            next_token,
+        })
     }
 }
