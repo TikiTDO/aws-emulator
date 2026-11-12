@@ -77,6 +77,8 @@ mod project_memberships;
 mod resource_tagging;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/subscription_requests.rs"]
+mod subscription_requests;
 #[path = "all/update_glossary.rs"]
 mod update_glossary;
 #[path = "all/update_glossary_term.rs"]

@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateSubscriptionRequest
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateSubscriptionRequest`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateSubscriptionRequest::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! A subscription request is a principal's ask for access to a catalog listing: this
+//! operation records it in the domain's store, PENDING a decision, and
+//! `GetSubscriptionRequestDetails` reads it back.
 //!
 //! ## Shape of an operation
 //!
@@ -189,18 +183,386 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateSubscriptionRequest` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateSubscriptionRequestErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateSubscriptionRequest"))
+        use crate::state::{
+            caller_principal, now_ms, stored_forms, IdempotencyKey, ResourceKind,
+            SubscribedListingRef, SubscriptionRequest, DOMAIN_STATUS_AVAILABLE, ENTITY_TYPE_ASSET,
+            MAX_SUBSCRIPTION_REQUESTS_PER_DOMAIN, SUBSCRIPTION_REQUEST_STATUS_PENDING,
+        };
+
+        // The metadata forms the request carries, read by the rule
+        // `crate::state::stored_forms` states — including the refusal of one `formName`
+        // named twice. A rule about the request's own shape, so it is answered before
+        // anything is looked up in the store.
+        let metadata_forms = stored_forms("metadataForms", input.metadata_forms.unwrap_or_default())
+            .map_err(|message| {
+                CreateSubscriptionRequestErrorModeled::ValidationException(ValidationException {
+                    message,
+                })
+            })?;
+
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            CreateSubscriptionRequestErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: "the DataZone store is unavailable".to_string(),
+                },
+            )
+        })?;
+        let mut store = state.lock();
+        let now = now_ms();
+        store.settle_clock(now);
+
+        // Authorization comes FIRST: a DataZone permission is held on a domain, so a
+        // caller holds none on an identifier this store serves no domain for, and the
+        // request is denied before any resource lookup — including the idempotency
+        // replay below — rather than reported as a miss.
+        if !store.authorizes_domain(&input.domain_identifier) {
+            return Err(CreateSubscriptionRequestErrorModeled::AccessDeniedException(
+                AccessDeniedException {
+                    message: crate::state::not_permitted_message(Self::NAME),
+                },
+            )
+            .into());
+        }
+
+        // The `@idempotencyToken`: a repeat of the SAME request reports the request the
+        // first one recorded, so a retry never leaves two asks behind. Resolved BEFORE
+        // the state checks below on purpose: a replay reports what the first request
+        // already recorded, whatever the domain has done since.
+        if let Some(recorded) = input
+            .client_token
+            .as_deref()
+            .and_then(|token| store.idempotent_subscription_request(&input.domain_identifier, token))
+        {
+            let domain = store.domains.get(&input.domain_identifier).ok_or_else(|| {
+                CreateSubscriptionRequestErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: "the DataZone store lost the domain mid-request".to_string(),
+                    },
+                )
+            })?;
+            return Ok(request_output(view(domain, recorded)?));
+        }
+
+        // This operation DOES model `ResourceNotFoundException` (smithy_query
+        // operation="CreateSubscriptionRequest"), so a domain already on its way out is
+        // answered with that 404.
+        let domain = store.live_domain(&input.domain_identifier).ok_or_else(|| {
+            CreateSubscriptionRequestErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: ResourceKind::Domain.not_found_message(),
+                },
+            )
+        })?;
+        // A domain still being created cannot take a subscription request: the request
+        // conflicts with the status the domain currently reports (the rule every create
+        // in this service applies).
+        if domain.status != DOMAIN_STATUS_AVAILABLE {
+            return Err(CreateSubscriptionRequestErrorModeled::ConflictException(
+                ConflictException {
+                    message: format!(
+                        "Domain {} is {}, so it cannot accept a subscription request",
+                        input.domain_identifier, domain.status
+                    ),
+                },
+            )
+            .into());
+        }
+
+        // The principals the access is asked FOR. Each is resolved against the domain,
+        // so a request is never recorded for a principal the domain does not know.
+        let mut principals = Vec::with_capacity(input.subscribed_principals.len());
+        for (index, principal) in input.subscribed_principals.iter().enumerate() {
+            principals.push(subscribed_principal_ref(domain, index, principal)?);
+        }
+
+        // The listings the access is asked FOR: each has to be a record the domain's
+        // catalog holds, and the revision pinned is the one it holds NOW, so a later
+        // change set does not rewrite what this request asked for.
+        let mut listings = Vec::with_capacity(input.subscribed_listings.len());
+        // The published ASSETS those listings record — what an `assetScopes` or
+        // `assetPermissions` entry may name.
+        let mut subscribed_assets: Vec<&str> = Vec::new();
+        for listing_input in &input.subscribed_listings {
+            let listing = domain
+                .listings
+                .get(&listing_input.identifier)
+                .ok_or_else(|| {
+                    CreateSubscriptionRequestErrorModeled::ResourceNotFoundException(
+                        ResourceNotFoundException {
+                            message: ResourceKind::Listing.not_found_message(),
+                        },
+                    )
+                })?;
+            // A listing with no recorded revision records no published entity, so there
+            // is nothing to subscribe to; every stored listing has one, because a
+            // listing is minted by the PUBLISH change set that records its first.
+            let revision = listing.latest_revision().ok_or_else(|| {
+                CreateSubscriptionRequestErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: ResourceKind::Listing.not_found_message(),
+                    },
+                )
+            })?;
+            if listing.entity_type == ENTITY_TYPE_ASSET {
+                subscribed_assets.push(listing.entity_id.as_str());
+            }
+            listings.push(SubscribedListingRef {
+                listing_id: listing.id.clone(),
+                revision: revision.revision,
+            });
+        }
+
+        // An `assetScopes` / `assetPermissions` entry narrows the access asked for on ONE
+        // asset, so it has to name an asset the subscribed listings publish — otherwise
+        // the request asks for something about an asset it is not about — and a scope's
+        // `filterIds` have to name filters of that asset, so a stored scope's filters
+        // always resolve when it is reported back.
+        for (index, scope) in input.asset_scopes.iter().flatten().enumerate() {
+            if !subscribed_assets.contains(&scope.asset_id.as_str()) {
+                return Err(CreateSubscriptionRequestErrorModeled::ValidationException(
+                    ValidationException {
+                        message: format!(
+                            "assetScopes[{index}].assetId must name an asset one of the subscribedListings publishes"
+                        ),
+                    },
+                )
+                .into());
+            }
+            let asset = domain.assets.get(&scope.asset_id);
+            if scope
+                .filter_ids
+                .iter()
+                .any(|id| asset.is_none_or(|asset| !asset.filters.contains_key(id)))
+            {
+                return Err(
+                    CreateSubscriptionRequestErrorModeled::ResourceNotFoundException(
+                        ResourceNotFoundException {
+                            message: ResourceKind::AssetFilter.not_found_message(),
+                        },
+                    )
+                    .into(),
+                );
+            }
+        }
+        for (index, permission) in input.asset_permissions.iter().flatten().enumerate() {
+            if !subscribed_assets.contains(&permission.asset_id.as_str()) {
+                return Err(CreateSubscriptionRequestErrorModeled::ValidationException(
+                    ValidationException {
+                        message: format!(
+                            "assetPermissions[{index}].assetId must name an asset one of the subscribedListings publishes"
+                        ),
+                    },
+                )
+                .into());
+            }
+        }
+
+        // The store is bounded, so a create loop cannot grow the emulator's heap without
+        // limit; the refusal past it is the error this operation already models.
+        if domain.subscription_requests.len() >= MAX_SUBSCRIPTION_REQUESTS_PER_DOMAIN {
+            return Err(
+                CreateSubscriptionRequestErrorModeled::ServiceQuotaExceededException(
+                    ServiceQuotaExceededException {
+                        message: format!(
+                            "this emulator stores at most {MAX_SUBSCRIPTION_REQUESTS_PER_DOMAIN} subscription requests in one domain"
+                        ),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        let id = store.mint_id(now);
+        let request = SubscriptionRequest {
+            id: id.clone(),
+            domain_id: input.domain_identifier.clone(),
+            // A created request is an ask awaiting a decision, which is the PENDING
+            // member of `SubscriptionRequestStatus`; `AcceptSubscriptionRequest` and
+            // `RejectSubscriptionRequest` are what move it to a terminal member.
+            status: SUBSCRIPTION_REQUEST_STATUS_PENDING.to_string(),
+            request_reason: input.request_reason,
+            principals,
+            listings,
+            metadata_forms,
+            asset_scopes: input.asset_scopes.unwrap_or_default(),
+            asset_permissions: input.asset_permissions.unwrap_or_default(),
+            created_by: caller_principal(ctx),
+            created_at_ms: now,
+            // Nothing has updated the request yet, so `updatedAt` — a REQUIRED output
+            // member — is the instant it was made, and `updatedBy` is absent.
+            updated_by: None,
+            updated_at_ms: now,
+            // Nobody has decided the request yet.
+            reviewer_id: None,
+            decision_comment: None,
+            // `existingSubscriptionId` names the subscription the asked-for access
+            // already exists under. A subscription is created by accepting a request,
+            // and `AcceptSubscriptionRequest` is still a scaffold, so this store holds
+            // none for any principal and there is none to report.
+            existing_subscription_id: None,
+        };
+
+        // The domain was read under this same lock a few lines up, so it is still there;
+        // if it somehow were not, the request would be dropped while the response said
+        // it was recorded, so that impossible case is answered as a server fault rather
+        // than silently.
+        let Some(stored_domain) = store.domains.get_mut(&input.domain_identifier) else {
+            return Err(
+                CreateSubscriptionRequestErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: format!(
+                            "Domain {} disappeared while the subscription request was being stored",
+                            input.domain_identifier
+                        ),
+                    },
+                )
+                .into(),
+            );
+        };
+        // `mint_id` never repeats within one process, so this slot is vacant; were it
+        // ever not, inserting would silently replace a stored request, so that is
+        // refused loudly instead.
+        if stored_domain.subscription_requests.contains_key(&id) {
+            return Err(
+                CreateSubscriptionRequestErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: format!("the minted subscription request id {id} is already in use"),
+                    },
+                )
+                .into(),
+            );
+        }
+        stored_domain
+            .subscription_requests
+            .insert(id.clone(), request);
+        // Built from the record that was actually stored, so a 200 can never report a
+        // request this call did not persist.
+        let output = request_output(view(
+            stored_domain,
+            &stored_domain.subscription_requests[&id],
+        )?);
+        // Recorded AFTER the request is stored: the bound this applies releases a token
+        // whose resource is not in the store.
+        if let Some(token) = input.client_token {
+            store.record_idempotency(
+                IdempotencyKey::subscription_request(&input.domain_identifier, &token),
+                id,
+                now,
+            );
+        }
+        Ok(output)
+    }
+}
+
+/// The stored request as this service's shared view of one, or the server fault a
+/// request whose listing the store lost is answered with (see
+/// [`crate::state::subscription_request_view`]).
+fn view(
+    domain: &crate::state::Domain,
+    request: &crate::state::SubscriptionRequest,
+) -> Result<crate::state::SubscriptionRequestView, CreateSubscriptionRequestError> {
+    crate::state::subscription_request_view(domain, request).ok_or_else(|| {
+        CreateSubscriptionRequestErrorModeled::InternalServerException(InternalServerException {
+            message: "the DataZone store lost a listing a subscription request records"
+                .to_string(),
+        })
+        .into()
+    })
+}
+
+/// This service's shared subscription-request view as this operation's response.
+///
+/// `CreateSubscriptionRequestOutput` and `GetSubscriptionRequestDetailsOutput` declare
+/// the same members, so both are built from that one view and the create and the read
+/// cannot report one stored request differently.
+fn request_output(rendered: crate::state::SubscriptionRequestView) -> CreateSubscriptionRequestOutput {
+    CreateSubscriptionRequestOutput {
+        id: rendered.id,
+        created_by: rendered.created_by,
+        updated_by: rendered.updated_by,
+        domain_id: rendered.domain_id,
+        status: rendered.status,
+        created_at: rendered.created_at,
+        updated_at: rendered.updated_at,
+        request_reason: rendered.request_reason,
+        subscribed_principals: rendered.subscribed_principals,
+        subscribed_listings: rendered.subscribed_listings,
+        reviewer_id: rendered.reviewer_id,
+        decision_comment: rendered.decision_comment,
+        existing_subscription_id: rendered.existing_subscription_id,
+        metadata_forms: rendered.metadata_forms,
+    }
+}
+
+/// The principal one `subscribedPrincipals` entry names, resolved against the domain.
+///
+/// Each arm of the modelled `SubscribedPrincipalInput` union names its principal by an
+/// identifier (smithy_query shape="SubscribedPrincipalInput"), and the union leaves it
+/// optional while a recorded request needs one, so an arm carrying none is refused with
+/// this operation's `ValidationException` naming the member.
+///
+/// A PROJECT and a USER are DataZone resources of the domain, so the identifier has to
+/// resolve to one the domain holds — otherwise the request would record an ask for a
+/// principal that does not exist. A user is addressed by its `UserProfileId`, which is
+/// the id a user profile is reported with, not the key it is stored under. A GROUP needs
+/// a group profile, and group profiles are created by `CreateGroupProfile`, which is
+/// still a scaffold, so no domain holds one (the same refusal
+/// `crate::state::resolve_membership_principal` answers a group member with). An IAM
+/// principal is a resource of another service, so DataZone resolves nothing for it and
+/// the modelled `@pattern` on the ARN is the whole of what is checked — by the boundary
+/// validator, before this handler runs.
+fn subscribed_principal_ref(
+    domain: &crate::state::Domain,
+    index: usize,
+    principal: &SubscribedPrincipalInput,
+) -> Result<crate::state::SubscribedPrincipalRef, CreateSubscriptionRequestError> {
+    use crate::state::{ResourceKind, SubscribedPrincipalRef};
+
+    let missing = |member: &str| -> CreateSubscriptionRequestError {
+        CreateSubscriptionRequestErrorModeled::ValidationException(ValidationException {
+            message: format!("subscribedPrincipals[{index}].{member}.identifier is required"),
+        })
+        .into()
+    };
+    let not_found = |kind: ResourceKind| -> CreateSubscriptionRequestError {
+        CreateSubscriptionRequestErrorModeled::ResourceNotFoundException(
+            ResourceNotFoundException {
+                message: kind.not_found_message(),
+            },
+        )
+        .into()
+    };
+    match principal {
+        SubscribedPrincipalInput::Project(project) => {
+            let identifier = project
+                .identifier
+                .as_deref()
+                .ok_or_else(|| missing("project"))?;
+            if !domain.projects.contains_key(identifier) {
+                return Err(not_found(ResourceKind::Project));
+            }
+            Ok(SubscribedPrincipalRef::Project(identifier.to_string()))
+        }
+        SubscribedPrincipalInput::User(user) => {
+            let identifier = user.identifier.as_deref().ok_or_else(|| missing("user"))?;
+            if !domain
+                .user_profiles
+                .values()
+                .any(|profile| profile.id == identifier)
+            {
+                return Err(not_found(ResourceKind::UserProfile));
+            }
+            Ok(SubscribedPrincipalRef::User(identifier.to_string()))
+        }
+        SubscribedPrincipalInput::Group(group) => {
+            if group.identifier.is_none() {
+                return Err(missing("group"));
+            }
+            Err(not_found(ResourceKind::GroupProfile))
+        }
+        SubscribedPrincipalInput::Iam(iam) => {
+            let identifier = iam.identifier.as_deref().ok_or_else(|| missing("iam"))?;
+            Ok(SubscribedPrincipalRef::Iam(identifier.to_string()))
+        }
     }
 }

@@ -232,9 +232,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // states — including the refusal of one `formName` named twice. A rule about the
         // request's own shape, so it is answered before anything is looked up in the
         // store.
-        let forms = stored_forms(input.forms_input.unwrap_or_default()).map_err(|message| {
-            CreateAssetErrorModeled::ValidationException(ValidationException { message })
-        })?;
+        let forms = stored_forms("formsInput", input.forms_input.unwrap_or_default()).map_err(
+            |message| CreateAssetErrorModeled::ValidationException(ValidationException { message }),
+        )?;
 
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             CreateAssetErrorModeled::InternalServerException(InternalServerException {

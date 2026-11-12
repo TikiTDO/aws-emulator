@@ -16,6 +16,13 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+/// Subscription requests: their stored record and the view every operation reports one
+/// with. A concern of its own, so it lives in its own module beside this one rather than
+/// growing this file; everything it declares is re-exported here, so a handler reaches
+/// it as `crate::state::…` the way it reaches every other part of this store.
+mod subscription_requests;
+pub use subscription_requests::*;
+
 /// The span the emulator takes to finish a domain lifecycle step AWS reports as
 /// in-progress (`CREATING` -> `AVAILABLE`, `DELETING` -> gone).
 ///
@@ -291,6 +298,12 @@ pub struct Domain {
     /// Nested under the domain so they go with it when it is deleted. Bounded by
     /// [`MAX_USER_PROFILES_PER_DOMAIN`].
     pub user_profiles: BTreeMap<String, UserProfile>,
+    /// The subscription requests made in this domain, keyed by their
+    /// `SubscriptionRequestId` — the identifier `GetSubscriptionRequestDetails` addresses
+    /// one by — so they go with the domain when it is deleted. A `BTreeMap` so every
+    /// listing of them iterates in one stable order and a pagination token can resume
+    /// from a key. Bounded by [`MAX_SUBSCRIPTION_REQUESTS_PER_DOMAIN`].
+    pub subscription_requests: BTreeMap<String, SubscriptionRequest>,
 }
 
 impl Domain {
@@ -1586,23 +1599,26 @@ impl AssetRevision {
     }
 }
 
-/// The metadata forms a request's `formsInput` attaches to a revision of an asset, in
-/// stored form, or the message a bad `formsInput` is refused with.
+/// The metadata forms a request's form list attaches to a resource, in stored form, or
+/// the message a bad list is refused with.
 ///
-/// A form is identified on the asset by its `formName` — that is the only way
-/// `formsOutput` names one — so two forms in one request cannot share a name. A form
-/// bound to a type whose revision the request did not name is bound to that type's
-/// first revision, and a form that names no type has no type revision either. Shared by
-/// `CreateAsset` and `CreateAssetRevision` so the two cannot read one `formsInput`
+/// A form is identified on its resource by its `formName` — that is the only way a form
+/// list names one — so two forms in one list cannot share a name; `member` is the input
+/// member the refusal names, so each operation's message points the caller at the member
+/// it sent. A form bound to a type whose revision the request did not name is bound to
+/// that type's first revision, and a form that names no type has no type revision
+/// either. Shared by every operation that takes a form list (`CreateAsset`,
+/// `CreateAssetRevision`, `CreateSubscriptionRequest`) so they cannot read one
 /// differently.
 pub fn stored_forms(
+    member: &str,
     forms_input: Vec<crate::ops::types::FormInput>,
 ) -> Result<Vec<StoredForm>, String> {
     let mut seen_form_names = std::collections::BTreeSet::new();
     for form in &forms_input {
         if !seen_form_names.insert(form.form_name.as_str()) {
             return Err(format!(
-                "formsInput names the form {} more than once; a form name is unique within an asset",
+                "{member} names the form {} more than once; a form name is unique within {member}",
                 form.form_name
             ));
         }
@@ -2376,6 +2392,7 @@ pub enum IdempotentResource {
     Glossary,
     GlossaryTerm,
     Asset,
+    SubscriptionRequest,
 }
 
 /// The key one remembered `@idempotencyToken` is filed under.
@@ -2437,6 +2454,17 @@ impl IdempotencyKey {
     pub fn asset(domain_id: &str, token: &str) -> Self {
         Self {
             kind: IdempotentResource::Asset,
+            domain_id: domain_id.to_string(),
+            token: token.to_string(),
+        }
+    }
+
+    /// The key a `CreateSubscriptionRequest` token is filed under, scoped the same way:
+    /// a subscription request is made IN a domain, so the same token in another domain
+    /// is a different key.
+    pub fn subscription_request(domain_id: &str, token: &str) -> Self {
+        Self {
+            kind: IdempotentResource::SubscriptionRequest,
             domain_id: domain_id.to_string(),
             token: token.to_string(),
         }
@@ -2527,6 +2555,22 @@ impl ComAmazonawsDatazoneDatazoneState {
         self.domains.get(domain_id)?.assets.get(&record.resource_id)
     }
 
+    /// The subscription request a `clientToken` already made in `domain_id`, if it is
+    /// still stored. Scoped to the domain the same way a glossary token is.
+    pub fn idempotent_subscription_request(
+        &self,
+        domain_id: &str,
+        token: &str,
+    ) -> Option<&SubscriptionRequest> {
+        let record = self
+            .idempotency
+            .get(&IdempotencyKey::subscription_request(domain_id, token))?;
+        self.domains
+            .get(domain_id)?
+            .subscription_requests
+            .get(&record.resource_id)
+    }
+
     /// Whether a remembered token still resolves to something this store holds. One
     /// lookup per level, because the key carries the owning domain.
     fn record_resolves(&self, key: &IdempotencyKey, record: &IdempotencyRecord) -> bool {
@@ -2548,6 +2592,13 @@ impl ComAmazonawsDatazoneDatazoneState {
                 .domains
                 .get(&key.domain_id)
                 .is_some_and(|domain| domain.assets.contains_key(&record.resource_id)),
+            IdempotentResource::SubscriptionRequest => {
+                self.domains.get(&key.domain_id).is_some_and(|domain| {
+                    domain
+                        .subscription_requests
+                        .contains_key(&record.resource_id)
+                })
+            }
         }
     }
 
@@ -3222,6 +3273,8 @@ pub enum ResourceKind {
     DataProduct,
     Listing,
     UserProfile,
+    GroupProfile,
+    SubscriptionRequest,
 }
 
 impl ResourceKind {
@@ -3241,6 +3294,8 @@ impl ResourceKind {
             Self::DataProduct => "Data product",
             Self::Listing => "Listing",
             Self::UserProfile => "User profile",
+            Self::GroupProfile => "Group profile",
+            Self::SubscriptionRequest => "Subscription request",
         }
     }
 
