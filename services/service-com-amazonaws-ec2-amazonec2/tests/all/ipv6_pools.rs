@@ -148,8 +148,10 @@ fn tag(key: &str, value: &str) -> Tag {
 /// Write one IPv6 pool holding `cidrs` into the store and answer the id minted for it.
 ///
 /// The store's own insert is what mints the id and canonicalises the ranges, so a seeded
-/// pool is a pool exactly as a provision would have created it.
-fn seed_pool(
+/// pool is a pool exactly as a provision would have created it. Shared with the
+/// `get_associated_ipv6_pool_cidrs` suite, which needs pools of its own to associate blocks
+/// out of.
+pub fn seed_pool(
     engine: &engine::InMemoryEngine,
     cidrs: &[&str],
     tags: Vec<Tag>,

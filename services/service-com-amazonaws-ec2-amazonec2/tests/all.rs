@@ -1905,3 +1905,9 @@ mod get_flow_logs_integration_template;
 // per-fleet errors and request-level refusals it answers. Declared beside `prefix_lists` for
 #[path = "all/delete_fleets.rs"]
 mod delete_fleets;
+// `GetAssociatedIpv6PoolCidrs`: the blocks of one IPv6 address pool that a resource of the
+// request's Region holds, paired with that resource, in address order behind a pool-scoped
+// `NextToken` — and what the read refuses. Declared at the tail of this file, which is where
+// every new ec2 suite lands, for the reason the note at the top records.
+#[path = "all/get_associated_ipv6_pool_cidrs.rs"]
+mod get_associated_ipv6_pool_cidrs;

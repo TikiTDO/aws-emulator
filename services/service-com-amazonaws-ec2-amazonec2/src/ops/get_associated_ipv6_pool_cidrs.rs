@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetAssociatedIpv6PoolCidrs
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetAssociatedIpv6PoolCidrs`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetAssociatedIpv6PoolCidrs::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Implemented: this operation REPORTS which of an IPv6 address pool's CIDR blocks are
+//! associated with a resource, and with which one — this is the ONLY file to touch for it.
 //!
 //! ## Shape of an operation
 //!
@@ -141,18 +134,185 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetAssociatedIpv6PoolCidrs` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetAssociatedIpv6PoolCidrsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetAssociatedIpv6PoolCidrs"))
+        // The Region this request was signed for. EC2 is a regional service reached through
+        // a regional endpoint, so the resources a pool's blocks are associated with are the
+        // ones of THIS Region: a VPC of another Region is invisible here, exactly as it is
+        // to the describe that reports VPCs.
+        let region = crate::state::request_region(ctx.parts());
+
+        // "Checks whether you have the required permissions for the action, without actually
+        // making the request, and provides an error response. If you have the required
+        // permissions, the error response is DryRunOperation"
+        // (`GetAssociatedIpv6PoolCidrsRequest$DryRun`). A request that reaches this handler
+        // is one the service-wide authorization gate admitted
+        // ([`crate::service::authorization`]), so the caller does hold the action: it is
+        // answered the permitted side of the probe, from the request's own members alone and
+        // before any state is resolved.
+        if input.dry_run.unwrap_or(false) {
+            return Err(crate::state::dry_run_operation());
+        }
+
+        // "The ID of the IPv6 address pool" (`$PoolId`) is `@required` but modelled
+        // `clientOptional`, so a request that left it out reaches this handler as an empty
+        // string rather than being refused at the boundary. A parameter the request did not
+        // carry is EC2's `MissingParameter`.
+        if input.pool_id.is_empty() {
+            return Err(crate::state::missing_parameter(
+                "The request must contain the parameter poolId",
+            ));
+        }
+
+        // A value that is not an IPv6 address pool id AT ALL is refused on its FORM, before
+        // any state is resolved, with this resource's `.Malformed` code: there is nothing to
+        // look up, so "not an id of this kind" is never reported as "no such pool". That is
+        // the order EC2 asks the two questions in for this operation, and it is the order
+        // every other id-taking operation of this crate keeps.
+        if !crate::state::ipv6_pool_id_is_well_formed(&input.pool_id) {
+            return Err(crate::state::invalid_ipv6_pool_id_malformed(&input.pool_id));
+        }
+
+        // "The token for the next page of results" (`$NextToken`) — anything else is refused
+        // rather than read as a position, and it is refused before any state is resolved, so
+        // whether a bogus token is caught never depends on what the store holds. The token is
+        // SCOPED to the pool it was minted while paging: the positions below are addresses
+        // inside one pool, so a token minted for another pool names no position here.
+        let start_at = match input.next_token.as_deref() {
+            None => None,
+            Some(token) => Some(
+                crate::state::decode_scoped_page_token(token, &input.pool_id)
+                    .ok_or_else(|| crate::state::invalid_pagination_token_for(token))?,
+            ),
+        };
+
+        // The store, with the "mounted on an engine that holds no state" case already turned
+        // into the server error every handler of this crate answers it with.
+        let state = crate::state::require_service_state(&*self.engine)?;
+        let mut store = state.lock();
+        // The clock-owed moves this read is allowed to apply — the same call the sibling
+        // reads make: an address range whose release has fallen due is gone whether or not
+        // anybody called, and the pool of that range goes with it, so applying it here
+        // changes nothing a later caller would not have seen anyway.
+        store.materialize_due_transitions();
+
+        // "for a SPECIFIED IPv6 address pool": a pool id of the right form that the account
+        // holds no pool for has no associations to report, so it is refused rather than
+        // answered with an empty set — which is what a pool nothing has drawn on answers.
+        if !store.ipv6_pools.contains_key(&input.pool_id) {
+            return Err(crate::state::invalid_ipv6_pool_id_not_found(&input.pool_id));
+        }
+
+        // "Information about the IPv6 CIDR block associations" (`$Ipv6CidrAssociations`): an
+        // association exists where a resource holds a block it took OUT OF this pool, which
+        // is recorded on the resource's own association (`VpcIpv6CidrBlockAssociation`'s
+        // `Ipv6Pool` — "The ID of the IPv6 address pool from which the IPv6 CIDR block is
+        // allocated"). So the set is derived from the associations the store holds rather
+        // than from a list this pool keeps, and a block of the pool nothing has taken is
+        // reported by no association at all.
+        let mut rows: Vec<AssociatedCidr> = store
+            .vpcs
+            .values()
+            .filter(|vpc| store.vpc_is_in_region(vpc.vpc_id.as_deref(), &region))
+            .flat_map(|vpc| {
+                vpc.ipv6_cidr_block_association_set
+                    .iter()
+                    .flatten()
+                    .filter_map(|association| {
+                        if association.ipv6_pool.as_deref() != Some(input.pool_id.as_str()) {
+                            return None;
+                        }
+                        Some(AssociatedCidr::new(
+                            association.ipv6_cidr_block.as_deref()?,
+                            vpc.vpc_id.as_deref()?,
+                            association.association_id.as_deref().unwrap_or_default(),
+                        ))
+                    })
+            })
+            .collect();
+
+        // Reported in ADDRESS order, the order the pool reports its own blocks in
+        // (`Ipv6Pool$PoolCidrBlocks`), with the resource holding the block and the association
+        // that made it after it so the order is total — which is what the cursor below names a
+        // position in, so a page always advances and an association made or dropped elsewhere
+        // in the order cannot shift what a page holds.
+        rows.sort_by(|left, right| left.position.cmp(&right.position));
+
+        // "The maximum number of results to return with a single call" (`$MaxResults`). A
+        // request that names none gets the largest page the model publishes, so the
+        // `NextToken` path behaves the same whether or not a page size was asked for. The
+        // model's `range 1..1000` has already refused anything outside it, so the only value
+        // that cannot convert is one the boundary validator would have rejected.
+        let limit = input
+            .max_results
+            .and_then(|max_results| usize::try_from(max_results).ok())
+            .unwrap_or(DEFAULT_MAX_RESULTS);
+
+        // "This value is null when there are no more results to return" (`$NextToken`): a
+        // token only when an association follows this page.
+        let (page, next_token) = crate::state::scoped_page_from_cursor(
+            &input.pool_id,
+            &rows,
+            start_at.as_deref(),
+            Some(limit),
+            crate::state::PageTokenRule::WhenAnotherItemFollows,
+            |row| row.position.as_str(),
+        );
+
+        Ok(GetAssociatedIpv6PoolCidrsOutput {
+            ipv6_cidr_associations: Some(
+                page.iter()
+                    .map(|row| row.association.clone())
+                    .collect::<Vec<Ipv6CidrAssociation>>(),
+            ),
+            next_token,
+        })
     }
 }
+
+/// The page size a request that names no `MaxResults` gets: the largest the model publishes
+/// (`Ipv6PoolMaxResults`, `range 1..1000`), which is also the most EC2 returns in one page.
+const DEFAULT_MAX_RESULTS: usize = 1000;
+
+/// One association this operation reports, beside the position it holds in the order the
+/// report is paged in.
+///
+/// The position is carried on the row rather than recomputed per comparison, so the sort, the
+/// cursor the page token names and the page boundary all read ONE value: a row's position and
+/// the order it is reported in cannot disagree.
+struct AssociatedCidr {
+    /// The row's place in the order the report is paged in: the block's base address and its
+    /// prefix length, then the resource holding it and the association that made it. The two
+    /// address parts are FIXED WIDTH, so comparing the text compares the addresses — a
+    /// block's text does not sort in address order (`2001:…` sorts before `::1`).
+    ///
+    /// Total, so the cursor can name any row: one resource cannot hold the same block twice,
+    /// so the resource and the block already identify a row, and the association's own id is
+    /// carried after it so a store holding one block twice over still orders the two rows.
+    position: String,
+    /// The association as the model reports it.
+    association: Ipv6CidrAssociation,
+}
+
+impl AssociatedCidr {
+    /// The row for the block `ipv6_cidr` that `associated_resource` holds through the
+    /// association `association_id`.
+    fn new(ipv6_cidr: &str, associated_resource: &str, association_id: &str) -> Self {
+        let (base, prefix_length) = crate::state::ipv6_cidr_address_order_key(ipv6_cidr);
+        Self {
+            position: format!(
+                "{base:032x}{prefix_length:03}{associated_resource}{POSITION_SEPARATOR}\
+                 {association_id}"
+            ),
+            association: Ipv6CidrAssociation {
+                ipv6_cidr: Some(ipv6_cidr.to_string()),
+                // "The resource that's associated with the IPv6 CIDR block"
+                // (`Ipv6CidrAssociation$AssociatedResource`): the resource's own id.
+                associated_resource: Some(associated_resource.to_string()),
+            },
+        }
+    }
+}
+
+/// What separates the resource holding a block from the association that made it, in
+/// [`AssociatedCidr::position`]: a character no EC2 resource id carries, so the two halves
+/// can never run together and two rows cannot share one position.
+const POSITION_SEPARATOR: char = ':';

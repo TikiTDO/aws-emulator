@@ -48,6 +48,44 @@ pub fn invalid_ipv6_pool_id_not_found<E>(pool_id: &str) -> Scaffolded<E> {
     )
 }
 
+/// EC2's error code for a value that is no IPv6 address pool id AT ALL, answered BEFORE the
+/// id is looked up — the `.Malformed` counterpart of [`INVALID_IPV6_POOL_ID_NOT_FOUND`],
+/// keyed to the same resource, so a caller can tell "not an id of this kind" from "no such
+/// pool" by the code alone.
+pub const INVALID_IPV6_POOL_ID_MALFORMED: &str = "InvalidIpv6PoolID.Malformed";
+
+/// Whether `pool_id` is an IPv6 address pool id EC2 could have ISSUED.
+///
+/// The pool id member carries no `@pattern` (`smithy_query(query="shape",shape=
+/// "Ipv6PoolEc2Id")` is a plain string), so the FORM an id of this kind has is read here:
+/// [`IPV6_POOL_RESOURCE_TYPE`] followed by one of EC2's two published id forms, excluding
+/// the all-zero placeholder a mint counting from one can never produce — the same reading
+/// [`super::issued_id_is_well_formed`] gives every other kind recorded refusing a
+/// placeholder on its form.
+pub fn ipv6_pool_id_is_well_formed(pool_id: &str) -> bool {
+    super::issued_id_is_well_formed(IPV6_POOL_RESOURCE_TYPE, pool_id)
+}
+
+/// Refuse a value that is not an IPv6 address pool id at all: HTTP 400
+/// [`INVALID_IPV6_POOL_ID_MALFORMED`], naming the resource by the EC2 resource token of an
+/// IPv6 address pool ([`IPV6_POOL_RESOURCE_TYPE`]) around the value the REQUEST sent.
+///
+/// `The ipv6pool-ec2 ID '<id>' is malformed` — the sentence EC2 answers a pool id of this
+/// kind it cannot read, as `The coip-pool ID '<id>' is malformed` is for the customer-owned
+/// family, so the resource is named by its wire token rather than by prose. Only the first
+/// [`super::MAX_ECHOED_RESOURCE_ID_CHARS`] characters of the value are named, the way every
+/// refusal of this crate that quotes a caller-chosen id bounds its echo.
+pub fn invalid_ipv6_pool_id_malformed<E>(pool_id: &str) -> Scaffolded<E> {
+    Scaffolded::service_error(
+        INVALID_IPV6_POOL_ID_MALFORMED,
+        400,
+        format!(
+            "The {IPV6_POOL_RESOURCE_TYPE} ID '{echoed}' is malformed",
+            echoed = super::echoed_resource_id(pool_id),
+        ),
+    )
+}
+
 /// One IPv6 address pool the account holds: the pool's own facts, beside the address ranges
 /// provisioned to it.
 ///
@@ -103,6 +141,19 @@ pub fn ipv6_pool_payload_bytes(record: &Ipv6PoolRecord) -> usize {
         .saturating_add(record.description.as_deref().map_or(0, str::len))
         .saturating_add(tag_list_bytes(&record.tags))
         .saturating_add(cidr_bytes)
+}
+
+/// The address-order key of the IPv6 CIDR block `cidr`: its base address and its prefix
+/// length, so blocks compare by the addresses they cover rather than by how they are spelled
+/// (`2001:…` sorts before `::1` as text).
+///
+/// The one reading of that order outside this module, so an operation that reports IPv6
+/// blocks in address order — the order [`ComAmazonawsEc2Amazonec2State::ipv6_pool_view`]
+/// reports a pool's own blocks in — orders them the same way the store does. A value that is
+/// no IPv6 CIDR block at all has no address to place, so it sorts after every block that has
+/// one rather than being dropped from a report.
+pub fn ipv6_cidr_address_order_key(cidr: &str) -> (u128, u8) {
+    split_ipv6_cidr(cidr).unwrap_or((u128::MAX, u8::MAX))
 }
 
 impl ComAmazonawsEc2Amazonec2State {
