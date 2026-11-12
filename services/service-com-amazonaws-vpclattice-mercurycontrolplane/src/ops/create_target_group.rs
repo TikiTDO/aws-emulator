@@ -275,6 +275,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // for the idempotency, name and ceiling guards and the insert they protect.
         let mut store = state.lock();
 
+        // A target group whose asynchronous deletion the clock has already made due is
+        // gone before this create looks at the store, so the account-unique name it held
+        // is free for this create and it no longer counts towards the ceiling.
+        store.expire_deleted_target_groups(now);
+
         // `clientToken` is an @idempotencyToken: a retry carrying the token of a
         // completed create answers with that same target group, while the same token
         // with different parameters fails (the member's own documentation: "If the
@@ -365,6 +370,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // Creation is asynchronous: the target group reports CREATE_IN_PROGRESS
             // until this stored due instant passes, then ACTIVE.
             active_at: now + crate::state::CREATE_TRANSITION,
+            // Nothing is deleting this target group yet.
+            deleting_at: None,
             sequence,
         };
 

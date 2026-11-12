@@ -74,8 +74,9 @@ pub(crate) fn absent_id(prefix: &str, fill: &str) -> String {
 }
 
 /// Assert one row: a 404 `ResourceNotFoundException` whose message is AWS's construction
-/// over `label` and the identifier the request submitted.
-fn assert_not_found(answer: &Answer, case: &str, label: &str, identifier: &str) {
+/// over `label` and the identifier the request submitted. Shared with the suites beside
+/// this file, so the assertion has one spelling.
+pub(crate) fn assert_not_found(answer: &Answer, case: &str, label: &str, identifier: &str) {
     assert_eq!(
         answer.status, 404,
         "case {case:?}: expected 404, got {} / {}",

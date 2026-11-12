@@ -6,7 +6,8 @@
 //! listener-rule / resource-policy slice, and the
 //! helpers every handler in `src/ops/` shares live here too: identifier resolution
 //! (bare id or ARN), id and ARN minting, the request's region, and the clock-owed
-//! `CREATE_IN_PROGRESS -> ACTIVE` span. Handlers reach the store through
+//! `CREATE_IN_PROGRESS -> ACTIVE` and `DELETE_IN_PROGRESS -> gone` spans. Handlers reach
+//! the store through
 //! [`service_state`]; nothing in `src/ops/` keeps a second copy of a resource.
 
 use std::collections::HashMap;
@@ -343,6 +344,16 @@ pub const DEFAULT_RULE_NOT_MODIFIABLE_MESSAGE: &str =
     "You can't modify a default listener rule. To modify a default listener rule, use \
      UpdateListener.";
 
+/// How the service refuses a DELETE of a listener's DEFAULT rule.
+///
+/// The RULE is `DeleteRule`'s own documentation: "You can delete additional listener
+/// rules, but you cannot delete the default rule." Like the modify refusal
+/// ([`DEFAULT_RULE_NOT_MODIFIABLE_MESSAGE`]) it is a service rule the model carries no
+/// trait for, so it is reported through [`service_rule_exception`] over the identifier
+/// member that names the rule. No recording covers it, so the sentence is that
+/// documented rule restated; the member it names is the requirement.
+pub const DEFAULT_RULE_NOT_DELETABLE_MESSAGE: &str = "You can't delete a default listener rule.";
+
 /// The HTTP status codes a fixed-response action may carry.
 ///
 /// From `FixedResponseAction`'s `statusCode` documentation: "The HTTP response code.
@@ -369,6 +380,18 @@ pub const UNSUPPORTED_STATUS_CODE_MESSAGE: &str = "Provided status code is not s
 /// never zero, so a caller that reads straight back still observes the transient
 /// status; nothing sleeps for it — the due instant is stored and compared on read.
 pub const CREATE_TRANSITION: Duration = Duration::from_millis(500);
+
+/// How long after its delete call a resource still reports `DELETE_IN_PROGRESS` before
+/// it is gone.
+///
+/// A VPC Lattice delete is asynchronous: `DeleteTargetGroup` answers with the
+/// non-terminal `DELETE_IN_PROGRESS` and the record disappears on its own, so a read of
+/// it is first that status and then the modelled 404. AWS documents no duration for it,
+/// so this is the emulator's CHOSEN span: never zero, so a caller that reads straight
+/// after the delete still observes the transient status and the state errors that go with
+/// it, and short enough that an await-deletion loop finishes promptly. Nothing sleeps for
+/// it — the due instant is stored and compared on read.
+pub const DELETE_TRANSITION: Duration = Duration::from_secs(3);
 
 /// The uppercase base-36 alphabet a Route 53 hosted-zone id is drawn from (`[0-9A-Z]`).
 const BASE36_UPPER: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -557,20 +580,41 @@ pub struct TargetGroup {
     pub last_updated_at: SystemTime,
     /// The instant the clock owes this target group its `ACTIVE` status.
     pub active_at: SystemTime,
+    /// The instant the clock owes this target group's REMOVAL, set by the delete that
+    /// started it ([`ComAmazonawsVpclatticeMercurycontrolplaneState::begin_target_group_deletion`]);
+    /// `None` for a target group no delete has touched. A record with a due instant
+    /// reports `DELETE_IN_PROGRESS` until it passes and is then gone
+    /// ([`ComAmazonawsVpclatticeMercurycontrolplaneState::expire_deleted_target_groups`]).
+    pub deleting_at: Option<SystemTime>,
     /// Creation order, so a listing pages deterministically. See [`encode_cursor`].
     pub sequence: u64,
 }
 
 impl TargetGroup {
     /// `TargetGroupStatus` at `now`: the transient create status until the stored due
-    /// instant passes, `ACTIVE` from then on. A pure function of stored state and the
-    /// clock, so reading it changes nothing a later caller sees.
+    /// instant passes, `ACTIVE` from then on, and the transient delete status from the
+    /// delete that started its removal. A pure function of stored state and the clock, so
+    /// reading it changes nothing a later caller sees.
     pub fn status(&self, now: SystemTime) -> &'static str {
-        if now >= self.active_at {
-            "ACTIVE"
-        } else {
+        if self.deleting_at.is_some() {
+            "DELETE_IN_PROGRESS"
+        } else if self.is_creating(now) {
             "CREATE_IN_PROGRESS"
+        } else {
+            "ACTIVE"
         }
+    }
+
+    /// Whether the clock still owes this target group its `ACTIVE` status at `now` — its
+    /// creation is in progress, which is one of the two states a delete is refused in.
+    pub fn is_creating(&self, now: SystemTime) -> bool {
+        self.deleting_at.is_none() && now < self.active_at
+    }
+
+    /// Whether a delete has started and the clock has made this record's removal due, so
+    /// the resource no longer exists for any caller.
+    pub fn deletion_due(&self, now: SystemTime) -> bool {
+        self.deleting_at.is_some_and(|due| now >= due)
     }
 }
 
@@ -1122,7 +1166,10 @@ pub struct ComAmazonawsVpclatticeMercurycontrolplaneState {
     /// and every rule of a deleted listener goes with it
     /// ([`ComAmazonawsVpclatticeMercurycontrolplaneState::remove_rules_of`]).
     pub rules: HashMap<String, Rule>,
-    /// Keyed by `tg-…` id. At most [`MAX_TARGET_GROUPS`] entries.
+    /// Keyed by `tg-…` id. At most [`MAX_TARGET_GROUPS`] entries, and a target group
+    /// whose asynchronous deletion has fallen due leaves this map on the next operation
+    /// that reads it
+    /// ([`ComAmazonawsVpclatticeMercurycontrolplaneState::expire_deleted_target_groups`]).
     pub target_groups: HashMap<String, TargetGroup>,
     /// `<resource id>` -> the resource-based permission policy document
     /// `PutResourcePolicy` attached to that resource, for the kinds whose ARN the
@@ -1308,24 +1355,106 @@ impl ComAmazonawsVpclatticeMercurycontrolplaneState {
         Some(removed)
     }
 
+    /// Drop one rule, answering the record that was removed (`None` when no rule is
+    /// stored under `rule_id`).
+    ///
+    /// The ONE rule-removal path: the rule leaves the store, its name leaves the name
+    /// index so that name and the priority it held are free for another rule of the same
+    /// listener, and no `clientToken` record outlives the rule it created. `DeleteRule`
+    /// takes it for one rule and [`Self::remove_rules_of`] takes it for every rule of a
+    /// listener, so a rule dropped with its listener releases exactly what one dropped on
+    /// its own does.
+    pub fn remove_rule(&mut self, rule_id: &str) -> Option<Rule> {
+        let removed = self.rules.remove(rule_id)?;
+        self.name_index
+            .remove(&rule_name_key(&removed.listener_id, &removed.name));
+        self.idempotency_tokens.forget_resource(&removed.id);
+        Some(removed)
+    }
+
     /// Drop every rule of `listener_id`, releasing its name and token records.
     ///
     /// A rule is a resource OF its listener, so deleting the listener (or the service
     /// that holds it) deletes its rules: `DeleteService` documents that "listener rules"
     /// go with the service.
     pub fn remove_rules_of(&mut self, listener_id: &str) {
-        let doomed: Vec<Rule> = self
+        let doomed: Vec<String> = self
             .rules
             .values()
             .filter(|rule| rule.listener_id == listener_id)
-            .cloned()
+            .map(|rule| rule.id.clone())
             .collect();
-        for rule in doomed {
-            self.rules.remove(&rule.id);
-            self.name_index
-                .remove(&rule_name_key(listener_id, &rule.name));
-            self.idempotency_tokens.forget_resource(&rule.id);
+        for id in doomed {
+            // One removal path for a rule, so a rule dropped with its listener releases
+            // exactly what one dropped on its own does.
+            let _ = self.remove_rule(&id);
         }
+    }
+
+    /// A rule whose action forwards traffic to `target_group_id`, if this store holds one.
+    ///
+    /// "You can't delete a target group if it is used in a listener rule"
+    /// (`DeleteTargetGroup`'s own documentation), and a listener's `defaultAction` is
+    /// stored as that listener's default RULE ([`Self::insert_default_rule`]), so every
+    /// use of a target group by a listener or by one of its rules is a rule record here.
+    pub fn rule_forwarding_to(&self, target_group_id: &str) -> Option<&Rule> {
+        self.rules
+            .values()
+            .find(|rule| action_forwards_to(&rule.action, target_group_id))
+    }
+
+    /// Start `target_group_id`'s asynchronous deletion, answering the record as it now
+    /// reads (`None` when no target group is stored under that id).
+    ///
+    /// The delete does not remove the record: it stores the instant the clock owes its
+    /// removal ([`DELETE_TRANSITION`]), so the target group reports `DELETE_IN_PROGRESS`
+    /// until then and is gone afterwards ([`Self::expire_deleted_target_groups`]). A
+    /// target group whose deletion is already under way keeps the instant its first
+    /// delete set — "if you retry it while the status is `DELETE_IN_PROGRESS`, the status
+    /// doesn't change" (`DeleteTargetGroup`'s `status` member).
+    pub fn begin_target_group_deletion(
+        &mut self,
+        target_group_id: &str,
+        now: SystemTime,
+    ) -> Option<&TargetGroup> {
+        let group = self.target_groups.get_mut(target_group_id)?;
+        if group.deleting_at.is_none() {
+            group.deleting_at = Some(now + DELETE_TRANSITION);
+        }
+        Some(group)
+    }
+
+    /// Materialise every target-group removal the clock has already made due: the record
+    /// leaves the store and the account-unique name it held leaves the name index, so the
+    /// name is free again and a later read of the id is the modelled not-found.
+    ///
+    /// Called by the operations that touch the target-group store before they read it, so
+    /// a deletion that fell due completes whether or not anything else happened in the
+    /// meantime; it writes nothing that was not already owed at the same instant.
+    pub fn expire_deleted_target_groups(&mut self, now: SystemTime) {
+        let doomed: Vec<String> = self
+            .target_groups
+            .values()
+            .filter(|group| group.deletion_due(now))
+            .map(|group| group.id.clone())
+            .collect();
+        for id in doomed {
+            let _ = self.remove_target_group(&id);
+        }
+    }
+
+    /// Drop one target group, answering the record that was removed (`None` when none is
+    /// stored under `target_group_id`).
+    ///
+    /// The ONE target-group-removal path: its name leaves the name index so the
+    /// account-unique name is free again, and no `clientToken` record outlives the
+    /// resource it created.
+    pub fn remove_target_group(&mut self, target_group_id: &str) -> Option<TargetGroup> {
+        let removed = self.target_groups.remove(target_group_id)?;
+        self.name_index
+            .remove(&name_key(KIND_TARGET_GROUP, &removed.name));
+        self.idempotency_tokens.forget_resource(&removed.id);
+        Some(removed)
     }
 
     /// Drop every listener of `service_id`, releasing its name and token records.

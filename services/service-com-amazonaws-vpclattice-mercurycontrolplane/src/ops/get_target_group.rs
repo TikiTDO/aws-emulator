@@ -3,8 +3,10 @@
 //! @op GetTargetGroup
 //! Reports the persisted target group an identifier names — the record
 //! `CreateTargetGroup` minted — with the status the clock owes it and the services that
-//! route to it, derived from the stored listener and rule records. A pure read: it
-//! changes nothing a later caller sees.
+//! route to it, derived from the stored listener and rule records. A report, not a
+//! mutation: the only thing it writes is a removal the clock had already made due (a
+//! target group whose asynchronous deletion has fallen in), which it then reports as the
+//! modelled 404.
 //!
 //! ## Shape of an operation
 //!
@@ -191,7 +193,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(not_found(&input.target_group_identifier));
         };
         let now = std::time::SystemTime::now();
-        let store = state.lock();
+        let mut store = state.lock();
+        // A delete is asynchronous: a target group whose removal the clock has already
+        // made due is gone, so this read materialises that removal first and then reports
+        // the modelled not-found for it, exactly as it does for an id nothing ever stored.
+        store.expire_deleted_target_groups(now);
         let Some(group) = store.target_groups.get(&id) else {
             return Err(not_found(&input.target_group_identifier));
         };

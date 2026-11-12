@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteRule
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteRule`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteRule::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Implemented: resolves the rule through its listener and owning service and REMOVES it
+//! from [`crate::state::ComAmazonawsVpclatticeMercurycontrolplaneState::rules`] through
+//! the state's one rule-removal path, so a later `GetRule` of that identifier is the
+//! modelled 404 and the name and priority it held are free for another rule of the same
+//! listener.
 //!
 //! ## Shape of an operation
 //!
@@ -122,6 +119,24 @@ impl From<DeleteRuleErrorModeled> for DeleteRuleError {
     }
 }
 
+/// HTTP 404 for an identifier that names no persisted resource of `kind`, built by the
+/// service's shared error construction ([`crate::state::resource_not_found`]): AWS's
+/// not-found message over the submitted identifier, and the kind's resource-type token.
+fn not_found(identifier: &str, kind: crate::state::ResourceKind) -> DeleteRuleError {
+    DeleteRuleErrorModeled::ResourceNotFoundException(crate::state::resource_not_found(
+        kind, identifier,
+    ))
+    .into()
+}
+
+/// HTTP 400 for a request a documented SERVICE RULE refuses, built by the shared
+/// construction ([`crate::state::service_rule_exception`]): the rule's own sentence over
+/// the bare member it constrains.
+fn refused_by_rule(violation: &crate::state::ServiceRuleViolation) -> DeleteRuleError {
+    DeleteRuleErrorModeled::ValidationException(crate::state::service_rule_exception(violation))
+        .into()
+}
+
 /// The `DeleteRule` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -158,18 +173,80 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteRule` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteRuleErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteRule"))
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(DeleteRuleErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: "the vpc-lattice state store is unavailable".to_string(),
+                    retry_after_seconds: None,
+                },
+            )
+            .into());
+        };
+        let mut store = state.lock();
+
+        // Every identifier is modelled as either the bare id or the resource's ARN, and a
+        // listener is a resource OF its service while a rule is a resource OF its
+        // listener: one naming nothing this store holds under the next is a 404, never a
+        // delete applied somewhere else. This is the resolution `GetRule` and `UpdateRule`
+        // read a rule with, so a rule reachable by one is deletable by this.
+        let Some(service_id) = crate::state::id_from_identifier(
+            &input.service_identifier,
+            crate::state::PREFIX_SERVICE,
+        )
+        .filter(|id| store.services.contains_key(id)) else {
+            return Err(not_found(
+                &input.service_identifier,
+                crate::state::ResourceKind::Service,
+            ));
+        };
+        let Some(listener_id) = crate::state::id_from_identifier(
+            &input.listener_identifier,
+            crate::state::PREFIX_LISTENER,
+        )
+        .filter(|id| {
+            store
+                .listeners
+                .get(id)
+                .is_some_and(|listener| listener.service_id == service_id)
+        }) else {
+            return Err(not_found(
+                &input.listener_identifier,
+                crate::state::ResourceKind::Listener,
+            ));
+        };
+        let Some(rule) = crate::state::id_from_identifier(
+            &input.rule_identifier,
+            crate::state::PREFIX_RULE,
+        )
+        .and_then(|id| store.rules.get(&id))
+        .filter(|rule| rule.listener_id == listener_id)
+        .cloned() else {
+            return Err(not_found(
+                &input.rule_identifier,
+                crate::state::ResourceKind::Rule,
+            ));
+        };
+
+        // "You can delete additional listener rules, but you cannot delete the default
+        // rule" (this operation's own documentation): the listener's default rule lives as
+        // long as the listener does, so a request naming it is refused and removes nothing.
+        if rule.is_default {
+            return Err(refused_by_rule(&crate::state::ServiceRuleViolation {
+                member: "ruleIdentifier".to_string(),
+                message: crate::state::DEFAULT_RULE_NOT_DELETABLE_MESSAGE.to_string(),
+            }));
+        }
+
+        // The delete goes through the state's one rule-removal path, so the name and the
+        // priority this rule held are free for another rule of the same listener and no
+        // `clientToken` record outlives it.
+        let removed = store.remove_rule(&rule.id);
+        debug_assert!(
+            removed.is_some(),
+            "the rule was just resolved out of this store"
+        );
+        // `DeleteRuleResponse` models no member: the answer is the modelled 204.
+        Ok(DeleteRuleOutput {})
     }
 }

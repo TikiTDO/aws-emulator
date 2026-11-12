@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteTargetGroup
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteTargetGroup`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteTargetGroup::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Implemented: starts the asynchronous removal of the target group an identifier names
+//! — refusing one still used by a listener rule or still being created — and answers the
+//! non-terminal `DELETE_IN_PROGRESS`. The record stays readable with that status until
+//! the span the clock owes its removal passes, then it is gone and a read of it is the
+//! modelled 404 with its account-unique name free again.
 //!
 //! ## Shape of an operation
 //!
@@ -122,6 +119,29 @@ impl From<DeleteTargetGroupErrorModeled> for DeleteTargetGroupError {
     }
 }
 
+/// HTTP 404 for an identifier that names no persisted target group, built by the
+/// service's shared error construction ([`crate::state::resource_not_found`]): AWS's
+/// not-found message over the submitted identifier, and the kind's resource-type token.
+fn not_found(identifier: &str) -> DeleteTargetGroupError {
+    DeleteTargetGroupErrorModeled::ResourceNotFoundException(crate::state::resource_not_found(
+        crate::state::ResourceKind::TargetGroup,
+        identifier,
+    ))
+    .into()
+}
+
+/// HTTP 409 for a delete the target group's current state forbids, built by the shared
+/// conflict construction, so `resourceType` is the kind's wire token and `resourceId` the
+/// target group the request named.
+fn conflict(target_group_id: &str, message: String) -> DeleteTargetGroupError {
+    DeleteTargetGroupErrorModeled::ConflictException(crate::state::conflict(
+        crate::state::ResourceKind::TargetGroup,
+        target_group_id,
+        message,
+    ))
+    .into()
+}
+
 /// The `DeleteTargetGroup` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -158,18 +178,62 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteTargetGroup` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteTargetGroupErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteTargetGroup"))
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(DeleteTargetGroupErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: "the vpc-lattice state store is unavailable".to_string(),
+                    retry_after_seconds: None,
+                },
+            )
+            .into());
+        };
+        // `targetGroupIdentifier` is modelled as either the bare id or the target
+        // group's ARN.
+        let Some(id) = crate::state::id_from_identifier(
+            &input.target_group_identifier,
+            crate::state::PREFIX_TARGET_GROUP,
+        ) else {
+            return Err(not_found(&input.target_group_identifier));
+        };
+        let now = std::time::SystemTime::now();
+        let mut store = state.lock();
+        // A target group whose asynchronous removal already fell due is gone, so a second
+        // delete after that point is the modelled not-found rather than a success.
+        store.expire_deleted_target_groups(now);
+        let Some(group) = store.target_groups.get(&id) else {
+            return Err(not_found(&input.target_group_identifier));
+        };
+
+        // "You can't delete a target group if it is used in a listener rule or if the
+        // target group creation is in progress" (this operation's own documentation), so
+        // both states refuse the delete and change nothing. No recording covers either
+        // refusal, so each message keeps its own wording over the identifiers the refusal
+        // is about; the 409 `ConflictException`, its `resourceType` token and the
+        // `resourceId` come from the shared conflict construction.
+        if group.is_creating(now) {
+            let message = format!("TargetGroup {id} creation is in progress.");
+            return Err(conflict(&id, message));
+        }
+        if let Some(rule) = store.rule_forwarding_to(&id) {
+            let message = format!("TargetGroup {id} is used in listener rule {}.", rule.id);
+            return Err(conflict(&id, message));
+        }
+
+        // Deletion is asynchronous: the record is marked with the instant the clock owes
+        // its removal and answers `DELETE_IN_PROGRESS` until then — and a retry while that
+        // is under way answers the same thing instead of restarting it ("if you retry it
+        // while the status is DELETE_IN_PROGRESS, the status doesn't change", the `status`
+        // member's own documentation).
+        let Some(deleting) = store.begin_target_group_deletion(&id, now) else {
+            return Err(not_found(&input.target_group_identifier));
+        };
+        // The answer is read off the record the delete just marked, so it and what a
+        // later `GetTargetGroup` reports are the same thing.
+        Ok(DeleteTargetGroupOutput {
+            id: Some(deleting.id.clone()),
+            arn: Some(deleting.arn.clone()),
+            status: Some(deleting.status(now).to_string()),
+        })
     }
 }
