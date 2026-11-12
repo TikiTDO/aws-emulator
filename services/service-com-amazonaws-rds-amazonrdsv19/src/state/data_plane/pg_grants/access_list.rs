@@ -22,7 +22,8 @@ pub(super) fn object_acl(
     name: &str,
 ) -> Result<Option<Option<String>>, EngineError> {
     let (catalog, name_column, acl_column) = class.catalog();
-    let found = database.execute(
+    let found = database.execute_in(
+        facts.connection_id,
         &facts.database,
         &format!("SELECT {acl_column} FROM {catalog} WHERE {name_column} = ?"),
         &[Some(name.to_string())],
@@ -39,7 +40,8 @@ pub(super) fn tables_in_schema(
     facts: &SessionFacts,
     schema: &str,
 ) -> Result<Vec<String>, EngineError> {
-    let found = database.execute(
+    let found = database.execute_in(
+        facts.connection_id,
         &facts.database,
         "SELECT c.relname FROM pg_class AS c \
            JOIN pg_namespace AS n ON n.oid = c.relnamespace \

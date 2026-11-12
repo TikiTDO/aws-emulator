@@ -52,7 +52,7 @@ const CATALOG_SCHEMA: [&str; 8] = [
        context text, vartype text, source text, min_val text, max_val text, enumvals text, \
        boot_val text, reset_val text, pending_restart boolean)",
     "CREATE TABLE IF NOT EXISTS pg_database (\
-       oid integer PRIMARY KEY, datname text UNIQUE, datdba text, encoding integer, \
+       oid integer PRIMARY KEY, datname text UNIQUE, datdba integer, encoding integer, \
        datcollate text, datctype text, datistemplate boolean, datallowconn boolean, \
        datconnlimit integer, datacl text)",
     "CREATE TABLE IF NOT EXISTS pg_roles (\
@@ -354,7 +354,12 @@ fn refresh_settings(
     database: &InstanceDatabase,
     facts: &SessionFacts,
 ) -> Result<(), EngineError> {
-    database.execute(&facts.database, "DELETE FROM pg_settings", &[])?;
+    database.execute_in(
+        facts.connection_id,
+        &facts.database,
+        "DELETE FROM pg_settings",
+        &[],
+    )?;
     let mut rows: Vec<Vec<Option<String>>> = Vec::new();
     let mut named: Vec<String> = Vec::new();
     for parameter in &facts.runtime.parameters {
@@ -438,7 +443,8 @@ fn refresh_databases(
 ) -> Result<(), EngineError> {
     // The privileges granted on a database are state of their own, so they survive the
     // rebuild of the rest of its row.
-    let held = database.execute(
+    let held = database.execute_in(
+        facts.connection_id,
         &facts.database,
         "SELECT datname, datacl FROM pg_database",
         &[],
@@ -457,8 +463,17 @@ fn refresh_databases(
             _ => None,
         })
         .collect();
-    database.execute(&facts.database, "DELETE FROM pg_database", &[])?;
-    let owner = facts.runtime.master_username.clone();
+    database.execute_in(
+        facts.connection_id,
+        &facts.database,
+        "DELETE FROM pg_database",
+        &[],
+    )?;
+    // `datdba` is "owner of the database, usually the user who created it", and PostgreSQL
+    // keys it by the OBJECT IDENTIFIER of that role in `pg_roles` — the same way
+    // `pg_namespace.nspowner` and `pg_class.relowner` are keyed ([`owner_oid`]) — so
+    // `pg_get_userbyid(datdba)` resolves it to the role's name.
+    let owner = owner_oid(facts);
     let rows: Vec<Vec<Option<String>>> = facts
         .databases
         .iter()
@@ -517,7 +532,8 @@ fn refresh_namespaces(
     facts: &SessionFacts,
 ) -> Result<(), EngineError> {
     for (offset, name) in SCHEMAS.iter().enumerate() {
-        database.execute(
+        database.execute_in(
+            facts.connection_id,
             &facts.database,
             "INSERT OR IGNORE INTO pg_namespace (oid, nspname, nspowner, nspacl) \
              VALUES (?, ?, ?, NULL)",
@@ -541,7 +557,8 @@ fn refresh_relations(
     database: &InstanceDatabase,
     facts: &SessionFacts,
 ) -> Result<(), EngineError> {
-    let present = database.execute(
+    let present = database.execute_in(
+        facts.connection_id,
         &facts.database,
         "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') ORDER BY name",
         &[],
@@ -569,7 +586,8 @@ fn refresh_relations(
         } else {
             FIRST_NAMESPACE_OID + 1
         };
-        database.execute(
+        database.execute_in(
+            facts.connection_id,
             &facts.database,
             "INSERT OR IGNORE INTO pg_class \
                (oid, relname, relnamespace, relowner, relkind, relacl) \
@@ -590,13 +608,19 @@ fn refresh_relations(
         .map(|(name, _)| Some(name.clone()))
         .collect();
     if held.is_empty() {
-        database.execute(&facts.database, "DELETE FROM pg_class", &[])?;
+        database.execute_in(
+            facts.connection_id,
+            &facts.database,
+            "DELETE FROM pg_class",
+            &[],
+        )?;
         return Ok(());
     }
     let placeholders = std::iter::repeat_n("?", held.len())
         .collect::<Vec<_>>()
         .join(", ");
-    database.execute(
+    database.execute_in(
+        facts.connection_id,
         &facts.database,
         &format!("DELETE FROM pg_class WHERE relname NOT IN ({placeholders})"),
         &held,
@@ -627,16 +651,17 @@ fn refresh_roles(database: &InstanceDatabase, facts: &SessionFacts) -> Result<()
     if let Some(master) = &facts.runtime.master_username {
         // The master user: "the user account you create … is not a PostgreSQL superuser",
         // which is what every privilege refusal on this endpoint rests on. It is created
-        // with `CREATEROLE`, so it can make the roles an application needs, and without
-        // `CREATEDB`, because creating a database on an RDS instance goes through the
-        // `rds_superuser` role it is a member of.
+        // with `CREATEROLE` and `CREATEDB`, which is how RDS withholds superuser while
+        // leaving the master user able to make the roles and the databases an application
+        // needs ("the master user … has the CREATEDB and CREATEROLE privileges", Amazon RDS
+        // User Guide, "Master user account privileges").
         rows.push(role_row(
             FIRST_USER_OID + RDS_ROLES.len() as i64,
             master,
             RoleAttributes {
                 superuser: false,
                 create_role: true,
-                create_db: false,
+                create_db: true,
                 can_login: true,
             },
         ));
@@ -644,8 +669,35 @@ fn refresh_roles(database: &InstanceDatabase, facts: &SessionFacts) -> Result<()
     for row in &rows {
         insert_rows(database, facts, "pg_roles", 11, std::slice::from_ref(row))?;
     }
+    // The MEMBERSHIP the instance comes with: "the master user … is a member of the
+    // rds_superuser role" (Amazon RDS User Guide, "Master user account privileges"), which
+    // is how it holds the privileges RDS withholds the superuser account for. Seeded like
+    // the rows above, so a membership a `GRANT` recorded since is left exactly as it is.
+    if facts.runtime.master_username.is_some() {
+        let group = FIRST_USER_OID
+            + RDS_ROLES
+                .iter()
+                .position(|(name, _, _)| *name == RDS_SUPERUSER_ROLE)
+                .unwrap_or_default() as i64;
+        database.execute_in(
+            facts.connection_id,
+            &facts.database,
+            "INSERT OR IGNORE INTO pg_auth_members \
+               (oid, roleid, member, grantor, admin_option) \
+             VALUES ((SELECT IFNULL(MAX(oid), 0) + 1 FROM pg_auth_members), ?, ?, ?, 0)",
+            &[
+                Some(group.to_string()),
+                Some((FIRST_USER_OID + RDS_ROLES.len() as i64).to_string()),
+                Some(FIRST_USER_OID.to_string()),
+            ],
+        )?;
+    }
     Ok(())
 }
+
+/// The role the master user is a member of, which is where its privileges come from; see
+/// [`RDS_ROLES`].
+const RDS_SUPERUSER_ROLE: &str = "rds_superuser";
 
 /// The attributes a role carries, as `pg_roles` reports them.
 #[derive(Debug, Clone, Copy)]
@@ -683,7 +735,12 @@ fn refresh_activity(
     database: &InstanceDatabase,
     facts: &SessionFacts,
 ) -> Result<(), EngineError> {
-    database.execute(&facts.database, "DELETE FROM pg_stat_activity", &[])?;
+    database.execute_in(
+        facts.connection_id,
+        &facts.database,
+        "DELETE FROM pg_stat_activity",
+        &[],
+    )?;
     let rows: Vec<Vec<Option<String>>> = facts
         .live_sessions()
         .into_iter()
@@ -727,7 +784,8 @@ fn insert_rows(
         .collect::<Vec<_>>()
         .join(", ");
     let values: Vec<Option<String>> = rows.iter().flatten().cloned().collect();
-    database.execute(
+    database.execute_in(
+        facts.connection_id,
         &facts.database,
         &format!("INSERT OR REPLACE INTO {table} VALUES {tuples}"),
         &values,
@@ -763,7 +821,8 @@ pub fn role_statement(
     };
     refresh_roles(database, facts)?;
     let exists = !database
-        .execute(
+        .execute_in(
+            facts.connection_id,
             &facts.database,
             "SELECT rolname FROM pg_roles WHERE rolname = ?",
             &[Some(name.clone())],
@@ -792,7 +851,8 @@ pub fn role_statement(
             // one superuser on an RDS instance is the account RDS keeps ([`RDS_ROLES`]).
             let can_login = object == "USER" || role_option(tokens, "LOGIN");
             let next_oid = database
-                .execute(
+                .execute_in(
+                    facts.connection_id,
                     &facts.database,
                     "SELECT IFNULL(MAX(oid), ?) + 1 FROM pg_roles",
                     &[Some(FIRST_USER_OID.to_string())],
@@ -826,7 +886,8 @@ pub fn role_statement(
                 return Err(role_missing(&name));
             }
             if role_option(tokens, "LOGIN") || role_option(tokens, "NOLOGIN") {
-                database.execute(
+                database.execute_in(
+                    facts.connection_id,
                     &facts.database,
                     "UPDATE pg_roles SET rolcanlogin = ? WHERE rolname = ?",
                     &[
@@ -843,7 +904,8 @@ pub fn role_statement(
                 }
                 return Err(role_missing(&name));
             }
-            database.execute(
+            database.execute_in(
+                facts.connection_id,
                 &facts.database,
                 "DELETE FROM pg_roles WHERE rolname = ?",
                 &[Some(name.clone())],
@@ -898,14 +960,95 @@ fn role_option(tokens: &[sqlparser::tokenizer::Token], option: &str) -> bool {
 /// A function this does not name is not one this server defines, and a statement calling it
 /// is refused by the engine as a function that does not exist.
 pub fn function_result_type(function: &str) -> Option<&'static str> {
+    if super::pg_numeric::is_numeric_function(function) {
+        // The exact-decimal functions a cast to `numeric` and the arithmetic over it are
+        // served by: the value they answer with is of that type.
+        return Some("numeric");
+    }
     match function {
         "pg_postmaster_start_time" => Some("timestamptz"),
         "pg_is_in_recovery" => Some("boolean"),
         "pg_backend_pid" => Some("integer"),
         "current_setting" => Some("text"),
+        "md5" => Some("text"),
+        // `pg_has_role` answers a question about the role catalog, which this server serves
+        // as the lookup in that catalog ([`catalog_function`]) wrapped in the call itself,
+        // so the column carries the boolean the function returns.
+        "pg_has_role" => Some("boolean"),
         "pg_sleep" => Some("void"),
         _ => None,
     }
+}
+
+/// The CATALOG-ACCESSOR functions this server defines: a function PostgreSQL answers out of
+/// one of its system catalogs, served as the lookup in that catalog that it IS.
+///
+/// * `pg_get_userbyid(role_oid)` is documented as returning the "role name with given OID",
+///   so the statement the engine runs carries the query over `pg_roles` — the catalog this
+///   server rebuilds from the instance's own roles ([`refresh_roles`]) — in place of the
+///   call.
+/// * `pg_has_role(user, role, privilege)` is documented as "does user have privilege for
+///   role", which is a question about the MEMBERSHIPS in `pg_auth_members`: a role has every
+///   privilege for itself, and otherwise it has them through being a member of that role.
+///   Its two-argument form asks about the CURRENT user, which the session's own value is
+///   substituted for before this runs (`super::dialect`).
+///
+/// Nothing is answered from the statement's text: the engine plans and runs the lookup like
+/// any other subquery, and a role the instance does not have resolves to nothing, as
+/// PostgreSQL's own does.
+///
+/// Answers the catalog the function reads, so a statement that calls it has that catalog
+/// rebuilt first (`super::wire_session::catalogs_named`); [`catalog_function_lookup`] is the
+/// lookup itself.
+#[must_use]
+pub fn catalog_function(function: &str) -> Option<&'static str> {
+    match function.to_ascii_lowercase().as_str() {
+        "pg_get_userbyid" => Some("pg_roles"),
+        "pg_has_role" => Some("pg_auth_members"),
+        _ => None,
+    }
+}
+
+/// The lookup [`catalog_function`] names, over the arguments the client wrote; `None` for a
+/// function that is not one, or for a call whose argument count is not one it takes — which
+/// the engine then answers for as the call it is.
+///
+/// `session_user` is the SESSION's own user as a SQL literal, which is the user the
+/// two-argument form of `pg_has_role` asks about ("the current user is assumed if
+/// `user` … is omitted").
+#[must_use]
+pub fn catalog_function_lookup(
+    function: &str,
+    arguments: &[String],
+    session_user: &str,
+) -> Option<String> {
+    match (function.to_ascii_lowercase().as_str(), arguments) {
+        ("pg_get_userbyid", [oid]) => Some(format!(
+            "(SELECT rolname FROM pg_roles WHERE oid = {oid})"
+        )),
+        // The privilege the last argument names is not read: `MEMBER` and `USAGE` are both
+        // held exactly by the members of the role, which is the one membership this server
+        // records.
+        ("pg_has_role", [role, _privilege]) => Some(has_role_lookup(session_user, role)),
+        ("pg_has_role", [user, role, _privilege]) => Some(has_role_lookup(user, role)),
+        _ => None,
+    }
+}
+
+/// Whether `user` has the privileges of `role`: it is that role, or it is a member of it, as
+/// `pg_auth_members` records the memberships.
+///
+/// Wrapped in the call of `pg_has_role` itself, which the engine answers as the truth of its
+/// argument: that is what makes the column PostgreSQL's own — named after the function and
+/// carrying the boolean it returns ([`function_result_type`]).
+fn has_role_lookup(user: &str, role: &str) -> String {
+    format!(
+        "pg_has_role({user} = {role} OR EXISTS (\
+           SELECT 1 FROM pg_auth_members AS m \
+             JOIN pg_roles AS r ON r.oid = m.roleid \
+             JOIN pg_roles AS g ON g.oid = m.member \
+           WHERE r.rolname = {role} AND g.rolname = {user}))"
+    )
 }
 
 /// The server functions this endpoint defines, with how many arguments each takes (`-1` for
@@ -915,12 +1058,20 @@ pub fn function_result_type(function: &str) -> Option<&'static str> {
 /// connection), so a statement that calls one is planned and run by the engine like any
 /// other — and so a function this list does not carry is refused as undefined rather than
 /// silently answered.
-pub const SERVER_FUNCTIONS: [(&str, i32); 5] = [
+pub const SERVER_FUNCTIONS: [(&str, i32); 7] = [
     ("pg_postmaster_start_time", 0),
     ("pg_is_in_recovery", 0),
     ("pg_backend_pid", 0),
     ("pg_sleep", 1),
     ("current_setting", -1),
+    // `md5(text)` — "Computes the MD5 hash of the argument, with the result written in
+    // hexadecimal" (PostgreSQL, "String Functions and Operators"), which MySQL's `MD5()`
+    // computes identically. The digest is computed over the argument's bytes by the engine's
+    // own call of it.
+    ("md5", 1),
+    // `pg_has_role`, as the ONE argument the lookup above leaves it: the truth of the
+    // membership the engine resolved out of the role catalog.
+    ("pg_has_role", 1),
 ];
 
 /// Whether `function` is one of [`SERVER_FUNCTIONS`].

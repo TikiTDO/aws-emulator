@@ -290,10 +290,11 @@ async fn a_postgresql_endpoint_serves_its_catalogs_and_its_server_functions() {
             Some("f".to_string()),
             Some("t".to_string()),
             Some("t".to_string()),
-            Some("f".to_string()),
+            Some("t".to_string()),
             Some("t".to_string())
         ]],
-        "the master user must be no superuser and must be able to log in, got {attributes:?}"
+        "the master user must be no superuser, must be able to log in and must carry \
+         CREATEROLE and CREATEDB, got {attributes:?}"
     );
     let superusers = value(
         &mut session,
@@ -524,7 +525,10 @@ async fn a_postgresql_endpoint_parses_the_postgresql_dialect() {
     let _ = value(&mut session, "INSERT INTO readings VALUES (4, '7')").await;
     for (case, expression, expected) in [
         ("a numeric literal", "SELECT 3::numeric", "3"),
-        ("a precision and scale", "SELECT 2::numeric(10,2)", "2"),
+        // A cast to `numeric` with a declared scale carries that scale: "the value will be
+        // rounded to the specified number of fractional digits", and those digits are what
+        // the value then has.
+        ("a precision and scale", "SELECT 2::numeric(10,2)", "2.00"),
         ("a parenthesised expression", "SELECT (1 + 2)::int", "3"),
         ("a function call", "SELECT length('abcd')::text", "4"),
         (

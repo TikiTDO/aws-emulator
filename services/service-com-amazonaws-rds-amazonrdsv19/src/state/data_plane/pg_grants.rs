@@ -730,7 +730,8 @@ fn role_membership(
         for member in &member_oids {
             match verb {
                 Verb::Grant => {
-                    database.execute(
+                    database.execute_in(
+                        facts.connection_id,
                         &facts.database,
                         "INSERT OR REPLACE INTO pg_auth_members \
                            (oid, roleid, member, grantor, admin_option) \
@@ -744,7 +745,8 @@ fn role_membership(
                     )?;
                 }
                 Verb::Revoke => {
-                    database.execute(
+                    database.execute_in(
+                        facts.connection_id,
                         &facts.database,
                         "DELETE FROM pg_auth_members WHERE roleid = ? AND member = ?",
                         &[Some(role.to_string()), Some(member.to_string())],
@@ -786,7 +788,8 @@ fn role_oid(
     facts: &SessionFacts,
     name: &str,
 ) -> Result<Option<i64>, EngineError> {
-    let found = database.execute(
+    let found = database.execute_in(
+        facts.connection_id,
         &facts.database,
         "SELECT oid FROM pg_roles WHERE rolname = ?",
         &[Some(name.to_string())],
@@ -807,7 +810,8 @@ fn schema_exists(
     facts: &SessionFacts,
     name: &str,
 ) -> Result<bool, EngineError> {
-    let found = database.execute(
+    let found = database.execute_in(
+        facts.connection_id,
         &facts.database,
         "SELECT 1 FROM pg_namespace WHERE nspname = ?",
         &[Some(name.to_string())],
@@ -950,7 +954,8 @@ fn object_privileges(
                 Verb::Revoke => acl.revoke(&grantee, &letters),
             }
         }
-        database.execute(
+        database.execute_in(
+            facts.connection_id,
             &facts.database,
             &format!("UPDATE {catalog} SET {acl_column} = ? WHERE {name_column} = ?"),
             &[acl.write(), Some(object.clone())],

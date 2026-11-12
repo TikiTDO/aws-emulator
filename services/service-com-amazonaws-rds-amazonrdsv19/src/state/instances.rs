@@ -47,12 +47,16 @@ pub struct DbInstanceRecord {
     /// credential — a read replica, an instance restored from a snapshot — manages none
     /// and reports none.
     pub master_user_secret: Option<ManagedMasterSecret>,
+    /// The port the instance's engine accepts connections on as the request configured it:
+    /// what `Port` (and `DBPortNumber`) set, else the documented default of its engine
+    /// family. Reported by `DbInstancePort` for a cluster member
+    /// ([`DbInstanceRecord::db_instance_port`]).
     pub endpoint_port: i32,
-    /// Where the instance's own engine listener accepts connections, for the engines
-    /// whose wire this emulator speaks: what the modelled `Endpoint` publishes, because
-    /// that is the address and port a client can actually reach the engine on. `None` for
-    /// an engine this emulator serves no data plane for, which keeps the DNS-form
-    /// endpoint and the configured port.
+    /// Where the instance's own engine listener accepts connections IN THIS PROCESS, for
+    /// the engines whose wire this emulator speaks: the address the modelled `Endpoint`
+    /// publishes, because that is the address and port a client can actually reach the
+    /// engine on. `None` for an engine this emulator serves no data plane for, which keeps
+    /// the DNS-form endpoint and the configured port.
     pub served_endpoint: Option<ServedEndpoint>,
     pub multi_az: bool,
     pub storage_type: String,
@@ -240,10 +244,12 @@ impl DbInstanceRecord {
     /// The port a client connects to: the port the instance's engine listener was
     /// assigned where it has one, else the configured port.
     ///
-    /// The core owns the port range the listener is bound in, so the configured port
-    /// ([`Self::endpoint_port`], which `Port` and `DBPortNumber` set) is what the
-    /// instance records and this is what it publishes; for an instance with no listener
-    /// the two are the same value.
+    /// The core owns the port range the listener is bound in and takes no port from this
+    /// service (`vendor/server/src/listeners.rs`), so the configured port
+    /// ([`Self::endpoint_port`], which `Port` and `DBPortNumber` set) is what the instance
+    /// records and the port the listener landed on is what it publishes — an endpoint whose
+    /// port nothing answers on would be no endpoint at all. For an instance with no
+    /// listener the two are the same value.
     pub fn published_port(&self) -> i32 {
         self.served_endpoint
             .as_ref()

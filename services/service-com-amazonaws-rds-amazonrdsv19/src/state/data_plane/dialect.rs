@@ -26,12 +26,31 @@ use super::EngineWire;
 
 /// The statement as the engine is asked to run it; see this module's own notes.
 pub fn render_for_engine(facts: &SessionFacts, tokens: &[Token]) -> String {
+    render_at(facts, tokens, 0)
+}
+
+/// How deep a NESTED catalog-function call this rewriting follows.
+///
+/// The only rewriting here that reads an expression inside another one is the catalog
+/// accessor, whose arguments are rendered by this same pass ([`call_arguments`]): the depth
+/// bounds that nesting, so a statement cannot drive this pass to the depth of its own
+/// parentheses. Past it the statement is handed to the engine as the client wrote it, which
+/// is this module's documented answer for anything it cannot translate.
+const MAX_CALL_DEPTH: usize = 16;
+
+/// [`render_for_engine`], `depth` calls into the arguments of a nested catalog-function
+/// call.
+fn render_at(facts: &SessionFacts, tokens: &[Token], depth: usize) -> String {
     // The pieces of the rendered statement, kept separate rather than concatenated,
     // because two of the rewritings below look BACK at what has already been emitted: a
     // cast takes the expression before the `::`, and an auto-increment column takes the
     // type before the keyword.
     let mut out: Vec<String> = Vec::new();
     let mut index = 0usize;
+    // Whether a catalog-accessor call is still followed: a call whose parentheses never
+    // close turns this off, so an unreadable statement is walked once rather than once per
+    // call it names.
+    let mut follow_calls = true;
     // Where a MySQL `CREATE TABLE`'s COLUMN-DEFINITION list closes, for the statements that
     // have one. Everything after it is table options, which the engine declares differently
     // (see `MYSQL_TABLE_OPTIONS`); everything before it is the client's own column list.
@@ -87,6 +106,45 @@ pub fn render_for_engine(facts: &SessionFacts, tokens: &[Token]) -> String {
                 }
                 let next = next_significant(tokens, index + 1);
                 let called = matches!(next.and_then(|at| tokens.get(at)), Some(Token::LParen));
+                // A CATALOG-ACCESSOR function (`pg_get_userbyid`, `pg_has_role`) is the
+                // lookup in the catalog it reads: the call is replaced by that query over
+                // the catalog this server rebuilds from its own state, with the client's own
+                // arguments inside it (each rendered by this same pass, so a session value
+                // or a cast in one is translated too).
+                //
+                // WHICH function it is is decided before anything is rendered, so no other
+                // call's arguments are walked; the nesting this follows is bounded
+                // ([`MAX_CALL_DEPTH`]); the arguments it rendered are EMITTED even where the
+                // call shape has no lookup, so no span is rendered twice; and a call whose
+                // parentheses never close stops this pass from following any further call in
+                // the statement, so one unreadable statement is walked once.
+                if facts.wire == EngineWire::Postgres
+                    && called
+                    && follow_calls
+                    && depth < MAX_CALL_DEPTH
+                    && super::pg_server::catalog_function(&lowered).is_some()
+                {
+                    match call_arguments(facts, tokens, next.unwrap_or(index + 1), depth + 1) {
+                        Some((arguments, consumed)) => {
+                            out.push(
+                                super::pg_server::catalog_function_lookup(
+                                    &lowered,
+                                    &arguments,
+                                    &text_literal(&facts.user),
+                                )
+                                // A call shape the function does not take is emitted as the
+                                // call it is, with its arguments as they were rendered: the
+                                // engine then answers for it.
+                                .unwrap_or_else(|| {
+                                    format!("{}({})", word.value, arguments.join(", "))
+                                }),
+                            );
+                            index = consumed;
+                            continue;
+                        }
+                        None => follow_calls = false,
+                    }
+                }
                 match session_function(facts, &lowered, called) {
                     // A function written with an empty argument list is substituted
                     // together with it.
@@ -114,6 +172,53 @@ pub fn render_for_engine(facts: &SessionFacts, tokens: &[Token]) -> String {
 /// The schema PostgreSQL's system catalogs live in, which is on every session's search path
 /// — so `pg_catalog.pg_settings` and `pg_settings` name the same relation.
 const PG_CATALOG_SCHEMA: &str = "pg_catalog";
+
+/// `value` as a SQL TEXT literal, with the quotes inside it doubled, so a value a session
+/// carries reaches the engine as one literal whatever it contains.
+fn text_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// The ARGUMENTS of a call whose opening parenthesis is at `open`, each rendered for the
+/// engine by this same pass at `depth`, and the index just past the call's closing
+/// parenthesis.
+///
+/// The arguments are split on the commas of the call ITSELF, so a comma inside a nested call
+/// or a parenthesised expression stays part of the argument it is in.
+///
+/// `None` for a call whose parentheses do not close, which is a statement the engine is
+/// handed as the client wrote it so that its own parse error is what the client reads.
+fn call_arguments(
+    facts: &SessionFacts,
+    tokens: &[Token],
+    open: usize,
+    depth: usize,
+) -> Option<(Vec<String>, usize)> {
+    let mut nesting = 0usize;
+    let mut arguments: Vec<String> = Vec::new();
+    let mut from = open + 1;
+    for (at, token) in tokens.iter().enumerate().skip(open) {
+        match token {
+            Token::LParen => nesting += 1,
+            Token::Comma if nesting == 1 => {
+                arguments.push(render_at(facts, tokens.get(from..at)?, depth));
+                from = at + 1;
+            }
+            Token::RParen => {
+                nesting -= 1;
+                if nesting == 0 {
+                    let last = tokens.get(from..at)?;
+                    if !last.is_empty() || !arguments.is_empty() {
+                        arguments.push(render_at(facts, last, depth));
+                    }
+                    return Some((arguments, at + 1));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
 
 /// Where a MySQL `CREATE TABLE … (<columns>) <options>` statement's COLUMN-DEFINITION list
 /// closes: the index of the parenthesis that ends it, after which only table options can

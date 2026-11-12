@@ -155,12 +155,16 @@ mod engine_default_catalog_head;
 mod engine_default_cluster_parameters;
 #[path = "all/engine_default_parameters.rs"]
 mod engine_default_parameters;
+#[path = "all/engine_result_column_types.rs"]
+mod engine_result_column_types;
 #[path = "all/engine_role_grants.rs"]
 mod engine_role_grants;
 #[path = "all/engine_row_lock_statement_bound.rs"]
 mod engine_row_lock_statement_bound;
 #[path = "all/engine_server_surface.rs"]
 mod engine_server_surface;
+#[path = "all/engine_session_isolation.rs"]
+mod engine_session_isolation;
 #[path = "all/engine_statement_classes.rs"]
 mod engine_statement_classes;
 #[path = "all/engine_version_families.rs"]

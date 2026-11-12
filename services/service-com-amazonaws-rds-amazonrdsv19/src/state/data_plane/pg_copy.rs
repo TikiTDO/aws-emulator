@@ -34,6 +34,51 @@ pub struct CopyTarget {
     pub columns: Vec<String>,
 }
 
+/// The refusal a `COPY` that names a FILE (or a program) gets, or `None` for a statement
+/// that names none.
+///
+/// Amazon RDS gives no client access to the host the engine runs on, so the server-side
+/// forms of `COPY` — `COPY … TO '<file>'`, `COPY … FROM '<file>'` and the `PROGRAM` forms —
+/// are not served on an RDS instance at all. RDS answers them with its own sentence rather
+/// than PostgreSQL's privilege refusal (recorded behavior: `COPY <table> TO '<path>'` on an
+/// RDS for PostgreSQL instance answers SQLSTATE `0A000` with "COPY to a file is not
+/// supported"), which is the capability refusal it is — and what a client is told instead of
+/// this emulator reading or writing a path on its own host. The client-side `COPY … FROM
+/// STDIN`, which streams the rows over the connection, is what this endpoint serves
+/// ([`copy_in_target`]).
+pub fn refused_file_copy(facts: &SessionFacts, tokens: &[Token]) -> Option<EngineError> {
+    if facts.wire != EngineWire::Postgres {
+        return None;
+    }
+    let leads_with_copy = matches!(tokens.first(), Some(Token::Word(word)) if word.value.eq_ignore_ascii_case("COPY"));
+    if !leads_with_copy {
+        return None;
+    }
+    for (at, token) in tokens.iter().enumerate() {
+        let direction = match token {
+            Token::Word(word) if word.value.eq_ignore_ascii_case("TO") => "to",
+            Token::Word(word) if word.value.eq_ignore_ascii_case("FROM") => "from",
+            _ => continue,
+        };
+        let names_a_path = match tokens.get(at + 1) {
+            // A quoted path, and the `PROGRAM` form, which runs a command on the host.
+            Some(Token::SingleQuotedString(_)) => true,
+            Some(Token::Word(word)) => word.value.eq_ignore_ascii_case("PROGRAM"),
+            _ => false,
+        };
+        if names_a_path {
+            return Some(
+                EngineError::new(
+                    EngineErrorKind::FeatureNotSupported,
+                    format!("COPY {direction} a file is not supported"),
+                )
+                .with_sqlstate("0A000"),
+            );
+        }
+    }
+    None
+}
+
 /// The copy-in target a statement names, or `None` for a statement that is not a `COPY …
 /// FROM STDIN` at all (including `COPY … TO`, which streams the other way).
 ///
@@ -102,8 +147,10 @@ pub fn load(
     // ENGINE reports them for the table, so a column the statement names that the table
     // does not have is refused by it rather than by a list kept here.
     let declared = database.describe(
+        facts.connection_id,
         &facts.database,
         &format!("SELECT * FROM {}", quoted(&target.table)),
+        &[],
     )?;
     let columns: Vec<(String, Option<String>)> = if target.columns.is_empty() {
         declared
@@ -177,7 +224,10 @@ pub fn load(
     }
     match outcome {
         Ok(loaded) => {
-            database.commit_transaction(facts.connection_id);
+            // The copy's own transaction, which no client opened: it is the statement's and
+            // it is committed here, so there is no isolation level of the client's to hold
+            // it to.
+            database.commit_transaction(facts.connection_id, false)?;
             Ok(loaded)
         }
         Err(error) => {

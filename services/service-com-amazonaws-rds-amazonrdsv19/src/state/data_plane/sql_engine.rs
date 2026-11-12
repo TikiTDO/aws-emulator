@@ -147,6 +147,14 @@ pub enum EngineErrorKind {
     /// Waiting for a row would close a cycle of transactions each waiting for the other, so
     /// the engine ended this one.
     Deadlock,
+    /// A value is outside the range the type it is being stored as or cast to carries.
+    NumericValueOutOfRange,
+    /// A divisor is zero.
+    DivisionByZero,
+    /// This transaction's reads and another transaction's writes cannot be ordered one
+    /// before the other, so the engine ended this one: the condition a SERIALIZABLE
+    /// transaction is refused with.
+    SerializationFailure,
     /// A value is not one its column accepts.
     DataError,
     /// The statement ran past [`STATEMENT_DEADLINE`].
@@ -323,11 +331,11 @@ pub struct ServerView {
 /// held to ([`MAX_RESULT_ROWS`]).
 pub const MAX_LOCKED_ROWS: usize = MAX_RESULT_ROWS;
 
-/// The wall-clock budget ONE rollback gets: the same budget one statement gets, because
-/// putting a transaction's rows back is engine work of the same kind. Checked between the
-/// rows and enforced inside each statement by the engine's own progress handler, so a
-/// rollback always gives up rather than holding the engine.
-pub const ROLLBACK_DEADLINE: Duration = STATEMENT_DEADLINE;
+/// The wall-clock budget ONE commit gets: the same budget one statement gets, because
+/// carrying a transaction's rows over into the shared database is engine work of the same
+/// kind. Checked between the rows and enforced inside each statement by the engine's own
+/// progress handler, so a commit always gives up rather than holding the engine.
+pub const COMMIT_DEADLINE: Duration = STATEMENT_DEADLINE;
 
 /// The size of one page of the engine's databases, which is what the budget below is
 /// counted in: SQLite's own default page size.
@@ -360,8 +368,13 @@ pub struct InstanceDatabase {
 /// The databases one instance holds.
 #[derive(Default)]
 struct Databases {
-    /// One connection per database name, keyed by the name as it was created.
+    /// One connection per database name, keyed by the name as it was created: the SHARED
+    /// database, which every session that is not inside a transaction reads and writes.
     open: BTreeMap<String, Connection>,
+    /// One connection per database a SESSION'S OPEN TRANSACTION has its own copy of, keyed
+    /// by that session and the database's name: the snapshot its statements run against
+    /// until it commits or rolls back ([`super::session_transactions`]).
+    working: BTreeMap<(u32, String), Connection>,
     /// Whether the databases the INSTANCE comes with ([`InstanceDatabase::seed`]) have
     /// been created yet. They are created once, on the first login, after which this
     /// engine is the only thing that says which databases the instance has — so a
@@ -501,7 +514,8 @@ impl InstanceDatabase {
 
     /// Run `sql` for the SESSION `session`, exactly as [`Self::execute_as`] runs it, and
     /// record the rows it changes against that session's transaction where it has one open —
-    /// so its own `ROLLBACK` puts back the rows IT wrote and no others.
+    /// so its own `ROLLBACK` drops the rows IT wrote and its `COMMIT` carries exactly those
+    /// over.
     pub fn execute_for(
         &self,
         session: u32,
@@ -511,6 +525,24 @@ impl InstanceDatabase {
         params: &[Option<String>],
     ) -> Result<ResultSet, EngineError> {
         self.run_for(Some(session), database, view, sql, params)
+    }
+
+    /// Run a statement of the SERVER's own for the session `session`: the catalog rebuilds
+    /// and the catalog rows a server command writes.
+    ///
+    /// It runs with no session view, as [`Self::execute`] does, and against the same
+    /// database that session's own statements run against — its transaction's copy where it
+    /// has one open — so a transaction reads the catalogs in the database its statements
+    /// read, and the rows a server command wrote inside it are carried over by its commit
+    /// like any other.
+    pub fn execute_in(
+        &self,
+        session: u32,
+        database: &str,
+        sql: &str,
+        params: &[Option<String>],
+    ) -> Result<ResultSet, EngineError> {
+        self.run_for(Some(session), database, &ServerView::default(), sql, params)
     }
 
     /// One statement, with its row changes recorded against `session`'s transaction when it
@@ -528,7 +560,7 @@ impl InstanceDatabase {
         params: &[Option<String>],
     ) -> Result<ResultSet, EngineError> {
         let mut databases = self.lock();
-        self.remember_the_state_before(&mut databases, session, database, sql)?;
+        self.take_the_sessions_snapshot(&mut databases, session, database)?;
         self.transactions.recording_for(session);
         let (deadline, timeout_first) = statement_deadline(view);
         {
@@ -536,7 +568,13 @@ impl InstanceDatabase {
             *current = view.clone();
             current.deadline = Some(deadline);
         }
-        let conn = connection(&mut databases, &self.view, &self.transactions, database)?;
+        let conn = connection_for(
+            &mut databases,
+            &self.view,
+            &self.transactions,
+            session,
+            database,
+        )?;
         conn.progress_handler(PROGRESS_HANDLER_OPS, Some(move || Instant::now() >= deadline))
             .map_err(from_engine)?;
         let answer = run_statement(conn, sql, params);
@@ -560,43 +598,33 @@ impl InstanceDatabase {
         }
     }
 
-    /// Keep the database `database` as it stands now for `session`'s transaction, where it
-    /// has one open and has not touched that database yet.
+    /// Give `session`'s transaction its OWN copy of the database `database`, where it has a
+    /// transaction open and no copy of that database yet.
     ///
-    /// The copy is the engine's own page-for-page backup ([`copy_database`]) and is taken
-    /// ONCE per database per transaction — before the first statement of it that WRITES in
-    /// that database, which is the state its `ROLLBACK` puts its rows back to.
+    /// That copy is the transaction's snapshot AND the database its statements run against:
+    /// it is the engine's own page-for-page backup ([`copy_database`]) taken ONCE per
+    /// database per transaction, at the transaction's first statement in it, whether that
+    /// statement reads or writes — a transaction that reads has to read the same rows
+    /// throughout, and one that writes has to write where no other session can see it until
+    /// it commits.
     ///
     /// The copies the OPEN transactions of this endpoint hold are charged against
     /// [`MAX_UNCOMMITTED_COPY_PAGES`]: the budget is checked before each copy, so what the
     /// uncommitted state of every session together can hold is that budget plus the page
     /// ceiling of one database, and a statement that would exceed it is refused instead of
     /// growing the process.
-    fn remember_the_state_before(
+    fn take_the_sessions_snapshot(
         &self,
         databases: &mut Databases,
         session: Option<u32>,
         database: &str,
-        sql: &str,
     ) -> Result<(), EngineError> {
         let Some(session) = session else {
             return Ok(());
         };
         let key = resolve(&databases.open, database).unwrap_or_else(|| database.to_string());
-        if !self.transactions.is_open(session) || self.transactions.holds_before(session, &key) {
-            return Ok(());
-        }
-        // Only a statement that WRITES needs the state before it kept, and whether this one
-        // does is the ENGINE's own answer about it (`sqlite3_stmt_readonly`): a transaction
-        // that only reads copies nothing. A statement the engine cannot prepare is treated as
-        // one that writes, so the copy is there if it turns out to.
-        let reads_only = {
-            let conn = connection(databases, &self.view, &self.transactions, &key)?;
-            conn.prepare(sql)
-                .map(|statement| statement.readonly())
-                .unwrap_or(false)
-        };
-        if reads_only {
+        if !self.transactions.is_open(session) || self.transactions.holds_a_copy_of(session, &key)
+        {
             return Ok(());
         }
         if self.transactions.charged_pages() >= MAX_UNCOMMITTED_COPY_PAGES {
@@ -610,10 +638,19 @@ impl InstanceDatabase {
             ));
         }
         let deadline = Instant::now() + COPY_DEADLINE;
+        // The copy records the rows it changes against the transactions of this endpoint,
+        // exactly as the shared database does: the rows the transaction writes in its own
+        // copy are the rows its commit carries over.
         let mut copy = open_confined_database(&self.view)?;
+        session_transactions::record_changes_of(&mut copy, &key, &self.transactions)
+            .map_err(unavailable)?;
         let conn = connection(databases, &self.view, &self.transactions, &key)?;
         let pages = copy_database(conn, &mut copy, deadline)?;
-        self.transactions.keep_before(session, &key, copy, pages);
+        // The SCHEMA the copy declares right now, which is what its commit carries its own
+        // changes over against ([`session_transactions::apply_schema`]).
+        let schema = session_transactions::schema_objects(&copy)?;
+        databases.working.insert((session, key.clone()), copy);
+        self.transactions.note_copy(session, &key, pages, schema);
         Ok(())
     }
 
@@ -645,69 +682,161 @@ impl InstanceDatabase {
         self.transactions.open(session)
     }
 
-    /// Commit `session`'s transaction: the rows it wrote stay and the rows it held are let
-    /// go. Answers whether it had one open.
-    pub fn commit_transaction(&self, session: u32) -> bool {
-        let committed = self.transactions.close(session).is_some();
+    /// Commit `session`'s transaction: the rows it wrote become the shared database's rows
+    /// for every session that reads afterwards, and the rows it held are let go. Answers
+    /// whether it had one open.
+    ///
+    /// `serializable` is whether the transaction ran at the SERIALIZABLE isolation level,
+    /// which is the level that cannot leave a read/write dependency unordered: such a
+    /// transaction is REFUSED where a transaction that committed while it was open wrote a
+    /// relation it read ([`session_transactions::OpenTransactions::conflicting_commit`]) —
+    /// PostgreSQL's own `could not serialize access` — and nothing it wrote reaches the
+    /// shared database. At every lower level the same pair commits, each transaction's own
+    /// write standing, which is what those levels permit.
+    ///
+    /// Blocking, CPU-bound work bounded by [`COMMIT_DEADLINE`]: a caller runs it on a
+    /// blocking task, as a wire handler runs a statement.
+    pub fn commit_transaction(
+        &self,
+        session: u32,
+        serializable: bool,
+    ) -> Result<bool, EngineError> {
+        let closed = self.transactions.close(session);
+        let Some(closed) = closed else {
+            self.locks.release(session);
+            return Ok(false);
+        };
+        // The session's own copies come OUT of the store first, so every path out of this
+        // call — the refusal below, a failure while carrying the rows over, an unwind —
+        // drops them with it: the transaction is closed, so nothing else would.
+        let copies = self.take_the_sessions_copies(session);
+        let conflict = serializable
+            .then(|| {
+                self.transactions
+                    .conflicting_commit(closed.began_after, &closed.read)
+            })
+            .flatten();
+        if let Some((_, relation)) = conflict {
+            // The transaction ends either way: its copies go, nothing it wrote is carried
+            // over, and the client is told why in the words its engine uses. Which relation
+            // the dependency is over is recorded rather than reported, because the sentence
+            // a client branches on is the one the engine words.
+            ::tracing::info!(
+                audit = true,
+                operation = "DbInstanceEngineStatement",
+                outcome = "serialization-failure",
+                connection_id = session,
+                object = %relation,
+                "a serializable transaction's reads could not be ordered after a commit"
+            );
+            drop(copies);
+            self.locks.release(session);
+            return Err(EngineError::new(
+                EngineErrorKind::SerializationFailure,
+                "could not serialize access due to read/write dependencies among transactions",
+            ));
+        }
+        let carried = self.carry_the_rows_over(&closed, copies);
+        if carried.is_ok() {
+            self.transactions.note_commit(closed.wrote());
+        }
         self.locks.release(session);
-        committed
+        carried.map(|()| true)
     }
 
-    /// Roll back `session`'s transaction: every row it changed goes back to the value the
-    /// database held before, and the rows it held are let go. Answers whether it had one
-    /// open.
+    /// Take every copy `session` holds out of the store, as the databases they are copies
+    /// of: dropping what this answers is what closes them.
     ///
-    /// The transaction ENDS either way: a rollback the engine could not finish (a recording
-    /// that overflowed, or one cut short by [`ROLLBACK_DEADLINE`]) is reported as the failure
-    /// it is, and the session is left out of its transaction with the rows that could not be
-    /// put back still changed.
+    /// Keyed by the session alone rather than by the databases a transaction recorded, so a
+    /// copy cannot outlive the transaction it belongs to however that transaction ended.
+    fn take_the_sessions_copies(&self, session: u32) -> Vec<(String, Connection)> {
+        let mut databases = self.lock();
+        let held: Vec<(u32, String)> = databases
+            .working
+            .keys()
+            .filter(|(whose, _)| *whose == session)
+            .cloned()
+            .collect();
+        held.into_iter()
+            .filter_map(|key| {
+                let name = key.1.clone();
+                databases.working.remove(&key).map(|copy| (name, copy))
+            })
+            .collect()
+    }
+
+    /// Record that `session`'s transaction has READ the relations `relations` of the
+    /// database `database`, where it has one open: what its commit at the SERIALIZABLE
+    /// level is checked against ([`Self::commit_transaction`]).
+    pub fn note_read_relations(
+        &self,
+        session: u32,
+        database: &str,
+        relations: impl IntoIterator<Item = String>,
+    ) {
+        self.transactions.note_read(session, database, relations);
+    }
+
+    /// Roll back `session`'s transaction: nothing it wrote reaches the shared database, and
+    /// the rows it held are let go. Answers whether it had one open.
     ///
-    /// Blocking, CPU-bound work bounded by [`ROLLBACK_DEADLINE`]: a caller runs it on a
-    /// blocking task, as a wire handler runs a statement.
+    /// Its own copy of each database it touched is DROPPED, which is what leaves the shared
+    /// database exactly as the transaction found it: the rows it wrote were only ever in that
+    /// copy ([`super::session_transactions`]).
     pub fn rollback_transaction(&self, session: u32) -> Result<bool, EngineError> {
         let closed = self.transactions.close(session);
-        let undone = match &closed {
-            Some(closed) => self.put_the_rows_back(closed),
-            None => Ok(()),
-        };
+        // Dropping what this takes out of the store is what closes the copies, whether the
+        // session had a transaction open or not.
+        drop(self.take_the_sessions_copies(session));
         self.locks.release(session);
-        undone.map(|()| closed.is_some())
+        Ok(closed.is_some())
     }
 
-    /// Put one ended transaction's rows back, database by database.
+    /// Carry one committing transaction's rows over into the shared databases, database by
+    /// database, and drop its copies.
     ///
-    /// Bounded by [`ROLLBACK_DEADLINE`] twice over: the engine's own progress handler is
-    /// installed for the duration, so no single statement of the restore can run past it,
-    /// and the deadline is checked between rows. A restore the deadline cuts short is
-    /// reported as the cancellation it is rather than left to run.
+    /// Bounded by [`COMMIT_DEADLINE`] twice over: the engine's own progress handler is
+    /// installed for the duration, so no single statement of it can run past it, and the
+    /// deadline is checked between rows. A commit the deadline cuts short is reported as the
+    /// cancellation it is rather than left to run.
     ///
-    /// The authorizer is lifted for the duration: putting a row back is the SERVER's own
+    /// The authorizer is lifted for the duration: carrying a row over is the SERVER's own
     /// work on the session's behalf, and it needs the one thing a session may not ask for —
     /// the engine's `defer_foreign_keys`, so the constraints are checked once the whole
-    /// transaction is undone rather than between its rows. No statement of the client's runs
+    /// transaction is in rather than between its rows. No statement of the client's runs
     /// under it: what runs is built from the rows the engine itself reported changed and the
-    /// values its own copy of the database holds for them. The lift is a GUARD, so the
-    /// connection is confined again on every path out, an unwind included.
-    fn put_the_rows_back(&self, closed: &ClosedTransaction) -> Result<(), EngineError> {
+    /// values the transaction's own copy of the database holds for them. The lift is a GUARD,
+    /// so the connection is confined again on every path out, an unwind included.
+    /// `copies` is the transaction's own copy of each database it touched, taken out of the
+    /// store by the caller ([`Self::take_the_sessions_copies`]) so that no path out of a
+    /// commit can leave one behind.
+    fn carry_the_rows_over(
+        &self,
+        closed: &ClosedTransaction,
+        copies: Vec<(String, Connection)>,
+    ) -> Result<(), EngineError> {
         if closed.overflowed {
             return Err(EngineError::new(
                 EngineErrorKind::Internal,
                 format!(
                     "this endpoint holds at most {} uncommitted rows per transaction, so this \
-                     transaction could not be rolled back",
+                     transaction could not be committed",
                     session_transactions::MAX_UNCOMMITTED_ROWS
                 ),
             ));
         }
-        let deadline = Instant::now() + ROLLBACK_DEADLINE;
+        let deadline = Instant::now() + COMMIT_DEADLINE;
         let mut databases = self.lock();
         self.transactions.recording_for(None);
-        for (name, rows) in &closed.changed {
-            let Some(before) = closed.before.get(name) else {
+        let mut carried = Ok(());
+        for (name, copy) in &copies {
+            if carried.is_err() {
                 continue;
-            };
+            }
+            let empty = std::collections::BTreeSet::new();
+            let rows = closed.changed.get(name).unwrap_or(&empty);
             let live = connection(&mut databases, &self.view, &self.transactions, name)?;
-            let undone = {
+            carried = {
                 let mut unconfined = Unconfined::of(live);
                 let live = unconfined.connection();
                 live.progress_handler(
@@ -715,16 +844,34 @@ impl InstanceDatabase {
                     Some(move || Instant::now() >= deadline),
                 )
                 .map_err(from_engine)?;
-                let undone = session_transactions::put_back(live, before, rows, deadline);
-                // The bound is removed once the restore is over. The next statement on this
+                // The SCHEMA the transaction declared comes first: a row of a table it
+                // created has nowhere to go until that table is there, and a table whose
+                // declaration it CHANGED is carried over whole, because its rows no longer
+                // have the columns the shared database held them under. What is carried over
+                // is the transaction's OWN delta, against the schema its copy declared when
+                // the copy was taken.
+                let before = closed.copies.get(name).cloned().unwrap_or_default();
+                let applied = session_transactions::apply_schema(live, copy, &before).and_then(
+                    |redeclared| {
+                        for table in &redeclared {
+                            session_transactions::copy_table(live, copy, table, deadline)?;
+                        }
+                        let rest: std::collections::BTreeSet<_> = rows
+                            .iter()
+                            .filter(|(table, _)| !redeclared.contains(table))
+                            .cloned()
+                            .collect();
+                        session_transactions::apply_rows(live, copy, &rest, deadline)
+                    },
+                );
+                // The bound is removed once the commit is over. The next statement on this
                 // connection installs its own, so a failure to remove this one cannot leave
                 // anything running unbounded.
                 let _ = live.progress_handler(PROGRESS_HANDLER_OPS, None::<fn() -> bool>);
-                undone
+                applied
             };
-            undone?;
         }
-        Ok(())
+        carried
     }
 
     /// The engine's own row ids of the rows `rows_sql` selects, for the statement `sql` the
@@ -746,6 +893,7 @@ impl InstanceDatabase {
     /// then takes NO row locks rather than the wrong ones.
     pub fn row_ids(
         &self,
+        session: u32,
         database: &str,
         view: &ServerView,
         rows_sql: &str,
@@ -759,8 +907,16 @@ impl InstanceDatabase {
             *current = view.clone();
             current.deadline = Some(deadline);
         }
-        let conn: &mut Connection =
-            connection(&mut databases, &self.view, &self.transactions, database).ok()?;
+        // The rows the statement asks for are the rows IT will see: a session inside a
+        // transaction reads its own copy of the database, so the predicate runs there too.
+        let conn: &mut Connection = connection_for(
+            &mut databases,
+            &self.view,
+            &self.transactions,
+            Some(session),
+            database,
+        )
+        .ok()?;
         conn.progress_handler(PROGRESS_HANDLER_OPS, Some(move || Instant::now() >= deadline))
             .ok()?;
         let ids = identified_rows(conn, rows_sql, sql, params);
@@ -769,16 +925,44 @@ impl InstanceDatabase {
         ids
     }
 
-    /// The columns `sql` would produce against `database`, without running it: what the
-    /// extended query protocol's `Describe` answers.
-    pub fn describe(&self, database: &str, sql: &str) -> Result<Vec<ColumnInfo>, EngineError> {
+    /// The columns `sql` would produce against `database`, without changing anything: what
+    /// the extended query protocol's `Describe` answers.
+    ///
+    /// A column the engine produced from a TABLE carries the type its declaration names. A
+    /// COMPUTED column (an aggregate, an expression, a cast) has no declaration, and its
+    /// type is the type of the value it carries — so for a statement the engine itself
+    /// reports as READ-ONLY (`sqlite3_stmt_readonly`), the engine is asked for its first row
+    /// and the type it holds each undeclared value as is the type that column is described
+    /// under. Nothing else changes: a statement that WRITES is never run to describe it, and
+    /// a column the engine holds as text or as NULL keeps the type a client decodes text
+    /// with, which is what this described before. The row is read under this endpoint's own
+    /// statement budget, so describing cannot hold the engine for longer than running the
+    /// statement may. A session inside a transaction is described against its OWN copy of
+    /// the database, which is where its statements run, and a portal is described with the
+    /// values the client bound to it.
+    pub fn describe(
+        &self,
+        session: u32,
+        database: &str,
+        sql: &str,
+        params: &[Option<String>],
+    ) -> Result<Vec<ColumnInfo>, EngineError> {
         let mut databases = self.lock();
-        let conn = connection(&mut databases, &self.view, &self.transactions, database)?;
-        let statement = conn.prepare(sql).map_err(from_engine)?;
-        Ok(statement
-            .columns()
-            .map(|column| named_column(column.name(), column.decl_type()))
-            .collect())
+        let conn = connection_for(
+            &mut databases,
+            &self.view,
+            &self.transactions,
+            Some(session),
+            database,
+        )?;
+        let deadline = Instant::now() + STATEMENT_DEADLINE;
+        conn.progress_handler(PROGRESS_HANDLER_OPS, Some(move || Instant::now() >= deadline))
+            .map_err(from_engine)?;
+        let described = described_columns(conn, sql, params);
+        // As everywhere else: the bound is removed once this is over, and the next statement
+        // installs its own.
+        let _ = conn.progress_handler(PROGRESS_HANDLER_OPS, None::<fn() -> bool>);
+        described
     }
 
     /// Copy every database this instance holds into a NEW engine, which is what TAKING a
@@ -950,6 +1134,35 @@ fn connection<'a>(
         .ok_or_else(|| EngineError::new(EngineErrorKind::Internal, "the database is not open"))
 }
 
+/// The connection a statement of `session`'s runs on: that session's own copy of the
+/// database where its transaction has one ([`InstanceDatabase::take_the_sessions_snapshot`]),
+/// and the shared database otherwise.
+///
+/// This is the ONE place that choice is made, so every statement of a session inside a
+/// transaction — the client's own, the predicate that identifies the rows it locks, and the
+/// server's catalog statements for it — runs against the same database, and no statement of
+/// a session outside one can reach another session's uncommitted rows.
+fn connection_for<'a>(
+    databases: &'a mut Databases,
+    view: &Arc<Mutex<ServerView>>,
+    transactions: &Arc<OpenTransactions>,
+    session: Option<u32>,
+    name: &str,
+) -> Result<&'a mut Connection, EngineError> {
+    let key = resolve(&databases.open, name).unwrap_or_else(|| name.to_string());
+    if let Some(session) = session {
+        if databases.working.contains_key(&(session, key.clone())) {
+            return databases
+                .working
+                .get_mut(&(session, key))
+                .ok_or_else(|| {
+                    EngineError::new(EngineErrorKind::Internal, "the database is not open")
+                });
+        }
+    }
+    connection(databases, view, transactions, &key)
+}
+
 /// One database of the instance, with the rows its connection changes reported to
 /// `transactions` — which is what makes a session's `ROLLBACK` able to put its own rows
 /// back.
@@ -1102,6 +1315,7 @@ fn open_confined_database(view: &Arc<Mutex<ServerView>>) -> Result<Connection, E
     conn.authorizer(Some(confine_to_the_instance))
         .map_err(unavailable)?;
     register_server_functions(&conn, view)?;
+    super::pg_numeric::register_numeric_functions(&conn)?;
     Ok(conn)
 }
 
@@ -1257,7 +1471,59 @@ fn register_server_functions(
         },
     )
     .map_err(unavailable)?;
+
+    // `pg_has_role(member)` — the truth of the membership the role catalog resolved for the
+    // call, which the statement carries in place of its arguments
+    // (`super::pg_server::catalog_function_lookup`). PostgreSQL returns a boolean, and this
+    // is what makes the column one: it is named after the function and reported under the
+    // function's own return type.
+    conn.create_scalar_function(
+        "pg_has_role",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |context| match context.get_raw(0) {
+            ValueRef::Null => Ok(None),
+            ValueRef::Integer(truth) => Ok(Some(i64::from(truth != 0))),
+            ValueRef::Real(truth) => Ok(Some(i64::from(truth != 0.0))),
+            ValueRef::Text(bytes) | ValueRef::Blob(bytes) => {
+                Ok(Some(i64::from(!bytes.is_empty() && bytes != b"0")))
+            }
+        },
+    )
+    .map_err(unavailable)?;
+
+    // `md5(text)` — "Computes the MD5 hash of the argument, with the result written in
+    // hexadecimal" on PostgreSQL, and the same digest under the same name on MySQL. The
+    // digest is computed over the argument's own bytes, so what the client hashes is what
+    // the client sent; a NULL argument hashes to NULL, as both engines answer.
+    conn.create_scalar_function(
+        "md5",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |context| {
+            let Some(bytes) = md5_argument(context.get_raw(0)) else {
+                return Ok(None);
+            };
+            Ok(Some(::hex::encode(
+                <::md5::Md5 as ::md5::Digest>::digest(bytes),
+            )))
+        },
+    )
+    .map_err(unavailable)?;
     Ok(())
+}
+
+/// The bytes `md5()` hashes: the argument's own, as the engine holds them — text as its
+/// UTF-8 bytes, a byte string as itself, and a number as the digits the engine renders it
+/// with, which is what both engines hash for a numeric argument. `None` for SQL NULL, whose
+/// digest is NULL.
+fn md5_argument(value: ValueRef<'_>) -> Option<Vec<u8>> {
+    match value {
+        ValueRef::Null => None,
+        ValueRef::Integer(number) => Some(number.to_string().into_bytes()),
+        ValueRef::Real(number) => Some(number.to_string().into_bytes()),
+        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => Some(bytes.to_vec()),
+    }
 }
 
 /// Prepare, bind and run one statement, reading its rows out under the result caps.
@@ -1364,6 +1630,68 @@ fn named_column(name: &str, declared: Option<&str>) -> ColumnInfo {
     }
 }
 
+/// The columns `sql` produces, each under the type a client decodes it with; see
+/// [`InstanceDatabase::describe`], which is the only caller and which installs the bound
+/// this runs under.
+fn described_columns(
+    conn: &Connection,
+    sql: &str,
+    params: &[Option<String>],
+) -> Result<Vec<ColumnInfo>, EngineError> {
+    let mut statement = conn.prepare(sql).map_err(from_engine)?;
+    let mut columns: Vec<ColumnInfo> = statement
+        .columns()
+        .map(|column| named_column(column.name(), column.decl_type()))
+        .collect();
+    let computed = columns
+        .iter()
+        .any(|column| column.declared_type.is_none());
+    // Only a statement the ENGINE itself reports as reading nothing but rows is run to
+    // describe it, so describing a statement changes nothing a later caller sees.
+    if !computed || !statement.readonly() {
+        return Ok(columns);
+    }
+    // The values the client bound to this portal, so the row the engine answers with is the
+    // row this portal would answer with; a statement described before anything is bound to
+    // it is described with its parameters unset, which is what the protocol asks for.
+    if statement.parameter_count() == params.len() {
+        for (position, value) in params.iter().enumerate() {
+            if statement
+                .raw_bind_parameter(position + 1, value.as_deref())
+                .is_err()
+            {
+                return Ok(columns);
+            }
+        }
+    }
+    let mut cursor = statement.raw_query();
+    if let Ok(Some(row)) = cursor.next() {
+        for (index, column) in columns.iter_mut().enumerate() {
+            if column.declared_type.is_some() {
+                continue;
+            }
+            if let Ok(value) = row.get_ref(index) {
+                column.declared_type = value_type(value).map(str::to_string);
+            }
+        }
+    }
+    Ok(columns)
+}
+
+/// The type of a value the engine HOLDS, in the type names a wire maps to its own type codes
+/// (`super::pg_wire`, `super::mysql_wire`): the type a computed column is described under.
+///
+/// `None` for text and for NULL — a text value is already what a column with no narrower
+/// type is reported as, and a NULL says nothing about the column's type.
+fn value_type(value: ValueRef<'_>) -> Option<&'static str> {
+    match value {
+        ValueRef::Integer(_) => Some("bigint"),
+        ValueRef::Real(_) => Some("double precision"),
+        ValueRef::Blob(_) => Some("bytea"),
+        ValueRef::Text(_) | ValueRef::Null => None,
+    }
+}
+
 /// Classify what the engine refused, keeping ITS message.
 fn from_engine(error: rusqlite::Error) -> EngineError {
     // A statement the engine could not READ at all arrives as its own variant, carrying
@@ -1402,11 +1730,26 @@ fn from_engine(error: rusqlite::Error) -> EngineError {
         EngineErrorKind::UndefinedObject
     } else if message == STATEMENT_TIMEOUT_CANCELLATION {
         EngineErrorKind::Cancelled
+    } else if message == NUMERIC_FIELD_OVERFLOW {
+        // The conditions the exact-decimal functions report (`super::pg_numeric`), each
+        // under the class its own engine reports it under: the function surface carries the
+        // engine's sentence, and the class is read back off it here.
+        EngineErrorKind::NumericValueOutOfRange
+    } else if message == DIVISION_BY_ZERO {
+        EngineErrorKind::DivisionByZero
     } else {
         kind
     };
     EngineError::new(kind, message)
 }
+
+/// What PostgreSQL tells a client whose value no longer fits the precision and scale its
+/// column or its cast declares, and what MySQL reports the same condition as: the sentence
+/// the exact-decimal functions refuse with, which is what the class above is read off.
+pub const NUMERIC_FIELD_OVERFLOW: &str = "numeric field overflow";
+
+/// The same, for a divisor of zero.
+pub const DIVISION_BY_ZERO: &str = "division by zero";
 
 /// What one engine failure code means, in terms both wires can render.
 fn failure_kind(failure: &rusqlite::ffi::Error) -> EngineErrorKind {
@@ -1501,6 +1844,7 @@ fn confine_to_the_instance(context: AuthContext<'_>) -> Authorization {
         AuthAction::Function { function_name } => {
             if ::service_common::sqlite_confinement::sql_function_is_permitted(function_name)
                 || super::pg_server::is_server_function(function_name)
+                || super::pg_numeric::is_engine_function(function_name)
             {
                 Authorization::Allow
             } else {

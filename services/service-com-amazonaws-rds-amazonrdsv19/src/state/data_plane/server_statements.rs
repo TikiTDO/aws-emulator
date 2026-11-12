@@ -159,7 +159,8 @@ pub fn open_extension_catalog(
     database: &InstanceDatabase,
     facts: &SessionFacts,
 ) -> Result<(), EngineError> {
-    let present = database.execute(
+    let present = database.execute_in(
+        facts.connection_id,
         &facts.database,
         "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'pg_extension'",
         &[],
@@ -171,7 +172,7 @@ pub fn open_extension_catalog(
     if present {
         return Ok(());
     }
-    database.execute(&facts.database, PG_EXTENSION_SCHEMA, &[])?;
+    database.execute_in(facts.connection_id, &facts.database, PG_EXTENSION_SCHEMA, &[])?;
     if let Some(entry) = extension(PRE_INSTALLED_EXTENSION) {
         record_extension(database, facts, *entry, None)?;
     }
@@ -180,8 +181,9 @@ pub fn open_extension_catalog(
 
 /// The extensions installed in the session's database, in the order they were installed.
 fn installed(database: &InstanceDatabase, facts: &SessionFacts) -> Result<Vec<String>, EngineError> {
-    database.execute(&facts.database, PG_EXTENSION_SCHEMA, &[])?;
-    let rows = database.execute(
+    database.execute_in(facts.connection_id, &facts.database, PG_EXTENSION_SCHEMA, &[])?;
+    let rows = database.execute_in(
+        facts.connection_id,
         &facts.database,
         "SELECT extname FROM pg_extension ORDER BY oid",
         &[],
@@ -305,8 +307,9 @@ fn record_extension(
     entry: Extension,
     version: Option<&str>,
 ) -> Result<(), EngineError> {
-    database.execute(&facts.database, PG_EXTENSION_SCHEMA, &[])?;
-    database.execute(
+    database.execute_in(facts.connection_id, &facts.database, PG_EXTENSION_SCHEMA, &[])?;
+    database.execute_in(
+        facts.connection_id,
         &facts.database,
         "INSERT INTO pg_extension (oid, extname, extowner, extnamespace, extversion) \
          VALUES (NULL, ?, ?, ?, ?)",
@@ -363,7 +366,8 @@ pub fn drop_extension(
     }
     let mut answer = StatementAnswer::new("DROP EXTENSION", ResultSet::changed(0, 0));
     for dependent in dependents {
-        database.execute(
+        database.execute_in(
+            facts.connection_id,
             &facts.database,
             "DELETE FROM pg_extension WHERE extname = ?",
             &[Some(dependent.clone())],
@@ -374,7 +378,8 @@ pub fn drop_extension(
             format!("drop cascades to extension {dependent}"),
         ));
     }
-    database.execute(
+    database.execute_in(
+        facts.connection_id,
         &facts.database,
         "DELETE FROM pg_extension WHERE extname = ?",
         &[Some(name.clone())],
@@ -553,7 +558,7 @@ pub fn transaction_control(
                     // "Beginning a transaction causes any pending transaction to be
                     // committed", so the session is left in a new one.
                     EngineWire::MySql => {
-                        database.commit_transaction(session);
+                        database.commit_transaction(session, facts.serializable())?;
                         database.begin_transaction(session);
                         StatementAnswer::new("BEGIN", ResultSet::changed(0, 0))
                     }
@@ -589,7 +594,7 @@ pub fn transaction_control(
                 if rollback {
                     database.rollback_transaction(session)?;
                 } else {
-                    database.commit_transaction(session);
+                    database.commit_transaction(session, facts.serializable())?;
                 }
             }
             if chain {

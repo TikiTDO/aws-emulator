@@ -780,8 +780,10 @@ pub fn load(
     // table the session has not got, and a column the statement names that the table does
     // not have, are refused by it rather than by a list kept here.
     let declared = database.describe(
+        facts.connection_id,
         &target,
         &format!("SELECT * FROM {}", quoted(&load.table)),
+        &[],
     )?;
     let columns: Vec<String> = if load.columns.is_empty() {
         declared.iter().map(|column| column.name.clone()).collect()
@@ -841,7 +843,10 @@ pub fn load(
     }
     match outcome {
         Ok(loaded) => {
-            database.commit_transaction(facts.connection_id);
+            // The load's own transaction, which no client opened: it is the statement's and
+            // it is committed here, so there is no isolation level of the client's to hold
+            // it to.
+            database.commit_transaction(facts.connection_id, false)?;
             Ok(loaded)
         }
         Err(error) => {

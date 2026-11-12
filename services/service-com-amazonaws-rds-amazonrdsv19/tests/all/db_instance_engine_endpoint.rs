@@ -179,6 +179,9 @@ pub(crate) struct Refusal {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Rows {
     pub(crate) columns: Vec<String>,
+    /// The type each column was described under, as the `RowDescription` carries it — the
+    /// `pg_type` OID a driver picks its decoder by.
+    pub(crate) type_oids: Vec<i32>,
     pub(crate) rows: Vec<Vec<Option<String>>>,
     /// What the server said about the statement without refusing it: the PostgreSQL
     /// `NoticeResponse` messages it sent before the `CommandComplete`.
@@ -467,11 +470,18 @@ impl PostgresSession {
                     let count = usize::from(u16::from_be_bytes([body[0], body[1]]));
                     let mut at = 2usize;
                     answer.columns.clear();
+                    answer.type_oids.clear();
                     for _ in 0..count {
                         let (name, next) = read_cstring(&body, at);
                         answer.columns.push(name);
                         // name, table oid, column number, type oid, size, modifier,
                         // format code.
+                        answer.type_oids.push(i32::from_be_bytes([
+                            body[next + 6],
+                            body[next + 7],
+                            body[next + 8],
+                            body[next + 9],
+                        ]));
                         at = next + 18;
                     }
                 }
@@ -1057,14 +1067,15 @@ async fn a_postgres_endpoint_serves_a_tls_session_its_identity_and_its_sql() {
         missing.code, "42P01",
         "an undefined table must carry its SQLSTATE, got {missing:?}"
     );
-    // The master user of an RDS instance is not a superuser.
+    // Amazon RDS does not serve `ALTER SYSTEM` on an RDS for PostgreSQL instance at all:
+    // the parameters are set through the instance's DB parameter group.
     let privileged = session
         .query("ALTER SYSTEM SET work_mem = '8MB'")
         .await
         .expect_err("ALTER SYSTEM must be refused");
     assert_eq!(
         (privileged.code.as_str(), privileged.message.as_str()),
-        ("42501", "must be superuser to execute ALTER SYSTEM command"),
+        ("42501", "ALTER SYSTEM command is not supported"),
         "the privilege refusal must be the server's own, got {privileged:?}"
     );
 }

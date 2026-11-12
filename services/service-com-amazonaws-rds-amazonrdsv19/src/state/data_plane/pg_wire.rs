@@ -456,19 +456,24 @@ async fn serve_session(
                     send(&mut conn, b't', &body).await?;
                 }
                 let sql = match what {
-                    b'P' => portals.get(&name).map(|portal| portal.sql.clone()),
-                    _ => prepared.get(&name).map(|statement| statement.sql.clone()),
+                    b'P' => portals
+                        .get(&name)
+                        .map(|portal| (portal.sql.clone(), portal.params.clone())),
+                    _ => prepared
+                        .get(&name)
+                        .map(|statement| (statement.sql.clone(), Vec::new())),
                 };
                 match sql {
                     // The columns the statement would produce, as the ENGINE reports
                     // them for it; a statement it cannot plan (a server command) is
                     // described as returning none, and what it does return is described
                     // when it runs.
-                    Some(sql) => {
+                    Some((sql, params)) => {
                         let columns = describe_columns(
                             &database_handle,
                             &session_facts,
                             sql,
+                            params,
                         )
                         .await;
                         if columns.is_empty() {
@@ -964,11 +969,12 @@ async fn describe_columns(
     database: &Arc<InstanceDatabase>,
     facts: &SessionFacts,
     sql: String,
+    params: Vec<Option<String>>,
 ) -> Vec<ColumnInfo> {
     let database = Arc::clone(database);
     let facts = facts.clone();
     tokio::task::spawn_blocking(move || {
-        wire_session::describe_statement(&database, &facts, &sql)
+        wire_session::describe_statement(&database, &facts, &sql, &params)
     })
     .await
     .unwrap_or_default()
@@ -1178,6 +1184,13 @@ fn sqlstate(kind: EngineErrorKind) -> &'static str {
         // transactions is broken with.
         EngineErrorKind::LockNotAvailable => "55P03",
         EngineErrorKind::Deadlock => "40P01",
+        // `numeric_value_out_of_range` and `division_by_zero`: the two conditions the exact
+        // decimal arithmetic reports (`super::pg_numeric`).
+        EngineErrorKind::NumericValueOutOfRange => "22003",
+        EngineErrorKind::DivisionByZero => "22012",
+        // `serialization_failure`: a SERIALIZABLE transaction whose reads and another
+        // transaction's writes cannot be ordered.
+        EngineErrorKind::SerializationFailure => "40001",
         EngineErrorKind::DataError => "22000",
         EngineErrorKind::Cancelled => "57014",
         // `program_limit_exceeded`: the statement asked for more than this endpoint

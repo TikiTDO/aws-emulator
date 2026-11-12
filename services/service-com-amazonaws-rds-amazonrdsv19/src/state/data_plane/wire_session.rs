@@ -978,6 +978,19 @@ impl SessionFacts {
         server_setting(self, &lowered)
     }
 
+    /// Whether this session's transaction runs at the SERIALIZABLE isolation level, which is
+    /// what `transaction_isolation` reports for it — the level a transaction with a
+    /// read/write dependency on another is refused at
+    /// (`super::sql_engine::InstanceDatabase::commit_transaction`).
+    ///
+    /// Both engines' spelling is read, because each reports the level in its own
+    /// ([`transaction_isolation`]).
+    #[must_use]
+    pub fn serializable(&self) -> bool {
+        self.setting("transaction_isolation")
+            .is_some_and(|level| level.eq_ignore_ascii_case("serializable"))
+    }
+
     /// Every setting this session can read, by lowercased name: the engine's parameters,
     /// the settings the server answers for itself, and the session's own `SET`s. What
     /// `current_setting` resolves against and what `pg_settings` reports.
@@ -1267,6 +1280,11 @@ pub fn run_statement(
             return Err(read_only::refusal(facts.wire, &command));
         }
     }
+    // A `COPY` that names a FILE or a program on the host is a capability no Amazon RDS
+    // instance serves, so it is refused before anything is served for it.
+    if let Some(refusal) = super::pg_copy::refused_file_copy(facts, &tokens) {
+        return Err(refusal);
+    }
     if let Some(answer) = server_command(database, facts, &words, &tokens)? {
         // The isolation level a transaction runs at belongs to THAT transaction: a `BEGIN`
         // that names one sets it for the transaction it opens, a `BEGIN` that names none
@@ -1299,6 +1317,12 @@ pub fn run_statement(
     // Where the statement's own names put it, and the statement as the engine reads it.
     let (target, stream) = resolve_qualifiers(database, facts, &stream)?;
     let prepared = dialect::render_for_engine(facts, &stream);
+    // The EXACT-DECIMAL arithmetic in it, computed exactly: a cast to `numeric` and the
+    // operators over it are the engine's own decimal functions rather than its binary
+    // floating point (`super::pg_numeric`). A statement that casts to no such type is handed
+    // to the engine exactly as it was.
+    let prepared = super::pg_numeric::exact_decimal_arithmetic(facts.wire, &prepared)
+        .unwrap_or(prepared);
     // The rows this statement locks, taken BEFORE it runs: a row another transaction holds
     // is not this statement's to read for update or to write, and the locking clause the
     // statement carried is served here rather than handed to an engine with no grammar for
@@ -1323,12 +1347,63 @@ pub fn run_statement(
     if result.is_ok() && held.writes {
         database.note_changed_rows(facts.connection_id, &target, &held.rows);
     }
+    // The relations it READ, which is what a SERIALIZABLE transaction's commit is checked
+    // against: a statement that ran is a statement whose rows this transaction has seen.
+    if result.is_ok() {
+        database.note_read_relations(
+            facts.connection_id,
+            &target,
+            relations_named(&tokens),
+        );
+    }
     // Outside a transaction the locks live for the statement: both engines release a row
     // lock a statement took when the statement that is its own transaction ends.
     if !database.in_transaction(facts.connection_id) {
         database.locks().release_rows(facts.connection_id, &held.rows);
     }
     Ok(StatementAnswer::new(verb, result?))
+}
+
+/// The RELATIONS a statement names: the identifier after each `FROM`, `JOIN`, `INTO`,
+/// `UPDATE` and `TABLE` word, which is where a statement names the relations it reads and
+/// writes.
+///
+/// The system catalogs this server rebuilds from its own state are left out: they are not
+/// relations two client transactions can be ordered by, and PostgreSQL's own serializable
+/// isolation covers no catalog access either.
+fn relations_named(tokens: &[Token]) -> Vec<String> {
+    let mut named = Vec::new();
+    let mut at = 0usize;
+    while at < tokens.len() {
+        let introduces = match &tokens[at] {
+            Token::Word(word) if word.quote_style.is_none() => matches!(
+                word.value.to_ascii_uppercase().as_str(),
+                "FROM" | "JOIN" | "INTO" | "UPDATE" | "TABLE"
+            ),
+            _ => false,
+        };
+        at += 1;
+        if !introduces {
+            continue;
+        }
+        // The relation is the identifier that follows, or the last label of a qualified
+        // name (`<database>.<relation>`), which is the relation inside that database.
+        let mut name = None;
+        while let Some(Token::Word(word)) = tokens.get(at) {
+            name = Some(word.value.clone());
+            match tokens.get(at + 1) {
+                Some(Token::Period) => at += 2,
+                _ => break,
+            }
+        }
+        if let Some(name) = name {
+            let lowered = name.to_ascii_lowercase();
+            if !lowered.starts_with("pg_") && !lowered.starts_with("sqlite_") {
+                named.push(name);
+            }
+        }
+    }
+    named
 }
 
 /// What taking the rows a statement locks came to: the rows this session now holds, whether
@@ -1367,7 +1442,14 @@ fn take_the_rows_it_locks(
             engine_sql: None,
         });
     };
-    let Some(ids) = database.row_ids(target, &server_view(facts), &plan.rows_sql, sql, params)
+    let Some(ids) = database.row_ids(
+        facts.connection_id,
+        target,
+        &server_view(facts),
+        &plan.rows_sql,
+        sql,
+        params,
+    )
     else {
         if plan.carries_a_clause() {
             return Err(unservable_clause(&plan));
@@ -1526,15 +1608,25 @@ fn transaction_isolation(
 
 /// The system catalogs a statement names, in the order [`super::pg_server::CATALOGS`] lists
 /// them. A statement that names none is run without rebuilding anything.
+///
+/// A statement that calls a CATALOG-ACCESSOR function names the catalog that function reads
+/// (`pg_get_userbyid` reads `pg_roles`), because the lookup it is served as is a query over
+/// that catalog ([`super::pg_server::catalog_function`]) — so the rows it resolves against
+/// are rebuilt from state exactly as a statement naming the catalog itself has them rebuilt.
 fn catalogs_named(tokens: &[Token]) -> Vec<&'static str> {
+    let named = |catalog: &str| {
+        tokens.iter().any(|token| match token {
+            Token::Word(word) => {
+                word.value.eq_ignore_ascii_case(catalog)
+                    || super::pg_server::catalog_function(&word.value)
+                        .is_some_and(|read| read.eq_ignore_ascii_case(catalog))
+            }
+            _ => false,
+        })
+    };
     super::pg_server::CATALOGS
         .into_iter()
-        .filter(|catalog| {
-            tokens.iter().any(|token| match token {
-                Token::Word(word) => word.value.eq_ignore_ascii_case(catalog),
-                _ => false,
-            })
-        })
+        .filter(|catalog| named(catalog))
         .collect()
 }
 
@@ -1626,7 +1718,8 @@ fn resolve_qualifiers(
     Ok((target.unwrap_or_else(|| facts.database.clone()), rendered))
 }
 
-/// The columns a statement would produce, as the engine reports them for it.
+/// The columns a statement would produce, as the engine reports them for it, with the
+/// values `params` bound to it where the caller has bound any.
 ///
 /// A server command is not the engine's to plan, and neither is a statement it cannot
 /// prepare, so both describe as producing no columns — what they do produce is described
@@ -1636,6 +1729,7 @@ pub fn describe_statement(
     database: &InstanceDatabase,
     facts: &SessionFacts,
     sql: &str,
+    params: &[Option<String>],
 ) -> Vec<ColumnInfo> {
     let Ok(stream) = statement_tokens(facts.wire, sql) else {
         return Vec::new();
@@ -1656,12 +1750,16 @@ pub fn describe_statement(
         return Vec::new();
     };
     let prepared = dialect::render_for_engine(facts, &stream);
+    let prepared = super::pg_numeric::exact_decimal_arithmetic(facts.wire, &prepared)
+        .unwrap_or(prepared);
     // A locking clause is this server's to serve, not the engine's to plan: the columns a
     // `SELECT … FOR UPDATE` produces are the columns of the same query without it.
     let described = lock_plan::plan(facts.wire, &prepared)
         .and_then(|plan| plan.engine_sql(None))
         .unwrap_or(prepared);
-    database.describe(&target, &described).unwrap_or_default()
+    database
+        .describe(facts.connection_id, &target, &described, params)
+        .unwrap_or_default()
 }
 
 /// The server commands a client sends that are not queries over its own tables.
@@ -1682,12 +1780,16 @@ fn server_command(
         return Ok(Some(answer));
     }
     match (facts.wire, first, second) {
-        // "ALTER SYSTEM is used for changing server configuration parameters across the
-        // entire database cluster ... only superusers can change configuration
-        // parameters" — and the RDS master user is not one.
+        // Amazon RDS does not give out the configuration file an `ALTER SYSTEM` writes: the
+        // parameters of an RDS for PostgreSQL instance are set through its DB parameter
+        // group, so the statement is refused on every RDS instance — the master user
+        // included, which is no superuser either — in the sentence RDS words it in, under
+        // `insufficient_privilege` (recorded behavior: `ALTER SYSTEM SET …` on an RDS for
+        // PostgreSQL instance answers SQLSTATE `42501` with "ALTER SYSTEM command is not
+        // supported", which is RDS's own refusal and not PostgreSQL's superuser sentence).
         (EngineWire::Postgres, "ALTER", "SYSTEM") => Err(EngineError::new(
             EngineErrorKind::InsufficientPrivilege,
-            "must be superuser to execute ALTER SYSTEM command".to_string(),
+            "ALTER SYSTEM command is not supported".to_string(),
         )),
         // The server objects a statement class of the engine's own creates: an extension
         // of a PostgreSQL database, and a database of the instance.

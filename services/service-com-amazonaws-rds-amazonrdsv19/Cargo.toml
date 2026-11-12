@@ -58,11 +58,23 @@ rusqlite = { version = "0.41", features = [
 ] }
 # `sqlparser` reads a statement as the TOKENS of its own dialect, which is how the wire
 # tells a server command (`SHOW`, `SET`) from a query and substitutes the session's values
-# into one without inspecting its text.
-sqlparser = "0.59"
+# into one without inspecting its text. The `visitor` feature walks a statement's PARSE,
+# which is how the exact-decimal arithmetic below is put in its place without matching on
+# the statement's text (`src/state/data_plane/pg_numeric.rs`).
+sqlparser = { version = "0.59", features = ["visitor"] }
+# `bigdecimal` is the arbitrary-precision DECIMAL the engines' `numeric` type is
+# (`src/state/data_plane/pg_numeric.rs`): "calculations with numeric values yield exact
+# results where possible", which a binary floating-point type cannot, so the arithmetic over
+# a value cast to `numeric` is computed on its digits by this crate. Already in this
+# workspace's lock file.
+bigdecimal = "0.4"
 # `sha1` is the digest the MySQL `mysql_native_password` handshake is defined in terms of,
 # and the only form a native-password login can be verified against.
 sha1 = "0.10"
+# `md-5` is the digest the engines' own `md5()` function computes
+# (`src/state/data_plane/sql_engine.rs`), which a client calls to checksum the rows it
+# loaded. The RustCrypto implementation, the same family as `sha1` and `sha2` above.
+md-5 = "0.10"
 # `getrandom` draws the per-connection nonce that handshake challenges a client with from
 # the operating system's own entropy, so the proof the client answers with cannot be
 # replayed.

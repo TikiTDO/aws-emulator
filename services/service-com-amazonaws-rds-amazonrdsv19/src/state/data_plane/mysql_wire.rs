@@ -809,6 +809,13 @@ fn statement_error(kind: EngineErrorKind) -> (u16, &'static str) {
         // broken with.
         EngineErrorKind::LockNotAvailable => (3572, "HY000"),
         EngineErrorKind::Deadlock => (1213, "40001"),
+        // `ER_WARN_DATA_OUT_OF_RANGE` and `ER_DIVISION_BY_ZERO`: the two conditions the
+        // exact decimal arithmetic reports (`super::pg_numeric`).
+        EngineErrorKind::NumericValueOutOfRange => (1264, "22003"),
+        EngineErrorKind::DivisionByZero => (1365, "22012"),
+        // `ER_LOCK_DEADLOCK` is also the number the server reports a transaction it could
+        // not serialize under, which is the same SQLSTATE class a client branches on.
+        EngineErrorKind::SerializationFailure => (1213, "40001"),
         EngineErrorKind::DataError => (1366, "HY000"),
         EngineErrorKind::Cancelled => (1317, "70100"),
         // `ER_UNKNOWN_ERROR`: the statement asked for more than this endpoint serves,

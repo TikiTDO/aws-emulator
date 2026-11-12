@@ -265,9 +265,10 @@ impl DbClusterRecord {
     /// The port a client connects to: the port the cluster's engine listener was assigned
     /// where it has one, else the configured port.
     ///
-    /// The core owns the port range the listener is bound in, so the configured port (what
-    /// `Port` set, which the record keeps) is what the cluster records and this is what it
-    /// publishes; for a cluster with no listener the two are the same value.
+    /// The core owns the port range the listener is bound in and takes no port from this
+    /// service (`vendor/server/src/listeners.rs`), so the configured port (what `Port` set,
+    /// which the record keeps) is what the cluster records and the port the listener landed
+    /// on is what it publishes; for a cluster with no listener the two are the same value.
     pub fn published_port(&self) -> i32 {
         self.served_endpoint
             .as_ref()

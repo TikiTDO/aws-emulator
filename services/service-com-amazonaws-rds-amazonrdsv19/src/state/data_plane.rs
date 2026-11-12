@@ -69,6 +69,7 @@ pub mod mysql_s3_load;
 pub mod mysql_wire;
 pub mod pg_copy;
 pub mod pg_grants;
+pub mod pg_numeric;
 pub mod pg_server;
 pub mod pg_sessions;
 pub mod pg_wire;

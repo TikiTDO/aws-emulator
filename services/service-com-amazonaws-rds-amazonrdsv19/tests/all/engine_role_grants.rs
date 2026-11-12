@@ -215,7 +215,11 @@ async fn a_grant_naming_more_names_than_the_endpoint_serves_is_refused() {
         value(
             "a repeated role name",
             &mut session,
-            "SELECT count(*) FROM pg_auth_members",
+            // The memberships of the role the grant named: the instance's own membership
+            // (the master user in `rds_superuser`) is not one this statement made.
+            "SELECT count(*) FROM pg_auth_members AS m \
+               JOIN pg_roles AS g ON g.oid = m.member \
+             WHERE g.rolname = 'appuser'",
         )
         .await,
         Some("1".to_string()),
@@ -245,7 +249,11 @@ async fn a_grant_naming_more_names_than_the_endpoint_serves_is_refused() {
         value(
             "more names than the endpoint serves",
             &mut session,
-            "SELECT count(*) FROM pg_auth_members",
+            // As above: the one membership the statements before it recorded, beside the
+            // instance's own.
+            "SELECT count(*) FROM pg_auth_members AS m \
+               JOIN pg_roles AS g ON g.oid = m.member \
+             WHERE g.rolname = 'appuser'",
         )
         .await,
         Some("1".to_string()),
