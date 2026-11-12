@@ -13,6 +13,8 @@
 // points it into `tests/all/`.
 #[path = "all/front_door_refusals.rs"]
 mod front_door_refusals;
+#[path = "all/list_pipes_token_refusal.rs"]
+mod list_pipes_token_refusal;
 #[path = "all/pipe_body_paths.rs"]
 mod pipe_body_paths;
 #[path = "all/pipe_bring_up.rs"]
