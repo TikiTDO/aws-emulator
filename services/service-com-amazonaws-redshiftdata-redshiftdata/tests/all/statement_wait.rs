@@ -56,9 +56,9 @@ async fn a_batch_callers_wait_bounds_its_own_response_and_not_the_execution() {
             label: "no wait at all, for a batch the engine completes",
             sqls: QUICK_SQLS,
             wait: None,
-            // Nobody waited, so whether this batch's execution has already
-            // reported when the response is written is the engine's business.
-            answered: &["SUBMITTED", "PICKED", "STARTED", "FINISHED"],
+            // Nobody waited, so this answers with the submission as accepted
+            // however quickly its transaction reports.
+            answered: &["SUBMITTED"],
             verdict: Verdict::Finished,
         },
         PatienceRow {

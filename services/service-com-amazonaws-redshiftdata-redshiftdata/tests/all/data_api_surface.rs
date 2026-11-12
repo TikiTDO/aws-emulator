@@ -29,8 +29,7 @@ use serde_json::{json, Value};
 
 // The harness every suite in this crate drives the emulator through.
 use super::emulator::{
-    error_code, id_of, list, number, Emulator, LONGER_THAN_A_QUICK_STATEMENT, SLOW_SQL,
-    WAIT_SECONDS,
+    error_code, id_of, list, number, wait_for_terminal, Emulator, SLOW_SQL, WAIT_SECONDS,
 };
 
 /// The connection every statement in this suite runs through unless it names
@@ -811,9 +810,10 @@ async fn a_statement_naming_only_a_session_runs_on_that_session_s_connection() {
 async fn a_session_s_status_follows_its_statements_and_its_ttl() {
     let emulator = Emulator::new();
 
-    // Submitted without waiting, and slow enough that it is really still
-    // running when the session is listed: the session reports BUSY and names
-    // the statement.
+    // Submitted without waiting, and its turn on the database is HELD by this
+    // test, so the statement is certainly still in flight when the session is
+    // listed: the session reports BUSY and names the statement.
+    let held = emulator.hold_turn("my-cluster", "dev");
     let mut request = cluster();
     request["Sql"] = json!(SLOW_SQL);
     request["SessionKeepAliveSeconds"] = json!(300);
@@ -839,16 +839,10 @@ async fn a_session_s_status_follows_its_statements_and_its_ttl() {
     );
 
     // Once the statement's execution has finished, the session is ready for the
-    // next one and names no statement.
-    for _ in 0..50 {
-        let page = emulator
-            .ok("ListSessions", &json!({"SessionId": session}))
-            .await;
-        if list(&page, "Sessions")[0]["Status"] == "AVAILABLE" {
-            break;
-        }
-        tokio::time::sleep(LONGER_THAN_A_QUICK_STATEMENT).await;
-    }
+    // next one and names no statement. Releasing the turn lets it run, and the
+    // record it reports is what says it is done — polled for, never waited out.
+    drop(held);
+    wait_for_terminal(&emulator, "the session's statement", &statement).await;
     let available = emulator
         .ok("ListSessions", &json!({"SessionId": session}))
         .await;

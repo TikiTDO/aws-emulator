@@ -59,5 +59,8 @@ mod statement_submission_surface;
 #[path = "all/statement_wait.rs"]
 mod statement_wait;
 
+#[path = "all/unwaited_submit_answer.rs"]
+mod unwaited_submit_answer;
+
 #[path = "all/warehouse_catalogue.rs"]
 mod warehouse_catalogue;

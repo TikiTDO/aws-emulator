@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 
 use super::emulator::{
     error_code, id_of, wait_for_terminal, wait_until_started, Emulator, RUNNING_STATUSES,
-    SLOW_SQL, WAIT_SECONDS,
+    UNBOUNDED_SQL, WAIT_SECONDS,
 };
 
 /// How long the session suite keeps its session alive: longer than the
@@ -51,14 +51,19 @@ async fn submit(emulator: &Emulator, database: &str, sql: &str) -> String {
     id_of(&response)
 }
 
-/// A statement that takes real time is observable as STARTED while the engine
-/// runs it, and that is the state in which a caller can stop it: the cancel
-/// answers that it stopped the query, and the statement lands ABORTED carrying
-/// the backend's own reason for stopping.
+/// A statement that runs until a bound stops it is observable as STARTED while
+/// the engine runs it, and that is the state in which a caller can stop it: the
+/// cancel answers that it stopped the query, and the statement lands ABORTED
+/// carrying the backend's own reason for stopping.
+///
+/// The statement submitted runs until one of the engine's own execution bounds
+/// ends it, so the window in which it is observable as running is that bound and
+/// never a span of this test's choosing: the cancel below reaches a query that
+/// is certainly still open however loaded the machine is.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_running_statement_is_started_and_cancelling_it_aborts_it() {
     let emulator = Emulator::new();
-    let id = submit(&emulator, "dev", SLOW_SQL).await;
+    let id = submit(&emulator, "dev", UNBOUNDED_SQL).await;
     let running = wait_until_started(&emulator, "a long statement", &id).await;
     assert_eq!(
         running["Duration"].as_i64().unwrap_or_default(),
@@ -106,7 +111,7 @@ async fn cancelling_a_stopped_statement_is_refused_naming_its_state() {
     wait_for_terminal(&emulator, "a statement that ran", &finished).await;
     let failed = submit(&emulator, "failed-db", "SELECT * FROM absent_table").await;
     wait_for_terminal(&emulator, "a statement the engine refused", &failed).await;
-    let aborted = submit(&emulator, "aborted-db", SLOW_SQL).await;
+    let aborted = submit(&emulator, "aborted-db", UNBOUNDED_SQL).await;
     wait_until_started(&emulator, "a statement to stop", &aborted).await;
     emulator
         .ok("CancelStatement", &json!({"Id": aborted}))

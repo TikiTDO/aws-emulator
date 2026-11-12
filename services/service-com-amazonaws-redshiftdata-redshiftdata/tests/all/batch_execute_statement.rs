@@ -18,8 +18,8 @@ use serde_json::{json, Value};
 use service_com_amazonaws_redshiftdata_redshiftdata::state::MAX_RETAINED_STATEMENTS;
 
 use super::emulator::{
-    error_code, flag, id_of, list, number, wait_until_started, Emulator,
-    LONGER_THAN_A_QUICK_STATEMENT, SLOW_SQL, WAIT_SECONDS,
+    error_code, flag, id_of, list, number, wait_for_terminal, wait_until_started, Emulator,
+    SLOW_SQL, UNBOUNDED_SQL, WAIT_SECONDS,
 };
 
 /// The connection every batch below is submitted with: one documented
@@ -600,12 +600,14 @@ async fn batch_parameters_are_bound_to_the_statements_that_reference_them() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unwaited_batch_is_submitted_while_its_transaction_runs() {
     let emulator = Emulator::new();
-    // Slow enough to be observed WHILE it runs, so what is cancelled below is a
-    // transaction that is really still open.
+    // The first statement takes real time and the second runs until a bound of
+    // the engine stops it, so the transaction is certainly still open while it
+    // is read and cancelled below: what keeps that window open is the engine's
+    // own execution bound and never a span of this test's choosing.
     let submitted = emulator
         .ok(
             "BatchExecuteStatement",
-            &batch(&[SLOW_SQL, SLOW_SQL], None),
+            &batch(&[SLOW_SQL, UNBOUNDED_SQL], None),
         )
         .await;
     let id = id_of(&submitted);
@@ -666,10 +668,14 @@ async fn an_unwaited_batch_is_submitted_while_its_transaction_runs() {
     let other = emulator
         .ok("BatchExecuteStatement", &batch(&["SELECT 1"], None))
         .await;
-    tokio::time::sleep(LONGER_THAN_A_QUICK_STATEMENT).await;
-    let finished = emulator
-        .ok("DescribeStatement", &json!({"Id": id_of(&other)}))
-        .await;
+    // Polled rather than waited out: the batch reports when its transaction
+    // does, so what this reads is the outcome that transaction really reached.
+    let finished = wait_for_terminal(
+        &emulator,
+        "a batch nobody waited for",
+        &id_of(&other),
+    )
+    .await;
     assert_eq!(
         finished["Status"], "FINISHED",
         "a batch whose transaction committed reports FINISHED: {finished}"

@@ -21,17 +21,14 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
-use service_com_amazonaws_redshiftdata_redshiftdata::state::MAX_ENGINE_DEADLINE;
+use service_com_amazonaws_redshiftdata_redshiftdata::state::{
+    service_state, ConnectionTarget, QueueSlot, MAX_ENGINE_DEADLINE,
+};
 use service_com_amazonaws_redshiftdata_redshiftdata::EmulatedService;
 
 /// An `Id` in the shape the `UUID` pattern accepts that no statement was ever
 /// minted with.
 pub const ABSENT_ID: &str = "00000000-0000-0000-0000-000000000000";
-
-/// Comfortably longer than a trivial statement's execution takes, so a
-/// statement submitted without a wait has certainly reported its outcome by the
-/// time this has passed.
-pub const LONGER_THAN_A_QUICK_STATEMENT: Duration = Duration::from_millis(900);
 
 /// A statement whose execution takes long enough to be observed WHILE it runs,
 /// so the transient `SUBMITTED` state and the state-dependent behaviour that
@@ -103,9 +100,10 @@ pub struct PatienceRow {
     /// The `WaitTimeSeconds` the submit carries, or `None` for a submit that
     /// names no wait at all.
     pub wait: Option<i32>,
-    /// The statuses the submit's own response may report. A submit that names no
-    /// wait reports the status the submission has at that instant; a wait
-    /// SHORTER than the service's whole execution bound reports whatever it has
+    /// The statuses the submit's own response may report. A submit that names NO
+    /// wait does not wait for the execution at all, so it reports the submission
+    /// as accepted — `SUBMITTED`, and nothing else; a wait SHORTER than the
+    /// service's whole execution bound reports whatever the submission has
     /// reached by the time that wait expires; only a wait that covers the
     /// service's execution bound is sure to carry the verdict.
     pub answered: &'static [&'static str],
@@ -164,9 +162,30 @@ const TERMINAL_STATUS_BUDGET: Duration =
 /// How long to wait between two polls of a statement's status.
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
+/// A turn on one database's queue, HELD.
+///
+/// The submissions of one database run one at a time and in submission order,
+/// so while this guard is alive every submission made to that database waits
+/// for its turn: none of them is picked, started or finished, and the window in
+/// which they are all in flight stays open for as long as the holder wants.
+/// Dropping the guard hands the turn on to the submission queued first behind
+/// it, and the queue drains in submission order from there.
+///
+/// It holds the very queue slot a submission takes
+/// ([`service_com_amazonaws_redshiftdata_redshiftdata::state::ComAmazonawsRedshiftdataRedshiftdataState::reserve_database`]),
+/// so what a suite drives here is the service's own queue rather than a
+/// test-only hook into it.
+pub struct HeldTurn {
+    /// Released on drop, which is what hands the turn on.
+    _slot: QueueSlot,
+}
+
 /// One emulator: a router with only this service mounted, over one shared engine.
 pub struct Emulator {
     router: MultiServiceRouter,
+    /// The shared engine the service was built over, kept so a suite can hold a
+    /// turn on one of its databases ([`Emulator::hold_turn`]).
+    engine: Arc<engine::InMemoryEngine>,
 }
 
 impl Emulator {
@@ -174,8 +193,33 @@ impl Emulator {
         let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
         let mut router = MultiServiceRouter::new();
         router.set_request_authentication(false);
-        router.register_service(EmulatedService::new(engine));
-        Self { router }
+        router.register_service(EmulatedService::new(Arc::clone(&engine)));
+        Self { router, engine }
+    }
+
+    /// Take and HOLD the turn on `database` of the provisioned cluster
+    /// `cluster`, so every submission made to it afterwards waits for its turn
+    /// until the returned guard is dropped.
+    ///
+    /// This is how a suite asserts something about submissions that are IN
+    /// FLIGHT — that they are bounded, that the session running one is busy —
+    /// without racing the executions those submissions start: the window is
+    /// closed by the test dropping the guard and never by how fast the host ran
+    /// the queue.
+    ///
+    /// Two preconditions, both held by every caller here: it must be called
+    /// BEFORE any submission is made to that database, since what it takes is
+    /// the HEAD of that database's queue; and the guard is meant to be held for
+    /// the few calls the window spans rather than across a retention span, since
+    /// a database nothing has used for one is closed and its queue goes with it.
+    pub fn hold_turn(&self, cluster: &str, database: &str) -> HeldTurn {
+        let state = service_state(&*self.engine)
+            .expect("the shared engine must hold this service's state store");
+        let (_handle, _pid, slot) = state
+            .lock()
+            .reserve_database(&ConnectionTarget::Cluster(cluster.to_string()), database)
+            .expect("the harness must be able to take a turn on a database's queue");
+        HeldTurn { _slot: slot }
     }
 
     /// Call one operation and return its HTTP status and JSON body.

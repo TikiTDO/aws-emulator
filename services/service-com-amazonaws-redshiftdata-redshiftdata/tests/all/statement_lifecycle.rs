@@ -28,8 +28,7 @@ use service_com_amazonaws_redshiftdata_redshiftdata::state::{
 // The harness every suite in this crate drives the emulator through.
 use super::emulator::{
     error_code, flag, id_of, list, number, timestamp, wait_for_terminal, wait_until_started,
-    Emulator, ABSENT_ID, LONGER_THAN_A_QUICK_STATEMENT, RUN_TIME_LOWER_BOUND_SECONDS, SLOW_SQL,
-    UNBOUNDED_SQL, WAIT_SECONDS,
+    Emulator, ABSENT_ID, RUN_TIME_LOWER_BOUND_SECONDS, UNBOUNDED_SQL, WAIT_SECONDS,
 };
 
 // ---------------------------------------------------------------------------
@@ -573,10 +572,10 @@ async fn a_submitted_statement_reaches_its_terminal_status_when_its_execution_do
         is_uuid_shaped(&quick_id),
         "the minted Id must match the modelled UUID pattern, got {quick_id:?}"
     );
-    tokio::time::sleep(LONGER_THAN_A_QUICK_STATEMENT).await;
-    let finished = emulator
-        .ok("DescribeStatement", &json!({"Id": quick_id}))
-        .await;
+    // Polled rather than waited out: the status follows the ENGINE, so what the
+    // read below reports is the outcome the execution really reached and not
+    // whatever the statement had got to after a span of this test's choosing.
+    let finished = wait_for_terminal(&emulator, "a statement nobody waited for", &quick_id).await;
     assert_eq!(
         finished["Status"], "FINISHED",
         "a statement whose execution finished reports its terminal status: {finished}"
@@ -615,9 +614,11 @@ async fn a_submitted_statement_reaches_its_terminal_status_when_its_execution_do
         "expected the row the statement produced, got {fetched}"
     );
 
-    // And a statement that takes real time is observable WHILE it runs: it
-    // reports STARTED — the query run has started — nothing about its result,
-    // and no rows to fetch.
+    // And a statement that runs until a bound of the engine stops it is
+    // observable WHILE it runs: it reports STARTED — the query run has started —
+    // nothing about its result, and no rows to fetch. What keeps that window
+    // open is the engine's own execution bound, so these reads never race the
+    // end of the statement's work.
     let submitted = emulator
         .ok(
             "ExecuteStatement",
@@ -625,7 +626,7 @@ async fn a_submitted_statement_reaches_its_terminal_status_when_its_execution_do
                 "ClusterIdentifier": "my-cluster",
                 "Database": "dev",
                 "DbUser": "awsuser",
-                "Sql": SLOW_SQL,
+                "Sql": UNBOUNDED_SQL,
                 "StatementName": "boot",
             }),
         )
@@ -669,6 +670,11 @@ async fn a_submitted_statement_reaches_its_terminal_status_when_its_execution_do
         "ValidationException",
         "expected ValidationException, got {refused}"
     );
+
+    // Stopped rather than left running: the statement was submitted to be
+    // observed while it ran, and it has been.
+    emulator.ok("CancelStatement", &json!({"Id": id})).await;
+    wait_for_terminal(&emulator, "the statement that was observed running", &id).await;
 }
 
 /// Whether a string matches the modelled `UUID` pattern

@@ -462,7 +462,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // on that database, so the submissions of one database run one at a
         // time and in submission order — which is what serialises two
         // transactions contending for the same row.
-        let (reserved, id) = {
+        let (reserved, id, accepted) = {
             let mut store = state.lock();
             store.materialise_due_transitions();
             // Every accepted submission runs independently of this request, so
@@ -487,7 +487,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // A batch whose database the warehouse has none of gets no engine,
             // for the same reason one statement does not: opening one would add
             // that database to the warehouse.
-            if absent_database {
+            let (reserved, id) = if absent_database {
                 let pid = store.mint_pid();
                 let id = store.record_pending(submission, pid, bound.interrupt());
                 (None, id)
@@ -530,7 +530,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     };
                 let id = store.record_pending(submission, pid, bound.interrupt());
                 (Some((handle, slot)), id)
-            }
+            };
+            // The answer to THIS request, read out of the record this request
+            // just wrote and while the lock that wrote it is still held: the
+            // submission as it was accepted, which is SUBMITTED — "the query was
+            // submitted, but not yet processed". A request that asked to wait
+            // reads the record again once its wait is up; one that asked for no
+            // wait is answered with this, so what it reports can never depend on
+            // how far the transaction handed over below happened to get while
+            // the response was being written.
+            let accepted = store.statement(&id).map(output_for);
+            (reserved, id, accepted)
         };
 
         // The transaction is the batch's, not the request's: it runs to a
@@ -590,12 +600,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         });
 
         // "The number of seconds to wait for the SQL statement to complete
-        // execution before returning the response": a caller that named one
-        // waits here, and gets whatever status the batch has reached by the time
-        // its own wait is up.
-        if let Some(budget) = crate::state::wait_budget(input.wait_time_seconds) {
-            let _ = tokio::time::timeout(budget, execution).await;
-        }
+        // execution before returning the response. If the SQL statement does not
+        // complete within the specified time, the response returns the current
+        // status": a caller that named a wait waits here and is then answered
+        // with the status the batch has reached. A caller that named none waits
+        // for NOTHING, so it is answered with the submission as this request
+        // accepted it.
+        let Some(budget) = crate::state::wait_budget(input.wait_time_seconds) else {
+            return accepted.ok_or_else(unavailable);
+        };
+        let _ = tokio::time::timeout(budget, execution).await;
 
         let mut store = state.lock();
         store.materialise_due_transitions();

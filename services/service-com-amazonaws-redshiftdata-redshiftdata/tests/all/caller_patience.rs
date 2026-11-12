@@ -46,11 +46,10 @@ async fn a_callers_wait_bounds_its_own_response_and_not_the_execution() {
             label: "no wait at all, for a statement the engine's bound stops",
             sqls: &[UNBOUNDED_SQL],
             wait: None,
-            // Nothing waited for this execution, and the execution runs until a
-            // bound of the engine stops it, so the response reports the status
-            // the statement has at that instant: one of the states a statement
-            // that has not stopped is in.
-            answered: &["SUBMITTED", "PICKED", "STARTED"],
+            // Nothing waited for this execution, so the response reports the
+            // submission as this request accepted it: the query was submitted,
+            // but not yet processed.
+            answered: &["SUBMITTED"],
             verdict: Verdict::Interrupted,
         },
         PatienceRow {
@@ -70,9 +69,9 @@ async fn a_callers_wait_bounds_its_own_response_and_not_the_execution() {
             label: "no wait at all, for a statement that finishes at once",
             sqls: &[QUICK_SQL],
             wait: None,
-            // Nobody waited, so whether this statement's execution has already
-            // reported when the response is written is the engine's business.
-            answered: &["SUBMITTED", "PICKED", "STARTED", "FINISHED"],
+            // Nobody waited, so this answers with the submission as accepted
+            // however quickly its execution reports.
+            answered: &["SUBMITTED"],
             verdict: Verdict::Finished,
         },
         PatienceRow {

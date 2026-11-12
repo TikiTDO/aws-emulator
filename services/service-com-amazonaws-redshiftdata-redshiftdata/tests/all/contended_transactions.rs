@@ -22,7 +22,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use super::emulator::{
-    error_code, id_of, list, wait_for_terminal, Emulator, SLOW_SQL, TERMINAL_STATUSES,
+    error_code, id_of, list, wait_for_terminal, Emulator, QUICK_SQL, TERMINAL_STATUSES,
     WAIT_SECONDS,
 };
 
@@ -266,17 +266,26 @@ async fn concurrent_submissions_on_one_row_each_reach_a_decision() {
 /// The submissions in flight are BOUNDED, and a submission the bound refuses
 /// reserves nothing: it takes no turn on the database, so the submissions after
 /// it still run.
+///
+/// The in-flight window is held open by this test rather than by how long the
+/// statements take: the turn on the database is taken first
+/// ([`Emulator::hold_turn`]), so every submission below waits for it and the
+/// bound is asserted over submissions that are all certainly still in flight.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_submissions_in_flight_are_bounded_and_a_refusal_takes_no_turn() {
     let emulator = Emulator::new();
 
-    // Fill the bound. The submissions of one database run one at a time, so
-    // statements that take real time queue up instead of finishing as they are
-    // submitted.
+    // The turn on the database every submission below is made to, held by this
+    // test: the submissions of one database run one at a time and in submission
+    // order, so none of them is picked, started or finished while this guard is
+    // alive.
+    let held = emulator.hold_turn("my-cluster", "dev");
+
+    // Fill the bound.
     let mut queued = Vec::new();
     for index in 0..MAX_ACTIVE_STATEMENTS {
         let mut request = connection();
-        request["Sql"] = json!(SLOW_SQL);
+        request["Sql"] = json!(QUICK_SQL);
         let response = emulator.ok("ExecuteStatement", &request).await;
         assert_eq!(
             response["Status"], "SUBMITTED",
@@ -299,14 +308,15 @@ async fn the_submissions_in_flight_are_bounded_and_a_refusal_takes_no_turn() {
         "expected the modelled capacity error, got {refused}"
     );
 
-    // Cancelling the queued submissions stops them: each reaches a terminal
-    // status, so the bound admits submissions again.
+    // Cancelling the queued submissions stops them: none of them had stopped on
+    // its own, each reaches a terminal status, so the bound admits submissions
+    // again.
     for id in &queued {
-        let (status, answer) = emulator.call("CancelStatement", &json!({"Id": id})).await;
-        assert!(
-            status == 200 || status == 400,
-            "cancelling {id} must either stop it or report it already stopped, got {status} \
-             {answer}"
+        let cancelled = emulator.ok("CancelStatement", &json!({"Id": id})).await;
+        assert_eq!(
+            cancelled["Status"],
+            json!(true),
+            "cancelling the in-flight {id} must stop it, got {cancelled}"
         );
         let described = wait_for_terminal(&emulator, "the cancelled queue", id).await;
         assert!(
@@ -315,9 +325,10 @@ async fn the_submissions_in_flight_are_bounded_and_a_refusal_takes_no_turn() {
         );
     }
 
-    // And a submission made after the refusal runs to completion: the refused
-    // one left no turn taken on the database, and nothing of the queue it was
-    // refused behind is still holding one.
+    // And a submission made after the refusal runs to completion once the turn
+    // is handed on: the refused one left no turn taken on the database, and
+    // nothing of the queue it was refused behind is still holding one.
+    drop(held);
     past_bound["WaitTimeSeconds"] = json!(WAIT_SECONDS);
     let after = emulator.ok("ExecuteStatement", &past_bound).await;
     let described = wait_for_terminal(&emulator, "after the refusal", &id_of(&after)).await;
