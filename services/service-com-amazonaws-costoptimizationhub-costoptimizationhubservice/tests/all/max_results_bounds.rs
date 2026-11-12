@@ -21,7 +21,8 @@
 use serde_json::{json, Value};
 
 use crate::cost_optimization_hub::{
-    call, error_code, fields, router, FIELD_VALIDATION_FAILED, FIELD_VALIDATION_SUMMARY,
+    call, error_code, fields, monthly_period, router, FIELD_VALIDATION_FAILED,
+    FIELD_VALIDATION_SUMMARY,
 };
 
 /// One paginated operation: its name, the rest of a well-formed request for it,
@@ -36,6 +37,9 @@ struct Paginated {
 }
 
 fn paginated_operations() -> Vec<Paginated> {
+    // The period the time-series read is asked over comes from the clock: that
+    // operation reports over a window ending at the present interval.
+    let (start, end) = monthly_period(1, 1);
     vec![
         Paginated {
             operation: "ListRecommendations",
@@ -62,7 +66,7 @@ fn paginated_operations() -> Vec<Paginated> {
             operation: "ListEfficiencyMetrics",
             request: json!({
                 "granularity": "Monthly",
-                "timePeriod": {"start": "2026-01-01", "end": "2026-02-01"},
+                "timePeriod": {"start": start, "end": end},
             }),
             min: 0,
             max: 1000,

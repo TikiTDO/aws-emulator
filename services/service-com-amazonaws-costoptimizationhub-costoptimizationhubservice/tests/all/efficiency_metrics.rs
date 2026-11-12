@@ -14,18 +14,27 @@
 //! Every money figure is checked against the SAME rows read through
 //! `ListRecommendations` and `ListRecommendationSummaries`, aggregated by the
 //! test: the oracle is another view of the store, never a number copied into
-//! this file. The tables span both granularities, the date forms the member
-//! accepts, months of 28, 29, 30 and 31 days, partially covered months, every
+//! this file. The tables span both granularities, periods of one and of several
+//! intervals, a period crossing a month boundary, part of a month, every
 //! grouping dimension, both savings estimation modes, each ordering dimension in
 //! both directions, and every page size.
+//!
+//! Every period is built from the clock, because the window this operation
+//! reports over ends at the present interval and reaches back 90 days of a daily
+//! series or 3 months of a monthly one. A case therefore takes whichever months
+//! that window holds, rather than naming a month of a chosen length or a leap
+//! day: the rule under test is the share of a month's figures a point carries,
+//! which holds for a month of any length, and the lengths a case meets are the
+//! ones the clock offers.
 
 use serde_json::{json, Value};
 use service_com_amazonaws_costoptimizationhub_costoptimizationhubservice as cost_optimization_hub;
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::cost_optimization_hub::{
-    assert_stated_rule_refusal, call, enrolled_router, enrolled_router_with_discounts_visible, ok,
-    router,
+    assert_stated_rule_refusal, call, daily_period, day_text, enrolled_router,
+    enrolled_router_with_discounts_visible, month_text, monthly_period, months_before, ok, router,
+    today,
 };
 
 /// The dimensions cost efficiency metrics can be grouped by, each paired with
@@ -101,12 +110,17 @@ fn stamps(group: &Value) -> Vec<String> {
         .collect()
 }
 
+/// One group's series, as the data points it carries in order.
+fn series(group: &Value) -> Vec<Value> {
+    group["metricsByTime"]
+        .as_array()
+        .unwrap_or_else(|| panic!("case series: expected a series in {group}"))
+        .clone()
+}
+
 /// One group's spend and savings totalled over its whole series, in whole cents.
 fn totals(group: &Value) -> (i64, i64) {
-    let series = group["metricsByTime"]
-        .as_array()
-        .unwrap_or_else(|| panic!("case totals: expected a series in {group}"))
-        .clone();
+    let series = series(group);
     let spend = series
         .iter()
         .map(|point| point["spend"].as_f64().unwrap_or_default())
@@ -199,8 +213,32 @@ async fn set_mode(router: &MultiServiceRouter, mode: &str) {
     .await;
 }
 
-/// A whole month, as the two dates that cover it exactly.
-const MARCH: (&str, &str) = ("2026-03-01", "2026-04-01");
+/// The whole month before this one, as the two bounds a monthly request covers
+/// it with.
+///
+/// The periods these tests ask about are built from the clock rather than
+/// written as fixed dates, because the operation reports over a window that
+/// moves with it: the last 3 months of a monthly series and the last 90 days of
+/// a daily one.
+fn last_whole_month() -> (String, String) {
+    monthly_period(1, 1)
+}
+
+/// A request for one whole reported interval at `granularity`: the month before
+/// this one, or the day before today.
+fn interval_request(granularity: &str) -> Value {
+    let (start, end) = if granularity == "Daily" {
+        daily_period(1, 1)
+    } else {
+        last_whole_month()
+    };
+    request(granularity, &start, &end)
+}
+
+/// A monthly request over the whole month before this one.
+fn last_month_request() -> Value {
+    interval_request("Monthly")
+}
 
 // ---------------------------------------------------------------------------
 // The time series
@@ -208,58 +246,64 @@ const MARCH: (&str, &str) = ("2026-03-01", "2026-04-01");
 
 /// One data point per interval of the requested granularity the period reaches,
 /// timestamped as that granularity is documented to be (`YYYY-MM-DD` for daily,
-/// `YYYY-MM` for monthly) — over a table spanning both granularities, both date
-/// forms the member accepts (`YYYY-MM-DD` and `YYYY-MM`), a month boundary, a
-/// leap day, and months the period only partly covers.
+/// `YYYY-MM` for monthly) — over a table spanning both granularities, periods of
+/// one and of several intervals, a period crossing a month boundary, and the far
+/// edge of the window each granularity reports over.
 #[tokio::test]
 async fn the_series_carries_one_point_per_interval_the_period_reaches() {
     let router = enrolled_router().await;
 
-    let cases: Vec<(&str, &str, &str, Vec<&str>)> = vec![
-        ("Daily", "2026-03-01", "2026-03-02", vec!["2026-03-01"]),
-        (
-            "Daily",
-            "2026-01-30",
-            "2026-02-02",
-            vec!["2026-01-30", "2026-01-31", "2026-02-01"],
-        ),
-        // February of a leap year has a 29th, which the series has to carry.
-        (
-            "Daily",
-            "2024-02-28",
-            "2024-03-01",
-            vec!["2024-02-28", "2024-02-29"],
-        ),
-        // A month on its own names its first day, so this is the whole of March.
-        ("Daily", "2026-03", "2026-03-04", vec![
-            "2026-03-01",
-            "2026-03-02",
-            "2026-03-03",
-        ]),
-        ("Monthly", "2026-03-01", "2026-04-01", vec!["2026-03"]),
-        (
-            "Monthly",
-            "2025-11-01",
-            "2026-02-01",
-            vec!["2025-11", "2025-12", "2026-01"],
-        ),
-        (
-            "Monthly",
-            "2026-01",
-            "2026-04",
-            vec!["2026-01", "2026-02", "2026-03"],
-        ),
-        // Both ends fall inside a month, so both of those months are reached.
-        (
-            "Monthly",
-            "2026-01-15",
-            "2026-02-15",
-            vec!["2026-01", "2026-02"],
-        ),
+    // (case, days before today the period starts, days it runs): a daily series
+    // carries one point per day of the period.
+    let daily: Vec<(&str, i64, i64)> = vec![
+        ("one day", 1, 1),
+        ("three days", 5, 3),
+        ("a fortnight", 20, 14),
+        // One day inside the far edge of the window: the window is read from the
+        // clock here and again in the handler, so a case ON the edge would flip
+        // if the UTC day rolled over between the two.
+        ("the day inside the far edge of the window", 89, 1),
     ];
+    let mut cases: Vec<(String, &str, String, String, Vec<String>)> = Vec::new();
+    for (name, days_back, days) in daily {
+        let start = today() - days_back;
+        cases.push((
+            format!("daily, {name}"),
+            "Daily",
+            day_text(start),
+            day_text(start + days),
+            (0..days).map(|day| day_text(start + day)).collect(),
+        ));
+    }
+    // A period crossing a month boundary carries the days either side of it.
+    let boundary = months_before(today(), 1);
+    cases.push((
+        "daily, across a month boundary".to_string(),
+        "Daily",
+        day_text(boundary - 2),
+        day_text(boundary + 2),
+        (-2..2).map(|day| day_text(boundary + day)).collect(),
+    ));
+    // (case, months before this one the period starts, months it runs): a
+    // monthly series carries one point per month.
+    for (name, months_back, months) in [
+        ("one month", 1, 1),
+        ("two months", 2, 2),
+        ("the month inside the far edge of the window", 2, 1),
+    ] {
+        let (start, end) = monthly_period(months_back, months);
+        cases.push((
+            format!("monthly, {name}"),
+            "Monthly",
+            start,
+            end,
+            (0..months)
+                .map(|month| month_text(months_before(today(), months_back - month)))
+                .collect(),
+        ));
+    }
 
-    for (granularity, start, end, expected_stamps) in &cases {
-        let case = format!("{granularity} from {start} to {end}");
+    for (case, granularity, start, end, expected_stamps) in &cases {
         let payload = ok(
             &router,
             "ListEfficiencyMetrics",
@@ -284,38 +328,33 @@ async fn the_series_carries_one_point_per_interval_the_period_reaches() {
 
 /// A point's figures are the month's prorated by the days of that month it
 /// covers inside the period, so the DAILY points of a month add up to that
-/// month's MONTHLY point — asserted over months of 28, 29, 30 and 31 days, and
-/// over a month the period only half covers, where both granularities report the
-/// same covered share.
+/// month's MONTHLY point, and the daily points of PART of a month add up to that
+/// share of it — asserted over each whole month inside the window both
+/// granularities reach, and over shares of one of them.
 #[tokio::test]
 async fn the_daily_points_of_a_month_add_up_to_its_monthly_point() {
     let router = enrolled_router().await;
 
-    // (case, start, end): each a period the two granularities must agree over.
-    let cases: Vec<(&str, &str, &str)> = vec![
-        ("a 31-day month", "2026-01-01", "2026-02-01"),
-        ("a 28-day month", "2026-02-01", "2026-03-01"),
-        ("a 29-day month of a leap year", "2024-02-01", "2024-03-01"),
-        ("a 30-day month", "2026-04-01", "2026-05-01"),
-        ("three whole months", "2026-01-01", "2026-04-01"),
-        ("half of a month", "2026-01-01", "2026-01-16"),
-        ("the tail of one month and the head of the next", "2026-01-20", "2026-02-10"),
-    ];
-
-    for (name, start, end) in &cases {
+    // The whole months inside the window a daily series also reaches (90 days),
+    // each as the days that cover it exactly and the month that names it.
+    for months_back in [1_u32, 2] {
+        let first = months_before(today(), months_back);
+        let next = months_before(today(), months_back - 1);
+        let name = format!("the whole of {}", month_text(first));
         let daily = groups(
             &ok(
                 &router,
                 "ListEfficiencyMetrics",
-                &request("Daily", start, end),
+                &request("Daily", &day_text(first), &day_text(next)),
             )
             .await,
         );
+        let (month_start, month_end) = monthly_period(months_back, 1);
         let monthly = groups(
             &ok(
                 &router,
                 "ListEfficiencyMetrics",
-                &request("Monthly", start, end),
+                &request("Monthly", &month_start, &month_end),
             )
             .await,
         );
@@ -326,6 +365,7 @@ async fn the_daily_points_of_a_month_add_up_to_its_monthly_point() {
              {daily:?} and {monthly:?}"
         );
 
+        let days_in_month = next - first;
         for (day_group, month_group) in daily.iter().zip(monthly.iter()) {
             let case = format!("{name} grouped as {:?}", label(day_group));
             let (day_spend, day_savings) = totals(day_group);
@@ -351,6 +391,44 @@ async fn the_daily_points_of_a_month_add_up_to_its_monthly_point() {
                 score(day_group),
                 score(month_group)
             );
+        }
+
+        // Part of the same month carries that share of it: the days covered over
+        // the days the month has.
+        for days in [1, days_in_month / 2, days_in_month - 1] {
+            let case = format!("{days} days of {}", month_text(first));
+            let part = groups(
+                &ok(
+                    &router,
+                    "ListEfficiencyMetrics",
+                    &request("Daily", &day_text(first), &day_text(first + days)),
+                )
+                .await,
+            );
+            for (part_group, month_group) in part.iter().zip(monthly.iter()) {
+                let (part_spend, _) = totals(part_group);
+                let (month_spend, _) = totals(month_group);
+                let expected = (month_spend * days) / days_in_month;
+                let slack = days / 2 + 2;
+                assert!(
+                    (part_spend - expected).abs() <= slack,
+                    "case {case:?}: expected {days} of {days_in_month} days to carry \
+                     {expected} cents of the month's {month_spend}, got {part_spend}"
+                );
+            }
+            // The same points exactly: a shorter period reports the days it
+            // covers with the figures the whole month's series gives them, so
+            // the share is a property of the day and not of the period asked
+            // for.
+            for (part_group, whole_group) in part.iter().zip(daily.iter()) {
+                let covered = usize::try_from(days).unwrap_or_default();
+                let head: Vec<Value> = series(whole_group).into_iter().take(covered).collect();
+                assert_eq!(
+                    series(part_group),
+                    head,
+                    "case {case:?}: expected the first {days} points of the month's series"
+                );
+            }
         }
     }
 }
@@ -395,7 +473,7 @@ async fn every_group_totals_the_rows_the_recommendation_readers_report() {
 
         for (dimension, member) in groupings {
             let case = format!("{mode} grouped by {dimension:?}");
-            let mut body = request("Monthly", MARCH.0, MARCH.1);
+            let mut body = last_month_request();
             if let Some(dimension) = dimension {
                 body["groupBy"] = json!(dimension);
             }
@@ -439,7 +517,7 @@ async fn every_group_totals_the_rows_the_recommendation_readers_report() {
 
     // The mode changes the figures, so the two runs above were not the same
     // answer twice.
-    let body = request("Monthly", MARCH.0, MARCH.1);
+    let body = last_month_request();
     let before = groups(&ok(&default_mode, "ListEfficiencyMetrics", &body).await);
     let after = groups(&ok(&discounted, "ListEfficiencyMetrics", &body).await);
     assert_ne!(
@@ -473,7 +551,7 @@ async fn the_ungrouped_savings_are_the_summaries_deduped_total() {
         &ok(
             &router,
             "ListEfficiencyMetrics",
-            &request("Monthly", MARCH.0, MARCH.1),
+            &last_month_request(),
         )
         .await,
     );
@@ -498,7 +576,7 @@ async fn a_group_with_no_cost_and_usage_data_reports_no_series_and_says_why() {
             &ok(
                 &not_enrolled,
                 "ListEfficiencyMetrics",
-                &request(granularity, MARCH.0, MARCH.1),
+                &interval_request(granularity),
             )
             .await,
         );
@@ -533,7 +611,7 @@ async fn a_group_with_no_cost_and_usage_data_reports_no_series_and_says_why() {
             &not_enrolled,
             "ListEfficiencyMetrics",
             &{
-                let mut body = request("Monthly", MARCH.0, MARCH.1);
+                let mut body = last_month_request();
                 body["groupBy"] = json!("Region");
                 body
             },
@@ -552,13 +630,13 @@ async fn a_group_with_no_cost_and_usage_data_reports_no_series_and_says_why() {
         &ok(
             &enrolled,
             "ListEfficiencyMetrics",
-            &request("Monthly", MARCH.0, MARCH.1),
+            &last_month_request(),
         )
         .await,
     );
     assert_eq!(
         stamps(&answered[0]),
-        vec!["2026-03".to_string()],
+        vec![last_whole_month().0],
         "case enrolled: expected the month's point, got {answered:?}"
     );
     assert!(
@@ -595,7 +673,7 @@ async fn the_groups_come_out_in_the_order_the_request_asked_for() {
     for dimension in ["group", "score", "savings", "spend", "SPEND"] {
         for (order, descending) in [("Asc", false), ("Desc", true)] {
             let case = format!("{dimension} {order}");
-            let mut body = request("Monthly", MARCH.0, MARCH.1);
+            let mut body = last_month_request();
             body["groupBy"] = json!("ResourceType");
             body["orderBy"] = json!({"dimension": dimension, "order": order});
             let answered = groups(&ok(&router, "ListEfficiencyMetrics", &body).await);
@@ -636,7 +714,7 @@ async fn the_groups_come_out_in_the_order_the_request_asked_for() {
 
     // No ordering asked for: by the dimension value, which every page resumes
     // at the same place in.
-    let mut body = request("Monthly", MARCH.0, MARCH.1);
+    let mut body = last_month_request();
     body["groupBy"] = json!("ResourceType");
     let answered = groups(&ok(&router, "ListEfficiencyMetrics", &body).await);
     let labels: Vec<Option<String>> = answered.iter().map(label).collect();
@@ -656,7 +734,8 @@ async fn the_groups_come_out_in_the_order_the_request_asked_for() {
 #[tokio::test]
 async fn the_groups_page_and_every_page_carries_the_whole_series() {
     let router = enrolled_router().await;
-    let mut body = request("Monthly", "2026-01-01", "2026-04-01");
+    let (start, end) = monthly_period(2, 2);
+    let mut body = request("Monthly", &start, &end);
     body["groupBy"] = json!("ResourceType");
 
     let whole = groups(&ok(&router, "ListEfficiencyMetrics", &body).await);
@@ -685,8 +764,8 @@ async fn the_groups_page_and_every_page_carries_the_whole_series() {
             for group in &page {
                 assert_eq!(
                     stamps(group).len(),
-                    3,
-                    "case page size {size}: expected the whole three-month series in every \
+                    2,
+                    "case page size {size}: expected the whole two-month series in every \
                      page, got {group:?}"
                 );
             }
@@ -719,7 +798,7 @@ async fn the_groups_page_and_every_page_carries_the_whole_series() {
 #[tokio::test]
 async fn a_token_this_read_did_not_issue_is_refused() {
     let router = enrolled_router().await;
-    let mut body = request("Monthly", MARCH.0, MARCH.1);
+    let mut body = last_month_request();
     body["groupBy"] = json!("ResourceType");
 
     // A token this read genuinely issued, so a case can differ from it only in
@@ -827,13 +906,13 @@ async fn a_token_this_read_did_not_issue_is_refused() {
 /// A request this operation cannot report is refused with HTTP 400
 /// `ValidationException`, whose `message` states the rule and whose `fields`
 /// names the member the rule stopped — rather than served metrics about another
-/// period, another grouping or another order.
+/// grouping or another order.
 #[tokio::test]
 async fn a_request_this_operation_cannot_report_is_refused() {
     let router = enrolled_router().await;
 
     // (case, the request, the member the refusal names)
-    let mut cases: Vec<(String, Value, &str)> = vec![
+    let cases: Vec<(String, Value, &str)> = vec![
         (
             "a groupBy naming no dimension of a recommendation".to_string(),
             json!({"groupBy": "NotADimension"}),
@@ -861,65 +940,17 @@ async fn a_request_this_operation_cannot_report_is_refused() {
             json!({"orderBy": {"dimension": "accountId", "order": "Asc"}}),
             "orderBy.dimension",
         ),
-        (
-            "a period whose start is its end".to_string(),
-            json!({"timePeriod": {"start": "2026-03-01", "end": "2026-03-01"}}),
-            "timePeriod.end",
-        ),
-        (
-            "a period that runs backwards".to_string(),
-            json!({"timePeriod": {"start": "2026-04-01", "end": "2026-03-01"}}),
-            "timePeriod.end",
-        ),
-        (
-            "a period whose months collapse to the same month".to_string(),
-            json!({"timePeriod": {"start": "2026-03", "end": "2026-03"}}),
-            "timePeriod.end",
-        ),
-        (
-            // A daily series longer than the operation reports for one group:
-            // the response pages over groups, so there is no member to resume a
-            // truncated series at.
-            "a daily period longer than the series this operation reports".to_string(),
-            json!({"timePeriod": {"start": "2020-01-01", "end": "2026-01-01"}}),
-            "timePeriod",
-        ),
     ];
-    // Every form of a date this operation cannot read, on either end of the
-    // period.
-    for (member, other) in [("start", "end"), ("end", "start")] {
-        for value in [
-            "not-a-date",
-            "2026-13-01",
-            "2026-02-30",
-            "2026",
-            "",
-            "03/01/2026",
-            "2026-03-01T00:00:00Z",
-        ] {
-            let mut period = json!({"start": "2026-03-01", "end": "2026-04-01"});
-            period[member] = json!(value);
-            period[other] = json!(if member == "start" {
-                "2026-04-01"
-            } else {
-                "2026-03-01"
-            });
-            cases.push((
-                format!("a {member} this operation cannot read: {value:?}"),
-                json!({"timePeriod": period}),
-                if member == "start" {
-                    "timePeriod.start"
-                } else {
-                    "timePeriod.end"
-                },
-            ));
-        }
-    }
+    // The period cases this suite's refusals are about are the ones that depend
+    // on no bound of the period at all; every rule about the bounds themselves —
+    // their form, the window they fall in, and their order — is asserted over
+    // its own table in `efficiency_metrics_period_refusal`.
 
     for (case, overrides, member) in &cases {
         // Each case is a well-formed request with the one member it is about
         // replaced, so nothing else can be what the refusal is answering.
-        let mut body = request("Daily", "2026-03-01", "2026-03-04");
+        let (start, end) = daily_period(5, 3);
+        let mut body = request("Daily", &start, &end);
         for (key, value) in overrides.as_object().expect("an object of overrides") {
             body[key] = value.clone();
         }
@@ -942,7 +973,8 @@ async fn a_request_this_operation_cannot_report_is_refused() {
 #[tokio::test]
 async fn reads_do_not_change_what_a_later_caller_sees() {
     let router = enrolled_router().await;
-    let mut body = request("Daily", "2026-03-01", "2026-03-05");
+    let (start, end) = daily_period(5, 4);
+    let mut body = request("Daily", &start, &end);
     body["groupBy"] = json!("Region");
 
     let catalog_before = deduped(&router).await;

@@ -428,6 +428,89 @@ fn close(actual: f64, expected: f64) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// The periods `ListEfficiencyMetrics` reports over
+// ---------------------------------------------------------------------------
+
+/// Seconds in a UTC day, for moving between an instant and the day it falls on.
+const SECONDS_PER_DAY: i64 = 86_400;
+
+/// The day the clock is on, as its number of days since the Unix epoch.
+///
+/// Every period a test asks efficiency metrics over is built from this rather
+/// than written as a fixed date, because the window that operation reports over
+/// ends at the present interval and reaches back a bounded number of them, so a
+/// fixed date leaves the window as the clock moves.
+pub(crate) fn today() -> i64 {
+    aws_smithy_types::DateTime::from(std::time::SystemTime::now())
+        .secs()
+        .div_euclid(SECONDS_PER_DAY)
+}
+
+/// A day as the `YYYY-MM-DD` text a daily bound takes.
+pub(crate) fn day_text(day: i64) -> String {
+    rendered(day)[..10].to_string()
+}
+
+/// The month a day falls in, as the `YYYY-MM` text a monthly bound takes.
+pub(crate) fn month_text(day: i64) -> String {
+    rendered(day)[..7].to_string()
+}
+
+/// One day rendered as an RFC 3339 instant in UTC, which both bound forms are a
+/// prefix of.
+fn rendered(day: i64) -> String {
+    aws_smithy_types::DateTime::from_secs(day * SECONDS_PER_DAY)
+        .fmt(aws_smithy_types::date_time::Format::DateTime)
+        .expect("a day of the calendar renders as an instant")
+}
+
+/// The first day of the month `months` months before the month `day` falls in.
+pub(crate) fn months_before(day: i64, months: u32) -> i64 {
+    let mut cursor = first_of_month(day);
+    for _ in 0..months {
+        cursor = first_of_month(cursor - 1);
+    }
+    cursor
+}
+
+/// The first day of the month `months` months after the month `day` falls in.
+pub(crate) fn months_after(day: i64, months: u32) -> i64 {
+    let mut cursor = first_of_month(day);
+    for _ in 0..months {
+        // 31 days past a month's first day always lands in the next month,
+        // whatever length the month has.
+        cursor = first_of_month(cursor + 31);
+    }
+    cursor
+}
+
+/// The first day of the month `day` falls in.
+fn first_of_month(day: i64) -> i64 {
+    let month = month_text(day);
+    let parsed = aws_smithy_types::DateTime::from_str(
+        &format!("{month}-01T00:00:00Z"),
+        aws_smithy_types::date_time::Format::DateTime,
+    )
+    .expect("a month of the calendar parses as an instant");
+    parsed.secs().div_euclid(SECONDS_PER_DAY)
+}
+
+/// A daily `timePeriod` inside the window the metrics are reported over:
+/// `days_back` days before today, running for `days` days.
+pub(crate) fn daily_period(days_back: i64, days: i64) -> (String, String) {
+    let start = today() - days_back;
+    (day_text(start), day_text(start + days))
+}
+
+/// A monthly `timePeriod` inside that window: from the month `months_back`
+/// months before this one, running for `months` months.
+pub(crate) fn monthly_period(months_back: u32, months: u32) -> (String, String) {
+    let start = months_before(today(), months_back);
+    let end = months_before(today(), months_back - months);
+    (month_text(start), month_text(end))
+}
+
+// ---------------------------------------------------------------------------
 // Enrollment
 // ---------------------------------------------------------------------------
 

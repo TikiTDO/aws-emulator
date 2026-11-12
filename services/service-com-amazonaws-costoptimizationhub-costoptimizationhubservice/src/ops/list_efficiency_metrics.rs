@@ -27,6 +27,12 @@
 //! the share of its days that fall inside the period — so the daily points of a
 //! month inside the period add up to that month's monthly point.
 //!
+//! A `timePeriod` this granularity reports no series over is refused rather than
+//! answered with a series about another period ([`period`]): each bound is
+//! written in the form the requested granularity takes its bounds in, names no
+//! interval later than the present one, comes in order, and reaches back no
+//! further than the window the granularity reports over.
+//!
 //! `score` is the efficiency score of the group: the percentage of its spend
 //! that is NOT identified as removable, so a group with nothing left to save
 //! scores 100 and a higher score is better optimization. It is a share of
@@ -240,8 +246,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // period read as dates, then cut at the requested granularity. A period
         // this operation cannot read, or cannot report as a series, is refused
         // rather than answered with a series about another period.
-        let period = period(&input.time_period)?;
-        let intervals = granularity.intervals(period)?;
+        let period = period(&input.time_period, granularity)?;
+        let intervals = granularity.intervals(period);
 
         // A `groupBy` that names no dimension these metrics can be grouped by
         // cannot be honoured, so the request is refused rather than silently
@@ -357,21 +363,28 @@ const SECONDS_PER_DAY: i64 = 86_400;
 /// next year.
 const MONTHS_PER_YEAR: u32 = 12;
 
-/// The two forms a `timePeriod` date is accepted in, which the member documents
-/// as "either YYYY-MM-DD format or YYYY-MM format": a month on its own names its
-/// first day.
-const DATE_FORMATS: &str = "YYYY-MM-DD or YYYY-MM";
+/// The forms a `timePeriod` bound is accepted in, one per granularity, as the
+/// member documents them: a date is given "in either YYYY-MM-DD format or
+/// YYYY-MM format depending on the desired granularity"
+/// (`smithy_query(query="doc", shape="ListEfficiencyMetricsInput",
+/// member="timePeriod")`), and a granularity's points are timestamped in the
+/// same form it takes its bounds in (`YYYY-MM-DD` for `Daily`, `YYYY-MM` for
+/// `Monthly`: `smithy_query(query="shape", shape="GranularityType")`). The
+/// patterns are the ones the service states in its refusal.
+const DAILY_DATE_FORMAT: &str = "yyyy-MM-dd";
+const MONTHLY_DATE_FORMAT: &str = "yyyy-MM";
 
-/// The longest series this operation reports for one group.
+/// How far back a series reaches, one per granularity: a daily series covers up
+/// to ninety days of history and a monthly one up to three months, which is the
+/// same stretch of the calendar read at each granularity's unit.
 ///
-/// A response pages over GROUPS — `maxResults` bounds them and `nextToken`
-/// resumes them — so there is no member a caller could resume a truncated series
-/// at: a period whose granularity asks for more points than this is refused
-/// instead, rather than answered with part of the series it asked for. The bound
-/// is this emulator's, chosen to match the largest page of groups the operation
-/// accepts ([`MAX_RESULTS_MAX`]), so one response carries a bounded series
-/// however many groups it carries.
-const MAX_DATA_POINTS: usize = 1000;
+/// The model states no window, so both figures are the service's own, as it
+/// states them in its refusal of a period reaching further ([`TIME_PERIOD`]
+/// names where those refusals come from). A response pages over GROUPS —
+/// `maxResults` bounds them and `nextToken` resumes them — so there is no member
+/// a caller could resume a truncated series at either way.
+const MAX_DAILY_DAYS: usize = 90;
+const MAX_MONTHLY_MONTHS: usize = 3;
 
 /// What a group whose resources have no spend over the requested period reports
 /// in place of a series: `metricsByTime` is modelled as "null when efficiency
@@ -424,10 +437,12 @@ struct Period {
 }
 
 impl Granularity {
-    /// The intervals of `period` at this granularity, in time order, or the
-    /// refusal of a period whose series would be longer than this operation
-    /// reports ([`MAX_DATA_POINTS`]).
-    fn intervals(self, period: Period) -> Result<Vec<Interval>, ListEfficiencyMetricsError> {
+    /// The intervals of `period` at this granularity, in time order.
+    ///
+    /// `period` is one this granularity reports over — [`period`] refuses a
+    /// period reaching outside that window — so the series is bounded by the
+    /// window itself: at most [`Granularity::max_intervals`] points.
+    fn intervals(self, period: Period) -> Vec<Interval> {
         let mut intervals: Vec<Interval> = Vec::new();
         // A daily series starts on the period's first day; a monthly one starts
         // at the month that day falls in, because a data point of a monthly
@@ -437,9 +452,6 @@ impl Granularity {
             Self::Monthly => month_start(period.start),
         };
         while let Some(day) = cursor.filter(|day| *day < period.end) {
-            if intervals.len() == MAX_DATA_POINTS {
-                return Err(too_many_data_points(self));
-            }
             let (next, timestamp, covered) = match self {
                 Self::Daily => (Some(day + 1), day_text(day), 1),
                 Self::Monthly => {
@@ -468,7 +480,7 @@ impl Granularity {
                 None => break,
             }
         }
-        Ok(intervals)
+        intervals
     }
 
     /// This granularity as the model names it, for a refusal that states the
@@ -478,6 +490,105 @@ impl Granularity {
             Self::Daily => GRANULARITY_DAILY,
             Self::Monthly => GRANULARITY_MONTHLY,
         }
+    }
+
+    /// The unit one data point of this granularity covers, as a refusal about
+    /// the period names it: a daily point "represent[s] a single day's worth of
+    /// efficiency data", so its unit is a day, and a monthly point "a full
+    /// month's worth", so its unit is a month
+    /// (`smithy_query(query="shape", shape="GranularityType")`).
+    fn unit(self) -> &'static str {
+        match self {
+            Self::Daily => "day",
+            Self::Monthly => "month",
+        }
+    }
+
+    /// The form a `timePeriod` bound takes at this granularity
+    /// ([`DAILY_DATE_FORMAT`], [`MONTHLY_DATE_FORMAT`]) — the member's date form
+    /// depends on the granularity asked for, so each granularity takes its
+    /// bounds in the form its data points are timestamped in.
+    fn date_format(self) -> &'static str {
+        match self {
+            Self::Daily => DAILY_DATE_FORMAT,
+            Self::Monthly => MONTHLY_DATE_FORMAT,
+        }
+    }
+
+    /// This granularity as a refusal states the aggregation it names: the
+    /// adverb the model's enum documents it by ("aggregated daily",
+    /// "aggregated monthly").
+    fn aggregation(self) -> &'static str {
+        match self {
+            Self::Daily => "daily",
+            Self::Monthly => "monthly",
+        }
+    }
+
+    /// One `timePeriod` bound read as a day of the calendar, accepting only the
+    /// form this granularity takes its bounds in: a day for `Daily`, and a
+    /// month — which names that month's first day — for `Monthly`.
+    fn parse_bound(self, value: &str) -> Option<EpochDay> {
+        match self {
+            Self::Daily => parse_day(value),
+            Self::Monthly => parse_month(value),
+        }
+    }
+
+    /// The present interval as a bound of this granularity: the day the clock is
+    /// on for a daily series, and the month it is in for a monthly one. A bound
+    /// past this one names an interval that has not elapsed.
+    fn present_bound(self) -> Option<EpochDay> {
+        let today = today()?;
+        match self {
+            Self::Daily => Some(today),
+            Self::Monthly => month_start(today),
+        }
+    }
+
+    /// The most intervals one series at this granularity covers, which is both
+    /// how far back a bound may reach and how many data points one group's
+    /// series carries ([`MAX_DAILY_DAYS`], [`MAX_MONTHLY_MONTHS`]).
+    fn max_intervals(self) -> usize {
+        match self {
+            Self::Daily => MAX_DAILY_DAYS,
+            Self::Monthly => MAX_MONTHLY_MONTHS,
+        }
+    }
+
+    /// What this granularity's intervals are called where a refusal states how
+    /// many of them a series covers: days of a daily series, months of a monthly
+    /// one.
+    fn intervals_name(self) -> &'static str {
+        match self {
+            Self::Daily => "days",
+            Self::Monthly => "months",
+        }
+    }
+
+    /// The window a series at this granularity is reported over, as the two
+    /// bounds every bound of a request has to fall between: from the present
+    /// interval ([`Granularity::present_bound`]) less the most intervals one
+    /// series covers, up to the present interval itself. A period inside this
+    /// window carries at most that many data points; one reaching outside it
+    /// asks for metrics over time this granularity reports none for.
+    ///
+    /// `None` where the clock is at an instant the calendar cannot place, in
+    /// which case the window is unknown and no period can be reported over.
+    fn reported_window(self) -> Option<(EpochDay, EpochDay)> {
+        let present = self.present_bound()?;
+        let intervals = i64::try_from(self.max_intervals()).ok()?;
+        let earliest = match self {
+            Self::Daily => present.checked_sub(intervals)?,
+            Self::Monthly => {
+                let mut month = present;
+                for _ in 0..intervals {
+                    month = previous_month(month)?;
+                }
+                month
+            }
+        };
+        Some((earliest, present))
     }
 }
 
@@ -530,6 +641,21 @@ fn next_month(day: EpochDay) -> Option<EpochDay> {
     parse_day(&format!("{year:04}-{number:02}-01"))
 }
 
+/// The first day of the month before the one `day` falls in, or `None` where
+/// the calendar has no such month.
+fn previous_month(day: EpochDay) -> Option<EpochDay> {
+    let month = month_text(day)?;
+    let (year, number) = month.split_once('-')?;
+    let year: i64 = year.parse().ok()?;
+    let number: u32 = number.parse().ok()?;
+    let (year, number) = if number <= 1 {
+        (year.checked_sub(1)?, MONTHS_PER_YEAR)
+    } else {
+        (year, number - 1)
+    };
+    parse_day(&format!("{year:04}-{number:02}-01"))
+}
+
 /// How many days the month `day` falls in has — 28, 29, 30 or 31, which is what
 /// one day of it is a share of — or `None` where the calendar cannot state it.
 fn days_in_month(day: EpochDay) -> Option<f64> {
@@ -538,24 +664,65 @@ fn days_in_month(day: EpochDay) -> Option<f64> {
     Some(days_as_f64(next - start)).filter(|days| *days > 0.0)
 }
 
-/// The requested period as days of the calendar, or the refusal of a period this
-/// operation cannot report: one whose dates it cannot read, and one whose start
-/// is not before its end — the start being inclusive and the end exclusive, such
-/// a period reaches no interval at all.
-fn period(requested: &TimePeriod) -> Result<Period, ListEfficiencyMetricsError> {
-    let start =
-        parse_date(&requested.start).ok_or_else(|| unreadable_date(START, &requested.start))?;
-    let end = parse_date(&requested.end).ok_or_else(|| unreadable_date(END, &requested.end))?;
+/// The requested period as days of the calendar, or the refusal of a period
+/// this operation cannot report metrics over: one whose bounds are not in the
+/// form the requested granularity takes them in, one whose start is not before
+/// its end — the start being inclusive and the end exclusive, such a period
+/// reaches no interval at all — and one reaching outside the window the
+/// granularity reports over, past the present interval or back before the
+/// earliest one ([`Granularity::reported_window`]).
+fn period(
+    requested: &TimePeriod,
+    granularity: Granularity,
+) -> Result<Period, ListEfficiencyMetricsError> {
+    let start = granularity
+        .parse_bound(&requested.start)
+        .ok_or_else(|| wrong_date_format(START, &requested.start, granularity))?;
+    let end = granularity
+        .parse_bound(&requested.end)
+        .ok_or_else(|| wrong_date_format(END, &requested.end, granularity))?;
+    // A window this operation cannot place on the calendar is one it cannot
+    // report a period against, so the request is answered as the server fault
+    // it is rather than with a series over a window nothing bounded.
+    let Some((earliest, present)) = granularity.reported_window() else {
+        return Err(ListEfficiencyMetricsErrorModeled::InternalServerException(
+            InternalServerException {
+                message: "the Cost Optimization Hub clock is unavailable".to_string(),
+            },
+        )
+        .into());
+    };
+    // Nothing has been spent yet over time that has not elapsed, so a bound
+    // naming an interval later than the one the clock is on is refused rather
+    // than reported as a series of nothing.
+    if start > present {
+        return Err(future_period(START, granularity));
+    }
+    if end > present {
+        return Err(future_period(END, granularity));
+    }
     if start >= end {
-        return Err(empty_period());
+        return Err(empty_period(granularity));
+    }
+    // A series covers a bounded stretch of elapsed time, so a bound reaching
+    // back before the window this granularity reports over is refused rather
+    // than answered with part of the series it asked for: the response pages
+    // over GROUPS, so there is no member a caller could resume a truncated
+    // series at.
+    if start < earliest {
+        return Err(period_too_long(granularity));
     }
     Ok(Period { start, end })
 }
 
-/// One `timePeriod` date in either form the member accepts: a day, or a month,
-/// which names that month's first day.
-fn parse_date(value: &str) -> Option<EpochDay> {
-    parse_day(value).or_else(|| parse_month(value))
+/// The day the emulator's clock is on, which is the latest interval a series can
+/// report — or `None` where the clock is at an instant the calendar cannot name,
+/// in which case the window a period is reported over is unknown and [`period`]
+/// reports no series at all.
+fn today() -> Option<EpochDay> {
+    let now = ::aws_smithy_types::DateTime::from(::std::time::SystemTime::now());
+    let day = now.secs().div_euclid(SECONDS_PER_DAY);
+    day_text(day).map(|_| day)
 }
 
 /// A `YYYY-MM-DD` date as a day of the calendar, or `None` for text that is not
@@ -796,42 +963,90 @@ fn no_order_dimension() -> ListEfficiencyMetricsError {
 /// which dimension the groups are ordered on.
 const ORDER_DIMENSION: &str = "orderBy.dimension";
 
-/// Refuse a `timePeriod` date this operation cannot read as a date.
-fn unreadable_date(member: &str, value: &str) -> ListEfficiencyMetricsError {
+/// How a refusal about the period names the member it is about: the service
+/// states it in the capitalization of the shape the member targets
+/// (`TimePeriod`), not in the wire spelling of the member itself.
+///
+/// The model fixes the class and status of every refusal below
+/// (`ValidationException`, errorKind client, httpError 400) but no wording, so
+/// each sentence is the service's own, as it states the rule in recorded
+/// `ListEfficiencyMetrics` refusals of trace
+/// `cost-optimization-hub-efficiency-metrics-workflow` (the form rule at step
+/// task#2, the present-interval rule at task#4, the window at task#6 and
+/// task#9, the order of the bounds at task#5 and task#8). Each is fixed text:
+/// no bound of the refused period, and no other per-run value, is stated in
+/// one.
+const TIME_PERIOD: &str = "TimePeriod";
+
+/// Refuse a `timePeriod` bound that is not in the form the requested
+/// granularity takes its bounds in: the member's date form "depend[s] on the
+/// desired granularity", so a bound written in the other granularity's form — or
+/// in no date form at all — is not one a series at this granularity can be
+/// reported over.
+fn wrong_date_format(
+    member: &str,
+    value: &str,
+    granularity: Granularity,
+) -> ListEfficiencyMetricsError {
+    let format = granularity.date_format();
     stated_refusal(
         format!(
-            "Invalid timePeriod specified. Cannot read {value} as a date in {DATE_FORMATS} format."
+            "Invalid {TIME_PERIOD} specified. Start and End must have format '{format}' for {} \
+             granularity.",
+            granularity.aggregation()
         ),
         member,
-        format!("{value} is not a date in {DATE_FORMATS} format"),
+        format!("{value} is not a date in '{format}' format"),
+    )
+}
+
+/// Refuse a `timePeriod` that reaches past the present: a series is reported
+/// over elapsed time, so an interval that has not happened yet has no spend to
+/// report and no saving to measure against it. `member` is the bound that names
+/// it, which is the one the caller has to move.
+fn future_period(member: &str, granularity: Granularity) -> ListEfficiencyMetricsError {
+    stated_refusal(
+        format!("Invalid {TIME_PERIOD} specified. Time period cannot be in the future."),
+        member,
+        format!(
+            "neither bound of the period may name a {} later than the present one",
+            granularity.unit()
+        ),
     )
 }
 
 /// Refuse a `timePeriod` that reaches no interval: the start is inclusive and
 /// the end exclusive, so a period whose start is not before its end covers no
 /// time for metrics to be aggregated over.
-fn empty_period() -> ListEfficiencyMetricsError {
+///
+/// The rule is stated on the END bound, in the unit the requested granularity
+/// reports its data points in ([`Granularity::unit`]) — the unit the caller has
+/// to move that bound by — and names the member as the service names it
+/// ([`TIME_PERIOD`]).
+fn empty_period(granularity: Granularity) -> ListEfficiencyMetricsError {
+    let unit = granularity.unit();
     stated_refusal(
-        "Invalid timePeriod specified. The start date must be earlier than the end date."
-            .to_string(),
+        format!("Invalid {TIME_PERIOD} specified. End {unit} must be after start {unit}."),
         END,
         "the end date must be later than the start date".to_string(),
     )
 }
 
-/// Refuse a `timePeriod` whose series at the requested granularity would be
-/// longer than this operation reports for one group ([`MAX_DATA_POINTS`]).
-fn too_many_data_points(granularity: Granularity) -> ListEfficiencyMetricsError {
-    let granularity = granularity.as_str();
+/// Refuse a `timePeriod` reaching back before the window a series at the
+/// requested granularity is reported over
+/// ([`Granularity::reported_window`], [`Granularity::max_intervals`]).
+fn period_too_long(granularity: Granularity) -> ListEfficiencyMetricsError {
+    let intervals = granularity.max_intervals();
+    let name = granularity.intervals_name();
     stated_refusal(
         format!(
-            "Invalid timePeriod specified. Cannot report more than {MAX_DATA_POINTS} \
-             {granularity} data points for this operation."
+            "Invalid {TIME_PERIOD} specified. {} granularity supports up to {intervals} {name}.",
+            granularity.as_str()
         ),
-        "timePeriod",
+        START,
         format!(
-            "the {granularity} metrics over this period would carry more than \
-             {MAX_DATA_POINTS} data points"
+            "a {} series reaches back at most {intervals} {name}",
+            granularity.aggregation()
         ),
     )
 }

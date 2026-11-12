@@ -22,7 +22,9 @@
 use serde_json::{json, Value};
 use service_com_amazonaws_costoptimizationhub_costoptimizationhubservice as cost_optimization_hub;
 
-use crate::cost_optimization_hub::{call, error_code, router, FIELD_VALIDATION_FAILED};
+use crate::cost_optimization_hub::{
+    call, error_code, monthly_period, router, FIELD_VALIDATION_FAILED,
+};
 
 /// The model's enum value sets, as the generated catalogue holds them — the same
 /// model data the constraint walk checks against, so the clause a refusal states
@@ -496,10 +498,15 @@ async fn every_request_inside_its_constraints_is_served() {
         (
             "a valid request to a time-series read".to_string(),
             "ListEfficiencyMetrics",
-            json!({
-                "granularity": "Monthly",
-                "timePeriod": {"start": "2026-01-01", "end": "2026-02-01"},
-            }),
+            {
+                // The period comes from the clock: that read reports over a
+                // window ending at the present interval.
+                let (start, end) = monthly_period(1, 1);
+                json!({
+                    "granularity": "Monthly",
+                    "timePeriod": {"start": start, "end": end},
+                })
+            },
             200,
         ),
         (

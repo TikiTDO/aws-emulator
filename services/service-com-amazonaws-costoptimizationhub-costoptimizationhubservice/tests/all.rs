@@ -19,6 +19,8 @@ mod commitment_purchase_savings;
 mod cost_optimization_hub;
 #[path = "all/efficiency_metrics.rs"]
 mod efficiency_metrics;
+#[path = "all/efficiency_metrics_period_refusal.rs"]
+mod efficiency_metrics_period_refusal;
 #[path = "all/enrollment_read_scope_gate.rs"]
 mod enrollment_read_scope_gate;
 #[path = "all/management_account_gating.rs"]
