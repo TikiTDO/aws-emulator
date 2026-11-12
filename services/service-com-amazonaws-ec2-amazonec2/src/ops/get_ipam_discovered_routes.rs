@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetIpamDiscoveredRoutes
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetIpamDiscoveredRoutes`'s real behaviour. Implement it here — this is
+//! IMPLEMENTED: reports the BGP routes one of the account's IPAM resource discoveries sees in a
+//! Region, DERIVED from [`crate::state`] — the discovery must be one this store holds, it
+//! discovers in the Regions it operates in, and the routes of a Region are the account's own
+//! BYOIP address ranges advertised from a network border group of that Region, one route per ASN
+//! announcing a range — narrowed by the request's `Filters` and answered one `MaxResults`-sized
+//! page at a time. A reporting operation: it stores nothing of its own, and the only write it
+//! makes is to materialise the state transitions the clock has ALREADY made due (an address
+//! range's `pending-provision` -> `provisioned`, a resource discovery's `create-in-progress` ->
+//! `create-complete`), which were owed at the same instant whether or not anybody called. This is
 //! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetIpamDiscoveredRoutes::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -145,18 +146,472 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetIpamDiscoveredRoutes` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetIpamDiscoveredRoutesErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetIpamDiscoveredRoutes"))
+        // `ctx` carries request metadata only, and this operation reads none of it: the Region
+        // the routes are discovered for is the one the request's own `ResourceRegion` member
+        // names, not the one its credential scope was signed for. The store is reached through
+        // the engine held on `self`.
+        let _ = ctx;
+        use crate::state::{
+            self, CompiledFilter, MatchBudget, PageTokenRule, MAX_FILTERS, MAX_FILTER_MATCH_STEPS,
+            MAX_FILTER_VALUES, MAX_FILTER_VALUE_BYTES, MAX_PAGE_SIZE,
+        };
+
+        // "The ID of the IPAM resource discovery"
+        // (`GetIpamDiscoveredRoutesRequest$IpamResourceDiscoveryId`, required): something that is
+        // not an id of that kind at all is a fact about the request, so it is refused before the
+        // account's own discoveries are looked at — the order every resource of this crate asks
+        // the two questions in.
+        state::require_well_formed_ipam_resource_discovery_id(&input.ipam_resource_discovery_id)?;
+
+        // "The Amazon Web Services Region to retrieve discovered routes for"
+        // (`GetIpamDiscoveredRoutesRequest$ResourceRegion`, required): the Region whose routes
+        // this call reports, so a value that names no Region at all names no route either.
+        if input.resource_region.is_empty() {
+            return Err(state::missing_parameter(
+                "The request must contain the parameter ResourceRegion",
+            ));
+        }
+
+        // "The token for the next page of results"
+        // (`GetIpamDiscoveredRoutesRequest$NextToken`) — anything else is refused rather than
+        // read as a position. These are the routes of ONE discovery in ONE Region, so each walk
+        // has its own position order and the token is SCOPED to the report it was minted for: a
+        // token from another discovery's or another Region's walk is refused rather than resumed
+        // inside this one.
+        let scope = report_scope(&input.ipam_resource_discovery_id, &input.resource_region);
+        let cursor = match input.next_token.as_deref() {
+            None => None,
+            Some(token) => Some(
+                state::decode_scoped_page_token(token, &scope)
+                    .ok_or_else(|| state::invalid_pagination_token_for(token))?,
+            ),
+        };
+
+        // Matching cost is filters x values x held values x discovered routes and the model
+        // bounds none of them (`Filters` is a plain `FilterList`), so the request-controlled
+        // factors are capped here, before any work proportional to them is done — and their
+        // PRODUCT is charged to one [`MatchBudget`] below, which is the bound the per-factor caps
+        // cannot give.
+        let supplied_filters = input.filters.as_ref().map_or(0, Vec::len);
+        if supplied_filters > MAX_FILTERS {
+            return Err(state::invalid_parameter_value(format!(
+                "The request carries {supplied_filters} filters, above the maximum \
+                 of {MAX_FILTERS}"
+            )));
+        }
+
+        // A filter name this operation does not resolve is refused whether or not any route would
+        // have matched it, so an unsupported filter can never read as "no results". Each filter's
+        // values are parsed into their wildcard patterns ONCE here, not once per candidate.
+        let filters: &[Filter] = input.filters.as_deref().unwrap_or_default();
+        let mut selectors: Vec<CompiledFilter> = Vec::with_capacity(filters.len());
+        for filter in filters {
+            let name = filter.name.as_deref().unwrap_or_default();
+            if !is_documented_filter(name) {
+                return Err(state::invalid_parameter_value(format!(
+                    "The filter '{name}' is invalid"
+                )));
+            }
+            let values = filter.values.as_deref().unwrap_or_default();
+            if values.len() > MAX_FILTER_VALUES {
+                return Err(state::invalid_parameter_value(format!(
+                    "The filter '{name}' carries {} values, above the maximum of \
+                     {MAX_FILTER_VALUES}",
+                    values.len()
+                )));
+            }
+            // A capped NUMBER of comparisons is not capped WORK: the matcher's cost is the
+            // product of the pattern's length and the value's, so each value's size is bounded
+            // too, before any matching runs under the lock.
+            if let Some(oversize) = values
+                .iter()
+                .find(|value| value.len() > MAX_FILTER_VALUE_BYTES)
+            {
+                return Err(state::invalid_parameter_value(format!(
+                    "A value of the filter '{name}' carries {} bytes, above the maximum of \
+                     {MAX_FILTER_VALUE_BYTES}",
+                    oversize.len()
+                )));
+            }
+            selectors.push(CompiledFilter::new(name.to_string(), values.to_vec()));
+        }
+
+        // "Checks whether you have the required permissions for the operation, without actually
+        // making the request" (`GetIpamDiscoveredRoutesRequest$DryRun`). Every caller of this
+        // emulator is permitted, so a dry run reports that outcome and reads nothing. It sits
+        // AFTER every parameter has been validated: the flag asks whether the request WOULD have
+        // succeeded, so one that would have been refused is refused with that reason instead.
+        if input.dry_run.unwrap_or(false) {
+            return Err(state::dry_run_operation());
+        }
+
+        let handle = state::require_service_state(&*self.engine)?;
+        let mut store = handle.lock();
+        // The clock-owed transitions this read is allowed to apply — the same call every other
+        // report in this crate makes: a range a provision answered as `pending-provision` is
+        // `provisioned` once its due instant has passed, and a resource discovery answered as
+        // `create-in-progress` is `create-complete` once its own has, whether or not anybody
+        // called, so applying them here changes nothing a later caller would not have seen
+        // anyway.
+        store.materialize_due_transitions();
+
+        // A discovery id the account holds no resource discovery for is an error, not an empty
+        // report: there is no discovery whose routes could be sampled.
+        let Some(discovery) = store
+            .ipam_resource_discoveries
+            .get(&input.ipam_resource_discovery_id)
+        else {
+            return Err(state::invalid_ipam_resource_discovery_id_not_found(
+                &input.ipam_resource_discovery_id,
+            ));
+        };
+        // "The operating Regions for the resource discovery"
+        // (`IpamResourceDiscovery$OperatingRegions`): a discovery discovers in the Regions it
+        // operates in, so a Region it does not operate in has no discovered route of its own —
+        // which is an empty report of that Region rather than a refusal of the request.
+        let discovers_region = discovery
+            .operating_regions
+            .iter()
+            .flatten()
+            .any(|operating| operating.region_name.as_deref() == Some(&*input.resource_region));
+
+        // "The time when the route was last sampled" (`IpamDiscoveredRoute$SampleTime`): this
+        // call samples the routes the store holds as they stand, so it is the instant that sample
+        // was taken, and every route of one sample carries it.
+        let sample_time = state::system_time_to_date_time(::std::time::SystemTime::now());
+
+        // Every announcement of the Region's routes, with every filter then holding ("If you
+        // specify multiple filters, the filters are joined with an AND" — `Filter`). Every
+        // comparison is charged to ONE budget, so the PRODUCT of sampled routes, filters, values,
+        // held values and value length is bounded however the caller combines them — which is
+        // also what bounds how long this holds the state lock.
+        let mut budget = MatchBudget::new(MAX_FILTER_MATCH_STEPS);
+        let mut selected: Vec<SelectedRoute> = Vec::new();
+        if discovers_region {
+            'routes: for (cidr, route) in &store.byoip_cidrs {
+                // Which Region a range's routes are discovered in: the range is advertised from
+                // the one network border group it was provisioned to
+                // (`ByoipCidr$NetworkBorderGroup`), and a group belongs to the Region whose name
+                // it carries ([`crate::state::byoip_network_border_group_allowed`], the one
+                // reading of that question), so a Local Zone group's routes are the parent
+                // Region's.
+                if !route
+                    .byoip_cidr
+                    .network_border_group
+                    .as_deref()
+                    .is_some_and(|group| {
+                        state::byoip_network_border_group_allowed(
+                            group,
+                            &input.resource_region,
+                            state::AddressFamily::of_cidr(cidr),
+                        )
+                    })
+                {
+                    continue;
+                }
+                for asn in route_origin_asns(route) {
+                    if budget.exhausted() {
+                        break 'routes;
+                    }
+                    let discovered = discovered_route(
+                        &input.ipam_resource_discovery_id,
+                        &input.resource_region,
+                        cidr,
+                        route,
+                        asn,
+                        sample_time,
+                    );
+                    if state::matches_every_filter(&selectors, &mut budget, &|name| {
+                        filter_values(&discovered, name)
+                    }) {
+                        selected.push(SelectedRoute {
+                            position: route_position(cidr, asn),
+                            route: discovered,
+                        });
+                    }
+                }
+            }
+        }
+        // A spent budget means the answer is INCOMPLETE, which is not something to report as a
+        // result: the request asked for more filtering than one call will do, and is told so
+        // rather than given a silently truncated page.
+        if budget.exhausted() {
+            return Err(crate::scaffolded::Scaffolded::request_limit_exceeded(
+                format!(
+                    "The request's filters would take more than {MAX_FILTER_MATCH_STEPS} \
+                     comparisons to evaluate; narrow them or page with MaxResults"
+                ),
+            ));
+        }
+
+        // Page in route-announcement order, which the cursor names a position in: one
+        // announcement is one prefix originated by one ASN, so that pair is a total order over the
+        // sample and the cursor always advances. The store is an ordered map, so its iteration
+        // order already satisfies the prefix half; sorting here establishes the invariant the
+        // cursor depends on at the point of use.
+        selected.sort_by(|left, right| left.position.cmp(&right.position));
+
+        // "The maximum number of results to return in a single call. If not specified, all
+        // available results are returned" (`GetIpamDiscoveredRoutesRequest$MaxResults`): a request
+        // naming no page size is not paged at all, which is the `None`
+        // [`state::scoped_page_from_cursor`] takes — and with it the answer carries no token,
+        // because there is no next page to ask for. The model's `range 5..1000` has already
+        // refused anything outside it, so the only value that cannot convert is one the boundary
+        // validator would have rejected.
+        let limit = input
+            .max_results
+            .and_then(|max_results| usize::try_from(max_results).ok())
+            .map(|max_results| max_results.min(MAX_PAGE_SIZE));
+
+        // The page and "the token to use to retrieve the next page of results"
+        // (`GetIpamDiscoveredRoutesResult$NextToken`) both come from the crate's one pager: a
+        // cursor naming the last announcement of the page just answered, and a token only when a
+        // further announcement follows it.
+        let (page, next_token) = state::scoped_page_from_cursor(
+            &scope,
+            &selected,
+            cursor.as_deref(),
+            limit,
+            PageTokenRule::WhenAnotherItemFollows,
+            |selected| selected.position.as_str(),
+        );
+
+        Ok(GetIpamDiscoveredRoutesOutput {
+            ipam_discovered_routes: Some(page.iter().map(|selected| selected.route.clone()).collect()),
+            next_token,
+        })
     }
 }
+
+/// One discovered route of the sample, beside the position the page cursor names it by.
+///
+/// The position is carried rather than read off the route because it spans TWO of its members —
+/// the prefix and the originating ASN — and the pager takes one `&str` per item.
+#[derive(Debug, Clone)]
+struct SelectedRoute {
+    /// This announcement's position in the sample's order ([`route_position`]).
+    position: String,
+    /// The route as the model shapes it.
+    route: IpamDiscoveredRoute,
+}
+
+/// What separates the prefix from the originating ASN in the position one announcement is paged
+/// by: a character neither an address prefix nor an ASN carries, so the two halves cannot run
+/// together and the position order is the (prefix, ASN) order it stands for.
+const ROUTE_POSITION_SEPARATOR: char = '|';
+
+/// The position of the announcement of `cidr` by `asn` in the sample's order.
+fn route_position(cidr: &str, asn: Option<&str>) -> String {
+    format!(
+        "{cidr}{ROUTE_POSITION_SEPARATOR}{asn}",
+        asn = asn.unwrap_or_default()
+    )
+}
+
+/// What separates the discovery from the Region in the scope a page token of this report is minted
+/// for: a character no resource id or Region name carries, so one report's scope cannot be read as
+/// another's.
+const REPORT_SCOPE_SEPARATOR: char = '/';
+
+/// The scope a page token of the report of `discovery_id` in `resource_region` is minted for.
+///
+/// One call reports the routes of ONE discovery in ONE Region, so a token minted while paging that
+/// report must not resume inside any other — which is what
+/// [`crate::state::decode_scoped_page_token`] checks it back against.
+fn report_scope(discovery_id: &str, resource_region: &str) -> String {
+    format!("{discovery_id}{REPORT_SCOPE_SEPARATOR}{resource_region}")
+}
+
+/// The ASNs that originate the route `route` carries, one per announcement this report has a
+/// discovered route for.
+///
+/// "The BYOIP CIDR associations with ASNs" (`ByoipCidr$AsnAssociations`) is where the account
+/// records which of its own ASNs advertises a range — "after the association succeeds, the ASN is
+/// eligible for advertisement" (`AssociateIpamByoasn`) — so each association the range still holds
+/// ([`crate::state::asn_association_is_held`]) is one announcement of it. A range holding none is
+/// still a route, announced by an ASN this emulator keeps no record of, so it has ONE announcement
+/// whose originating ASN is absent.
+///
+/// An association the store holds no `AsnAssociationState` for is not one the range holds: an ASN
+/// is eligible to advertise a range once its association REACHES a state, so an association with
+/// no state at all announces nothing.
+fn route_origin_asns(route: &crate::state::ByoipCidrRecord) -> Vec<Option<&str>> {
+    let mut asns: Vec<Option<&str>> = route
+        .byoip_cidr
+        .asn_associations
+        .iter()
+        .flatten()
+        .filter(|association| {
+            association
+                .state
+                .as_deref()
+                .is_some_and(crate::state::asn_association_is_held)
+        })
+        .filter_map(|association| association.asn.as_deref())
+        .map(Some)
+        .collect();
+    asns.sort_unstable();
+    asns.dedup();
+    if asns.is_empty() {
+        asns.push(None);
+    }
+    asns
+}
+
+/// The IPAM-discovered report of ONE announcement of `cidr` by `asn`.
+///
+/// Every member is read off the STORED range, so what this discovery reports about a range and
+/// what `DescribeByoipCidrs` reports about it cannot disagree. `sample_time` is passed in rather
+/// than read here, so every route of one sample carries the one instant that sample was taken at.
+fn discovered_route(
+    discovery_id: &str,
+    resource_region: &str,
+    cidr: &str,
+    route: &crate::state::ByoipCidrRecord,
+    asn: Option<&str>,
+    sample_time: ::aws_smithy_types::DateTime,
+) -> IpamDiscoveredRoute {
+    IpamDiscoveredRoute {
+        // "The ID of the IPAM resource discovery that discovered the route" and "the Amazon Web
+        // Services Region where the route was discovered" (`$IpamResourceDiscoveryId` /
+        // `$ResourceRegion`): the discovery this report was asked through, and the Region it was
+        // asked about — the discovery having been resolved out of the store and that Region being
+        // one it operates in.
+        ipam_resource_discovery_id: Some(discovery_id.to_string()),
+        resource_region: Some(resource_region.to_string()),
+        // "The ID of the resource owner" (`$ResourceOwnerId`): every resource this emulator holds
+        // belongs to the one account it emulates.
+        resource_owner_id: Some(::engine::emulator_account_id().to_string()),
+        // "The IP address prefix of the discovered route in CIDR notation" (`$Cidr`), as the store
+        // spells it — the canonical form every BYOIP operation keys a range by, so one range is
+        // reported one way however it was named.
+        cidr: Some(cidr.to_string()),
+        // "The Autonomous System Number (ASN) that originates the route" (`$Asn`).
+        asn: asn.map(str::to_string),
+        // "The state of the BYOIP CIDR" (`$State`, the `IpamByoipCidrState` enum): the state the
+        // stored range is in. Every `ByoipCidrState` word is a member of that enum too
+        // (`crate::ops::types::BYOIP_CIDR_STATE_VALUES` and `IPAM_BYOIP_CIDR_STATE_VALUES` are the
+        // same catalog), so the stored word is reported as it stands.
+        state: route.byoip_cidr.state.clone(),
+        advertisement_type: advertisement_type_of(route.byoip_cidr.advertisement_type.as_deref())
+            .map(str::to_string),
+        // "The network border group for the route" (`$NetworkBorderGroup`): the group the range is
+        // advertised from, which is what placed it in the Region this report is of.
+        network_border_group: route.byoip_cidr.network_border_group.clone(),
+        // "The ID of the BYOIP pool associated with the route" (`$PoolId`): the public address
+        // pool the range is in, which a range IPAM manages has left (`MoveByoipCidrToIpam` clears
+        // `ByoipCidr$PoolId`), so this is absent for exactly those ranges the store holds in no
+        // such pool.
+        pool_id: route.byoip_cidr.pool_id.clone(),
+        // "The ID of the IPAM pool associated with the route" (`$IpamPoolId`), which
+        // `MoveByoipCidrToIpam` is what writes: a range no IPAM manages is still a discovered
+        // route, and it is one no IPAM pool is associated with.
+        ipam_pool_id: route.byoip_cidr.ipam_pool_id.clone(),
+        sample_time: Some(sample_time),
+    }
+}
+
+/// The `ByoipCidr$AdvertisementType` of a range advertised from a single location: "`unicast`: IP
+/// is advertised from a single location (regional services like EC2)".
+const BYOIP_ADVERTISEMENT_TYPE_UNICAST: &str = "unicast";
+
+/// The `ByoipCidr$AdvertisementType` of a range advertised from many: "`anycast`: IP is advertised
+/// from multiple global locations simultaneously (global services like CloudFront)".
+const BYOIP_ADVERTISEMENT_TYPE_ANYCAST: &str = "anycast";
+
+/// The `IpamByoipAdvertisementType` of a route advertised from a single location: the catalog's
+/// `regional` member (the generated catalog is
+/// `crate::ops::types::IPAM_BYOIP_ADVERTISEMENT_TYPE_VALUES`).
+const ADVERTISEMENT_TYPE_REGIONAL: &str = "regional";
+
+/// The `IpamByoipAdvertisementType` of a route advertised from many (same catalog).
+const ADVERTISEMENT_TYPE_GLOBAL: &str = "global";
+
+/// How a discovered route spells the advertisement method the stored range carries.
+///
+/// The two enums name the same two methods in different words, each pair sharing the model's own
+/// sentence: `unicast` and `regional` are both "advertised from a single location (regional
+/// services … EC2)", `anycast` and `global` both "advertised from multiple global locations
+/// simultaneously (global services … CloudFront)" (`ByoipCidr$AdvertisementType` /
+/// `IpamDiscoveredRoute$AdvertisementType`). A range the store holds no method for is advertised by
+/// none this report can name, and a word that is neither is not one of the two methods either.
+fn advertisement_type_of(advertisement_type: Option<&str>) -> Option<&'static str> {
+    match advertisement_type? {
+        BYOIP_ADVERTISEMENT_TYPE_UNICAST => Some(ADVERTISEMENT_TYPE_REGIONAL),
+        BYOIP_ADVERTISEMENT_TYPE_ANYCAST => Some(ADVERTISEMENT_TYPE_GLOBAL),
+        _ => None,
+    }
+}
+
+/// The filter names this operation resolves.
+///
+/// `GetIpamDiscoveredRoutesRequest$Filters` documents no list of its own — "One or more filters to
+/// apply to the results" is all of it
+/// (`smithy_query(query="doc",shape="GetIpamDiscoveredRoutesRequest",member="Filters")`) — so the
+/// names are the ones EC2's filtering convention gives: each member of the resource the operation
+/// reports, spelled in kebab-case. This list is therefore derived mechanically from the
+/// `IpamDiscoveredRoute` shape (`smithy_query(query="shape",shape="IpamDiscoveredRoute")`), one
+/// entry per member. A discovered route carries no `Tags` member, so the `tag-key` / `tag-value` /
+/// `tag:<key>` set an EC2 describe of a TAGGABLE resource accepts has nothing to read here and is
+/// not among these. Every entry must be answered by [`filter_values`].
+const IPAM_DISCOVERED_ROUTE_FILTERS: [&str; 11] = [
+    "advertisement-type",
+    "asn",
+    "cidr",
+    "ipam-pool-id",
+    "ipam-resource-discovery-id",
+    "network-border-group",
+    "pool-id",
+    "resource-owner-id",
+    "resource-region",
+    "sample-time",
+    "state",
+];
+
+/// Is `name` a filter this operation resolves? "Filter names are case-sensitive"
+/// (`Filter$Name`), so the comparison is exact.
+fn is_documented_filter(name: &str) -> bool {
+    IPAM_DISCOVERED_ROUTE_FILTERS.contains(&name)
+}
+
+/// The values the EC2 filter `name` compares against one discovered route.
+///
+/// A filter naming an attribute this route does not carry compares against NO values, so it
+/// selects nothing — the same answer AWS gives for, say, `pool-id` on a range held in no public
+/// address pool. A timestamp is compared as the wire spells it
+/// ([`crate::state::filter_timestamp_values`]), which is how a client would send the filter value.
+fn filter_values<'a>(
+    route: &'a IpamDiscoveredRoute,
+    name: &str,
+) -> Vec<::std::borrow::Cow<'a, str>> {
+    use ::std::borrow::Cow;
+
+    let text = |value: Option<&'a str>| -> Vec<Cow<'a, str>> {
+        value.map(Cow::Borrowed).into_iter().collect()
+    };
+    match name {
+        "advertisement-type" => text(route.advertisement_type.as_deref()),
+        "asn" => text(route.asn.as_deref()),
+        "cidr" => text(route.cidr.as_deref()),
+        "ipam-pool-id" => text(route.ipam_pool_id.as_deref()),
+        "ipam-resource-discovery-id" => text(route.ipam_resource_discovery_id.as_deref()),
+        "network-border-group" => text(route.network_border_group.as_deref()),
+        "pool-id" => text(route.pool_id.as_deref()),
+        "resource-owner-id" => text(route.resource_owner_id.as_deref()),
+        "resource-region" => text(route.resource_region.as_deref()),
+        "sample-time" => crate::state::filter_timestamp_values(route.sample_time),
+        "state" => text(route.state.as_deref()),
+        // Unreachable: `is_documented_filter` has already refused every other name. An
+        // unresolvable name compares against nothing, so it could never widen a result even if
+        // that check were bypassed.
+        _ => Vec::new(),
+    }
+}
+
+// The AND/OR evaluation of the whole `Filters` member is
+// `crate::state::matches_every_filter`, the one place this crate defines it: "if you specify
+// multiple filters, the filters are joined with an AND" (`Filter`), and within one filter "if you
+// specify multiple values for a filter, the values are joined with an OR" (`Filter$Values`), each
+// value matched case-sensitively with EC2's `*`/`?` wildcards and every comparison charged to the
+// call's one `crate::state::MatchBudget`. Only the per-operation lookup differs, which is
+// `filter_values` above.

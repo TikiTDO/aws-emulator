@@ -1028,6 +1028,11 @@ mod ipam_discovered_public_addresses;
 // `MaxResults` pages it.
 #[path = "all/ipam_discovered_accounts.rs"]
 mod ipam_discovered_accounts;
+// Which BGP routes an IPAM resource discovery reports for a Region: one per announcement of the
+// account's own BYOIP address ranges advertised from a border group of that Region, what each
+// discovered route carries, how `Filters` narrow the report and how `MaxResults` pages it.
+#[path = "all/ipam_discovered_routes.rs"]
+mod ipam_discovered_routes;
 // Creating the association between an IPAM and a Regional Internet Registry.
 #[path = "all/ipam_internet_registry_association_creation.rs"]
 mod ipam_internet_registry_association_creation;
