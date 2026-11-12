@@ -268,12 +268,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
-        // `extractionMode` / `extractionConfig` steer LONG-TERM memory extraction, whose
-        // records are reached through the `*MemoryRecord*` operations — every one of them
-        // still a 501 in this crate. They change nothing an implemented operation can
-        // report (`Event` models neither member), so this slice stores the event and
-        // leaves them to the issue that implements memory records: synthesising an
+        // `extractionConfig` steers the namespace substitution LONG-TERM extraction uses,
+        // which no implemented operation reports, so this slice stores the event without
+        // it and leaves it to the issue that implements memory records: synthesising an
         // extraction nothing performed would be worse than not performing it.
+        // `extractionMode` is kept, because it decides whether this event's messages are
+        // read by long-term extraction at all, and the units of extraction work a
+        // container holds are reported by `ListMemoryExtractionJobs`.
         let seq = store.next_seq();
         // A session the caller did not name is created for it, and reported back on the
         // event so the caller can address that session afterwards.
@@ -290,6 +291,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             payload: input.payload,
             branch: input.branch,
             metadata: input.metadata,
+            extraction_mode: input.extraction_mode,
             seq,
         };
         // Built from what is about to be stored, so the response and the store cannot

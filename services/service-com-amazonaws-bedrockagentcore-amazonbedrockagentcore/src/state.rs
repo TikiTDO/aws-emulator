@@ -100,6 +100,11 @@ pub use batch_evaluations::*;
 mod browser;
 pub use browser::*;
 
+/// The long-term memory extraction plane: [`ExtractionJobUnit`], the units of extraction
+/// work a memory container holds, derived from the messages its events carry.
+mod extraction_jobs;
+pub use extraction_jobs::*;
+
 use crate::ops::types::{
     Branch, Certificate, Event, ExtractionConfig, IngestPayloadType, MemoryContent, MemoryRecord,
     MemoryRecordMetadataValue, MemoryRecordOutput, MetadataValue, PayloadType, SessionSummary,
@@ -1337,6 +1342,10 @@ impl SessionStore {
 /// long-term extraction reads.
 #[derive(Debug, Clone)]
 pub struct IngestedContent {
+    /// The id this service minted for the stored content, in the `EventId` form
+    /// [`mint_event_id`] spells: an extraction job names each message of this content by
+    /// it, which is the only identity `MessageMetadata` carries for a message.
+    pub content_id: String,
     pub memory_id: String,
     pub actor_id: String,
     pub session_id: String,
@@ -1365,6 +1374,11 @@ pub struct StoredEvent {
     pub payload: Vec<PayloadType>,
     pub branch: Option<Branch>,
     pub metadata: Option<HashMap<String, MetadataValue>>,
+    /// The `extractionMode` the creating request carried, kept as sent. `SKIP` excludes
+    /// the event from long-term memory extraction, so its messages compose no unit of
+    /// extraction work ([`EXTRACTION_MODE_SKIP`]); the member absent means the event "is
+    /// processed for extraction as usual".
+    pub extraction_mode: Option<String>,
     /// The value [`ComAmazonawsBedrockagentcoreAmazonbedrockagentcoreState::next_seq`]
     /// handed this event. It totally orders events created in the same millisecond
     /// and with the same `eventTimestamp`, so a listing is deterministic.

@@ -261,8 +261,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // and the `*MemoryRecord*` operations that report extracted records are still
         // 501 in this crate. Synthesising records nothing extracted would be worse than
         // not reporting them, so this operation stores the content and leaves those
-        // records to the issues that implement them.
+        // records to the issues that implement them. The content IS a unit of extraction
+        // work the container now holds, which `ListMemoryExtractionJobs` reports under
+        // the id minted here.
         let ingestion = crate::state::IngestedContent {
+            content_id: crate::state::mint_event_id(seq),
             memory_id: memory_id.clone(),
             actor_id: input.actor_id.clone(),
             session_id: session_id.clone(),

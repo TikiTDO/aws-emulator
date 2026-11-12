@@ -33,6 +33,8 @@ mod harness;
 mod memory_actors;
 #[path = "all/memory_events.rs"]
 mod memory_events;
+#[path = "all/memory_extraction_jobs.rs"]
+mod memory_extraction_jobs;
 #[path = "all/memory_ingestion.rs"]
 mod memory_ingestion;
 #[path = "all/memory_records.rs"]
