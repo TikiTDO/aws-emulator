@@ -45,7 +45,6 @@ mod cloudformation_condition_gated_secrets_policy;
 // Functions, Lambda, Amazon SQS and IAM at once.
 #[path = "all/cloudformation_sfn_lambda_published_handles.rs"]
 mod cloudformation_sfn_lambda_published_handles;
-// Declared here, in this same head region, for the reason the entries above record: the
 // metric-stream export pipeline a stack deploys, which only moves data if CloudFormation,
 // IAM, CloudWatch, Firehose and Amazon S3 all agree, so no single crate's test target can
 // follow a published datapoint to the object it lands in.
@@ -867,7 +866,6 @@ mod payment_cryptography_signing_name_routing;
 mod pinpoint_sms_voice_signing_name_routing;
 // Declared HERE, beside the neighbouring entry of this same quiet span, for the reason it
 // records: the appended tail at the end of this file and the HEAD of the sorted list are
-// both regions every concurrently landing router suite puts its line in.
 #[path = "all/polly_synthesis_task_side_effects.rs"]
 mod polly_synthesis_task_side_effects;
 // this file or beside the other `cloudformation_provisions_*` suites in the `c` span: both
@@ -1475,10 +1473,16 @@ mod sfn_execution_status_change_on_an_authenticating_router;
 // CloudTrail reports at once — no single service crate's test target can ask it.
 #[path = "all/codepipeline_approval_reviewer_attribution.rs"]
 mod codepipeline_approval_reviewer_attribution;
-// Declared in the appended tail, which is where every new suite inserts its lines: what a
 // RUNNING function's own DynamoDB item call is authorized against spans IAM (the role and its
 // document), STS (the session the call is signed with), Lambda (the handler and the SDK it is
 // given) and DynamoDB (the decision) at once, so no single service crate's test target can
 // ask it.
 #[path = "all/lambda_in_function_dynamodb_authorization.rs"]
 mod lambda_in_function_dynamodb_authorization;
+// Declared here, in this same head region, for the reason the entry above records: a backup
+// job's own state change, routed by content to an EventBridge rule's Lambda target whose run
+// is read in CloudWatch Logs, spans AWS Backup, EventBridge, Lambda, CloudWatch Logs and IAM
+// at once, so no single service's test target can ask it.
+#[path = "all/backup_job_state_change_invokes_its_lambda_target.rs"]
+mod backup_job_state_change_invokes_its_lambda_target;
+// Declared in the appended tail, which is where every new suite inserts its lines: how a
