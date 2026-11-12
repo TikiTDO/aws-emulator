@@ -163,7 +163,14 @@ const TEMPLATE: &str = concat!(
 
 /// The `PhysicalResourceId` the stack publishes for one of its resources — the value this
 /// type's `Ref` resolves to, and what a client addresses the resource by.
-async fn published_name(router: &MultiServiceRouter, stack: &str, logical_id: &str) -> String {
+///
+/// Shared with `rds_published_name_identity.rs`, which holds that same published value to
+/// the identity the OWNING service reports, so both suites read it the one way.
+pub(crate) async fn published_name(
+    router: &MultiServiceRouter,
+    stack: &str,
+    logical_id: &str,
+) -> String {
     let (status_code, body) = call(
         router,
         "DescribeStackResources",
@@ -196,7 +203,10 @@ fn is_an_rds_name(name: &str) -> bool {
 /// Create the stack of [`TEMPLATE`] under `stack_name`, wait past both clocks — the stack's
 /// own terminal status, and the status Amazon RDS owes a database it is bringing up — and
 /// answer its stack id, which is how a stack whose deletion COMPLETED is still readable.
-async fn deploy(
+///
+/// Shared with `rds_published_name_identity.rs`, which deploys a template of these same
+/// types through it, so neither suite spells the two clocks a database stack owes itself.
+pub(crate) async fn deploy(
     case: &str,
     router: &MultiServiceRouter,
     stack_name: &str,

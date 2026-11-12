@@ -24,7 +24,7 @@
 //! provisions a bucket by template and then writes into it observes.
 
 use crate::stack_lifecycle::{
-    create_stack, describe_stack, router, wait_for_the_transition, xml_text, xml_texts, call,
+    create_stack, describe_stack, router, wait_for_the_transition, xml_text, call,
     member, REGION,
 };
 use service_com_amazonaws_cloudformation_cloudformation::state::status;
@@ -87,19 +87,14 @@ async fn head_bucket(router: &MultiServiceRouter, bucket: &str) -> u16 {
     s3(router, "HEAD", &format!("/{bucket}"), b"").await.status
 }
 
-/// The `OutputValue` the stack reports for `key`.
+/// The `OutputValue` the stack reports for `key`, or the empty string where it reports
+/// none.
 ///
-/// Read as the pair of lists the response carries, which is sound here because every
-/// output of every template below resolves: an output with no value would shift the
-/// pairing, and the assertions on the value would fail loudly rather than silently pass.
+/// The one reader is `stack_lifecycle::output_value`, which takes the value INSIDE the
+/// `Outputs` entry carrying that key; this is its total form, for the suites whose every
+/// output resolves and which compare the value rather than its presence.
 pub(crate) fn output_value(xml: &str, key: &str) -> String {
-    let keys = xml_texts(xml, "OutputKey");
-    let values = xml_texts(xml, "OutputValue");
-    keys.iter()
-        .zip(values.iter())
-        .find(|(output_key, _)| output_key.as_str() == key)
-        .map(|(_, value)| value.clone())
-        .unwrap_or_default()
+    crate::stack_lifecycle::output_value(xml, key).unwrap_or_default()
 }
 
 /// The `PhysicalResourceId` the stack reports for the resource `logical_id`.

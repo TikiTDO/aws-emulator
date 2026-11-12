@@ -467,6 +467,21 @@ pub(crate) fn list_members(xml: &str, tag: &str) -> Vec<String> {
     members
 }
 
+/// The `OutputValue` a described stack reports under `key`, read INSIDE the `Outputs` entry
+/// that carries that `OutputKey` — so an `OutputKey` and an `OutputValue` belonging to two
+/// different outputs cannot be paired.
+///
+/// Shared so a suite reading one output does not zip two parallel lists itself
+/// ([`list_members`] is the scan it is built on). `None` where the stack reports no output
+/// under that key — which is also what an output carrying a key and no value looks like, the
+/// shape a client's `{o["OutputKey"]: o["OutputValue"]}` read raises on.
+pub(crate) fn output_value(xml: &str, key: &str) -> Option<String> {
+    list_members(xml, "Outputs")
+        .into_iter()
+        .find(|entry| xml_text(entry, "OutputKey").as_deref() == Some(key))
+        .and_then(|entry| xml_text(&entry, "OutputValue"))
+}
+
 /// `extra` plus the `Capabilities` member that acknowledges the IAM resources a template
 /// declares.
 ///
