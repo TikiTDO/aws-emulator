@@ -227,6 +227,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // ended, which is this call's for the execution it stopped and the earlier one
         // for an execution that had already ended.
         let stopped = execution.stop(input.error, now);
+        drop(store);
+        // The stop is a status the execution MOVED INTO, so the account's default event bus
+        // is owed one event reporting it: it is recorded with no store guard held, and the
+        // clock this store runs publishes it (`crate::state::durable_events`).
+        crate::state::durable_events::publish(&*self.engine, ctx.callback());
         Ok(StopDurableExecutionOutput {
             stop_timestamp: ::aws_smithy_types::DateTime::from(stopped),
         })

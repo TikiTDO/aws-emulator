@@ -226,6 +226,18 @@ impl FunctionRecord {
         }
         // And the same rule for every durable execution: one whose `ExecutionTimeout`
         // the clock has already made due has run past it, so it timed out.
+        self.materialize_durable_executions(now);
+    }
+
+    /// Bring every durable execution of this function up to whatever the clock has already
+    /// made due, and NOTHING else.
+    ///
+    /// Split out of [`FunctionRecord::materialize`] because one reader wants exactly this and
+    /// none of the rest: the status-change publication
+    /// ([`crate::state::durable_events`]) reports what the executions moved into, and it has
+    /// no business settling this function's asynchronous event queue or its provisioned
+    /// concurrency on the way past. So the loop lives in one place and both callers run it.
+    pub fn materialize_durable_executions(&mut self, now: SystemTime) {
         for execution in self.durable_executions.values_mut() {
             execution.materialize(now);
         }

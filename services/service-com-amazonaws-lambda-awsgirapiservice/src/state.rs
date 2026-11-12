@@ -183,7 +183,7 @@
 //! takes a batch out of the queue through the queue's own delivery bookkeeping and records
 //! what became of it on [`EventSourceMappingRecord::last_processing_result`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, SystemTime};
 
 use base64::Engine as _;
@@ -373,6 +373,12 @@ pub use invocation_logs::configured_log_group;
 /// and the queue that drives it in [`async_invocation`]. The record it settles stays in this
 /// module.
 pub mod durable_run;
+
+/// The EventBridge events a durable execution's status changes OWE the account's default
+/// event bus live in [`durable_events`], beside the record whose statuses they report: one
+/// event per status an execution moves into, published off the response path, with the clock
+/// that keeps publishing for the transitions nobody will ask for.
+pub mod durable_events;
 
 /// Which stored function URL a request ADDRESSES — the reading behind the data plane that
 /// serves the endpoints [`function_url()`] mints — lives in the [`function_url`] module,
@@ -3147,6 +3153,26 @@ pub struct ComAmazonawsLambdaAwsgirapiserviceState {
     /// The running sampler's task handle, kept so the sampler it replaces is aborted rather
     /// than merely forgotten.
     pub concurrency_metering: Option<::tokio::task::JoinHandle<()>>,
+    /// The durable-execution status changes waiting to be published onto the account's
+    /// default event bus, oldest first and bounded by
+    /// [`durable_events::MAX_PENDING_EVENTS`]; see [`durable_events`].
+    pub pending_durable_events: VecDeque<durable_events::StatusChange>,
+    /// The status last NOTICED for each durable execution, keyed by the ARN the execution is
+    /// addressed by, which is what makes the publication a diff: a status that differs from
+    /// the one held here is a status the execution moved into. It is written when the change
+    /// is QUEUED rather than once the bus has taken it, which is what keeps one move to one
+    /// event while the queue is being drained; a batch the bus did not take is retried from
+    /// the queue itself ([`durable_events`]). Pruned to the executions the store still holds.
+    pub noticed_durable_status: BTreeMap<String, String>,
+    /// Whether an event clock is already running over this store's durable executions; see
+    /// [`durable_events::publish`], which is the only thing that sets it.
+    pub durable_event_clock_running: bool,
+    /// Which claim on that clock is the current one, so a clock standing down because nothing
+    /// is owed releases only its OWN claim and never one a later call is holding.
+    pub durable_event_clock_generation: u64,
+    /// The running clock's task handle, kept so the clock it replaces is aborted rather than
+    /// merely forgotten.
+    pub durable_event_clock: Option<::tokio::task::JoinHandle<()>>,
 }
 
 /// One code-signing configuration.

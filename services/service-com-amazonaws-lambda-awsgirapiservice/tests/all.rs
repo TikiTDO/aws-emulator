@@ -93,6 +93,8 @@ mod durable_execution_refusals;
 mod durable_execution_run;
 #[path = "all/durable_execution_start.rs"]
 mod durable_execution_start;
+#[path = "all/durable_execution_status_events.rs"]
+mod durable_execution_status_events;
 #[path = "all/durable_execution_stop.rs"]
 mod durable_execution_stop;
 #[path = "all/dynamodb_stream_event_source_delivery.rs"]

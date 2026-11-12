@@ -750,6 +750,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 invocation
             });
             drop(store);
+            // The accepted invocation's execution is RUNNING from this instant, which is a
+            // status the account's event bus is owed
+            // (`crate::state::durable_events`): it is recorded BEFORE the delivery is
+            // handed over, so the move into `RUNNING` is published as its own event rather
+            // than being overtaken by the terminal status the run settles on. An invocation
+            // that started no execution moved no status, so it owes the bus nothing.
+            if started.execution_name.is_some() {
+                crate::state::durable_events::publish(&*self.engine, ctx.callback());
+            }
             // The de-duplicated repeat is the SAME invocation answered again rather than a
             // second one, so it is not counted a second time either.
             if let Some(invocation) = delivered {
@@ -974,6 +983,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // unhandled error is still HTTP 200" — the error document and the `FunctionError`
         // signal for an exception it raised. "The status code in the API response doesn't
         // reflect function errors."
+        //
+        // The execution this invocation registered is RUNNING from the instant it was
+        // registered, so that status is recorded before the run begins: the account's event
+        // bus is owed one event per status the execution MOVES INTO
+        // (`crate::state::durable_events`), and a run that settles the execution in this
+        // same call would otherwise leave the move into `RUNNING` unreported.
+        if started_durable.execution_name.is_some() {
+            crate::state::durable_events::publish(&*self.engine, ctx.callback());
+        }
         let invoked = crate::state::run_invocation(invocation).await;
         // The run was the durable execution's own, so the execution ends in the status this
         // invocation came to: a caller polling the handle it was answered sees a terminal
@@ -985,6 +1003,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 name,
                 &crate::state::durable_run::run_outcome(&invoked),
             );
+            // Both statuses the execution moved into during this call — `RUNNING` and the
+            // one its run settled on — are recorded here, and the clock this store runs
+            // publishes each as its own event off this response path.
+            crate::state::durable_events::publish(&*self.engine, ctx.callback());
         }
         let invoked = invoked.map_err(unrunnable)?;
         Ok(InvokeOutput {

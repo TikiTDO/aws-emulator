@@ -107,6 +107,10 @@ aws-sdk-kms = { version = "1", default-features = false }
 # namespace, so a service's own metrics never travel over that API; this writes the very
 # store `ListMetrics`/`GetMetricStatistics` read.
 service-com-amazonaws-cloudwatch-graniteserviceversion20100801 = { workspace = true }
+# The EventBridge client a durable execution's status changes are published through
+# (`state::durable_events`), over the same in-process callback: the shared construction of
+# that hop is `service_common::eventbridge_client`, and this is the entry type it builds.
+aws-sdk-eventbridge = { version = "1", default-features = false }
 
 # ---------------------------------------------------------------------------
 # The EXECUTION substrate: what runs a function's own deployment package.

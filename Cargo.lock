@@ -14527,6 +14527,7 @@ dependencies = [
  "aws-emulator-smithy-schema-server",
  "aws-emulator-smithy-server-runtime",
  "aws-sdk-dynamodbstreams",
+ "aws-sdk-eventbridge",
  "aws-sdk-kinesis",
  "aws-sdk-kms",
  "aws-sdk-lambda",
