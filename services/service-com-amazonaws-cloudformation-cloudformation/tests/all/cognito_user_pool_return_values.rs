@@ -27,7 +27,9 @@
 //! * the SPELLING the output reaches the attribute through — the long-form `Fn::GetAtt`,
 //!   the YAML short form and a `Fn::Sub` variable — crossed with both template languages;
 //! * the pool's IDENTITY — a pool the template NAMES and one it leaves CloudFormation to
-//!   name, whose identity is therefore generated;
+//!   name: either way the identity the attributes are read off is the id Amazon Cognito
+//!   MINTED for the pool its create made, since the name is only what that create was made
+//!   under;
 //! * the REGION the stack is created in, which both the ARN and the pool's endpoint host
 //!   carry.
 //!
@@ -288,24 +290,19 @@ async fn every_published_user_pool_attribute_resolves_in_a_stacks_outputs() {
                     case.case
                 )
             });
-        match case.declared_name {
-            // "Ref returns the user pool ID", which for a pool the template NAMES is the
-            // identity that name gives it.
-            Some(declared) => assert_eq!(
-                pool, declared,
-                "case {:?}: expected the declared pool to carry the identity its name \
-                 gives it, got {pool:?}",
-                case.case
-            ),
-            // A pool the template does not name is named by CloudFormation:
-            // `<stack name>-<logical id>-<unique id>`.
-            None => assert!(
-                pool.starts_with(&format!("{}-{LOGICAL_ID}-", case.stack_name)),
-                "case {:?}: expected a generated identity built from the stack name and \
-                 the logical id, got {pool:?}",
-                case.case
-            ),
-        }
+        // "Ref returns the user pool ID", which is the id Amazon Cognito MINTED for the pool
+        // its create made — `UserPoolIdType`, `^[\w-]+_[0-9a-zA-Z]+$`, built from the Region
+        // the pool lives in — whether or not the template named the pool: the name the
+        // declaration states, or the one CloudFormation generated for it, is only what the
+        // create was made under.
+        assert!(
+            pool.starts_with(&format!("{}_", case.region))
+                && pool.rsplit('_').next().is_some_and(|minted| {
+                    !minted.is_empty() && minted.chars().all(|c| c.is_ascii_alphanumeric())
+                }),
+            "case {:?}: expected the id Amazon Cognito minted for the pool, got {pool:?}",
+            case.case
+        );
 
         for attribute in attributes {
             let wanted = expected(attribute, case.region, &pool);
@@ -350,6 +347,7 @@ async fn an_attribute_the_type_does_not_publish_resolves_to_nothing() {
             }
         },
         "Outputs": {
+            REF_KEY: { "Value": { "Ref": LOGICAL_ID } },
             "Published": { "Value": { "Fn::GetAtt": [LOGICAL_ID, "ProviderName"] } },
             "NearMiss": {
                 "Value": { "Fn::GetAtt": [LOGICAL_ID, UNPUBLISHED_ATTRIBUTE] }
@@ -360,17 +358,20 @@ async fn an_attribute_the_type_does_not_publish_resolves_to_nothing() {
 
     let response = deploy(&case, &body).await;
     let outputs = wire_outputs(&response);
+    // The pool's own identity, as the same response reports it: the id Amazon Cognito minted,
+    // which is what every published attribute of the pool is read off.
+    let pool = output_for(&outputs, REF_KEY)
+        .and_then(|output| output.value.clone())
+        .unwrap_or_else(|| {
+            panic!(
+                "case {:?}: expected the stack to publish Ref of the pool, got {outputs:?}",
+                case.case
+            )
+        });
     let published = output_for(&outputs, "Published").and_then(|output| output.value.clone());
     assert_eq!(
         published.as_deref(),
-        Some(
-            expected(
-                "ProviderName",
-                case.region,
-                case.declared_name.unwrap_or_default()
-            )
-            .as_str()
-        ),
+        Some(expected("ProviderName", case.region, &pool).as_str()),
         "case {:?}: expected the published attribute to resolve, got {published:?}",
         case.case
     );

@@ -30,12 +30,14 @@
 //! Most of these types have no provisioner, so each is declared-only
 //! (`unprovisioned_resources.rs` pins that: nothing is called in the owning service and the
 //! stack completes). The ones that DO are created through the owning service's own API, which
-//! this crate's harness mounts beside CloudFormation: `AWS::Cognito::UserPoolGroup`, which
-//! cannot be created from a declaration that states none of its properties, because the pool
-//! a group belongs to is one of them — such a row's stack FAILS, naming the property the type
-//! requires — and `AWS::Cognito::IdentityPool`, whose create needs no property of the
-//! declaration and whose identity that service ASSIGNS, so its row carries the `REGION:GUID`
-//! pool id rather than a name CloudFormation computed. What this suite asserts either way is
+//! this crate's harness mounts beside CloudFormation. Four of them cannot be created from a
+//! declaration that states none of their properties, because the pool the resource belongs to
+//! is one of them — `AWS::Cognito::UserPoolGroup`, `AWS::Cognito::UserPoolClient`,
+//! `AWS::Cognito::UserPoolIdentityProvider` and `AWS::Cognito::UserPoolResourceServer`, whose
+//! rows' stacks FAIL naming the property the type requires — while `AWS::Cognito::IdentityPool` and `AWS::Cognito::UserPool` need no
+//! property of the declaration and have their identity ASSIGNED by that service, so their rows
+//! carry the `REGION:GUID` identity pool id and the `<region>_<id>` user pool id rather than a
+//! name CloudFormation computed. What this suite asserts either way is
 //! only what the rule is about — that a template may DECLARE the type at all, and that the
 //! declared resource is recorded under the type it declared.
 
@@ -106,15 +108,31 @@ const PUBLISHED: &[&str] = &[
 ///
 /// A group is identified by the pair `(UserPoolId, GroupName)`, so a declaration naming no
 /// pool describes no group `CreateGroup` could make: the provisioner refuses it, naming
-/// that property, rather than sending a request the owning service would reject. A role
-/// attachment is in the same position: it configures ONE identity pool, which its
-/// `IdentityPoolId` names.
+/// that property, rather than sending a request the owning service would reject. An app
+/// client, an identity provider and a resource server are in the same position — each belongs
+/// to ONE user pool, which `CreateUserPoolClient`, `CreateIdentityProvider` and
+/// `CreateResourceServer` all require — and a role attachment too: it configures ONE identity
+/// pool, which its `IdentityPoolId` names.
 const REQUIRES_A_PROPERTY: &[(&str, &str)] = &[
     ("AWS::Cognito::UserPoolGroup", "UserPoolId"),
+    ("AWS::Cognito::UserPoolClient", "UserPoolId"),
+    ("AWS::Cognito::UserPoolIdentityProvider", "UserPoolId"),
+    ("AWS::Cognito::UserPoolResourceServer", "UserPoolId"),
     (
         "AWS::Cognito::IdentityPoolRoleAttachment",
         "IdentityPoolId",
     ),
+];
+
+/// The character the owning service's own identifier form separates its parts with, per type
+/// whose identity that service ASSIGNS: `IdentityPoolId` is `^[\w-]+:[0-9a-f-]+$` (the
+/// `REGION:GUID` form) and `UserPoolIdType` is `^[\w-]+_[0-9a-zA-Z]+$` (the `<region>_<id>`
+/// form), both from those services' own Smithy models. A row reads it to check the
+/// identifier the stack reports is one of that form rather than a name CloudFormation could
+/// have computed.
+const ASSIGNED_IDENTIFIER_SEPARATOR: &[(&str, char)] = &[
+    ("AWS::Cognito::IdentityPool", ':'),
+    ("AWS::Cognito::UserPool", '_'),
 ];
 
 /// The property a property-free declaration of `resource_type` cannot be created without,
@@ -274,11 +292,24 @@ async fn every_published_cognito_type_may_be_declared_and_is_recorded() {
         // The physical id a declared-only resource carries is the one CloudFormation's
         // naming rules computed. A type this emulator really PROVISIONS and whose identity
         // its owning service ASSIGNS carries that service's own identifier instead — for an
-        // identity pool the `REGION:GUID` id `CreateIdentityPool` minted, which is what
-        // `Ref` returns for the type.
+        // identity pool the `REGION:GUID` id `CreateIdentityPool` minted and for a user pool
+        // the `<region>_<id>` `CreateUserPool` minted, which is what `Ref` returns for each
+        // type ([`ASSIGNED_IDENTIFIER_SEPARATOR`] carries the form).
         if identity_is_service_assigned(resource_type) {
+            let separator = ASSIGNED_IDENTIFIER_SEPARATOR
+                .iter()
+                .find(|(declared, _)| declared == resource_type)
+                .map(|(_, separator)| *separator)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "case {resource_type:?}: this suite must state the identifier form \
+                         the owning service assigns"
+                    )
+                });
             assert!(
-                !physical_id.contains(&stack_name) && physical_id.contains(':'),
+                !physical_id.contains(&stack_name)
+                    && !physical_id.contains("Subject")
+                    && physical_id.contains(separator),
                 "case {resource_type:?}: expected the identifier the owning service assigned, \
                  got {physical_id:?}"
             );

@@ -67,6 +67,13 @@ impl Owner {
             Self::CognitoIdentityPool(kind) => {
                 cognito_identity_pool::create(ctx, region, kind, resource, propagated).await
             }
+            // A POOL is taggable: its `UserPoolTags` property is the tag map `CreateUserPool`
+            // takes, so it carries the tags CloudFormation gives the resource beside its own.
+            // Neither an app client nor an identity provider is: every tagging call of that
+            // service addresses a pool, so there is no call that could carry a tag to one.
+            Self::CognitoUserPool(kind) => {
+                cognito_user_pool::create(ctx, region, kind, resource, propagated).await
+            }
             // A rotation schedule carries no tags of its own: it is not a resource of the
             // owning service, but the rotation CONFIGURATION of the secret it names, so
             // CloudFormation propagates none to it.
@@ -190,6 +197,9 @@ impl Owner {
             // A pool exists, and its role configuration is in force, from the moment the
             // owning service's own call answers.
             Self::CognitoIdentityPool(_) => Ok(cognito_identity_pool::ready()),
+            // A user pool, an app client and an identity provider each exist from the moment
+            // their own create answers.
+            Self::CognitoUserPool(_) => Ok(cognito_user_pool::ready()),
             // `CreateStack` answers as soon as the stack's creation has STARTED, so the
             // parent's resource is held open until CloudFormation reports the child settled.
             Self::NestedStack => {
@@ -281,6 +291,11 @@ impl Owner {
             // publishes no attribute this emulator computes, so there is nothing left to
             // read once either resource is up.
             Self::CognitoIdentityPool(_) => Ok(BTreeMap::new()),
+            // A pool's ARN and issuer are read off the id its own create answered, a client's
+            // name and secret are what that create answered, and an identity provider
+            // publishes no attribute at all — so there is nothing left to read once any of
+            // these resources is up.
+            Self::CognitoUserPool(_) => Ok(BTreeMap::new()),
             // A nested stack's own id is what its create answered with, and the attributes it
             // publishes are its CHILD's outputs — "Fn::GetAtt … Outputs.<NestedStackOutputName>"
             // — which the child publishes only once it has finished coming up, so they are
@@ -382,6 +397,9 @@ impl Owner {
             // `DeleteIdentityPool` takes the pool away as it answers, and the call that
             // clears a pool's roles leaves nothing behind either.
             Self::CognitoIdentityPool(_) => Ok(Removal::Gone),
+            // `DeleteUserPool`, `DeleteUserPoolClient` and `DeleteIdentityProvider` each take
+            // the resource away as they answer.
+            Self::CognitoUserPool(_) => Ok(Removal::Gone),
             // `DeleteStack` starts the child's deletion, so the parent's resource is held
             // open until CloudFormation no longer holds the stack.
             Self::NestedStack => {
@@ -487,6 +505,10 @@ impl Owner {
             Self::CognitoIdentityPool(kind) => {
                 cognito_identity_pool::update(ctx, region, kind, resource, declared).await
             }
+            Self::CognitoUserPool(kind) => {
+                cognito_user_pool::update(ctx, region, kind, resource, declared, propagated)
+                    .await
+            }
             // A nested stack is CHANGED by CloudFormation's own `UpdateStack`, under the id
             // the create minted, so the child keeps its identity and its resources. Boxed for
             // the reason [`Self::create`]'s arm records.
@@ -582,6 +604,10 @@ impl Owner {
             // A pool's tags are replaced by its own update call, which carries the
             // declaration's whole configuration, so nothing is asked about them here.
             Self::CognitoIdentityPool(_) => Ok(()),
+            // A user pool's tags are replaced by its own update call, which carries the
+            // declaration's whole tag map, and neither an app client nor an identity provider
+            // is taggable — so nothing is asked about any of them here.
+            Self::CognitoUserPool(_) => Ok(()),
             // A nested stack's own tags are the ones its `UpdateStack` carries, over the
             // template it already has: the set it must end up with is reconciled here, since
             // a deployment can state the stack's tags differently with no declaration
@@ -680,6 +706,13 @@ impl Owner {
             // with no snapshot invented for it.
             Self::CognitoIdentityPool(kind) => {
                 cognito_identity_pool::delete(ctx, region, kind, resource).await
+            }
+            // Amazon Cognito user pools takes no snapshot of a pool, an app client or an
+            // identity provider on the way out: there is no such call, so a `Snapshot`
+            // deletion policy on one of them deletes the resource with no snapshot invented
+            // for it.
+            Self::CognitoUserPool(kind) => {
+                cognito_user_pool::delete(ctx, region, kind, resource).await
             }
             // CloudFormation takes no snapshot of a stack on the way out: there is no such
             // call, so a `Snapshot` deletion policy on this type deletes the nested stack —
@@ -793,6 +826,9 @@ impl Owner {
             Self::CognitoIdentityPool(kind) => {
                 cognito_identity_pool::actual_configuration(ctx, region, kind, resource).await
             }
+            Self::CognitoUserPool(kind) => {
+                cognito_user_pool::actual_configuration(ctx, region, kind, resource).await
+            }
             // A nested stack's own configuration is its TEMPLATE, and the drift of a nested
             // stack is detected by running a detection against that stack itself ("perform
             // DetectStackDrift directly on the nested stack"), so this arm reads nothing
@@ -849,8 +885,8 @@ impl Owner {
             Self::LogsResource(_) | Self::IotAuthorizer => message.to_string(),
             // Amazon EC2's does the same.
             Self::Ec2VpcNetwork(_) | Self::Ec2Instance => message.to_string(),
-            // Amazon Cognito Identity's does the same.
-            Self::CognitoIdentityPool(_) => message.to_string(),
+            // Amazon Cognito Identity's and Amazon Cognito user pools' do the same.
+            Self::CognitoIdentityPool(_) | Self::CognitoUserPool(_) => message.to_string(),
             // The nested-stack provider reports what CloudFormation answered as it came: the
             // child's own refusal, which is the account of why the stack was not created.
             Self::NestedStack => message.to_string(),

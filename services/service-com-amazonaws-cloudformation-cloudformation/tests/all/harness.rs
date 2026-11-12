@@ -96,6 +96,15 @@ pub fn router_with_engine() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>)
             Arc::clone(&engine),
         ),
     );
+    // Amazon Cognito user pools, for the `AWS::Cognito::UserPool`, the
+    // `AWS::Cognito::UserPoolClient` and the `AWS::Cognito::UserPoolIdentityProvider` a stack
+    // really creates there, so a suite that deploys one reads the pool, its app client and
+    // its identity provider back through that service's own wire, by the ids the stack
+    // publishes.
+    router.register_service(
+        service_com_amazonaws_cognitoidentityprovider_awscognitoidentityproviderservice::
+            EmulatedService::new(Arc::clone(&engine)),
+    );
     // AWS Step Functions, for the `AWS::StepFunctions::StateMachine` a stack really creates
     // there — including the one an `AWS::Serverless::StateMachine` becomes — so a suite that
     // deploys one reads the machine back through that service's own wire.

@@ -10324,6 +10324,7 @@ dependencies = [
  "service-com-amazonaws-cloudwatchlogs-logs-20140328",
  "service-com-amazonaws-codepipeline-codepipeline-20150709",
  "service-com-amazonaws-cognitoidentity-awscognitoidentityservice",
+ "service-com-amazonaws-cognitoidentityprovider-awscognitoidentityproviderservice",
  "service-com-amazonaws-dynamodb-dynamodb-20120810",
  "service-com-amazonaws-ec2-amazonec2",
  "service-com-amazonaws-ecr-amazonec2containerregistry-v20150921",

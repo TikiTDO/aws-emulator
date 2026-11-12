@@ -193,18 +193,24 @@ pub(super) fn return_values(
                 None => (name.to_string(), attributes),
             }
         }
+        // "Ref returns the user pool ID"; Fn::GetAtt: Arn, ProviderName, ProviderURL. Each of
+        // the three is read off the IDENTITY in force ([`user_pool_attributes`]): the name
+        // computed here until the pool's own create has answered, and the id Amazon Cognito
+        // minted from then on ([`crate::state::provisioning::cognito_user_pool`] re-points
+        // them, exactly as the physical id itself is re-pointed).
         COGNITO_USER_POOL => {
-            let host = format!("{COGNITO_IDP_ARN_NAMESPACE}.{region}.{URL_SUFFIX}");
+            attributes.extend(user_pool_attributes(region, name));
+            (name.to_string(), attributes)
+        }
+        // "Ref returns the client ID"; Fn::GetAtt: ClientSecret — the secret Amazon Cognito
+        // generated for the client, which only `CreateUserPoolClient`'s own answer carries,
+        // so what is computed here is the stand-in a declaration is resolved against until
+        // that create has answered ([`service_assigned_document`]).
+        COGNITO_USER_POOL_CLIENT => {
             attributes.insert(
-                "Arn".to_string(),
-                ::emulator_server::emulator_arn(
-                    COGNITO_IDP_ARN_NAMESPACE,
-                    region,
-                    &format!("userpool/{name}"),
-                ),
+                "ClientSecret".to_string(),
+                service_assigned_document(name, "ClientSecret"),
             );
-            attributes.insert("ProviderName".to_string(), format!("{host}/{name}"));
-            attributes.insert("ProviderURL".to_string(), format!("https://{host}/{name}"));
             (name.to_string(), attributes)
         }
         // "Ref returns the bucket name"; Fn::GetAtt: Arn, DomainName,
@@ -1975,6 +1981,7 @@ pub fn published_attribute_names(resource_type: &str) -> &'static [&'static str]
         CODEARTIFACT_DOMAIN => &["Arn", "Name", "Owner"],
         CODEARTIFACT_REPOSITORY => &["Arn", "DomainOwner", "Name"],
         COGNITO_USER_POOL => &["Arn", "ProviderName", "ProviderURL"],
+        COGNITO_USER_POOL_CLIENT => &["ClientSecret"],
         FIS_EXPERIMENT_TEMPLATE => &["Id"],
         CLOUDFRONT_DISTRIBUTION => &["DomainName", "Id"],
         CLOUDFRONT_ORIGIN_ACCESS_CONTROL => &["Id"],
@@ -2349,6 +2356,19 @@ pub fn identity_is_service_assigned(resource_type: &str) -> bool {
         // in force is the one that service answered. The pool's own NAME is its `Name`
         // attribute, which the create reports.
         || resource_type == COGNITO_IDENTITY_POOL
+        // An Amazon Cognito USER POOL and an app client of one are two more:
+        // `CreateUserPool` takes only the pool's `PoolName` and answers the `Id` it minted
+        // (`UserPoolIdType`, `@pattern ^[\w-]+_[0-9a-zA-Z]+$` — the `<region>_<id>` form),
+        // and `CreateUserPoolClient` takes the client's `ClientName` and answers the
+        // `ClientId` it assigned (`ClientIdType`, `@pattern ^[\w+]+$`). Each type's `Ref`
+        // returns that identifier, and it is the handle every cognito-idp operation on the
+        // resource takes (`DescribeUserPool$UserPoolId`,
+        // `DescribeUserPoolClient$ClientId`, `AdminCreateUser$UserPoolId`) — a pattern no
+        // name CloudFormation decides satisfies — so the identifier in force is the one that
+        // service answered, and the name is only what the create was made under
+        // ([`crate::state::provisioning::cognito_user_pool`]).
+        || resource_type == COGNITO_USER_POOL
+        || resource_type == COGNITO_USER_POOL_CLIENT
         // The four AWS AppConfig types are four more, for the reason their own constants
         // record ([`APPCONFIG_APPLICATION`] and its siblings): every one of those creates
         // takes the resource's NAME and no identifier, and answers the `Id` AppConfig minted
@@ -2879,12 +2899,59 @@ pub const COGNITO_IDENTITY_POOL_ROLE_ATTACHMENT: &str =
 /// identity and stays a declared PROPERTY, which is what the provisioner's calls carry.
 pub const COGNITO_USER_POOL_GROUP: &str = "AWS::Cognito::UserPoolGroup";
 
+/// The three attributes `AWS::Cognito::UserPool` publishes, read off the IDENTITY in force:
+/// the pool's ARN, and the issuer a pool's tokens name it by, as a name
+/// (`cognito-idp.<region>.amazonaws.com/<id>`) and as the URL of that name.
+///
+/// The ONE place that formula is written, because the identity it is read off changes: the
+/// name CloudFormation computed stands in until `CreateUserPool` has answered, and the id
+/// Amazon Cognito minted is the identity from then on — so the provisioner recomputes the
+/// three from that id ([`crate::state::provisioning::cognito_user_pool`]) rather than keeping
+/// values built on a name that identifies no pool.
+pub fn user_pool_attributes(region: &str, identity: &str) -> Vec<(String, String)> {
+    let host = format!("{COGNITO_IDP_ARN_NAMESPACE}.{region}.{URL_SUFFIX}");
+    vec![
+        (
+            "Arn".to_string(),
+            ::emulator_server::emulator_arn(
+                COGNITO_IDP_ARN_NAMESPACE,
+                region,
+                &format!("userpool/{identity}"),
+            ),
+        ),
+        ("ProviderName".to_string(), format!("{host}/{identity}")),
+        (
+            "ProviderURL".to_string(),
+            format!("https://{host}/{identity}"),
+        ),
+    ]
+}
+
 /// The type of an Amazon Cognito user pool (the cognito-idp model's
 /// `awsService.cloudFormationName: Cognito`), whose published return values
 /// [`return_values`] carries: a pool is how a federated identity pool, an app client and an
 /// OpenID relying party all name the same user pool, and each of them names it through one
 /// of those values.
 pub const COGNITO_USER_POOL: &str = "AWS::Cognito::UserPool";
+
+/// The type of an APP CLIENT of a user pool, whose published return values
+/// [`return_values`] carries: the client id its `Ref` returns is what every sign-in and
+/// every `DescribeUserPoolClient` names the client by, and the secret its `ClientSecret`
+/// publishes is what a confidential client signs its token requests with.
+pub const COGNITO_USER_POOL_CLIENT: &str = "AWS::Cognito::UserPoolClient";
+
+/// The type of a third-party IDENTITY PROVIDER of a user pool. Its identity is the
+/// `ProviderName` its declaration states — the name that service addresses a provider by,
+/// beside the pool that holds it — which is what [`declared_name_property`] names the
+/// property it is stated in.
+pub const COGNITO_USER_POOL_IDENTITY_PROVIDER: &str = "AWS::Cognito::UserPoolIdentityProvider";
+
+/// The type of a RESOURCE SERVER of a user pool: the API whose custom scopes an app client of
+/// the pool may be permitted. Its identity is the `Identifier` its declaration states — the
+/// value every call on one addresses it by beside its pool, and the one a scope is spelled
+/// `<identifier>/<scope>` with — which is what [`declared_name_property`] names the property
+/// it is stated in.
+pub const COGNITO_USER_POOL_RESOURCE_SERVER: &str = "AWS::Cognito::UserPoolResourceServer";
 
 /// Amazon Cognito user pools' ARN namespace and endpoint prefix, which its own model
 /// carries as `awsService.arnNamespace` and `endpointPrefix` (`cognito-idp`) — the service

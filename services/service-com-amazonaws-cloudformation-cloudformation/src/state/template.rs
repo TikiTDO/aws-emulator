@@ -2684,6 +2684,25 @@ pub fn replacement_properties(resource_type: &str) -> &'static [&'static str] {
         // node an association was created for cannot be changed on it, so a declaration
         // naming another node asks for a different association.
         SSM_ASSOCIATION => &["InstanceId"],
+        // An Amazon Cognito user pool's sign-in aliases and its username attributes and their
+        // case sensitivity are fixed when the pool is made: each is a member of
+        // `CreateUserPool` and of no member of `UpdateUserPool`, so a declaration restating
+        // one asks for a different pool. (Its `Schema` is NOT one of them: the schema is
+        // append-only on the pool that exists, and `AddCustomAttributes` is the call that adds
+        // to it — `crate::state::provisioning::cognito_user_pool`.) An app client's secret
+        // generation is the same case against `UpdateUserPoolClient`, and an identity
+        // provider's type against `UpdateIdentityProvider`.
+        //
+        // The POOL each of those three belongs to is not among them, even though no update
+        // call moves a resource between pools: a declaration naming another pool is reported
+        // as a change that was NOT APPLIED, by the arm that would have made the call
+        // (`cognito_user_pool`'s own `create_only_properties`), which is the same reading an
+        // identity-pool role attachment moved to another pool gets. A resource server's
+        // identifier and an identity provider's name are those resources' identities, which
+        // `name_is_create_only` already covers.
+        COGNITO_USER_POOL => &["AliasAttributes", "UsernameAttributes", "UsernameConfiguration"],
+        COGNITO_USER_POOL_CLIENT => &["GenerateSecret"],
+        COGNITO_USER_POOL_IDENTITY_PROVIDER => &["ProviderType"],
         // A rotation schedule IS the rotation configured on the secret its `SecretId` names:
         // `RotateSecret` takes that secret's id and there is no call that moves a rotation to
         // another secret, so a declaration naming another secret asks for a different

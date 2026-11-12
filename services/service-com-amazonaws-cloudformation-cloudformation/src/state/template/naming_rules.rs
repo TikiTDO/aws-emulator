@@ -239,6 +239,21 @@ pub(super) fn naming_rules(resource_type: &str) -> Option<NameRules> {
         // (cognito-idp's own Smithy model), which a generated name is already inside —
         // letters, digits and the hyphen are all admitted — but may be longer than.
         COGNITO_USER_POOL_GROUP => rules(128, Characters::AsGenerated),
+        // Amazon Cognito `CreateUserPool.PoolName`: `UserPoolNameType`,
+        // `@length(min: 1, max: 128)` with pattern `^[\w\s+=,.@-]+$` (cognito-idp's own
+        // Smithy model), which a generated name is already inside — letters, digits and the
+        // hyphen are all admitted — but may be longer than.
+        COGNITO_USER_POOL => rules(128, Characters::AsGenerated),
+        // The same service's `CreateIdentityProvider.ProviderName`: `ProviderNameTypeV2`,
+        // `@length(min: 1, max: 32)` (that same model) — the tightest of the three, and one a
+        // generated name would otherwise break.
+        COGNITO_USER_POOL_IDENTITY_PROVIDER => rules(32, Characters::AsGenerated),
+        // The same service's `CreateResourceServer.Identifier`:
+        // `ResourceServerIdentifierType`, `@length(min: 1, max: 256)` with pattern
+        // `^[\x21\x23-\x5B\x5D-\x7E]+$` (that same model), which a generated name is already
+        // inside — every character one is built from is printable and is neither a quotation
+        // mark nor a backslash — but may be longer than.
+        COGNITO_USER_POOL_RESOURCE_SERVER => rules(256, Characters::AsGenerated),
         // Elastic Beanstalk `CreateApplication.ApplicationName` (`ApplicationName`) and
         // `CreateApplicationVersion.VersionLabel` (`VersionLabel`): each
         // `@length(min: 1, max: 100)` in that service's own Smithy model.
@@ -597,6 +612,17 @@ pub(super) fn declared_name_property(resource_type: &str) -> Option<&'static str
         // `GroupName` — the type's last segment is `UserPoolGroup`, so neither
         // `UserPoolGroupName` nor `Name` finds it.
         COGNITO_USER_POOL_GROUP => Some("GroupName"),
+        // The same service's `CreateIdentityProvider` takes a `ProviderName`, so the type
+        // publishes `ProviderName` — the type's last segment is `UserPoolIdentityProvider`,
+        // so neither `UserPoolIdentityProviderName` nor `Name` finds it. That name is what
+        // the provider is CREATED under and the identifier every cognito-idp call on one
+        // takes beside its pool, so it is the physical id.
+        COGNITO_USER_POOL_IDENTITY_PROVIDER => Some("ProviderName"),
+        // The same service's `CreateResourceServer` takes an `Identifier` — "a unique
+        // resource server identifier" — beside the resource server's `Name`, and that
+        // identifier is what every call on one takes and what a custom scope of it is spelled
+        // with, so it is the physical id rather than the `Name` the convention would find.
+        COGNITO_USER_POOL_RESOURCE_SERVER => Some("Identifier"),
         // Amazon EC2's `CreateSecurityGroup` takes a `GroupName`, so the type publishes
         // `GroupName` — the type's last segment is `SecurityGroup`, so neither
         // `SecurityGroupName` nor `Name` finds it. That name is what the group is CREATED

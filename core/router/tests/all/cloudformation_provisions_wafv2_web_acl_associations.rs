@@ -67,8 +67,16 @@ fn build_waf_router() -> MultiServiceRouter {
         )),
     );
     router.register_service(service_com_amazonaws_wafv2_awswaf_20190729::EmulatedService::new(
-        engine,
+        Arc::clone(&engine),
     ));
+    // Amazon Cognito user pools, for the `AWS::Cognito::UserPool` one row declares beside the
+    // web ACL it binds: that pool is really created there
+    // (`state::provisioning::cognito_user_pool`), so its owning service has to be mounted
+    // beside CloudFormation or the create is refused and the stack fails.
+    router.register_service(
+        service_com_amazonaws_cognitoidentityprovider_awscognitoidentityproviderservice::
+            EmulatedService::new(engine),
+    );
     router
 }
 

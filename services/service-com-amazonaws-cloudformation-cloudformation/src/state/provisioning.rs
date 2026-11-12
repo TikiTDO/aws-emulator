@@ -209,6 +209,12 @@ mod appconfig_resources;
 /// ([`super::template::return_values`] names the two whose identity their create answers).
 pub(super) mod application_auto_scaling;
 mod cognito_identity_pool;
+/// The three Amazon Cognito user-pool types a stack declares — the user pool, the app client
+/// that signs in against it and the identity provider it federates with: visible to the rest
+/// of this service's state because the types' own NAMES live here, beside the arms that
+/// provision them ([`super::template::return_values`] names the two whose identity their
+/// create answers, and the one whose name property it reads).
+pub(in crate::state) mod cognito_user_pool;
 /// `AWS::DynamoDB::Table`: visible to the rest of this service's state because the type's
 /// own NAME lives here, beside the arm that provisions it, and more than one module answers
 /// about that type ([`super::resource_inventory`]).
@@ -820,6 +826,10 @@ pub(super) enum Owner {
     /// identity pool, and the role attachment that binds the pool's IAM roles to it. Which
     /// of them it is travels with the owner, as for the Amazon EC2 types above.
     CognitoIdentityPool(cognito_identity_pool::Kind),
+    /// One of the three Amazon Cognito user-pool types [`cognito_user_pool`] creates: the
+    /// pool, the app client that signs in against it, and the third-party identity provider
+    /// it federates with. Which of them it is travels with the owner, as for the types above.
+    CognitoUserPool(cognito_user_pool::Kind),
     /// `AWS::CloudFormation::Stack`, whose arms are [`nested_stack`]'s: the owning service is
     /// CloudFormation itself, so a nested stack is created by the same `CreateStack` a
     /// client calls.
@@ -897,6 +907,9 @@ pub(super) fn owner_for(resource_type: &str) -> Option<Owner> {
     }
     if let Some(kind) = cognito_identity_pool::kind_of(resource_type) {
         return Some(Owner::CognitoIdentityPool(kind));
+    }
+    if let Some(kind) = cognito_user_pool::kind_of(resource_type) {
+        return Some(Owner::CognitoUserPool(kind));
     }
     if resource_type == nested_stack::CLOUDFORMATION_STACK {
         return Some(Owner::NestedStack);

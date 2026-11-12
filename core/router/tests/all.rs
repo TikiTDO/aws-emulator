@@ -18,6 +18,12 @@
 #[path = "all/cloudformation_fifo_resource_generated_names.rs"]
 mod cloudformation_fifo_resource_generated_names;
 // Declared here, in this same head region, for the reason the entry above records: the
+// identifiers a stack publishes for the Amazon Cognito user pool, app client, resource server
+// and identity provider it declares are the ones that service minted or is addressed by, which
+// spans CloudFormation and Amazon Cognito user pools at once, so neither crate's own test
+// target can ask it.
+#[path = "all/cloudformation_provisions_cognito_user_pools.rs"]
+mod cloudformation_provisions_cognito_user_pools;
 // object a WorkMail Message Flow update installs has to be written through Amazon S3's own
 // API and read back through WorkMail Message Flow's, so neither crate's own test target can
 // mount both sides of it.
