@@ -15,6 +15,8 @@
 mod agent_assist_query_pipeline;
 #[path = "all/assistant_association.rs"]
 mod assistant_association;
+#[path = "all/assistant_association_listing.rs"]
+mod assistant_association_listing;
 #[path = "all/assistant_lifecycle.rs"]
 mod assistant_lifecycle;
 #[path = "all/client_error_refusals.rs"]

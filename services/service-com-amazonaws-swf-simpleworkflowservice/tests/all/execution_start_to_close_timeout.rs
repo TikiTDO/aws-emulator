@@ -216,10 +216,16 @@ async fn an_unattended_run_is_closed_by_the_service_when_its_budget_is_spent() {
             .and_then(Value::as_f64)
             .unwrap_or_else(|| panic!("case {:?}: no closeTimestamp", case.name));
         let elapsed = close_timestamp - start_timestamp;
+        // `closeTimestamp` IS the deadline, so the gap between the two instants is the
+        // budget itself — in BOTH directions, which `>=` alone did not pin. Both instants
+        // travel as epoch seconds in a JSON number, whose resolution around the present
+        // epoch is a fraction of a microsecond, so the gap is compared to a tolerance far
+        // below the budgets above rather than exactly.
+        const INSTANT_TOLERANCE: f64 = 1e-3;
         assert!(
-            elapsed >= case.budget.as_secs_f64(),
-            "case {:?}: the close instant must be the deadline, i.e. at least {:?} after \
-             the start, got {elapsed} seconds",
+            (elapsed - case.budget.as_secs_f64()).abs() < INSTANT_TOLERANCE,
+            "case {:?}: the close instant must be the deadline, i.e. {:?} after the start, \
+             got {elapsed} seconds",
             case.name,
             case.budget
         );
