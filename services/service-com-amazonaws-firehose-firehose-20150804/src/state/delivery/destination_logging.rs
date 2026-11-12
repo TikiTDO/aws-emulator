@@ -174,9 +174,19 @@ pub fn report_delivery_errors<Eng: Send + Sync + 'static>(
             );
             continue;
         }
+        // The data identifiers the data protection policies in force for the group name: such
+        // a policy masks what is ingested into the group, by whichever path the events
+        // arrive.
+        let data_identifiers = store
+            .log_groups
+            .get(&report.logging.log_group)
+            .map(|group| store.data_protection_identifiers_for(group))
+            .unwrap_or_default();
+        let message = error_event(stream_arn, version_id, report);
         let event = logs::StoredEvent {
             timestamp,
-            message: error_event(stream_arn, version_id, report),
+            masked_message: logs::data_protection::masked(&message, &data_identifiers),
+            message,
             ingestion_time: now_ms,
             ingestion_seq: store.take_ingestion_seq(),
         };

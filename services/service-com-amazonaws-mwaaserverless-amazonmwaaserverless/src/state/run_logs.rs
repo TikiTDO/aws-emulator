@@ -189,10 +189,19 @@ pub fn publish<Eng: Send + Sync + 'static>(engine: &Eng, region: &str, lines: Ve
             );
             continue;
         }
+        // The data identifiers the data protection policies in force for the group name: such
+        // a policy masks what is ingested into the group, by whichever path the events
+        // arrive.
+        let data_identifiers = store
+            .log_groups
+            .get(&log_group)
+            .map(|group| store.data_protection_identifiers_for(group))
+            .unwrap_or_default();
         let events: Vec<logs::StoredEvent> = events
             .into_iter()
             .map(|(timestamp, message)| logs::StoredEvent {
                 timestamp,
+                masked_message: logs::data_protection::masked(&message, &data_identifiers),
                 message,
                 ingestion_time: ingested_at,
                 ingestion_seq: store.take_ingestion_seq(),

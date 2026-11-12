@@ -3080,6 +3080,62 @@ pub(super) fn adopt_composite_identity(resource: &mut StoredResource) {
     adopt_identity(resource, identity);
 }
 
+/// The properties that SCOPE a resource type's physical name: the parent resource its
+/// owning service addresses one of these resources INSIDE, so that the name identifies one
+/// resource only together with them; the empty list for a type whose name identifies a
+/// resource on its own.
+///
+/// A physical name identifies one resource — which is why a second resource cannot be
+/// created under a name a stack already holds ([`crate::state::physical_name`]) — but for a
+/// CHILD resource that name is unique only within its parent: every call of the owning
+/// service that addresses one takes the parent beside the name, so two declarations stating
+/// the same name under DIFFERENT parents describe two resources, and AWS creates both.
+///
+/// Source for each row: the members the owning API's own calls take to address one resource
+/// of the type.
+///
+/// * a log stream lives IN a log group (`CreateLogStream`, `DeleteLogStream` and
+///   `PutLogEvents` each take `logGroupName` beside `logStreamName`, and
+///   `DescribeLogStreams` lists the streams of one group);
+/// * a metric filter and a subscription filter are each put ON a log group
+///   (`PutMetricFilter`/`DeleteMetricFilter` and
+///   `PutSubscriptionFilter`/`DeleteSubscriptionFilter` take `logGroupName` beside
+///   `filterName`, and the two describes list the filters of one group);
+/// * a stage belongs to ONE REST API (`GetStage` and `DeleteStage` take `restApiId` beside
+///   `stageName`).
+///
+/// A type whose physical id its owning service ASSIGNS needs no row: that identifier is
+/// unique by construction, so two resources of the type never resolve to one name.
+pub fn name_scope_properties(resource_type: &str) -> &'static [&'static str] {
+    match resource_type {
+        crate::state::provisioning::logs_resources::LOGS_LOG_STREAM
+        | crate::state::provisioning::logs_resources::LOGS_METRIC_FILTER
+        | crate::state::provisioning::logs_resources::LOGS_SUBSCRIPTION_FILTER => {
+            &["LogGroupName"]
+        }
+        "AWS::ApiGateway::Stage" => &["RestApiId"],
+        _ => &[],
+    }
+}
+
+/// The values one resource's declaration states for the properties that scope its name
+/// ([`name_scope_properties`]), in that order.
+///
+/// A property the declaration does not state, or states as something other than a scalar,
+/// contributes the empty string: two declarations that both leave the parent out are in the
+/// same (unnamed) scope, which is what comparing them says.
+pub fn name_scope(resource_type: &str, properties: &Value) -> Vec<String> {
+    name_scope_properties(resource_type)
+        .iter()
+        .map(|property| {
+            properties
+                .get(*property)
+                .and_then(scalar_text)
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
 /// The three AWS Backup resource types a stack creates in that service (the AWS Backup
 /// model: `cloudFormationName: Backup`).
 ///

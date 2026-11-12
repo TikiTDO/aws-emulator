@@ -374,11 +374,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // `ctx` carries only request metadata; `unmask` concerns data-protection masking,
-        // which no policy in this store applies; and `interleaved` is documented as ignored
+        // `ctx` carries only request metadata; `unmask` selects WHICH version of a masked
+        // event's message is reported, which is applied where the page is rendered below;
+        // and `interleaved` is documented as ignored
         // ("this parameter is ignored and the value is assumed to be true"), which is what a
         // single pass over every selected stream in one event order already answers.
-        let _ = (ctx, input.unmask, input.interleaved);
+        let _ = (ctx, input.interleaved);
 
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             FilterLogEventsError::from(FilterLogEventsErrorModeled::ServiceUnavailableException(
@@ -545,7 +546,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             events.push(FilteredLogEvent {
                 log_stream_name: Some((*log_stream_name).to_string()),
                 timestamp: Some(event.timestamp),
-                message: Some(event.message.clone()),
+                // Masked by default for an event the group's data protection policy masked
+                // something in at ingest; the ingested bytes for a reader that asked to
+                // unmask them.
+                message: Some(event.message_as_read(input.unmask).to_string()),
                 ingestion_time: Some(event.ingestion_time),
                 // The id of the event, which is the id the same stored event is DELIVERED
                 // under to a subscription destination: one event has one id, whichever way

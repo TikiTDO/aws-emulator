@@ -1024,6 +1024,7 @@ mod tests {
         StoredEvent {
             timestamp: 1_700_000_000_000,
             message: message.to_string(),
+            masked_message: None,
             ingestion_time: 1_700_000_000_123,
             ingestion_seq,
         }

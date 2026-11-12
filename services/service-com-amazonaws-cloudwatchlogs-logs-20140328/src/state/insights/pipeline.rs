@@ -332,9 +332,12 @@ fn apply(
         }
         "dedup" => dedup(rows, arguments, budget),
         LOOKUP => lookup(lookup_tables, rows, arguments, budget),
-        // "unmask — Displays all the content of a log event that has masked data": this store
-        // holds every event's message exactly as it was ingested, so the records in hand
-        // already carry their whole content and nothing is unmasked.
+        // "unmask — Displays all the content of a log event that has masked data": the
+        // records in hand carry every event's message exactly as it was ingested
+        // (`insights::record_of`), so this stage has nothing further to reveal. A data
+        // protection policy's masked rendering is deliberately not applied on this path:
+        // the two event reads that report it are `GetLogEvents` and `FilterLogEvents`
+        // (`crate::state::data_protection`).
         "unmask" => Ok(()),
         // "diff — Compares the log events in the time range with the events in the previous
         // time range of the same length": the comparison is over a SECOND range this run

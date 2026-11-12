@@ -31,6 +31,8 @@ mod cmk_key_policy_scope;
 mod configuration_templates;
 #[path = "all/dangling_query_commands.rs"]
 mod dangling_query_commands;
+#[path = "all/data_protection_masking.rs"]
+mod data_protection_masking;
 #[path = "all/data_protection_policies.rs"]
 mod data_protection_policies;
 #[path = "all/data_protection_policy.rs"]

@@ -224,6 +224,10 @@ pub use integration_records::*;
 mod policy_documents;
 pub use policy_documents::*;
 
+/// Masking the sensitive data a log group's data protection policy names, as an event is
+/// ingested.
+pub mod data_protection;
+
 /// The vended-log delivery resources — a delivery, its source and its destination — as they
 /// are stored.
 mod deliveries;
@@ -2520,7 +2524,14 @@ impl LogStreamRecord {
 #[derive(Debug, Clone)]
 pub struct StoredEvent {
     pub timestamp: i64,
+    /// The message as it was INGESTED, byte for byte: what a read with `unmask` reveals.
     pub message: String,
+    /// The message as a reader sees it by default, for an event the log group's data
+    /// protection policy masked something in when it was ingested
+    /// ([`data_protection::masked`]); `None` for an event nothing was masked in, which is
+    /// every event of a group with no such policy and every event ingested before one was
+    /// put.
+    pub masked_message: Option<String>,
     pub ingestion_time: i64,
     pub ingestion_seq: u64,
 }
@@ -2531,6 +2542,18 @@ impl StoredEvent {
         EventKey {
             timestamp: self.timestamp,
             seq: self.ingestion_seq,
+        }
+    }
+
+    /// The message a read reports: the ingested bytes where the reader asked to `unmask`
+    /// ("Specify true to display the log event fields with all sensitive data unmasked and
+    /// visible"), and otherwise the masked version where the event has one — "by default,
+    /// when a user views a log event that includes masked data, the sensitive data is
+    /// replaced by asterisks".
+    pub fn message_as_read(&self, unmask: bool) -> &str {
+        match &self.masked_message {
+            Some(masked) if !unmask => masked,
+            _ => &self.message,
         }
     }
 

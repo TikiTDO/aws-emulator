@@ -57,7 +57,9 @@ pub fn already_exists_in_stack(physical_resource_id: &str, stack_id: &str) -> St
 /// A record of the SAME logical resource is never a collision: that is the resource itself,
 /// which is what a deployment carries forward or replaces. A record with no physical name at
 /// all cannot collide with anything, and the question is asked per TYPE, because a physical
-/// name identifies a resource of one type.
+/// name identifies a resource of one type — and, for a type whose resource lives INSIDE a
+/// parent, within that parent ([`scope_of`]), because that is the scope the owning service
+/// identifies one of its resources in.
 pub fn taken_in_the_stack<'a>(
     candidate: &StoredResource,
     recorded: impl IntoIterator<Item = &'a StoredResource>,
@@ -65,12 +67,21 @@ pub fn taken_in_the_stack<'a>(
     if candidate.physical_resource_id.is_empty() {
         return None;
     }
+    let scope = scope_of(candidate);
     recorded.into_iter().find(|existing| {
         existing.materialised
             && existing.logical_id != candidate.logical_id
             && existing.resource_type == candidate.resource_type
             && existing.physical_resource_id == candidate.physical_resource_id
+            && scope_of(existing) == scope
     })
+}
+
+/// The scope a resource's physical name identifies it in: the values its declaration states
+/// for the properties naming its parent ([`super::template::name_scope_properties`]), which
+/// is the empty list for a type whose name identifies a resource on its own.
+pub fn scope_of(resource: &StoredResource) -> Vec<String> {
+    super::template::name_scope(&resource.resource_type, &resource.properties)
 }
 
 /// One physical resource name a live stack of a Region already MANAGES: the type of the
@@ -84,6 +95,9 @@ pub struct ManagedName {
     pub resource_type: String,
     pub physical_resource_id: String,
     pub stack_id: String,
+    /// The scope that name identifies the resource in ([`scope_of`]): the parent a resource
+    /// of this type lives inside, for a type whose name is unique only within one.
+    pub scope: Vec<String>,
 }
 
 /// The index of one Region's managed names, as the deployments that are held to it share it.
@@ -124,6 +138,7 @@ impl ComAmazonawsCloudformationCloudformationState {
                             resource_type: resource.resource_type.clone(),
                             physical_resource_id: resource.physical_resource_id.clone(),
                             stack_id: stack.stack_id.clone(),
+                            scope: scope_of(resource),
                         })
                     })
                 })
@@ -139,7 +154,8 @@ impl ComAmazonawsCloudformationCloudformationState {
 /// collision: a resource of that stack is the resource itself — carried forward, replaced or
 /// re-created by its own rollback — and a second declaration of it inside that stack is what
 /// [`taken_in_the_stack`] answers. The question is asked per TYPE, because a physical name
-/// identifies a resource of one type, and an unnamed candidate collides with nothing.
+/// identifies a resource of one type — and within the scope that type's resources are
+/// identified in ([`scope_of`]) — and an unnamed candidate collides with nothing.
 pub fn taken_by_another_stack<'a>(
     candidate: &StoredResource,
     managed: &'a [ManagedName],
@@ -148,10 +164,12 @@ pub fn taken_by_another_stack<'a>(
     if candidate.physical_resource_id.is_empty() {
         return None;
     }
+    let scope = scope_of(candidate);
     managed.iter().find(|held| {
         held.stack_id != deploying
             && held.resource_type == candidate.resource_type
             && held.physical_resource_id == candidate.physical_resource_id
+            && held.scope == scope
     })
 }
 
@@ -209,6 +227,69 @@ mod tests {
             assert_eq!(
                 reason, *expected,
                 "case {case:?}: expected {expected:?}, got {reason:?}"
+            );
+        }
+    }
+
+    /// RULE: a name a type's resources are identified by WITHIN a parent is taken only by a
+    /// resource under the SAME parent — two streams of one name in two log groups are two
+    /// resources — while a type whose name identifies a resource on its own collides on the
+    /// name alone.
+    #[test]
+    fn a_child_resources_name_is_taken_only_inside_its_own_parent() {
+        let stream = |logical_id: &str, group: &str| StoredResource {
+            logical_id: logical_id.to_string(),
+            resource_type: "AWS::Logs::LogStream".to_string(),
+            physical_resource_id: "app".to_string(),
+            attributes: ::std::collections::BTreeMap::new(),
+            metadata: None,
+            properties: ::serde_json::json!({
+                "LogGroupName": group,
+                "LogStreamName": "app",
+            }),
+            materialised: true,
+            deletion_policy: None,
+        };
+        let rows: &[(&str, &str, &str, Option<&str>)] = &[
+            (
+                "the same stream name in another log group",
+                "other-group",
+                "one-group",
+                None,
+            ),
+            (
+                "the same stream name in the same log group",
+                "one-group",
+                "one-group",
+                Some("Held"),
+            ),
+        ];
+        for (case, candidate_group, held_group, expected) in rows {
+            let candidate = stream("Candidate", candidate_group);
+            let held = [stream("Held", held_group)];
+            let taken = taken_in_the_stack(&candidate, held.iter());
+            assert_eq!(
+                taken.map(|existing| existing.logical_id.as_str()),
+                *expected,
+                "case {case:?}: expected {expected:?}, got {taken:?}"
+            );
+            let managed = vec![ManagedName {
+                resource_type: "AWS::Logs::LogStream".to_string(),
+                physical_resource_id: "app".to_string(),
+                stack_id: "arn:aws:cloudformation:us-east-1:000000000000:stack/theirs/1"
+                    .to_string(),
+                scope: scope_of(&held[0]),
+            }];
+            let elsewhere = taken_by_another_stack(
+                &candidate,
+                &managed,
+                "arn:aws:cloudformation:us-east-1:000000000000:stack/mine/0",
+            );
+            assert_eq!(
+                elsewhere.is_some(),
+                expected.is_some(),
+                "case {case:?}: expected another stack to hold it: {}, got {elsewhere:?}",
+                expected.is_some()
             );
         }
     }
@@ -291,6 +372,7 @@ mod tests {
             resource_type: resource_type.to_string(),
             physical_resource_id: physical.to_string(),
             stack_id: stack_id.to_string(),
+            scope: Vec::new(),
         };
         let parameter = "AWS::SSM::Parameter";
         let mine = "arn:aws:cloudformation:us-east-1:000000000000:stack/mine/0";

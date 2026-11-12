@@ -1313,11 +1313,21 @@ fn deliver_events<Eng: Send + Sync + 'static>(engine: &Eng, deliveries: &[Delive
             );
             continue;
         }
+        // The data identifiers the data protection policies in force for the group name: such
+        // a policy masks what is ingested into the group, by whichever path the events arrive
+        // ("Sensitive data is detected and masked when it is ingested into the log group"). A
+        // group this delivery is about to create is covered by no group-level policy.
+        let data_identifiers = store
+            .log_groups
+            .get(&delivery.log_group)
+            .map(|group| store.data_protection_identifiers_for(group))
+            .unwrap_or_default();
         let events: Vec<logs::StoredEvent> = delivery
             .events
             .iter()
             .map(|(timestamp, message)| logs::StoredEvent {
                 timestamp: *timestamp,
+                masked_message: logs::data_protection::masked(message, &data_identifiers),
                 message: message.clone(),
                 ingestion_time: now_ms,
                 ingestion_seq: store.take_ingestion_seq(),

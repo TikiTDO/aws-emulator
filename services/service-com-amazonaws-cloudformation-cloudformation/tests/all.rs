@@ -251,6 +251,8 @@ mod list_type_versions_registry_scope;
 mod list_types;
 #[path = "all/logs_and_iot_resources.rs"]
 mod logs_and_iot_resources;
+#[path = "all/logs_group_children_resources.rs"]
+mod logs_group_children_resources;
 #[path = "all/macro_acknowledgement_and_include_refresh.rs"]
 mod macro_acknowledgement_and_include_refresh;
 #[path = "all/malformed_policy_document_rollback.rs"]
@@ -377,6 +379,8 @@ mod scan_and_registry_reads;
 mod scan_hook_and_progress_refusal_wording;
 #[path = "all/scratch.rs"]
 mod scratch;
+#[path = "all/scratch_probe.rs"]
+mod scratch_probe;
 #[path = "all/search_indexing_pipeline_outputs.rs"]
 mod search_indexing_pipeline_outputs;
 #[path = "all/section_loop_expansion.rs"]

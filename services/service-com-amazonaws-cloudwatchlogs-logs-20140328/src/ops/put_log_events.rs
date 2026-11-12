@@ -435,6 +435,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutLogEvents<Eng>
             .get(&input.log_group_name)
             .map(crate::state::metric_filters::CompiledFilters::of)
             .unwrap_or_default();
+        // The DATA IDENTIFIERS the data protection policies in force for the group name are
+        // read here for the same reason, and because masking is decided as the event is
+        // stored: "sensitive data is detected and masked when it is ingested into the log
+        // group", and "log events ingested into the log group before [the policy was set] are
+        // not masked". A group no policy covers names none, so nothing of its events is
+        // masked.
+        let data_identifiers = store
+            .log_groups
+            .get(&input.log_group_name)
+            .map(|group| store.data_protection_identifiers_for(group))
+            .unwrap_or_default();
 
         // The documented batch constraints, which bound what one request may store:
         // "The maximum batch size is 1,048,576 bytes. This size is calculated as the sum
@@ -545,6 +556,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutLogEvents<Eng>
             let ingestion_seq = store.take_ingestion_seq();
             batch.push(crate::state::StoredEvent {
                 timestamp: event.timestamp,
+                masked_message: crate::state::data_protection::masked(
+                    &event.message,
+                    &data_identifiers,
+                ),
                 message: event.message.clone(),
                 ingestion_time,
                 ingestion_seq,

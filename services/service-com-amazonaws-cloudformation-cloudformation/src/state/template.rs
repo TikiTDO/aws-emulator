@@ -2684,6 +2684,16 @@ pub fn replacement_properties(resource_type: &str) -> &'static [&'static str] {
         // node an association was created for cannot be changed on it, so a declaration
         // naming another node asks for a different association.
         SSM_ASSOCIATION => &["InstanceId"],
+        // A log stream, a metric filter and a subscription filter each exist INSIDE the log
+        // group their `LogGroupName` names, and Amazon CloudWatch Logs publishes no call that
+        // moves one to another group — every call on one takes the group beside the child's
+        // own name — so a declaration naming another group asks for a different resource,
+        // which is what that property's "Update requires: Replacement" says.
+        crate::state::provisioning::logs_resources::LOGS_LOG_STREAM
+        | crate::state::provisioning::logs_resources::LOGS_METRIC_FILTER
+        | crate::state::provisioning::logs_resources::LOGS_SUBSCRIPTION_FILTER => {
+            &["LogGroupName"]
+        }
         _ => composite_identity_properties(resource_type),
     }
 }

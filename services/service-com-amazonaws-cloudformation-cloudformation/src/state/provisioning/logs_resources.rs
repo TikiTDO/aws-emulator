@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! `AWS::Logs::LogGroup`, `AWS::Logs::LogStream` and `AWS::Logs::MetricFilter`: the log
-//! group a stack declares, the stream inside it and the metric filter on it, created in
-//! Amazon CloudWatch Logs itself.
+//! `AWS::Logs::LogGroup`, `AWS::Logs::LogStream`, `AWS::Logs::MetricFilter` and
+//! `AWS::Logs::SubscriptionFilter`: the log group a stack declares, the stream inside it and
+//! the metric and subscription filters on it, created in Amazon CloudWatch Logs itself.
 //!
-//! This is the per-type half of provisioning for three resource types, the half
+//! This is the per-type half of provisioning for four resource types, the half
 //! [`super::super::provisioner`] holds for every other type this emulator creates; it lives
 //! in its own module beside [`super::cognito_identity_pool`] for the reason that module
 //! records — the catalogue file is far past the length a change to this repository may
@@ -20,8 +20,11 @@
 //! resolves to nothing: the metric filter the next template declares on it cannot be put,
 //! and the stream it declares inside it cannot be made. The same holds one level down — a
 //! stream exists only inside the group that holds it, and a filter only on the group it
-//! filters — which is why all three types are provisioned here rather than left
-//! declared-only.
+//! filters — which is why all four types are provisioned here rather than left
+//! declared-only. A SUBSCRIPTION filter is the case where the difference is a delivery: the
+//! filter is what forwards the group's matching events to its destination, so a stack that
+//! reported one created while nothing put it leaves a group with no filter to reconcile
+//! against and a destination nothing ever reaches.
 //!
 //! ## The properties
 //!
@@ -43,9 +46,24 @@
 //! a `[{Key, Value}]` list in the template against the MAP the API's own
 //! `MetricTransformation$dimensions` takes ([`metric_transformations`]).
 //!
+//! `AWS::Logs::SubscriptionFilter`'s properties are `PutSubscriptionFilter`'s own members
+//! under the same names up to case — that call being "Creates or updates a subscription
+//! filter", so it serves this type's create and its in-place update alike — and the filter
+//! it configures is what forwards the group's matching events to the destination the
+//! declaration names.
+//!
 //! A declared property none of those calls carries is REFUSED rather than dropped
 //! ([`refuse_unapplied_properties`]): a resource reported created with less than its
 //! declaration asked for is the shallow success these arms exist to avoid.
+//!
+//! ## A child moved to another group
+//!
+//! A stream, a metric filter and a subscription filter each exist INSIDE the log group their
+//! `LogGroupName` names, and no call of that service moves one to another group: the
+//! property is one of the type's "Update requires: Replacement" ones, so a declaration
+//! naming a different group is applied by REPLACING the resource — the child is made in the
+//! group now declared and the one it replaced is taken out of the group it was in
+//! ([`replace_in_another_group`]) — rather than reported as a change nothing applied.
 
 use std::collections::BTreeMap;
 
@@ -61,6 +79,7 @@ use crate::state::StoredResource;
 pub(crate) const LOGS_LOG_GROUP: &str = "AWS::Logs::LogGroup";
 pub(crate) const LOGS_LOG_STREAM: &str = "AWS::Logs::LogStream";
 pub(crate) const LOGS_METRIC_FILTER: &str = "AWS::Logs::MetricFilter";
+pub(crate) const LOGS_SUBSCRIPTION_FILTER: &str = "AWS::Logs::SubscriptionFilter";
 
 /// The SigV4 signing name of the service that owns them, which is what routes the in-process
 /// call to Amazon CloudWatch Logs's own handlers (that model's `sigv4Name`/`endpointPrefix`,
@@ -95,6 +114,8 @@ pub(in crate::state) enum Kind {
     LogStream,
     /// `AWS::Logs::MetricFilter`.
     MetricFilter,
+    /// `AWS::Logs::SubscriptionFilter`.
+    SubscriptionFilter,
 }
 
 /// The kind `resource_type` names, or `None` for a type this module does not own.
@@ -103,6 +124,7 @@ pub(super) fn kind_of(resource_type: &str) -> Option<Kind> {
         LOGS_LOG_GROUP => Some(Kind::LogGroup),
         LOGS_LOG_STREAM => Some(Kind::LogStream),
         LOGS_METRIC_FILTER => Some(Kind::MetricFilter),
+        LOGS_SUBSCRIPTION_FILTER => Some(Kind::SubscriptionFilter),
         _ => None,
     }
 }
@@ -138,6 +160,19 @@ const METRIC_FILTER_PROPERTIES: &[&str] = &[
     "MetricTransformations",
 ];
 
+/// Every property `AWS::Logs::SubscriptionFilter` publishes, each a member of
+/// `PutSubscriptionFilter` under the same name up to case
+/// (`smithy_query(query="operation",operation="PutSubscriptionFilter")`).
+const SUBSCRIPTION_FILTER_PROPERTIES: &[&str] = &[
+    "ApplyOnTransformedLogs",
+    "DestinationArn",
+    "Distribution",
+    "FilterName",
+    "FilterPattern",
+    "LogGroupName",
+    "RoleArn",
+];
+
 /// Create the resource one of these types declares, in Amazon CloudWatch Logs itself — so a
 /// client that deployed the stack can pass `!Ref <group>` straight to `PutMetricFilter` or
 /// `PutLogEvents` and read the stream and the filter back with that service's own reads.
@@ -153,8 +188,12 @@ pub(super) async fn create(
         // Neither a stream nor a metric filter is taggable: CloudWatch Logs tags a log
         // group (and a destination), so there is no call that could carry a tag to either,
         // and CloudFormation propagates none to a resource type that is not taggable.
-        Kind::LogStream => create_log_stream(ctx, region, resource).await,
+        Kind::LogStream => create_log_stream(ctx, region, resource, &resource.properties).await,
         Kind::MetricFilter => put_metric_filter(ctx, region, resource, &resource.properties).await,
+        // Nor is a subscription filter, for the same reason.
+        Kind::SubscriptionFilter => {
+            put_subscription_filter(ctx, region, resource, &resource.properties).await
+        }
     }
 }
 
@@ -283,23 +322,76 @@ fn retention_days(value: &Value) -> Option<i64> {
     }
 }
 
-/// Create the stream an `AWS::Logs::LogStream` declares, inside the group its declaration
-/// names.
+/// Create the stream an `AWS::Logs::LogStream` declares, inside the group `declared` names.
+///
+/// `declared` is the document in force, which on the create of a REPLACEMENT is the new
+/// declaration rather than the one the record carries.
 async fn create_log_stream(
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
     resource: &StoredResource,
+    declared: &Value,
 ) -> Result<Created, Refusal> {
-    refuse_unapplied_properties(
-        &resource.properties,
-        &resource.resource_type,
-        LOG_STREAM_PROPERTIES,
-    )?;
+    refuse_unapplied_properties(declared, &resource.resource_type, LOG_STREAM_PROPERTIES)?;
     let request = serde_json::json!({
-        "logGroupName": required_log_group(resource)?,
+        "logGroupName": declared_log_group(declared).ok_or_else(|| missing(resource, LOG_GROUP_NAME))?,
         "logStreamName": resource.physical_resource_id.clone(),
     });
     call_logs(ctx, region, "CreateLogStream", &request).await?;
+    Ok(Created::attributes(BTreeMap::new()))
+}
+
+/// Put the filter an `AWS::Logs::SubscriptionFilter` declares on the group its declaration
+/// names, so the group's matching events are delivered to the destination it names.
+///
+/// `PutSubscriptionFilter` "creates or updates a subscription filter", so this one call
+/// serves the type's create and its in-place update alike — `declared` is the document in
+/// force, which on an update is the new declaration rather than the one the record carries.
+/// Every member the call takes is a property of the type under the same name up to case, so
+/// each declared one travels and the owning service's own validation judges the filter it
+/// would judge for a client's own call.
+async fn put_subscription_filter(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    resource: &StoredResource,
+    declared: &Value,
+) -> Result<Created, Refusal> {
+    refuse_unapplied_properties(
+        declared,
+        &resource.resource_type,
+        SUBSCRIPTION_FILTER_PROPERTIES,
+    )?;
+    let mut request = Map::new();
+    request.insert(
+        "logGroupName".to_string(),
+        Value::String(declared_log_group(declared).ok_or_else(|| missing(resource, LOG_GROUP_NAME))?),
+    );
+    request.insert(
+        "filterName".to_string(),
+        Value::String(resource.physical_resource_id.clone()),
+    );
+    // `filterPattern` is required by the call and by the type, and "" is a pattern — the one
+    // that matches every log event — so a declaration that states none is sent as it.
+    request.insert(
+        "filterPattern".to_string(),
+        Value::String(declared_text(declared, "FilterPattern").unwrap_or_default()),
+    );
+    request.insert(
+        "destinationArn".to_string(),
+        Value::String(
+            declared_text(declared, "DestinationArn")
+                .ok_or_else(|| missing(resource, "DestinationArn"))?,
+        ),
+    );
+    for (property, member) in [("RoleArn", "roleArn"), ("Distribution", "distribution")] {
+        if let Some(value) = declared_text(declared, property) {
+            request.insert(member.to_string(), Value::String(value));
+        }
+    }
+    if let Some(flag) = declared.get("ApplyOnTransformedLogs").and_then(declared_flag) {
+        request.insert("applyOnTransformedLogs".to_string(), Value::Bool(flag));
+    }
+    call_logs(ctx, region, "PutSubscriptionFilter", &Value::Object(request)).await?;
     Ok(Created::attributes(BTreeMap::new()))
 }
 
@@ -408,17 +500,18 @@ fn declared_dimensions(transformation: &Value) -> Option<Value> {
 ///
 /// Nothing is asked, and nothing waits: a group EXISTS from the moment `CreateLogGroup`
 /// answers — a stream can be made in it and events put to it — a stream from the moment
-/// `CreateLogStream` answers, and a filter is in force the moment `PutMetricFilter` answers.
-/// None of the three calls reports a non-terminal state for the resource to settle out of.
+/// `CreateLogStream` answers, and a filter is in force the moment `PutMetricFilter` or
+/// `PutSubscriptionFilter` answers. None of those calls reports a non-terminal state for the
+/// resource to settle out of.
 pub(super) fn ready() -> Readiness {
     Readiness::Ready
 }
 
 /// Whether the owning service has finished removing a deleted resource.
 ///
-/// Nothing is asked: each of `DeleteLogGroup`, `DeleteLogStream` and `DeleteMetricFilter`
-/// takes the resource away as it answers, and CloudWatch Logs reports no state a removed one
-/// is still being deleted in.
+/// Nothing is asked: each of `DeleteLogGroup`, `DeleteLogStream`, `DeleteMetricFilter` and
+/// `DeleteSubscriptionFilter` takes the resource away as it answers, and CloudWatch Logs
+/// reports no state a removed one is still being deleted in.
 pub(super) fn removal() -> Removal {
     Removal::Gone
 }
@@ -437,9 +530,8 @@ pub(super) fn removal() -> Removal {
 /// `AssociateKmsKey`/`DisassociateKmsKey`.
 ///
 /// `Ok(None)` is a change no call can make: a log group's `LogGroupClass` is fixed when the
-/// group is created, and a stream has no property that is not part of its identity, so such a
-/// deployment reports the change as not applied rather than as a success that dropped the
-/// caller's change.
+/// group is created, and a stream's own NAME is its identity, so such a deployment reports
+/// the change as not applied rather than as a success that dropped the caller's change.
 pub(super) async fn update(
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
@@ -461,23 +553,81 @@ pub(super) async fn update(
             update_log_group(ctx, region, &name, &resource.properties, declared).await?;
             Ok(Some(Created::attributes(BTreeMap::new())))
         }
-        // Both of a stream's properties are its identity — the group that holds it and its
-        // own name — so a declaration that changes either describes a different stream.
-        Kind::LogStream => Ok(None),
+        // A stream's own NAME is its identity, so a declaration that states another one
+        // describes a different stream and the deployment replaces the resource itself. The
+        // group that HOLDS the stream is the other half of its identity: a declaration
+        // naming another group is applied by making the stream there and taking the old one
+        // out of the group it was in.
+        Kind::LogStream => {
+            if moved_to_another_group(resource, declared) {
+                return replace_in_another_group(ctx, region, kind, resource, declared)
+                    .await
+                    .map(Some);
+            }
+            Ok(None)
+        }
         Kind::MetricFilter => {
-            // A filter moved to ANOTHER group is a different filter: the group this one is on
-            // would keep the filter this resource put there, so the change is reported as not
-            // applied.
-            let moved = declared_log_group(declared)
-                .is_some_and(|group| Some(group) != declared_log_group(&resource.properties));
-            if moved {
-                return Ok(None);
+            if moved_to_another_group(resource, declared) {
+                return replace_in_another_group(ctx, region, kind, resource, declared)
+                    .await
+                    .map(Some);
             }
             put_metric_filter(ctx, region, resource, declared)
                 .await
                 .map(Some)
         }
+        Kind::SubscriptionFilter => {
+            if moved_to_another_group(resource, declared) {
+                return replace_in_another_group(ctx, region, kind, resource, declared)
+                    .await
+                    .map(Some);
+            }
+            put_subscription_filter(ctx, region, resource, declared)
+                .await
+                .map(Some)
+        }
     }
+}
+
+/// Whether a declaration states a DIFFERENT log group from the one the record's resource
+/// lives in, for one of the three types whose resource exists inside a group.
+///
+/// A declaration that states no group at all moves nothing: the create's own refusal
+/// ([`missing`]) is what judges it.
+fn moved_to_another_group(resource: &StoredResource, declared: &Value) -> bool {
+    declared_log_group(declared)
+        .is_some_and(|group| Some(group) != declared_log_group(&resource.properties))
+}
+
+/// Apply a declaration that moves a stream or a filter to ANOTHER log group, by REPLACING
+/// the resource: the child is made in the group now declared, and the one it replaced is
+/// taken out of the group it was in.
+///
+/// That order is CloudFormation's own for a replacement — the new resource is created and
+/// the old one cleaned up afterwards — so a failure to make the new child leaves the old one
+/// standing. What the removal answers changes nothing about the deployment, exactly as it
+/// changes nothing for the cleanup `Delete` the algorithm itself owes a replaced resource
+/// ([`super::reconcile`]): the replacement is already in force, and a child the owning
+/// service could not take out of the group it was in is not a child this resource still
+/// publishes. A child whose GROUP has already gone is in that position too, which is why the
+/// removal is the same call [`delete`] makes and is judged the same way.
+async fn replace_in_another_group(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    kind: Kind,
+    resource: &StoredResource,
+    declared: &Value,
+) -> Result<Created, Refusal> {
+    let created = match kind {
+        Kind::LogStream => create_log_stream(ctx, region, resource, declared).await?,
+        Kind::MetricFilter => put_metric_filter(ctx, region, resource, declared).await?,
+        Kind::SubscriptionFilter => put_subscription_filter(ctx, region, resource, declared).await?,
+        // A log group is not inside a group: it is the parent, and a renamed group is a
+        // different resource the deployment replaces for itself.
+        Kind::LogGroup => return Ok(Created::attributes(BTreeMap::new())),
+    };
+    let _ = delete(ctx, region, kind, resource).await;
+    Ok(created)
 }
 
 /// Apply the three settings of a log group that a deployment states differently, and the KMS
@@ -566,8 +716,9 @@ async fn update_log_group(
 /// Delete the resource a stack created.
 ///
 /// A group is `DeleteLogGroup` ("Deletes the specified log group and permanently deletes all
-/// the archived log events associated with the log group"), a stream `DeleteLogStream` and a
-/// filter `DeleteMetricFilter`, each addressed by the name the create used. A resource the
+/// the archived log events associated with the log group"), a stream `DeleteLogStream`, a
+/// metric filter `DeleteMetricFilter` and a subscription filter `DeleteSubscriptionFilter`,
+/// each addressed by the name the create used. A resource the
 /// owning service no longer holds is already in the state the delete asks for, judged on the
 /// CODE and never on a message — which is also what makes deleting a stream or a filter
 /// whose GROUP has already gone a completed deletion rather than a failure.
@@ -596,6 +747,13 @@ pub(super) async fn delete(
                 "filterName": resource.physical_resource_id.clone(),
             }),
         ),
+        Kind::SubscriptionFilter => (
+            "DeleteSubscriptionFilter",
+            serde_json::json!({
+                "logGroupName": required_log_group(resource)?,
+                "filterName": resource.physical_resource_id.clone(),
+            }),
+        ),
     };
     match call_logs(ctx, region, operation, &request).await {
         Ok(_) => Ok(()),
@@ -618,8 +776,9 @@ async fn delete_log_group(
 
 /// The resource's configuration as the owning service reports it, for drift detection.
 ///
-/// A group is read with `DescribeLogGroups` filtered to its own name and a filter with
-/// `DescribeMetricFilters` filtered to its own name, each answer mapped back onto the
+/// A group is read with `DescribeLogGroups` filtered to its own name, a metric filter with
+/// `DescribeMetricFilters` and a subscription filter with `DescribeSubscriptionFilters`, each
+/// filtered to its own name and each answer mapped back onto the
 /// property vocabulary the type declares. A STREAM reports nothing to compare: both of its
 /// properties are its identity, so there is no configuration of it that could drift.
 /// `None` is a resource the owning service no longer holds, which is a deleted one.
@@ -689,6 +848,44 @@ pub(super) async fn actual_configuration(
                 ("FilterName", "filterName"),
                 ("FilterPattern", "filterPattern"),
                 ("LogGroupName", "logGroupName"),
+            ] {
+                if let Some(value) = filter.get(member) {
+                    configuration.insert(property.to_string(), value.clone());
+                }
+            }
+            Ok(Some(Value::Object(configuration)))
+        }
+        Kind::SubscriptionFilter => {
+            let request = serde_json::json!({
+                "logGroupName": required_log_group(resource)?,
+                "filterNamePrefix": name.clone(),
+            });
+            let answer =
+                match call_logs(ctx, region, "DescribeSubscriptionFilters", &request).await {
+                    Ok(answer) => answer,
+                    Err(refusal) if refusal.code == NOT_FOUND => return Ok(None),
+                    Err(refusal) => return Err(refusal),
+                };
+            let Some(filter) = answer
+                .get("subscriptionFilters")
+                .and_then(Value::as_array)
+                .and_then(|filters| {
+                    filters.iter().find(|filter| {
+                        filter.get("filterName").and_then(Value::as_str) == Some(name.as_str())
+                    })
+                })
+            else {
+                return Ok(None);
+            };
+            let mut configuration = Map::new();
+            for (property, member) in [
+                ("ApplyOnTransformedLogs", "applyOnTransformedLogs"),
+                ("DestinationArn", "destinationArn"),
+                ("Distribution", "distribution"),
+                ("FilterName", "filterName"),
+                ("FilterPattern", "filterPattern"),
+                ("LogGroupName", "logGroupName"),
+                ("RoleArn", "roleArn"),
             ] {
                 if let Some(value) = filter.get(member) {
                     configuration.insert(property.to_string(), value.clone());
@@ -810,15 +1007,15 @@ async fn call_logs(
 mod tests {
     use super::*;
 
-    /// The three type names this module owns are exactly the ones it claims, and nothing
+    /// The four type names this module owns are exactly the ones it claims, and nothing
     /// else: a near miss of one is another type's, which this module must not answer for.
     #[test]
-    fn the_owned_types_are_the_three_logs_types() {
+    fn the_owned_types_are_the_four_logs_types() {
         let cases: &[(&str, Option<Kind>)] = &[
             (LOGS_LOG_GROUP, Some(Kind::LogGroup)),
             (LOGS_LOG_STREAM, Some(Kind::LogStream)),
             (LOGS_METRIC_FILTER, Some(Kind::MetricFilter)),
-            ("AWS::Logs::SubscriptionFilter", None),
+            (LOGS_SUBSCRIPTION_FILTER, Some(Kind::SubscriptionFilter)),
             ("AWS::Logs::LogGroupAlias", None),
             ("AWS::SQS::Queue", None),
             ("", None),

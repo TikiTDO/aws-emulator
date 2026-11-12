@@ -336,9 +336,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // `ctx` carries only request metadata, and `unmask` concerns data-protection
-        // masking, which no policy in this store applies.
-        let _ = (ctx, input.unmask);
+        // `ctx` carries only request metadata. `unmask` selects WHICH version of a masked
+        // event's message is reported, which is applied where the page is rendered below.
+        let _ = ctx;
 
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             GetLogEventsError::from(GetLogEventsErrorModeled::ServiceUnavailableException(
@@ -545,7 +545,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 page.iter()
                     .map(|event| OutputLogEvent {
                         timestamp: Some(event.timestamp),
-                        message: Some(event.message.clone()),
+                        // Masked by default for an event the group's data protection policy
+                        // masked something in at ingest; the ingested bytes for a reader that
+                        // asked to unmask them.
+                        message: Some(event.message_as_read(input.unmask).to_string()),
                         ingestion_time: Some(event.ingestion_time),
                     })
                     .collect(),

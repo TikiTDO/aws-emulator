@@ -198,8 +198,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         // `ctx` carries only request metadata: the record is named by the pointer and by
-        // nothing about the request. `unmask` reveals nothing further, because this store
-        // holds every event's raw message (see the module docs).
+        // nothing about the request. `unmask` reveals nothing further here: this read reports
+        // the event's message as it was ingested, a data protection policy's masked rendering
+        // being applied on the two reads that report it (`crate::state::data_protection`).
         let _ = (ctx, input.unmask);
 
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {

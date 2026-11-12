@@ -603,8 +603,13 @@ pub(super) fn declared_name_property(resource_type: &str) -> Option<&'static str
         MSK_SERVERLESS_CLUSTER => Some("ClusterName"),
         // Amazon CloudWatch Logs's `PutMetricFilter` takes a `filterName` — "Ref returns the
         // metric filter name" — so the type publishes `FilterName`; the type's last segment
-        // is `MetricFilter`, so neither `MetricFilterName` nor `Name` finds it.
-        crate::state::provisioning::logs_resources::LOGS_METRIC_FILTER => Some("FilterName"),
+        // is `MetricFilter`, so neither `MetricFilterName` nor `Name` finds it. Its
+        // `PutSubscriptionFilter` takes the same `filterName` — "Ref returns the
+        // subscription filter name" — for the same reason.
+        crate::state::provisioning::logs_resources::LOGS_METRIC_FILTER
+        | crate::state::provisioning::logs_resources::LOGS_SUBSCRIPTION_FILTER => {
+            Some("FilterName")
+        }
         _ => None,
     }
 }
