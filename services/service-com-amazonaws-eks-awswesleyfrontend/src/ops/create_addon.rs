@@ -64,6 +64,15 @@
 //! Both the outcome and the due instant are stored on the record and materialised by
 //! whichever read first runs after it.
 //!
+//! An install the service never STARTS is the exception, and it is the same decision
+//! made at the same point: where the unmet precondition is the ADD-ON's own rather
+//! than the cluster's — the AWS Marketplace subscription its software cannot be
+//! pulled without — nothing is applied, so no later instant can change the answer and
+//! there is no `CREATING` to report. Such a request is still ACCEPTED: the add-on is
+//! created in the terminal state it is already in, carrying the health issue that
+//! says what is missing, which is what a client reads off it and remediates
+//! ([`crate::state::AddonInstallOutcome::refused`]).
+//!
 //! Shared types live in `super::types`; the error channel in `crate::scaffolded`.
 //!
 //! ---
@@ -149,7 +158,7 @@
 use super::types::*;
 use crate::state::{
     self, AddonRecord,
-    ADDON_DEFAULT_NAMESPACE, ADDON_OWNER_AWS, ADDON_PUBLISHER_EKS, ADDON_STATUS_CREATING,
+    ADDON_DEFAULT_NAMESPACE, ADDON_STATUS_CREATING,
     CLUSTER_STATUSES_AN_ADDON_IS_MANAGED_IN, DEFAULT_KUBERNETES_VERSION, MAX_ADDONS_PER_CLUSTER,
     MAX_POD_IDENTITY_ASSOCIATIONS_PER_CLUSTER,
 };
@@ -719,31 +728,46 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &namespace,
             now,
         );
-        // An add-on applied against another add-on's resources settles after that
-        // add-on does, so a chain installed in one go takes a span per level.
-        let settles_at =
-            guard.addon_install_settles_at(&region, &input.cluster_name, &input.addon_name, now);
-
-        // What the catalog publishes about this add-on itself, read once: its
-        // publisher, its owner and the AWS Marketplace listing it is subscribed
-        // through, if it is listed on Marketplace at all.
-        let catalog_metadata = guard.published_addon(&input.addon_name, now).map(|published| {
+        // WHEN IT REPORTS THAT STATE. An install that reaches the cluster is
+        // asynchronous, so the add-on reports `CREATING` until the clock owes it the
+        // outcome above — and an add-on applied against another add-on's resources
+        // settles after that add-on does, so a chain installed in one go takes a span
+        // per level. An install the service never STARTS, because a precondition of
+        // the add-on itself is unmet before anything is applied to the cluster
+        // ([`crate::state::AddonInstallOutcome::refused`]), has no such span: there is
+        // no work under way for a later instant to finish, so the record is written in
+        // the terminal state it is already in and this call answers with it.
+        let (status, health_issues, active_at) = if install_outcome.settled_at_the_call {
             (
-                published.publisher.clone(),
-                published.owner.clone(),
-                published.marketplace_information.clone(),
+                install_outcome.status.clone(),
+                install_outcome.issues.clone(),
+                None,
             )
-        });
+        } else {
+            (
+                ADDON_STATUS_CREATING.to_string(),
+                // An install that has not settled yet reports nothing wrong with it:
+                // the issues of the state it settles in are written onto the record
+                // when that state is materialised.
+                Vec::new(),
+                Some(guard.addon_install_settles_at(
+                    &region,
+                    &input.cluster_name,
+                    &input.addon_name,
+                    now,
+                )),
+            )
+        };
 
         let record = AddonRecord {
             arn: addon_arn,
             // The caller's version if it named one, else the default version for the
             // cluster's Kubernetes version (resolved above).
             addon_version,
-            status: ADDON_STATUS_CREATING.to_string(),
+            status,
             created_at: now,
             modified_at: now,
-            active_at: Some(settles_at),
+            active_at,
             // Nothing has asked to remove a freshly installed add-on.
             removed_at: None,
             service_account_role_arn: input.service_account_role_arn.clone(),
@@ -758,33 +782,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // request asked for them.
             pod_identity_association_arns: association_arns,
             namespace,
-            // The add-on's own catalog metadata: an add-on's publisher, owner
-            // and Marketplace listing are properties of the ADD-ON
-            // (`AddonInfo$publisher` / `$owner` / `$marketplaceInformation`), so
-            // an installed add-on reports what `DescribeAddonVersions` publishes
-            // for that name rather than one value for every add-on. Every add-on
-            // this far into the handler is one the catalog publishes (see the
-            // body-member layer above); the Amazon EKS-managed pair stands in
-            // only for a catalog entry that somehow publishes none of its own.
-            publisher: catalog_metadata
-                .as_ref()
-                .map(|(publisher, _, _)| publisher.clone())
-                .unwrap_or_else(|| ADDON_PUBLISHER_EKS.to_string()),
-            owner: catalog_metadata
-                .as_ref()
-                .map(|(_, owner, _)| owner.clone())
-                .unwrap_or_else(|| ADDON_OWNER_AWS.to_string()),
-            marketplace_information: catalog_metadata.and_then(|(_, _, listing)| listing),
             client_request_token: input.client_request_token.clone(),
             cluster_name: input.cluster_name.clone(),
             addon_name: input.addon_name.clone(),
             // Nothing is in flight on a freshly installed add-on: `UpdateAddon` is
             // what puts a pending change on the record.
             pending_update: None,
-            // An install that has not settled yet reports nothing wrong with it: the
-            // issues of the state it settles in are the ones the outcome carries, and
-            // they are written onto the record when that state is materialised.
-            health_issues: Vec::new(),
+            // What the add-on reports as wrong with it: nothing while an install is
+            // still under way, and the issues of the state it settled in for one this
+            // call has already settled (see above).
+            health_issues,
             install_outcome,
             // `resolveConflicts` decides what happens to a SELF-MANAGED copy of the
             // add-on already running on the cluster; this emulator runs no Kubernetes,

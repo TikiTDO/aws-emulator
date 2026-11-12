@@ -639,8 +639,11 @@ impl ComAmazonawsEksAwswesleyfrontendState {
     /// 1. an add-on sold through the AWS Marketplace needs a SUBSCRIPTION to it
     ///    before its software may be pulled at all. This emulator serves no
     ///    Marketplace, so it holds no subscription to any listing and such an
-    ///    install never comes up ([`ADDON_ISSUE_SUBSCRIPTION_NEEDED`]); the
-    ///    remediation is the one Amazon EKS states, outside this API;
+    ///    install never STARTS ([`ADDON_ISSUE_SUBSCRIPTION_NEEDED`]): it is
+    ///    settled at the call that asked for it
+    ///    ([`AddonInstallOutcome::refused`]), because this precondition is the
+    ///    ADD-ON's own and no span of the clock can change it; the remediation
+    ///    is the one Amazon EKS states, outside this API;
     /// 2. the add-ons its resources are applied against must be ON the cluster,
     ///    otherwise the Kubernetes resources it needs are not there and the
     ///    install fails ([`ADDON_ISSUE_K8S_RESOURCE_NOT_FOUND`]);
@@ -667,7 +670,7 @@ impl ComAmazonawsEksAwswesleyfrontendState {
             return AddonInstallOutcome::running();
         };
         if published.owner == ADDON_OWNER_MARKETPLACE {
-            return AddonInstallOutcome::failed(AddonIssue {
+            return AddonInstallOutcome::refused(AddonIssue {
                 code: Some(ADDON_ISSUE_SUBSCRIPTION_NEEDED.to_string()),
                 message: Some(ADDON_ISSUE_SUBSCRIPTION_NEEDED_MESSAGE.to_string()),
                 // Nothing was applied to the cluster, so there is no resource of

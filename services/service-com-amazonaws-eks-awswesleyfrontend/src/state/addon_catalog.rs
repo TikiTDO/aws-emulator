@@ -12,6 +12,7 @@ use super::*;
 /// The catalog is a PUBLICATION, like the Kubernetes version calendar
 /// ([`VERSION_CALENDAR`]): it is what Amazon EKS offers, not per-account data,
 /// so it is seeded once and no operation writes it.
+#[derive(Clone, Copy)]
 pub(super) struct AddonCatalogSeed {
     /// The add-on's name, the value `CreateAddon$addonName` takes.
     pub(super) addon_name: &'static str,
@@ -145,9 +146,10 @@ pub(super) struct AddonCatalogSeed {
 /// publishes the EKS-managed and the community rows alike, so both are published
 /// by [`ADDON_PUBLISHER_EKS`].
 ///
-/// This table is what the catalog PUBLISHES, so an add-on missing from it cannot
-/// be discovered or installed at all: a row here is the only way a caller reads
-/// an add-on's builds, its compatibilities and its configuration surface.
+/// This table, beside the vendor rebuilds of its rows ([`ADDON_FIPS_REBUILDS`]),
+/// is what the catalog PUBLISHES, so an add-on missing from both cannot be
+/// discovered or installed at all: a row is the only way a caller reads an
+/// add-on's builds, its compatibilities and its configuration surface.
 ///
 /// The rest are AWS Marketplace add-ons ([`ADDON_OWNER_MARKETPLACE`]), published
 /// by their VENDOR and carrying the `marketplaceInformation` of the listing they
@@ -1146,6 +1148,86 @@ pub(super) const ADDON_CATALOG: &[AddonCatalogSeed] = &[
     },
 ];
 
+/// The vendor that publishes the FIPS rebuilds [`ADDON_FIPS_REBUILDS`] names,
+/// the value `DescribeAddonVersions$publishers` filters them by.
+pub(super) const ADDON_PUBLISHER_FIPS_REBUILDS: &str = "chainguard";
+
+/// The AWS Marketplace add-ons that are a VENDOR'S REBUILD of an add-on
+/// [`ADDON_CATALOG`] already publishes, as `(the name the rebuild is sold under,
+/// the add-on it rebuilds)`.
+///
+/// Source: the AWS Marketplace add-on listings Amazon EKS publishes for the
+/// FIPS-validated builds of its add-ons, whose `<vendor>_<add-on>-fips` names
+/// are what `CreateAddon$addonName` takes. A caller installing a cluster that
+/// must use validated cryptography installs these INSTEAD of the Amazon
+/// EKS-managed add-ons of the same software, which is why both are published.
+///
+/// A rebuild is the SAME software built by a vendor rather than by Amazon EKS,
+/// so what the catalog publishes about it is the rebuilt add-on's own — its
+/// category, the namespace its workloads run in, how its pods are placed, the
+/// add-ons its resources are applied against, the IAM permissions and service
+/// accounts it needs, and its whole configuration surface — under the vendor's
+/// name, owned by [`ADDON_OWNER_MARKETPLACE`] and carrying the
+/// `marketplaceInformation` of its own listing (see [`published_addon_seeds`]).
+/// Writing the rebuilt add-on's name here rather than repeating its row is what
+/// keeps the two from publishing different surfaces for one piece of software.
+pub(super) const ADDON_FIPS_REBUILDS: &[(&str, &str)] = &[
+    ("chainguard_aws-ebs-csi-driver-fips", "aws-ebs-csi-driver"),
+    ("chainguard_aws-efs-csi-driver-fips", "aws-efs-csi-driver"),
+    ("chainguard_cert-manager-fips", "cert-manager"),
+    ("chainguard_coredns-fips", "coredns"),
+    ("chainguard_external-dns-fips", "external-dns"),
+    ("chainguard_kube-proxy-fips", "kube-proxy"),
+    ("chainguard_kube-state-metrics-fips", "kube-state-metrics"),
+    ("chainguard_metrics-server-fips", "metrics-server"),
+    (
+        "chainguard_prometheus-node-exporter-fips",
+        "prometheus-node-exporter",
+    ),
+    ("chainguard_vpc-cni-fips", "vpc-cni"),
+];
+
+/// The add-on `addon_name` is a vendor's rebuild of, when the catalog publishes
+/// it as one ([`ADDON_FIPS_REBUILDS`]); `None` for every add-on that is published
+/// in its own right.
+pub(super) fn rebuilt_addon(addon_name: &str) -> Option<&'static str> {
+    ADDON_FIPS_REBUILDS
+        .iter()
+        .find(|(rebuild, _)| *rebuild == addon_name)
+        .map(|(_, rebuilt)| *rebuilt)
+}
+
+/// Every add-on this service publishes, in add-on NAME order — the order the
+/// catalog is published in: the rows [`ADDON_CATALOG`] writes out, and the
+/// Marketplace rebuilds [`ADDON_FIPS_REBUILDS`] names, each taking the published
+/// surface of the add-on it rebuilds under its vendor's name.
+///
+/// A rebuild of a name the catalog does not publish is a typo in the table,
+/// which is why it panics here — at seed time, with both names — rather than
+/// quietly publishing nothing for it.
+fn published_addon_seeds() -> Vec<AddonCatalogSeed> {
+    let mut seeds: Vec<AddonCatalogSeed> = ADDON_CATALOG.to_vec();
+    for &(addon_name, rebuilt) in ADDON_FIPS_REBUILDS {
+        let published = ADDON_CATALOG
+            .iter()
+            .find(|seed| seed.addon_name == rebuilt)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the add-on catalog publishes {addon_name} as a rebuild of {rebuilt}, \
+                     which it does not publish"
+                )
+            });
+        seeds.push(AddonCatalogSeed {
+            addon_name,
+            owner: ADDON_OWNER_MARKETPLACE,
+            publisher: ADDON_PUBLISHER_FIPS_REBUILDS,
+            ..*published
+        });
+    }
+    seeds.sort_by(|left, right| left.addon_name.cmp(right.addon_name));
+    seeds
+}
+
 /// One Kubernetes version a published add-on build supports, as the catalog
 /// holds it: the modelled `Compatibility`.
 #[derive(Debug, Clone)]
@@ -1808,9 +1890,12 @@ pub(super) fn nested_configuration_properties(
     addon_name: &str,
     property: &str,
 ) -> &'static [AddonSchemaProperty] {
+    // A vendor's rebuild of an add-on is the same software, so the keys the
+    // objects of its configuration carry are the rebuilt add-on's own.
+    let published_for = rebuilt_addon(addon_name).unwrap_or(addon_name);
     ADDON_NESTED_CONFIGURATION_PROPERTIES
         .iter()
-        .find(|(addon, key, _)| *addon == addon_name && *key == property)
+        .find(|(addon, key, _)| *addon == published_for && *key == property)
         .map(|(_, _, properties)| *properties)
         .unwrap_or_default()
 }
@@ -1888,7 +1973,8 @@ fn addon_build_version(seed: &AddonCatalogSeed, step: usize) -> String {
     format!("v{major}.{minor}.{patch}-eksbuild.1")
 }
 
-/// Build the add-on catalog this service publishes from [`ADDON_CATALOG`].
+/// Build the add-on catalog this service publishes from
+/// [`published_addon_seeds`].
 ///
 /// An add-on publishes one build per Kubernetes minor version it has been
 /// OFFERED for, along its own version line ([`addon_build_version`]): the build
@@ -1908,9 +1994,9 @@ fn addon_build_version(seed: &AddonCatalogSeed, step: usize) -> String {
 /// cluster version older than the one it was introduced on.
 ///
 /// Each add-on's builds come out NEWEST FIRST, the order the catalog publishes
-/// them in; the add-ons themselves keep [`ADDON_CATALOG`]'s name order.
+/// them in; the add-ons themselves keep the publication's name order.
 pub(super) fn seed_addon_catalog() -> Vec<AddonCatalogRecord> {
-    ADDON_CATALOG
+    published_addon_seeds()
         .iter()
         .map(|seed| {
             let first = first_published_row(seed);

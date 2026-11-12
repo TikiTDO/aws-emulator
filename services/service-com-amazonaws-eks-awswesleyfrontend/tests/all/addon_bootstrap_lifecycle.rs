@@ -52,6 +52,16 @@ use crate::wire::{call, emulator, encode_label, error_code, Answer};
 /// The region every request in this suite is signed for.
 const REGION: &str = "us-west-2";
 
+/// How long a poll of an asynchronous transition keeps looking before the suite
+/// calls it a failure, and how long it waits between looks.
+///
+/// Generous next to every span this service owes (half a second each), because
+/// what a poll asserts is the state a transition reaches, not how fast the host
+/// running these tests gets there.
+const POLL_DEADLINE: Duration = Duration::from_secs(30);
+/// See [`POLL_DEADLINE`].
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
 /// The smallest `CreateCluster` request: the three required members.
 fn cluster_request(name: &str) -> serde_json::Value {
     serde_json::json!({
@@ -570,9 +580,10 @@ async fn a_configuration_document_is_read_in_either_format_and_held_to_the_schem
 // ---------------------------------------------------------------------------
 // RULE 3: an add-on sold through the AWS Marketplace needs a subscription to the
 // listing. This emulator serves no Marketplace and so holds a subscription to no
-// listing, so such an install is taken and settles `CREATE_FAILED` carrying the
-// issue that says what is missing — and the add-on reports the listing it was
-// bought through, which an Amazon EKS-managed add-on has none of.
+// listing, so such an install is TAKEN and settles `CREATE_FAILED` at the call
+// that asked for it — nothing of the add-on is applied to the cluster, so there
+// is no asynchronous install to wait out — carrying the issue that says what is
+// missing. An install that DOES reach the cluster keeps its `CREATING` span.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -603,40 +614,36 @@ async fn a_marketplace_addon_settles_create_failed_for_want_of_a_subscription() 
         );
         assert_eq!(
             installed.addon()["status"],
-            serde_json::json!("CREATING"),
-            "case {addon:?}: the install has not settled yet, got {:?}",
+            serde_json::json!("CREATE_FAILED"),
+            "case {addon:?}: an unsubscribed listing is never installed, so the add-on is \
+             created in the state it has already settled in, got {:?}",
             installed.addon()["status"]
         );
-        // The listing it was bought through, and who owns and publishes it.
         assert_eq!(
-            installed.addon()["owner"],
-            serde_json::json!(ADDON_OWNER_MARKETPLACE),
-            "case {addon:?}: a Marketplace add-on reports its owner, got {:?}",
-            installed.addon()["owner"]
+            health_issues(installed.addon()),
+            vec![(
+                ADDON_ISSUE_SUBSCRIPTION_NEEDED.to_string(),
+                ADDON_ISSUE_SUBSCRIPTION_NEEDED_MESSAGE.to_string(),
+            )],
+            "case {addon:?}: the create answers with the subscription issue, got {:?}",
+            installed.addon()["health"]
         );
-        let publisher = installed.addon()["publisher"].as_str().unwrap_or_default();
-        assert!(
-            addon.starts_with(publisher) && !publisher.is_empty(),
-            "case {addon:?}: the publisher must be the vendor the listing is published \
-             by, got {publisher:?}"
-        );
-        for member in ["productId", "productUrl"] {
-            assert!(
-                installed.addon()["marketplaceInformation"][member]
-                    .as_str()
-                    .is_some_and(|value| !value.is_empty()),
-                "case {addon:?}: the listing must report its {member}, got {:?}",
-                installed.addon()["marketplaceInformation"]
+        // The metadata of the listing it was bought through belongs to the CATALOG
+        // ([`addon_catalog_metadata.rs`]), not to the installed add-on, which
+        // reports none of it.
+        for member in ["owner", "publisher", "marketplaceInformation"] {
+            assert_eq!(
+                installed.addon()[member],
+                serde_json::Value::Null,
+                "case {addon:?}: an installed add-on reports no {member}, got {:?}",
+                installed.addon()[member]
             );
         }
     }
 
-    // Once the clock has settled the cluster and then the installs, every one of
-    // them reports the subscription that is missing.
-    tokio::time::sleep(
-        CLUSTER_ACTIVATION_DELAY + ADDON_ACTIVATION_DELAY + Duration::from_millis(250),
-    )
-    .await;
+    // Every one of them reports the subscription that is missing, with no wait: the
+    // install was never started, so there is no span of the clock between the create
+    // and the state the add-on has settled in.
     for addon in &marketplace {
         let described = describe_addon(&router, cluster, addon).await;
         assert_eq!(
@@ -673,8 +680,8 @@ async fn a_marketplace_addon_settles_create_failed_for_want_of_a_subscription() 
         );
     }
 
-    // An Amazon EKS-managed add-on is the other side of the same rule: it reports
-    // no listing at all, and its install is not refused for a subscription.
+    // An Amazon EKS-managed add-on is the other side of the same rule: its install
+    // is not refused for a subscription.
     let managed = create_addon(
         &router,
         cluster,
@@ -685,16 +692,27 @@ async fn a_marketplace_addon_settles_create_failed_for_want_of_a_subscription() 
         managed.status, 200,
         "an EKS-managed add-on installs, got {managed:?}"
     );
-    for member in ["owner", "publisher", "marketplaceInformation"] {
-        assert_eq!(
-            managed.addon()[member],
-            serde_json::Value::Null,
-            "an EKS-managed add-on reports no {member}, got {:?}",
-            managed.addon()[member]
-        );
-    }
-    tokio::time::sleep(ADDON_ACTIVATION_DELAY + Duration::from_millis(250)).await;
-    let settled = describe_addon(&router, cluster, "vpc-cni").await;
+    assert_eq!(
+        managed.addon()["status"],
+        serde_json::json!("CREATING"),
+        "an install that reaches the cluster is asynchronous, got {:?}",
+        managed.addon()["status"]
+    );
+    // An install that DOES reach the cluster is the other side of the same rule: it
+    // is asynchronous, so the add-on reports its terminal status once the clock has
+    // settled the cluster and then the install. The read is repeated until it does
+    // rather than timed: what is asserted is the state the install reaches, not how
+    // fast the host gets there.
+    let deadline = std::time::Instant::now() + POLL_DEADLINE;
+    let settled = loop {
+        let read = describe_addon(&router, cluster, "vpc-cni").await;
+        if read.addon()["status"] == serde_json::json!("ACTIVE")
+            || std::time::Instant::now() >= deadline
+        {
+            break read;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    };
     assert_eq!(
         settled.addon()["status"],
         serde_json::json!("ACTIVE"),

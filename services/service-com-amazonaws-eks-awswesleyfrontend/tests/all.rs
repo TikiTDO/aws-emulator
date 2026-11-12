@@ -129,6 +129,8 @@ mod insights_listing;
 mod insights_refresh;
 #[path = "all/list_pod_identity_associations.rs"]
 mod list_pod_identity_associations;
+#[path = "all/marketplace_addon_install.rs"]
+mod marketplace_addon_install;
 #[path = "all/nodegroup_config_update.rs"]
 mod nodegroup_config_update;
 #[path = "all/nodegroup_lifecycle.rs"]

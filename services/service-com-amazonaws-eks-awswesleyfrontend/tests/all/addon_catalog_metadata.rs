@@ -491,23 +491,25 @@ async fn the_operator_publishes_its_pod_identity_policy_and_cert_manager_none() 
 }
 
 // ---------------------------------------------------------------------------
-// RULE: an INSTALLED add-on reports the metadata that identifies the AWS
-// Marketplace listing it was bought through — `Addon$owner`, `$publisher` and
-// `$marketplaceInformation` are that listing's, read back unchanged through
-// `DescribeAddon`. An add-on Amazon EKS builds or curates is bought through no
-// listing and reports none of the three: the recorded service answers an
-// install of one with those members absent (the add-on's own owner and
-// publisher are what `DescribeAddonVersions` publishes, asserted above).
+// RULE: who publishes an add-on, who owns it and the AWS Marketplace listing it
+// is sold through are what the CATALOG states about an add-on NAME — the
+// `AddonInfo$publisher`, `$owner` and `$marketplaceInformation`
+// `DescribeAddonVersions` publishes (asserted above) — and not part of an
+// INSTALLED add-on: the recorded service answers an install and a read of one
+// with `Addon$publisher`, `$owner` and `$marketplaceInformation` absent, for an
+// add-on Amazon EKS builds and for one bought through a listing alike. An
+// `Addon` is the add-on's installed state; a client that wants the metadata
+// reads the catalog for the name it installed.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn an_installed_addon_reports_the_catalog_metadata_of_its_own_name() {
+async fn an_installed_addon_reports_no_catalog_metadata_of_its_own() {
     let router = emulator();
     active_cluster(&router, "addon-metadata", DEFAULT_KUBERNETES_VERSION).await;
 
     // The rows span the owner kinds an install can take: one Amazon Web Services
     // builds, an upstream project Amazon EKS curates, and one subscribed through
-    // AWS Marketplace (the kind that carries a listing).
+    // AWS Marketplace (the kind that carries a listing at all).
     for addon_name in ["vpc-cni", "cert-manager", "kubecost_kubecost"] {
         let published = published_addon(&router, addon_name, None).await;
         let created = create_addon(
@@ -526,51 +528,44 @@ async fn an_installed_addon_reports_the_catalog_metadata_of_its_own_name() {
             "case {addon_name:?}: expected HTTP 200 from DescribeAddon, got {described:?}"
         );
 
-        // What an installed add-on reports for the three members: the listing's
-        // own values for an add-on bought through AWS Marketplace, and nothing at
-        // all for one that is bought through no listing.
-        let sold_on_marketplace = string_member(&published, "owner") == ADDON_OWNER_MARKETPLACE;
-        for member in ["owner", "publisher"] {
-            let expected = if sold_on_marketplace {
-                published[member].clone()
-            } else {
-                serde_json::Value::Null
-            };
+        for member in ["owner", "publisher", "marketplaceInformation"] {
             assert_eq!(
                 created.addon()[member],
-                expected,
-                "case {addon_name:?}: expected {member} {expected:?}, got {:?}",
+                serde_json::Value::Null,
+                "case {addon_name:?}: an installed add-on reports no {member}, got {:?}",
                 created.addon()[member]
             );
             assert_eq!(
                 described.addon()[member],
-                expected,
-                "case {addon_name:?}: the installed {member} reads back unchanged, got {:?}",
+                serde_json::Value::Null,
+                "case {addon_name:?}: a read of the add-on reports no {member} either, \
+                 got {:?}",
                 described.addon()[member]
             );
         }
+
+        // The other side of the rule: the metadata the add-on does not report is
+        // the metadata the catalog publishes for that same name.
+        assert!(
+            !string_member(&published, "publisher").is_empty(),
+            "case {addon_name:?}: the catalog publishes who builds the add-on, got {published:?}"
+        );
+        let sold_on_marketplace = string_member(&published, "owner") == ADDON_OWNER_MARKETPLACE;
         let listing = published
             .get("marketplaceInformation")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        assert_eq!(
-            described.addon()["marketplaceInformation"],
-            listing,
-            "case {addon_name:?}: an installed add-on reports the Marketplace listing the \
-             catalog publishes for it, got {:?} against {listing:?}",
-            described.addon()["marketplaceInformation"]
-        );
         if sold_on_marketplace {
             assert!(
                 !string_member(&listing, "productId").is_empty(),
-                "case {addon_name:?}: a Marketplace add-on is installed with its listing, got \
-                 {listing:?}"
+                "case {addon_name:?}: the catalog publishes the listing a Marketplace add-on \
+                 is sold through, got {listing:?}"
             );
         } else {
             assert!(
                 listing.is_null(),
-                "case {addon_name:?}: an add-on that is not sold on Marketplace carries no \
-                 listing, got {listing:?}"
+                "case {addon_name:?}: an add-on that is not sold on Marketplace is published \
+                 with no listing, got {listing:?}"
             );
         }
     }

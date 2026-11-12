@@ -2894,6 +2894,17 @@ pub struct AddonInstallOutcome {
     /// The `AddonHealth$issues` it settles with: EMPTY for an install that came
     /// up, one issue naming what the cluster could not give it otherwise.
     pub issues: Vec<AddonIssue>,
+    /// Whether the install is settled by the CALL that asks for it rather than
+    /// by the clock.
+    ///
+    /// An install that reaches the cluster is asynchronous, so the add-on
+    /// reports `CREATING` until [`ADDON_ACTIVATION_DELAY`] has passed. An
+    /// install the service never starts — one whose precondition is already
+    /// decided before anything is applied, so there is no work for the cluster
+    /// to do and no later instant at which the answer could change — is terminal
+    /// at that call, and `CreateAddon` answers with the add-on already in this
+    /// status, carrying these issues (see [`Self::refused`]).
+    pub settled_at_the_call: bool,
 }
 
 impl AddonInstallOutcome {
@@ -2903,6 +2914,7 @@ impl AddonInstallOutcome {
         Self {
             status: ADDON_STATUS_ACTIVE.to_string(),
             issues: Vec::new(),
+            settled_at_the_call: false,
         }
     }
 
@@ -2912,6 +2924,22 @@ impl AddonInstallOutcome {
         Self {
             status: ADDON_STATUS_CREATE_FAILED.to_string(),
             issues: vec![issue],
+            settled_at_the_call: false,
+        }
+    }
+
+    /// The outcome of an install that is never STARTED: a precondition of the
+    /// add-on's own — not of the cluster — is unmet, so nothing of it is applied
+    /// and no span of the clock can change the answer.
+    ///
+    /// It settles the add-on at the call that asked for it: the install is
+    /// ACCEPTED (the add-on is created, with the issue that says what is
+    /// missing, so a client can read it off the add-on and remediate), and there
+    /// is no `CREATING` to report because no install is under way.
+    pub fn refused(issue: AddonIssue) -> Self {
+        Self {
+            settled_at_the_call: true,
+            ..Self::failed(issue)
         }
     }
 
@@ -2921,6 +2949,7 @@ impl AddonInstallOutcome {
         Self {
             status: ADDON_STATUS_DEGRADED.to_string(),
             issues: vec![issue],
+            settled_at_the_call: false,
         }
     }
 }
@@ -2969,16 +2998,6 @@ pub struct AddonRecord {
     /// The Kubernetes namespace this add-on is installed into: the one the
     /// request's `namespaceConfig` named, or [`ADDON_DEFAULT_NAMESPACE`].
     pub namespace: String,
-    /// Who publishes and who owns the add-on this record installs: the
-    /// catalog's own `publisher` and `owner` for that add-on name
-    /// ([`AddonCatalogRecord`]), so the metadata an installed add-on reports is
-    /// the metadata `DescribeAddonVersions` publishes for it.
-    pub publisher: String,
-    pub owner: String,
-    /// The AWS Marketplace listing the add-on is subscribed through, for an
-    /// add-on the catalog publishes one for; `None` for every add-on that is
-    /// not listed on Marketplace at all.
-    pub marketplace_information: Option<MarketplaceInformation>,
     pub client_request_token: Option<String>,
     /// The change the asynchronous update this add-on is taking puts on it when
     /// the clock completes that update; `None` when the add-on is taking none.
@@ -3131,22 +3150,21 @@ impl AddonRecord {
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect(),
             ),
-            // Who publishes and owns the add-on, and the AWS Marketplace listing
-            // it is subscribed through, are reported for an add-on bought through
-            // the Marketplace — the add-on whose `owner` and `publisher` identify
-            // the listing and the vendor behind it. An add-on Amazon EKS or the
-            // community publishes reports none of the three: the recorded service
-            // answers a read of one with all three ABSENT (every recorded add-on
-            // read of an Amazon EKS-built add-on in the corpus this emulator is
-            // replayed against does), and `DescribeAddonVersions` is where the
-            // catalog states who publishes and owns each published add-on.
-            publisher: (self.owner == ADDON_OWNER_MARKETPLACE).then(|| self.publisher.clone()),
-            owner: (self.owner == ADDON_OWNER_MARKETPLACE).then(|| self.owner.clone()),
+            // WHO PUBLISHES AND OWNS the add-on, and the AWS Marketplace listing
+            // it is sold through, are what the CATALOG states about an add-on
+            // name (`AddonInfo$publisher` / `$owner` / `$marketplaceInformation`,
+            // which `DescribeAddonVersions` publishes), not what an installed
+            // add-on reports: the recorded service answers every read of an
+            // installed add-on with all three ABSENT, an Amazon EKS-built add-on
+            // and an add-on bought through the Marketplace alike. An `Addon` is
+            // the add-on's INSTALLED state, so a client that wants the metadata
+            // reads the catalog for the name it installed.
+            publisher: None,
+            owner: None,
             configuration_values: self.configuration_values.clone(),
-            // "Information about an Amazon EKS add-on from the Amazon Web
-            // Services Marketplace": the listing the catalog publishes for this
-            // add-on, which an Amazon EKS-managed add-on has none of.
-            marketplace_information: self.marketplace_information.clone(),
+            // See `publisher` above: the listing is the catalog's, not the
+            // installed add-on's.
+            marketplace_information: None,
             pod_identity_associations: {
                 let owned: Vec<String> = self
                     .pod_identity_association_arns
