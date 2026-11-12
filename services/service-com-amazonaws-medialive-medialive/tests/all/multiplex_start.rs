@@ -248,11 +248,13 @@ async fn a_start_touches_only_the_multiplex_it_names() {
 }
 
 /// Rule: a multiplex runs from the stopped state only, so a start sent while it
-/// is in any other state is refused with a 409 `ConflictException` naming the
-/// state it is in, and moves nothing — a start is never a no-op.
+/// is in any other state is refused with a 409 `ConflictException` carrying this
+/// service's wording for that class — which names the multiplex and the state it
+/// is in — and moves nothing: a start is never a no-op.
 ///
 /// The rows span every state this slice can put a multiplex in besides the
-/// stopped one.
+/// stopped one. The states an accepted delete puts it in are refused the same
+/// way, on the recorded evidence `crate::multiplex_start_after_delete` pins.
 #[tokio::test]
 async fn a_multiplex_starts_only_from_the_stopped_state() {
     // (case, the state the multiplex is in when the start is sent)
@@ -303,9 +305,10 @@ async fn a_multiplex_starts_only_from_the_stopped_state() {
             "case {case:?}: expected ConflictException, got {body}"
         );
         let message = error_message(&body);
-        assert!(
-            message.contains(&id) && message.contains(state) && message.contains("IDLE"),
-            "case {case:?}: expected the refusal to name the multiplex, its state and the state a start needs, got {body}"
+        assert_eq!(
+            message,
+            format!("Multiplex {id} cannot be started while in {state} state"),
+            "case {case:?}: expected the refusal to name the multiplex and the state it is in, got {body}"
         );
 
         // The refused start moved nothing.

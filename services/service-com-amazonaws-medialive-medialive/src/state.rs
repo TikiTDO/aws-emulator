@@ -100,6 +100,19 @@
 //! and never with the state conflict a resource that still exists gets, while a
 //! read goes on reporting the record in its terminal state.
 //!
+//! The MULTIPLEX is the resource whose own recorded behaviour differs, so its
+//! mutations are NOT written over that lookup: its record stays RESOLVABLE after
+//! the delete is accepted, and the real service goes on judging a call against
+//! the state that record is in. In the
+//! `medialive.multiplex-start-without-programs-rejected` fixture the multiplex is
+//! already gone from `ListMultiplexes` while a `StartMultiplex` sent straight
+//! afterwards is refused with the state conflict naming its `DELETING` state, not
+//! with a not-found answer. So `StartMultiplex`, `UpdateMultiplex` and
+//! `DeleteMultiplex` resolve their `MultiplexId` across the whole
+//! [`ComAmazonawsMedialiveMedialiveState::multiplexes`] store and answer the
+//! conflict their own state rule makes, keeping their modelled not-found error
+//! for an id this account holds no record for at all.
+//!
 //! The INPUT SECURITY GROUP is the one resource here whose delete is a SOFT
 //! delete: it only drops the group from `ListInputSecurityGroups`, leaving the
 //! group individually addressable AND still mutable. So a mutation of a group
@@ -3721,15 +3734,24 @@ pub fn channel_not_startable_message(channel_id: &str, state: &str) -> String {
     )
 }
 
-/// The message a multiplex start refused on the multiplex's state carries, with
-/// the same shape and for the same reason as
-/// [`channel_not_startable_message`]: `StartMultiplex` and `BatchStart` refuse
-/// the same multiplex, so they cannot word the refusal two ways.
+/// The message a multiplex start refused on the multiplex's state carries: the
+/// multiplex the request named and the state its record is in, which are this
+/// class's two variable parts — the first taken from the request, the second
+/// from the stored record.
+///
+/// The multiplex family words this refusal in its OWN template rather than in
+/// the channel family's ([`channel_not_startable_message`]), because that is the
+/// wording the service answers it with: the recorded refusal of the
+/// `medialive.multiplex-start-without-programs-rejected` fixture, sent while the
+/// record read `DELETING`, is "Multiplex <id> cannot be started while in
+/// DELETING state". Nothing else is interpolated — the state a start does need
+/// is not part of the sentence.
+///
+/// ONE helper, for the same reason as [`channel_not_startable_message`]:
+/// `StartMultiplex` and `BatchStart` refuse the same multiplex, so they cannot
+/// word the refusal two ways.
 pub fn multiplex_not_startable_message(multiplex_id: &str, state: &str) -> String {
-    format!(
-        "Multiplex {multiplex_id} is in state {state} and can only be started from {}",
-        multiplex_state::IDLE
-    )
+    format!("Multiplex {multiplex_id} cannot be started while in {state} state")
 }
 
 /// The message a create or a rename refused because the account already holds a

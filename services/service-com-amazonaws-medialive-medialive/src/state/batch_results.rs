@@ -17,9 +17,13 @@
 //! * The classification a failed entry's `Code` carries ("Error code for the
 //!   failed operation"): the wire error code of the refusal the SINGLE-resource
 //!   call for that resource answers with, which on this service is the modelled
-//!   exception's shape name — and an id no resource of that kind has, including
-//!   one whose delete has already been accepted, is NOT FOUND before it is
-//!   anything else.
+//!   exception's shape name — so an id no resource of that kind has is NOT
+//!   FOUND, and what an id whose delete has already been accepted is reported as
+//!   is whatever that resource's own single-resource call answers for it: the
+//!   channel family drops such an id out of resolution and reports it NOT FOUND
+//!   before any state rule, while a multiplex's record stays resolvable and its
+//!   start keeps the state conflict naming the tear-down state (see
+//!   [`super::MultiplexStartRefusal`] for the recorded evidence).
 //! * The id-count bound. The model targets every Batch request's id lists at
 //!   plain `__listOf__string` with no length constraint, so nothing else bounds
 //!   them, and each named id costs a derivation over the stores plus one entry
@@ -78,8 +82,12 @@ pub mod failure_code {
     /// Neither an existing resource nor one a caller may still act on —
     /// `NotFoundException` (404), which every single-resource delete, start and
     /// stop in this service models: no resource of that kind has that id, or the
-    /// one it had has been deleted. Checked BEFORE any state rule, so a resource
-    /// the account no longer holds is never reported as a state conflict.
+    /// one it had has been deleted and its family's delete takes the record out
+    /// of resolution. For the channel family that check comes BEFORE any state
+    /// rule, so a channel the account no longer holds is never reported as a
+    /// state conflict; a multiplex's record is still resolvable after its delete
+    /// has been accepted, so its own refusal is the [`CONFLICT`] its state rule
+    /// makes.
     pub const NOT_FOUND: &str = "NotFoundException";
     /// The resource still exists but its current state does not allow the call —
     /// `ConflictException` (409), modelled by `DeleteChannel`, `DeleteInput`,

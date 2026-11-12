@@ -311,6 +311,9 @@ mod multiplex_programs;
 #[path = "all/multiplex_start.rs"]
 mod multiplex_start;
 
+#[path = "all/multiplex_start_after_delete.rs"]
+mod multiplex_start_after_delete;
+
 #[path = "all/multiplex_stop.rs"]
 mod multiplex_stop;
 

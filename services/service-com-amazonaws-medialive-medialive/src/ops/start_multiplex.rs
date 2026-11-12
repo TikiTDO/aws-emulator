@@ -196,8 +196,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 /// start does not accept is the resource being in a condition that prevents the
 /// action, which is the 409 `ConflictException` this operation models — the same
 /// answer `StartChannel` gives a channel it cannot start. Each message names the
-/// multiplex, its state and the state a start needs, so the caller can fix the
-/// call from that text alone.
+/// multiplex and, for the state refusal, the state its record is in, so the
+/// caller can tell from that text alone which multiplex was refused and why.
+///
+/// A multiplex whose delete has been accepted is one of those states, not a
+/// not-found: its record stays resolvable, and the real service refuses the
+/// start on the state the tear-down is in (the recorded evidence is cited on
+/// [`crate::state::MultiplexStartRefusal`]).
 fn refused(refusal: crate::state::MultiplexStartRefusal, multiplex_id: &str) -> StartMultiplexError {
     match refusal {
         crate::state::MultiplexStartRefusal::NotFound => {

@@ -268,6 +268,14 @@ fn start_channel(
 /// rather than treated as a no-op, and an accepted start puts it in `STARTING`,
 /// owing the `RUNNING` the clock then makes due. This is the asymmetry with
 /// `BatchStop`, which a multiplex that is not running answers as a no-op.
+///
+/// The tear-down states are among those "any other" ones rather than a
+/// not-found: a multiplex's record stays resolvable once its delete has been
+/// accepted, so a start of it is the state conflict naming that state, which is
+/// what the real service answers (the recorded evidence is cited on
+/// [`crate::state::MultiplexStartRefusal`]). That is where this arm differs from
+/// the channel one above, whose family's delete takes the record out of
+/// resolution.
 fn start_multiplex(
     state: &mut State,
     id: &str,

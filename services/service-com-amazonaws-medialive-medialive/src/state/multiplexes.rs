@@ -402,6 +402,15 @@ pub enum MultiplexStopRefusal {
 
 /// Why [`ComAmazonawsMedialiveMedialiveState::start_multiplex`] started
 /// nothing. Each variant is one refusal `StartMultiplex` models.
+///
+/// Two variants, because the id's resolution and the record's state are the only
+/// things a start is judged on, and the accepted delete is NOT a third class
+/// here: a multiplex's record stays resolvable once its delete has been
+/// accepted, and the real service goes on refusing a start of it on the state
+/// that record is in (the recorded refusal of the
+/// `medialive.multiplex-start-without-programs-rejected` fixture, sent while the
+/// record read `DELETING`), so the tear-down states reach
+/// [`Self::NotStartable`] like every other state a start does not accept.
 #[derive(Debug)]
 pub enum MultiplexStartRefusal {
     /// No multiplex in the store has the id the request named, so there is
