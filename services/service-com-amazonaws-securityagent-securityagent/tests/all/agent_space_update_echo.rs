@@ -365,11 +365,21 @@ async fn an_unresolvable_agent_space_is_refused_with_the_services_fixed_sentence
     // Ids that resolve to nothing, differing along FORM: the shape of a minted id with a
     // value the per-process counter cannot reach, a readable label, another script, a near
     // miss of the stored id, and the stored id with a suffix.
+    //
+    // The near miss differs from the stored id in its FIRST character, whatever that
+    // character is: a minted id is hex, so the replacement is another hex digit and the row
+    // stays a well-formed id that names no space. Substituting a fixed digit would name the
+    // stored space itself whenever the mint happens to start with that digit.
+    let near_miss = {
+        let first = stored.chars().next().expect("a minted id is not empty");
+        let replacement = if first == '0' { '1' } else { '0' };
+        format!("{replacement}{}", &stored[1..])
+    };
     let unknown_ids: Vec<(&str, String)> = vec![
         ("32 hex f's, a value the id counter cannot reach", "f".repeat(32)),
         ("a readable label", "no-such-agent-space".to_string()),
         ("an id in another script", "неизвестно".to_string()),
-        ("a near miss of the stored id", format!("0{}", &stored[1..])),
+        ("a near miss of the stored id", near_miss),
         ("the stored id with a suffix", format!("{stored}0")),
     ];
 

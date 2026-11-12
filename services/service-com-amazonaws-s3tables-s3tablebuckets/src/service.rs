@@ -62,6 +62,10 @@ use std::sync::Arc;
 /// this model does not declare.
 mod request_layer;
 
+/// The Iceberg REST catalog this service serves beside its control plane, at a
+/// path space the model binds no operation to.
+mod iceberg_rest;
+
 /// The one client-input error this service models: `BadRequestException`,
 /// `errorKind` client, `httpError` 400, one `message` member
 /// (`smithy_query(query="shape", shape="BadRequestException")`). It is a
@@ -203,6 +207,10 @@ pub struct EmulatedService<Eng: Send + Sync + 'static> {
     /// because [`Service::override_operation`] hands back a borrow of one of its
     /// own operations.
     unreadable_body: request_layer::UnreadableBody<Eng>,
+    /// Serves the Iceberg REST catalog's table endpoint (see [`iceberg_rest`]).
+    /// Held on the service for the same reason as the layer above: the seam that
+    /// selects it hands back a borrow of one of the service's own operations.
+    iceberg_catalog: iceberg_rest::IcebergCatalog<Eng>,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -211,9 +219,10 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// operation's behaviour lives in that operation's own `impl Operation`.
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
-            entry: crate::ServiceDefinition::new(engine),
+            entry: crate::ServiceDefinition::new(Arc::clone(&engine)),
             protocol: service_common::date_time_json::DateTimeRestJson::new(),
             unreadable_body: request_layer::UnreadableBody::new(),
+            iceberg_catalog: iceberg_rest::IcebergCatalog::new(engine),
         }
     }
 }
@@ -255,6 +264,15 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // table; the overridden protocol below carries none (a protocol's routes
         // are read by `routing_key` alone) and is what READS the body, exactly as
         // the generated walk reads it.
+        // The Iceberg REST catalog's table endpoint is addressed by a path the
+        // model binds no operation to, so the generated routing table cannot
+        // name it and the request would be answered as an operation this
+        // emulator does not implement. It IS served — by this service, out of
+        // the same table records the control plane reads and writes — so a
+        // request that addresses it resolves to the catalog operation.
+        if iceberg_rest::catalog_request_of(req.method(), req.uri()).is_some() {
+            return Some(&self.iceberg_catalog);
+        }
         let routing = self.entry.protocol();
         let codec: &dyn ServerHttpProtocol = &self.protocol;
         if let Ok(key) = routing.routing_key(req) {

@@ -445,6 +445,23 @@ impl Emulator {
         .await
     }
 
+    /// `ListNamespaces`: the bucket's ARN is a path label and `prefix`,
+    /// `continuationToken` and `maxNamespaces` travel as query members.
+    pub async fn list_namespaces(
+        &self,
+        region: &str,
+        arn: &str,
+        query: &[(&str, String)],
+    ) -> Reply {
+        self.call(
+            "GET",
+            &format!("/namespaces/{}{}", encode(arn), query_string(query)),
+            region,
+            None,
+        )
+        .await
+    }
+
     pub async fn delete_namespace(&self, region: &str, arn: &str, namespace: &str) -> Reply {
         self.call(
             "DELETE",
@@ -554,6 +571,64 @@ impl Emulator {
         .await
     }
 
+    /// The Iceberg REST catalog's table endpoint for one table: the warehouse
+    /// prefix is the table bucket's ARN, so its `:` and `/` travel encoded
+    /// exactly as a path label's do.
+    pub async fn catalog_table(
+        &self,
+        method: &str,
+        region: &str,
+        arn: &str,
+        namespace: &str,
+        table: &str,
+        body: Option<&Value>,
+    ) -> Reply {
+        self.call(
+            method,
+            &catalog_table_path(arn, namespace, table),
+            region,
+            body,
+        )
+        .await
+    }
+
+    /// The catalog's `LoadTable`: the table's Iceberg metadata document.
+    pub async fn load_table(
+        &self,
+        region: &str,
+        arn: &str,
+        namespace: &str,
+        table: &str,
+    ) -> Reply {
+        self.catalog_table("GET", region, arn, namespace, table, None)
+            .await
+    }
+
+    /// The catalog's table existence check.
+    pub async fn table_exists(
+        &self,
+        region: &str,
+        arn: &str,
+        namespace: &str,
+        table: &str,
+    ) -> Reply {
+        self.catalog_table("HEAD", region, arn, namespace, table, None)
+            .await
+    }
+
+    /// The catalog's commit: the requirements and updates travel in the body.
+    pub async fn commit_table(
+        &self,
+        region: &str,
+        arn: &str,
+        namespace: &str,
+        table: &str,
+        request: &Value,
+    ) -> Reply {
+        self.catalog_table("POST", region, arn, namespace, table, Some(request))
+            .await
+    }
+
     /// `RenameTable`: the bucket's ARN, the namespace and the table's CURRENT
     /// name are path labels, and the coordinates the table moves to —
     /// `newNamespaceName`, `newName` — travel in the body with the caller's
@@ -597,6 +672,16 @@ pub fn encode(value: &str) -> String {
         .replace('/', "%2F")
         .replace('&', "%26")
         .replace('=', "%3D")
+}
+
+/// The path of the Iceberg REST catalog's table endpoint for one table.
+pub fn catalog_table_path(arn: &str, namespace: &str, table: &str) -> String {
+    format!(
+        "/iceberg/v1/{}/namespaces/{}/tables/{}",
+        encode(arn),
+        encode(namespace),
+        encode(table)
+    )
 }
 
 /// The query string for `parameters`, or the empty string when there are none.

@@ -190,19 +190,15 @@ const ICEBERG_PRIMITIVE_TYPES: &[&str] = &[
 
 /// The nested type constructors an Iceberg column type may be spelled with: a
 /// struct, a list or a map, each parameterized by the types it holds. Their
-/// contents are not read apart here — the schema a create carries is written to
-/// the table's metadata file, which no operation of this service reads back — so
-/// a nested type is accepted on its constructor.
+/// contents are not read apart here — the schema a create carries is stored as
+/// the table's metadata document and handed back to a catalog read as it was
+/// declared — so a nested type is accepted on its constructor.
 const ICEBERG_NESTED_TYPES: &[&str] = &["struct", "list", "map"];
 
 /// The transforms a partition field or a sort field may name, as the Apache
 /// Iceberg table specification names them. `bucket[N]` and `truncate[W]` carry a
 /// width in their spelling and are checked by [`parameterized_transform`].
 const ICEBERG_TRANSFORMS: &[&str] = &["identity", "year", "month", "day", "hour", "void"];
-
-/// The order id Iceberg gives the unsorted sort order, which is the one order
-/// that names no field to sort by.
-const UNSORTED_ORDER_ID: i32 = 0;
 
 /// The widest `decimal` precision Iceberg admits, and the narrowest.
 const DECIMAL_PRECISION: std::ops::RangeInclusive<u32> = 1..=38;
@@ -337,21 +333,22 @@ fn schema_is_creatable(schema: &IcebergSchema) -> bool {
 }
 
 /// Whether a `type` document of a version 2 schema field is a type an Iceberg
-/// column may have: the text of a primitive, or a nested type stated as an
-/// object naming its constructor.
+/// column may have: a document within the bounds [`document_value`] reads one
+/// under, and then the text of a primitive or an object naming its constructor.
+///
+/// Read through [`type_document`], so the document is walked under those bounds
+/// and judged in the form it is stored in rather than twice in two forms.
 fn document_type_is_declarable(declared: &::aws_smithy_types::Document) -> bool {
-    match declared {
-        ::aws_smithy_types::Document::String(text) => column_type_is_declarable(text),
-        ::aws_smithy_types::Document::Object(members) => members
+    match type_document(declared) {
+        None => false,
+        Some(::serde_json::Value::String(text)) => column_type_is_declarable(&text),
+        Some(::serde_json::Value::Object(members)) => members
             .get("type")
-            .is_some_and(|named| match named {
-                ::aws_smithy_types::Document::String(text) => {
-                    ICEBERG_NESTED_TYPES.contains(&text.as_str())
-                        || column_type_is_declarable(text)
-                }
-                _ => false,
+            .and_then(::serde_json::Value::as_str)
+            .is_some_and(|text| {
+                ICEBERG_NESTED_TYPES.contains(&text) || column_type_is_declarable(text)
             }),
-        _ => false,
+        Some(_) => false,
     }
 }
 
@@ -366,7 +363,11 @@ fn schema_v2_is_creatable(schema: &IcebergSchemaV2) -> bool {
     // by scanning would cost their product.
     let ids: ::std::collections::BTreeSet<i32> =
         schema.fields.iter().map(|field| field.id).collect();
-    names_are_distinct(schema.fields.iter().map(|field| field.name.as_str()))
+    // A schema is REFERRED to by its id (the table names the one it writes
+    // under), so a stated id is an identifier and not a count: the same rule a
+    // partition spec's `spec_id` follows.
+    schema.schema_id.is_none_or(|id| id >= 0)
+        && names_are_distinct(schema.fields.iter().map(|field| field.name.as_str()))
         && ids_are_distinct(schema.fields.iter().map(|field| field.id))
         && schema
             .fields
@@ -414,13 +415,13 @@ fn sort_order_is_creatable(
     write_order: &IcebergSortOrder,
     column_ids: &::std::collections::BTreeSet<i32>,
 ) -> bool {
-    if write_order.order_id < UNSORTED_ORDER_ID {
+    if write_order.order_id < crate::state::UNSORTED_ORDER_ID {
         return false;
     }
     if write_order.fields.is_empty() {
         return true;
     }
-    write_order.order_id != UNSORTED_ORDER_ID
+    write_order.order_id != crate::state::UNSORTED_ORDER_ID
         && keys_are_distinct(
             write_order.fields.iter().map(|field| {
                 (
@@ -492,6 +493,243 @@ fn metadata_describes_a_table(metadata: &TableMetadata) -> bool {
         return false;
     }
     true
+}
+
+/// The deepest a column type document may nest, and the most nodes one may
+/// carry.
+///
+/// A version 2 column states its type as a free-form document
+/// (`smithy_query(query="shape", shape="SchemaV2Field")`), so its depth and its
+/// size are the CALLER's: both are bounded before the document is walked, so a
+/// deeply nested or enormous type cannot exhaust the stack or the store. CHOSEN,
+/// not Iceberg-published figures: what matters is that the walk is BOUNDED, and
+/// a document past either bound is the client input this operation refuses with
+/// its invalid-metadata sentence. A nested Iceberg type nests one level per
+/// `struct`, `list` or `map` constructor, so a type a table is really created
+/// with sits far inside this depth.
+const MAX_TYPE_DEPTH: usize = 32;
+const MAX_TYPE_NODES: usize = 10_000;
+
+/// A column type document as JSON: the form the table's metadata document
+/// carries it in, and the form it was declared in. `None` when the document
+/// nests deeper than [`MAX_TYPE_DEPTH`] or carries more than [`MAX_TYPE_NODES`]
+/// nodes, which is a document this service will not create a table from.
+///
+/// A version 2 column declares its type as a free-form document, because a
+/// nested type is an object rather than a name; it is stored as declared, so a
+/// catalog read answers with the type the table was created with rather than
+/// with this service's reading of it.
+///
+/// `depth` is this node's nesting and `budget` the nodes left to read, so the
+/// recursion is bounded by both however the caller nested its document.
+fn document_value(
+    document: &::aws_smithy_types::Document,
+    depth: usize,
+    budget: &mut usize,
+) -> Option<::serde_json::Value> {
+    use ::aws_smithy_types::{Document, Number};
+
+    if depth > MAX_TYPE_DEPTH || *budget == 0 {
+        return None;
+    }
+    *budget -= 1;
+    Some(match document {
+        Document::Null => ::serde_json::Value::Null,
+        Document::Bool(flag) => ::serde_json::Value::from(*flag),
+        Document::String(text) => ::serde_json::Value::from(text.clone()),
+        Document::Number(Number::PosInt(number)) => ::serde_json::Value::from(*number),
+        Document::Number(Number::NegInt(number)) => ::serde_json::Value::from(*number),
+        Document::Number(Number::Float(number)) => ::serde_json::Value::from(*number),
+        Document::Array(elements) => ::serde_json::Value::Array(
+            elements
+                .iter()
+                .map(|element| document_value(element, depth + 1, budget))
+                .collect::<Option<Vec<::serde_json::Value>>>()?,
+        ),
+        Document::Object(members) => ::serde_json::Value::Object(
+            members
+                .iter()
+                .map(|(name, value)| {
+                    document_value(value, depth + 1, budget).map(|value| (name.clone(), value))
+                })
+                .collect::<Option<::serde_json::Map<String, ::serde_json::Value>>>()?,
+        ),
+    })
+}
+
+/// The whole type document as JSON, read from its root under the bounds above.
+fn type_document(declared: &::aws_smithy_types::Document) -> Option<::serde_json::Value> {
+    let mut budget = MAX_TYPE_NODES;
+    document_value(declared, 0, &mut budget)
+}
+
+/// The schema the create's metadata declares, as this service stores it.
+///
+/// Either form of the member declares the same thing — the table's columns — so
+/// both are stored as one schema record. The field ids are the ones the request
+/// states, with every column that states none numbered by the service in
+/// declaration order ([`crate::state::assigned_ids`]); a document
+/// declaring no schema declares a table with no columns, which an engine adds
+/// to later.
+fn stored_schema(iceberg: &IcebergMetadata) -> Option<crate::state::IcebergSchemaRecord> {
+    use crate::state::{assigned_ids, IcebergField, IcebergSchemaRecord, INITIAL_SCHEMA_ID};
+
+    /// The id the first column of a schema takes when it states none: Iceberg
+    /// numbers a schema's columns from one.
+    const FIRST_COLUMN_ID: i32 = 1;
+
+    if let Some(schema) = &iceberg.schema {
+        let stated: Vec<Option<i32>> = schema.fields.iter().map(|field| field.id).collect();
+        let fields = schema
+            .fields
+            .iter()
+            .zip(assigned_ids(&stated, FIRST_COLUMN_ID))
+            .map(|(field, id)| IcebergField {
+                id,
+                name: field.name.clone(),
+                field_type: ::serde_json::Value::from(field.r#type.clone()),
+                required: field.required,
+                doc: None,
+            })
+            .collect();
+        return Some(IcebergSchemaRecord {
+            schema_id: INITIAL_SCHEMA_ID,
+            fields,
+            identifier_field_ids: Vec::new(),
+        });
+    }
+    if let Some(schema) = &iceberg.schema_v2 {
+        // A column type past the bounds [`type_document`] reads one under is a
+        // document this service does not create a table from, which is what the
+        // `None` says: the create refuses it rather than storing a reading of
+        // its own.
+        let fields = schema
+            .fields
+            .iter()
+            .map(|field| {
+                Some(IcebergField {
+                    // The version 2 shape makes the field id `@required`
+                    // (`smithy_query(query="shape", shape="SchemaV2Field")`), so
+                    // every column of such a schema states its own.
+                    id: field.id,
+                    name: field.name.clone(),
+                    field_type: type_document(&field.r#type)?,
+                    required: field.required,
+                    doc: field.doc.clone(),
+                })
+            })
+            .collect::<Option<Vec<IcebergField>>>()?;
+        return Some(IcebergSchemaRecord {
+            schema_id: schema.schema_id.unwrap_or(INITIAL_SCHEMA_ID),
+            fields,
+            identifier_field_ids: schema.identifier_field_ids.clone().unwrap_or_default(),
+        });
+    }
+    Some(IcebergSchemaRecord {
+        schema_id: INITIAL_SCHEMA_ID,
+        fields: Vec::new(),
+        identifier_field_ids: Vec::new(),
+    })
+}
+
+/// The table's first metadata document, as this service stores it: what the
+/// create's `metadata` member describes, under the identity the create minted
+/// for the table.
+///
+/// `table_uuid` is the table's own minted id — the last segment of its ARN —
+/// which is what identifies the table for the life of the record whatever it is
+/// renamed to, so it is the UUID the table's metadata carries.
+///
+/// `None` for a document this service will not create a table from, which
+/// [`metadata_describes_a_table`] has already refused before anything is
+/// minted: the two read the same document under the same bounds, so the create
+/// stores a table's description or refuses it, never a reading of its own.
+fn stored_metadata(
+    metadata: &TableMetadata,
+    table_uuid: &str,
+    warehouse_location: &str,
+    at: ::std::time::SystemTime,
+) -> Option<crate::state::IcebergTableMetadata> {
+    use crate::state::{
+        assigned_ids, epoch_millis, IcebergPartitionFieldRecord, IcebergPartitionSpecRecord,
+        IcebergSortFieldRecord, IcebergSortOrderRecord, IcebergTableMetadata,
+        FIRST_PARTITION_FIELD_ID, INITIAL_SPEC_ID, UNSORTED_ORDER_ID,
+    };
+
+    let TableMetadata::Iceberg(iceberg) = metadata;
+    let schema = stored_schema(iceberg)?;
+    // The spec the create declares, else the empty spec of a table that
+    // partitions nothing. A partition field that states no id of its own is
+    // numbered by the service, from where the specification starts numbering
+    // them and past every id a sibling field stated — the same rule the
+    // schema's columns are numbered by.
+    let partition_spec = match &iceberg.partition_spec {
+        None => IcebergPartitionSpecRecord {
+            spec_id: INITIAL_SPEC_ID,
+            fields: Vec::new(),
+        },
+        Some(spec) => {
+            let stated: Vec<Option<i32>> = spec.fields.iter().map(|field| field.field_id).collect();
+            IcebergPartitionSpecRecord {
+                spec_id: spec.spec_id.unwrap_or(INITIAL_SPEC_ID),
+                fields: spec
+                    .fields
+                    .iter()
+                    .zip(assigned_ids(&stated, FIRST_PARTITION_FIELD_ID))
+                    .map(|(field, field_id)| IcebergPartitionFieldRecord {
+                        source_id: field.source_id,
+                        field_id,
+                        name: field.name.clone(),
+                        transform: field.transform.clone(),
+                    })
+                    .collect(),
+            }
+        }
+    };
+    // Every table writes in the unsorted order unless it declares one of its
+    // own, so the unsorted order is always among the table's orders and the
+    // declared one — the order the table writes in — is the default.
+    let mut sort_orders = vec![IcebergSortOrderRecord::unsorted()];
+    let mut default_sort_order_id = UNSORTED_ORDER_ID;
+    if let Some(order) = iceberg
+        .write_order
+        .as_ref()
+        .filter(|order| !order.fields.is_empty())
+    {
+        sort_orders.push(IcebergSortOrderRecord {
+            order_id: order.order_id,
+            fields: order
+                .fields
+                .iter()
+                .map(|field| IcebergSortFieldRecord {
+                    source_id: field.source_id,
+                    transform: field.transform.clone(),
+                    direction: field.direction.clone(),
+                    null_order: field.null_order.clone(),
+                })
+                .collect(),
+        });
+        default_sort_order_id = order.order_id;
+    }
+    Some(IcebergTableMetadata {
+        table_uuid: table_uuid.to_string(),
+        location: warehouse_location.to_string(),
+        last_updated_ms: epoch_millis(at),
+        current_schema_id: schema.schema_id,
+        schemas: vec![schema],
+        default_spec_id: partition_spec.spec_id,
+        partition_specs: vec![partition_spec],
+        sort_orders,
+        default_sort_order_id,
+        properties: iceberg
+            .properties
+            .iter()
+            .flatten()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+        // The file this document is written to is the table's first.
+        metadata_version: 0,
+    })
 }
 
 /// The `CreateTable` operation.
@@ -583,12 +821,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         let tags: ::std::collections::BTreeMap<String, String> =
             input.tags.into_iter().flatten().collect();
-        // A table carries a metadata file only once one exists for it: the create
-        // writes the first one when the request describes the table's metadata,
-        // and `UpdateTableMetadataLocation` is what moves it afterwards. The
-        // schema itself is the metadata file's content, which no operation in
-        // this service reads back.
-        let has_metadata = input.metadata.is_some();
 
         let mut store = state.lock();
 
@@ -640,17 +872,34 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let version_token = store.mint_version_token();
         let table_arn = crate::state::table_arn(&bucket_arn, &table_id);
         let warehouse_location = crate::state::warehouse_location(&table_id);
-        let metadata_location = if has_metadata {
-            let metadata_id = store.mint_metadata_id();
-            Some(crate::state::metadata_location(
-                &warehouse_location,
-                &metadata_id,
-            ))
-        } else {
-            None
-        };
-        let account = ::engine::emulator_account_id().to_string();
         let now = ::std::time::SystemTime::now();
+        // A table carries a metadata file only once one exists for it: the create
+        // writes the first one when the request describes the table's metadata,
+        // and `UpdateTableMetadataLocation` is what moves it afterwards. What
+        // that file holds is the table's own description, stored with it, so the
+        // Iceberg catalog reads the table back as it was created and the
+        // maintenance configuration can be judged against it.
+        let iceberg = match input.metadata.as_ref() {
+            None => None,
+            // The document was read once before anything was looked up or
+            // minted ([`metadata_describes_a_table`]), so a document this
+            // refuses is one that read differently the second time; it is
+            // refused as the client input it is rather than stored partly.
+            Some(metadata) => Some(
+                stored_metadata(metadata, &table_id, &warehouse_location, now).ok_or_else(
+                    || bad_request(crate::state::INVALID_METADATA_MESSAGE.to_string()),
+                )?,
+            ),
+        };
+        let metadata_location = iceberg.as_ref().map(|metadata| {
+            let metadata_id = store.mint_metadata_id();
+            crate::state::metadata_location(
+                &warehouse_location,
+                metadata.metadata_version,
+                &metadata_id,
+            )
+        });
+        let account = ::engine::emulator_account_id().to_string();
         let table = Table {
             name: input.name.clone(),
             table_arn: table_arn.clone(),
@@ -664,6 +913,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             format,
             version_token,
             metadata_location,
+            iceberg,
             warehouse_location,
             created_at: now,
             created_by: account.clone(),

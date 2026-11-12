@@ -399,6 +399,21 @@ async fn a_body_that_reads_keeps_its_own_class_of_answer() {
     );
 }
 
+/// A version 2 column type nested `depth` `list` constructors deep: one
+/// document of a shape the version 2 schema admits, at a depth the case chooses.
+fn nested_type(depth: usize) -> Value {
+    let mut document = json!("string");
+    for level in 0..depth {
+        document = json!({
+            "type": "list",
+            "element-id": level + 2,
+            "element": document,
+            "element-required": false,
+        });
+    }
+    document
+}
+
 /// The metadata documents that do not describe a table this service can create.
 ///
 /// The rules they break are Iceberg's own (the Apache Iceberg table
@@ -409,6 +424,18 @@ async fn a_body_that_reads_keeps_its_own_class_of_answer() {
 /// shape="IcebergSortOrder,IcebergSortField,IcebergPartitionSpec,IcebergPartitionField,IcebergSchemaV2")`).
 fn metadata_that_describes_no_table() -> Vec<(&'static str, Value)> {
     vec![
+        (
+            // A version 2 column's type is a free-form document, so its depth
+            // is the caller's; a document nested past what the service reads
+            // one under describes no table it will create.
+            "a version 2 column type nested deeper than the service reads one",
+            json!({ "iceberg": { "schemaV2": {
+                "type": "struct",
+                "fields": [
+                    { "id": 1, "name": "deep", "type": nested_type(64), "required": false },
+                ],
+            } } }),
+        ),
         (
             "a column of a type no open table format has",
             json!({ "iceberg": { "schema": { "fields": [
@@ -798,6 +825,17 @@ fn metadata_that_describes_a_table() -> Vec<(&'static str, Value)> {
                     { "id": 2, "name": "label", "type": "string", "required": false },
                 ],
                 "identifier-field-ids": [1],
+            } } }),
+        ),
+        (
+            // The nesting a real Iceberg type reaches is well inside the depth
+            // the service reads a type document under.
+            "a version 2 column type nested a few levels deep",
+            json!({ "iceberg": { "schemaV2": {
+                "type": "struct",
+                "fields": [
+                    { "id": 1, "name": "nested", "type": nested_type(3), "required": false },
+                ],
             } } }),
         ),
         (

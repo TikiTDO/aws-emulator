@@ -293,6 +293,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .and_then(|namespace| namespace.tables.get_mut(&input.name))
             .ok_or_else(no_such_table)?;
 
+        // A compaction strategy that rewrites records in the table's sort order
+        // has nothing to order by unless the table's metadata carries one, so
+        // such a configuration is refused for the table it was addressed to —
+        // the client request error the model's `BadRequestException` (HTTP 400)
+        // names, since adding a sort order to the table is what makes the
+        // configuration possible. Judged against the table's OWN metadata, and
+        // before anything is written, so what a read reports for the task
+        // afterwards is still what it reported before.
+        if let Some(crate::state::MaintenanceSettings::IcebergCompaction(compaction)) = settings {
+            let orders_by_sort_order = compaction
+                .strategy
+                .is_some_and(crate::state::IcebergCompactionStrategy::requires_sort_order);
+            let carries_sort_order = table
+                .iceberg
+                .as_ref()
+                .is_some_and(|metadata| metadata.carries_sort_order());
+            if orders_by_sort_order && !carries_sort_order {
+                return Err(bad_request(
+                    crate::state::COMPACTION_SORT_ORDER_REQUIRED_MESSAGE.to_string(),
+                ));
+            }
+        }
+
         // The operation REPLACES the configuration of the task it names and
         // leaves every other task's alone, so what a read reports for this task
         // afterwards is exactly this request's configuration.

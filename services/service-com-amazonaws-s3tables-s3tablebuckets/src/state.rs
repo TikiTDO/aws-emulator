@@ -10,6 +10,13 @@
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
+/// A table's Iceberg metadata: the document the create writes for the table,
+/// what a catalog commit makes of it, and the two questions asked of it — what
+/// an Iceberg catalog read answers with, and whether the table carries a sort
+/// order.
+mod iceberg;
+pub use iceberg::*;
+
 /// The region a table bucket's ARN carries when the request carries no
 /// parseable SigV4 credential scope to name one.
 pub const DEFAULT_REGION: &str = "us-east-1";
@@ -490,6 +497,22 @@ impl IcebergCompactionStrategy {
             .copied()
             .find(|candidate| candidate.as_wire() == value)
     }
+
+    /// Whether compaction under this strategy orders a table's records by the
+    /// table's sort order, which it can only do for a table whose metadata
+    /// carries one.
+    ///
+    /// The two that do are the ones that REWRITE records in an order: sorting
+    /// them by the table's sort order, and interleaving them in z-order over
+    /// the columns that order names. Packing files together reorders nothing,
+    /// and the automatic strategy is the service choosing for itself what the
+    /// table supports.
+    pub fn requires_sort_order(self) -> bool {
+        match self {
+            Self::Auto | Self::Binpack => false,
+            Self::Sort | Self::ZOrder => true,
+        }
+    }
 }
 
 /// The stored form of the `IcebergCompactionSettings` structure.
@@ -759,6 +782,12 @@ pub struct Table {
     /// token can tell its view is stale.
     pub version_token: String,
     pub metadata_location: Option<String>,
+    /// The table's own Iceberg metadata, held alongside the location of the
+    /// file it is written to, and `None` for exactly the tables that have no
+    /// metadata file. It is the table's description — its schema, partition
+    /// spec, sort order and properties — so every answer about those is read
+    /// from here rather than recomputed from a request.
+    pub iceberg: Option<IcebergTableMetadata>,
     pub warehouse_location: String,
     pub created_at: SystemTime,
     pub created_by: String,
@@ -1098,11 +1127,12 @@ pub fn warehouse_location(table_id: &str) -> String {
 
 /// The location of a table's metadata file, under its warehouse location.
 ///
-/// `metadata_id` is server-minted, and the `00000-` prefix is the first
-/// metadata version of a table, as the Iceberg table specification names
-/// metadata files.
-pub fn metadata_location(warehouse_location: &str, metadata_id: &str) -> String {
-    format!("{warehouse_location}/metadata/00000-{metadata_id}.metadata.json")
+/// `metadata_id` is server-minted, and `version` — counted from zero for the
+/// file the create writes, one higher for each metadata file a commit writes
+/// after it — is the five-digit version prefix the Iceberg table specification
+/// names metadata files with.
+pub fn metadata_location(warehouse_location: &str, version: u32, metadata_id: &str) -> String {
+    format!("{warehouse_location}/metadata/{version:05}-{metadata_id}.metadata.json")
 }
 
 /// How this service states a table bucket name it will not accept.
@@ -1253,6 +1283,17 @@ pub const INVALID_RESOURCE_ARN_MESSAGE: &str = "The specified resourceArn is not
 /// [`INVALID_TABLE_BUCKET_NAME_MESSAGE`]: it names the CLASS of the failure and
 /// neither echoes the value nor lists the formats this service does accept.
 pub const INVALID_OPEN_TABLE_FORMAT_MESSAGE: &str = "The specified open table format is not valid";
+
+/// How this service states a compaction strategy that orders a table's records
+/// by its sort order, asked for on a table whose metadata carries no sort
+/// order: the client request error the model's `BadRequestException` (HTTP 400)
+/// names, since adding a sort order to the table — not retrying — is what makes
+/// the configuration possible. FIXED text, as
+/// [`INVALID_TABLE_BUCKET_NAME_MESSAGE`]: it names the class of the failure and
+/// takes neither the strategy nor the table from the request.
+pub const COMPACTION_SORT_ORDER_REQUIRED_MESSAGE: &str =
+    "The specified compaction strategy requires sort order in the table metadata. Please refer to \
+     the S3 Tables documentation for steps on configuring sort order.";
 
 /// How this service states table metadata it will not accept: a `metadata`
 /// document that does not describe a table this service can create — a column

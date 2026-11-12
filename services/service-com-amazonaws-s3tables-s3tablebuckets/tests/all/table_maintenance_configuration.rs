@@ -81,6 +81,11 @@ impl Reported {
 
 /// Create a table bucket, a namespace and one table in it, and answer the
 /// bucket's ARN with the table's ARN.
+///
+/// The table is created WITH a schema and a sort order, so every modeled
+/// compaction strategy can be configured on it: a strategy that rewrites
+/// records in the table's sort order is refused on a table whose metadata
+/// carries none, which is the rule `compaction_sort_order.rs` covers.
 async fn create_table(
     emulator: &Emulator,
     region: &str,
@@ -112,7 +117,28 @@ async fn create_table(
             region,
             &bucket_arn,
             namespace,
-            &json!({ "name": table, "format": OpenTableFormat::Iceberg.as_wire() }),
+            &json!({
+                "name": table,
+                "format": OpenTableFormat::Iceberg.as_wire(),
+                "metadata": { "iceberg": {
+                    "schema": { "fields": [
+                        { "name": "id", "type": "long", "required": true },
+                        { "name": "recorded_at", "type": "timestamp", "required": false },
+                    ]},
+                    // `IcebergSortOrder` and `IcebergSortField` carry their
+                    // members under the names the model's `@jsonName` gives
+                    // them (`smithy_query(query="shape",
+                    // shape="IcebergSortOrder,IcebergSortField")`).
+                    "writeOrder": { "order-id": 1, "fields": [
+                        {
+                            "source-id": 2,
+                            "transform": "identity",
+                            "direction": "asc",
+                            "null-order": "nulls-first",
+                        },
+                    ]},
+                }},
+            }),
         )
         .await;
     assert_eq!(

@@ -13,14 +13,20 @@
 // points it into `tests/all/`.
 #[path = "all/audit_records.rs"]
 mod audit_records;
+#[path = "all/compaction_sort_order.rs"]
+mod compaction_sort_order;
 #[path = "all/constraint_refusals.rs"]
 mod constraint_refusals;
 #[path = "all/fixed_error_sentences.rs"]
 mod fixed_error_sentences;
 #[path = "all/harness.rs"]
 mod harness;
+#[path = "all/iceberg_rest_catalog.rs"]
+mod iceberg_rest_catalog;
 #[path = "all/invalid_input_refusals.rs"]
 mod invalid_input_refusals;
+#[path = "all/list_namespaces.rs"]
+mod list_namespaces;
 #[path = "all/metrics_configuration_not_found_message.rs"]
 mod metrics_configuration_not_found_message;
 #[path = "all/namespace_and_table_lifecycle.rs"]
