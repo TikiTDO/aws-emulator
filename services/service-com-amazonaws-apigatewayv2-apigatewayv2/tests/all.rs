@@ -145,6 +145,8 @@ mod model_lifecycle;
 mod model_template;
 #[path = "all/mutating_success_status.rs"]
 mod mutating_success_status;
+#[path = "all/not_found_sentence_per_addressing_operation.rs"]
+mod not_found_sentence_per_addressing_operation;
 #[path = "all/portal_data_plane.rs"]
 mod portal_data_plane;
 #[path = "all/portal_deletion.rs"]
