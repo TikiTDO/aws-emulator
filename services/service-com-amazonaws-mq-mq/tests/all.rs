@@ -25,6 +25,8 @@ mod configuration_deleted_id;
 mod configuration_lifecycle;
 #[path = "all/configuration_name.rs"]
 mod configuration_name;
+#[path = "all/configuration_revision_isolation.rs"]
+mod configuration_revision_isolation;
 #[path = "all/configuration_wire_form.rs"]
 mod configuration_wire_form;
 #[path = "all/no_content_framing.rs"]
