@@ -263,6 +263,8 @@ mod handler_sdk_client_config;
 mod handler_sdk_error_classes;
 #[path = "all/handler_sdk_idempotency_token.rs"]
 mod handler_sdk_idempotency_token;
+#[path = "all/handler_sdk_paginator.rs"]
+mod handler_sdk_paginator;
 #[path = "all/handler_sdk_service_inventory.rs"]
 mod handler_sdk_service_inventory;
 #[path = "all/handler_secret_sdk.rs"]

@@ -802,10 +802,11 @@ fn clamp_recursion(vm: &VirtualMachine, limit: usize) -> PyResult<()> {
 }
 
 /// The module the host functions live on, and the whole of what guest code can call of
-/// this process: `log`, `sleep`, `aws`, `db_auth_token`, `request` and `presign` — the
-/// invocation log, a sleep clamped to what the run has left, ONE AWS SDK call into this
-/// same emulator, the authentication token an SDK mints in its client, the one request a
-/// handler sends itself and the one URL it has signed. Nothing else of the host is
+/// this process: `log`, `sleep`, `aws`, `db_auth_token`, `request`, `presign` and
+/// `pagination` — the invocation log, a sleep clamped to what the run has left, ONE AWS SDK
+/// call into this same emulator, the authentication token an SDK mints in its client, the one
+/// request a handler sends itself, the one URL it has signed, and what the called service's
+/// own model states about paging one operation through. Nothing else of the host is
 /// reachable from guest code, and nothing here moves a bound.
 fn host_module(
     vm: &VirtualMachine,
@@ -1007,6 +1008,24 @@ fn host_module(
                 Err(refused) => refusal_answer_for(&refused),
             };
             Ok(vm.ctx.new_str(answered).into())
+        },
+    );
+    // What the SDK's own PAGINATOR for one operation drives: the input member a continuation
+    // value is sent back in, the output member it arrives in, the member a page's size is
+    // asked for and the members a page's results arrive in, read out of the CALLED service's
+    // own model ([`super::sdk_model`]). Nothing is dispatched and no service answers, so this
+    // spends neither the call count nor the deadline; what the guest decides is only which
+    // operation of which service it asks about.
+    set_function(
+        vm,
+        &module,
+        "pagination",
+        move |args: FuncArgs, vm: &VirtualMachine| {
+            let (service, operation): (String, String) = args.bind(vm)?;
+            Ok(vm
+                .ctx
+                .new_str(super::aws_sdk_guest::pagination_config(&service, &operation))
+                .into())
         },
     );
     module
@@ -1981,6 +2000,7 @@ mod tests {
             "aws",
             "db_auth_token",
             "log",
+            "pagination",
             "presign",
             "request",
             "sleep"

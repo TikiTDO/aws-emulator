@@ -33,8 +33,11 @@
 //!   request, the signature and the refusal are the ones above. A service this runtime
 //!   supplies no resource classes for is REFUSED rather than served an interface that does
 //!   nothing.
-//! * There is no paginator: `client.get_paginator(...)` raises rather than pretending to
-//!   serve one. A blob member travels as the base64 text an AWS JSON protocol carries it
+//! * A paginated operation has the paginator the SDK's own client answers with:
+//!   `client.get_paginator(...)` pages it through by driving the members its model states
+//!   ([`paginator`]), and an operation the model does not mark as paginated has none, which
+//!   is what `can_paginate` reports and `OperationNotPageableError` says. A blob member
+//!   travels as the base64 text an AWS JSON protocol carries it
 //!   as, in both directions, and `bytes` a handler passes are encoded to it. A `datetime`
 //!   a handler passes for a timestamp member travels as the seconds since the epoch that
 //!   same protocol carries a timestamp as, whether or not it carries a zone of its own.
@@ -58,6 +61,9 @@ use super::package::PackageModule;
 /// marshalling between a plain Python value and an attribute value.
 mod dynamodb;
 
+/// The paginator a client answers with for a paginated operation.
+mod paginator;
+
 /// The modules this runtime puts on a Python handler's import path, as the SDK it ships.
 ///
 /// Resolved AFTER the deployment package's own entries, so a package that ships its own
@@ -79,12 +85,36 @@ pub fn runtime_modules() -> Vec<PackageModule> {
         ("boto3/session.py", BOTO3_SESSION_SOURCE),
     ]
     .into_iter()
+    .chain(paginator::modules())
     .chain(dynamodb::modules())
     .map(|(path, source)| PackageModule {
         path: path.to_string(),
         source: source.to_string(),
     })
     .collect()
+}
+
+/// What the paginator of one operation of the service `service` names drives, as the document
+/// a client reads it from — an empty one for an operation that service's model does not mark
+/// as paginated, and so has no paginator for.
+///
+/// Every member of it is the called operation's own model's ([`super::sdk_model`]), read from
+/// the same reading of that model every other question about the service is answered from, so
+/// the paginator a handler is given drives the members the service really pages that operation
+/// through.
+#[must_use]
+pub fn pagination_config(service: &str, operation: &str) -> String {
+    let held = super::sdk_model::client_exports(service);
+    let Some(paged) = held.pagination.get(operation) else {
+        return "{}".to_string();
+    };
+    ::serde_json::json!({
+        "input_token": paged.input_token,
+        "output_token": paged.output_token,
+        "limit_key": paged.page_size,
+        "result_key": paged.result_keys,
+    })
+    .to_string()
 }
 
 /// `botocore`: the package the client interface and the exceptions live under.
@@ -147,6 +177,14 @@ class UnknownServiceError(DataNotFoundError):
 
 class ParamValidationError(BotoCoreError):
     fmt = "Parameter validation failed:\n{report}"
+
+
+class PaginationError(BotoCoreError):
+    fmt = "Error during pagination: {message}"
+
+
+class OperationNotPageableError(BotoCoreError):
+    fmt = "Operation cannot be paginated: {operation_name}"
 
 
 class ReadTimeoutError(BotoCoreError):
@@ -542,6 +580,7 @@ import json
 from botocore.config import Config
 from botocore.exceptions import (
     ClientError,
+    OperationNotPageableError,
     ParamValidationError,
     ReadTimeoutError,
     SdkCallNotMade,
@@ -759,7 +798,12 @@ class Client:
         return method
 
     def can_paginate(self, operation_name):
-        return False
+        """Whether this operation is one the SDK pages through.
+
+        An operation the service's own model states no pagination for has no paginator at
+        all, which is what a caller asking this is told.
+        """
+        return bool(self._pagination(operation_name))
 
     def _db_auth_token(self, DBHostname, Port, DBUsername, Region=None):
         """The authentication token a database login presents in place of a password.
@@ -782,9 +826,24 @@ class Client:
         return answered.get("token") or ""
 
     def get_paginator(self, operation_name):
-        raise SdkCallNotMade(
-            detail="the AWS SDK this runtime supplies has no paginator; call %s in a "
-            "loop over its own continuation member instead" % (operation_name,)
+        """The paginator of one operation, which pages it through as the SDK's own does.
+
+        Which members it drives is the called operation's own model's; one page is one call
+        of the operation, made through this same client.
+        """
+        config = self._pagination(operation_name)
+        if not config:
+            raise OperationNotPageableError(operation_name=operation_name)
+        from botocore.paginate import Paginator
+
+        return Paginator(
+            getattr(self, operation_name), _operation_name(operation_name), config
+        )
+
+    def _pagination(self, operation_name):
+        """How the named operation is paged through, as its own model states it."""
+        return json.loads(
+            _host.pagination(self._service_name, _operation_name(operation_name))
         )
 
     def close(self):
