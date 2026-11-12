@@ -149,12 +149,14 @@ mod list_instances_pagination;
 mod listed_instance_projection_matches_describe;
 #[path = "all/listed_instance_state_after_instance_writes.rs"]
 mod listed_instance_state_after_instance_writes;
-#[path = "all/listed_instance_state_every_entry.rs"]
-mod listed_instance_state_every_entry;
+#[path = "all/listed_instance_state_at_the_list_bound.rs"]
+mod listed_instance_state_at_the_list_bound;
 #[path = "all/listed_instance_state_source.rs"]
 mod listed_instance_state_source;
 #[path = "all/listed_instance_state_under_any_name.rs"]
 mod listed_instance_state_under_any_name;
+#[path = "all/listed_instance_state_without_a_name.rs"]
+mod listed_instance_state_without_a_name;
 #[path = "all/managed_policies.rs"]
 mod managed_policies;
 #[path = "all/managed_policies_in_permission_set.rs"]
@@ -231,7 +233,7 @@ mod unknown_instance_message;
 mod validation_message_wording;
 #[path = "all/withdrawn_assignment_copy_in_place.rs"]
 mod withdrawn_assignment_copy_in_place;
-#[path = "all/listed_instance_state_at_the_list_bound.rs"]
-mod listed_instance_state_at_the_list_bound;
+#[path = "all/listed_instance_state_every_entry.rs"]
+mod listed_instance_state_every_entry;
 #[path = "all/listed_instance_state_across_read_edge_cases.rs"]
 mod listed_instance_state_across_read_edge_cases;
