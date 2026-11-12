@@ -1426,6 +1426,12 @@ mod s3_object_events_fan_out_through_sns;
 // over the counts the rule generalises over is the owning ECS crate's own suite.
 #[path = "all/ecs_fargate_service_converges_to_its_desired_count.rs"]
 mod ecs_fargate_service_converges_to_its_desired_count;
+// Declared in the appended tail, which is where every new suite inserts its lines: what the
+// audit record of a call a service ACCEPTED and then failed carries, which spans the service
+// that writes the record (IAM, CloudTrail) and the `cloudtrail:LookupEvents` that reports it
+// in one Region and not another, so no single service crate's test target can ask it.
+#[path = "all/audited_calls_that_fail_after_acceptance.rs"]
+mod audited_calls_that_fail_after_acceptance;
 // Amazon SNS notifications an Auto Scaling group's notification configuration publishes
 // span Auto Scaling, Amazon EC2, SNS and Amazon SQS at once, and the publish is addressed
 // the way a client's own `sns`-scoped call is, so no single crate's test target can ask
