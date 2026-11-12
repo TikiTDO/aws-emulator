@@ -23,12 +23,14 @@ use crate::ops::types::{
     MobileDeviceManagement, OpenIdConfiguration, ResourceNotFoundException,
 };
 
-/// The refusal the resource-tagging endpoints answer an ARN naming no resource with, which
-/// is the tagging layer's own error class rather than one of this service's.
+/// The refusals the resource-tagging endpoints answer a `ResourceArn` they cannot parse, and
+/// an ARN naming no resource, with — the tagging layer's own error classes rather than any of
+/// this service's.
 mod tagging_refusal;
 
 pub use tagging_refusal::{
-    TaggingError, TaggingNotFound, TAG_NOT_FOUND_ERROR_CODE, TAG_NOT_FOUND_MESSAGE,
+    TaggingError, TaggingRefusal, TAG_BAD_REQUEST_ERROR_CODE, TAG_BAD_REQUEST_MESSAGE,
+    TAG_BAD_REQUEST_STATUS, TAG_NOT_FOUND_ERROR_CODE, TAG_NOT_FOUND_MESSAGE,
     TAG_NOT_FOUND_STATUS,
 };
 
@@ -853,8 +855,8 @@ fn string_violations(member: &'static Schema, value: &str) -> Vec<Violation> {
 /// How many fields an ARN is built from: `arn:<partition>:<service>:<region>:<account>:<resource>`.
 const ARN_FIELD_COUNT: usize = 6;
 
-/// Whether `value` is a well-formed ARN naming a resource of some service OTHER than this
-/// one.
+/// Whether `value` is syntactically an ARN, which is the ONE thing the resource-tagging layer
+/// parses a `ResourceArn` for before it resolves anything.
 ///
 /// An ARN is six colon-separated fields — `arn:<partition>:<service>:<region>:<account-id>:<resource>`
 /// — of which the literal `arn`, the partition, the service and the resource are always
@@ -862,23 +864,49 @@ const ARN_FIELD_COUNT: usize = 6;
 /// resources, so neither is required here. The resource field keeps any further colons,
 /// because a resource id may carry them.
 ///
-/// Such a value DOES name a resource, so a call naming it is a lookup that finds nothing
-/// rather than a request this service cannot parse.
-fn names_another_services_resource(value: &str) -> bool {
+/// Nothing here is about THIS service: a value that parses names some resource somewhere, so a
+/// call naming it is a lookup that may find nothing, and a value that does not parse is a
+/// request the layer refuses before any service sees it.
+fn parses_as_arn(value: &str) -> bool {
     let fields: Vec<&str> = value.splitn(ARN_FIELD_COUNT, ':').collect();
     let [prefix, partition, service, _region, _account, resource] = fields.as_slice() else {
         return false;
     };
-    *prefix == "arn"
-        && !partition.is_empty()
-        && !service.is_empty()
-        && *service != ARN_SERVICE
-        && !resource.is_empty()
+    *prefix == "arn" && !partition.is_empty() && !service.is_empty() && !resource.is_empty()
 }
 
-/// Why `resource_arn` is not a resource ARN this service could hold anything under, stated
-/// the way the request boundary states a path label outside its own constraints, or `None`
-/// when it is a value to look a resource up by.
+/// Why a tagging operation will not look a resource up under `resource_arn`.
+///
+/// The two refusals are different layers' and must not be collapsed: see
+/// [`resource_arn_rejection`].
+#[derive(Debug)]
+pub enum ResourceArnRejection {
+    /// The value is not an ARN at all, so the resource-tagging layer's own ARN parse failed:
+    /// its [`TaggingError::malformed_resource_arn`] refusal, worded by that layer and naming
+    /// nothing of the request.
+    Malformed,
+    /// A well-formed ARN of THIS service that is not one of the resource ARNs it publishes, so
+    /// the service's own check of the value failed, with the sentence it states.
+    NotAResourceOfThisService(String),
+}
+
+impl ResourceArnRejection {
+    /// This rejection as the operation's error, given how that operation words a refusal its
+    /// own model covers (`validation`). Keeps the two layers' refusals apart in the one place
+    /// all three tagging operations call.
+    pub fn into_error<E>(
+        self,
+        validation: impl FnOnce(String) -> TaggingError<E>,
+    ) -> TaggingError<E> {
+        match self {
+            Self::Malformed => TaggingError::malformed_resource_arn(),
+            Self::NotAResourceOfThisService(why) => validation(why),
+        }
+    }
+}
+
+/// Why `resource_arn` is not a value a tagging operation will look a resource up under, or
+/// `None` when it is.
 ///
 /// The tagging operations take `ResourceArn` as a bare `String` with no `@pattern` and no
 /// `@length` (smithy_query: operation ListTagsForResource / TagResource / UntagResource), so
@@ -886,28 +914,35 @@ fn names_another_services_resource(value: &str) -> bool {
 /// can live — while the same ARNs reached as `ConnectorArn` or `ChallengeArn` labels are
 /// refused there, against the very patterns [`RESOURCE_ARN_PATTERN`] is built from.
 ///
-/// Two things are therefore separated. A value that could not name a resource at all, and an
-/// ARN of THIS service that is not one of its published resource ARNs, are input the service
-/// cannot parse. An ARN of another service is well formed and simply holds nothing here, so
-/// it is left to the lookup to miss.
+/// Three things are therefore separated, because two different layers answer them.
 ///
-/// The check and the wording are both the FRAMEWORK's: the constraint walk
-/// ([`aws_smithy_schema_server::constraints::validate`]) runs over the member schema above
-/// and renders one clause per constraint broken, length before pattern, in its
-/// `N validation error(s) detected` envelope with its own elision of the echoed value.
+/// A value that is not an ARN at all never reaches this service: the resource-tagging layer
+/// that fronts `/tags/{ResourceArn}` parses it first and refuses it with its OWN error class
+/// and one fixed sentence ([`ResourceArnRejection::Malformed`]), reporting neither the value,
+/// the member nor any expression — which is the RECORDED answer to such a request.
 ///
-/// That envelope is the conventional AWS one, and it is NOT the sentence this service states
-/// for a patterned label whose value fell outside its `@pattern`: that one is reworded from
-/// the refusal the model's own constraints produced
-/// ([`crate::service::refusal`]), on the strength of the recorded answer to such a request.
-/// There is no recorded answer for a `ResourceArn` this service cannot parse — the member
-/// carries no modelled constraint, so nothing observed says how the service words its own
-/// check of it — and this envelope is what the rest of the tree states for that class.
-pub fn resource_arn_rejection(resource_arn: &str) -> Option<String> {
-    if names_another_services_resource(resource_arn) {
+/// An ARN of THIS service that is not one of its published resource ARNs did parse, so it is
+/// this service's own check of the value that fails. The check and the wording there are the
+/// FRAMEWORK's: the constraint walk ([`aws_smithy_schema_server::constraints::validate`]) runs
+/// over the member schema above and renders one clause per constraint broken, length before
+/// pattern, in its `N validation error(s) detected` envelope with its own elision of the
+/// echoed value. That envelope is the conventional AWS one, and it is NOT the sentence this
+/// service states for a patterned label whose value fell outside its `@pattern`: that one is
+/// reworded from the refusal the model's own constraints produced ([`crate::service::refusal`])
+/// on the strength of the recorded answer to such a request. Nothing recorded shows how this
+/// member's own check is worded, so it keeps what the rest of the tree states for the class.
+///
+/// An ARN of another service parsed and names a resource elsewhere, so it is left to the
+/// lookup to miss and be reported by the tagging layer's not-found refusal.
+pub fn resource_arn_rejection(resource_arn: &str) -> Option<ResourceArnRejection> {
+    if !parses_as_arn(resource_arn) {
+        return Some(ResourceArnRejection::Malformed);
+    }
+    if resource_arn.split(':').nth(2) != Some(ARN_SERVICE) {
         return None;
     }
     envelope(&string_violations(&M_RESOURCE_ARN, resource_arn))
+        .map(ResourceArnRejection::NotAResourceOfThisService)
 }
 
 /// Whether `character` is one a tag key or a tag value may carry.

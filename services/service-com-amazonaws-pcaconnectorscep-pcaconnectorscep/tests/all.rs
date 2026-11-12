@@ -41,6 +41,8 @@ mod connector_vpc_endpoint;
 mod harness;
 #[path = "all/harness_contract.rs"]
 mod harness_contract;
+#[path = "all/malformed_resource_arn.rs"]
+mod malformed_resource_arn;
 #[path = "all/minted_identifier_form.rs"]
 mod minted_identifier_form;
 #[path = "all/missing_resource_status_class.rs"]

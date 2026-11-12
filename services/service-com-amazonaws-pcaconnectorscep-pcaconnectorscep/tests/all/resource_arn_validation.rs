@@ -2,22 +2,25 @@
 
 //! End-to-end cover for how the tagging operations read their `ResourceArn`.
 //!
-//! The rule under test: `ResourceArn` is parsed BEFORE anything is looked up. A value that
-//! could not name a resource — not an ARN at all — and an ARN of THIS service that is not one
-//! of the resource-ARN forms it publishes are input-validation failures, refused with HTTP 400
-//! `ValidationException` in the `N validation error(s) detected: Value '<value>' at '<member>'
-//! failed to satisfy constraint: <requirement>` envelope, naming the member and every
-//! requirement the value broke. The tagging layer's own
-//! not-found refusal is left to a well-formed resource ARN that this service simply holds no
-//! record under — which includes an ARN of another service, because such a value does name a
-//! resource.
+//! The rule under test: `ResourceArn` is parsed BEFORE anything is looked up, and the three
+//! answers come from three places. A value the resource-tagging layer cannot parse as an ARN
+//! at all never reaches this service: that layer refuses it itself
+//! ([`harness::assert_tagging_bad_request`]), with its own error code and one fixed sentence.
+//! An ARN of THIS service that is not one of the resource-ARN forms it publishes did parse, so
+//! it is this service's own check that refuses it, with HTTP 400 `ValidationException` in the
+//! `N validation error(s) detected: Value '<value>' at '<member>' failed to satisfy
+//! constraint: <requirement>` envelope, naming the member and every requirement the value
+//! broke. The tagging layer's not-found refusal is left to a well-formed resource ARN that
+//! this service simply holds no record under — which includes an ARN of another service,
+//! because such a value does name a resource.
 //!
 //! `ResourceArn` is modelled as a bare `String` with no `@pattern` and no `@length`
 //! (smithy_query operation=ListTagsForResource,TagResource), so nothing is refused for it at
-//! the request boundary and the handler is the only place the check can live. That also means
-//! nothing recorded shows how the service words its own check of this member, which is why
-//! this envelope — the tree's wording for the class — is what it keeps, where a value outside
-//! a `@pattern` the MODEL declares is worded as that refusal was recorded (see
+//! the request boundary and the handler is the only place the check can live. The bad-syntax
+//! refusal's status, code and sentence are the RECORDED ones; nothing recorded shows how the
+//! service words its own check of a parsed ARN that is not one of its resources, which is why
+//! the validation envelope — the tree's wording for the class — is what that keeps, where a
+//! value outside a `@pattern` the MODEL declares is worded as that refusal was recorded (see
 //! `model_pattern_refusal`).
 //!
 //! Every case drives the service the way a client does: one HTTP request per call, through the
@@ -25,10 +28,10 @@
 //! implemented tagging operations. The rows differ along what the rule generalises over: how
 //! the value fails to be an ARN (shape, field count, an empty field), which part of this
 //! service's published form it breaks (resource type, connector id, challenge id, account,
-//! region), which of the two resource kinds it looks like, both published length bounds and
-//! one past each, a value past the ceiling on what a clause echoes back, and — on the other
-//! side of the rule — well-formed ARNs of either kind, of another partition and of another
-//! service.
+//! region), which of the two resource kinds it looks like, the published maximum length — at
+//! it and one past it — a value past the ceiling on what a clause echoes back, and — on the
+//! other side of the rule — well-formed ARNs of either kind, of another partition and of
+//! another service.
 
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
@@ -53,9 +56,11 @@ const CONNECTOR_ID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 /// A challenge id in the same form.
 const CHALLENGE_ID: &str = "99999999-8888-7777-6666-555544443333";
 
-/// The published length bounds of a resource ARN: the `@length(5, 200)` that both
-/// `ConnectorArn` and `ChallengeArn` declare (smithy_query shape=ConnectorArn,ChallengeArn).
-const MIN_ARN_LENGTH: usize = 5;
+/// The published upper length bound of a resource ARN: the `200` of the `@length(5, 200)` that
+/// both `ConnectorArn` and `ChallengeArn` declare (smithy_query
+/// shape=ConnectorArn,ChallengeArn). The lower bound of that same `@length` is below the
+/// shortest string that can parse as an ARN at all, so no value can reach a clause stating it:
+/// a shorter one is refused by the tagging layer's parse first, which is the `arn:` row below.
 const MAX_ARN_LENGTH: usize = 200;
 
 /// The expression a refusal quotes as the requirement for `ResourceArn`: `ConnectorArn`'s own
@@ -121,7 +126,6 @@ fn region_padding_arn_to(total: usize) -> String {
 /// order the request boundary states them for a patterned label: length, then pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Clause {
-    TooShort,
     TooLong,
     Pattern,
 }
@@ -145,9 +149,6 @@ fn echoed(value: &str) -> String {
 /// The clause a broken constraint states, built from the published bounds and pattern.
 fn clause_text(clause: Clause, value: &str) -> String {
     let requirement = match clause {
-        Clause::TooShort => {
-            format!("Member must have length greater than or equal to {MIN_ARN_LENGTH}")
-        }
         Clause::TooLong => {
             format!("Member must have length less than or equal to {MAX_ARN_LENGTH}")
         }
@@ -179,6 +180,10 @@ fn expected_message(value: &str, clauses: &[Clause]) -> String {
 /// What a row expects of both tagging operations.
 #[derive(Debug)]
 enum Expected {
+    /// The resource-tagging layer's own refusal of a value it could not parse as an ARN
+    /// ([`harness::assert_tagging_bad_request`]): one fixed sentence, naming neither the value
+    /// nor the member nor any expression.
+    BadSyntax,
     /// 400 `ValidationException`, stating exactly these clauses.
     Refused(Vec<Clause>),
     /// The tagging layer's own not-found refusal: the value could name a resource of this
@@ -201,6 +206,14 @@ fn refused(name: &'static str, arn: String, clauses: &[Clause]) -> Case {
         name,
         arn,
         expected: Expected::Refused(clauses.to_vec()),
+    }
+}
+
+fn bad_syntax(name: &'static str, arn: String) -> Case {
+    Case {
+        name,
+        arn,
+        expected: Expected::BadSyntax,
     }
 }
 
@@ -229,33 +242,29 @@ fn cases() -> Vec<Case> {
         CONNECTOR_ID,
     );
     vec![
-        // Not an ARN at all.
-        refused("a bare word", "banana".to_string(), &[Clause::Pattern]),
-        refused(
+        // Not an ARN at all: the tagging layer's own parse fails, so none of this service's
+        // checks of the value ever runs.
+        bad_syntax("a bare word", "banana".to_string()),
+        bad_syntax(
             "colon-separated text that is not an ARN",
             "not:an:arn".to_string(),
-            &[Clause::Pattern],
         ),
-        refused(
+        bad_syntax(
             "a truncated ARN naming this service and nothing else",
             "arn:aws:pca-connector-scep".to_string(),
-            &[Clause::Pattern],
         ),
-        refused(
+        bad_syntax(
             "an ARN whose partition is empty",
             "arn::pca-connector-scep:eu-west-3:000000000000:connector/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
                 .to_string(),
-            &[Clause::Pattern],
         ),
-        refused(
+        bad_syntax(
             "an ARN whose resource field is empty",
             format!("arn:aws:pca-connector-scep:{REGION}:{ACCOUNT}:"),
-            &[Clause::Pattern],
         ),
-        refused(
+        bad_syntax(
             "a URL rather than an ARN",
             "https://example.test/connectors/1".to_string(),
-            &[Clause::Pattern],
         ),
         // This service's own ARN space, broken in one part each.
         refused(
@@ -298,26 +307,24 @@ fn cases() -> Vec<Case> {
             connector_arn("aws", "EU_WEST_3", ACCOUNT, CONNECTOR_ID),
             &[Clause::Pattern],
         ),
-        // The published length bounds, and one past each.
-        refused(
+        // The published length bounds, and one past each. A length clause is this service's
+        // own check, so only a value the tagging layer PARSED can reach one.
+        bad_syntax(
             "one character below the published minimum length",
             "arn:".to_string(),
-            &[Clause::TooShort, Clause::Pattern],
         ),
-        refused(
+        bad_syntax(
             "at the published minimum length, and still not an ARN",
             "arn:a".to_string(),
-            &[Clause::Pattern],
         ),
         refused(
             "one character past the published maximum length",
             past_max,
             &[Clause::TooLong],
         ),
-        refused(
+        bad_syntax(
             "far longer than the value a clause echoes back",
             format!("not-an-arn-{}", "x".repeat(400)),
-            &[Clause::TooLong, Clause::Pattern],
         ),
         // Well formed, and naming nothing here.
         not_found("at the published maximum length", at_max),
@@ -347,6 +354,12 @@ fn cases() -> Vec<Case> {
 /// Assert one row against one operation's answer.
 fn assert_row(case: &Case, operation: &str, answer: &Answer) {
     match &case.expected {
+        Expected::BadSyntax => {
+            harness::assert_tagging_bad_request(
+                answer,
+                &format!("{} on {operation}", case.name),
+            );
+        }
         Expected::Refused(clauses) => {
             assert_eq!(
                 (answer.status, answer.error_type.as_str()),
@@ -387,7 +400,7 @@ fn assert_row(case: &Case, operation: &str, answer: &Answer) {
 }
 
 #[tokio::test]
-async fn a_resource_arn_that_names_no_resource_is_a_validation_failure_not_a_404() {
+async fn a_resource_arn_that_names_no_resource_is_refused_by_the_layer_that_checks_it() {
     let (router, engine) = new_router();
     // A connector and a challenge that DO exist, so no row below is answered out of an empty
     // store.
@@ -516,13 +529,9 @@ async fn a_refused_resource_arn_writes_nothing() {
         connector_id.clone(),
     ] {
         let tagged = tag_resource(&router, &malformed, json!({ "keep": "overwritten" })).await;
-        assert_eq!(
-            (tagged.status, tagged.error_type.as_str()),
-            (400, "ValidationException"),
-            "case {malformed:?}: expected 400 ValidationException, got {} / {:?}",
-            tagged.status,
-            tagged.body
-        );
+        // None of the three is an ARN — the first has no `arn` prefix, the second no fields at
+        // all, the third only one — so each is the tagging layer's own bad-syntax refusal.
+        harness::assert_tagging_bad_request(&tagged, &malformed);
     }
 
     let listed = list_tags(&router, &connector).await;

@@ -188,9 +188,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // `ResourceArn` is parsed BEFORE anything is looked up — before the store is even
         // reached — so a value that names no resource at all is refused as the input error it
-        // is, rather than reported as a resource this service does not hold.
-        if let Some(why) = crate::state::resource_arn_rejection(&input.resource_arn) {
-            return Err(validation(why));
+        // is, rather than reported as a resource this service does not hold. A value that is
+        // not an ARN at all is the tagging layer's own refusal; one that is an ARN of this
+        // service and not a resource ARN it publishes is this service's own.
+        if let Some(rejection) = crate::state::resource_arn_rejection(&input.resource_arn) {
+            return Err(rejection.into_error(validation));
         }
 
         let state = crate::state::service_state(&*self.engine).ok_or_else(store_unavailable)?;
@@ -298,8 +300,9 @@ fn invalid_state(resource_arn: &str, connector_arn: &str, status: &str) -> Untag
 /// `message` member, naming no value of the request. A call naming a deleted resource, or one
 /// whose owning connector's teardown has completed, lands here.
 ///
-/// Reserved for an ARN that could name one of this service's resources: a value that is not
-/// such an ARN is refused by [`validation`] before any lookup.
+/// Reserved for a value the tagging layer PARSED as an ARN: one it cannot parse is refused by
+/// that layer's bad-request class, and an ARN of this service that is not one of its published
+/// resource ARNs by [`validation`], both before any lookup.
 fn not_found() -> UntagResourceError {
     UntagResourceError::not_found()
 }

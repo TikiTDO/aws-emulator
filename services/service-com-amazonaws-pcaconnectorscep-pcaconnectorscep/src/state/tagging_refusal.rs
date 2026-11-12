@@ -1,19 +1,25 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! The refusal the resource-tagging endpoints answer an ARN naming no resource with.
+//! The refusals the resource-tagging endpoints answer with, which are the tagging layer's own
+//! error classes rather than any error of this service.
 //!
 //! The three tagging operations share ONE route (`/tags/{ResourceArn}`, by method) and are
 //! answered by the resource-tagging layer rather than by this service's own resource
-//! operations. That layer reports an ARN it resolves to no resource with its OWN error
-//! class, which is not the `ResourceNotFoundException` the service's resource operations
-//! answer: the status is [`TAG_NOT_FOUND_STATUS`], the wire error code is
-//! [`TAG_NOT_FOUND_ERROR_CODE`], and the body carries the single lower-case `message` member
-//! [`TAG_NOT_FOUND_MESSAGE`] — fixed text, the same whichever ARN was presented, so the refusal
-//! reports no value the caller sent and carries none of the service error's `ResourceId` /
-//! `ResourceType` members.
+//! operations. That layer answers its two failures with its OWN error classes, neither of
+//! which is one this service's resource operations answer:
 //!
-//! The shape is in NO model — the tagging layer's error is not bound to any operation of
-//! this service — so it is spelled here once, in the `smithy.framework` namespace the
+//! * a `ResourceArn` it cannot PARSE as an ARN — [`TAG_BAD_REQUEST`], the error code
+//!   [`TAG_BAD_REQUEST_ERROR_CODE`] with the sentence [`TAG_BAD_REQUEST_MESSAGE`]; and
+//! * an ARN it parsed and resolved to no resource — [`TAG_NOT_FOUND`], the error code
+//!   [`TAG_NOT_FOUND_ERROR_CODE`] with the sentence [`TAG_NOT_FOUND_MESSAGE`].
+//!
+//! Both carry their sentence under the single lower-case `message` member, and both sentences
+//! are fixed text — the same whichever value was presented, so neither refusal reports a value
+//! the caller sent and neither carries the service error's `ResourceId` / `ResourceType`
+//! members.
+//!
+//! Neither shape is in ANY model — the tagging layer's errors are bound to no operation of
+//! this service — so they are spelled here once, in the `smithy.framework` namespace the
 //! scaffold reserves for a shape no model declares, and every tagging operation's error
 //! channel is [`TaggingError`] over its own modelled errors.
 
@@ -35,6 +41,19 @@ pub const TAG_NOT_FOUND_ERROR_CODE: &str = "NotFoundException";
 /// The HTTP status that refusal carries: the tagging layer states an ARN it cannot resolve as
 /// a bad request about the value it was handed, not as a missing resource of this service.
 pub const TAG_NOT_FOUND_STATUS: u16 = 400;
+
+/// The sentence the tagging layer's refusal of an unparseable `ResourceArn` carries: fixed
+/// text, naming neither the value, the member nor any expression.
+pub const TAG_BAD_REQUEST_MESSAGE: &str = "Invalid input resource arn: bad syntax";
+
+/// The wire error code that refusal is identified by. The tagging layer's own class again,
+/// distinct from the not-found one above, so a client can tell "this string is not an ARN"
+/// from "that ARN names nothing".
+pub const TAG_BAD_REQUEST_ERROR_CODE: &str = "BadRequestException";
+
+/// The HTTP status that refusal carries: a request the layer could not parse is a client
+/// error.
+pub const TAG_BAD_REQUEST_STATUS: u16 = 400;
 
 /// The `message` member of the tagging layer's not-found shape — lower-case on the wire,
 /// which is the name a client reads the sentence out of.
@@ -64,39 +83,110 @@ pub static TAG_NOT_FOUND_SCHEMA: Schema = Schema::new_struct(
     &[&NOT_FOUND_MESSAGE_MEMBER],
 );
 
-/// The payload of that refusal: the one fixed sentence, as its single member.
-#[derive(Debug, Clone)]
-pub struct TaggingNotFound {
-    /// The sentence, always [`TAG_NOT_FOUND_MESSAGE`].
-    pub message: String,
+/// The `message` member of the tagging layer's bad-request shape — lower-case on the wire for
+/// the same reason as the not-found one.
+static BAD_REQUEST_MESSAGE_MEMBER: Schema = Schema::new_member(
+    ShapeId::from_static(
+        "smithy.framework#BadRequestException$message",
+        "smithy.framework",
+        "message",
+    ),
+    ShapeType::String,
+    "message",
+    0,
+);
+
+/// Schema for the tagging layer's bad-request shape.
+///
+/// In the `smithy.framework` namespace as well: this service's model does declare a
+/// `BadRequestException`, but with a required UPPER-case `Message` member and bound to none of
+/// the tagging operations, so the tagging layer's refusal is not that shape and must not
+/// collide with it.
+pub static TAG_BAD_REQUEST_SCHEMA: Schema = Schema::new_struct(
+    ShapeId::from_static(
+        "smithy.framework#BadRequestException",
+        "smithy.framework",
+        "BadRequestException",
+    ),
+    ShapeType::Structure,
+    &[&BAD_REQUEST_MESSAGE_MEMBER],
+);
+
+/// One refusal class of the resource-tagging layer: everything that distinguishes it on the
+/// wire, in one place, so the two classes differ only in these values and share every line of
+/// rendering below.
+pub struct TaggingRefusalClass {
+    /// The wire error code a client branches on.
+    pub error_code: &'static str,
+    /// The HTTP status the refusal carries.
+    pub http_status: u16,
+    /// The fixed sentence, which is the whole of what the body says.
+    pub message: &'static str,
+    /// The shape the body is written through.
+    schema: &'static Schema,
+    /// That shape's single lower-case `message` member.
+    message_member: &'static Schema,
 }
 
-impl TaggingNotFound {
-    /// The refusal, as the tagging layer words it.
-    pub fn new() -> Self {
+/// The tagging layer's refusal of an ARN it resolved to no resource.
+pub static TAG_NOT_FOUND: TaggingRefusalClass = TaggingRefusalClass {
+    error_code: TAG_NOT_FOUND_ERROR_CODE,
+    http_status: TAG_NOT_FOUND_STATUS,
+    message: TAG_NOT_FOUND_MESSAGE,
+    schema: &TAG_NOT_FOUND_SCHEMA,
+    message_member: &NOT_FOUND_MESSAGE_MEMBER,
+};
+
+/// The tagging layer's refusal of a `ResourceArn` it could not parse as an ARN.
+pub static TAG_BAD_REQUEST: TaggingRefusalClass = TaggingRefusalClass {
+    error_code: TAG_BAD_REQUEST_ERROR_CODE,
+    http_status: TAG_BAD_REQUEST_STATUS,
+    message: TAG_BAD_REQUEST_MESSAGE,
+    schema: &TAG_BAD_REQUEST_SCHEMA,
+    message_member: &BAD_REQUEST_MESSAGE_MEMBER,
+};
+
+/// The payload of one of those refusals: the class it belongs to, and the one fixed sentence
+/// that class states, as its single member.
+#[derive(Clone)]
+pub struct TaggingRefusal {
+    /// Which of the layer's classes this is.
+    class: &'static TaggingRefusalClass,
+    /// The sentence, always the class's own [`TaggingRefusalClass::message`].
+    message: String,
+}
+
+impl TaggingRefusal {
+    /// The refusal of `class`, as the tagging layer words it.
+    pub fn new(class: &'static TaggingRefusalClass) -> Self {
         Self {
-            message: TAG_NOT_FOUND_MESSAGE.to_string(),
+            class,
+            message: class.message.to_string(),
         }
     }
 }
 
-impl Default for TaggingNotFound {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ::std::fmt::Display for TaggingNotFound {
+impl ::std::fmt::Debug for TaggingRefusal {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        write!(f, "{TAG_NOT_FOUND_ERROR_CODE}: {}", self.message)
+        f.debug_struct("TaggingRefusal")
+            .field("error_code", &self.class.error_code)
+            .field("http_status", &self.class.http_status)
+            .field("message", &self.message)
+            .finish()
     }
 }
 
-impl ::std::error::Error for TaggingNotFound {}
+impl ::std::fmt::Display for TaggingRefusal {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        write!(f, "{}: {}", self.class.error_code, self.message)
+    }
+}
 
-impl SerializableStruct for TaggingNotFound {
+impl ::std::error::Error for TaggingRefusal {}
+
+impl SerializableStruct for TaggingRefusal {
     fn serialize_members(&self, serializer: &mut dyn ShapeSerializer) -> Result<(), SerdeError> {
-        serializer.write_string(&NOT_FOUND_MESSAGE_MEMBER, self.message.as_str())?;
+        serializer.write_string(self.class.message_member, self.message.as_str())?;
         Ok(())
     }
 }
@@ -105,21 +195,27 @@ impl SerializableStruct for TaggingNotFound {
 ///
 /// [`Self::Scaffolded`] is the usual one — the operation's own modelled errors, plus the
 /// `ValidationException` a handler needs for a refusal its model cannot express — and
-/// [`Self::NotFound`] is the tagging layer's own refusal, which the model declares on no
-/// shape. Generic over the operation's modelled error enum, so all three tagging operations
+/// [`Self::Tagging`] is the resource-tagging layer's own refusal, which the model declares on
+/// no shape. Generic over the operation's modelled error enum, so all three tagging operations
 /// share one spelling of the second channel.
 #[derive(Debug)]
 pub enum TaggingError<E> {
     /// A modelled error, or a refusal the scaffold channel words.
     Scaffolded(Scaffolded<E>),
-    /// The tagging layer's refusal of an ARN that names no resource.
-    NotFound(TaggingNotFound),
+    /// One of the resource-tagging layer's own refusals.
+    Tagging(TaggingRefusal),
 }
 
 impl<E> TaggingError<E> {
     /// The tagging layer's refusal of an ARN naming no resource of this service.
     pub fn not_found() -> Self {
-        Self::NotFound(TaggingNotFound::new())
+        Self::Tagging(TaggingRefusal::new(&TAG_NOT_FOUND))
+    }
+
+    /// The tagging layer's refusal of a `ResourceArn` it could not parse as an ARN, which it
+    /// answers before any resource is looked up.
+    pub fn malformed_resource_arn() -> Self {
+        Self::Tagging(TaggingRefusal::new(&TAG_BAD_REQUEST))
     }
 }
 
@@ -127,7 +223,7 @@ impl<E: ::std::fmt::Display> ::std::fmt::Display for TaggingError<E> {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
         match self {
             Self::Scaffolded(error) => write!(f, "{error}"),
-            Self::NotFound(error) => write!(f, "{error}"),
+            Self::Tagging(error) => write!(f, "{error}"),
         }
     }
 }
@@ -136,7 +232,7 @@ impl<E: ::std::error::Error + 'static> ::std::error::Error for TaggingError<E> {
     fn source(&self) -> Option<&(dyn ::std::error::Error + 'static)> {
         match self {
             Self::Scaffolded(error) => error.source(),
-            Self::NotFound(error) => error.source(),
+            Self::Tagging(error) => error.source(),
         }
     }
 }
@@ -148,37 +244,37 @@ impl<E: OperationError> OperationError for TaggingError<E> {
     fn as_serializable(&self) -> &dyn SerializableStruct {
         match self {
             Self::Scaffolded(error) => error.as_serializable(),
-            Self::NotFound(error) => error,
+            Self::Tagging(error) => error,
         }
     }
 
     fn variant_schema(&self) -> &'static Schema {
         match self {
             Self::Scaffolded(error) => error.variant_schema(),
-            Self::NotFound(_) => &TAG_NOT_FOUND_SCHEMA,
+            Self::Tagging(error) => error.class.schema,
         }
     }
 
     fn shape_name(&self) -> &'static str {
         match self {
             Self::Scaffolded(error) => error.shape_name(),
-            Self::NotFound(_) => TAG_NOT_FOUND_ERROR_CODE,
+            Self::Tagging(error) => error.class.error_code,
         }
     }
 
     fn http_status(&self) -> u16 {
         match self {
             Self::Scaffolded(error) => error.http_status(),
-            Self::NotFound(_) => TAG_NOT_FOUND_STATUS,
+            Self::Tagging(error) => error.class.http_status,
         }
     }
 
     fn query_error_code(&self) -> Option<&'static str> {
         match self {
             Self::Scaffolded(error) => error.query_error_code(),
-            // No `awsQueryError` trait to honour: the shape is in no model, and this service
-            // speaks restJson1 in any case.
-            Self::NotFound(_) => None,
+            // No `awsQueryError` trait to honour: neither shape is in a model, and this
+            // service speaks restJson1 in any case.
+            Self::Tagging(_) => None,
         }
     }
 }

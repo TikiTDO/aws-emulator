@@ -12,8 +12,9 @@
 //!   through the same `MultiServiceRouter` the emulator boots, carrying the SigV4 credential
 //!   scope a handler reads the caller's Region out of, and what came back.
 //! * [`label`]: the `@httpLabel` percent-encoding rule.
-//! * [`assert_tagging_not_found`]: the refusal the tagging endpoints answer an ARN naming no
-//!   resource with, which is the tagging layer's own error class and not this service's.
+//! * [`assert_tagging_not_found`] and [`assert_tagging_bad_request`]: the two refusals the
+//!   tagging endpoints answer with, which are the tagging layer's own error classes and not
+//!   this service's.
 //! * [`set_pending_due`] and the four helpers over it: the clock move, so a case about a
 //!   transient status neither sleeps for the transition span nor races it.
 //!
@@ -190,21 +191,43 @@ pub async fn call_with_scope(
 /// Those three operations are served by the resource-tagging layer, which reports an ARN it
 /// resolves to nothing with its OWN error class rather than with this service's
 /// `ResourceNotFoundException`: HTTP 400, the `NotFoundException` error code, and a single
-/// lower-case `message` member carrying one fixed sentence — no ARN, and none of the service
-/// error's `Message` / `ResourceId` / `ResourceType` members. The three literals are the
-/// recorded wire values of that refusal, spelled here rather than read back out of the
+/// lower-case `message` member carrying one fixed sentence. The literals are the recorded
+/// wire values of that refusal, spelled here rather than read back out of the
 /// implementation.
 pub fn assert_tagging_not_found(answer: &Answer, case: &str) {
+    assert_tagging_refusal(answer, "NotFoundException", "Resource was not found", case);
+}
+
+/// Assert `answer` is the refusal those same endpoints answer a `ResourceArn` the tagging
+/// layer cannot parse as an ARN with.
+///
+/// The layer parses the value before it resolves anything, so a value that is not an ARN is
+/// refused by the layer itself rather than reported against the member: HTTP 400, the
+/// `BadRequestException` error code, and one fixed lower-case `message`. The literals are the
+/// recorded wire values of that refusal.
+pub fn assert_tagging_bad_request(answer: &Answer, case: &str) {
+    assert_tagging_refusal(
+        answer,
+        "BadRequestException",
+        "Invalid input resource arn: bad syntax",
+        case,
+    );
+}
+
+/// The shape both of the tagging layer's refusals share: the status, its own error code, one
+/// fixed sentence under the lower-case `message` member — no value of the request, and none of
+/// the service error's `Message` / `ResourceId` / `ResourceType` members.
+fn assert_tagging_refusal(answer: &Answer, code: &str, message: &str, case: &str) {
     assert_eq!(
         (answer.status, answer.error_type.as_str()),
-        (400, "NotFoundException"),
-        "case {case:?}: expected the tagging layer's 400 NotFoundException, got {} / {:?}",
+        (400, code),
+        "case {case:?}: expected the tagging layer's 400 {code}, got {} / {:?}",
         answer.status,
         answer.body
     );
     assert_eq!(
         answer.body["message"].as_str(),
-        Some("Resource was not found"),
+        Some(message),
         "case {case:?}: expected the fixed lower-case `message` of the tagging layer's \
          refusal, got {:?}",
         answer.body
