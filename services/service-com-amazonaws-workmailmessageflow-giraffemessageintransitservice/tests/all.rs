@@ -25,7 +25,11 @@ mod mime_header_octets;
 mod raw_message_content;
 #[path = "all/regional_message_namespace.rs"]
 mod regional_message_namespace;
+#[path = "all/s3_object_resolution.rs"]
+mod s3_object_resolution;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/update_access_record.rs"]
+mod update_access_record;
 #[path = "all/update_eligibility.rs"]
 mod update_eligibility;

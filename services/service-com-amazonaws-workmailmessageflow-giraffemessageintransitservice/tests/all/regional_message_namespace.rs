@@ -17,14 +17,13 @@
 //! with the id form and the content, so no row depends on the particular region or
 //! id the issue recorded. They drive the same in-process router as the rest of the
 //! suite, through the `pub(crate)` harness in
-//! [`crate::raw_message_content`]; the store is reached only to SEED a message or
-//! an S3 object, standing in for the two producers this API does not model.
+//! [`crate::raw_message_content`]; state is reached only to SEED a message in
+//! transit, standing in for WorkMail delivery, and to stage an S3 object in Amazon
+//! S3's own store — one bucket per Region, since a bucket lives in exactly one.
 
-use service_com_amazonaws_workmailmessageflow_giraffemessageintransitservice::state::{
-    S3Object, S3Ref,
+use crate::raw_message_content::{
+    mime, regional_reference, Emulator, Reply, StagedObject,
 };
-
-use crate::raw_message_content::{mime, reference, Emulator, Reply, BUCKET};
 
 /// One row of the table: where the message is in transit (`home`), which other
 /// region the request is signed for (`away`), the id, and the bytes in transit.
@@ -171,19 +170,17 @@ async fn put_updates_only_the_region_the_message_is_in_transit_in() {
             state.seed_in_transit_message_in_region(*home, message_id.as_str(), content.clone());
         });
 
-        // One object per region, each in the bucket region its own requests are
-        // made in, so a refusal is the message namespace's and never the
-        // `InvalidContentLocation` bucket-region rule.
-        let at_home_object = reference("updated/at-home");
-        let away_object = S3Ref::new(BUCKET, "updated/away", None);
+        // One object per region, each in a bucket of that region, so a refusal is
+        // the message namespace's and never the `InvalidContentLocation`
+        // bucket-region rule.
         let replacement = mime("rewritten at home", "body");
-        emulator.seed_object(
-            &at_home_object,
-            S3Object::new(replacement.clone()).in_region(*home),
+        let at_home_object = emulator.seed_object(
+            &regional_reference(home, "updated/at-home"),
+            StagedObject::new(replacement.clone()).in_region(home),
         );
-        emulator.seed_object(
-            &away_object,
-            S3Object::new(mime("rewritten from elsewhere", "body")).in_region(*away),
+        let away_object = emulator.seed_object(
+            &regional_reference(away, "updated/away"),
+            StagedObject::new(mime("rewritten from elsewhere", "body")).in_region(away),
         );
 
         let from_elsewhere = emulator
@@ -262,11 +259,10 @@ async fn one_id_in_two_regions_is_two_messages() {
             );
         }
 
-        let s3_reference = reference("updated/one-region");
         let replacement = mime("rewritten in one region only", "body");
-        emulator.seed_object(
-            &s3_reference,
-            S3Object::new(replacement.clone()).in_region(*home),
+        let s3_reference = emulator.seed_object(
+            &regional_reference(home, "updated/one-region"),
+            StagedObject::new(replacement.clone()).in_region(home),
         );
         let put = emulator
             .put_raw_message_content(home, message_id, &s3_reference)
@@ -319,11 +315,10 @@ async fn freezing_one_region_s_message_leaves_the_other_region_s_updatable() {
             );
         });
 
-        let s3_reference = reference("updated/object");
         let replacement = mime("rewritten", "body");
-        emulator.seed_object(
-            &s3_reference,
-            S3Object::new(replacement.clone()).in_region(*away),
+        let s3_reference = emulator.seed_object(
+            &regional_reference(away, "updated/object"),
+            StagedObject::new(replacement.clone()).in_region(away),
         );
 
         let frozen = emulator

@@ -5,9 +5,14 @@
 //! Every assertion goes over the wire: a request is built, dispatched through the
 //! same [`MultiServiceRouter`] the production emulator mounts, and only the HTTP
 //! status, the `x-amzn-errortype` header and the response payload are inspected.
-//! The store is reached only to SEED it — to stand in for WorkMail delivery, which
-//! puts a message in transit, and for S3, which holds the object a
-//! `PutRawMessageContent` reference names. Neither producer is modeled by this API.
+//! State is reached only to SEED it — this service's own store to stand in for
+//! WorkMail delivery, which puts a message in transit (a producer this API does not
+//! model), and AMAZON S3's store for the object a `PutRawMessageContent` reference
+//! names, which is S3's resource and not this service's: an object is staged with
+//! S3's own `CreateBucket`/`PutObject` seams, exactly as an S3 client's calls leave
+//! it, so what the handler resolves is what S3 holds. The cross-service path over
+//! the wire, with both services mounted, is in the router's own suite
+//! (`core/router/tests/all/workmailmessageflow_resolves_an_s3_object.rs`).
 //!
 //! The tests are tables: each row is one input along the axis the rule under test
 //! generalises over (id form and length, content form and size, reference
@@ -21,8 +26,12 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use serde_json::{json, Value};
+use service_com_amazonaws_s3_amazons3::state::{
+    service_state as s3_service_state, BucketCreation, Object as S3StoredObject, ObjectDeletion,
+    ObjectWrite,
+};
 use service_com_amazonaws_workmailmessageflow_giraffemessageintransitservice::state::{
-    service_state, S3Object, S3Ref,
+    service_state, S3Ref,
     ComAmazonawsWorkmailmessageflowGiraffemessageintransitserviceState as FlowState,
 };
 use service_com_amazonaws_workmailmessageflow_giraffemessageintransitservice::EmulatedService;
@@ -116,9 +125,97 @@ impl Emulator {
         });
     }
 
-    /// Make `content` resolvable at `reference`, as an S3 `PutObject` does.
-    pub(crate) fn seed_object(&self, reference: &S3Ref, object: S3Object) {
-        self.with_state(|state| state.seed_s3_object(reference.clone(), object));
+    /// Stage `object` in AMAZON S3's own store at the bucket and key `reference`
+    /// names — as an S3 client's `CreateBucket` and `PutObject` leave it — and
+    /// answer the reference that names what was written.
+    ///
+    /// A `reference` carrying an `objectVersion` asks for a VERSIONING-ENABLED
+    /// bucket ([`versioned_reference`]); the id it carries is a placeholder, since a
+    /// version id is S3's to mint, and the reference that comes back carries the id
+    /// S3 minted for this write. An unversioned one comes back unversioned.
+    ///
+    /// Nothing of this service's own state is touched: the object belongs to S3,
+    /// which is why a reference resolves for any client that can call `PutObject`.
+    pub(crate) fn seed_object(&self, reference: &S3Ref, object: StagedObject) -> S3Ref {
+        let s3 = s3_service_state(&*self.engine).expect("Amazon S3's store is reachable");
+        let mut store = s3.lock();
+        let creation = match &object.provisioned_by {
+            Some(service) => {
+                store.provision_bucket(&reference.bucket, &object.region, service)
+            }
+            None => store.create_bucket(&reference.bucket, &object.region),
+        };
+        assert!(
+            matches!(creation, BucketCreation::Created | BucketCreation::NameTaken),
+            "staging {:?}: expected the bucket to be created or to already exist, got \
+             {creation:?}",
+            reference.bucket
+        );
+        let held_region = store
+            .bucket(&reference.bucket)
+            .map(|bucket| bucket.region.clone());
+        assert_eq!(
+            held_region.as_deref(),
+            Some(object.region.as_str()),
+            "staging {:?}: a bucket is in exactly one Region, so stage each Region's objects \
+             in their own bucket; got {held_region:?}",
+            reference.bucket
+        );
+        if reference.object_version.is_some() {
+            store
+                .bucket_mut(&reference.bucket)
+                .expect("the bucket just staged is held")
+                .set_versioning("Enabled", None);
+        }
+        let write = store.put_object(
+            &reference.bucket,
+            &reference.key,
+            S3StoredObject::stored(object.content, None),
+        );
+        assert!(
+            matches!(
+                write,
+                Some(ObjectWrite::Created | ObjectWrite::Replaced)
+            ),
+            "staging {:?}: expected the object write to be recorded, got {write:?}",
+            reference.key
+        );
+        let minted = store
+            .bucket(&reference.bucket)
+            .and_then(|bucket| bucket.object(&reference.key))
+            .and_then(|stored| stored.version_id.clone());
+        assert_eq!(
+            minted.is_some(),
+            reference.object_version.is_some(),
+            "staging {:?}: expected a minted version id exactly for a versioned stage, got \
+             {minted:?}",
+            reference.key
+        );
+        S3Ref::new(reference.bucket.clone(), reference.key.clone(), minted)
+    }
+
+    /// Lay a DELETE MARKER over `reference`'s key in Amazon S3, as an S3
+    /// `DeleteObject` naming no version does, so the key's current version is a
+    /// marker and every version behind it is still stored.
+    ///
+    /// The marker is what the row this feeds turns on, so the outcome is asserted
+    /// rather than assumed: a hard removal would make the same row pass for another
+    /// reason.
+    pub(crate) fn delete_object(&self, reference: &S3Ref) {
+        let s3 = s3_service_state(&*self.engine).expect("Amazon S3's store is reachable");
+        let mut store = s3.lock();
+        let removal = store.remove_object(&reference.bucket, &reference.key);
+        assert!(
+            matches!(
+                removal,
+                Some(ObjectDeletion::MarkerLaid {
+                    displaced_object: true,
+                    ..
+                })
+            ),
+            "deleting {:?}: expected a delete marker over a current object, got {removal:?}",
+            reference.key
+        );
     }
 
     async fn send(&self, method: &str, uri: &str, region: &str, body: Option<Vec<u8>>) -> Reply {
@@ -213,6 +310,80 @@ pub(crate) const BUCKET: &str = "mailbucket";
 /// is refused at the boundary before any handler runs.
 pub(crate) fn reference(key: &str) -> S3Ref {
     S3Ref::new(BUCKET, key, None)
+}
+
+/// A VERSIONED stage of `key`: a reference into a VERSIONING-ENABLED bucket of its
+/// own, named after the key, whose `objectVersion` is a placeholder.
+///
+/// A bucket of its own because versioning is a property of the BUCKET: every write
+/// into a versioning-enabled bucket gets a minted id, so the unversioned stages of
+/// a test must not share the bucket with a versioned one.
+/// [`Emulator::seed_object`] reads the placeholder as "enable versioning on this
+/// bucket" and answers with the version id S3 minted.
+pub(crate) fn versioned_reference(key: &str) -> S3Ref {
+    S3Ref::new(
+        format!("{BUCKET}-v-{}", key.replace('/', "-")),
+        key,
+        Some(STAGE_A_VERSION.to_string()),
+    )
+}
+
+/// The placeholder [`versioned_reference`] carries. It is never the id a stage comes
+/// back with: S3 mints that, and nothing here can name it in advance.
+pub(crate) const STAGE_A_VERSION: &str = "stage-a-version";
+
+/// The bucket a test stages an object in FOR `region`, as a reference to `key` in
+/// it.
+///
+/// One bucket name per region, because a real S3 bucket lives in exactly one
+/// Region: a row that needs the same key in two regions needs two buckets, which is
+/// the thing a per-object region tag got wrong. The name stays inside
+/// `S3Reference$bucket`'s `^[a-z0-9][a-z0-9\-]*$`, since a Region code is lowercase
+/// letters, digits and dashes.
+pub(crate) fn regional_reference(region: &str, key: &str) -> S3Ref {
+    S3Ref::new(format!("{BUCKET}-{region}"), key, None)
+}
+
+/// How an object is staged in AMAZON S3's own store: the bytes, the Region of the
+/// bucket that holds it, whether that bucket is one another emulated service
+/// provisioned (so it is held in a service-managed account rather than the calling
+/// one), and whether it is versioning-enabled (so S3 mints a version id for the
+/// write).
+///
+/// Every one of those is a property of the BUCKET or the OBJECT in S3, which is
+/// what the handler reads them off.
+pub(crate) struct StagedObject {
+    content: Vec<u8>,
+    region: String,
+    provisioned_by: Option<String>,
+}
+
+impl StagedObject {
+    /// `content` in a bucket of the caller's own account in [`REGION`].
+    pub(crate) fn new(content: impl Into<Vec<u8>>) -> Self {
+        Self {
+            content: content.into(),
+            region: REGION.to_string(),
+            provisioned_by: None,
+        }
+    }
+
+    /// The same object in a bucket created in `region`.
+    #[must_use]
+    pub(crate) fn in_region(mut self, region: &str) -> Self {
+        self.region = region.to_string();
+        self
+    }
+
+    /// The same object in a bucket `service` — another emulated service —
+    /// provisioned as the object store of one of ITS resources. S3 leaves such a
+    /// bucket out of "the buckets in your account", so for the calling account its
+    /// owner is another account.
+    #[must_use]
+    pub(crate) fn provisioned_by(mut self, service: &str) -> Self {
+        self.provisioned_by = Some(service.to_string());
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -393,8 +564,8 @@ async fn put_replaces_the_stored_content_and_the_next_get_reports_it() {
         ),
         (
             "a versioned reference",
-            S3Ref::new(BUCKET, "updated/message-mime", Some("v2".to_string())),
-            mime("rewritten at v2", "body"),
+            versioned_reference("updated/message-mime"),
+            mime("rewritten at the version S3 minted", "body"),
         ),
         (
             "content shorter than the original",
@@ -448,7 +619,7 @@ async fn put_replaces_the_stored_content_and_the_next_get_reports_it() {
         let message_id = "00000000-0000-0000-0000-000000000001";
         let original = b"From: a@example.com\r\nSubject: original\r\n\r\nbody".to_vec();
         emulator.seed_message(message_id, &original);
-        emulator.seed_object(&s3_reference, S3Object::new(replacement.clone()));
+        let s3_reference = emulator.seed_object(&s3_reference, StagedObject::new(replacement.clone()));
 
         let before = emulator.get_raw_message_content(REGION, message_id).await;
         assert_eq!(
@@ -503,17 +674,22 @@ async fn put_replaces_the_stored_content_and_the_next_get_reports_it() {
 #[tokio::test]
 async fn an_accepted_reference_is_retained_with_its_object_version() {
     let cases = [
-        ("unversioned", None),
-        ("versioned", Some("3HL4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY+MTRCxf3vjVBH40Nr8X8gdRQBpUMLUo")),
-        ("a one-character version", Some("1")),
+        ("unversioned", reference("updated/object")),
+        ("versioned", versioned_reference("updated/object")),
     ];
 
-    for (case, version) in cases {
+    for (case, staged) in cases {
         let emulator = Emulator::new();
         let message_id = "retained-0";
         emulator.seed_message(message_id, &mime("original", "body"));
-        let s3_reference = S3Ref::new(BUCKET, "updated/object", version.map(str::to_string));
-        emulator.seed_object(&s3_reference, S3Object::new(mime("rewritten", "body")));
+        let s3_reference = emulator.seed_object(&staged, StagedObject::new(mime("rewritten", "body")));
+        assert_eq!(
+            s3_reference.object_version.is_some(),
+            staged.object_version.is_some(),
+            "case {case:?}: expected the staged reference to be versioned exactly when it was \
+             asked to be, got {:?}",
+            s3_reference.object_version
+        );
 
         let put = emulator
             .put_raw_message_content(REGION, message_id, &s3_reference)
@@ -542,8 +718,8 @@ async fn an_accepted_reference_is_retained_with_its_object_version() {
 #[tokio::test]
 async fn put_to_an_unknown_message_is_not_found() {
     let emulator = Emulator::new();
-    let s3_reference = reference("updated/object");
-    emulator.seed_object(&s3_reference, S3Object::new(mime("rewritten", "body")));
+    let s3_reference =
+        emulator.seed_object(&reference("updated/object"), StagedObject::new(mime("rewritten", "body")));
 
     let cases = [
         ("the issue's unknown id", "does-not-exist".to_string()),
@@ -597,8 +773,8 @@ async fn put_to_an_unknown_message_is_not_found() {
 /// refused update.
 #[tokio::test]
 async fn an_unknown_message_id_is_refused_with_the_id_it_was_asked_about() {
-    let resolvable = reference("updated/object");
-    let versioned = S3Ref::new(BUCKET, "updated/versioned", Some("v1".to_string()));
+    let staged_resolvable = reference("updated/object");
+    let staged_versioned = versioned_reference("updated/versioned");
     // A reference nothing is stored at: if the content-location check ran first
     // this row would answer InvalidContentLocation instead.
     let unresolvable = reference("never/stored");
@@ -622,8 +798,12 @@ async fn an_unknown_message_id_is_refused_with_the_id_it_was_asked_about() {
         // A message IS in transit under another id, so the rows below are refused
         // for the id they name and not because the store is empty.
         emulator.seed_message("present-0", &mime("present", "body"));
-        emulator.seed_object(&resolvable, S3Object::new(mime("rewritten", "body")));
-        emulator.seed_object(&versioned, S3Object::new(mime("rewritten v1", "body")));
+        let resolvable =
+            emulator.seed_object(&staged_resolvable, StagedObject::new(mime("rewritten", "body")));
+        let versioned = emulator.seed_object(
+            &staged_versioned,
+            StagedObject::new(mime("rewritten at a version", "body")),
+        );
 
         let expected = format!("Unknown messageId: {message_id}");
         let paths: Vec<(&str, Reply)> = vec![
@@ -706,8 +886,10 @@ async fn put_to_a_frozen_message_is_refused_and_changes_nothing() {
                 .seed_in_transit_message(message_id, original.clone())
                 .frozen = true;
         });
-        let s3_reference = reference("updated/object");
-        emulator.seed_object(&s3_reference, S3Object::new(mime("rewritten", "body")));
+        let s3_reference = emulator.seed_object(
+            &reference("updated/object"),
+            StagedObject::new(mime("rewritten", "body")),
+        );
 
         let reply = emulator
             .put_raw_message_content(REGION, message_id, &s3_reference)
@@ -734,45 +916,94 @@ async fn put_to_a_frozen_message_is_refused_and_changes_nothing() {
     }
 }
 
-/// Every way a reference can fail to resolve to a readable object answers
-/// `InvalidContentLocation` and leaves the message alone. The rows are the
+/// What one emulator holds in AMAZON S3 for the unreadable-location rows below,
+/// each in a bucket of its own: a Region and an owning account are properties of a
+/// BUCKET, so no two of these can be the same bucket.
+pub(crate) struct StagedObjects {
+    /// A readable object in a bucket of the caller's account in [`REGION`].
+    pub(crate) readable: S3Ref,
+    /// A readable object in a versioning-enabled bucket, at the version S3 minted.
+    pub(crate) versioned: S3Ref,
+    /// A readable object in a bucket in another Region.
+    pub(crate) elsewhere: S3Ref,
+    /// A readable object in a bucket another emulated service provisioned, so S3
+    /// holds it outside the calling account's own buckets.
+    pub(crate) service_managed: S3Ref,
+    /// A versioned key whose CURRENT version is a delete marker: every version
+    /// behind it is still stored, and S3 behaves as though the key held nothing.
+    pub(crate) deleted: S3Ref,
+}
+
+impl StagedObjects {
+    /// Stage all five in `emulator`'s Amazon S3 store.
+    pub(crate) fn stage(emulator: &Emulator) -> Self {
+        let deleted = emulator.seed_object(
+            &versioned_reference("deleted/object"),
+            StagedObject::new(mime("deleted", "body")),
+        );
+        emulator.delete_object(&deleted);
+        Self {
+            readable: emulator.seed_object(
+                &reference("updated/message-mime"),
+                StagedObject::new(mime("rewritten", "body")),
+            ),
+            versioned: emulator.seed_object(
+                &versioned_reference("versioned/object"),
+                StagedObject::new(mime("rewritten at a version", "body")),
+            ),
+            elsewhere: emulator.seed_object(
+                &regional_reference("eu-west-1", "elsewhere/object"),
+                StagedObject::new(mime("elsewhere", "body")).in_region("eu-west-1"),
+            ),
+            service_managed: emulator.seed_object(
+                &S3Ref::new("mailbucket-service-managed", "managed/object", None),
+                StagedObject::new(mime("someone else's", "body"))
+                    .provisioned_by("com.amazonaws.lightsail"),
+            ),
+            deleted,
+        }
+    }
+}
+
+/// One unreadable-location row: its name and the reference the request carries,
+/// computed from what Amazon S3 holds — a version id is S3's to mint, so a row that
+/// names one cannot be a constant.
+type UnreadableRow = (&'static str, fn(&StagedObjects) -> S3Ref);
+
+/// Every way a reference can fail to resolve to a readable object in Amazon S3
+/// answers `InvalidContentLocation` and leaves the message alone. The rows are the
 /// documented reasons: nothing stored there, the bucket's region is not the
 /// request's region, and the bucket owner is not the calling account.
 #[tokio::test]
 async fn put_with_an_unreadable_object_is_an_invalid_content_location() {
-    let stored = reference("updated/message-mime");
-    let versioned = S3Ref::new(BUCKET, "versioned/object", Some("v1".to_string()));
-
-    let cases: Vec<(&str, S3Ref)> = vec![
-        ("the issue's missing key", reference("missing/object")),
-        ("an unknown bucket", S3Ref::new("otherbucket", stored.key.clone(), None)),
-        (
-            "a version that is not stored",
-            S3Ref::new(BUCKET, versioned.key.clone(), Some("v9".to_string())),
-        ),
-        (
-            "an unversioned reference to a versioned object",
-            S3Ref::new(BUCKET, versioned.key.clone(), None),
-        ),
-        ("an object in another region", reference("other-region/object")),
-        ("an object owned by another account", reference("other-owner/object")),
+    let rows: Vec<UnreadableRow> = vec![
+        ("the issue's missing key", |_| reference("missing/object")),
+        ("a bucket S3 does not hold", |staged| {
+            S3Ref::new("otherbucket", staged.readable.key.clone(), None)
+        }),
+        ("a version no write minted", |staged| {
+            S3Ref::new(
+                staged.versioned.bucket.clone(),
+                staged.versioned.key.clone(),
+                Some("not-a-minted-version".to_string()),
+            )
+        }),
+        ("a key whose current version is a delete marker", |staged| {
+            S3Ref::new(staged.deleted.bucket.clone(), staged.deleted.key.clone(), None)
+        }),
+        ("a bucket in another region", |staged| staged.elsewhere.clone()),
+        ("a bucket held in another account", |staged| {
+            staged.service_managed.clone()
+        }),
     ];
 
-    for (case, s3_reference) in cases {
+    for (case, row) in rows {
         let emulator = Emulator::new();
         let message_id = "00000000-0000-0000-0000-000000000001";
         let original = mime("original", "body");
         emulator.seed_message(message_id, &original);
-        emulator.seed_object(&stored, S3Object::new(mime("rewritten", "body")));
-        emulator.seed_object(&versioned, S3Object::new(mime("rewritten v1", "body")));
-        emulator.seed_object(
-            &reference("other-region/object"),
-            S3Object::new(mime("elsewhere", "body")).in_region("eu-west-1"),
-        );
-        emulator.seed_object(
-            &reference("other-owner/object"),
-            S3Object::new(mime("someone else's", "body")).owned_by("210987654321"),
-        );
+        let staged = StagedObjects::stage(&emulator);
+        let s3_reference = row(&staged);
 
         let reply = emulator
             .put_raw_message_content(REGION, message_id, &s3_reference)
@@ -799,21 +1030,31 @@ async fn put_with_an_unreadable_object_is_an_invalid_content_location() {
         );
     }
 
-    // The control: the same object, referenced correctly, is accepted — so the
-    // rows above fail for the reason under test and not because the fixture is
-    // broken.
-    let emulator = Emulator::new();
-    emulator.seed_message("control-0", &mime("original", "body"));
-    emulator.seed_object(&stored, S3Object::new(mime("rewritten", "body")));
-    let reply = emulator
-        .put_raw_message_content(REGION, "control-0", &stored)
-        .await;
-    assert_eq!(
-        reply.status, 200,
-        "case \"control\": expected HTTP 200, got {} ({})",
-        reply.status,
-        reply.summary()
-    );
+    // The controls: the two objects the rows above name indirectly are accepted
+    // when referenced as S3 holds them — so each row fails for the reason under
+    // test and not because the fixture is broken.
+    for (case, pick) in [
+        ("the readable object", 0usize),
+        ("the versioned object", 1usize),
+    ] {
+        let emulator = Emulator::new();
+        emulator.seed_message("control-0", &mime("original", "body"));
+        let staged = StagedObjects::stage(&emulator);
+        let s3_reference = if pick == 0 {
+            staged.readable.clone()
+        } else {
+            staged.versioned.clone()
+        };
+        let reply = emulator
+            .put_raw_message_content(REGION, "control-0", &s3_reference)
+            .await;
+        assert_eq!(
+            reply.status, 200,
+            "case {case:?}: expected HTTP 200, got {} ({})",
+            reply.status,
+            reply.summary()
+        );
+    }
 }
 
 /// An object in the request's own region resolves; the same object in any other
@@ -840,10 +1081,9 @@ async fn an_object_resolves_only_in_the_region_the_request_was_made_in() {
             // this row turns only on the bucket's region.
             state.seed_in_transit_message_in_region(request_region, message_id, original.clone());
         });
-        let s3_reference = reference("updated/object");
-        emulator.seed_object(
-            &s3_reference,
-            S3Object::new(replacement.clone()).in_region(bucket_region),
+        let s3_reference = emulator.seed_object(
+            &regional_reference(bucket_region, "updated/object"),
+            StagedObject::new(replacement.clone()).in_region(bucket_region),
         );
 
         let reply = emulator
@@ -949,8 +1189,8 @@ async fn put_with_unusable_mime_content_is_rejected() {
         let message_id = "mime-0";
         let original = mime("original", "body");
         emulator.seed_message(message_id, &original);
-        let s3_reference = reference("updated/object");
-        emulator.seed_object(&s3_reference, S3Object::new(content));
+        let s3_reference = emulator
+            .seed_object(&reference("updated/object"), StagedObject::new(content));
 
         let reply = emulator
             .put_raw_message_content(REGION, message_id, &s3_reference)
@@ -1014,8 +1254,8 @@ async fn put_with_unusable_mime_content_is_rejected() {
         let emulator = Emulator::new();
         let message_id = "mime-1";
         emulator.seed_message(message_id, &mime("original", "body"));
-        let s3_reference = reference("updated/object");
-        emulator.seed_object(&s3_reference, S3Object::new(content.clone()));
+        let s3_reference = emulator
+            .seed_object(&reference("updated/object"), StagedObject::new(content.clone()));
 
         let reply = emulator
             .put_raw_message_content(REGION, message_id, &s3_reference)
@@ -1093,20 +1333,17 @@ async fn put_then_get_round_trips_every_generated_mime_message() {
         let message_id = case_message_id(case);
         let original = case_mime(case);
         let replacement = case_mime(case + GENERATED_CASES);
-        let s3_reference = S3Ref::new(
-            BUCKET,
-            format!("objects/{case}"),
-            // Half the cases name a version, half do not.
-            if case % 2 == 0 {
-                Some(format!("v{case}"))
-            } else {
-                None
-            },
-        );
+        let staged = if case % 2 == 0 {
+            // Half the cases resolve a version S3 minted, half the key's current
+            // version.
+            versioned_reference(&format!("objects/{case}"))
+        } else {
+            reference(&format!("objects/{case}"))
+        };
 
         let emulator = Emulator::new();
         emulator.seed_message(&message_id, &original);
-        emulator.seed_object(&s3_reference, S3Object::new(replacement.clone()));
+        let s3_reference = emulator.seed_object(&staged, StagedObject::new(replacement.clone()));
 
         let put = emulator
             .put_raw_message_content(REGION, &message_id, &s3_reference)

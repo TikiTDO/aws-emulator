@@ -171,20 +171,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let store = crate::state::service_state(&*self.engine).ok_or_else(store_unavailable)?;
         let reference = S3Ref::from_modeled(&input.content.s3_reference);
 
-        // FIRST critical section: the message's own identity and eligibility, then
-        // the reference resolved to bytes. An update names a message, and a message
-        // that is no longer in transit cannot take one. The guard is dropped at the
-        // end of this block so the content validation below — whose cost is
-        // proportional to the message, not to the state access — does not hold the
-        // store against every other request.
-        let resolved = {
+        // FIRST critical section: the message's own identity and eligibility. An
+        // update names a message, and a message that is no longer in transit cannot
+        // take one. The guard is dropped at the end of this block so neither the S3
+        // read nor the content validation below — whose cost is proportional to the
+        // message, not to the state access — holds the store against every other
+        // request.
+        {
             let state = store.lock();
             refuse_if_not_updatable(&state, &akid, &input.message_id, &request_region)?;
-            resolve_content(&state, &reference, &request_region)
-        };
+        }
 
-        let content = match resolved {
+        // The reference resolved to bytes, out of AMAZON S3's own store: the object
+        // is S3's, so a client makes it resolvable with `PutObject` and this reads
+        // what that write left. Run with NO guard of this service's store held, the
+        // lock order [`crate::state::referenced_object`] states.
+        let content = match resolve_content(&*self.engine, &reference, &request_region) {
             Ok(bytes) => bytes,
+            Err(Unreadable::S3Unavailable) => {
+                return Err(s3_store_unavailable(
+                    &akid,
+                    &input.message_id,
+                    &reference,
+                    &request_region,
+                ));
+            }
             Err(Unreadable::Oversize(octets)) => {
                 // The object is readable; it is its CONTENT that is beyond what
                 // this emulator will read, so the answer is the content refusal.
@@ -202,7 +213,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // Which of the documented conditions fired stays in the access
                 // record: the wire error carries the model's own generic wording,
                 // the way the real service answers, rather than the stored object's
-                // region or owner.
+                // region or owner. The reason is recorded through its `Debug`, like
+                // the reference beside it, because it carries a value read out of
+                // the store (a bucket's Region) and no stored value may be able to
+                // terminate or forge a record.
                 ::tracing::info!(
                     operation = "PutRawMessageContent",
                     akid = %akid,
@@ -210,7 +224,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     reference = ?reference,
                     region = %request_region,
                     outcome = "InvalidContentLocation",
-                    reason = %reason,
+                    reason = ?reason,
                     "refused an update whose S3 reference could not be read"
                 );
                 return Err(PutRawMessageContentErrorModeled::InvalidContentLocation(
@@ -403,7 +417,7 @@ fn refuse_rejected(
         reference = ?reference,
         region = %region,
         outcome = "MessageRejected",
-        reason = %reason,
+        reason = ?reason,
         "refused an update whose content is not usable MIME"
     );
     PutRawMessageContentErrorModeled::MessageRejected(MessageRejected {
@@ -412,56 +426,57 @@ fn refuse_rejected(
     .into()
 }
 
-/// The bytes the reference resolves to, or the reason it is not readable — an
-/// `InvalidContentLocation` for the caller, and this string for the access record.
+/// The bytes the reference resolves to IN AMAZON S3, or the reason it is not
+/// readable — an `InvalidContentLocation` for the caller, and this string for the
+/// access record.
+///
+/// The object belongs to S3, not to this service: the model documents
+/// `S3Reference` as "Amazon S3 object representing the updated message content, in
+/// MIME format" (`smithy_query(query="shape", shape="S3Reference")`), so what a
+/// client uploaded with `PutObject` is what this reads, through
+/// [`crate::state::referenced_object`]. Nothing about the reference is echoed into
+/// the message: the bytes come out of the stored object.
 ///
 /// Three conditions make an object unreadable, and the model's own
 /// `InvalidContentLocation` documentation
 /// (`smithy_query(query="doc", shape="InvalidContentLocation")`) names the first
 /// two of them: "You made the request in a region other than your S3 bucket
 /// region" and "The S3 bucket owner is not the same as the calling AWS account".
-/// The third is the reference naming no object at all — including a versioned
-/// reference naming a version that is not stored, since the model documents
-/// `objectVersion` as selecting one version of the object.
+/// The third is the reference naming no object at all — no such bucket, no such
+/// key, a key whose current version is a delete marker, or a versioned reference
+/// naming a version that is not stored, since the model documents `objectVersion`
+/// as selecting one version of the object.
 ///
 /// The remaining documented reason, an incomplete or missing S3 bucket policy, is
-/// not decided here: this emulator's S3 holds no bucket policies, so there is
-/// nothing to evaluate.
-fn resolve_content(
-    state: &crate::state::ComAmazonawsWorkmailmessageflowGiraffemessageintransitserviceState,
+/// not decided here: an object this emulator's S3 serves the calling account is one
+/// that account can read, so there is no policy state to evaluate against.
+fn resolve_content<Eng: ::std::marker::Send + ::std::marker::Sync + 'static>(
+    engine: &Eng,
     reference: &S3Ref,
     request_region: &str,
 ) -> Result<Vec<u8>, Unreadable> {
-    let Some(object) = state.resolve_s3_object(reference) else {
-        return Err(Unreadable::Location(
-            "no object is stored at that bucket, key and object version".to_string(),
-        ));
+    let Some(resolved) =
+        crate::state::referenced_object(engine, reference, request_region, MAX_CONTENT_OCTETS)
+    else {
+        return Err(Unreadable::S3Unavailable);
     };
-
-    if object.region != request_region {
-        return Err(Unreadable::Location(format!(
-            "the bucket is in region {} but the request was made in region {request_region}",
-            object.region
-        )));
+    match resolved {
+        crate::state::ReferencedObject::Content(bytes) => Ok(bytes),
+        crate::state::ReferencedObject::NoObject => Err(Unreadable::Location(
+            "no object is stored at that bucket, key and object version".to_string(),
+        )),
+        crate::state::ReferencedObject::OtherRegion { bucket_region } => {
+            Err(Unreadable::Location(format!(
+                "the bucket is in region {bucket_region} but the request was made in region \
+                 {request_region}"
+            )))
+        }
+        crate::state::ReferencedObject::OtherAccount => Err(Unreadable::Location(format!(
+            "the bucket is not one the calling AWS account {} holds",
+            ::engine::emulator_account_id()
+        ))),
+        crate::state::ReferencedObject::Oversize { octets } => Err(Unreadable::Oversize(octets)),
     }
-
-    let caller = ::engine::emulator_account_id();
-    if object.owner_account_id != caller {
-        return Err(Unreadable::Location(format!(
-            "the bucket owner {} is not the calling AWS account {caller}",
-            object.owner_account_id
-        )));
-    }
-
-    // The ceiling is decided here, where the object is still BORROWED from the
-    // store, so content beyond it is refused without being copied: the copy below
-    // is what hands the bytes out of the critical section, and it is the one place
-    // this operation duplicates an object.
-    if object.content.len() > MAX_CONTENT_OCTETS {
-        return Err(Unreadable::Oversize(object.content.len()));
-    }
-
-    Ok(object.content.clone())
 }
 
 /// Why a reference did not yield content this operation can work on.
@@ -474,6 +489,10 @@ enum Unreadable {
     /// content, so it is answered as unusable content and not as a location
     /// failure.
     Oversize(usize),
+    /// Amazon S3's own store is not reachable at all, so whether the reference
+    /// resolves is not known — see [`s3_store_unavailable`]. Not a location
+    /// failure: nothing was learned about the object.
+    S3Unavailable,
 }
 
 /// Headers RFC 5322 §3.6 permits at most once in a message.
@@ -981,6 +1000,40 @@ fn store_unavailable() -> PutRawMessageContentError {
     crate::scaffolded::Scaffolded::NotImplemented(crate::scaffolded::NotImplemented {
         message: "the WorkMail Message Flow in-transit message store is unavailable: this \
                   service is mounted on an engine that holds no state for it"
+            .to_string(),
+    })
+}
+
+/// Record and build the answer for when AMAZON S3's store is not reachable at all,
+/// so whether the reference resolves cannot be decided.
+///
+/// Not a modeled failure either, and NOT `InvalidContentLocation`: that error says
+/// WorkMail could not access the content at a location it did reach, while this
+/// says the object store was never consulted. Like [`store_unavailable`] it can
+/// only happen when the service is mounted on an engine that is not the shared
+/// in-memory one, so it is reported as 501 with wording that says exactly that.
+///
+/// It leaves the same access record every other outcome of this mutating operation
+/// leaves: who asked, which message, which reference and in which region.
+fn s3_store_unavailable(
+    akid: &str,
+    message_id: &str,
+    reference: &S3Ref,
+    region: &str,
+) -> PutRawMessageContentError {
+    ::tracing::info!(
+        operation = "PutRawMessageContent",
+        akid = %akid,
+        message_id = %message_id,
+        reference = ?reference,
+        region = %region,
+        outcome = "NotImplemented",
+        "refused an update whose S3 reference could not be resolved: no Amazon S3 store to read"
+    );
+    crate::scaffolded::Scaffolded::NotImplemented(crate::scaffolded::NotImplemented {
+        message: "the Amazon S3 object store is unavailable: this service is mounted on an \
+                  engine that holds no state for Amazon S3, so the updated content cannot be \
+                  read"
             .to_string(),
     })
 }

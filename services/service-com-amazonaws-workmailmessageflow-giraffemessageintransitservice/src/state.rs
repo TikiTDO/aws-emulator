@@ -5,17 +5,20 @@
 //! WorkMail Message Flow has no create or delete operation of its own: an
 //! in-transit message exists because WorkMail delivery put it in transit, and the
 //! MIME content `PutRawMessageContent` installs comes out of an S3 object that S3
-//! holds. Both of those producers live outside this API, so this module owns the
-//! two stores the two modeled operations act on, plus the seed helpers that stand
-//! in for those producers ([`ComAmazonawsWorkmailmessageflowGiraffemessageintransitserviceState::seed_in_transit_message`]
-//! and [`ComAmazonawsWorkmailmessageflowGiraffemessageintransitserviceState::seed_s3_object`]).
-//! Nothing here fabricates content: every byte a handler returns was written into
-//! the store by a seed or by a successful `PutRawMessageContent`.
+//! holds. Both of those producers live outside this API, and they are owned in two
+//! different places: the in-transit messages are this module's store, with the seed
+//! helper that stands in for WorkMail delivery
+//! ([`ComAmazonawsWorkmailmessageflowGiraffemessageintransitserviceState::seed_in_transit_message`]),
+//! while an S3 object belongs to AMAZON S3 and is read out of S3's own store in the
+//! shared engine ([`referenced_object`]) — never out of a copy kept here, which no
+//! S3 client could write. Nothing here fabricates content: every byte a handler
+//! returns was written into the store by a seed, or installed by a successful
+//! `PutRawMessageContent` out of the object S3 holds.
 //!
-//! Both stores are regional. A message is in transit in the message flow of one
-//! region and an S3 object sits in one bucket region, so each is keyed or tagged
-//! with its region and a handler resolves it against the region the request was
-//! made in ([`request_region`]).
+//! Both sides are regional. A message is in transit in the message flow of one
+//! region and an S3 bucket lives in one region, so the message is keyed with its
+//! region and the bucket's own region is read off the bucket, each resolved against
+//! the region the request was made in ([`request_region`]).
 
 use std::collections::HashMap;
 use std::time::SystemTime;
@@ -87,44 +90,104 @@ impl S3Ref {
     }
 }
 
-/// An S3 object this emulator can resolve a reference to.
+/// What the S3 object a reference names turns out to be, read from Amazon S3's own
+/// store ([`referenced_object`]).
 ///
-/// Beside the bytes it carries the two facts the model says WorkMail must be able
-/// to check before it reads an object, both from the `InvalidContentLocation`
-/// documentation (`smithy_query(query="doc", shape="InvalidContentLocation")`):
-/// the bucket's region, which must match the region the request was made in, and
-/// the bucket owner, which must be the calling account.
-#[derive(Debug, Clone)]
-pub struct S3Object {
-    pub content: Vec<u8>,
-    pub region: String,
-    pub owner_account_id: String,
+/// The variants other than [`Self::Content`] are the conditions that stop WorkMail
+/// from reading the object, and each is a property of the REAL bucket or object:
+/// the two the model's `InvalidContentLocation` documentation names
+/// (`smithy_query(query="doc", shape="InvalidContentLocation")`) — "you made the
+/// request in a region other than your S3 bucket region" and "the S3 bucket owner
+/// is not the same as the calling AWS account" — plus the reference naming no
+/// object at all, and the one ceiling this emulator reads content up to. Which
+/// condition fired is reported here rather than decided here, so the wording of
+/// the refusal stays with the operation that answers it.
+#[derive(Debug)]
+pub enum ReferencedObject {
+    /// The bytes the referenced object holds.
+    Content(Vec<u8>),
+    /// S3 holds no bucket of that name, no object at that key, or no such version
+    /// of it — including a key whose current version is a delete marker, which is
+    /// a key S3 behaves as though it held nothing at.
+    NoObject,
+    /// The bucket is in `bucket_region`, which is not the region the request was
+    /// made in.
+    OtherRegion { bucket_region: String },
+    /// The bucket is not one of the buckets the calling account holds in S3.
+    OtherAccount,
+    /// The object carries `octets` octets, beyond the ceiling the caller asked to
+    /// read up to.
+    Oversize { octets: usize },
 }
 
-impl S3Object {
-    /// An object holding `content`, in [`DEFAULT_REGION`], owned by this
-    /// emulator's account.
-    pub fn new(content: impl Into<Vec<u8>>) -> Self {
-        Self {
-            content: content.into(),
-            region: DEFAULT_REGION.to_string(),
-            owner_account_id: ::engine::emulator_account_id().to_string(),
-        }
+/// The object `reference` names in AMAZON S3, resolved against S3's own store in
+/// the shared engine, for a request made in `request_region` and reading content up
+/// to `max_octets`.
+///
+/// `None` when that store is unreachable (the engine is not the shared in-memory
+/// one) — the same condition [`service_state`] reports for this service's own
+/// store, and never an empty resolution, so an unreachable store is not reported as
+/// a reference that does not resolve.
+///
+/// The model documents `S3Reference` as "Amazon S3 object representing the updated
+/// message content, in MIME format", and notes that "the region for the S3 bucket
+/// containing the S3 object must match the region used for WorkMail operations" and
+/// that "for WorkMail to process an S3 object, it must have permission to access
+/// that object" (`smithy_query(query="doc", shape="S3Reference")`), so the object is
+/// S3's and so are the two conditions: a client makes it resolvable by calling
+/// `PutObject`, and this reads what that write left. `objectVersion` selects one
+/// version of it, and a reference that names none addresses the key's current
+/// version, which is what an S3 read naming no version answers with.
+///
+/// Ownership is decided by the two properties S3's own "buckets in your account"
+/// seam filters on (`account_buckets` is `buckets()` less `provisioned_by` and
+/// `aws_published`): a bucket another emulated service provisioned as the object
+/// store of one of ITS resources, and one AWS publishes, are held in a
+/// service-managed account, so for the calling account they are exactly the
+/// documented "bucket owner is not the same as the calling AWS account". Asked of
+/// the bucket the address already resolved, so it costs no second lookup. Those two
+/// are the ONLY ownership signal the object store carries — this emulator serves one
+/// account, so a bucket created over S3's own API belongs to the caller and can
+/// never earn this refusal.
+///
+/// LOCK ORDER: this takes Amazon S3's store lock and holds no other while it does,
+/// and it hands back owned values rather than a guard — so it is called with NO
+/// guard of this service's own store held. Keeping the cross-service read
+/// one-directional and guard-free is what makes a lock cycle between the two stores
+/// unreachable.
+pub fn referenced_object<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    reference: &S3Ref,
+    request_region: &str,
+    max_octets: usize,
+) -> Option<ReferencedObject> {
+    let s3 = ::service_com_amazonaws_s3_amazons3::state::service_state(engine)?;
+    let store = s3.lock();
+    let Some(bucket) = store.bucket(&reference.bucket) else {
+        return Some(ReferencedObject::NoObject);
+    };
+    if bucket.region != request_region {
+        return Some(ReferencedObject::OtherRegion {
+            bucket_region: bucket.region.clone(),
+        });
     }
-
-    /// The same object in `region`.
-    #[must_use]
-    pub fn in_region(mut self, region: impl Into<String>) -> Self {
-        self.region = region.into();
-        self
+    if bucket.provisioned_by().is_some() || bucket.is_aws_published() {
+        return Some(ReferencedObject::OtherAccount);
     }
-
-    /// The same object owned by `account_id`.
-    #[must_use]
-    pub fn owned_by(mut self, account_id: impl Into<String>) -> Self {
-        self.owner_account_id = account_id.into();
-        self
+    let Some(object) =
+        bucket.addressed_object(&reference.key, reference.object_version.as_deref())
+    else {
+        return Some(ReferencedObject::NoObject);
+    };
+    // The ceiling is decided while the object is still BORROWED from S3's store, so
+    // content beyond it is refused without being copied: the copy below is the one
+    // place this read duplicates an object's bytes.
+    if object.body.len() > max_octets {
+        return Some(ReferencedObject::Oversize {
+            octets: object.body.len(),
+        });
     }
+    Some(ReferencedObject::Content(object.body.clone()))
 }
 
 /// The key an in-transit message is stored under.
@@ -134,7 +197,7 @@ impl S3Object {
 /// `smithy_query(query="service_info")`), and an in-transit message belongs to the
 /// message flow of exactly one region. The id alone is therefore not an address:
 /// the region a request was made in is part of it, exactly as it is part of the
-/// identity of an [`S3Object`].
+/// identity of an S3 bucket.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MessageKey {
     pub region: String,
@@ -194,10 +257,6 @@ pub struct ComAmazonawsWorkmailmessageflowGiraffemessageintransitserviceState {
     /// the `messageId` that region's endpoint addresses it by, so one region's
     /// endpoint never resolves another region's message.
     pub messages: HashMap<MessageKey, InTransitMessage>,
-    /// The S3 objects a `PutRawMessageContent` reference can resolve to, keyed by
-    /// the whole reference (bucket, key and object version) so a versioned
-    /// reference resolves only to the version it names.
-    pub s3_objects: HashMap<S3Ref, S3Object>,
 }
 
 impl ComAmazonawsWorkmailmessageflowGiraffemessageintransitserviceState {
@@ -240,16 +299,6 @@ impl ComAmazonawsWorkmailmessageflowGiraffemessageintransitserviceState {
     pub fn message(&self, region: &str, message_id: &str) -> Option<&InTransitMessage> {
         self.messages
             .get(&MessageKey::new(region, message_id))
-    }
-
-    /// Make `object` resolvable at `reference`, as an S3 `PutObject` does.
-    pub fn seed_s3_object(&mut self, reference: S3Ref, object: S3Object) {
-        self.s3_objects.insert(reference, object);
-    }
-
-    /// The object `reference` names, or `None` when nothing is stored there.
-    pub fn resolve_s3_object(&self, reference: &S3Ref) -> Option<&S3Object> {
-        self.s3_objects.get(reference)
     }
 
     /// Replace the MIME content of `message_id` in `region`'s message flow with

@@ -17,13 +17,11 @@
 //! absent, and in what way an immutable header's value differs (rewritten,
 //! removed, added, dropped from a repeated trace, reordered). Every row drives the
 //! same in-process router as the rest of the suite through the `pub(crate)`
-//! harness in [`crate::raw_message_content`]; the store is reached only to SEED
-//! the message in transit and the S3 object, standing in for the two producers
-//! this API does not model.
+//! harness in [`crate::raw_message_content`]; state is reached only to SEED the
+//! message in transit, standing in for WorkMail delivery, and to stage the S3
+//! object in Amazon S3's own store.
 
-use service_com_amazonaws_workmailmessageflow_giraffemessageintransitservice::state::S3Object;
-
-use crate::raw_message_content::{reference, Emulator, Reply, DATE, REGION};
+use crate::raw_message_content::{reference, Emulator, Reply, StagedObject, DATE, REGION};
 
 /// The header fields every message must carry, lowercased. RFC 5322 §3.6 marks
 /// `orig-date` (`Date`) and `from` (`From`) as the two fields a message is
@@ -85,8 +83,10 @@ pub(crate) async fn update(content: &[u8], replacement: &[u8]) -> (Reply, Vec<u8
     let emulator = Emulator::new();
     let message_id = "in-transit-0";
     emulator.seed_message(message_id, content);
-    let s3_reference = reference("updated/object");
-    emulator.seed_object(&s3_reference, S3Object::new(replacement.to_vec()));
+    let s3_reference = emulator.seed_object(
+        &reference("updated/object"),
+        StagedObject::new(replacement.to_vec()),
+    );
 
     let reply = emulator
         .put_raw_message_content(REGION, message_id, &s3_reference)

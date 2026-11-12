@@ -21,6 +21,10 @@ bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# The Amazon S3 object store: the MIME content `PutRawMessageContent` installs comes out
+# of the S3 object its `S3Reference` names, which S3 owns, so the reference is resolved
+# against S3's own state in the shared engine rather than against a copy kept here.
+service-com-amazonaws-s3-amazons3 = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

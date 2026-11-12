@@ -21,17 +21,19 @@
 //! outcomes whichever section decided them.
 //!
 //! Everything goes over the wire through the `pub(crate)` harness in
-//! [`crate::raw_message_content`]; the store is reached only to SEED the message
-//! in transit and the S3 object, standing in for the two producers this API does
-//! not model.
+//! [`crate::raw_message_content`]; state is reached only to SEED the message in
+//! transit, standing in for WorkMail delivery, and to stage the S3 object in
+//! Amazon S3's own store, as an S3 client's `PutObject` leaves it.
 
 use std::sync::Arc;
 
 use service_com_amazonaws_workmailmessageflow_giraffemessageintransitservice::state::{
-    MessageKey, S3Object, S3Ref,
+    MessageKey, S3Ref,
 };
 
-use crate::raw_message_content::{mime, reference, Emulator, Reply, BUCKET, REGION};
+use crate::raw_message_content::{
+    mime, reference, versioned_reference, Emulator, Reply, StagedObject, REGION,
+};
 
 /// The longest `messageId` either operation accepts: `len 1..120` on both
 /// (`smithy_query(query="operation", operation="PutRawMessageContent")`).
@@ -166,19 +168,19 @@ async fn eligibility_decides_the_answer_whichever_critical_section_asks() {
             "digits only, in transit, versioned reference",
             Transit::Eligible,
             "0123456789".to_string(),
-            S3Ref::new(BUCKET, "versioned/object", Some("v2".to_string())),
+            versioned_reference("versioned/object"),
         ),
         (
             "digits only, frozen, versioned reference",
             Transit::Frozen,
             "9876543210".to_string(),
-            S3Ref::new(BUCKET, "versioned/object", Some("v2".to_string())),
+            versioned_reference("versioned/object"),
         ),
         (
             "nothing in transit, versioned reference",
             Transit::Absent,
             "never-9".to_string(),
-            S3Ref::new(BUCKET, "versioned/object", Some("v2".to_string())),
+            versioned_reference("versioned/object"),
         ),
     ];
 
@@ -195,7 +197,7 @@ async fn eligibility_decides_the_answer_whichever_critical_section_asks() {
                     .frozen = true;
             }),
         }
-        emulator.seed_object(&s3_reference, S3Object::new(updated.clone()));
+        let s3_reference = emulator.seed_object(&s3_reference, StagedObject::new(updated.clone()));
 
         let expected = outcome_of(transit);
         let reply = emulator
@@ -256,8 +258,10 @@ async fn freezing_a_message_mid_update_is_refused_with_the_same_answer() {
     let original = mime("original", "the body the message arrived with");
     let updated = mime("rewritten", "the body every racing update installs");
     emulator.seed_message(message_id, &original);
-    let s3_reference = reference("racing/object");
-    emulator.seed_object(&s3_reference, S3Object::new(updated.clone()));
+    let s3_reference = emulator.seed_object(
+        &reference("racing/object"),
+        StagedObject::new(updated.clone()),
+    );
 
     let mut updates = Vec::with_capacity(RACING_UPDATES);
     for _ in 0..RACING_UPDATES {
