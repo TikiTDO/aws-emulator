@@ -962,17 +962,68 @@ pub fn monetization_amount(amount: &str) -> ::bigdecimal::BigDecimal {
         .unwrap_or_else(|_| ::bigdecimal::BigDecimal::from(0))
 }
 
+/// How many fractional digits a `MonetizationAmountValue` is written to.
+///
+/// The model carries the shape as a plain string with no pattern, so its textual
+/// form is this service's: `Currency` names one denomination, `USDC`
+/// (`smithy_query(query="shape",shape="Currency")`), whose smallest unit is one
+/// millionth of a token, and every amount is written at that scale — the integer
+/// part, `.`, and exactly this many fractional digits, so a zero balance reads
+/// `0.000000`. One scale for every amount is what lets a client hand the member
+/// straight to a fixed-scale decimal parser.
+pub const MONETIZATION_AMOUNT_SCALE: i64 = 6;
+
+/// `amount` written as the `MonetizationAmountValue` this service reports: the
+/// decimal it comes to, at [`MONETIZATION_AMOUNT_SCALE`] fractional digits.
+///
+/// A quantity finer than the currency's smallest unit cannot be written at that
+/// scale, so it is rounded to the nearest unit (halves away from zero, the way
+/// money is rounded) rather than truncated — THIS EMULATOR'S CHOICE: the model
+/// states no rule, and an on-chain USDC amount is a whole number of those units,
+/// so nothing finer arises.
+pub fn monetization_amount_value(amount: &::bigdecimal::BigDecimal) -> String {
+    let scale = usize::try_from(MONETIZATION_AMOUNT_SCALE).unwrap_or_default();
+    // At that scale the value is a whole number of the currency's smallest units,
+    // so the digits of that whole number, zero-padded to cover the fraction, are
+    // the amount's digits: the point goes `scale` digits from the right. Rendering
+    // it this way rather than through the decimal's own `Display` is what writes
+    // the trailing zeros a quantity shorter than the scale does not carry.
+    let units = amount
+        .with_scale_round(
+            MONETIZATION_AMOUNT_SCALE,
+            ::bigdecimal::RoundingMode::HalfUp,
+        )
+        .as_bigint_and_exponent()
+        .0
+        .to_string();
+    let (sign, digits) = match units.strip_prefix('-') {
+        Some(magnitude) => ("-", magnitude),
+        None => ("", units.as_str()),
+    };
+    let padded = format!("{digits:0>width$}", width = scale + 1);
+    let point = padded.len() - scale;
+    format!("{sign}{}.{}", &padded[..point], &padded[point..])
+}
+
+/// `amount` re-read and written back in the one form this service reports a
+/// `MonetizationAmountValue` in. See [`monetization_amount_value`].
+pub fn monetization_amount_reported(amount: &str) -> String {
+    monetization_amount_value(&monetization_amount(amount))
+}
+
 /// The sum of `amounts`, as the `MonetizationAmountValue` a revenue figure is
 /// reported in. The sum of no amount is zero, the figure a window that settled
-/// nothing reports. See [`monetization_amount`].
+/// nothing reports. See [`monetization_amount`] and
+/// [`monetization_amount_value`].
 pub fn monetization_amount_total<'a>(amounts: impl IntoIterator<Item = &'a str>) -> String {
-    amounts
-        .into_iter()
-        .map(monetization_amount)
-        .fold(::bigdecimal::BigDecimal::from(0), |total, amount| {
-            total + amount
-        })
-        .to_string()
+    monetization_amount_value(
+        &amounts
+            .into_iter()
+            .map(monetization_amount)
+            .fold(::bigdecimal::BigDecimal::from(0), |total, amount| {
+                total + amount
+            }),
+    )
 }
 
 /// What this service sorts a settlement listing by when the request names no

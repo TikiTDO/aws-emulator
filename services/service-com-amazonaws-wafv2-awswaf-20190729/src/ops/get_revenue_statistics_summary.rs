@@ -24,8 +24,12 @@
 //! transactions reports exactly the figures those come to.
 //!
 //! "This operation is only available for CLOUDFRONT scope", so a request naming the
-//! regional namespace is refused as the parameter failure it is, and "the maximum
+//! regional namespace is refused as the invalid operation it is, and "the maximum
 //! supported time window is 90 days", so a wider window is refused too.
+//!
+//! Every amount it reports is a `MonetizationAmountValue`, which the model carries
+//! as a string: it is written in the one fixed-scale decimal form this service
+//! reports money in (`crate::state::monetization_amount_value`).
 //!
 //! The call REPORTS: it reads the ledger and changes nothing a later caller sees.
 //!
@@ -297,7 +301,8 @@ fn invalid_parameter_without_field(
 
 /// The sum of the `Amount` of each of `records`, in the `MonetizationAmountValue`
 /// form a revenue figure is reported in — the exact decimal the amounts come to,
-/// through the one reading of a monetization amount this service shares.
+/// at the fixed scale every amount is written to, through the one reading and the
+/// one rendering of a monetization amount this service shares.
 fn total_amount<'a>(records: impl Iterator<Item = &'a SettlementRecord>) -> String {
     crate::state::monetization_amount_total(records.map(|record| record.amount.as_str()))
 }

@@ -730,7 +730,10 @@ async fn a_reported_record_carries_the_transaction_as_the_ledger_holds_it() {
         ("TransactionId", json!("tx-2")),
         ("RequestId", json!("req-2")),
         ("Status", json!("PENDING")),
-        ("Amount", json!("0.010")),
+        // "The payment amount in the specified currency": the quantity the ledger
+        // holds, written at the scale every reported amount is written to
+        // (`state::MONETIZATION_AMOUNT_SCALE`).
+        ("Amount", json!("0.010000")),
         // "The currency for the amounts in the response" is the one the request
         // asked them in.
         ("Currency", json!(CURRENCY)),

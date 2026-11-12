@@ -306,11 +306,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .flatten();
 
         // `Currency` is "the currency for the amounts in the response", which is the
-        // denomination the request asked for, so every reported record carries it.
+        // denomination the request asked for, so every reported record carries it,
+        // and `Amount` is "the payment amount in the specified currency", written in
+        // the one form this service reports a monetization amount in
+        // (`crate::state::monetization_amount_reported`).
         let settlements = selected
             .into_iter()
             .map(|(_, entry)| SettlementRecord {
                 currency: Some(input.currency.clone()),
+                amount: crate::state::monetization_amount_reported(&entry.record.amount),
                 ..entry.record.clone()
             })
             .collect();

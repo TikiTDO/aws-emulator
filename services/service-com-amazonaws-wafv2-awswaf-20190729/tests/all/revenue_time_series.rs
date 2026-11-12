@@ -12,7 +12,9 @@
 //! `GroupBy` dimension, into one point per value of that dimension in the bucket;
 //! each point reports one HTTP 402 answer per selected transaction, the count of
 //! those whose `Status` is `SETTLED`, and — for the `DATE_HISTOGRAM` statistic —
-//! the exact decimal sum of the `Amount` of exactly those settled transactions; a
+//! the exact decimal sum of the `Amount` of exactly those settled transactions,
+//! written in the fixed-scale decimal form this service reports a
+//! `MonetizationAmountValue` in; a
 //! bucket no transaction falls in is no point; the series is cut into pages of at
 //! most `Limit` points; and the call REPORTS: it changes nothing a later caller
 //! sees.
@@ -59,8 +61,10 @@ const DATE_HISTOGRAM: &str = "DATE_HISTOGRAM";
 /// The traffic statistic: "PAYMENT_TRAFFIC for payment traffic patterns".
 const PAYMENT_TRAFFIC: &str = "PAYMENT_TRAFFIC";
 
-/// The amount a bucket that settled nothing comes to: the sum of no amount.
-const NO_REVENUE: &str = "0";
+/// The amount a bucket that settled nothing comes to: the sum of no amount,
+/// written at the scale every reported amount is written to
+/// (`state::MONETIZATION_AMOUNT_SCALE`).
+const NO_REVENUE: &str = "0.000000";
 
 /// Whole seconds in one day, the unit the published window maximum is stated in.
 const DAY_SECS: i64 = 24 * 60 * 60;
@@ -236,35 +240,35 @@ async fn the_series_aggregates_the_selected_transactions_into_interval_buckets()
             "to the minute",
             "MINUTELY",
             vec![
-                (0, 1, 1, "0.004"),
-                (60, 1, 1, "0.250"),
+                (0, 1, 1, "0.004000"),
+                (60, 1, 1, "0.250000"),
                 (180, 1, 0, NO_REVENUE),
-                (3_660, 1, 1, "0.010"),
-                (90_000, 2, 1, "0.500"),
+                (3_660, 1, 1, "0.010000"),
+                (90_000, 2, 1, "0.500000"),
             ],
         ),
         (
             "to five minutes",
             "FIVE_MINUTELY",
             vec![
-                (0, 3, 2, "0.254"),
-                (3_600, 1, 1, "0.010"),
-                (90_000, 2, 1, "0.500"),
+                (0, 3, 2, "0.254000"),
+                (3_600, 1, 1, "0.010000"),
+                (90_000, 2, 1, "0.500000"),
             ],
         ),
         (
             "to the hour",
             "HOURLY",
             vec![
-                (0, 3, 2, "0.254"),
-                (3_600, 1, 1, "0.010"),
-                (90_000, 2, 1, "0.500"),
+                (0, 3, 2, "0.254000"),
+                (3_600, 1, 1, "0.010000"),
+                (90_000, 2, 1, "0.500000"),
             ],
         ),
         (
             "to the day",
             "DAILY",
-            vec![(0, 4, 3, "0.264"), (86_400, 2, 1, "0.500")],
+            vec![(0, 4, 3, "0.264000"), (86_400, 2, 1, "0.500000")],
         ),
     ] {
         let answer = waf
@@ -335,46 +339,46 @@ async fn grouping_splits_each_bucket_by_the_value_of_the_dimension() {
             "by bot name",
             "NAME",
             vec![
-                (0, "claudebot", 1, 1, "0.250"),
-                (0, "googlebot", 1, 1, "0.010"),
-                (0, "gptbot", 2, 1, "0.004"),
-                (86_400, "gptbot", 2, 1, "0.500"),
+                (0, "claudebot", 1, 1, "0.250000"),
+                (0, "googlebot", 1, 1, "0.010000"),
+                (0, "gptbot", 2, 1, "0.004000"),
+                (86_400, "gptbot", 2, 1, "0.500000"),
             ],
         ),
         (
             "by bot category",
             "CATEGORY",
             vec![
-                (0, "ai", 3, 2, "0.254"),
-                (0, "search_engine", 1, 1, "0.010"),
-                (86_400, "ai", 2, 1, "0.500"),
+                (0, "ai", 3, 2, "0.254000"),
+                (0, "search_engine", 1, 1, "0.010000"),
+                (86_400, "ai", 2, 1, "0.500000"),
             ],
         ),
         (
             "by declared intent",
             "INTENT",
             vec![
-                (0, "search", 3, 2, "0.014"),
-                (0, "training", 1, 1, "0.250"),
-                (86_400, "search", 2, 1, "0.500"),
+                (0, "search", 3, 2, "0.014000"),
+                (0, "training", 1, 1, "0.250000"),
+                (86_400, "search", 2, 1, "0.500000"),
             ],
         ),
         (
             "by organization",
             "ORGANIZATION",
             vec![
-                (0, "anthropic", 1, 1, "0.250"),
-                (0, "google", 1, 1, "0.010"),
-                (0, "openai", 2, 1, "0.004"),
-                (86_400, "openai", 2, 1, "0.500"),
+                (0, "anthropic", 1, 1, "0.250000"),
+                (0, "google", 1, 1, "0.010000"),
+                (0, "openai", 2, 1, "0.004000"),
+                (86_400, "openai", 2, 1, "0.500000"),
             ],
         ),
         (
             "by web ACL",
             "WEBACL",
             vec![
-                (0, arn.as_str(), 4, 3, "0.264"),
-                (86_400, arn.as_str(), 2, 1, "0.500"),
+                (0, arn.as_str(), 4, 3, "0.264000"),
+                (86_400, arn.as_str(), 2, 1, "0.500000"),
             ],
         ),
     ] {
@@ -587,7 +591,7 @@ async fn each_bucket_selects_what_the_window_and_the_filters_select() {
             "a window covering the first two transactions",
             window(0, 100),
             json!({}),
-            vec![(0, 2, 2, "0.254")],
+            vec![(0, 2, 2, "0.254000")],
         ),
         (
             "a window covering one unsettled transaction",
@@ -605,13 +609,13 @@ async fn each_bucket_selects_what_the_window_and_the_filters_select() {
             "the settled status alone",
             whole_window(),
             json!({ "Filters": [filter("SettlementStatus", &["SETTLED"])] }),
-            vec![(0, 3, 3, "0.264"), (86_400, 1, 1, "0.500")],
+            vec![(0, 3, 3, "0.264000"), (86_400, 1, 1, "0.500000")],
         ),
         (
             "one bot by name",
             whole_window(),
             json!({ "Filters": [filter("SourceName", &["claudebot"])] }),
-            vec![(0, 1, 1, "0.250")],
+            vec![(0, 1, 1, "0.250000")],
         ),
         (
             "the testnet mode, which nothing settled on",
@@ -802,7 +806,7 @@ async fn a_query_outside_what_the_operation_supports_is_refused() {
         .await;
     assert_points(
         &answer,
-        &[(0, 4, 3, "0.264"), (86_400, 2, 1, "0.500")],
+        &[(0, 4, 3, "0.264000"), (86_400, 2, 1, "0.500000")],
         "the published maximum exactly",
     );
 }

@@ -10,7 +10,9 @@
 //! reporting one HTTP 402 answer per selected transaction, the count of those whose
 //! `Status` is `SETTLED`, and the exact decimal sum of the `Amount` of exactly
 //! those settled transactions, split by `Verified` into two tiers that add up to
-//! that total; and the call REPORTS: it changes nothing a later caller sees.
+//! that total, each amount written in the fixed-scale decimal form this service
+//! reports a `MonetizationAmountValue` in; and the call REPORTS: it changes
+//! nothing a later caller sees.
 //!
 //! Every suite asserts that over a TABLE rather than over one request: windows that
 //! cover all, part and none of the ledger, filters over the currency mode, the
@@ -48,8 +50,10 @@ const OPERATION: &str = "GetRevenueStatisticsSummary";
 /// report the same selection.
 const LISTING: &str = "ListSettlementRecords";
 
-/// The amount a selection that settled nothing comes to: the sum of no amount.
-const NO_REVENUE: &str = "0";
+/// The amount a selection that settled nothing comes to: the sum of no amount,
+/// written at the scale every reported amount is written to
+/// (`state::MONETIZATION_AMOUNT_SCALE`).
+const NO_REVENUE: &str = "0.000000";
 
 /// Whole seconds in one day, the unit the published window maximum is stated in.
 const DAY_SECS: i64 = 24 * 60 * 60;
@@ -136,8 +140,9 @@ fn settlement(
 /// paths and both currency modes — the last one settled on a testnet network
 /// (`BASE_SEPOLIA`), so it lies outside the production default.
 ///
-/// Amounts are written to three decimals, so every expected sum below is the exact
-/// decimal the operands spell.
+/// The seeded amounts are written to three decimals, so every expected sum below is
+/// the exact decimal the operands spell, reported at the scale every amount is
+/// written to.
 fn ledger(web_acl_arn: &str) -> Vec<SettlementRecordEntry> {
     let settled = |seconds, amount, verified, paid| {
         settlement(web_acl_arn, seconds, amount, "SETTLED", verified, paid)
@@ -220,13 +225,13 @@ async fn the_breakdown_aggregates_the_transactions_the_window_and_the_filters_se
             "the whole ledger, production transactions by default",
             window(0, 3_600),
             json!({}),
-            ("0.255", "0.005", "0.250", 3, 8),
+            ("0.255000", "0.005000", "0.250000", 3, 8),
         ),
         (
             "a window covering the first two transactions",
             window(0, 25),
             json!({}),
-            ("0.254", "0.004", "0.250", 2, 2),
+            ("0.254000", "0.004000", "0.250000", 2, 2),
         ),
         (
             "a window covering one unsettled transaction",
@@ -244,19 +249,19 @@ async fn the_breakdown_aggregates_the_transactions_the_window_and_the_filters_se
             "the testnet mode alone",
             window(0, 3_600),
             filters("CurrencyMode", &["TEST"]),
-            ("0.008", "0.008", NO_REVENUE, 1, 1),
+            ("0.008000", "0.008000", NO_REVENUE, 1, 1),
         ),
         (
             "both currency modes",
             window(0, 3_600),
             filters("CurrencyMode", &["REAL", "TEST"]),
-            ("0.263", "0.013", "0.250", 4, 9),
+            ("0.263000", "0.013000", "0.250000", 4, 9),
         ),
         (
             "the settled status alone",
             window(0, 3_600),
             filters("SettlementStatus", &["SETTLED"]),
-            ("0.255", "0.005", "0.250", 3, 3),
+            ("0.255000", "0.005000", "0.250000", 3, 3),
         ),
         (
             "two statuses that settled nothing",
@@ -268,13 +273,13 @@ async fn the_breakdown_aggregates_the_transactions_the_window_and_the_filters_se
             "one bot by name",
             window(0, 3_600),
             filters("SourceName", &["claudebot"]),
-            ("0.250", NO_REVENUE, "0.250", 1, 1),
+            ("0.250000", NO_REVENUE, "0.250000", 1, 1),
         ),
         (
             "one content path by prefix",
             window(0, 3_600),
             filters("UriPathPrefix", &["/docs"]),
-            ("0.001", "0.001", NO_REVENUE, 1, 1),
+            ("0.001000", "0.001000", NO_REVENUE, 1, 1),
         ),
         (
             "a content path nothing was paid for",
@@ -298,23 +303,39 @@ async fn amounts_of_different_decimal_places_add_up_to_exactly_what_they_spell()
     // A revenue total is a sum of money written in decimal, so it must come to
     // exactly the figure the operands spell — including the pairs a binary float
     // cannot hold (0.1 + 0.2), places finer than the operands share, and whole
-    // numbers. A ledger value that spells no decimal number contributes nothing
-    // rather than deciding the answer.
+    // numbers — and it is reported at the one scale every amount is written to,
+    // whatever the operands' own places. A quantity finer than the currency's
+    // smallest unit cannot be written at that scale, so it is reported rounded to
+    // the nearest unit. A ledger value that spells no decimal number contributes
+    // nothing rather than deciding the answer.
     for (case, amounts, expected) in [
-        ("three places", ["0.004", "0.250", "0.001"].as_slice(), "0.255"),
-        ("the classic float pair", ["0.1", "0.2"].as_slice(), "0.3"),
-        ("mixed places", ["1", "2.5"].as_slice(), "3.5"),
-        ("whole numbers", ["3", "4"].as_slice(), "7"),
         (
-            "places finer than the others",
-            ["0.000001", "0.0000005"].as_slice(),
-            "0.0000015",
+            "three places",
+            ["0.004", "0.250", "0.001"].as_slice(),
+            "0.255000",
         ),
-        ("one amount", ["12.500"].as_slice(), "12.500"),
+        (
+            "the classic float pair",
+            ["0.1", "0.2"].as_slice(),
+            "0.300000",
+        ),
+        ("mixed places", ["1", "2.5"].as_slice(), "3.500000"),
+        ("whole numbers", ["3", "4"].as_slice(), "7.000000"),
+        (
+            "the currency's smallest unit",
+            ["0.000001", "0.000002"].as_slice(),
+            "0.000003",
+        ),
+        (
+            "half a unit, finer than the scale holds",
+            ["0.000001", "0.0000005"].as_slice(),
+            "0.000002",
+        ),
+        ("one amount", ["12.500"].as_slice(), "12.500000"),
         (
             "a value that spells no number",
             ["12.5", "not-an-amount"].as_slice(),
-            "12.5",
+            "12.500000",
         ),
         ("nothing at all", [].as_slice(), NO_REVENUE),
     ] {
@@ -588,7 +609,7 @@ async fn a_query_outside_what_the_operation_supports_is_refused() {
                 SCOPE_CLOUDFRONT,
                 window(0, MAX_MONETIZATION_WINDOW_DAYS * DAY_SECS),
             ),
-            ("0.255", "0.005", "0.250", 3, 8),
+            ("0.255000", "0.005000", "0.250000", 3, 8),
         ),
         (
             "the web ACL the transactions were settled for",
@@ -596,7 +617,7 @@ async fn a_query_outside_what_the_operation_supports_is_refused() {
                 request(SCOPE_CLOUDFRONT, window(0, 3_600)),
                 filters("WebACLArn", &[arn.as_str()]),
             ),
-            ("0.255", "0.005", "0.250", 3, 8),
+            ("0.255000", "0.005000", "0.250000", 3, 8),
         ),
         (
             "a web ACL nothing was settled for",
