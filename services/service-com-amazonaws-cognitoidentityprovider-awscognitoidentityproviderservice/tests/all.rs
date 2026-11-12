@@ -231,6 +231,8 @@ mod sign_in_lambda_triggers;
 mod sign_up_client_secret;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/stated_enum_value_set_order.rs"]
+mod stated_enum_value_set_order;
 #[path = "all/stored_state_normalization.rs"]
 mod stored_state_normalization;
 #[path = "all/terms_branding_and_passkey_refusal_wire.rs"]

@@ -41,8 +41,10 @@ const GOOD_PASSWORD: &str = "Passw0rd!2024";
 const REVOKED_REFRESH_TOKEN: &str = "Refresh Token has been revoked";
 
 /// The sentence a refresh-token sign-in is refused with when the token it
-/// presents resolves to no refresh token of that app client at all.
-const INVALID_REFRESH_TOKEN: &str = "Invalid Refresh Token.";
+/// presents resolves to no refresh token of that app client at all. It ends in
+/// no period, as the sentence Amazon Cognito denies a refresh token with does
+/// not.
+const INVALID_REFRESH_TOKEN: &str = "Invalid Refresh Token";
 
 /// One emulator with just this service mounted.
 fn router() -> MultiServiceRouter {

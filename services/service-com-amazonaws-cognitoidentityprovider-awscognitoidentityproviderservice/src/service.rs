@@ -96,7 +96,7 @@ use service_common::validation::{
     refusing_violations_with_declared_echoes_quoting_up_to, unanchored, SubmittedEcho,
 };
 use service_common::validation_message::{
-    quoting_the_submitted_collection, quoting_the_whole_submitted_value,
+    in_hashed_enum_order, quoting_the_submitted_collection, quoting_the_whole_submitted_value,
 };
 use smithy_server_runtime::{
     http, BoxFuture, DeserializableStruct, ErasedOperation, ErasedServiceDefinition, Operation,
@@ -506,6 +506,10 @@ impl<O> WithSubmittedValues<O> {
 ///   satisfy ([`unanchored`]). The CHECK is still the model's pattern as written: only this
 ///   rendering drops the pair.
 ///
+/// The last of those is one half of [`requirement_as_stated`], which owns BOTH of this
+/// endpoint's requirement renderings: the unanchored `@pattern` expression and the order an
+/// enumerated type's value set is listed in.
+///
 /// Every other clause keeps the framework's own rendering, which already states the bytes the
 /// caller submitted, and a value the echo bounds declined to render keeps the framework's
 /// text rather than losing the clause.
@@ -521,12 +525,39 @@ fn quoting_the_submitted_value(violation: Violation, echo: SubmittedEcho) -> Vio
         quoting_the_submitted_collection(withheld_value_quoted(violation, &echo), echo.clone()),
         &echo,
     );
-    match &quoted.kind {
+    requirement_as_stated(&quoted)
+}
+
+/// `violation` with the REQUIREMENT half of its clause worded the way this endpoint words
+/// it, and every other half of the clause left exactly as the framework built it.
+///
+/// Two requirement classes are stated differently from the way the model writes them, and
+/// both belong to the constraint rather than to the member, the operation or the depth the
+/// value sat at — so both are applied here, in the one place every refusal of this service
+/// passes through, rather than per operation:
+///
+/// * a `@pattern` expression is published WITHOUT the `^`/`$` a whole-value pattern is
+///   written with in the model ([`unanchored`]);
+/// * an enumerated type's admissible set is enumerated in the order the set's own HASH
+///   TABLE is walked — ascending bucket of each value's string hash, two values of one
+///   bucket read from the head each was pushed onto — rather than in the order the model
+///   declares them or a sort of them
+///   ([`in_hashed_enum_order`]). `FeedbackValueType`, declared `Valid`, `Invalid`
+///   (`smithy_query(query="shape",shape="FeedbackValueType")`), is stated `[Invalid,
+///   Valid]`; `UpdateReplicaStatusType`'s two values fall in ascending buckets, so its set
+///   reads in declaration order. The order is computed from the declared values
+///   themselves, so a type the model gains needs no row anywhere.
+///
+/// The CHECK is untouched by either: the model's pattern as written is still what refused
+/// the value, and the set that refused it still holds exactly the model's values.
+fn requirement_as_stated(violation: &Violation) -> Violation {
+    match &violation.kind {
         ViolationKind::Pattern(pattern) => Violation {
             kind: ViolationKind::Pattern(unanchored(pattern)),
-            ..quoted
+            ..violation.clone()
         },
-        _ => quoted,
+        ViolationKind::EnumValue(_) => in_hashed_enum_order(violation),
+        _ => violation.clone(),
     }
 }
 
@@ -888,18 +919,11 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // request that breaks a modelled rule is never worded two ways.
         match refusal {
             Refusal::Invalid(violations) => {
-                // The `@pattern` rendering is the same one the wrapper states, so one
-                // request's expression cannot be quoted two ways.
-                let violations: Vec<Violation> = violations
-                    .iter()
-                    .map(|violation| match &violation.kind {
-                        ViolationKind::Pattern(pattern) => Violation {
-                            kind: ViolationKind::Pattern(unanchored(pattern)),
-                            ..violation.clone()
-                        },
-                        _ => violation.clone(),
-                    })
-                    .collect();
+                // The requirement rendering is the same one the wrapper states
+                // ([`requirement_as_stated`]), so one request's expression cannot be
+                // quoted two ways and one enum's set cannot be listed two ways.
+                let violations: Vec<Violation> =
+                    violations.iter().map(requirement_as_stated).collect();
                 Some(Refused {
                     code: INVALID_PARAMETER_EXCEPTION.to_string(),
                     message: ::aws_smithy_schema_server::constraints::envelope(&violations)

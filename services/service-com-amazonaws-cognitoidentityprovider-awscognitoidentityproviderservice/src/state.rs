@@ -1644,6 +1644,19 @@ pub struct ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceS
     /// adjustment has moved holds no entry and reports the rate it includes, so
     /// the map records the adjustments rather than the whole catalogue.
     pub provisioned_api_rates: BTreeMap<String, i32>,
+    /// The account's Service Quotas ceiling per API category, in requests per
+    /// second, keyed by the category name: the highest rate the account may
+    /// provision for that category's limit
+    /// ([`ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState::api_category_quota_ceiling`]).
+    ///
+    /// A category whose quota no increase has raised holds no entry, and its
+    /// ceiling is the value Service Quotas starts it at — the category's own
+    /// published request rate. Raising one is a Service Quotas increase
+    /// request, which belongs to Service Quotas rather than to this API, so no
+    /// operation of this service writes here
+    /// ([`ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState::raise_api_category_quota_ceiling`]
+    /// is what a granted increase does to this account).
+    pub api_category_quota_ceilings: BTreeMap<String, i32>,
     /// The managed login branding styles a modification is IN FLIGHT for right
     /// now, keyed by the (`UserPoolId`, `ManagedLoginBrandingId`) pair every
     /// handler reaches a style by, which is what makes concurrent modification
@@ -4186,17 +4199,6 @@ pub const API_CATEGORY_LIMIT_CLASS: &str = "API_CATEGORY";
 /// (`LimitDefinitionType.Attributes` in this service's model).
 pub const API_CATEGORY_ATTRIBUTE: &str = "Category";
 
-/// The highest rate the account may provision for ANY one API rate limit, in
-/// requests per second.
-///
-/// `UpdateProvisionedLimit`: "The value must be between the default limit and
-/// your account-level maximum limit in Service Quotas" (this service's model).
-/// That maximum is the account's own Service Quotas value, which this API
-/// neither reports nor raises — only a Service Quotas increase request does —
-/// so this emulator's account holds ONE maximum, the same for every limit, and
-/// a rate above it is refused as a quota excess rather than stored.
-pub const MAX_PROVISIONED_API_RATE: i32 = 10_000;
-
 /// One API category an account holds a request-rate limit for.
 #[derive(Debug)]
 pub struct ApiCategory {
@@ -4223,9 +4225,11 @@ pub struct ApiCategory {
 /// per-category rates are the included rates here (Amazon Cognito Developer
 /// Guide, "Quotas in Amazon Cognito").
 ///
-/// Every limit is provisionable over the same range, from the rate it includes
-/// up to [`MAX_PROVISIONED_API_RATE`]: the upper bound is the account's, not
-/// the category's.
+/// Every limit is provisionable from the rate it includes up to the account's
+/// Service Quotas ceiling for it
+/// ([`ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState::api_category_quota_ceiling`]).
+/// The upper bound is the account's rather than the category's: a quota
+/// increase moves it, and nothing in this API does.
 pub const API_CATEGORIES: &[ApiCategory] = &[
     ApiCategory {
         name: "UserAuthentication",
@@ -4303,9 +4307,9 @@ pub enum RateRefusal {
     /// The requested rate is below the rate the limit includes, which is the
     /// lowest rate it can hold.
     BelowFreeRate { requested: i32, free_rate: i32 },
-    /// The requested rate is above the account's maximum, so provisioning it
-    /// would need a Service Quotas increase.
-    AboveAccountMaximum { requested: i32, maximum: i32 },
+    /// The requested rate is above the account's Service Quotas ceiling for
+    /// this limit, so provisioning it would need a quota increase first.
+    AboveQuotaCeiling { requested: i32, ceiling: i32 },
 }
 
 impl RateRefusal {
@@ -4326,11 +4330,13 @@ impl RateRefusal {
                 "The requested limit value {requested} is below the default limit of \
                  {free_rate} requests per second for this limit."
             ),
-            Self::AboveAccountMaximum { requested, maximum } => format!(
-                "The requested limit value {requested} exceeds your account's maximum limit \
-                 of {maximum} requests per second for this limit. To increase your limit, \
-                 submit a Service Quotas increase request."
-            ),
+            // The quota excess states the rate that was asked for and the
+            // ceiling it passed, and nothing else: the caller raises the
+            // ceiling in Service Quotas rather than in this API, so there is no
+            // step for this sentence to name.
+            Self::AboveQuotaCeiling { requested, ceiling } => {
+                format!("Requested value {requested} exceeds Service Quota ceiling of {ceiling}")
+            }
         }
     }
 }
@@ -4377,6 +4383,26 @@ pub fn api_category_definition(category: &ApiCategory) -> LimitDefinitionType {
     }
 }
 
+/// The account's Service Quotas ceiling for `category`'s request-rate limit,
+/// read off the account's quota state
+/// ([`ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState::api_category_quota_ceiling`]).
+///
+/// `UpdateProvisionedLimit`: "The value must be between the default limit and
+/// your account-level maximum limit in Service Quotas" (this service's model).
+/// That maximum is a Service Quotas value of the ACCOUNT, raised only by a
+/// quota increase request — "to increase these limits, submit a Service Quotas
+/// increase request" (the same doc) — and no operation of this service submits
+/// or grants one. So a category whose quota nothing has raised holds the value
+/// Service Quotas starts it at, the category's own published request rate,
+/// which is also the rate the limit reports as its default
+/// (`LimitType.FreeLimitValue`). A rate above the ceiling needs that increase
+/// before it can be provisioned, which is what `ServiceQuotaExceededException`
+/// reports.
+#[must_use]
+pub fn default_api_category_quota_ceiling(category: &ApiCategory) -> i32 {
+    category.free_rate
+}
+
 impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
     /// The limit this account holds for `category`.
     ///
@@ -4397,14 +4423,52 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
         }
     }
 
+    /// The account's Service Quotas ceiling for `category`'s request-rate
+    /// limit, in requests per second: the highest rate this account may
+    /// provision for it.
+    ///
+    /// Read off the account's quota state
+    /// ([`Self::api_category_quota_ceilings`](ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState)),
+    /// which holds an entry only for a category whose quota an increase has
+    /// raised; every other category stands at
+    /// [`default_api_category_quota_ceiling`].
+    #[must_use]
+    pub fn api_category_quota_ceiling(&self, category: &ApiCategory) -> i32 {
+        self.api_category_quota_ceilings
+            .get(category.name)
+            .copied()
+            .unwrap_or_else(|| default_api_category_quota_ceiling(category))
+    }
+
+    /// Record a GRANTED Service Quotas increase for `category`'s request-rate
+    /// limit, raising the highest rate this account may provision for it to
+    /// `ceiling`.
+    ///
+    /// What moves this ceiling is a Service Quotas increase request — "to
+    /// increase these limits, submit a Service Quotas increase request"
+    /// (`UpdateProvisionedLimit` in this service's model) — which belongs to
+    /// Service Quotas rather than to this API, so no operation of this service
+    /// calls this: the account's quota is state this service READS when it
+    /// decides a requested rate. It never LOWERS a ceiling, and never below
+    /// the rate the category includes, which is the floor of the range
+    /// whatever the account's quota says.
+    pub fn raise_api_category_quota_ceiling(&mut self, category: &ApiCategory, ceiling: i32) {
+        let raised = ceiling
+            .max(self.api_category_quota_ceiling(category))
+            .max(category.free_rate);
+        self.api_category_quota_ceilings
+            .insert(category.name.to_string(), raised);
+    }
+
     /// Provision `requested` requests per second for `category` and return the
     /// limit as it now stands.
     ///
     /// Every rate in the account's range is stored, the rate already in force
-    /// included: the range runs from the rate the category includes up to
-    /// [`MAX_PROVISIONED_API_RATE`], and a rate outside it is refused. A
-    /// refused call stores nothing, so the limit a later read reports is the
-    /// one that was already in force.
+    /// included: the range runs from the rate the category includes up to the
+    /// account's Service Quotas ceiling for that limit
+    /// ([`Self::api_category_quota_ceiling`]), and a rate outside it is
+    /// refused. A refused call stores nothing, so the limit a later read
+    /// reports is the one that was already in force.
     pub fn set_api_category_limit(
         &mut self,
         category: &ApiCategory,
@@ -4416,11 +4480,9 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
                 free_rate: category.free_rate,
             });
         }
-        if requested > MAX_PROVISIONED_API_RATE {
-            return Err(RateRefusal::AboveAccountMaximum {
-                requested,
-                maximum: MAX_PROVISIONED_API_RATE,
-            });
+        let ceiling = self.api_category_quota_ceiling(category);
+        if requested > ceiling {
+            return Err(RateRefusal::AboveQuotaCeiling { requested, ceiling });
         }
         self.provisioned_api_rates
             .insert(category.name.to_string(), requested);

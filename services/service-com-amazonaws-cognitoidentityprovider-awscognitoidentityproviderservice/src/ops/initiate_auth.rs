@@ -1078,8 +1078,13 @@ fn incorrect_credentials() -> InitiateAuthError {
 
 /// The refusal for a `REFRESH_TOKEN` this emulator cannot resolve to a live refresh
 /// token of the app client the request names.
+///
+/// One fixed sentence, which names neither the value presented nor the app client it was
+/// presented to — and which ends in no period: this is the sentence Amazon Cognito denies
+/// a refresh token with, and a sentence's punctuation is as much its text as its words
+/// are.
 fn invalid_refresh_token() -> InitiateAuthError {
-    not_authorized("Invalid Refresh Token.")
+    not_authorized("Invalid Refresh Token")
 }
 
 /// The refusal for a `REFRESH_TOKEN` this emulator issued for the app client the

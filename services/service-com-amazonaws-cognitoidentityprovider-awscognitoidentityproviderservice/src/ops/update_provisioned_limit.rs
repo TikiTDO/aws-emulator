@@ -205,16 +205,16 @@ fn invalid_definition(failure: crate::state::LimitLookupFailure) -> UpdateProvis
 
 /// How this operation renders a rate the account cannot provision.
 ///
-/// A rate above the account's maximum needs a Service Quotas increase, which is
-/// what `ServiceQuotaExceededException` reports: "The request exceeded your
-/// account's service quota. To increase your limit, use or submit a Service
-/// Quotas increase request" (this service's model). A rate below the rate the
-/// limit includes is a malformed parameter.
+/// A rate above the account's Service Quotas ceiling for the limit needs a
+/// quota increase, which is what `ServiceQuotaExceededException` reports: "The
+/// request exceeded your account's service quota. To increase your limit, use
+/// or submit a Service Quotas increase request" (this service's model). A rate
+/// below the rate the limit includes is a malformed parameter.
 fn refused(refusal: crate::state::RateRefusal) -> UpdateProvisionedLimitError {
     use crate::state::RateRefusal;
     let message = Some(refusal.message());
     match refusal {
-        RateRefusal::AboveAccountMaximum { .. } => {
+        RateRefusal::AboveQuotaCeiling { .. } => {
             UpdateProvisionedLimitErrorModeled::ServiceQuotaExceededException(
                 ServiceQuotaExceededException { message },
             )

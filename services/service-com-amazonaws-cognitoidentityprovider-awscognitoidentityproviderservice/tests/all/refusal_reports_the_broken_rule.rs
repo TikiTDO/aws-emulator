@@ -431,10 +431,11 @@ async fn a_definition_that_identifies_no_limit_is_a_bad_parameter() {
     }
 
     // The control: a category this service DOES publish — one no recorded case
-    // cited — is served, and the rate an update stores reads back, so the
-    // refusals above are about the value rather than about the operation.
-    // `UserRead` is one of this service's own catalogue of API categories
-    // (`API_CATEGORIES` in `src/state.rs`).
+    // cited — is served, and a rate above the account's Service Quotas ceiling
+    // for it is refused as a QUOTA excess rather than as a definition naming
+    // nothing, so the refusals above are about the value rather than about the
+    // operation. `UserRead` is one of this service's own catalogue of API
+    // categories (`API_CATEGORIES` in `src/state.rs`).
     let read = ok(
         &router,
         "GetProvisionedLimit",
@@ -447,16 +448,26 @@ async fn a_definition_that_identifies_no_limit_is_a_bad_parameter() {
         free,
         "case \"a published category\": an unadjusted limit reports its included rate, got {read}"
     );
-    let provisioned = free.unwrap_or_default() + 80;
-    ok(
+    // The ceiling this account holds for a limit is the limit's own default
+    // rate while no Service Quotas increase has raised it, so a rate past that
+    // default is a rate past the ceiling.
+    let past_the_ceiling = free.unwrap_or_default() + 80;
+    refused(
         &router,
+        "a published category asked for a rate past its ceiling",
         "UpdateProvisionedLimit",
         &json!({
             "LimitDefinition": limit_definition("UserRead"),
-            "RequestedLimitValue": provisioned,
+            "RequestedLimitValue": past_the_ceiling,
         }),
+        "ServiceQuotaExceededException",
+        &format!(
+            "Requested value {past_the_ceiling} exceeds Service Quota ceiling of {}",
+            free.unwrap_or_default()
+        ),
     )
     .await;
+    // The refusal wrote nothing, so the limit still reports the rate in force.
     let read_back = ok(
         &router,
         "GetProvisionedLimit",
@@ -465,8 +476,8 @@ async fn a_definition_that_identifies_no_limit_is_a_bad_parameter() {
     .await;
     assert_eq!(
         read_back["Limit"]["ProvisionedLimitValue"].as_i64(),
-        Some(provisioned),
-        "case \"a published category\": the stored rate must read back, got {read_back}"
+        free,
+        "case \"a published category\": a refused update must store nothing, got {read_back}"
     );
 }
 

@@ -922,6 +922,138 @@ async fn the_refresh_exchange_tells_another_clients_token_apart() {
     );
 }
 
+/// RULE: the refresh-token SIGN-IN denies a value it cannot resolve to a live refresh
+/// token of the app client named with the same sentence the refresh exchange denies one
+/// with — the fixed text, no trailing period — whatever makes the value unresolvable, and
+/// tells a token it DID issue and has since revoked apart from it.
+#[tokio::test]
+async fn the_refresh_token_sign_in_denies_an_unresolvable_token_in_the_exchanges_words() {
+    let router = router();
+    let flows = ["ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"];
+    let user_pool_id = create_pool(&router, "refresh-sign-in-pool").await;
+    let other_pool_id = create_pool(&router, "refresh-sign-in-other-pool").await;
+    let client_id = create_client(&router, &user_pool_id, "mine", &flows, None, None, None).await;
+    let sibling = create_client(&router, &user_pool_id, "sibling", &flows, None, None, None).await;
+    let abroad = create_client(&router, &other_pool_id, "abroad", &flows, None, None, None).await;
+    create_confirmed_user(&router, &user_pool_id, "alice").await;
+    create_confirmed_user(&router, &other_pool_id, "alice").await;
+    create_confirmed_user(&router, &user_pool_id, "bob").await;
+
+    let mine = sign_in(&router, &user_pool_id, &client_id, "alice").await;
+    let siblings = sign_in(&router, &user_pool_id, &sibling, "alice").await;
+    let abroads = sign_in(&router, &other_pool_id, &abroad, "alice").await;
+    let revoked = sign_in(&router, &user_pool_id, &client_id, "bob").await;
+    ok(
+        &router,
+        "AdminUserGlobalSignOut",
+        &json!({ "UserPoolId": user_pool_id, "Username": "bob" }),
+    )
+    .await;
+
+    /// Present `refresh_token` to the refresh-token sign-in of `client_id`.
+    async fn presented(
+        router: &MultiServiceRouter,
+        client_id: &str,
+        refresh_token: &str,
+    ) -> (u16, Value) {
+        call(
+            router,
+            "InitiateAuth",
+            &json!({
+                "ClientId": client_id,
+                "AuthFlow": "REFRESH_TOKEN_AUTH",
+                "AuthParameters": { "REFRESH_TOKEN": refresh_token },
+            }),
+        )
+        .await
+    }
+
+    // The rows differ along WHY the presented value is not a live refresh token of this
+    // app client: nothing issued it, it is a token of another kind of the caller's own
+    // sign-in, it is a refresh token of another app client of the pool or of an app
+    // client of another pool, or it was revoked.
+    let rows: [(&str, &str, &str); 7] = [
+        (
+            "a value nothing issued",
+            "not.a.token.this.emulator.issued",
+            INVALID_REFRESH_TOKEN,
+        ),
+        (
+            "a single opaque word",
+            "notatokenatall",
+            INVALID_REFRESH_TOKEN,
+        ),
+        (
+            "the access token of the caller's own sign-in",
+            mine.access.as_str(),
+            INVALID_REFRESH_TOKEN,
+        ),
+        (
+            "the id token of the caller's own sign-in",
+            mine.id.as_str(),
+            INVALID_REFRESH_TOKEN,
+        ),
+        (
+            "a refresh token of another app client of the pool",
+            siblings.refresh.as_str(),
+            INVALID_REFRESH_TOKEN,
+        ),
+        (
+            "a refresh token of an app client of another pool",
+            abroads.refresh.as_str(),
+            INVALID_REFRESH_TOKEN,
+        ),
+        (
+            "a refresh token a global sign-out revoked",
+            revoked.refresh.as_str(),
+            "Refresh Token has been revoked",
+        ),
+    ];
+
+    for (case, refresh_token, expected) in rows {
+        let (status, payload) = presented(&router, &client_id, refresh_token).await;
+        assert_eq!(
+            (status, error_code(&payload), error_message(&payload)),
+            (400, "NotAuthorizedException", expected),
+            "case {case:?}: expected {expected:?}, got {status} with {payload}"
+        );
+    }
+
+    // The caller's own live refresh token signs in, so every refusal above is the row's
+    // own rather than this flow refusing everything.
+    let refreshed = ok(
+        &router,
+        "InitiateAuth",
+        &json!({
+            "ClientId": client_id,
+            "AuthFlow": "REFRESH_TOKEN_AUTH",
+            "AuthParameters": { "REFRESH_TOKEN": mine.refresh },
+        }),
+    )
+    .await;
+    assert!(
+        refreshed["AuthenticationResult"]["AccessToken"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty()),
+        "the caller's own refresh token must sign in, got {refreshed}"
+    );
+
+    // The two refresh surfaces word the denial alike: one sentence for a value neither
+    // can resolve, whichever API the caller reached.
+    let (status, payload) = call(
+        &router,
+        "GetTokensFromRefreshToken",
+        &json!({ "ClientId": client_id, "RefreshToken": "not.a.token.this.emulator.issued" }),
+    )
+    .await;
+    assert_eq!(
+        (status, error_code(&payload), error_message(&payload)),
+        (400, "NotAuthorizedException", INVALID_REFRESH_TOKEN),
+        "case \"the exchange's own denial\": expected {INVALID_REFRESH_TOKEN:?}, got {status} \
+         with {payload}"
+    );
+}
+
 /// Start the `NEW_PASSWORD_REQUIRED` challenge for a user `AdminCreateUser` just created
 /// with a temporary password, and return the `Session` it hands out.
 async fn challenge_session(

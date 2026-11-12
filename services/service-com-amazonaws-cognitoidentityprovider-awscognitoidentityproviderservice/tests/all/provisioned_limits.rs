@@ -11,19 +11,33 @@
 //! beside the rate that category includes at no additional cost — the included
 //! rate itself while nothing has adjusted the limit — and changes nothing.
 //! `UpdateProvisionedLimit` stores any rate in the account's range, which runs
-//! from the limit's included rate up to the account's maximum, and refuses a
-//! rate outside it: below the included rate as a malformed parameter, above the
-//! account maximum as a quota excess. A refused request stores nothing.
+//! from the limit's included rate up to the account's Service Quotas ceiling
+//! for that limit, and refuses a rate outside it: below the included rate as a
+//! malformed parameter, above the ceiling as a quota excess naming the rate
+//! asked for and the ceiling it passed. A refused request stores nothing.
+//!
+//! Stated plainly, because it decides how the tests below reach a provisioned
+//! rate at all: that ceiling is a Service Quotas value of the ACCOUNT, and
+//! while no increase has raised it, it IS the limit's included rate — so no
+//! operation of this service can store a rate DIFFERENT from the one already in
+//! force, and a quota increase is what opens the range. A granted increase is
+//! recorded in this service's own account state
+//! (`State::raise_api_category_quota_ceiling`), which is what the write tests
+//! below do before they provision, so each one really stores a rate the limit
+//! did not hold and reads it back.
 //!
 //! Each table row names the case it asserts and every assertion reports the
-//! actual value. The harness is the one `log_delivery_configuration.rs` already
-//! builds for this service, reached through the test crate root rather than
-//! copied.
+//! actual value. The wire harness (the `call`/`ok` pair and the error readers)
+//! is the one `log_delivery_configuration.rs` already builds for this service,
+//! reached through the test crate root rather than copied; this suite mounts its
+//! own router so it holds the engine the account's quota state lives in.
 
 use serde_json::{json, Value};
+use service_com_amazonaws_cognitoidentityprovider_awscognitoidentityproviderservice as cognito_idp;
 use smithy_server_runtime::MultiServiceRouter;
+use std::sync::Arc;
 
-use super::log_delivery_configuration::{call, error_code, error_message, ok, router};
+use super::log_delivery_configuration::{call, error_code, error_message, ok};
 
 /// One API rate limit this account holds: the `Category` attribute that
 /// identifies it and the rate it includes at no additional cost, in requests
@@ -68,11 +82,42 @@ const LIMITS: &[Limit] = &[
     },
 ];
 
-/// The highest rate the account may provision for any one limit, in requests
-/// per second: `MAX_PROVISIONED_API_RATE` in `src/state.rs`, which is the
-/// account-level maximum `UpdateProvisionedLimit` documents rather than a
-/// per-category number.
-const ACCOUNT_MAXIMUM: i64 = 10_000;
+/// How far above a limit's included rate the suite raises the account's Service
+/// Quotas ceiling for it before provisioning: wide enough that a rate strictly
+/// inside the range exists, and the same for every category so the range's width
+/// is not what a row varies.
+const GRANTED_INCREASE: i64 = 500;
+
+/// One emulator with just this service mounted, beside the engine its state —
+/// including the account's Service Quotas ceilings — lives in.
+fn router_and_engine() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
+    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+    let mut router = MultiServiceRouter::new();
+    router.register_service(cognito_idp::EmulatedService::new(Arc::clone(&engine)));
+    router.set_request_authentication(false);
+    (router, engine)
+}
+
+/// Record a granted Service Quotas increase raising this account's ceiling for
+/// `limit` to `ceiling`, and return the ceiling now in force.
+///
+/// What a Service Quotas increase does to the account, which is the only thing
+/// that moves this ceiling: it is not an operation of this service, so it is
+/// applied to the account's own quota state rather than over the wire.
+fn granted_increase(engine: &Arc<engine::InMemoryEngine>, limit: &Limit, ceiling: i64) -> i64 {
+    let category = cognito_idp::state::API_CATEGORIES
+        .iter()
+        .find(|candidate| candidate.name == limit.category)
+        .unwrap_or_else(|| panic!("{} is one of this service's API categories", limit.category));
+    let service_state =
+        cognito_idp::state::service_state(&**engine).expect("this service's state");
+    let mut guard = service_state.lock();
+    guard.raise_api_category_quota_ceiling(
+        category,
+        i32::try_from(ceiling).expect("a ceiling within the modelled rate type"),
+    );
+    i64::from(guard.api_category_quota_ceiling(category))
+}
 
 /// The definition that identifies `category`'s API rate limit.
 fn definition(category: &str) -> Value {
@@ -117,7 +162,7 @@ fn rendered(limit: &Limit, provisioned: i64) -> Value {
 
 #[tokio::test]
 async fn a_limit_nothing_has_adjusted_reports_its_included_rate() {
-    let router = router();
+    let (router, _engine) = router_and_engine();
 
     for limit in LIMITS {
         let case = format!("a fresh account's {} limit", limit.category);
@@ -140,18 +185,29 @@ async fn a_limit_nothing_has_adjusted_reports_its_included_rate() {
 
 #[tokio::test]
 async fn an_adjusted_rate_is_what_every_reader_renders() {
-    let router = router();
+    let (router, engine) = router_and_engine();
 
     for limit in LIMITS {
+        // A granted quota increase opens the range above the rate in force, so
+        // every row below asks for a rate the limit did NOT hold and the
+        // read-back afterwards can only answer it if the update stored it.
+        let ceiling = granted_increase(&engine, limit, limit.included + GRANTED_INCREASE);
+        assert_eq!(
+            ceiling,
+            limit.included + GRANTED_INCREASE,
+            "case {:?}: the granted increase must be the ceiling in force, got {ceiling}",
+            limit.category
+        );
+
         // The rows differ along where in the account's range the rate sits:
         // both bounds, rates inside it, the same rate twice, and a release back
         // to the included rate.
-        let midpoint = (limit.included + ACCOUNT_MAXIMUM) / 2;
+        let midpoint = (limit.included + ceiling) / 2;
         let rows: Vec<(String, i64)> = vec![
             ("one above the included rate".to_string(), limit.included + 1),
             ("a rate inside the range".to_string(), midpoint),
             ("that same rate again".to_string(), midpoint),
-            ("the account maximum".to_string(), ACCOUNT_MAXIMUM),
+            ("the account's ceiling".to_string(), ceiling),
             ("back down to the included rate".to_string(), limit.included),
             ("the included rate again".to_string(), limit.included),
         ];
@@ -184,12 +240,14 @@ async fn an_adjusted_rate_is_what_every_reader_renders() {
 
 #[tokio::test]
 async fn each_limit_holds_its_own_provisioned_rate() {
-    let router = router();
+    let (router, engine) = router_and_engine();
 
-    // Two limits with different included rates, so provisioning one is not
-    // provisioning the other.
+    // Two limits with different included rates. The quota increase is granted
+    // for the FIRST one only, so the rate it is provisioned at is above the
+    // second limit's own ceiling.
     let (first, second) = (&LIMITS[0], &LIMITS[1]);
-    let requested = ACCOUNT_MAXIMUM;
+    let ceiling = granted_increase(&engine, first, first.included + GRANTED_INCREASE);
+    let requested = ceiling;
 
     let (status, answered) = provision(&router, first.category, requested).await;
     assert_eq!(
@@ -210,6 +268,25 @@ async fn each_limit_holds_its_own_provisioned_rate() {
          got {reported}"
     );
 
+    // The increase was granted for the first limit alone, so the same rate on
+    // the second limit is above ITS ceiling and refused rather than carried
+    // over.
+    let case = format!("{} asked for {}'s rate", second.category, first.category);
+    let (status, payload) = provision(&router, second.category, requested).await;
+    assert_eq!(
+        (
+            status,
+            error_code(&payload),
+            error_message(&payload).to_string()
+        ),
+        (
+            400,
+            "ServiceQuotaExceededException",
+            above_ceiling_message(requested, second.included)
+        ),
+        "case {case:?}: each limit has its own ceiling, got {status} with {payload}"
+    );
+
     let case = format!("{} itself", first.category);
     let reported = read_back(&router, &case, first.category).await;
     assert_eq!(
@@ -217,18 +294,27 @@ async fn each_limit_holds_its_own_provisioned_rate() {
         rendered(first, requested),
         "case {case:?}: the provisioned limit reports its own rate, got {reported}"
     );
+    assert_ne!(
+        requested, first.included,
+        "case {case:?}: the rate asserted above must differ from the one a fresh limit reports"
+    );
 }
 
 #[tokio::test]
 async fn a_rate_outside_the_accounts_range_is_refused_and_stores_nothing() {
-    let router = router();
+    let (router, engine) = router_and_engine();
 
     for limit in LIMITS {
+        // The account's ceiling for this limit, raised by a granted increase so
+        // that the baseline below is a rate the limit did not already hold and
+        // the ceiling the refusals name is not the included rate either.
+        let ceiling = granted_increase(&engine, limit, limit.included + GRANTED_INCREASE);
+
         // Each row is a rate outside the account's range for this limit, with
         // the error the bound it missed carries: below the included rate is a
-        // malformed parameter, above the account maximum needs a quota
-        // increase. Each bound is covered one step past it, plus no rate at
-        // all, a negative rate, and a rate far above the maximum.
+        // malformed parameter, above the account's Service Quotas ceiling needs
+        // a quota increase. Each bound is covered one step past it, plus no
+        // rate at all, a negative rate, and a rate far above the ceiling.
         let rows: Vec<(String, i64, &str, String)> = vec![
             (
                 "one below the included rate".to_string(),
@@ -249,21 +335,22 @@ async fn a_rate_outside_the_accounts_range_is_refused_and_stores_nothing() {
                 below_included_message(-1, limit.included),
             ),
             (
-                "one above the account maximum".to_string(),
-                ACCOUNT_MAXIMUM + 1,
+                "one above the account's ceiling".to_string(),
+                ceiling + 1,
                 "ServiceQuotaExceededException",
-                above_maximum_message(ACCOUNT_MAXIMUM + 1, ACCOUNT_MAXIMUM),
+                above_ceiling_message(ceiling + 1, ceiling),
             ),
             (
-                "far above the account maximum".to_string(),
+                "far above the account's ceiling".to_string(),
                 2_000_000_000,
                 "ServiceQuotaExceededException",
-                above_maximum_message(2_000_000_000, ACCOUNT_MAXIMUM),
+                above_ceiling_message(2_000_000_000, ceiling),
             ),
         ];
 
-        // A rate in force that a refusal has to leave alone, so the assertion
-        // is about the write and not about an untouched default.
+        // A rate in force that a refusal has to leave alone, and one no fresh
+        // limit reports, so the reads below are about the write and not about
+        // an untouched default.
         let stored = limit.included + 1;
         let (status, answered) = provision(&router, limit.category, stored).await;
         assert_eq!(
@@ -278,6 +365,13 @@ async fn a_rate_outside_the_accounts_range_is_refused_and_stores_nothing() {
             limit.category,
         )
         .await;
+        assert_eq!(
+            before,
+            rendered(limit, stored),
+            "case {:?}: the baseline every refusal is measured against must be the stored \
+             rate rather than the included one, got {before}",
+            limit.category
+        );
 
         for (position, requested, expected_code, expected_message) in rows {
             let case = format!("{} asked for {requested} ({position})", limit.category);
@@ -305,8 +399,60 @@ async fn a_rate_outside_the_accounts_range_is_refused_and_stores_nothing() {
 }
 
 #[tokio::test]
+async fn an_account_with_no_increase_has_the_included_rate_as_its_ceiling() {
+    let (router, _engine) = router_and_engine();
+
+    // No increase is granted anywhere in this test, so each limit's ceiling is
+    // the value Service Quotas starts its quota at — the rate the limit
+    // includes. The rows differ along how far past that ceiling the request
+    // reaches: one step, a round number, and a value far beyond any rate.
+    for limit in LIMITS {
+        for (position, requested) in [
+            ("one step past it", limit.included + 1),
+            ("ten times it", limit.included * 10),
+            ("far beyond any rate", 2_000_000_000),
+        ] {
+            let case = format!("{} asked for {requested} ({position})", limit.category);
+            let (status, payload) = provision(&router, limit.category, requested).await;
+            assert_eq!(
+                (
+                    status,
+                    error_code(&payload),
+                    error_message(&payload).to_string()
+                ),
+                (
+                    400,
+                    "ServiceQuotaExceededException",
+                    above_ceiling_message(requested, limit.included)
+                ),
+                "case {case:?}: with no increase granted the ceiling is the included rate, \
+                 got {status} with {payload}"
+            );
+
+            // The refusal wrote nothing: the limit still reports the rate it
+            // held.
+            let reported = read_back(&router, &case, limit.category).await;
+            assert_eq!(
+                reported,
+                rendered(limit, limit.included),
+                "case {case:?}: a refused update must store nothing, got {reported}"
+            );
+        }
+
+        // The ceiling itself is inside the range, so the refusals above are
+        // about passing it rather than about the operation refusing everything.
+        let case = format!("{} asked for its ceiling", limit.category);
+        let (status, answered) = provision(&router, limit.category, limit.included).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: the rate at the ceiling is served, got {status} with {answered}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_definition_that_identifies_no_limit_is_refused_by_both_operations() {
-    let router = router();
+    let (router, _engine) = router_and_engine();
 
     // A definition that identifies no limit is a definition the request has to
     // correct, whichever part of it names nothing: a category value the service
@@ -384,13 +530,11 @@ fn below_included_message(requested: i64, included: i64) -> String {
     )
 }
 
-/// What a refusal says for a rate above the account's maximum.
-fn above_maximum_message(requested: i64, maximum: i64) -> String {
-    format!(
-        "The requested limit value {requested} exceeds your account's maximum limit of \
-         {maximum} requests per second for this limit. To increase your limit, submit a \
-         Service Quotas increase request."
-    )
+/// What a refusal says for a rate above the account's Service Quotas ceiling
+/// for the limit: the rate that was asked for and the ceiling it passed, and
+/// nothing else.
+fn above_ceiling_message(requested: i64, ceiling: i64) -> String {
+    format!("Requested value {requested} exceeds Service Quota ceiling of {ceiling}")
 }
 
 /// What a refusal says for a category value the service publishes no limit of:
