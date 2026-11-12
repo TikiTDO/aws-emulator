@@ -216,10 +216,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "The ID of the Capacity Reservation from which you want to split the capacity"
         // (`SourceCapacityReservationId`): the capacity comes OUT of that reservation, so an
-        // id this account holds no reservation for has nothing to split — resolved through
-        // the one resolver every operation of this crate reads a `CapacityReservationId`
-        // with, which refuses a malformed id before an unknown one.
-        let source = state::require_known_capacity_reservation(
+        // id this account holds no reservation for has nothing to split. This operation's
+        // validator reads the id by its SHAPE
+        // ([`state::require_capacity_reservation_by_id_shape`]): a value of the Capacity
+        // Reservation id form the account holds no reservation under — the all-zero
+        // placeholder included — is reported NOT FOUND, so a caller that branches on the
+        // not-found code to create the reservation it is missing sees it, and only a value
+        // outside that form is refused as malformed, before any lookup.
+        let source = state::require_capacity_reservation_by_id_shape(
             &store,
             &input.source_capacity_reservation_id,
         )?;
@@ -241,20 +245,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "The number of instances in the new Capacity Reservation. The number of instances
         // in the source Capacity Reservation was REDUCED by this amount" (`$InstanceCount`):
-        // the capacity is MOVED rather than created, so the source has to hold at least that
-        // many instances that nothing has launched into, and it has to keep at least one —
-        // a reservation cannot be split down to nothing. Two callers splitting the same
-        // reservation at once are serialized by the one store lock, so the second one sees
-        // what the first took and is refused here rather than oversubscribing the source.
+        // the capacity is MOVED rather than created, so the capacity a split can take is the
+        // capacity nothing has launched into — "the remaining capacity"
+        // (`CapacityReservation$AvailableInstanceCount`) — less the one instance the source
+        // keeps, because a reservation cannot be split down to nothing. Two callers splitting
+        // the same reservation at once are serialized by the one store lock, so the second
+        // one sees what the first took and is refused here rather than oversubscribing the
+        // source.
         let available = source_view.available_instance_count.unwrap_or_default();
-        if input.instance_count >= available {
-            return Err(state::invalid_parameter_value(format!(
-                "Invalid value '{requested}' for instanceCount. The capacity reservation \
-                 '{source_id}' has {available} instances available, and a split leaves at \
-                 least one of them in it",
-                requested = input.instance_count,
-                source_id = input.source_capacity_reservation_id,
-            )));
+        let splittable = available.saturating_sub(INSTANCES_THE_SOURCE_KEEPS);
+        if input.instance_count > splittable {
+            return Err(insufficient_available_capacity(
+                splittable,
+                input.instance_count,
+            ));
         }
 
         // The request is one that would have succeeded, so a dry run stops HERE: "If you
@@ -365,4 +369,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             instance_count: Some(input.instance_count),
         })
     }
+}
+
+/// How many instances a split leaves in the source Capacity Reservation: a split MOVES
+/// capacity out of a reservation that goes on holding capacity, so the whole of the source
+/// cannot be split away — the capacity a split can take is the source's available capacity
+/// less this.
+const INSTANCES_THE_SOURCE_KEEPS: i32 = 1;
+
+/// Refuse a split of more instances than the source Capacity Reservation has to give: HTTP
+/// 400 `InvalidParameterValue`, worded the way EC2 words a split past the source's capacity
+/// — two fixed sentences naming how much capacity is there to split (`available`, from the
+/// source reservation as the store now holds it) and how much the request asked for
+/// (`requested`, its `InstanceCount`).
+fn insufficient_available_capacity(
+    available: i32,
+    requested: i32,
+) -> CreateCapacityReservationBySplittingError {
+    crate::state::invalid_parameter_value(format!(
+        "There isn't enough available capacity in the source Capacity Reservation. The \
+         current available instance count is {available}. You requested to split {requested}."
+    ))
 }

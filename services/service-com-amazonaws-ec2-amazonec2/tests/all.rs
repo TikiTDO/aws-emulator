@@ -15,6 +15,12 @@
 // exactly that. The lines above are the file header, which no landing edits.
 #[path = "all/prefix_lists.rs"]
 mod prefix_lists;
+// `CreateCapacityReservationBySplitting`: the reading it gives a source reservation id it
+// cannot resolve, and how much capacity a source has to give. Declared beside `prefix_lists`
+// for the reason the note above gives: the sorted neighbourhood and the tail of this file are
+// where every new ec2 suite inserts its lines.
+#[path = "all/capacity_reservation_split_refusals.rs"]
+mod capacity_reservation_split_refusals;
 // The RECORDED response elements a reported shape carries that this checkout's model
 // declares no member for — a VPC's `dhcpOptionsSource` and a Verified Access instance's
 // transit-gateway attachment set — beside the state those same reads depend on: a created
