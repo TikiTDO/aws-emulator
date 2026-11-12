@@ -63,9 +63,8 @@
 //! `crate::scaffolded` describes, whose members the serializer never sees, so the headers
 //! are written onto the refusal here instead. The set is the same one a success carries, so
 //! the policy a client reads off this endpoint does not depend on the outcome of the call —
-//! including the cross-origin read grant, which this service asserts on NO response unless
-//! the operator selected the recorded browser-facing policy
-//! (`crate::state::BrowserPolicy`).
+//! including the cross-origin read grant, which names which origins may read an answer and
+//! admits no request this service would otherwise refuse.
 //!
 //! # How this service words a refusal
 //!
@@ -336,7 +335,7 @@ fn with_response_envelope(mut resp: RtResponse) -> RtResponse {
         // describes rather than the modelled error shape, so its members never reach the
         // serializer and the headers are written onto the response here, by the same
         // `crate::state` policy the outputs report.
-        for (name, value) in crate::state::response_header_policy() {
+        for (name, value) in crate::state::RESPONSE_HEADER_POLICY {
             if resp.headers().get(name).is_none() {
                 let _ = resp.headers_mut().try_insert(name, value);
             }

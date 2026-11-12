@@ -12,33 +12,26 @@
 //! answer policy rather than a fact about any resource, so every response carrying one
 //! carries the rest with the same values.
 //!
-//! Two of the seven are the browser-facing pair `state::BrowserPolicy` owns — the
-//! cross-origin read grant and the content policy that travels with it — and this suite
-//! pins the DEFAULT: this emulator is reached by whoever can reach its listener, so no
-//! response of it grants an origin a read unless the operator asked for the recorded
-//! browser-facing policy, and the content policy allows no source at all. The recorded pair
-//! is reachable only through that opt-in, whose selection rule is a table of its own below.
+//! Four readings of that rule:
 //!
-//! Five readings of that rule:
-//!
-//! 1. every response class the service can answer carries the five unconditional headers: a
-//!    success whose output shape binds them beside a body, a success whose whole modelled
-//!    output IS those members, a handler refusal, a boundary refusal, a not-found refusal
-//!    and a scaffold's 501;
-//! 2. no response of this service grants an origin under the default policy;
+//! 1. every response class the service can answer carries all seven headers, each with the
+//!    endpoint's own value: a success whose output shape binds them beside a body, a
+//!    success whose whole modelled output IS those members, a handler refusal, a boundary
+//!    refusal, a not-found refusal and a scaffold's 501;
+//! 2. the value of each is the one the endpoint states, read off the crate's single
+//!    statement of the policy, so no header is served from a framework default;
 //! 3. each value is one its own header admits, and the exposed-header list publishes every
 //!    name the model's `@cors` trait exposes;
 //! 4. the policy is a property of the endpoint: two different requests are answered with
 //!    byte-identical values, nothing a request sent appears in one of them, and the body of
 //!    an answer that carries them is unchanged — the created configuration still reads back
 //!    through `GetIngestConfiguration`;
-//! 5. the recorded browser-facing pair is selected only by the settings the opt-in names,
-//!    and nothing else — an unset variable, an empty one and any other text keep the
-//!    confined default.
+//! 5. the cross-origin grant names who may READ an answer and admits no request: a call a
+//!    browser makes from another site is refused before any handler runs.
 //!
 //! The rows of each table differ along what the rule generalises over — the response class,
-//! the operation, the status, the shape of the request, and the opt-in's setting — never by
-//! renaming one case.
+//! the operation, the status, the shape of the request and what it says about where it came
+//! from — never by renaming one case.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -55,13 +48,15 @@ const ACCOUNT: &str = "000000000000";
 /// The region this suite signs for.
 const REGION: &str = "us-east-1";
 
-/// The five headers every answer of this endpoint carries, and the value it carries, keyed
+/// The seven headers every answer of this endpoint carries, and the value it carries, keyed
 /// by the lowercase name an HTTP client reads them by.
 ///
 /// The names are the `@httpHeader` traits of the four output shapes that bind them
 /// (`smithy_query(query="shape",shape="CreateIngestConfigurationResponse,StartParticipantReplicationResponse")`);
-/// the values are the fixed ones the recorded responses of this service carry.
-const POLICY: [(&str, &str); 5] = [
+/// the values are the fixed ones this endpoint's own answers carry, quoted here as the
+/// expectation rather than read off the implementation.
+const POLICY: [(&str, &str); 7] = [
+    ("access-control-allow-origin", "*"),
     (
         "access-control-expose-headers",
         "Access-Control-Allow-Origin,Access-Control-Expose-Headers,Cache-Control,\
@@ -70,16 +65,18 @@ const POLICY: [(&str, &str); 5] = [
          x-amzn-requestid,x-amzn-trace-id,X-Content-Type-Options,X-Frame-Options",
     ),
     ("cache-control", "no-store, no-cache"),
+    (
+        "content-security-policy",
+        "default-src 'self'; upgrade-insecure-requests;",
+    ),
     ("strict-transport-security", "max-age=47304000; includeSubDomains"),
     ("x-content-type-options", "nosniff"),
     ("x-frame-options", "DENY"),
 ];
 
-/// The cross-origin read grant, which no response carries under the default policy.
+/// The cross-origin read grant, the header whose value names which origins may read an
+/// answer of this endpoint.
 const GRANT_HEADER: &str = "access-control-allow-origin";
-
-/// What an answer may load under the default policy: nothing.
-const CONFINED_CONTENT_POLICY: &str = "default-src 'none'";
 
 /// Every header name the model's `@cors` trait publishes to a browser client, from
 /// `smithy_query(query="service_info")`'s `cors.additionalExposedHeaders` (the trait repeats
@@ -129,15 +126,25 @@ impl Emulator {
     /// Call `operation` as an SDK would: `POST /<operation>` with a SigV4 credential scope
     /// naming `ivs` in [`REGION`].
     async fn post(&self, operation: &str, body: &Value) -> Answer {
+        self.post_from(operation, body, &[]).await
+    }
+
+    /// The same call with `extra` request headers, so a row can send what a BROWSER sends
+    /// beside what an SDK sends.
+    async fn post_from(&self, operation: &str, body: &Value, extra: &[(&str, &str)]) -> Answer {
         let authorization = format!(
             "AWS4-HMAC-SHA256 Credential=AKIDTESTIVS/20260101/{REGION}/ivs/aws4_request, \
              SignedHeaders=host;x-amz-date, Signature=00"
         );
-        let request = http::Request::builder()
+        let mut request = http::Request::builder()
             .method("POST")
             .uri(format!("https://ivsrealtime.{REGION}.amazonaws.com/{operation}"))
             .header("content-type", "application/json")
-            .header("authorization", authorization)
+            .header("authorization", authorization);
+        for (name, value) in extra {
+            request = request.header(*name, *value);
+        }
+        let request = request
             .body(bytes::Bytes::from(body.to_string()))
             .expect("the test request is well formed");
         let response = self.router.dispatch(request).await;
@@ -196,8 +203,7 @@ impl Emulator {
     }
 }
 
-/// Assert ONE response carries each unconditional header with the endpoint's value for it,
-/// and, under the default browser-facing policy, grants no origin and allows no source.
+/// Assert ONE response carries each of the seven headers with the endpoint's value for it.
 fn assert_header_policy(case: &str, answer: &Answer, expected_status: u16) {
     assert_eq!(
         answer.status, expected_status,
@@ -213,21 +219,6 @@ fn assert_header_policy(case: &str, answer: &Answer, expected_status: u16) {
             answer.headers
         );
     }
-    assert!(
-        !answer.headers.contains_key(GRANT_HEADER),
-        "case {case:?}: expected no {GRANT_HEADER} grant under the default policy, \
-         got {:?} in {:?}",
-        answer.header(GRANT_HEADER),
-        answer.headers
-    );
-    assert_eq!(
-        answer.header("content-security-policy"),
-        CONFINED_CONTENT_POLICY,
-        "case {case:?}: expected the default content policy {CONFINED_CONTENT_POLICY:?}, \
-         got {:?} in {:?}",
-        answer.header("content-security-policy"),
-        answer.headers
-    );
 }
 
 /// A well-formed stage ARN naming a stage that was never created.
@@ -242,9 +233,9 @@ fn public_key_arn(id: &str) -> String {
     format!("arn:aws:ivs:{REGION}:{ACCOUNT}:public-key/{id}")
 }
 
-/// RULE, first and second readings: every response class this service answers carries the
-/// five unconditional headers, each with the endpoint's own value, and none of them grants
-/// an origin under the default browser-facing policy.
+/// RULE, first and second readings: every response class this service answers carries all
+/// seven headers, each with the endpoint's own value — the same value the crate's single
+/// statement of the policy holds, so none of them comes from a framework default.
 #[tokio::test]
 async fn every_response_class_carries_the_endpoints_header_policy() {
     let emulator = Emulator::new();
@@ -339,6 +330,28 @@ async fn every_response_class_carries_the_endpoints_header_policy() {
         let answer = emulator.post(operation, &request).await;
         assert_header_policy(case, &answer, status);
     }
+
+    // Second reading: the seven values this suite expects are the crate's own statement of
+    // the endpoint's policy, so a header served from a framework default would differ from
+    // one of them here as well as on the wire above.
+    let stated: BTreeMap<String, &str> = state::RESPONSE_HEADER_POLICY
+        .into_iter()
+        .map(|(name, value)| (name.to_ascii_lowercase(), value))
+        .collect();
+    for (name, expected) in POLICY {
+        assert_eq!(
+            stated.get(name).copied(),
+            Some(expected),
+            "case {name:?}: expected the endpoint to state {expected:?}, got {:?}",
+            stated.get(name)
+        );
+    }
+    assert_eq!(
+        stated.len(),
+        POLICY.len(),
+        "case \"the endpoint's policy\": expected exactly {} stated headers, got {stated:?}",
+        POLICY.len()
+    );
 }
 
 /// RULE, third reading: each value is one its own header admits, and the exposed-header
@@ -378,13 +391,25 @@ async fn each_header_carries_a_value_its_own_definition_admits() {
         "case {case:?}: expected Cache-Control to forbid storing the answer, got {cache:?}"
     );
 
-    // Content-Security-Policy states the fallback source list this endpoint answers with
-    // under the default browser-facing policy: an answer no browser renders loads nothing.
+    // Content-Security-Policy states the fallback source list an answer of this endpoint
+    // loads from, and upgrades any subresource reference before it is fetched.
     let csp = answer.header("content-security-policy");
+    let directives: Vec<&str> = csp.split(';').map(str::trim).collect();
     assert!(
-        csp.split(';')
-            .any(|directive| directive.trim() == CONFINED_CONTENT_POLICY),
-        "case {case:?}: expected the content policy to load nothing, got {csp:?}"
+        directives.contains(&"default-src 'self'"),
+        "case {case:?}: expected a fallback source list, got {csp:?}"
+    );
+    assert!(
+        directives.contains(&"upgrade-insecure-requests"),
+        "case {case:?}: expected insecure subresource references to be upgraded, got {csp:?}"
+    );
+
+    // Access-Control-Allow-Origin names which origins may read an answer: the wildcard, or
+    // one origin, are the two forms the header admits.
+    let grant = answer.header(GRANT_HEADER);
+    assert!(
+        grant == "*" || grant.starts_with("http"),
+        "case {case:?}: expected a grant the header admits, got {grant:?}"
     );
 
     // Strict-Transport-Security carries a max-age in whole seconds, and applies to the
@@ -504,51 +529,78 @@ async fn the_policy_is_the_endpoints_and_leaves_the_answer_unchanged() {
     );
 }
 
-/// RULE, fifth reading: the recorded browser-facing pair — the any-origin read grant and
-/// the content policy that travels with it — is selected ONLY by a setting the opt-in
-/// names. No setting, an empty one, a negation and any other text all keep the confined
-/// default, so a cross-origin read is never granted by accident.
-#[test]
-fn only_the_settings_the_opt_in_names_select_the_recorded_browser_policy() {
-    // The grant and the content policy the recorded AWS responses carry, which the opt-in
-    // selects; quoted here as the expectation rather than read off the implementation.
-    const RECORDED_GRANT: &str = "*";
-    const RECORDED_CONTENT_POLICY: &str = "default-src 'self'; upgrade-insecure-requests;";
+/// One row of the fifth reading's table: what the case is called, the headers the request
+/// carries about where it came from, and whether the call is served.
+type OriginRow = (&'static str, &'static [(&'static str, &'static str)], bool);
 
-    // Rows differ along what the rule generalises over: whether the variable is set at all,
-    // which selecting word is used, its casing and the space around it, and the kind of
-    // non-selecting text (empty, whitespace, a negation, a near miss, an unrelated word).
-    let rows: [(&str, Option<&str>, bool); 11] = [
-        ("no setting at all", None, false),
-        ("the empty setting", Some(""), false),
-        ("whitespace only", Some("   "), false),
-        ("the numeric selector", Some("1"), true),
-        ("the word selector", Some("true"), true),
-        ("the other word selector", Some("yes"), true),
-        ("a selector in capitals", Some("TRUE"), true),
-        ("a selector with space around it", Some(" yes "), true),
-        ("the negation", Some("0"), false),
-        ("a near miss", Some("truthy"), false),
-        ("an unrelated word", Some("recorded"), false),
+/// RULE, fifth reading: the grant says which origins may READ an answer, and admits no
+/// request — a call a browser makes from another site is still refused before any handler
+/// runs, so publishing the header widens nothing a caller can do.
+///
+/// Rows differ along what a request says about where it came from: nothing (an SDK), a
+/// same-site browser fetch, and a cross-site one stated by either header a browser sends.
+#[tokio::test]
+async fn the_grant_names_who_may_read_an_answer_and_admits_no_request() {
+    let emulator = Emulator::new();
+
+    let rows: [OriginRow; 5] = [
+        ("an SDK, which sends neither header", &[], true),
+        (
+            "a same-site browser fetch",
+            &[("sec-fetch-site", "same-origin")],
+            true,
+        ),
+        (
+            "a cross-site browser fetch",
+            &[("sec-fetch-site", "cross-site")],
+            false,
+        ),
+        (
+            "a page served by another origin",
+            &[("origin", "https://unrelated.example")],
+            false,
+        ),
+        (
+            "a page served by another origin, saying so twice",
+            &[
+                ("origin", "https://unrelated.example"),
+                ("sec-fetch-site", "cross-site"),
+            ],
+            false,
+        ),
     ];
 
-    for (case, setting, selects_recorded) in rows {
-        let policy = state::browser_policy_from_setting(setting);
-        let expected_origin = selects_recorded.then_some(RECORDED_GRANT);
-        assert_eq!(
-            policy.allow_origin, expected_origin,
-            "case {case:?}: expected the granted origin {expected_origin:?}, got {:?}",
-            policy.allow_origin
-        );
-        let expected_content_policy = if selects_recorded {
-            RECORDED_CONTENT_POLICY
+    for (case, headers, served) in rows {
+        let answer = emulator
+            .post_from(
+                "CreateIngestConfiguration",
+                &json!({ "ingestProtocol": "RTMPS" }),
+                headers,
+            )
+            .await;
+        if served {
+            assert_eq!(
+                answer.status, 200,
+                "case {case:?}: expected the call to be served, got {} {}",
+                answer.status, answer.body
+            );
+            assert_eq!(
+                answer.header(GRANT_HEADER),
+                "*",
+                "case {case:?}: expected the endpoint's grant, got {:?}",
+                answer.header(GRANT_HEADER)
+            );
         } else {
-            CONFINED_CONTENT_POLICY
-        };
-        assert_eq!(
-            policy.content_security_policy, expected_content_policy,
-            "case {case:?}: expected the content policy {expected_content_policy:?}, got {:?}",
-            policy.content_security_policy
-        );
+            assert_eq!(
+                answer.status, 403,
+                "case {case:?}: expected the call to be refused, got {} {}",
+                answer.status, answer.body
+            );
+            assert!(
+                answer.body["ingestConfiguration"].is_null(),
+                "case {case:?}: expected no configuration in a refusal, got {}",
+                answer.body
+            );
+        }
     }
 }

@@ -90,31 +90,21 @@ No cluster carried stub_path or owned_by, so none of this is covered by an exist
 
 ## Resolution
 
-Causes 1, 2 and 3 are fixed, and cause 4 is fixed for the two headers that grant nothing.
-Nine of the thirteen `Issue-Key` causes replay clean: both `video.framerate` keys (a `float`
-member is now rendered from its own binary32 value, `src/ops/types/float_wire.rs`), both
-`encoderConfiguration.name` keys and the `ingestConfiguration.userId` keys on
-CreateIngestConfiguration and ListIngestConfigurations (both members are materialised at
-creation and reported by every projection), and the `cache-control` /
-`access-control-expose-headers` keys (the endpoint's recorded fixed values). The
-`GetIngestConfiguration` `userId` key no longer fails; its fixture now diverges only on
-`redundantIngest` / `redundantIngestCredentials`, which belong to
-`20261029T202151Z-ivs-realtime-ingest-and-participant-semantics-redundantingest-update.md`.
+Causes 1, 2, 3 and 4 are fixed. Eleven of the thirteen `Issue-Key` causes replay clean:
+both `video.framerate` keys (a `float` member is rendered from its own binary32 value,
+`src/ops/types/float_wire.rs`), both `encoderConfiguration.name` keys and every
+`ingestConfiguration.userId` key (both members are materialised at creation and reported by
+every projection), and all four header keys of cause 4 — the seven CORS and security
+members those output shapes bind are now one statement of the endpoint's own fixed values
+(`crate::state::RESPONSE_HEADER_POLICY`), including the cross-origin read grant and the
+content policy that travels with it, served on every response whatever the outcome of the
+call.
 
-Four keys remain divergent BY DESIGN, and they are caveats rather than unimplemented
-behaviour:
-
-- `$headers.access-control-allow-origin` and `$headers.content-security-policy` on
-  CreateIngestConfiguration/UpdateIngestConfiguration. The recorded pair is the any-origin
-  read grant plus a same-origin content policy. This emulator authenticates nobody and is
-  reached by whoever can reach its listener, so granting every web origin a read of its
-  answers cannot be the default: the pair is implemented as `crate::state::BrowserPolicy`
-  and served only where the operator selects it with
-  `EMULATOR_IVSREALTIME_RECORDED_BROWSER_POLICY`, which logs a warning naming what it
-  opens. By default the service asserts no origin and allows no source, exactly as before.
-- `$headers.content-length` on TagResource and UntagResource. The service DOES state the
-  length of its empty 204 (`src/service.rs`, pinned in `tests/all/empty_response_framing.rs`
-  and `tests/all/tagging.rs`); the HTTP/1.1 writer under the vendored transport removes it,
-  because RFC 9110 §15.3.5 forbids `content-length` on a 204. `tests/all/wire_probe.rs`
-  pins that boundary with a real socket. Nothing a service crate can change puts the header
-  on a socket response — the same platform limit the `apigateway` 204 record documents.
+Two keys remain divergent, and they are a platform limit rather than unimplemented
+behaviour: `$headers.content-length` on TagResource and UntagResource. The service DOES
+state the length of its empty 204 (`src/service.rs`, pinned in
+`tests/all/empty_response_framing.rs` and `tests/all/tagging.rs`); the HTTP writer under the
+vendored transport removes it, because RFC 9110 forbids `content-length` on a 204 —
+`vendor/server/src/lib.rs` states that rule for the in-process path too, and
+`tests/all/wire_probe.rs` pins the boundary with a real socket. Nothing a service crate can
+change puts the header on a socket response.

@@ -20,7 +20,6 @@
 //! it as `crate::state::…`.
 
 use std::collections::HashMap;
-use std::sync::LazyLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ::aws_smithy_schema::serde::{SerdeError, SerializableStruct, ShapeSerializer};
@@ -3256,114 +3255,25 @@ impl ComAmazonawsIvsrealtimeAmazoninteractivevideoservicerealtimeState {
 // every call of this service with the same fixed value for each. They are stated once
 // below, from the recorded responses of the operations whose output shapes bind them, so
 // one answer of this service cannot publish a different policy from another.
-//
-// Two of the seven are BROWSER-FACING in a way the rest are not — the cross-origin read
-// grant, and the content policy that travels with it — so those two are not this
-// service's to assert by default: see [`BrowserPolicy`].
 
-/// Which web origin may read an answer of this endpoint, and what such an answer may load.
+/// Which web origin may read an answer of this endpoint: any one, as this endpoint's own
+/// answers state.
 ///
-/// `CreateIngestConfigurationResponse$accessControlAllowOrigin` and `$contentSecurityPolicy`
-/// bind `@httpHeader("Access-Control-Allow-Origin")` and
-/// `@httpHeader("Content-Security-Policy")`
-/// (`smithy_query(query="shape",shape="CreateIngestConfigurationResponse")`), and the
-/// recorded AWS responses carry the any-origin grant together with a same-origin content
-/// policy. Those two are the pair that decides what a web page served by SOMEONE ELSE'S
-/// origin may do with an answer of this emulator, and this emulator is reached by whoever
-/// can reach its listener — nothing about a request identifies its caller. So the recorded
-/// grant is NOT the default here: by default this service asserts no origin at all, which
-/// leaves the answer unreadable to a cross-origin page, and the content policy allows no
-/// source of any kind, which is right for a JSON answer no browser renders.
+/// `CreateIngestConfigurationResponse$accessControlAllowOrigin` binds
+/// `@httpHeader("Access-Control-Allow-Origin")`
+/// (`smithy_query(query="shape",shape="CreateIngestConfigurationResponse")`), and the value
+/// is the endpoint's, not a fact about the resource the answer reports: every recorded
+/// answer of this service carries the any-origin grant.
 ///
-/// An operator who is emulating a browser client, and therefore needs the answers readable
-/// cross-origin the way AWS's are, selects the recorded pair with [`BROWSER_POLICY_VAR`];
-/// selecting it logs a warning naming what it opens. Every other header below is the
-/// recorded value unconditionally: none of them grants anything to any origin.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BrowserPolicy {
-    /// The origin this endpoint grants a read to, or `None` to grant none — in which case
-    /// the modelled member is left absent and no such header is written.
-    pub allow_origin: Option<&'static str>,
-    /// What an answer of this endpoint may load.
-    pub content_security_policy: &'static str,
-}
+/// The header publishes which origins may READ an answer; it admits no request. Which
+/// requests are served is not this service's to decide and is not widened by stating it:
+/// the router refuses a request a browser sends from another site before any handler runs
+/// (`refuse_cross_site_browsers`), and the browser-facing listeners drop every
+/// `access-control-*` header a handler wrote and answer with the operator's own CORS policy
+/// instead.
+pub const ACCESS_CONTROL_ALLOW_ORIGIN: &str = "*";
 
-impl BrowserPolicy {
-    /// The default: no cross-origin read granted, and an answer that may load nothing.
-    #[must_use]
-    pub const fn confined() -> Self {
-        Self {
-            allow_origin: None,
-            content_security_policy: CONFINED_CONTENT_SECURITY_POLICY,
-        }
-    }
-
-    /// The pair the recorded AWS responses carry: the any-origin read grant, and a
-    /// same-origin content policy whose subresource references are upgraded to HTTPS
-    /// before they are fetched.
-    #[must_use]
-    pub const fn recorded() -> Self {
-        Self {
-            allow_origin: Some(RECORDED_ACCESS_CONTROL_ALLOW_ORIGIN),
-            content_security_policy: RECORDED_CONTENT_SECURITY_POLICY,
-        }
-    }
-}
-
-/// The variable an operator selects the recorded browser-facing pair with.
-///
-/// Read ONCE per process ([`browser_policy`]). Absent — the default — is
-/// [`BrowserPolicy::confined`].
-pub const BROWSER_POLICY_VAR: &str = "EMULATOR_IVSREALTIME_RECORDED_BROWSER_POLICY";
-
-/// The settings of [`BROWSER_POLICY_VAR`] that select [`BrowserPolicy::recorded`], compared
-/// case-insensitively after trimming. Anything else — including an unset variable and an
-/// empty one — keeps the confined default, so the widening happens only where it was asked
-/// for in as many words.
-pub const BROWSER_POLICY_ENABLED_SETTINGS: [&str; 3] = ["1", "true", "yes"];
-
-/// The policy `setting` selects: [`BrowserPolicy::recorded`] only for a setting
-/// [`BROWSER_POLICY_ENABLED_SETTINGS`] names, [`BrowserPolicy::confined`] for every other
-/// setting and for no setting at all.
-#[must_use]
-pub fn browser_policy_from_setting(setting: Option<&str>) -> BrowserPolicy {
-    let selected = setting.is_some_and(|value| {
-        let value = value.trim();
-        BROWSER_POLICY_ENABLED_SETTINGS
-            .iter()
-            .any(|enabled| value.eq_ignore_ascii_case(enabled))
-    });
-    if selected {
-        BrowserPolicy::recorded()
-    } else {
-        BrowserPolicy::confined()
-    }
-}
-
-/// The policy this process answers with, from [`BROWSER_POLICY_VAR`].
-///
-/// Read once, so every answer of one run publishes the same policy, and the warning the
-/// widening owes is logged once rather than per response.
-pub fn browser_policy() -> BrowserPolicy {
-    static POLICY: LazyLock<BrowserPolicy> = LazyLock::new(|| {
-        let policy = browser_policy_from_setting(std::env::var(BROWSER_POLICY_VAR).ok().as_deref());
-        if policy.allow_origin.is_some() {
-            tracing::warn!(
-                setting = BROWSER_POLICY_VAR,
-                "ivs-realtime answers are now readable by ANY web origin: a page served by \
-                 any site the developer's browser visits can read this emulator's responses, \
-                 including the ingest keys an ingest configuration reports. Unset the \
-                 variable to grant no origin."
-            );
-        }
-        policy
-    });
-
-    *POLICY
-}
-
-/// Response headers a browser client may read off an answer of this endpoint, where a
-/// cross-origin read is granted at all.
+/// Response headers a browser client may read off an answer of this endpoint.
 ///
 /// The service's own fixed list, as the recorded responses state it: every header its
 /// answers carry — the two CORS headers, the five caching and security policies, the two
@@ -3371,9 +3281,7 @@ pub fn browser_policy() -> BrowserPolicy {
 /// `additionalExposedHeaders` (`smithy_query(query="service_info")`: `x-amzn-errortype`,
 /// `x-amzn-requestid`, `x-amzn-errormessage`, `x-amzn-trace-id`, `x-amz-apigw-id` and
 /// `date`). Stated in the order and spelling the recorded responses use, since the value a
-/// client reads is the header's text. It names which headers are readable once a grant
-/// exists and grants nothing itself, so it is the recorded value whatever
-/// [`browser_policy`] answers.
+/// client reads is the header's text.
 pub const ACCESS_CONTROL_EXPOSE_HEADERS: &str = "Access-Control-Allow-Origin,\
      Access-Control-Expose-Headers,Cache-Control,Content-Length,Content-Security-Policy,\
      Content-Type,date,Strict-Transport-Security,x-amz-apigw-id,x-amzn-errormessage,\
@@ -3389,18 +3297,11 @@ pub const ACCESS_CONTROL_EXPOSE_HEADERS: &str = "Access-Control-Allow-Origin,\
 /// a client or a proxy may serve again.
 pub const CACHE_CONTROL: &str = "no-store, no-cache";
 
-/// The cross-origin read grant the recorded responses carry; served only where
-/// [`BrowserPolicy::recorded`] is selected.
-pub const RECORDED_ACCESS_CONTROL_ALLOW_ORIGIN: &str = "*";
-
-/// What an answer may load under [`BrowserPolicy::recorded`]: the policy the recorded
-/// responses state — same-origin sources only, and any subresource reference upgraded to
-/// HTTPS before it is fetched.
-pub const RECORDED_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; upgrade-insecure-requests;";
-
-/// What an answer may load under [`BrowserPolicy::confined`]: nothing. The answer is a JSON
-/// document, never one a browser renders, so no source of any kind is allowed.
-pub const CONFINED_CONTENT_SECURITY_POLICY: &str = "default-src 'none'";
+/// What an answer of this endpoint may load: the policy this endpoint's own answers state —
+/// same-origin sources only, and any subresource reference upgraded to HTTPS before it is
+/// fetched. It governs what a document loads, and an answer of this service is a JSON
+/// document that references nothing.
+pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; upgrade-insecure-requests;";
 
 /// How long a client holds this endpoint to TLS, stated as the header's `max-age` in
 /// seconds and applied to its subdomains too. The span is this emulator's own choice; what
@@ -3417,8 +3318,7 @@ pub const X_CONTENT_TYPE_OPTIONS: &str = "nosniff";
 pub const X_FRAME_OPTIONS: &str = "DENY";
 
 /// The headers above, each paired with the name the model's `@httpHeader` trait gives it:
-/// the five every answer carries, plus the cross-origin grant where [`browser_policy`]
-/// selects one.
+/// the seven every answer of this endpoint carries.
 ///
 /// A SUCCESS does not go through this table: there they are modelled output members
 /// ([`ResponseHeaderPolicy`]), so the protocol serializer writes each under the name its
@@ -3429,26 +3329,18 @@ pub const X_FRAME_OPTIONS: &str = "DENY";
 /// writes them onto the response itself, at the one place every response passes through.
 /// The set is the SAME one a success carries, so the policy a client reads off this
 /// endpoint does not depend on whether the call succeeded.
-#[must_use]
-pub fn response_header_policy() -> Vec<(&'static str, &'static str)> {
-    let browser = browser_policy();
-    let mut policy = Vec::with_capacity(7);
-    if let Some(origin) = browser.allow_origin {
-        policy.push(("Access-Control-Allow-Origin", origin));
-    }
-    policy.extend([
-        (
-            "Access-Control-Expose-Headers",
-            ACCESS_CONTROL_EXPOSE_HEADERS,
-        ),
-        ("Cache-Control", CACHE_CONTROL),
-        ("Content-Security-Policy", browser.content_security_policy),
-        ("Strict-Transport-Security", STRICT_TRANSPORT_SECURITY),
-        ("X-Content-Type-Options", X_CONTENT_TYPE_OPTIONS),
-        ("X-Frame-Options", X_FRAME_OPTIONS),
-    ]);
-    policy
-}
+pub const RESPONSE_HEADER_POLICY: [(&str, &str); 7] = [
+    ("Access-Control-Allow-Origin", ACCESS_CONTROL_ALLOW_ORIGIN),
+    (
+        "Access-Control-Expose-Headers",
+        ACCESS_CONTROL_EXPOSE_HEADERS,
+    ),
+    ("Cache-Control", CACHE_CONTROL),
+    ("Content-Security-Policy", CONTENT_SECURITY_POLICY),
+    ("Strict-Transport-Security", STRICT_TRANSPORT_SECURITY),
+    ("X-Content-Type-Options", X_CONTENT_TYPE_OPTIONS),
+    ("X-Frame-Options", X_FRAME_OPTIONS),
+];
 
 /// An output shape of this service that binds the CORS and security response headers.
 ///
@@ -3460,9 +3352,7 @@ pub fn response_header_policy() -> Vec<(&'static str, &'static str)> {
 /// reports, so they are filled in here, in one place, instead of in each handler.
 pub trait ResponseHeaderPolicy {
     /// This output with each member the shape binds carrying the endpoint's value for it,
-    /// so the protocol serializer writes them on the response. The cross-origin grant is
-    /// the one member that may be left absent — [`browser_policy`] decides, and an absent
-    /// member writes no header, which grants no origin.
+    /// so the protocol serializer writes them on the response.
     #[must_use]
     fn with_response_header_policy(self) -> Self;
 }
@@ -3473,14 +3363,13 @@ macro_rules! impl_response_header_policy {
     ($($output:ty),+ $(,)?) => {
         $(impl ResponseHeaderPolicy for $output {
             fn with_response_header_policy(mut self) -> Self {
-                let browser = browser_policy();
                 self.access_control_allow_origin =
-                    browser.allow_origin.map(::std::string::ToString::to_string);
+                    Some(ACCESS_CONTROL_ALLOW_ORIGIN.to_string());
                 self.access_control_expose_headers =
                     Some(ACCESS_CONTROL_EXPOSE_HEADERS.to_string());
                 self.cache_control = Some(CACHE_CONTROL.to_string());
                 self.content_security_policy =
-                    Some(browser.content_security_policy.to_string());
+                    Some(CONTENT_SECURITY_POLICY.to_string());
                 self.strict_transport_security = Some(STRICT_TRANSPORT_SECURITY.to_string());
                 self.x_content_type_options = Some(X_CONTENT_TYPE_OPTIONS.to_string());
                 self.x_frame_options = Some(X_FRAME_OPTIONS.to_string());

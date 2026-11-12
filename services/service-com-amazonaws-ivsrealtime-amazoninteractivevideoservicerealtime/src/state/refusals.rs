@@ -10,6 +10,8 @@
 //! surfaces the recordings show AWS answering a code its model does not declare, which
 //! travel through [`crate::scaffolded::Scaffolded::unmodeled`].
 
+use std::sync::LazyLock;
+
 use super::*;
 
 /// How this service states a request that named a resource it does not hold: the
