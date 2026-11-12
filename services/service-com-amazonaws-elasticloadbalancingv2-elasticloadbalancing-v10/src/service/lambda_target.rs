@@ -126,6 +126,10 @@ const BASE64_MEMBER: &str = "isBase64Encoded";
 const FORWARDED_PROTO_HEADER: &str = "x-forwarded-proto";
 const FORWARDED_PORT_HEADER: &str = "x-forwarded-port";
 
+/// The response header a load balancer's own cookie travels in — the target-group stickiness
+/// pin ([`super::target_group_selection`]) — beside whatever the function's own response set.
+const SET_COOKIE_HEADER: &str = "set-cookie";
+
 /// Which function a `forward` to a `lambda` target group invokes, and what the event reports
 /// about the hop — read out of the store under its own guard, so the invocation is made with
 /// no lock of this service's held.
@@ -143,6 +147,11 @@ pub(super) struct Forwarded {
     pub(super) protocol: Option<String>,
     /// The port of that listener, when it carries one.
     pub(super) port: Option<i32>,
+    /// The `Set-Cookie` field the answer carries, where the forward action pins the client
+    /// to the target group this request was distributed to
+    /// ([`super::target_group_selection`]). The load balancer's own, so it accompanies the
+    /// response the FUNCTION produced and no status the load balancer answered instead.
+    pub(super) set_cookie: Option<String>,
 }
 
 /// Whether `group` exchanges ARRAYS of header and query-string values with its function:
@@ -270,7 +279,15 @@ pub(super) async fn served(
         return Served::status(BAD_GATEWAY_STATUS);
     }
     match mapped_response(&returned, forwarded.multi_value_headers) {
-        Ok(served) => served,
+        Ok(mut served) => {
+            // The target answered, so the pin the forward action mints goes back with its
+            // response — the one answer "requests from a client should be routed to the same
+            // target group" can be made true of.
+            if let Some(field) = forwarded.set_cookie.clone() {
+                served.headers.push((SET_COOKIE_HEADER.to_string(), field));
+            }
+            served
+        }
         Err(reason) => {
             ::tracing::info!(
                 function = %forwarded.function_arn,
@@ -670,6 +687,7 @@ mod tests {
             multi_value_headers,
             protocol: Some("HTTP".to_string()),
             port: Some(80),
+            set_cookie: None,
         }
     }
 

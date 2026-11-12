@@ -62,6 +62,15 @@ aws-sdk-ec2 = { version = "1", default-features = false }
 # The ONE reading of an IPv4/IPv6 CIDR block and of whether an address is inside it, which
 # is how an `ip` target is matched against the subnets and the VPC of its target group.
 ipnet = "2"
+# The DRAW one request of a weighted `forward` action is distributed by: each target group of
+# the action receives the share of requests its `Weight` gives it, so which group a single
+# request reaches is a sample of the unit interval rather than a position in a rotation
+# nothing may store (`src/service/target_group_selection.rs`).
+rand = "0.9"
+# The digest the target-group stickiness cookie carries instead of the chosen group's ARN, so
+# the pin names the group to this service and nothing of the account's naming to the client
+# (`src/service/target_group_selection.rs`).
+sha2 = { workspace = true }
 # The rendering of an authenticated page marker's bytes as the opaque string a paginated
 # read hands back in `NextMarker` (`src/state/pagination.rs`).
 hex = { workspace = true }
@@ -95,7 +104,6 @@ service-com-amazonaws-ec2-amazonec2 = { workspace = true }
 emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
-sha2 = { workspace = true }
 # The HTTPS-listener suite dials the address a load balancer publishes, in this process,
 # exactly as a client handed that name does: `rcgen` mints the real leaf and key a client
 # imports into Certificate Manager, and the Certificate Manager service is mounted beside

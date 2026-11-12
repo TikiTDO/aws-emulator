@@ -103,7 +103,8 @@ use crate::state::{
 // reserved path namespace, the first path segment, the host without its port, the port a
 // client addressed, and whether a host names a service at all.
 use ::service_common::data_plane_addressing::{
-    addressed_port, first_segment, host_only, names_a_service, EMULATOR_PATH_NAMESPACE,
+    addressed_port, first_segment, host_only, names_a_service, service_named_by_host,
+    EMULATOR_PATH_NAMESPACE,
 };
 
 /// The segment that names THIS service's data plane behind [`EMULATOR_PATH_NAMESPACE`]:
@@ -218,6 +219,13 @@ const MAX_REDIRECT_RENDER_CHARS: usize = 8 * 1024;
 const AWS_API_CALL_HEADERS: &[&str] = &["x-amz-target", "x-amz-date"];
 const AWS_API_CALL_QUERY_PARAMETERS: &[&str] = &["X-Amz-Credential", "X-Amz-Signature"];
 const SIGV4_SCHEME: &str = "AWS4-HMAC-SHA256";
+
+/// The header the host a CLIENT addressed travels in, for a request this plane did not
+/// receive from that client directly: a load balancer's own socket re-addresses the request
+/// to this service's own endpoint so the plane resolves out of the reserved path, and carries
+/// the name the client dialled here ([`super::listener_socket`]). The socket SETS it, so a
+/// client's own value never travels with the request it forwards.
+pub(super) const FORWARDED_HOST_HEADER: &str = "x-forwarded-host";
 
 /// The five placeholders a `redirect` action's components may be written with, from
 /// `RedirectActionConfig`: "You can reuse URI components using the following reserved
@@ -535,22 +543,35 @@ pub(super) struct DataPlaneRequest {
 impl DataPlaneRequest {
     /// What the runtime-API request carries, for the path [`resolve`] read out of it and
     /// the `uri` the `http` crate parsed out of it.
+    ///
+    /// The HOST is the one the CLIENT addressed and the PORT the one the request reached a
+    /// listener on, and the two are read apart: a request a load balancer's own socket
+    /// accepted is handed to this plane re-addressed to this service's own endpoint carrying
+    /// the PORT of the listener the connection reached, with the client's own host carried
+    /// beside it ([`FORWARDED_HOST_HEADER`]), so the listener is selected by the port the
+    /// socket states while `#{host}` and a `host-header` condition read the name the client
+    /// dialled.
     fn of(req: &RtRequest, uri: &http::Uri, path: &str) -> Self {
-        let host = req
+        let addressed = req
             .headers()
             .get("host")
             .or_else(|| uri.authority().map(http::uri::Authority::as_str));
+        let client_host = req
+            .headers()
+            .get(FORWARDED_HOST_HEADER)
+            .filter(|host| !host.trim().is_empty())
+            .or(addressed);
         Self {
             method: req.method().to_string(),
             path: path.to_string(),
             query: uri.query().unwrap_or_default().to_string(),
-            host: host.map(host_only).unwrap_or_default().to_string(),
+            host: client_host.map(host_only).unwrap_or_default().to_string(),
             headers: req
                 .headers()
                 .iter()
                 .map(|(name, value)| (name.to_ascii_lowercase(), value.to_string()))
                 .collect(),
-            port: addressed_port(host),
+            port: addressed_port(addressed),
         }
     }
 
@@ -573,6 +594,30 @@ impl DataPlaneRequest {
             self.headers.retain(|(held, _)| held != &name);
             self.headers.push((name, value));
         }
+    }
+
+    /// Read the host this request ADDRESSED as the name the load balancer published, where
+    /// the host it arrived under is THIS API's own endpoint rather than an address a client
+    /// dialled, and nothing carried the client's own host beside it
+    /// ([`FORWARDED_HOST_HEADER`]).
+    ///
+    /// Every answer that reports the host the client addressed — the `#{host}` a `redirect`
+    /// action substitutes, and a `host-header` condition's own subject — is answered from
+    /// this one value, so it has to be the name the CLIENT used. A request re-addressed to
+    /// this service's own endpoint carries the client's host beside it and is read from that;
+    /// one that carries none — an in-process caller of this plane — dialled the address the
+    /// load balancer PUBLISHES (`LoadBalancer$DNSName`, "the public DNS name of the load
+    /// balancer"), so that is the host it addressed. Every OTHER host is the client's own
+    /// addressing — the published name, the emulator's own endpoint, or any name a client
+    /// resolves to the load balancer, which is what a `host-header` condition is written
+    /// for — and is left exactly as it arrived.
+    fn addressed_the_published_name(&mut self, dns_name: &str) {
+        let this_api =
+            service_named_by_host(&self.host).is_some_and(|named| named == super::ROUTE_KEY);
+        if !this_api {
+            return;
+        }
+        self.host = host_only(dns_name).to_string();
     }
 }
 
@@ -653,7 +698,7 @@ pub async fn serve<Eng: Send + Sync + 'static>(
     // A load balancer the clock still owes its move out of `provisioning` is not serving
     // traffic on the name it published yet. Read, never written: this plane moves no
     // status.
-    let (load_balancer_arn, listener_arn) = {
+    let (load_balancer_arn, listener_arn, published_name) = {
         let store = state.lock();
         let Some(record) = store.load_balancers.get(&resolved.load_balancer_arn) else {
             return rendered(&Served::status(PROVISIONING_STATUS));
@@ -664,8 +709,15 @@ pub async fn serve<Eng: Send + Sync + 'static>(
         let Some(listener) = listener_addressed(&store, record, request.port) else {
             return rendered(&Served::status(PROVISIONING_STATUS));
         };
-        (record.arn.clone(), listener.arn.clone())
+        (
+            record.arn.clone(),
+            listener.arn.clone(),
+            record.dns_name.clone(),
+        )
     };
+    // The host the CLIENT addressed, for a request this plane did not receive from the
+    // client directly ([`DataPlaneRequest::addressed_the_published_name`]).
+    request.addressed_the_published_name(&published_name);
 
     // The web ACL `AssociateWebACL` bound to this load balancer, which decides the request
     // BEFORE the listener's own action — the load balancer's ARN is the one the binding was
@@ -1093,7 +1145,7 @@ fn performed(
     match action.r#type.as_str() {
         FIXED_RESPONSE_ACTION => Performed::Answered(fixed_response(action)),
         REDIRECT_ACTION => Performed::Answered(redirect(action, listener, request)),
-        FORWARD_ACTION => forward(store, listener, action, now),
+        FORWARD_ACTION => forward(store, listener, action, request, now),
         // Unreachable: every type that is not terminating was answered above, and
         // `Action$Type` carries no other terminating one.
         _ => Performed::Answered(Served::status(ACTION_NOT_PERFORMED_STATUS)),
@@ -1278,30 +1330,62 @@ fn default_port(protocol: &str) -> Option<&'static str> {
     }
 }
 
-/// What a `forward` answers. The target groups it names are this store's own, and the
-/// registration it chooses decides what happens next: a `lambda` target group's function is
-/// INVOKED ([`super::lambda_target`]), and a target of any other group is a registration
-/// this emulator has no server behind, so the answer is the status a load balancer gives for
-/// the condition that holds — no target to choose, or a target chosen whose connection
-/// cannot be made.
+/// What a `forward` answers. The target groups it names are this store's own, the DRAW over
+/// the weights it distributes them at decides which of them this request reaches
+/// ([`super::target_group_selection`]), and the registration that group holds decides what
+/// happens next: a `lambda` target group's function is INVOKED ([`super::lambda_target`]),
+/// and a target of any other group is a registration this emulator has no server behind, so
+/// the answer is the status a load balancer gives for the condition that holds — no target to
+/// choose, or a target chosen whose connection cannot be made.
 fn forward(
     store: &ElbState,
     listener: &ListenerRecord,
     action: &Action,
+    request: &DataPlaneRequest,
     now: SystemTime,
 ) -> Performed {
-    let named = crate::state::action_target_group_arns(std::slice::from_ref(action));
-    let chosen = named
+    let distribution = super::target_group_selection::distribution(action);
+    // Every group of the distribution this store holds that has a target to send the request
+    // to, with the weight the action gives it. A group whose targets are none the load
+    // balancer may send a request to is not one this request can be distributed to, so it
+    // takes no share of the action's requests — and a request the action's other groups can
+    // answer is answered rather than lost to the draw.
+    let candidates: Vec<(&TargetGroupRecord, &RegisteredTarget, i32)> = distribution
+        .groups
         .iter()
-        .filter_map(|arn| store.target_groups.get(arn))
-        .find_map(|group| {
+        .filter_map(|(arn, weight)| store.target_groups.get(arn).map(|group| (group, *weight)))
+        .filter_map(|(group, weight)| {
             group
                 .targets
                 .values()
                 .find(|target| receives_requests(group, target, now))
-                .map(|target| (group, target))
-        });
-    let Some((group, target)) = chosen else {
+                .map(|target| (group, target, weight))
+        })
+        .collect();
+    let weights: Vec<i32> = candidates
+        .iter()
+        .map(|(_, _, weight)| *weight)
+        .collect::<Vec<i32>>();
+    // The pin the client carried back, where this action's stickiness minted one and the
+    // group it names still takes a share of the action's requests.
+    let pinned = distribution
+        .sticky
+        .then(|| {
+            let token = super::target_group_selection::pinned_token(
+                request.header(super::target_group_selection::COOKIE_HEADER),
+            )?;
+            candidates.iter().position(|(group, _, weight)| {
+                *weight > 0 && super::target_group_selection::group_token(&group.arn) == token
+            })
+        })
+        .flatten();
+    // One draw per request, which is what makes the share each group receives converge on
+    // the weight the action gives it. Nothing of the draw is written: it is a choice made
+    // for this request alone.
+    let chosen = pinned.or_else(|| {
+        super::target_group_selection::drawn_entry(&weights, ::rand::random::<f64>())
+    });
+    let Some((group, target, _)) = chosen.and_then(|index| candidates.get(index)) else {
         return Performed::Answered(Served::status(NO_HEALTHY_TARGET_STATUS));
     };
     if group.is_lambda() {
@@ -1313,6 +1397,15 @@ fn forward(
             multi_value_headers: super::lambda_target::multi_value_headers(group),
             protocol: listener.protocol.clone(),
             port: listener.port,
+            // The pin that answer hands back, for a client that does not hold it already:
+            // "requests from a client should be routed to the same target group" is what the
+            // cookie makes true of every later request carrying it.
+            set_cookie: (distribution.sticky && pinned.is_none()).then(|| {
+                super::target_group_selection::set_cookie(
+                    &group.arn,
+                    distribution.sticky_duration_seconds,
+                )
+            }),
         }));
     }
     tracing::warn!(

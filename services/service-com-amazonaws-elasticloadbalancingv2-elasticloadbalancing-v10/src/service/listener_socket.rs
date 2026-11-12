@@ -117,9 +117,16 @@ fn in_flight() -> Arc<Semaphore> {
 ///
 /// `Host` is this socket's own address, which the forwarded request replaces with the
 /// address of the listener the connection reached (the plane resolves the load balancer from
-/// the reserved path instead), and the two framing headers describe a body this leg
+/// the reserved path instead, and reads the name the CLIENT dialled off
+/// [`crate::service::data_plane::FORWARDED_HOST_HEADER`], which this leg SETS so a client's
+/// own value cannot travel as one), and the two framing headers describe a body this leg
 /// re-frames itself.
-const HEADERS_NOT_FORWARDED: [&str; 3] = ["host", "content-length", "transfer-encoding"];
+const HEADERS_NOT_FORWARDED: [&str; 4] = [
+    "host",
+    "content-length",
+    "transfer-encoding",
+    crate::service::data_plane::FORWARDED_HOST_HEADER,
+];
 
 /// Serves ONE load balancer's socket: it terminates TLS under that load balancer's own
 /// certificates and hands every request it accepts to this service's data plane.
@@ -239,11 +246,16 @@ impl ListenerSocket {
     /// is read from, or `None` when there is nothing to serve on it: a socket whose load
     /// balancer is gone, a client that sent nothing, a TLS handshake this emulator could not
     /// complete, and a TLS connection to a load balancer that terminates none.
+    ///
+    /// Every phase BEFORE a request is read is bounded by [`handshake_deadline`], the first
+    /// byte included: a client that completes TCP and then sends nothing holds the connection
+    /// permit the core issued for it only until that deadline, so cheap connections cannot
+    /// park this socket's whole allowance without a request being sent.
     async fn accepted(&self, mut conn: ListenerConn) -> Option<Accepted> {
         let load_balancer_arn = self.load_balancer.get().cloned()?;
         let mut first = [0u8; 1];
-        match conn.read(&mut first).await {
-            Ok(1) => {}
+        match ::tokio::time::timeout(handshake_deadline(), conn.read(&mut first)).await {
+            Ok(Ok(1)) => {}
             _ => return None,
         }
         let prefixed: ListenerConn = Box::new(Prefixed::new(first.to_vec(), conn));
@@ -278,9 +290,14 @@ impl ListenerSocket {
             // served by the core's own TLS server, under the emulator's own certificate.
             None => {
                 let upgrader = self.upgrader.clone()?;
-                match upgrader.accept(prefixed, None).await {
-                    Ok((upgraded, _negotiated)) => upgraded,
-                    Err(error) => {
+                match ::tokio::time::timeout(
+                    handshake_deadline(),
+                    upgrader.accept(prefixed, None),
+                )
+                .await
+                {
+                    Ok(Ok((upgraded, _negotiated))) => upgraded,
+                    Ok(Err(error)) => {
                         ::tracing::debug!(
                             %error,
                             "a TLS handshake on a load balancer's own address was not completed \
@@ -288,6 +305,7 @@ impl ListenerSocket {
                         );
                         return None;
                     }
+                    Err(_) => return None,
                 }
             }
         };
@@ -588,7 +606,7 @@ async fn answer(
             &load_balancer_name,
             listener_port,
         ) else {
-            return generated(BAD_GATEWAY, NO_LOAD_BALANCER);
+            return generated(BAD_REQUEST, MALFORMED_REQUEST_TARGET);
         };
         match callback.http_connector().call(forwarded).await {
             Ok(response) => {
@@ -624,6 +642,19 @@ async fn answer(
 /// the plane evaluates that listener's rules rather than the load balancer's lowest-numbered
 /// one.
 ///
+/// The host the CLIENT dialled travels beside it, in
+/// [`crate::service::data_plane::FORWARDED_HOST_HEADER`]: re-addressing the leg is what lets
+/// the plane resolve this model, and it must not cost the request the one thing a `#{host}`
+/// substitution and a `host-header` condition are about. It is SET here, over anything the
+/// client sent under that name ([`HEADERS_NOT_FORWARDED`]), so what the plane reads is the
+/// address this socket was dialled at and nothing a client wrote.
+///
+/// The reserved prefix is what tells the plane WHICH load balancer must answer, and the
+/// client's own path is appended to it, so a path that could take the request out from under
+/// that prefix is not forwarded at all: a request target carrying a dot segment
+/// ([`carries_a_dot_segment`]) renders as no forwarded request, and this address answers it
+/// itself.
+///
 /// `None` when the client's own request does not render as one, which addresses nothing.
 fn forwarded(
     parts: ::http::request::Parts,
@@ -632,6 +663,9 @@ fn forwarded(
     listener_port: Option<i32>,
 ) -> Option<RtRequest> {
     let request_path = parts.uri.path();
+    if carries_a_dot_segment(request_path) {
+        return None;
+    }
     let query = parts
         .uri
         .query()
@@ -643,10 +677,24 @@ fn forwarded(
     };
     let prefix = crate::service::data_plane::data_plane_path(load_balancer_name);
     let uri = format!("https://{host}{prefix}{request_path}{query}");
+    // The leg has to address the reserved path of THIS load balancer: a target that renders
+    // to anything else addresses another plane, and is not forwarded.
+    let addressed = uri.parse::<::http::Uri>().ok()?;
+    if !addressed.path().starts_with(prefix.as_str()) {
+        return None;
+    }
     let mut builder = ::http::Request::builder()
         .method(parts.method.clone())
         .uri(uri)
         .header(::http::header::HOST, &host);
+    if let Some(dialled) = parts
+        .headers
+        .get(::http::header::HOST)
+        .or_else(|| parts.headers.get(crate::service::data_plane::FORWARDED_HOST_HEADER))
+        .filter(|dialled| !dialled.is_empty())
+    {
+        builder = builder.header(crate::service::data_plane::FORWARDED_HOST_HEADER, dialled);
+    }
     for (name, value) in parts.headers.iter() {
         if HEADERS_NOT_FORWARDED.contains(&name.as_str()) {
             continue;
@@ -657,10 +705,28 @@ fn forwarded(
     RtRequest::try_from(built).ok()
 }
 
+/// Whether a request target carries a DOT SEGMENT — `.` or `..`, in the clear or
+/// percent-encoded, read through the one decoding of a request path
+/// ([`::smithy_server_runtime::percent_decode`]) so an encoded separator cannot hide one.
+///
+/// Such a target resolves, for anything that resolves it, to a path that need not stay under
+/// the reserved prefix the forwarded leg addresses this load balancer's plane by — and that
+/// prefix is the only thing that says whose listeners, rules and targets must answer. So it
+/// is answered by this address rather than forwarded.
+fn carries_a_dot_segment(request_path: &str) -> bool {
+    ::smithy_server_runtime::percent_decode(request_path)
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+}
+
 /// What this address answers a request it could not hand to the data plane at all: the
 /// status a load balancer answers with when it produced the answer itself instead of a
 /// target.
 const BAD_GATEWAY: u16 = 502;
+
+/// What it answers a request whose target it will not forward: one carrying a dot segment,
+/// which does not render as a request under this load balancer's own reserved path.
+const BAD_REQUEST: u16 = 400;
 
 /// What it answers a request that arrived while this service was already reading as many
 /// request bodies as it reads at once.
@@ -677,6 +743,9 @@ const SERVER_BUSY: &str = "This address is serving as many requests as it can. T
 
 /// The body of an answer for a request that reached no load balancer.
 const NO_LOAD_BALANCER: &str = "This address serves no load balancer.\n";
+
+/// The body of an answer for a request whose target this address will not forward.
+const MALFORMED_REQUEST_TARGET: &str = "This request target cannot be served.\n";
 
 /// The body of an answer for a request larger than this address accepts.
 const BODY_TOO_LARGE: &str = "This request is larger than this address accepts.\n";
@@ -820,6 +889,59 @@ mod tests {
                 forwarded.headers().get("x-client").map(ToString::to_string),
                 Some("kept".to_string()),
                 "case {requested:?}: expected the client's own headers forwarded"
+            );
+            // The host the CLIENT dialled travels beside the re-addressed one, so the plane
+            // reads `#{host}` and a `host-header` condition off the name the client used.
+            assert_eq!(
+                forwarded
+                    .headers()
+                    .get(crate::service::data_plane::FORWARDED_HOST_HEADER)
+                    .map(ToString::to_string),
+                Some("127.0.0.1:52811".to_string()),
+                "case {requested:?}: expected the client's own host carried, got {:?}",
+                forwarded
+                    .headers()
+                    .get(crate::service::data_plane::FORWARDED_HOST_HEADER)
+            );
+        }
+    }
+
+    /// A request TARGET whose resolved form need not stay under the reserved prefix the leg
+    /// addresses this load balancer's plane by is not forwarded at all: the prefix is what
+    /// says whose listeners, rules and targets must answer.
+    #[test]
+    fn a_target_carrying_a_dot_segment_renders_as_no_forwarded_request() {
+        // The rows span the spellings of a dot segment the wire carries — `..` and `.` at the
+        // front, in the middle and at the end, percent-encoded in either case — beside the
+        // ordinary paths a client sends, which are forwarded, including one whose segments
+        // merely CONTAIN dots.
+        let cases: &[(&str, bool)] = &[
+            ("/index.html", true),
+            ("/a/b?q=1", true),
+            ("/", true),
+            ("/a.b.c/d", true),
+            ("/..%2f_aws/execute-api/abc", false),
+            ("/../other", false),
+            ("/a/../b", false),
+            ("/a/..", false),
+            ("/./a", false),
+            ("/a/%2E%2E/b", false),
+            ("/a/%2e/b", false),
+        ];
+        for (requested, forwards) in cases {
+            let request = ::http::Request::builder()
+                .method("GET")
+                .uri(*requested)
+                .header("host", "127.0.0.1:52811")
+                .body(())
+                .expect("the case's own request");
+            let (parts, ()) = request.into_parts();
+            let rendered = forwarded(parts, Bytes::new(), "my-alb", Some(80));
+            assert_eq!(
+                rendered.is_some(),
+                *forwards,
+                "case {requested:?}: expected it to forward {forwards}, got {:?}",
+                rendered.map(|request| request.uri().to_string())
             );
         }
     }

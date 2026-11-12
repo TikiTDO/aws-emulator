@@ -65,6 +65,8 @@ mod management_event_recording;
 mod provisioning_loop;
 #[path = "all/query_error_envelope.rs"]
 mod query_error_envelope;
+#[path = "all/redirect_request_host.rs"]
+mod redirect_request_host;
 #[path = "all/refusal_class_by_failure_mode.rs"]
 mod refusal_class_by_failure_mode;
 #[path = "all/reported_member_defaults.rs"]
@@ -127,6 +129,8 @@ mod trust_store_lifecycle;
 mod trust_stores;
 #[path = "all/web_acl_enforcement.rs"]
 mod web_acl_enforcement;
+#[path = "all/weighted_forward_and_target_group_stickiness.rs"]
+mod weighted_forward_and_target_group_stickiness;
 #[path = "all/wire.rs"]
 mod wire;
 #[path = "all/zonal_shift_registration.rs"]

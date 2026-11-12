@@ -92,6 +92,8 @@ pub mod data_plane;
 
 pub mod lambda_target;
 
+pub mod target_group_selection;
+
 pub mod web_acl;
 
 pub mod listener_socket;

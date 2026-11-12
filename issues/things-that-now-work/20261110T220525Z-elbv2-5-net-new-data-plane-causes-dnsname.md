@@ -121,3 +121,34 @@ Smithy consulted (model services/service-com-amazonaws-elasticloadbalancingv2-el
 5. Cause 4: create an HTTPS listener with MutualAuthentication={Mode:'passthrough', TrustStoreArn:<ts>}, connect with a client certificate, and echo the request headers from the target. Expected x-amzn-mtls-clientcert (and companions); actual none. Repeat sending a forged x-amzn-mtls-clientcert and confirm it is stripped.
 6. Cause 5: for each of SslPolicy, routing.http2.enabled, routing.http.drop_invalid_header_fields.enabled, routing.http.desync_mitigation_mode, routing.http.xff_header_processing.mode, weighted/zero-weight forward actions with TargetGroupStickinessConfig, and a fixed-response action, send the corresponding probe and observe the negotiated TLS version/cipher, the ALPN protocol, the headers the target receives, the 400 for ambiguous framing, which target group answers, and the RequestCount/HTTPCode_Target_4XX_Count series. Expected: each attribute changes the observed behaviour as modeled. Actual: no probe produces a graded observation within the budget.
 7. Re-replay the 17 ids in trace_ids to confirm the fix.
+
+## Resolution
+Cause 3 and the target-selection stage of Cause 5 are implemented; the rest is blocked and
+re-files as live failures until the blockers below are lifted.
+
+* Cause 3 (FIXED) — the reserved keywords of a `redirect` action, and a `host-header`
+  condition, now read the host the CLIENT addressed: the load balancer's own socket carries
+  the name the client dialled on the leg it hands the data plane, and a request that carries
+  none and arrives under this API's own endpoint is read as having addressed the name the
+  load balancer publishes. No `Location` names the ELBv2 API endpoint any more.
+* Cause 5, target-selection stage (FIXED) — a `forward` action now distributes its requests
+  across the target groups it names in proportion to each group's `Weight` (a group at weight
+  0 is never selected), and an action whose `TargetGroupStickinessConfig` is enabled mints the
+  `AWSALBTG` cookie for the group that answered and pins every later request carrying it to
+  that group for the configured duration.
+* Cause 1 (BLOCKED, vendor) — `DNSName` can only be a bare host once a load balancer can
+  answer on the ports its listeners declare. The core owns the socket, the interface and the
+  port (`vendor/server/src/listeners.rs`, `bind_std`/`bind_tokio`, and `tcp_plaintext`, which
+  takes no requested port), and `vendor/` cannot be changed from a service crate. Needed
+  there: a listener API that accepts a requested port or a per-resource loopback address.
+  This also keeps Cause 3's check failing on its final assertion, which compares the
+  substituted host to the whole published `host:port`.
+* Causes 2 and 4, and the header/framing, TLS-negotiation and metric stages of Cause 5
+  (BLOCKED, platform) — each needs the load balancer to connect to the address a registered
+  `ip`/`instance` target names and proxy to it. The emulator runs no workload behind such a
+  registration (it has no container or process runtime for the EC2/ECS workload it stands
+  for), and dialling a caller-supplied target address is request-configured outbound
+  forwarding, which the engine contract forbids in the production path
+  (`vendor/engine/src/lib.rs`). The `forward`-to-`lambda` path is the one target type this
+  process serves, and it is the path the fixes above improve. Nothing was re-worded: such a
+  forward still earns the 502 a load balancer gives a target it cannot connect to.

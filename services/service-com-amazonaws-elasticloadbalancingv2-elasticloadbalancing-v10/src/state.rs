@@ -4228,7 +4228,10 @@ pub const DEFAULT_TARGET_GROUP_STICKINESS: bool = false;
 /// specify only one target group using `ForwardConfig` and it must be the same target group
 /// specified in `TargetGroupArn`" — so the configuration is read off whichever spelling the
 /// request carried.
-fn reported_forward_config(action: &Action) -> Option<ForwardActionConfig> {
+/// `pub(crate)` because the data plane DISTRIBUTES a request by exactly this reading: the
+/// groups and weights a read reports are the ones a forward performs against
+/// (`crate::service::target_group_selection`).
+pub(crate) fn reported_forward_config(action: &Action) -> Option<ForwardActionConfig> {
     let mut config = action.forward_config.clone().unwrap_or_default();
     let mut groups = config.target_groups.take().unwrap_or_default();
     if groups.is_empty() {
