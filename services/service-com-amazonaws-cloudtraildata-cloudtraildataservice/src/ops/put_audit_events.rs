@@ -3,8 +3,10 @@
 //! @op PutAuditEvents
 //!
 //! Ingests a batch of audit events into a CloudTrail Lake channel held in this
-//! service's engine state (see [`crate::state`]): the channel is resolved from
-//! `channelArn` (full ARN or ARN suffix), a channel ARN naming another account is
+//! service's engine state (see [`crate::state`]): the call is first authorized against the
+//! calling principal's identity-based IAM policies (see
+//! [`crate::service::authorization`]), the channel is then resolved from `channelArn`
+//! (full ARN or ARN suffix), a channel ARN naming another account is
 //! denied before the channel is looked up, the caller's account and the channel's
 //! external-id requirement are checked, the batch is rejected as a whole when it
 //! repeats an event id, and every event that passes per-event validation is APPENDED to
@@ -15,8 +17,9 @@
 //! Each refusal states the message the service words for its class: the sentence the
 //! model documents for the error shape, which carries no caller value where that wording
 //! leaves no slot for one (`InvalidChannelARN`) and names the channel the request asked
-//! about where it does (`ChannelNotFound`). The authorization denial is built from the
-//! request too: it names the principal, the action and the resource ARN.
+//! about where it does (`ChannelNotFound`). An authorization denial is built from the
+//! request too: it names the principal, the action and the resource ARN, and carries
+//! neither `successful` nor `failed`.
 //!
 //! The channel's ingest log is the emulator's own record of what it accepted, bounded by
 //! the retention limits in [`crate::state`] (oldest evicted first) so repeated calls
@@ -182,26 +185,29 @@ pub const INVALID_CHANNEL_ARN_CODE: &str = "InvalidChannelARN";
 /// violation against this expression.
 pub const CHANNEL_ARN_PATTERN: &str = "^arn:.*$";
 
-/// The IAM action this operation is authorized under: the service's signing name
-/// (`sigv4Name` / `awsService.endpointPrefix` — `cloudtrail-data`) and the operation's
-/// own name, which is how an action is spelled in a policy and in a denial.
-const PUT_AUDIT_EVENTS_ACTION: &str = "cloudtrail-data:PutAuditEvents";
+/// This operation's own name, as the model declares it: what the access record reports and
+/// what the IAM action it is authorized under is built from.
+const OPERATION_NAME: &str = "PutAuditEvents";
 
-/// The principal a request to this emulator speaks for: the single long-term identity it
-/// publishes, which is the one `sts:GetCallerIdentity` answers with.
-fn caller_principal() -> String {
-    ::engine::emulator_arn("iam", "", "user/emulator")
+/// The IAM action this operation is authorized under, as a policy and a denial spell one:
+/// this service's action namespace and the operation's own name, composed by
+/// [`crate::service::authorization::action_for`] so the namespace has one source of truth.
+fn put_audit_events_action() -> String {
+    crate::service::authorization::action_for(OPERATION_NAME)
 }
 
-/// The denial for a call the caller holds no grant for: who it spoke for, what it asked
-/// to do, and which resource it named — built from the request, and saying nothing about
-/// whether that resource exists.
-fn not_authorized_message(resource: &str) -> String {
-    format!(
-        "User: {} is not authorized to perform: {PUT_AUDIT_EVENTS_ACTION} on resource: \
-         {resource} because no resource-based policy allows the \
-         {PUT_AUDIT_EVENTS_ACTION} action",
-        caller_principal()
+/// The denial for a call whose resource field names an account no document of this account
+/// can grant over: who it spoke for, what it asked to do, and which resource it named —
+/// built from the request, and saying nothing about whether that resource exists.
+///
+/// The principal is the identity the presented credentials speak for
+/// ([`crate::service::authorization::caller_arn`]), so this refusal and the policy decision
+/// ahead of it blame the same caller.
+fn not_authorized_message(principal: &str, resource: &str) -> String {
+    ::service_common::iam_authorization::not_authorized_by_resource_policy(
+        principal,
+        &put_audit_events_action(),
+        resource,
     )
 }
 
@@ -278,7 +284,7 @@ fn record_access(
     detail: &str,
 ) {
     tracing::info!(
-        operation = "PutAuditEvents",
+        operation = OPERATION_NAME,
         akid = %::engine::extract_akid(&ctx.parts().headers),
         account_id = %::engine::emulator_account_id(),
         channel = ?channel_arn,
@@ -324,6 +330,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // AUTHORIZATION FIRST, as IAM decides a signed call ahead of the service: the
+        // calling principal's identity-based policies are evaluated for this operation's
+        // own action on the channel reference the request carried (see
+        // [`crate::service::authorization`]). A principal no statement allows is refused
+        // before anything of this service is read, so the answer reports neither whether
+        // that channel exists nor any per-event outcome.
+        if let Some(denial) = crate::service::authorization::refusal(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &input.channel_arn,
+        ) {
+            record_access(
+                ctx,
+                &input.channel_arn,
+                crate::scaffolded::ACCESS_DENIED_CODE,
+                "the caller's identity-based policies do not allow this action",
+            );
+            return Err(crate::scaffolded::Scaffolded::access_denied(denial));
+        }
+
         // The engine is reachable from `&self` (constructor-injected); never build one
         // here, or the ingest log this request appends to is dropped on return.
         let Some(state) = crate::state::service_state(&*self.engine) else {
@@ -363,13 +390,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
-        // Authorization is decided on the resource the request NAMES, ahead of anything
-        // this service knows about it: the emulator's caller speaks for the emulator's
-        // own account, so a channel ARN whose account segment is another account's is
-        // covered by no grant the caller holds and the call is denied. Taken BEFORE the
-        // channel is looked up, so the answer is the same whether or not such a channel
-        // is registered here — a denial that reported "not found" instead would tell
-        // another account's caller which of its channels exist.
+        // A channel ARN whose account segment is another account's is covered by no
+        // document of THIS account, so the call is denied on the request's own resource
+        // field, with no policy evaluation to make: that is a fact about the reference
+        // rather than about the caller's grants. Taken BEFORE the channel is looked up, so
+        // the answer is the same whether or not such a channel is registered here — a
+        // denial that reported "not found" instead would tell another account's caller
+        // which of its channels exist.
         if let crate::state::ChannelRef::Arn(arn) = &channel_ref {
             if arn.account_id != ::engine::emulator_account_id() {
                 record_access(
@@ -379,7 +406,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     "the channel ARN names another account",
                 );
                 return Err(crate::scaffolded::Scaffolded::access_denied(
-                    not_authorized_message(&arn.arn),
+                    not_authorized_message(
+                        &crate::service::authorization::caller_arn(&*self.engine, ctx),
+                        &arn.arn,
+                    ),
                 ));
             }
         }

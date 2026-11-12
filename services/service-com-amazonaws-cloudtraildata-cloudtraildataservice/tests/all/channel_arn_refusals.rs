@@ -46,7 +46,7 @@ const GOOD_EVENT: &str = r#"{"eventSource":"custom.app","eventName":"Login"}"#;
 /// The prose member of a refusal: the modelled error shapes of this service spell it
 /// `message`, and the authorization layer's `AccessDeniedException` — which is not one of
 /// this service's shapes — spells it `Message`.
-fn message_of(reply: &Reply) -> String {
+pub fn message_of(reply: &Reply) -> String {
     for member in ["message", "Message"] {
         if let Some(text) = reply.body.get(member).and_then(serde_json::Value::as_str) {
             return text.to_string();

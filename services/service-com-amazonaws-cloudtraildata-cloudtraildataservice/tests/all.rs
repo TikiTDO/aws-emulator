@@ -21,6 +21,8 @@ mod channel_arn_syntax;
 mod clause_value_slot;
 #[path = "all/constraint_refusals.rs"]
 mod constraint_refusals;
+#[path = "all/identity_authorization.rs"]
+mod identity_authorization;
 #[path = "all/put_audit_events.rs"]
 mod put_audit_events;
 #[path = "all/state_roundtrip.rs"]

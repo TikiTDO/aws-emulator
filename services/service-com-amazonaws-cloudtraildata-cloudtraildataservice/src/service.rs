@@ -38,11 +38,16 @@
 //!   body). The default returns `None`, keeping the entry's protocol-correct
 //!   rendering. Return `Some(resp)` to reword it if desired.
 //!
+//! Beside those seams, [`authorization`] holds the decision every operation of this
+//! service takes before it reads anything: whether the calling principal's identity-based
+//! IAM policies allow the action it asks for.
+//!
 //! The model-derived half of this service — its identity, wire protocol, routing
 //! table, and the default error renderers — lives in the generated `ServiceDefinition`
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
 
+pub mod authorization;
 mod validation;
 
 use smithy_server_runtime::{

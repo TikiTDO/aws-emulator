@@ -22,13 +22,23 @@ use service_com_amazonaws_cloudtraildata_cloudtraildataservice::state::{
 use service_com_amazonaws_cloudtraildata_cloudtraildataservice::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
 
-/// Routes the request to this service: `resolve_route_key` reads the signing name out
-/// of the SigV4 credential scope. Signature verification is off in these tests.
-const SIGV4_AUTH: &str = "AWS4-HMAC-SHA256 \
-     Credential=AKIAEMULATORTEST/20260101/us-east-1/cloudtrail-data/aws4_request, \
-     SignedHeaders=host, Signature=0";
+/// The access key id a call signs with unless a case names another: a key neither STS nor
+/// IAM holds a record for, which is the position the account's own published credential is
+/// in.
+pub const DEFAULT_ACCESS_KEY_ID: &str = "AKIAEMULATORTEST";
 
 pub const REGION: &str = "us-east-1";
+
+/// Routes the request to this service: `resolve_route_key` reads the signing name out
+/// of the SigV4 credential scope, and the key id is what names the principal the request
+/// speaks for. Signature verification is off in these tests.
+fn sigv4_auth(access_key_id: &str) -> String {
+    format!(
+        "AWS4-HMAC-SHA256 \
+         Credential={access_key_id}/20260101/{REGION}/cloudtrail-data/aws4_request, \
+         SignedHeaders=host, Signature=0"
+    )
+}
 
 /// A channel ARN in the emulator's own account, as the CloudTrail control plane would
 /// mint it: `arn:aws:cloudtrail:<region>:<account>:channel/<id>`.
@@ -186,6 +196,12 @@ impl Harness {
         Self { engine, router }
     }
 
+    /// The shared engine this service is mounted on, so a case can seed the stores the IAM
+    /// and STS services hold their records in — the stores an authorization decision reads.
+    pub fn engine(&self) -> &Arc<engine::InMemoryEngine> {
+        &self.engine
+    }
+
     /// Seed a channel, the way the CloudTrail control plane's `CreateChannel` will once
     /// it is implemented: into this service's store in the SHARED engine.
     pub fn register(&self, channel: Channel) {
@@ -223,6 +239,19 @@ impl Harness {
     }
 
     pub async fn put(&self, channel: &str, external_id: Option<&str>, events: &[Ev]) -> Reply {
+        self.put_as(DEFAULT_ACCESS_KEY_ID, channel, external_id, events)
+            .await
+    }
+
+    /// The same call, signed with `access_key_id` — what names the principal the request
+    /// speaks for.
+    pub async fn put_as(
+        &self,
+        access_key_id: &str,
+        channel: &str,
+        external_id: Option<&str>,
+        events: &[Ev],
+    ) -> Reply {
         let mut uri = format!("/PutAuditEvents?channelArn={channel}");
         if let Some(external_id) = external_id {
             uri.push_str("&externalId=");
@@ -234,7 +263,7 @@ impl Harness {
         let request = http::Request::builder()
             .method("POST")
             .uri(uri)
-            .header("authorization", SIGV4_AUTH)
+            .header("authorization", sigv4_auth(access_key_id))
             .header("content-type", "application/json")
             .body(bytes::Bytes::from(
                 serde_json::to_vec(&body).expect("serialize the request body"),
