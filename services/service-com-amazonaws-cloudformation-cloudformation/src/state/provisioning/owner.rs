@@ -268,10 +268,18 @@ impl Owner {
             // publishes no attribute this emulator computes, so there is nothing left to
             // read once either resource is up.
             Self::CognitoIdentityPool(_) => Ok(BTreeMap::new()),
-            // A nested stack's own id is what its create answered with, and the outputs a
-            // parent reads off it are the CHILD's outputs rather than attributes this walk
-            // reads back, so there is nothing to read once the child is up.
-            Self::NestedStack => Ok(BTreeMap::new()),
+            // A nested stack's own id is what its create answered with, and the attributes it
+            // publishes are its CHILD's outputs — "Fn::GetAtt … Outputs.<NestedStackOutputName>"
+            // — which the child publishes only once it has finished coming up, so they are
+            // read now ([`nested_stack::ready_attributes`]).
+            Self::NestedStack => {
+                Box::pin(nested_stack::ready_attributes(
+                    ctx,
+                    region,
+                    physical_resource_id,
+                ))
+                .await
+            }
             // A secret's ARN and name are the ones its own create answered with, so there is
             // nothing left to read once the resource is up; a state machine's `Arn` and `Name`
             // are the same case.

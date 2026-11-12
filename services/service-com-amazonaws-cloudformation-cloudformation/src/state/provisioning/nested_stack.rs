@@ -70,7 +70,10 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::{call_query_carrying, xml_element, Created, Readiness, Refusal, Removal};
+use super::{
+    call_query_carrying, xml_element, xml_member_structures, Created, Readiness, Refusal,
+    Removal,
+};
 use crate::state::StoredResource;
 
 /// The resource type this module provisions.
@@ -512,6 +515,64 @@ pub(super) async fn readiness(
         reason.as_deref(),
     )))
 }
+
+/// The attributes this type publishes once the nested stack is up: ONE per output the child
+/// stack published, under the name `Fn::GetAtt` addresses it by.
+///
+/// "Fn::GetAtt … `Outputs.<NestedStackOutputName>`: returns the value of the specified output
+/// of the nested stack" — so the attributes of an `AWS::CloudFormation::Stack` resource are
+/// not a fixed roster of the TYPE at all: they are whatever its child template declares as
+/// outputs, read under the [`OUTPUTS_ATTRIBUTE`] prefix in the dotted notation `Fn::GetAtt`
+/// reads a path with. That is what lets a parent expose a child's resources — its own output
+/// reading `Outputs.<Key>` of the child, or one of its resources' properties doing so.
+///
+/// The values are the child's OWN outputs, read through CloudFormation's own
+/// `DescribeStacks` exactly as its status is ([`reported_status`]) and never decided here, so
+/// what the parent publishes is what the child published. They are read only once the child
+/// is settled, which is where this is asked: a stack still being worked on has not published
+/// its outputs yet.
+///
+/// An output the child could not evaluate a value for carries no `OutputValue`, and the
+/// parent publishes no attribute for it rather than an empty one — an absent value is not a
+/// blank, and a declaration reading it is answered as reading an attribute nothing publishes.
+pub(super) async fn ready_attributes(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    physical_resource_id: &str,
+) -> Result<BTreeMap<String, String>, Refusal> {
+    let parameters = vec![("StackName".to_string(), physical_resource_id.to_string())];
+    let answer =
+        called_carrying(ctx, region, DESCRIBE_STACKS, &parameters, &chain_in_flight(ctx))
+            .await?;
+    let mut attributes = BTreeMap::new();
+    for output in xml_member_structures(&answer, OUTPUTS) {
+        let Some(key) = output
+            .get(OUTPUT_KEY)
+            .and_then(Value::as_str)
+            .filter(|key| !key.is_empty())
+        else {
+            continue;
+        };
+        let Some(value) = output.get(OUTPUT_VALUE).and_then(Value::as_str) else {
+            continue;
+        };
+        attributes.insert(
+            format!("{OUTPUTS_ATTRIBUTE}.{key}"),
+            value.to_string(),
+        );
+    }
+    Ok(attributes)
+}
+
+/// The member a stack's `DescribeStacks` answer carries its outputs under, and the two
+/// members each entry of that list carries: "Output has members OutputKey … OutputValue".
+const OUTPUTS: &str = "Outputs";
+const OUTPUT_KEY: &str = "OutputKey";
+const OUTPUT_VALUE: &str = "OutputValue";
+
+/// The prefix the attributes of this type are addressed under —
+/// `Outputs.<NestedStackOutputName>`. See [`ready_attributes`].
+const OUTPUTS_ATTRIBUTE: &str = "Outputs";
 
 /// Whether CloudFormation still holds the nested stack: the question the parent's resource
 /// removal is held open on.

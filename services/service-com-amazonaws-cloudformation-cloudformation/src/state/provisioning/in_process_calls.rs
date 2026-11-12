@@ -593,6 +593,115 @@ pub(crate) fn xml_member_list(document: &str, parent: &str) -> Vec<String> {
     }
 }
 
+/// The ENTRIES of one list member whose entries are STRUCTURES: the scalar children of every
+/// `<member>` element directly inside the first `<parent>`, in document order, one map per
+/// entry.
+///
+/// [`xml_member_list`] reads a list whose entries are scalars and [`xml_scalar_children`] one
+/// structure; a list of structures — a stack's `Outputs`, carried as
+/// `<Outputs><member><OutputKey/><OutputValue/></member>…` — is read by this one. Reading each
+/// entry on its own is what keeps an OPTIONAL member honest: a member one entry does not carry
+/// is absent from that entry, rather than shifting the next entry's value onto it the way
+/// reading two members as parallel lists would.
+///
+/// Scoped to that member's own element exactly as [`xml_member_list`] is: the walk starts at
+/// its start tag and stops at its end tag, and only an entry opened at its own depth is one of
+/// its entries, so a `<member>` nested deeper cannot be mistaken for one. A list the answer
+/// does not carry, and one it carries empty, are both the empty list. A child that HOLDS other
+/// elements is not a scalar and is left out of its entry, as it is for
+/// [`xml_scalar_children`].
+pub(crate) fn xml_member_structures(
+    document: &str,
+    parent: &str,
+) -> Vec<::serde_json::Map<String, Value>> {
+    use ::quick_xml::events::Event;
+
+    const MEMBER: &[u8] = b"member";
+
+    let mut reader = ::quick_xml::Reader::from_str(document);
+    reader.config_mut().trim_text(false);
+    let mut entries: Vec<::serde_json::Map<String, Value>> = Vec::new();
+    let mut inside = false;
+    // How many elements are open BELOW `parent`: an entry opens at 0 and its own members at 1.
+    let mut depth = 0usize;
+    // The entry being read, the direct child of it being read while that child is still a
+    // candidate scalar, and that child's text.
+    let mut entry: Option<::serde_json::Map<String, Value>> = None;
+    let mut member: Option<String> = None;
+    let mut text = String::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(start)) => {
+                let name = String::from_utf8_lossy(start.local_name().as_ref()).into_owned();
+                if !inside {
+                    inside = name == parent;
+                    continue;
+                }
+                match depth {
+                    0 if name.as_bytes() == MEMBER => entry = Some(::serde_json::Map::new()),
+                    1 if entry.is_some() => {
+                        member = Some(name);
+                        text.clear();
+                    }
+                    // The child this is nested in holds elements, so it is not a scalar.
+                    _ => member = None,
+                }
+                depth += 1;
+            }
+            Ok(Event::Text(found)) if inside && depth == 2 && member.is_some() => {
+                text.push_str(&found.xml10_content().unwrap_or_default());
+            }
+            Ok(Event::GeneralRef(reference)) if inside && depth == 2 && member.is_some() => {
+                text.push_str(&referenced_text(&reference));
+            }
+            Ok(Event::Empty(empty)) if inside => {
+                let name = String::from_utf8_lossy(empty.local_name().as_ref()).into_owned();
+                match depth {
+                    // An empty entry (`<member/>`) carries no member at all.
+                    0 if name.as_bytes() == MEMBER => entries.push(::serde_json::Map::new()),
+                    // An empty element (`<OutputValue/>`) is the empty value of that member.
+                    1 => {
+                        if let Some(held) = entry.as_mut() {
+                            held.insert(name, Value::String(String::new()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::End(end)) if inside => {
+                let name = String::from_utf8_lossy(end.local_name().as_ref()).into_owned();
+                if depth == 0 {
+                    if name == parent {
+                        return entries;
+                    }
+                    continue;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    if name.as_bytes() == MEMBER {
+                        if let Some(held) = entry.take() {
+                            entries.push(held);
+                        }
+                    }
+                } else if depth == 1 {
+                    if let Some(read) = member.take() {
+                        if read == name {
+                            if let Some(held) = entry.as_mut() {
+                                held.insert(
+                                    read,
+                                    Value::String(::std::mem::take(&mut text)),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Event::Eof) | Err(_) => return entries,
+            Ok(_) => {}
+        }
+    }
+}
+
 /// Each DIRECT child element of `parent` that holds TEXT, as the JSON object the rest of
 /// this module compares: one entry per such element, keyed by its own name.
 ///
