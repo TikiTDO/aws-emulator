@@ -40,3 +40,29 @@ Cause 2: subprocess.CalledProcessError: Command '['aws', 'eks', 'update-cluster-
 ## Steps to Reproduce
 Cause 1: aws eks create-cluster ... --logging '{"clusterLogging":[{"types":["api","audit"],"enabled":true}]}'; then poll aws logs describe-log-groups --log-group-name-prefix /aws/eks/<cluster>/cluster -> never appears.
 Cause 2: aws eks update-cluster-config --name <cluster> --logging '{"clusterLogging": [{"types": ["api"], "enabled": true}]}' -> exit 254.
+
+## Resolution
+Both causes are served: a cluster whose `logging` enables one or more log types gets the
+log group `/aws/eks/<cluster name>/cluster` with one stream per enabled type and a record
+in each, whether the types are enabled by `CreateCluster` or turned on afterwards by
+`UpdateClusterConfig`, which accepts the `logging` member, persists it and answers an
+`Update` of type `LoggingUpdate`. A configuration that enables no type provisions nothing
+at all.
+
+Replay keys: `eks-enable-cluster-logging-creates-log-group`,
+`eks-cluster-log-group-naming-follows-convention-per-cluster`,
+`eks-audit-log-streams-delivered-to-cloudwatch` and
+`cli-eks-update-logging-config-workflow` pass.
+
+`eks-disabled-log-type-produces-no-log-group` is NOT GRADEABLE under the replay harness's
+60 s per-check cap, and its state says nothing about this behaviour: the check reads
+`present_while_disabled = _poll_log_group_present(...)` and then asserts that answer is
+`False`, so against an emulator that correctly creates nothing the helper can only answer
+by running to its own (longer) deadline, and the cap ends the check while it polls — the
+same "Check timed out after 60.0s" this report records for an emulator that created
+nothing at all. That the check does observe the emulator's answer was confirmed by
+deliberately inverting the behaviour once: with the group created for an all-disabled
+cluster, that check failed immediately with "log group /aws/eks/<cluster>/cluster appeared
+despite every control-plane log type being disabled". The absence it asks for is pinned
+in-tree instead, by `core/router/tests/all/eks_control_plane_log_suppression.rs` and
+`services/service-com-amazonaws-eks-awswesleyfrontend/tests/all/control_plane_log_suppression.rs`.

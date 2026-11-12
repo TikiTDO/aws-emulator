@@ -1165,6 +1165,11 @@ mod cloudformation_wafv2_protection_stack;
 // reason those entries record: the appended tail at the end of this file and the `e…` span
 #[path = "all/eks_control_plane_logs.rs"]
 mod eks_control_plane_logs;
+// Declared in this same head region, for the reason the note above records: the NEGATIVE
+// half of a cluster's control plane logging — a type nobody enabled exporting nothing —
+// is observable only with EKS and CloudWatch Logs on one engine.
+#[path = "all/eks_control_plane_log_suppression.rs"]
+mod eks_control_plane_log_suppression;
 // Declared in this same head region, for the reason the note above records.
 #[path = "all/bedrock_agentcore_data_plane_parent_resources.rs"]
 mod bedrock_agentcore_data_plane_parent_resources;
