@@ -94,6 +94,54 @@ pub async fn service_principal_trust_violation(
     }
 }
 
+/// Whether IAM reports that this account holds NO role of this ARN — the second
+/// question the operations that are handed a caller-supplied role ask about it.
+///
+/// An add-on's `serviceAccountRoleArn` is assumed by a Kubernetes service account
+/// of the cluster — through the cluster's OIDC provider, or EKS Pod Identity —
+/// rather than by an AWS service principal, so there is no principal to require
+/// in its trust policy and existence is all there is to ask.
+/// [`service_principal_trust_violation`] is the same `GetRole` call for the roles
+/// whose contract DOES name one.
+///
+/// `false` for a value that is not an in-account role ARN at all
+/// ([`pass_role_refusal`] is what reports that), and `false` when this emulator
+/// has no IAM to ask: a refusal has to be grounded in what IAM answered rather
+/// than assumed from silence.
+pub async fn iam_holds_no_such_role(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    role_arn: &str,
+) -> bool {
+    let Some(role_name) = iam_role_name(role_arn) else {
+        return false;
+    };
+    let Some(endpoint) = peer_endpoint("iam", region) else {
+        return false;
+    };
+    let answer = callback_client!(aws_sdk_iam, ctx, endpoint, region)
+        .get_role()
+        .role_name(role_name)
+        .send()
+        .await;
+    match answer {
+        Ok(_) => false,
+        // IAM says this account holds no such role: the refusal is grounded.
+        Err(error) if iam_role_is_absent(&error) => true,
+        // Any other answer is this emulator failing to ask, not IAM reporting an
+        // absent role, so it refuses nothing — and it is worth a warning, because
+        // a deployment with no IAM to ask is one where this gate does not run.
+        Err(error) => {
+            ::tracing::warn!(
+                %role_arn,
+                error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
+                "the role could not be verified against IAM"
+            );
+            false
+        }
+    }
+}
+
 /// The message a role that IAM does not hold, or whose trust policy lets none of
 /// `principals` assume it, is refused with: the two cases are one refusal,
 /// because a caller cannot tell them apart without a role it may not be allowed

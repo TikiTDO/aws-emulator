@@ -37,6 +37,8 @@ mod addon_install_outcome;
 mod addon_lifecycle;
 #[path = "all/addon_pod_identity_catalog.rs"]
 mod addon_pod_identity_catalog;
+#[path = "all/addon_request_precedence.rs"]
+mod addon_request_precedence;
 #[path = "all/addon_request_validation.rs"]
 mod addon_request_validation;
 #[path = "all/addon_update.rs"]

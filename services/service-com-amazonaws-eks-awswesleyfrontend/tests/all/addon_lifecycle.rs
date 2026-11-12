@@ -411,18 +411,17 @@ async fn a_cluster_that_does_not_exist_is_not_found_whatever_the_body_says() {
     wait_for_cluster_active().await;
 
     // The rows differ along what else is wrong with the request — nothing, an
-    // add-on name of a form no add-on has, a role ARN that is not one, a
-    // configuration document that is not valid JSON, a duplicated service account
-    // — because the cluster layer is checked before any of them.
+    // add-on name of a form no add-on has, a configuration document that is not
+    // valid JSON, a duplicated service account — because the cluster layer is
+    // checked before any of them. What is NOT here is the request's own addressing:
+    // the `@httpLabel` cluster name and the `serviceAccountRoleArn` this request
+    // asks Amazon EKS to pass are judged BEFORE the cluster is resolved, which is
+    // the `addon_request_precedence` suite's rule.
     let cases: Vec<(&str, serde_json::Value)> = vec![
         ("nothing else wrong", serde_json::json!({ "addonName": "vpc-cni" })),
         (
             "an add-on name of an impossible form",
             serde_json::json!({ "addonName": "not an addon name" }),
-        ),
-        (
-            "a serviceAccountRoleArn that is not a role ARN",
-            serde_json::json!({ "addonName": "vpc-cni", "serviceAccountRoleArn": "nonsense" }),
         ),
         (
             "configurationValues that are not valid JSON",
@@ -606,10 +605,12 @@ async fn members_the_model_cannot_constrain_are_refused_as_invalid_parameters() 
 
     // Source for the rows: `CreateAddon`'s input members, from
     // `smithy_query query="operation" operation="CreateAddon"` — `addonName` is a
-    // plain required `String` (no length, no pattern), `serviceAccountRoleArn` is
-    // bounded only in length, `configurationValues` is a free-form document, and
-    // `podIdentityAssociations` maps a service account to a role. Each row is a
-    // value those constraints accept but the service cannot.
+    // plain required `String` (no length, no pattern), `configurationValues` is a
+    // free-form document, and `podIdentityAssociations` maps a service account to a
+    // role. Each row is a value those constraints accept but the service cannot.
+    // `serviceAccountRoleArn` is NOT here: it is a role the request asks Amazon EKS to
+    // pass, so it is judged by the pass-role rule ahead of the body
+    // ([`crate::pass_role_authorization`], [`crate::addon_request_precedence`]).
     let refused: Vec<(&str, serde_json::Value)> = vec![
         ("an empty addonName", serde_json::json!({ "addonName": "" })),
         (
@@ -623,31 +624,6 @@ async fn members_the_model_cannot_constrain_are_refused_as_invalid_parameters() 
         (
             "an addonName one character past the length ceiling",
             serde_json::json!({ "addonName": "a".repeat(MAX_KUBERNETES_NAME_LEN + 1) }),
-        ),
-        (
-            "a serviceAccountRoleArn that is not an ARN at all",
-            serde_json::json!({ "addonName": "vpc-cni", "serviceAccountRoleArn": "AddonRole" }),
-        ),
-        (
-            "a serviceAccountRoleArn naming another service",
-            serde_json::json!({
-                "addonName": "vpc-cni",
-                "serviceAccountRoleArn": "arn:aws:eks:us-west-2:000000000000:cluster/validated",
-            }),
-        ),
-        (
-            "a serviceAccountRoleArn naming an IAM user",
-            serde_json::json!({
-                "addonName": "vpc-cni",
-                "serviceAccountRoleArn": "arn:aws:iam::000000000000:user/someone",
-            }),
-        ),
-        (
-            "a serviceAccountRoleArn carrying a region (IAM is global)",
-            serde_json::json!({
-                "addonName": "vpc-cni",
-                "serviceAccountRoleArn": "arn:aws:iam:us-west-2:000000000000:role/AddonRole",
-            }),
         ),
         (
             "configurationValues that open a JSON object and do not close it",
@@ -745,13 +721,6 @@ async fn members_the_model_cannot_constrain_are_refused_as_invalid_parameters() 
                 "addonName": "aws-ebs-csi-driver",
                 "serviceAccountRoleArn":
                     "arn:aws:iam::000000000000:role/aws-service-role/eks.amazonaws.com/Role",
-            }),
-        ),
-        (
-            "a role ARN in another partition",
-            serde_json::json!({
-                "addonName": "aws-efs-csi-driver",
-                "serviceAccountRoleArn": "arn:aws-us-gov:iam::000000000000:role/AddonRole",
             }),
         ),
         (

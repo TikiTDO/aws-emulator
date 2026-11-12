@@ -109,7 +109,9 @@ impl Emulator {
         crate::wire::call_as(&self.router, access_key_id, REGION, method, uri, body).await
     }
 
-    /// One awsQuery call to IAM or STS, as the account's own credential.
+    /// One awsQuery call to IAM or STS, as the account's own credential — built by the
+    /// shared harness, so this suite's setup calls are exactly the ones every other
+    /// suite sends (`crate::wire::query`).
     async fn query(
         &self,
         signing_name: &str,
@@ -117,31 +119,7 @@ impl Emulator {
         action: &str,
         params: &[(&str, String)],
     ) -> (u16, String) {
-        let mut body = format!("Action={action}&Version={version}");
-        for (name, value) in params {
-            body.push('&');
-            body.push_str(name);
-            body.push('=');
-            body.push_str(&encode_label(value));
-        }
-        let request = http::Request::builder()
-            .method("POST")
-            .uri(format!("https://{signing_name}.amazonaws.com/"))
-            .header("content-type", "application/x-www-form-urlencoded")
-            .header(
-                "authorization",
-                format!(
-                    "AWS4-HMAC-SHA256 Credential={ACCOUNT_KEY}/20260101/{REGION}/\
-                     {signing_name}/aws4_request, SignedHeaders=host, Signature=0000"
-                ),
-            )
-            .body(bytes::Bytes::from(body))
-            .expect("a well-formed awsQuery request");
-        let response = self.router.dispatch(request).await;
-        (
-            response.status().as_u16(),
-            String::from_utf8_lossy(response.body()).to_string(),
-        )
+        crate::wire::query(&self.router, signing_name, version, action, params).await
     }
 
     /// Create an IAM role carrying `document` as its inline policy (when one is given),

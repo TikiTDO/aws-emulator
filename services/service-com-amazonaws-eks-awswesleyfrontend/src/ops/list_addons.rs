@@ -168,10 +168,36 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .unwrap_or(DEFAULT_LIST_PAGE_SIZE)
             .max(1) as usize;
 
+        // THE REQUEST'S OWN ADDRESSING FIRST, before the store is even locked:
+        // `clusterName` arrives in the path and every cluster name of this API obeys
+        // one grammar and one length maximum (`ClusterName` is `@length(1..100)` +
+        // `@pattern`, [`crate::state::is_cluster_name`]), so a label outside it names
+        // no cluster in ANY Region — it is the invalid parameter it is, in the sentence
+        // Amazon EKS states for that parameter
+        // ([`crate::state::cluster_name_refusal`]), rather than a not-found that would
+        // invite the caller to create a cluster under a name Amazon EKS will never
+        // accept. The framework's validating walk does not judge a value bound to an
+        // `@httpLabel`, so this is where it is judged; the page size this listing asks
+        // for is bounded by the model and answered ahead of the cluster by the layer
+        // that owns that order (`crate::service::precedence`).
+        if !state::is_cluster_name(&input.cluster_name) {
+            return Err(ListAddonsErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    cluster_name: Some(input.cluster_name.clone()),
+                    message: Some(state::cluster_name_refusal(
+                        "clusterName",
+                        &input.cluster_name,
+                    )),
+                    ..Default::default()
+                },
+            )
+            .into());
+        }
+
         let mut guard = store.lock();
         guard.materialize_due_transitions(SystemTime::now());
 
-        // THE PARENT RESOURCE FIRST: a listing of a cluster this region does not hold is
+        // THE PARENT RESOURCE NEXT: a listing of a cluster this region does not hold is
         // that 404 whatever else the request carries.
         let Some(cluster) = guard
             .clusters

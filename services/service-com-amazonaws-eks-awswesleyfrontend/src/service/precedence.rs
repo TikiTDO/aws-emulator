@@ -1,57 +1,71 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! What this service answers BEFORE a refusal of the request body: the pass-role
-//! authorization of a role the request hands Amazon EKS, the capability type a
-//! `CreateCapability` asks for, and the resolution of the cluster the request is
-//! addressed to.
+//! What this service answers BEFORE a refusal of the request body: the resolution of
+//! the request's own addressing, the authorization of a role it hands Amazon EKS, the
+//! page size it asks for, the capability type a `CreateCapability` asks for, and the
+//! resolution of the cluster the request is addressed to.
 //!
-//! Every handler in `crate::ops` already keeps that order — the pass-role question
-//! is decided from the value alone and needs no state, and the `@httpLabel` cluster
-//! names the resource being acted on, so both are answered before any member of the
-//! body is judged. The framework's own walk does not: it validates the whole input
-//! against the operation's generated schema and refuses a modelled constraint
-//! BEFORE `handle` runs (`vendor/smithy-server-runtime/src/operation.rs`), so for a
-//! request that breaks one of those constraints the body refusal reached the caller
-//! first and the earlier answers were never given. A client keying on the
-//! missing cluster to create it and retry, or on the pass-role denial to fix its
-//! policy, saw a parameter complaint instead.
+//! RULE: Amazon EKS judges a request in three stages — first the request's own
+//! ADDRESSING and AUTHORIZATION (the `@httpLabel` path parameters, the role it asks
+//! Amazon EKS to pass, and the `@httpQuery` page size), then the EXISTENCE of the
+//! cluster the request is addressed to, and only then the rest of the body and the
+//! state of the resources it names. A request with several problems therefore earns
+//! the refusal of the EARLIEST stage one of its problems sits in.
 //!
-//! This layer restores the order for exactly those requests. It runs in the one seam
-//! a service has BEFORE dispatch (`smithy_server_runtime::Service::override_operation`),
-//! the same seam the tag and resolve-conflicts contracts beside it use, and it claims
-//! a request only when ALL of:
+//! Two things in this emulator break that order, and both are answered here:
 //!
-//! * the operation it was sent to is one of the operations below — each takes a role
-//!   it asks Amazon EKS to pass, or addresses a cluster by `@httpLabel` and answers an
-//!   unknown one with [`crate::state::cluster_not_found`], or both;
-//! * the framework's validating walk would refuse the body. The walk is run HERE,
-//!   through the same `aws_smithy_schema_server::constraints::validate` and the same
-//!   generated input schema the dispatch sequence runs, so this layer cannot disagree
-//!   with the walk that would otherwise follow it. A request whose body the walk
-//!   accepts is NOT claimed: its handler already answers both questions in the right
-//!   order, and nothing here may change what it reports;
-//! * one of the earlier answers actually fires — the value names no role this
-//!   caller can pass, the request asks for a capability type this API does not define,
-//!   or the store holds no such cluster — or the request is a `CreateCluster` whose
-//!   refused parameter this service states its own sentence for (see
-//!   [`super::parameter_contract`]), whose refusal also carries the `clusterName` the
-//!   request asked for. Otherwise the request falls through to the modelled
-//!   operation, which refuses the body exactly as before.
+//! * the framework's own walk validates the whole input against the operation's
+//!   generated schema and refuses a modelled constraint BEFORE `handle` runs
+//!   (`vendor/smithy-server-runtime/src/operation.rs`), so for a request that breaks
+//!   one of those constraints the body refusal reached the caller first and the
+//!   earlier stages were never judged. A client keying on the missing cluster to
+//!   create it and retry, or on the pass-role denial to fix its policy, saw a
+//!   parameter complaint instead;
+//! * that walk does not judge a value bound to an `@httpLabel` at all — a label
+//!   outside the cluster-name grammar reached the handler, which looked it up and
+//!   reported the cluster missing, inviting the caller to create a cluster under a
+//!   name no cluster can carry.
+//!
+//! This layer restores the order. It runs in the one seam a service has BEFORE
+//! dispatch (`smithy_server_runtime::Service::override_operation`), the same seam the
+//! tag contract beside it uses, and it claims a request only when ALL of:
+//!
+//! * the operation it was sent to is one of the operations below — each addresses a
+//!   cluster by `@httpLabel`, or takes a role it asks Amazon EKS to pass, or bounds a
+//!   page size, or all of these;
+//! * one of the earlier stages actually answers something: the label names no cluster
+//!   any Region could hold, the value names no role this caller can pass, the page
+//!   size is outside its published bounds, the request asks for a capability type this
+//!   API does not define, or — for a request whose body the framework's walk would
+//!   refuse — the store holds no such cluster, or the refused parameter is one this
+//!   service states its own sentence for (see [`super::parameter_contract`]).
+//!
+//! The cluster is answered ahead of the body only for a request the walk WOULD refuse:
+//! the walk is run HERE, through the same `aws_smithy_schema_server::constraints::validate`
+//! and the same generated input schema the dispatch sequence runs, so this layer
+//! cannot disagree with the walk that would otherwise follow it, and a request whose
+//! body the walk accepts keeps its handler's own answer, which already resolves the
+//! cluster first.
 //!
 //! The answers are the service's own modelled shapes, rendered through the same
 //! protocol call the framework's error tail makes: `AccessDeniedException` (403) for
-//! the pass-role denial, `InvalidParameterException` (400) for the capability type
-//! this API does not define, and `ResourceNotFoundException` (404) for the missing
-//! cluster. Each claimed operation answers those same shapes and statuses from its own
-//! handler, so a refusal worded here and one worded there are indistinguishable on
-//! the wire.
+//! the pass-role denial, `InvalidParameterException` (400) for the request's own
+//! parameters and the capability type this API does not define, and
+//! `ResourceNotFoundException` (404) for the missing cluster. Each claimed operation
+//! answers those same shapes and statuses from its own handler, so a refusal worded
+//! here and one worded there are indistinguishable on the wire.
 //!
 //! WHY the capability type is answered here rather than by the handler, and why it
 //! comes before the cluster: see [`crate::service::off_enum_member_contract`], which
 //! states the rule and builds the refusal. `CreateCapability`'s `type` targets an
 //! enum, so the walk refuses an undeclared value before `handle` runs and the handler
 //! never sees it — and the value names no capability type at all, so no cluster could
-//! make the request answerable.
+//! make the request answerable. An add-on's `resolveConflicts` is judged by the same
+//! membership test and answered LAST, after the cluster: it says what to do with a
+//! copy of the add-on already running on the cluster, which is a question about the
+//! add-on rather than about the request's addressing (see
+//! [`super::resolve_conflicts_contract`]).
+
 
 use std::sync::Arc;
 
@@ -68,16 +82,17 @@ use smithy_server_runtime::{
 use crate::ops::types::{
     AccessDeniedException, AssociateIdentityProviderConfigInput, CreateAccessEntryInput,
     CreateAddonInput, CreateCapabilityInput, CreateClusterInput, CreateFargateProfileInput,
-    CreateNodegroupInput, CreatePodIdentityAssociationInput, InvalidParameterException,
-    ListAddonsInput, ListCapabilitiesInput, ListNodegroupsInput, ListUpdatesInput,
-    ResourceNotFoundException, UpdateClusterConfigInput,
+    CreateNodegroupInput, CreatePodIdentityAssociationInput, DeleteAddonInput, DescribeAddonInput,
+    InvalidParameterException, ListAddonsInput, ListCapabilitiesInput, ListNodegroupsInput,
+    ListUpdatesInput, ResourceNotFoundException, UpdateAddonInput, UpdateClusterConfigInput,
     ASSOCIATE_IDENTITY_PROVIDER_CONFIG_INPUT_SCHEMA, CREATE_ACCESS_ENTRY_INPUT_SCHEMA,
     CREATE_ADDON_INPUT_SCHEMA, CREATE_CAPABILITY_INPUT_SCHEMA, CREATE_CLUSTER_INPUT_SCHEMA,
     CREATE_FARGATE_PROFILE_INPUT_SCHEMA, CREATE_NODEGROUP_INPUT_SCHEMA,
-    CREATE_POD_IDENTITY_ASSOCIATION_INPUT_SCHEMA, LIST_ADDONS_INPUT_SCHEMA,
-    LIST_CAPABILITIES_INPUT_SCHEMA, LIST_NODEGROUPS_INPUT_SCHEMA, LIST_UPDATES_INPUT_SCHEMA,
-    SCHEMA_ACCESS_DENIED_EXCEPTION, SCHEMA_INVALID_PARAMETER_EXCEPTION,
-    SCHEMA_RESOURCE_NOT_FOUND_EXCEPTION, UPDATE_CLUSTER_CONFIG_INPUT_SCHEMA,
+    CREATE_POD_IDENTITY_ASSOCIATION_INPUT_SCHEMA, DELETE_ADDON_INPUT_SCHEMA,
+    DESCRIBE_ADDON_INPUT_SCHEMA, LIST_ADDONS_INPUT_SCHEMA, LIST_CAPABILITIES_INPUT_SCHEMA,
+    LIST_NODEGROUPS_INPUT_SCHEMA, LIST_UPDATES_INPUT_SCHEMA, SCHEMA_ACCESS_DENIED_EXCEPTION,
+    SCHEMA_INVALID_PARAMETER_EXCEPTION, SCHEMA_RESOURCE_NOT_FOUND_EXCEPTION,
+    UPDATE_ADDON_INPUT_SCHEMA, UPDATE_CLUSTER_CONFIG_INPUT_SCHEMA,
 };
 
 use super::off_enum_member_contract::undefined_capability_type;
@@ -91,15 +106,25 @@ const RESOURCE_NOT_FOUND_EXCEPTION: &str = "ResourceNotFoundException";
 const INVALID_PARAMETER_EXCEPTION: &str = "InvalidParameterException";
 
 /// What the operation a claimed request was sent to answers before it judges the rest
-/// of the body: the roles the request asks Amazon EKS to pass, in the order its
-/// handler judges them, a member whose value this API does not define, and the cluster
-/// it is addressed to.
+/// of the body: the request's own addressing, the roles it asks Amazon EKS to pass, in
+/// the order its handler judges them, the page size it asks for, a member whose value
+/// this API does not define, and the cluster it is addressed to.
 ///
 /// All of them are read from the request the dispatch sequence would have handed the
 /// handler, so this layer reads exactly the values the handler would.
 #[derive(Debug, Default)]
 pub struct Addressed {
     passed_roles: Vec<String>,
+    /// The refusal the request's own `@httpLabel` cluster name earns, when it carries
+    /// a value no cluster of this API could be named: answered before anything is
+    /// looked up, because such a label names no cluster in any Region (see
+    /// [`cluster_label_refusal`]).
+    label: Option<InvalidParameterException>,
+    /// The refusal the page size this request asks for earns, when it is outside the
+    /// bounds the model publishes: `maxResults` travels in the query string, so it is
+    /// part of the request's own addressing and is answered before the cluster is
+    /// resolved (see [`super::parameter_contract::page_size_refusal`]).
+    page_size: Option<InvalidParameterException>,
     /// The refusal a member whose value this API does not define earns, when the
     /// request carries one: a question about the request alone, so it is answered
     /// before the cluster is resolved (see
@@ -107,11 +132,12 @@ pub struct Addressed {
     undefined_value: Option<InvalidParameterException>,
     cluster: Option<String>,
     /// The refusal this service states for the parameter the walk refused, when it
-    /// states one for that rule (see [`super::parameter_contract`]). It carries the
-    /// members the refusal payload reports beside the sentence, which the per-service
-    /// message seam cannot reach; it is answered LAST, because it is a complaint about
-    /// the body and everything above is about the request's authorization or the
-    /// resources it names.
+    /// states one for that rule (see [`super::parameter_contract`]), or the one an
+    /// add-on's `resolveConflicts` earns (see [`super::resolve_conflicts_contract`]).
+    /// It carries the members the refusal payload reports beside the sentence, which
+    /// the per-service message seam cannot reach; it is answered LAST, because it is a
+    /// complaint about the body and everything above is about the request's own text,
+    /// the authorization of it, or the resources it names.
     parameter: Option<InvalidParameterException>,
 }
 
@@ -128,7 +154,63 @@ impl Addressed {
         self.parameter = refusal;
         self
     }
+
+    /// The same request, carrying the refusal the page size it asks for earns.
+    fn with_page_size_refusal(mut self, refusal: Option<InvalidParameterException>) -> Self {
+        self.page_size = refusal;
+        self
+    }
+
+    /// Whether this layer owes an answer the REQUEST alone decides — everything but
+    /// the cluster, which only the store can resolve.
+    ///
+    /// This is what lets the layer claim a request whose body the walk accepts: a path
+    /// label the walk never judged, a role no caller may pass and a page size outside
+    /// its published bounds are each wrong on their own.
+    fn answers_from_the_request_alone(&self) -> bool {
+        self.passed_roles
+            .iter()
+            .any(|role_arn| crate::state::pass_role_refusal(role_arn).is_some())
+            || self.label.is_some()
+            || self.page_size.is_some()
+            || self.undefined_value.is_some()
+            || self.parameter.is_some()
+    }
 }
+
+/// The refusal a cluster name arriving in an `@httpLabel` earns when no cluster of
+/// this API could carry it, or `None` for a name inside the grammar.
+///
+/// Every cluster name of this API obeys one grammar and one length maximum
+/// ([`crate::state::is_cluster_name`]), which the model states on `ClusterName` and
+/// this service enforces on the members it leaves unconstrained as well, so a label
+/// outside it names no cluster in any Region rather than one this Region does not
+/// hold. The sentence is the one Amazon EKS states for that parameter
+/// ([`crate::state::cluster_name_refusal`]) and the payload reports the value the
+/// request supplied, which is how a caller that passed a cluster ARN where a bare name
+/// belongs sees WHICH value was refused.
+fn cluster_label_refusal(member: &str, cluster: &str) -> Option<InvalidParameterException> {
+    (!crate::state::is_cluster_name(cluster)).then(|| InvalidParameterException {
+        cluster_name: Some(cluster.to_string()),
+        message: Some(crate::state::cluster_name_refusal(member, cluster)),
+        ..Default::default()
+    })
+}
+
+/// The refusal the `serviceAccountRoleArn` of an add-on request earns, or `None` when
+/// it names a role this caller may have Amazon EKS pass.
+///
+/// `serviceAccountRoleArn` is a role the request asks Amazon EKS to pass, so it is the
+/// same question [`crate::state::pass_role_refusal`] answers for every role this
+/// service is handed, reported in the same class: 403 `AccessDeniedException`. It is
+/// answered HERE rather than by the handler because `CreateAddon` does not model that
+/// error at all, so its own channel cannot carry it — whether the value names a role
+/// IAM could hold is a separate question, which the handler asks
+/// (`crate::state::names_a_role_iam_could_hold`).
+fn addon_role(role_arn: Option<&String>) -> Vec<String> {
+    role_arn.cloned().into_iter().collect()
+}
+
 
 /// One answer this layer gives, as the shape and status the service models for it.
 #[derive(Debug)]
@@ -251,12 +333,17 @@ fn boundary_violations(input: &dyn SerializableStruct, schema: &'static Schema) 
 }
 
 /// Read one claimed operation's request and name what its handler answers before it
-/// judges the body, or `None` when the walk accepts the body (so there is no
-/// question) or the body cannot be read at all.
+/// judges the body, or `None` when the body cannot be read at all — which is the
+/// framework's refusal, not this layer's question.
 ///
 /// The walk's own violations are handed to `members` beside the input, so an arm that
 /// words the refusal of a parameter reads exactly the violations the dispatch sequence
 /// would have reported.
+///
+/// The CLUSTER is dropped from the answer when the walk accepts the body: such a
+/// request is served by its own handler, which already resolves the cluster before it
+/// judges anything else, and nothing here may change what that handler reports. Every
+/// other answer stands on the request alone and is given either way.
 fn addressed_with<T: DeserializableStruct + SerializableStruct>(
     protocol: &dyn ServerHttpProtocol,
     schema: &'static Schema,
@@ -268,10 +355,11 @@ fn addressed_with<T: DeserializableStruct + SerializableStruct>(
     // it cannot read one request differently.
     let input: T = super::read_input(protocol, schema, req)?;
     let violations = boundary_violations(&input, schema);
+    let mut addressed = members(&input, &violations);
     if violations.is_empty() {
-        return None;
+        addressed.cluster = None;
     }
-    Some(members(&input, &violations))
+    Some(addressed)
 }
 
 /// One role the request hands Amazon EKS, and no cluster to resolve.
@@ -282,9 +370,12 @@ fn passes_roles(roles: Vec<String>) -> Addressed {
     }
 }
 
-/// The cluster the request is addressed to, and no role to authorize.
-fn addresses_cluster(cluster: &str) -> Addressed {
+/// The cluster the request is addressed to, named by the member its `@httpLabel`
+/// arrives in — which is what the refusal of a label outside the cluster-name grammar
+/// names (see [`cluster_label_refusal`]) — and no role to authorize.
+fn addresses_cluster(member: &str, cluster: &str) -> Addressed {
     Addressed {
+        label: cluster_label_refusal(member, cluster),
         cluster: Some(cluster.to_string()),
         ..Default::default()
     }
@@ -292,23 +383,101 @@ fn addresses_cluster(cluster: &str) -> Addressed {
 
 /// Both: a role to authorize first, then the cluster the request is addressed to —
 /// the order every handler that does both keeps.
-fn passes_roles_and_addresses_cluster(roles: Vec<String>, cluster: &str) -> Addressed {
+fn passes_roles_and_addresses_cluster(roles: Vec<String>, member: &str, cluster: &str) -> Addressed {
     Addressed {
         passed_roles: roles,
-        cluster: Some(cluster.to_string()),
-        ..Default::default()
+        ..addresses_cluster(member, cluster)
     }
+}
+
+/// The member the CHILD resources of a cluster carry their parent's name in, as the
+/// model spells it (`CreateAddon$clusterName`, `ListAddons$clusterName`, …) — the
+/// name a refusal of that label reports.
+const CLUSTER_NAME_MEMBER: &str = "clusterName";
+
+/// The member the CLUSTER-scope operations carry the same name in
+/// (`UpdateClusterConfig$name`, `ListUpdates$name`).
+const CLUSTER_SCOPE_NAME_MEMBER: &str = "name";
+
+/// The first path segment every URI of this API that addresses a cluster begins with
+/// (`/clusters/{clusterName}/addons`, `/clusters/{name}/update-config`, …).
+const CLUSTERS_PATH_SEGMENT: &str = "clusters";
+
+/// The position of the cluster label in such a URI, counted as
+/// [`::service_common::nth_path_segment`] counts: `/clusters/<label>/…`.
+const CLUSTER_LABEL_SEGMENT: usize = 1;
+
+/// The member the operation `key` carries its cluster label in, or `None` for an
+/// operation this layer does not judge or one that addresses no cluster by path.
+///
+/// The same scope as the table below, read from the request's PATH rather than from a
+/// deserialized input — see [`addressed_by_path`] for why that reading is needed at
+/// all.
+fn cluster_label_member(key: &str) -> Option<&'static str> {
+    match key {
+        "UpdateClusterConfig" | "ListUpdates" => Some(CLUSTER_SCOPE_NAME_MEMBER),
+        "CreateNodegroup" | "CreateCapability" | "CreateFargateProfile" | "CreateAddon"
+        | "UpdateAddon" | "DescribeAddon" | "DeleteAddon" | "CreateAccessEntry"
+        | "CreatePodIdentityAssociation" | "AssociateIdentityProviderConfig"
+        | "ListNodegroups" | "ListAddons" | "ListCapabilities" => Some(CLUSTER_NAME_MEMBER),
+        _ => None,
+    }
+}
+
+/// What this layer answers for a request whose body the codec cannot read at all.
+///
+/// A request that omits a member this API requires fails DESERIALIZATION rather than
+/// the validating walk (`vendor/smithy-server-runtime/src/pre_dispatch.rs` turns that
+/// failure into the same refusal), so the typed reading below answers nothing about it
+/// — and that is exactly the request Amazon EKS answers with its PATH LABEL: the
+/// addressing is in the request line, which is readable whatever the body says, and a
+/// label no cluster of this API could carry is refused before any member of the body
+/// is looked at.
+///
+/// Only the label is read here, and the request is claimed only when that label is
+/// refused: nothing else about a body the codec could not read is known, so every
+/// other request keeps the framework's own refusal of it.
+fn addressed_by_path(key: &str, req: &RtRequest) -> Option<Addressed> {
+    let member = cluster_label_member(key)?;
+    let path = ::service_common::uri_path(req.uri());
+    if ::service_common::nth_path_segment(path, 0)? != CLUSTERS_PATH_SEGMENT {
+        return None;
+    }
+    // Decoded the way the codec that deserializes the request decodes a non-greedy
+    // `@httpLabel`, so this layer and the handler read the same value: a cluster ARN
+    // passed where a bare name belongs arrives with its `:` and `/` escaped.
+    let cluster = ::service_common::percent_decode_path_label(::service_common::nth_path_segment(
+        path,
+        CLUSTER_LABEL_SEGMENT,
+    )?);
+    Some(Addressed {
+        label: Some(cluster_label_refusal(member, &cluster)?),
+        ..Default::default()
+    })
 }
 
 /// What the operation `key` names answers before it judges the body, for this
 /// request.
 ///
-/// The table is this layer's whole scope. An operation is in it because its handler
-/// makes one of those two checks first and its body carries a modelled constraint
-/// the walk can refuse; `None` for every other operation, which keeps the generated
-/// routing table as its only source. On this service's restJson1 protocol a routing
-/// key is the operation's own shape name.
+/// The table is this layer's whole scope. An operation is in it because it addresses a
+/// cluster by `@httpLabel`, or hands Amazon EKS a role, or bounds a page size — the
+/// stages the rule above puts ahead of the body; `None` for every other operation,
+/// which keeps the generated routing table as its only source. On this service's
+/// restJson1 protocol a routing key is the operation's own shape name.
+///
+/// A request the codec cannot read at all falls back to its PATH, which carries the
+/// addressing either way (see [`addressed_by_path`]).
 fn addressed(
+    key: &str,
+    protocol: &dyn ServerHttpProtocol,
+    req: &RtRequest,
+) -> Option<Addressed> {
+    addressed_by_input(key, protocol, req).or_else(|| addressed_by_path(key, req))
+}
+
+/// What the operation `key` names answers, read from the input the dispatch sequence
+/// would hand its handler — `None` when that input cannot be read at all.
+fn addressed_by_input(
     key: &str,
     protocol: &dyn ServerHttpProtocol,
     req: &RtRequest,
@@ -349,6 +518,7 @@ fn addressed(
             |input: &CreateNodegroupInput, _| {
                 passes_roles_and_addresses_cluster(
                     vec![input.node_role.clone()],
+                    CLUSTER_NAME_MEMBER,
                     &input.cluster_name,
                 )
             },
@@ -364,6 +534,7 @@ fn addressed(
             |input: &CreateCapabilityInput, _| {
                 passes_roles_and_addresses_cluster(
                     vec![input.role_arn.clone()],
+                    CLUSTER_NAME_MEMBER,
                     &input.cluster_name,
                 )
                 .with_undefined_value(undefined_capability_type(&input.r#type))
@@ -376,6 +547,7 @@ fn addressed(
             |input: &CreateFargateProfileInput, _| {
                 passes_roles_and_addresses_cluster(
                     vec![input.pod_execution_role_arn.clone()],
+                    CLUSTER_NAME_MEMBER,
                     &input.cluster_name,
                 )
             },
@@ -384,19 +556,78 @@ fn addressed(
             protocol,
             UPDATE_CLUSTER_CONFIG_INPUT_SCHEMA,
             req,
-            |input: &UpdateClusterConfigInput, _| addresses_cluster(&input.name),
+            |input: &UpdateClusterConfigInput, _| {
+                addresses_cluster(CLUSTER_SCOPE_NAME_MEMBER, &input.name)
+            },
         ),
+        // The two add-on operations: each hands Amazon EKS the add-on's service
+        // account role, which they report an unusable value as in their own two
+        // classes ([`addon_role_refusal`]), and each takes `resolveConflicts`, whose
+        // enum membership is a question about the ADD-ON and so is answered after the
+        // cluster (see [`super::resolve_conflicts_contract`]).
         "CreateAddon" => addressed_with(
             protocol,
             CREATE_ADDON_INPUT_SCHEMA,
             req,
-            |input: &CreateAddonInput, _| addresses_cluster(&input.cluster_name),
+            |input: &CreateAddonInput, violations| {
+                passes_roles_and_addresses_cluster(
+                    addon_role(input.service_account_role_arn.as_ref()),
+                    CLUSTER_NAME_MEMBER,
+                    &input.cluster_name,
+                )
+                .with_parameter_refusal(super::resolve_conflicts_contract::off_enum_refusal(
+                    super::resolve_conflicts_contract::CREATE_ADDON,
+                    input.resolve_conflicts.as_deref(),
+                    &input.cluster_name,
+                    &input.addon_name,
+                    violations,
+                ))
+            },
+        ),
+        "UpdateAddon" => addressed_with(
+            protocol,
+            UPDATE_ADDON_INPUT_SCHEMA,
+            req,
+            |input: &UpdateAddonInput, violations| {
+                passes_roles_and_addresses_cluster(
+                    addon_role(input.service_account_role_arn.as_ref()),
+                    CLUSTER_NAME_MEMBER,
+                    &input.cluster_name,
+                )
+                .with_parameter_refusal(super::resolve_conflicts_contract::off_enum_refusal(
+                    super::resolve_conflicts_contract::UPDATE_ADDON,
+                    input.resolve_conflicts.as_deref(),
+                    &input.cluster_name,
+                    &input.addon_name,
+                    violations,
+                ))
+            },
+        ),
+        // The two add-on reads addressed to a `(cluster, add-on)` pair: they carry no
+        // body at all, so the only stage ahead of their own lookup is the label.
+        "DescribeAddon" => addressed_with(
+            protocol,
+            DESCRIBE_ADDON_INPUT_SCHEMA,
+            req,
+            |input: &DescribeAddonInput, _| {
+                addresses_cluster(CLUSTER_NAME_MEMBER, &input.cluster_name)
+            },
+        ),
+        "DeleteAddon" => addressed_with(
+            protocol,
+            DELETE_ADDON_INPUT_SCHEMA,
+            req,
+            |input: &DeleteAddonInput, _| {
+                addresses_cluster(CLUSTER_NAME_MEMBER, &input.cluster_name)
+            },
         ),
         "CreateAccessEntry" => addressed_with(
             protocol,
             CREATE_ACCESS_ENTRY_INPUT_SCHEMA,
             req,
-            |input: &CreateAccessEntryInput, _| addresses_cluster(&input.cluster_name),
+            |input: &CreateAccessEntryInput, _| {
+                addresses_cluster(CLUSTER_NAME_MEMBER, &input.cluster_name)
+            },
         ),
         // `roleArn` is the role the EKS Pod Identity agent has Amazon EKS assume for
         // the Pods of the service account, so the handler authorizes passing it
@@ -408,6 +639,7 @@ fn addressed(
             |input: &CreatePodIdentityAssociationInput, _| {
                 passes_roles_and_addresses_cluster(
                     vec![input.role_arn.clone()],
+                    CLUSTER_NAME_MEMBER,
                     &input.cluster_name,
                 )
             },
@@ -417,35 +649,55 @@ fn addressed(
             ASSOCIATE_IDENTITY_PROVIDER_CONFIG_INPUT_SCHEMA,
             req,
             |input: &AssociateIdentityProviderConfigInput, _| {
-                addresses_cluster(&input.cluster_name)
+                addresses_cluster(CLUSTER_NAME_MEMBER, &input.cluster_name)
             },
         ),
-        // The listings of a cluster's resources: each bounds `maxResults`, so the walk
-        // can refuse the body of a read too, and each answers an unknown cluster with
-        // the same 404.
+        // The listings of a cluster's resources: each bounds `maxResults` in the query
+        // string, which is part of the request's own addressing and so is answered
+        // before the cluster, and each answers an unknown cluster with the same 404.
         "ListNodegroups" => addressed_with(
             protocol,
             LIST_NODEGROUPS_INPUT_SCHEMA,
             req,
-            |input: &ListNodegroupsInput, _| addresses_cluster(&input.cluster_name),
+            |input: &ListNodegroupsInput, violations| {
+                addresses_cluster(CLUSTER_NAME_MEMBER, &input.cluster_name)
+                    .with_page_size_refusal(super::parameter_contract::page_size_refusal(
+                        violations,
+                    ))
+            },
         ),
         "ListAddons" => addressed_with(
             protocol,
             LIST_ADDONS_INPUT_SCHEMA,
             req,
-            |input: &ListAddonsInput, _| addresses_cluster(&input.cluster_name),
+            |input: &ListAddonsInput, violations| {
+                addresses_cluster(CLUSTER_NAME_MEMBER, &input.cluster_name)
+                    .with_page_size_refusal(super::parameter_contract::page_size_refusal(
+                        violations,
+                    ))
+            },
         ),
         "ListCapabilities" => addressed_with(
             protocol,
             LIST_CAPABILITIES_INPUT_SCHEMA,
             req,
-            |input: &ListCapabilitiesInput, _| addresses_cluster(&input.cluster_name),
+            |input: &ListCapabilitiesInput, violations| {
+                addresses_cluster(CLUSTER_NAME_MEMBER, &input.cluster_name)
+                    .with_page_size_refusal(super::parameter_contract::page_size_refusal(
+                        violations,
+                    ))
+            },
         ),
         "ListUpdates" => addressed_with(
             protocol,
             LIST_UPDATES_INPUT_SCHEMA,
             req,
-            |input: &ListUpdatesInput, _| addresses_cluster(&input.name),
+            |input: &ListUpdatesInput, violations| {
+                addresses_cluster(CLUSTER_SCOPE_NAME_MEMBER, &input.name)
+                    .with_page_size_refusal(super::parameter_contract::page_size_refusal(
+                        violations,
+                    ))
+            },
         ),
         _ => None,
     }
@@ -455,15 +707,18 @@ fn addressed(
 /// `crate::service::EmulatedService::override_operation` makes, with no store in
 /// hand.
 ///
-/// It is deliberately the cheap half: the answer itself needs the store and the
-/// request's signing region, which are only reachable once the claimed operation
-/// runs (see [`PrecedenceFirst::run`]).
+/// It is deliberately the cheap half: a question only the store can answer — whether
+/// the cluster this request is addressed to exists — is claimed by the fact that the
+/// request RESOLVES one, and answered once the claimed operation runs (see
+/// [`PrecedenceFirst::run`]). Everything else is decided from the request alone.
 pub fn has_a_question(key: &str, protocol: &dyn ServerHttpProtocol, req: &RtRequest) -> bool {
-    addressed(key, protocol, req).is_some()
+    addressed(key, protocol, req).is_some_and(|addressed| {
+        addressed.answers_from_the_request_alone() || addressed.cluster.is_some()
+    })
 }
 
-/// The operation this service serves for a request whose body the walk refuses and
-/// whose operation answers something else first.
+/// The operation this service serves for a request whose own text, authorization or
+/// cluster its operation answers before the body.
 ///
 /// An [`ErasedOperation`] rather than a response built in
 /// `Service::override_operation`, because that seam hands the router a BORROWED
@@ -504,6 +759,16 @@ impl<Eng: Send + Sync + 'static> PrecedenceFirst<Eng> {
                 }));
             }
         }
+        // THE REQUEST'S OWN ADDRESSING NEXT: a path label no cluster of this API could
+        // carry, and a page size outside its published bounds. Both are decided from
+        // the request alone, and neither names a resource any lookup could find, so no
+        // resolution can precede them.
+        if let Some(exception) = addressed.label.clone() {
+            return Some(Answer::ParameterRefused(exception));
+        }
+        if let Some(exception) = addressed.page_size.clone() {
+            return Some(Answer::ParameterRefused(exception));
+        }
         // THE VALUE THIS API DOES NOT DEFINE NEXT: it is decided from the request
         // alone, like the authorization above, and it names nothing any cluster could
         // hold, so no resolution can precede it (see
@@ -531,10 +796,10 @@ impl<Eng: Send + Sync + 'static> PrecedenceFirst<Eng> {
             }
         }
         // THE BODY LAST, in this service's own words for the parameter the walk
-        // refused: everything above is about the authorization of the request or the
-        // resources it names, which the recorded service answers first. A rule this
-        // service states no sentence for leaves this empty, and the modelled operation
-        // answers the framework's own report exactly as before.
+        // refused: everything above is about the request's own text, the authorization
+        // of it or the resources it names, which the recorded service answers first. A
+        // rule this service states no sentence for leaves this empty, and the modelled
+        // operation answers the framework's own report exactly as before.
         addressed.parameter.clone().map(Answer::ParameterRefused)
     }
 }

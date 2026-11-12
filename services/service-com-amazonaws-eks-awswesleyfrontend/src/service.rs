@@ -25,15 +25,16 @@
 //!   [`request_pipeline`], the sequence that runs before any handler — the IAM
 //!   authorization decision ([`authorization`]), then the pre-dispatch contracts:
 //!   a tag request the model's own tag contract refuses, so that refusal is stated
-//!   in the error code the called operation declares (see [`tag_contract`]), an
-//!   add-on request whose `resolveConflicts` is outside the modelled enum, so that
-//!   refusal names the operation it was sent to (see
-//!   [`resolve_conflicts_contract`]), and a request whose body the framework's walk
-//!   refuses but whose operation answers the pass-role authorization, a capability
-//!   type this API does not define, or the missing cluster first (see
-//!   [`precedence`], and [`off_enum_member_contract`] for the rule the
-//!   undefined-value half of it implements). A request none of them answers is
-//!   served by the generated operation the routing table names, exactly as before.
+//!   in the error code the called operation declares (see [`tag_contract`]), and a
+//!   request whose own addressing, authorization or cluster its operation answers
+//!   before the body — the `@httpLabel` cluster name, the pass-role authorization
+//!   of a role it hands Amazon EKS, the page size it asks for, a capability type
+//!   this API does not define, the missing cluster, and the add-on
+//!   `resolveConflicts` the cluster is resolved ahead of (see [`precedence`], with
+//!   [`off_enum_member_contract`] for the rule the undefined-value half of it
+//!   implements and [`resolve_conflicts_contract`] for the add-on member's own
+//!   sentence). A request none of them answers is served by the generated operation
+//!   the routing table names, exactly as before.
 //! - `override_refusal` — how this service words a request the framework refused
 //!   before any handler ran. The default returns `None`, keeping the framework's
 //!   wording. See the inline note on that method for how to reword.

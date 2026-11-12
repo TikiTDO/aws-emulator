@@ -593,15 +593,20 @@ async fn a_resolve_conflicts_value_outside_the_enum_is_refused_in_this_services_
 
     // The sentence rewords a refusal; it does not outrank the framework's own
     // validating walk. A body that ALSO breaks a modelled constraint — here
-    // `serviceAccountRoleArn`, whose `RoleArn` target is `@length(1..255)`, given an
-    // empty value — keeps the whole violation report, which one sentence about one
-    // member cannot carry.
+    // `serviceAccountRoleArn`, whose `RoleArn` target is `@length(1..255)`, given a
+    // role ARN of this account past that maximum — keeps the whole violation report,
+    // which one sentence about one member cannot carry.
+    let too_long_role = format!(
+        "arn:aws:iam::{}:role/{}",
+        engine::emulator_account_id(),
+        "r".repeat(255)
+    );
     let both_wrong = create_addon(
         &router,
         "conflicts",
         &serde_json::json!({
             "addonName": "vpc-cni",
-            "serviceAccountRoleArn": "",
+            "serviceAccountRoleArn": too_long_role,
             "resolveConflicts": "BANANA",
         }),
     )

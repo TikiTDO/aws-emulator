@@ -8,12 +8,11 @@
 //! ([`super::authorization`]) — a caller that may not perform the action is refused
 //! `AccessDeniedException` whatever else is wrong with the request, and nothing it asked
 //! for is read or written — and only then does the service judge the request itself: the
-//! tag contract, the add-on `resolveConflicts` contract and the precedence layer, each of
-//! which answers a request its own way (see [`super::tag_contract`],
-//! [`super::resolve_conflicts_contract`] and [`super::precedence`]). A request none of
-//! them claims is served by the generated operation exactly as it always was.
+//! tag contract and the precedence layer, each of which answers a request its own way
+//! (see [`super::tag_contract`] and [`super::precedence`]). A request neither claims is
+//! served by the generated operation exactly as it always was.
 //!
-//! It is ONE [`ErasedOperation`] rather than four decisions in
+//! It is ONE [`ErasedOperation`] rather than three decisions in
 //! [`smithy_server_runtime::Service::override_operation`], because that seam is handed no
 //! request context: the authorization decision needs the credential store the context
 //! carries ([`smithy_server_runtime::OperationContext::credential_store`]), which is
@@ -33,7 +32,7 @@ use smithy_server_runtime::{
 
 use crate::ops::types::{AccessDeniedException, SCHEMA_ACCESS_DENIED_EXCEPTION};
 
-use super::{precedence, resolve_conflicts_contract, tag_contract};
+use super::{precedence, tag_contract};
 
 /// The error code the model pins on `AccessDeniedException`, which is also its shape name.
 const ACCESS_DENIED_EXCEPTION: &str = "AccessDeniedException";
@@ -45,7 +44,7 @@ const ACCESS_DENIED_STATUS: u16 = 403;
 /// The pre-dispatch sequence of this service, holding the layers it runs in order.
 ///
 /// Holds the shared engine, because the authorization decision is made from the IAM and STS
-/// stores of that engine, and the three contract answerers, because
+/// stores of that engine, and the two contract answerers, because
 /// [`ErasedOperation::run`] hands the request to whichever of them claims it and each must
 /// be a borrow that outlives the call.
 pub struct RequestPipeline<Eng> {
@@ -54,14 +53,11 @@ pub struct RequestPipeline<Eng> {
     /// refuses, in the error channel those two operations declare (see
     /// [`tag_contract`]).
     refused_tag_request: tag_contract::RefusedTagRequest,
-    /// Answers a `CreateAddon` / `UpdateAddon` request whose `resolveConflicts` is outside
-    /// the modelled enum, in this service's own sentence for that value (see
-    /// [`resolve_conflicts_contract`]).
-    refused_addon_request: resolve_conflicts_contract::RefusedAddonRequest,
-    /// Answers a request whose body the framework's validating walk refuses but whose
-    /// operation answers something else FIRST — the pass-role authorization of a role it
-    /// hands Amazon EKS, a capability type this API does not define, or the cluster it is
-    /// addressed to (see [`precedence`]).
+    /// Answers a request whose own addressing, authorization or cluster its operation
+    /// judges BEFORE the body — the `@httpLabel` cluster name, the pass-role
+    /// authorization of a role it hands Amazon EKS, the page size it asks for, a value
+    /// this API does not define, or the cluster it is addressed to (see
+    /// [`precedence`]).
     precedence_first: precedence::PrecedenceFirst<Eng>,
 }
 
@@ -71,7 +67,6 @@ impl<Eng: Send + Sync + 'static> RequestPipeline<Eng> {
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
             refused_tag_request: tag_contract::RefusedTagRequest::new(),
-            refused_addon_request: resolve_conflicts_contract::RefusedAddonRequest::new(),
             precedence_first: precedence::PrecedenceFirst::new(Arc::clone(&engine)),
             engine,
         }
@@ -99,8 +94,8 @@ impl<Eng: Send + Sync + 'static> RequestPipeline<Eng> {
     /// Which pre-dispatch contract claims this request, or `None` when none does and the
     /// modelled operation serves it.
     ///
-    /// The ORDER is the one this sequence keeps, and it is stated here once: the two
-    /// contracts that reword a refusal of a named operation, then the precedence layer.
+    /// The ORDER is the one this sequence keeps, and it is stated here once: the contract
+    /// that rewords a refusal of a named operation, then the precedence layer.
     fn contract<'pipeline>(
         &'pipeline self,
         key: &str,
@@ -113,16 +108,12 @@ impl<Eng: Send + Sync + 'static> RequestPipeline<Eng> {
         if tag_contract::refusal_for(key, body, req).is_some() {
             return Some(&self.refused_tag_request as &dyn ErasedOperation);
         }
-        // An add-on request whose `resolveConflicts` is outside the modelled enum is
-        // refused in a sentence that names the OPERATION it was sent to (see
-        // [`resolve_conflicts_contract`]).
-        if resolve_conflicts_contract::refusal_for(key, body, req).is_some() {
-            return Some(&self.refused_addon_request as &dyn ErasedOperation);
-        }
-        // A request whose body the framework's validating walk would refuse, sent to an
-        // operation that answers the pass-role authorization of a role it hands Amazon EKS,
-        // a capability type this API does not define, or the cluster it is addressed to,
-        // BEFORE it judges the body (see [`precedence`]).
+        // A request sent to an operation that answers its own addressing (the
+        // `@httpLabel` cluster name, the page size), the pass-role authorization of a
+        // role it hands Amazon EKS, a value this API does not define, or the cluster it
+        // is addressed to BEFORE it judges the body (see [`precedence`]) — including the
+        // add-on `resolveConflicts` refusal, which that layer answers after the cluster
+        // (see [`super::resolve_conflicts_contract`]).
         if precedence::has_a_question(key, body, req) {
             return Some(&self.precedence_first as &dyn ErasedOperation);
         }

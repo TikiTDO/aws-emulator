@@ -17,7 +17,7 @@
 //! ARNs — and, across the suites, every member of this service that carries such a role
 //! (`CreateCluster$roleArn`, `CreateCluster$computeConfig.nodeRoleArn`,
 //! `CreateNodegroup$nodeRole`, `CreateCapability$roleArn`,
-//! `CreatePodIdentityAssociation$roleArn`,
+//! `CreateAddon$serviceAccountRoleArn`, `CreatePodIdentityAssociation$roleArn`,
 //! `RegisterCluster$connectorConfig.roleArn` — the last of which the recording shows
 //! reporting the SAME question as its own 400 `InvalidParameterException`, so its suite
 //! asserts that shape instead).
@@ -374,6 +374,85 @@ async fn create_capability_passes_only_a_capability_role_of_this_account() {
     assert_row(
         "a role of another account on a cluster that does not exist",
         "arn:aws:iam::111122223333:role/anything",
+        Verdict::CrossAccount,
+        &answer,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `CreateAddon$serviceAccountRoleArn`: the IAM role the add-on's Kubernetes service
+// account is given.
+//
+// The same rule on the add-on surface, and — like the capability above — decided
+// before anything is reported about the cluster the request names, so an unpassable
+// role is a 403 even when that cluster does not exist.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn create_addon_passes_only_a_service_account_role_of_this_account() {
+    let cluster = "addon-role-cluster";
+    for (index, (case, role_arn, verdict)) in role_rows().into_iter().enumerate() {
+        let router = emulator();
+        cluster_for_nodegroups(&router, cluster).await;
+        tokio::time::sleep(
+            service_com_amazonaws_eks_awswesleyfrontend::state::CLUSTER_ACTIVATION_DELAY,
+        )
+        .await;
+        // One add-on name installs at most once per cluster, and every row gets its own
+        // router anyway; the name is one the catalog publishes so the row is never
+        // refused for the add-on it asks for.
+        let addon = "vpc-cni";
+        let body = serde_json::json!({
+            "addonName": addon,
+            "serviceAccountRoleArn": role_arn,
+        });
+        let answer = call(
+            &router,
+            REGION,
+            "POST",
+            &format!("/clusters/{}/addons", encode_label(cluster)),
+            &body.to_string(),
+        )
+        .await;
+        assert_row(case, &role_arn, verdict, &answer);
+
+        // A refused create wrote nothing; an accepted one is there to read.
+        let expected_read = if verdict == Verdict::Passed { 200 } else { 404 };
+        let described = call(
+            &router,
+            REGION,
+            "GET",
+            &format!(
+                "/clusters/{}/addons/{}",
+                encode_label(cluster),
+                encode_label(addon)
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(
+            described.status, expected_read,
+            "case {case:?} (row {index}): expected DescribeAddon to answer \
+             {expected_read}, got {described:?}"
+        );
+    }
+
+    // The same rule, with no cluster at all: authorization is not reached through the
+    // parent resource, so an unpassable role is still a 403 and never a 404.
+    let router = emulator();
+    let role_arn = "arn:aws:iam::111122223333:role/anything";
+    let answer = call(
+        &router,
+        REGION,
+        "POST",
+        "/clusters/no-such-cluster/addons",
+        &serde_json::json!({ "addonName": "vpc-cni", "serviceAccountRoleArn": role_arn })
+            .to_string(),
+    )
+    .await;
+    assert_row(
+        "a role of another account on a cluster that does not exist",
+        role_arn,
         Verdict::CrossAccount,
         &answer,
     );

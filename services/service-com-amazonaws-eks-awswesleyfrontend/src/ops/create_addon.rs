@@ -10,6 +10,16 @@
 //! An add-on is a child of a cluster, so the layers this handler checks run from the
 //! OUTSIDE IN, and each layer's refusal is the modelled error for what it found:
 //!
+//! 0. the request's OWN ADDRESSING: the `@httpLabel` `clusterName` must be a name a
+//!    cluster of this API could carry, and the `serviceAccountRoleArn` must be a role
+//!    this caller may hand Amazon EKS (answered before dispatch as the 403 this
+//!    operation does not model, `crate::service::precedence`) that names a role IAM
+//!    could hold at all — otherwise `InvalidParameterException` (400). Neither
+//!    question needs any state, and a label outside the cluster-name grammar names no
+//!    cluster in any Region, so answering it as a not-found would invite a caller to
+//!    create a cluster under a name Amazon EKS will never accept. This stage runs
+//!    ahead of the framework's own refusal of a body member, which only a pre-dispatch
+//!    layer can order (`crate::service::precedence`);
 //! 1. the cluster named by the `@httpLabel` must exist IN THE REQUEST'S REGION —
 //!    otherwise `ResourceNotFoundException` (404), before any member of the body is
 //!    looked at, because a request against a cluster that does not exist cannot be
@@ -248,8 +258,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let region = state::request_region(ctx.parts());
         let now = SystemTime::now();
-        let mut guard = store.lock();
-        guard.materialize_due_transitions(now);
 
         // The two refusal shapes every parameter layer below reports through, both the
         // `InvalidParameterException` the operation models for a member of the body —
@@ -261,9 +269,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // is not offered, the build it is not offered, the configuration that add-on
         // does not take — reports the add-on and its cluster in the exception's
         // `addonName`/`clusterName`; one about the REQUEST'S OWN TEXT — a member of a
-        // form no add-on name, role ARN, service account or namespace can have, and a
-        // document that cannot be read at all — carries the sentence alone, as the
-        // recorded service answers each.
+        // form no add-on name, service account or namespace can have, the role that
+        // cannot be given to the add-on, and a document that cannot be read at all —
+        // carries the sentence alone, as the recorded service answers each.
         let invalid_parameter = |message: String| {
             CreateAddonError::from(CreateAddonErrorModeled::InvalidParameterException(
                 InvalidParameterException {
@@ -282,6 +290,73 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 },
             ))
         };
+
+        // LAYER 0 — the request's own addressing, which needs nothing from the store
+        // and so is judged before it is even locked. `clusterName` arrives in the path
+        // (`POST /clusters/{clusterName}/addons`) and every cluster name of this API
+        // obeys one grammar and one length maximum (`ClusterName` is `@length(1..100)`
+        // + `@pattern`, `crate::state::is_cluster_name`), so a label outside it names
+        // no cluster in any Region rather than one this Region does not hold: it is
+        // refused as the invalid parameter it is, before anything is looked up, in the
+        // sentence Amazon EKS states for that parameter and reporting the value the
+        // request supplied ([`crate::state::cluster_name_refusal`]). A 404 here would
+        // invite a caller that passed a cluster ARN where a bare name belongs to create
+        // a cluster under a name Amazon EKS will never accept.
+        //
+        // The same answer is given BEFORE the framework's validating walk could refuse
+        // a member of the body, which is the order the recorded service keeps and which
+        // only a pre-dispatch layer can restore (see `crate::service::precedence`); the
+        // check stands here too, so this operation reports it whichever path reaches it.
+        if !state::is_cluster_name(&input.cluster_name) {
+            return Err(CreateAddonErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    cluster_name: Some(input.cluster_name.clone()),
+                    message: Some(state::cluster_name_refusal(
+                        "clusterName",
+                        &input.cluster_name,
+                    )),
+                    ..Default::default()
+                },
+            )
+            .into());
+        }
+
+        // Still the request's own addressing: `serviceAccountRoleArn` is the IAM role
+        // the add-on's Kubernetes service account is given, so the add-on operations ask
+        // two questions about it, both decided from the value alone and both before the
+        // cluster is resolved. Whether this caller may PASS it is the service-wide
+        // pass-role question, answered as the 403 this operation does not model, before
+        // dispatch (`crate::service::precedence`), so it is not re-judged here. Whether
+        // the value names a role IAM could hold at all is this one
+        // ([`crate::state::names_a_role_iam_could_hold`]): a role name or path outside
+        // the grammar IAM publishes names no role in any account, and Amazon EKS refuses
+        // it with the sentence it states for that parameter
+        // ([`crate::state::ADDON_SERVICE_ACCOUNT_ROLE_ARN_REFUSAL`]).
+        if input
+            .service_account_role_arn
+            .as_deref()
+            .is_some_and(|role_arn| !state::names_a_role_iam_could_hold(role_arn))
+        {
+            return Err(invalid_parameter(
+                state::ADDON_SERVICE_ACCOUNT_ROLE_ARN_REFUSAL.to_string(),
+            ));
+        }
+        // And whether IAM HOLDS the role that value names, which only IAM can answer:
+        // a role the account does not have cannot be given to the add-on's service
+        // account either, and it is the same refusal
+        // ([`crate::state::iam_holds_no_such_role`]). It runs with no lock held — it is
+        // a call out to another service — and refuses nothing where there is no IAM to
+        // ask, because a refusal is grounded in what IAM answered.
+        if let Some(role_arn) = input.service_account_role_arn.as_deref() {
+            if state::iam_holds_no_such_role(ctx, &region, role_arn).await {
+                return Err(invalid_parameter(
+                    state::ADDON_SERVICE_ACCOUNT_ROLE_ARN_REFUSAL.to_string(),
+                ));
+            }
+        }
+
+        let mut guard = store.lock();
+        guard.materialize_due_transitions(now);
 
         // LAYER 1 — the cluster. An add-on is created ON a cluster
         // (`POST /clusters/{clusterName}/addons`) and a cluster name identifies a
@@ -386,16 +461,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .default_addon_version(&input.addon_name, &cluster_version, now)
                 .unwrap_or_else(|| state::derive_default_addon_version(&cluster_version))
         });
-        if let Some(role_arn) = input
-            .service_account_role_arn
-            .as_deref()
-            .filter(|arn| !state::is_iam_role_arn(arn))
-        {
-            return Err(invalid_parameter(format!(
-                "serviceAccountRoleArn {role_arn:?} is not an IAM role ARN of the form \
-                 arn:<partition>:iam::<account>:role/<name>."
-            )));
-        }
+        // `serviceAccountRoleArn` is judged with the request's own addressing, above:
+        // the authorization of a role the request asks Amazon EKS to pass needs nothing
+        // from the cluster, so it is not re-judged here.
         // "The set of configuration values for the add-on that's created. The values
         // that you provide are validated against the schema returned by
         // DescribeAddonConfiguration" — so the document is READ first and then held to
@@ -797,8 +865,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // add-on already running on the cluster; this emulator runs no Kubernetes,
             // so there is never a self-managed copy to resolve against, and the member
             // is not part of what an `Addon` reports. A value outside the modelled
-            // enum never reaches here: it is refused before dispatch, in this
-            // service's own wording (`crate::service::resolve_conflicts_contract`).
+            // enum never reaches here: it is refused before dispatch, once the cluster
+            // has been resolved, in this service's own wording
+            // (`crate::service::precedence`, `crate::service::resolve_conflicts_contract`).
         };
 
         // The associations this install created are already in the store, so the

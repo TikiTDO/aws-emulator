@@ -145,6 +145,34 @@ pub fn refusal_message(violations: &[Violation]) -> Option<String> {
     }
 }
 
+/// The refusal a listing's `maxResults` outside its published bounds earns, or
+/// `None` when that is not what the walk refused.
+///
+/// `maxResults` travels in the QUERY STRING (`@httpQuery`), so it is part of the
+/// request's own addressing rather than of a body: Amazon EKS answers a page size
+/// outside its bounds before it resolves the resource the request is addressed to, and
+/// the refusal carries the sentence ALONE — no cluster is named, because the complaint
+/// is about the page the caller asked for and not about any resource (see
+/// [`super::precedence`] for where in the order this is answered).
+pub fn page_size_refusal(violations: &[Violation]) -> Option<InvalidParameterException> {
+    let violation = violations.first()?;
+    if member_of(&violation.path)? != MAX_RESULTS_MEMBER {
+        return None;
+    }
+    // Only the published bounds earn the published sentence: the same comparison
+    // `refusal_message` makes, so a differently bounded member of some later model
+    // revision keeps the framework's report rather than being told a bound it does not
+    // have.
+    let message = match &violation.kind {
+        ViolationKind::MinValue(_) | ViolationKind::MaxValue(_) => refusal_message(violations)?,
+        _ => return None,
+    };
+    Some(InvalidParameterException {
+        message: Some(message),
+        ..Default::default()
+    })
+}
+
 /// The refusal `CreateCluster` answers a parameter the walk refused with: Amazon EKS's
 /// own sentence for the rule it broke, and — for the rules whose refusal names it —
 /// the `clusterName` the request asked for.

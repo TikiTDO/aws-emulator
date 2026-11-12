@@ -16,7 +16,8 @@
 use std::time::Duration;
 
 use service_com_amazonaws_eks_awswesleyfrontend::state::{
-    cluster_not_found_message, CLUSTER_ACTIVATION_DELAY, CROSS_ACCOUNT_PASS_ROLE_REFUSAL,
+    cluster_not_found_message, max_results_range_message, CLUSTER_ACTIVATION_DELAY,
+    CROSS_ACCOUNT_PASS_ROLE_REFUSAL, MAX_LIST_MAX_RESULTS, MIN_LIST_MAX_RESULTS,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -92,14 +93,15 @@ type BuildRequest = fn(&str) -> Request;
 
 // ---------------------------------------------------------------------------
 // RULE: a request addressed to a cluster that does not exist is answered with that
-// missing cluster, whatever is wrong with its body.
+// missing cluster, whatever is wrong with its BODY — while what is wrong with the
+// request's own addressing (the page size it asks for, in the query string) is
+// answered before the cluster is resolved at all.
 // ---------------------------------------------------------------------------
 
 /// The table spans what the rule generalises over: which operation the request was
-/// sent to (a configuration update, three child creates, an association, and four
-/// listings), and which kind of modelled constraint its body breaks — an enum
-/// member, an integer range below its minimum, and a map below its minimum entry
-/// count.
+/// sent to (a configuration update, three child creates and an association), and
+/// which kind of modelled constraint its body breaks — an enum member, an integer
+/// range below its minimum, and a map below its minimum entry count.
 #[tokio::test]
 async fn an_unknown_cluster_is_reported_before_the_body_is_refused() {
     let router = emulator();
@@ -107,7 +109,7 @@ async fn an_unknown_cluster_is_reported_before_the_body_is_refused() {
     // same request against it must be refused as the bad body it is.
     active_cluster(&router, "precedence-cluster").await;
 
-    let rows: [(&str, BuildRequest); 10] = [
+    let rows: [(&str, BuildRequest); 6] = [
         (
             "UpdateClusterConfig with a log type outside the modelled enum",
             |cluster| {
@@ -188,22 +190,6 @@ async fn an_unknown_cluster_is_reported_before_the_body_is_refused() {
                 )
             },
         ),
-        (
-            "ListNodegroups with maxResults below its modelled minimum",
-            |cluster| Request::get(cluster_path(cluster, "/node-groups?maxResults=0")),
-        ),
-        (
-            "ListAddons with maxResults below its modelled minimum",
-            |cluster| Request::get(cluster_path(cluster, "/addons?maxResults=0")),
-        ),
-        (
-            "ListCapabilities with maxResults below its modelled minimum",
-            |cluster| Request::get(cluster_path(cluster, "/capabilities?maxResults=0")),
-        ),
-        (
-            "ListUpdates with maxResults below its modelled minimum",
-            |cluster| Request::get(cluster_path(cluster, "/updates?maxResults=0")),
-        ),
     ];
 
     for (case, build) in &rows {
@@ -240,6 +226,93 @@ async fn an_unknown_cluster_is_reported_before_the_body_is_refused() {
             "case {case:?} on an existing cluster: expected InvalidParameterException, \
              got {code:?}"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RULE: the page size a listing asks for travels in the QUERY STRING, so it is part
+// of the request's own addressing: a value outside the bounds the model publishes is
+// refused 400 `InvalidParameterException` with the page-size sentence BEFORE the
+// cluster the listing is addressed to is resolved, and the refusal names no resource.
+// ---------------------------------------------------------------------------
+
+/// The table spans what the rule generalises over: which listing of a cluster's
+/// resources was called (four, including one whose label member the model calls
+/// `name` rather than `clusterName`), which published bound the value broke, and
+/// whether the cluster it is addressed to exists at all.
+///
+/// Source for the bounds: every `maxResults` of this API is `@range {min: 1, max:
+/// 100}` (`smithy_query query="operation" operation="ListAddons"` reports
+/// `ListAddonsRequestMaxResults` with those bounds), read here through the published
+/// constants rather than written out.
+#[tokio::test]
+async fn a_page_size_outside_its_bounds_is_refused_before_the_cluster() {
+    let router = emulator();
+    active_cluster(&router, "page-size-cluster").await;
+
+    let listings = [
+        ("ListNodegroups", "/node-groups"),
+        ("ListAddons", "/addons"),
+        ("ListCapabilities", "/capabilities"),
+        ("ListUpdates", "/updates"),
+    ];
+    // One value below the published minimum, one above the published maximum, and
+    // both published bounds themselves, which are inside the range.
+    let refused = [MIN_LIST_MAX_RESULTS - 1, MAX_LIST_MAX_RESULTS + 1];
+    let accepted = [MIN_LIST_MAX_RESULTS, MAX_LIST_MAX_RESULTS];
+
+    for (operation, suffix) in listings {
+        for size in refused {
+            for cluster in [GHOST, "page-size-cluster"] {
+                let case = format!("{operation} maxResults={size} on cluster {cluster:?}");
+                let answer =
+                    Request::get(cluster_path(cluster, &format!("{suffix}?maxResults={size}")))
+                        .send(&router)
+                        .await;
+                assert_eq!(
+                    answer.status, 400,
+                    "case {case}: expected HTTP 400, got {answer:?}"
+                );
+                let code = error_code(&answer);
+                assert_eq!(
+                    code, "InvalidParameterException",
+                    "case {case}: expected InvalidParameterException, got {code:?}"
+                );
+                let expected = max_results_range_message();
+                assert_eq!(
+                    answer.body["message"],
+                    serde_json::json!(expected),
+                    "case {case}: expected message {expected:?}, got {:?}",
+                    answer.body["message"]
+                );
+                assert!(
+                    answer.body.get("clusterName").is_none(),
+                    "case {case}: the page-size refusal names no resource, got {:?}",
+                    answer.body["clusterName"]
+                );
+            }
+        }
+        // A page size INSIDE the bounds leaves the order as it was: the listing is
+        // served on the cluster that exists and reports the missing one on the ghost.
+        for size in accepted {
+            let served =
+                Request::get(cluster_path("page-size-cluster", &format!("{suffix}?maxResults={size}")))
+                    .send(&router)
+                    .await;
+            assert_eq!(
+                served.status, 200,
+                "case {operation} maxResults={size} on an existing cluster: expected 200, \
+                 got {served:?}"
+            );
+            let missing = Request::get(cluster_path(GHOST, &format!("{suffix}?maxResults={size}")))
+                .send(&router)
+                .await;
+            assert_eq!(
+                missing.status, 404,
+                "case {operation} maxResults={size} on an unknown cluster: expected 404, \
+                 got {missing:?}"
+            );
+        }
     }
 }
 

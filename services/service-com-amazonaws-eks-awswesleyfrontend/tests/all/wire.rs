@@ -138,6 +138,46 @@ pub fn xml_element(body: &str, name: &str) -> Option<String> {
     Some(body[start..end].to_string())
 }
 
+/// One awsQuery call to a peer service of this emulator — IAM or STS — as the account's
+/// own credential, answering its HTTP status and body text.
+///
+/// Here rather than in a suite because more than one suite needs a peer record to exist
+/// before this service will serve a request that names it (an IAM role, an assumed
+/// session), and a second copy is a second place where those setup calls can drift.
+pub async fn query(
+    router: &MultiServiceRouter,
+    signing_name: &str,
+    version: &str,
+    action: &str,
+    params: &[(&str, String)],
+) -> (u16, String) {
+    let mut body = format!("Action={action}&Version={version}");
+    for (name, value) in params {
+        body.push('&');
+        body.push_str(name);
+        body.push('=');
+        body.push_str(&encode_label(value));
+    }
+    let request = http::Request::builder()
+        .method("POST")
+        .uri(format!("https://{signing_name}.amazonaws.com/"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header(
+            "authorization",
+            format!(
+                "AWS4-HMAC-SHA256 Credential={DEFAULT_ACCESS_KEY_ID}/20260101/us-west-2/\
+                 {signing_name}/aws4_request, SignedHeaders=host, Signature=deadbeef"
+            ),
+        )
+        .body(bytes::Bytes::from(body))
+        .expect("a well-formed awsQuery request");
+    let response = router.dispatch(request).await;
+    (
+        response.status().as_u16(),
+        String::from_utf8_lossy(response.body()).to_string(),
+    )
+}
+
 pub async fn call(
     router: &MultiServiceRouter,
     region: &str,

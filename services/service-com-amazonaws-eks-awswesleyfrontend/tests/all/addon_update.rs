@@ -40,12 +40,14 @@ const REGION: &str = "us-west-2";
 const KUBERNETES_VERSION: &str = "1.33";
 
 const ROLE_ARN: &str = "arn:aws:iam::000000000000:role/AddonRole";
-const OTHER_ROLE_ARN: &str = "arn:aws:iam::111122223333:role/OtherAddonRole";
-/// A SECOND role of this account, for the association another owner holds: the
-/// role a request hands Amazon EKS must be one of the caller's own account
-/// ([`crate::pass_role_authorization`]), which `OTHER_ROLE_ARN` above — a role of
-/// another account, carried only on members this service stores rather than
-/// passes — is not.
+/// A SECOND role an add-on's service account can be given, for the rows that change
+/// which role the add-on runs under.
+///
+/// A role of THIS account: `serviceAccountRoleArn` is a role the request asks Amazon
+/// EKS to pass, so one of another account is refused 403 before anything else about
+/// the request is judged ([`crate::addon_request_precedence`]).
+const OTHER_ROLE_ARN: &str = "arn:aws:iam::000000000000:role/OtherAddonRole";
+/// A THIRD role of this account, for the association another owner holds.
 const CONTESTING_ROLE_ARN: &str = "arn:aws:iam::000000000000:role/ContestingRole";
 
 /// A configuration document every published add-on's schema accepts:
@@ -909,12 +911,12 @@ async fn an_unanswerable_update_is_refused_and_writes_nothing() {
             "ResourceNotFoundException",
         ),
         (
-            "a serviceAccountRoleArn that is not a role ARN",
+            "a serviceAccountRoleArn this caller may not pass",
             cluster,
             "vpc-cni",
             serde_json::json!({ "serviceAccountRoleArn": "AddonRole" }),
-            400,
-            "InvalidParameterException",
+            403,
+            "AccessDeniedException",
         ),
         (
             "a serviceAccountRoleArn carrying a region (IAM is global)",
@@ -923,8 +925,8 @@ async fn an_unanswerable_update_is_refused_and_writes_nothing() {
             serde_json::json!({
                 "serviceAccountRoleArn": "arn:aws:iam:us-west-2:000000000000:role/AddonRole",
             }),
-            400,
-            "InvalidParameterException",
+            403,
+            "AccessDeniedException",
         ),
         (
             "configurationValues that open a JSON object and do not close it",

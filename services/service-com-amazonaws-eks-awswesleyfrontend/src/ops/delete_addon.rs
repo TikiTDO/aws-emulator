@@ -167,6 +167,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ))
         };
 
+        // THE REQUEST'S OWN ADDRESSING FIRST, before the store is even locked:
+        // `clusterName` arrives in the path and every cluster name of this API obeys
+        // one grammar and one length maximum (`ClusterName` is `@length(1..100)` +
+        // `@pattern`, [`crate::state::is_cluster_name`]), so a label outside it names
+        // no cluster in ANY Region — it is the invalid parameter it is, in the sentence
+        // Amazon EKS states for that parameter
+        // ([`crate::state::cluster_name_refusal`]), rather than a not-found that would
+        // invite the caller to create a cluster under a name Amazon EKS will never
+        // accept. The framework's validating walk does not judge a value bound to an
+        // `@httpLabel`, so this is where it is judged.
+        if !crate::state::is_cluster_name(&input.cluster_name) {
+            return Err(DeleteAddonErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    cluster_name: Some(input.cluster_name.clone()),
+                    message: Some(crate::state::cluster_name_refusal(
+                        "clusterName",
+                        &input.cluster_name,
+                    )),
+                    ..Default::default()
+                },
+            )
+            .into());
+        }
+
         let now = SystemTime::now();
         let mut guard = store.lock();
         guard.materialize_due_transitions(now);

@@ -31,6 +31,76 @@ pub const CROSS_ACCOUNT_PASS_ROLE_REFUSAL: &str = "Cross-account pass role is no
 /// differs, and each reports it as its own recording shows.
 pub const CONNECTOR_ROLE_ARN_REFUSAL: &str = "The provided roleArn is invalid.";
 
+/// The refusal an add-on request whose `serviceAccountRoleArn` is not a role the
+/// add-on's service account could be given earns.
+///
+/// The SENTENCE is the one the recorded service answers for this class, verbatim —
+/// including the internal parameter name `addonServiceAccountRoleArn`, which is
+/// how Amazon EKS words this refusal rather than the member name the model
+/// publishes, exactly as `RegisterCluster`'s connector-role refusal names a
+/// `roleArn` ([`CONNECTOR_ROLE_ARN_REFUSAL`]). It is fixed text with no variable
+/// part, so nothing of the request is echoed into it.
+///
+/// The add-on operations ask TWO questions about that role, reported in two
+/// classes. Whether this caller may pass it at all is the service-wide pass-role
+/// question ([`pass_role_refusal`], 403 [`CROSS_ACCOUNT_PASS_ROLE_REFUSAL`]).
+/// Whether the value names a role the account could have — one inside the grammar
+/// IAM publishes for a role ([`names_a_role_iam_could_hold`]) and one IAM actually
+/// holds ([`iam_holds_no_such_role`]) — is this one, refused 400
+/// `InvalidParameterException` in that sentence: the same split
+/// [`CONNECTOR_ROLE_ARN_REFUSAL`] makes for a registration's connector role.
+pub const ADDON_SERVICE_ACCOUNT_ROLE_ARN_REFUSAL: &str =
+    "The provided addonServiceAccountRoleArn is invalid.";
+
+/// The role-NAME grammar IAM publishes: `roleNameType` is `@length(1..64)` +
+/// `@pattern ^[\w+=,.@-]+$`
+/// (`smithy_query(query="shape",shape="roleNameType",
+/// model_path="services/service-com-amazonaws-iam-awsidentitymanagementv20100508/smithy-model/com-amazonaws-iam-awsidentitymanagementv20100508.json")`).
+const MAX_IAM_ROLE_NAME_LEN: usize = 64;
+
+/// Whether `role_arn` names a role IAM COULD hold: an IAM role ARN
+/// ([`is_iam_role_arn`]) whose resource is `role/`, an optional path, and a role
+/// name, each inside the grammar IAM publishes for it — the role name
+/// `^[\w+=,.@-]{1,64}$` (`roleNameType`) and every path segment printable ASCII
+/// (`pathType` is `^(\u002F)|(\u002F[\u0021-\u007E]+\u002F)$`).
+///
+/// A value outside those grammars names no role in any account, whatever else
+/// about it looks like an ARN, which is why it is a question about the PARAMETER
+/// rather than about the caller's permission to pass it: the operations that take
+/// such a role refuse it with their own sentence
+/// ([`ADDON_SERVICE_ACCOUNT_ROLE_ARN_REFUSAL`]), while a well-formed role of
+/// another account or partition is the pass-role denial [`pass_role_refusal`]
+/// answers.
+pub fn names_a_role_iam_could_hold(role_arn: &str) -> bool {
+    if !super::is_iam_role_arn(role_arn) {
+        return false;
+    }
+    // `is_iam_role_arn` has already established the `role/<resource>` form, so the
+    // resource below is the path (if any) followed by the role's own name.
+    let Some(resource) = role_arn
+        .splitn(6, ':')
+        .nth(5)
+        .and_then(|resource| resource.strip_prefix("role/"))
+    else {
+        return false;
+    };
+    let mut segments: Vec<&str> = resource.split('/').collect();
+    let Some(name) = segments.pop() else {
+        return false;
+    };
+    let named = !name.is_empty()
+        && name.chars().count() <= MAX_IAM_ROLE_NAME_LEN
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '=' | ',' | '.' | '@' | '-'));
+    // Every path segment is printable ASCII and carries no delimiter of its own; the
+    // slashes it is spelled with are what `split` consumed.
+    let pathed = segments
+        .iter()
+        .all(|segment| !segment.is_empty() && segment.bytes().all(|byte| (0x21..=0x7E).contains(&byte)));
+    named && pathed
+}
+
 /// The service principal the EKS connector role must let assume it: the cluster
 /// is registered as a Systems Manager managed instance, so SSM is what assumes
 /// the role `connectorConfig.roleArn` names (Amazon EKS User Guide, "Connecting

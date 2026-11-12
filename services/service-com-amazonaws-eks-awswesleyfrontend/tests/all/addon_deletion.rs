@@ -34,7 +34,10 @@ use crate::wire::{call, emulator, encode_label, error_code, Answer};
 const ROLE_ARN: &str = "arn:aws:iam::000000000000:role/AddonRole";
 
 /// Another one, so an update can ask for a value the add-on does not already have.
-const OTHER_ROLE_ARN: &str = "arn:aws:iam::111122223333:role/OtherAddonRole";
+/// A role of THIS account: `serviceAccountRoleArn` is a role the request asks Amazon
+/// EKS to pass, so one of another account is refused 403 before anything else about
+/// the request is judged ([`crate::addon_request_precedence`]).
+const OTHER_ROLE_ARN: &str = "arn:aws:iam::000000000000:role/OtherAddonRole";
 
 /// One cluster in [`REGION`], waited into `ACTIVE` so the add-on layer that
 /// requires a running control plane is past.

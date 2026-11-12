@@ -226,6 +226,64 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }))
         })?;
 
+        // LAYER 0 — the request's own addressing, which needs nothing from this
+        // service's own state and so is judged before the store is even locked.
+        //
+        // The `@httpLabel` `clusterName` must be a name a cluster of this API could
+        // carry (`ClusterName` is `@length(1..100)` + `@pattern`,
+        // [`crate::state::is_cluster_name`]), so a label outside it names no cluster in
+        // any Region and is refused as the invalid parameter it is rather than looked
+        // up. And `serviceAccountRoleArn`, the IAM role the add-on's Kubernetes service
+        // account is given, must be a role this caller may hand Amazon EKS — the
+        // service-wide pass-role question, answered before dispatch as the 403 this
+        // operation does not model (`crate::service::precedence`), so it is not
+        // re-judged here — and one IAM could hold at all
+        // ([`crate::state::names_a_role_iam_could_hold`]), which is refused with the
+        // sentence this API states for that parameter. The pre-dispatch layer gives
+        // these same answers ahead of the framework's own refusal of a body member.
+        if !state::is_cluster_name(&input.cluster_name) {
+            return Err(UpdateAddonErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    cluster_name: Some(input.cluster_name.clone()),
+                    message: Some(state::cluster_name_refusal(
+                        "clusterName",
+                        &input.cluster_name,
+                    )),
+                    ..Default::default()
+                },
+            )
+            .into());
+        }
+        if input
+            .service_account_role_arn
+            .as_deref()
+            .is_some_and(|role_arn| !state::names_a_role_iam_could_hold(role_arn))
+        {
+            // The sentence ALONE: nothing was resolved when the role was judged, so
+            // there is no cluster and no add-on for the payload to report.
+            return Err(UpdateAddonErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    message: Some(state::ADDON_SERVICE_ACCOUNT_ROLE_ARN_REFUSAL.to_string()),
+                    ..Default::default()
+                },
+            )
+            .into());
+        }
+        // And whether IAM HOLDS the role that value names, which only IAM can answer
+        // ([`crate::state::iam_holds_no_such_role`]): the same refusal, with no lock
+        // held, and nothing refused where there is no IAM to ask.
+        if let Some(role_arn) = input.service_account_role_arn.as_deref() {
+            if state::iam_holds_no_such_role(ctx, &region, role_arn).await {
+                return Err(UpdateAddonErrorModeled::InvalidParameterException(
+                    InvalidParameterException {
+                        message: Some(state::ADDON_SERVICE_ACCOUNT_ROLE_ARN_REFUSAL.to_string()),
+                        ..Default::default()
+                    },
+                )
+                .into());
+            }
+        }
+
         let mut guard = store.lock();
         guard.materialize_due_transitions(now);
 
@@ -408,16 +466,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 ));
             }
         }
-        if let Some(role_arn) = input
-            .service_account_role_arn
-            .as_deref()
-            .filter(|arn| !state::is_iam_role_arn(arn))
-        {
-            return Err(invalid_parameter(format!(
-                "serviceAccountRoleArn {role_arn:?} is not an IAM role ARN of the form \
-                 arn:<partition>:iam::<account>:role/<name>."
-            )));
-        }
+        // `serviceAccountRoleArn` is judged with the request's own addressing, at the
+        // top of this handler: the authorization of a role the request asks Amazon EKS
+        // to pass needs nothing from the cluster or the add-on, so it is not re-judged
+        // here.
         // "The values that you provide are validated against the schema returned by
         // DescribeAddonConfiguration" — so the document is READ first
         // ([`crate::state::read_addon_configuration`], the one reading this operation
