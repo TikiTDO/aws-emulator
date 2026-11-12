@@ -109,11 +109,6 @@ mod event_type {
     pub const VALIDATION_ERROR: &str = "VALIDATION_ERROR";
 }
 
-/// `OperationEvent$DetailedStatus` for an event reporting a validation failure, from the
-/// model's `DetailedStatus` enum: the operation's additional status is that a validation
-/// failed.
-const VALIDATION_FAILED: &str = "VALIDATION_FAILED";
-
 /// `OperationEvent$ValidationFailureMode` for one: the member targets the failure-mode enum
 /// (`[FAIL, WARN]`), and a validation whose failure FAILED the change set was handled by
 /// failing rather than warned about.
@@ -196,10 +191,7 @@ fn operation_event_view(stored: &StoredEvent, operation: Option<&StoredOperation
         hook_status_reason: None,
         hook_invocation_point: None,
         hook_failure_mode: None,
-        detailed_status: stored
-            .validation
-            .as_ref()
-            .map(|_| VALIDATION_FAILED.to_string()),
+        detailed_status: crate::state::detailed_status_of(stored).map(str::to_string),
         // "Specifies how validation failures are handled": a validation that FAILED the
         // change set is one whose failure was handled by failing — the `FAIL` of the
         // failure-mode enum this member targets — rather than warned about.

@@ -14,9 +14,11 @@
 //! again resumes it.
 //!
 //! The message body is the event as `Key='value'` lines, one per line, in the order
-//! [`NOTIFICATION_KEYS`] fixes. A member the event does not carry is rendered
-//! [`ABSENT_VALUE`], in one rule for every member, rather than being left out — a subscriber
-//! parses the same line set for every event.
+//! [`NOTIFICATION_KEYS`] fixes. What a member the event has no value for renders as is stated
+//! per member, once: the two members a notification states only where the event HAS them
+//! ([`OMITTED_WHEN_ABSENT`]) carry no line at all without one, and every other member states
+//! its own absent form ([`absent_value`]) rather than being left out — so a subscriber parses
+//! the same line, at the same position, for it on every event.
 //!
 //! ## When a notification is owed, and to whom
 //!
@@ -68,16 +70,33 @@ const SNS_API_VERSION: &str = "2010-03-31";
 /// The `Subject` every one of these notifications carries.
 const SUBJECT: &str = "AWS CloudFormation Notification";
 
-/// What a member the event does not carry is rendered as.
+/// The DEFAULT form a member the event carries no value for is rendered as; the two lists
+/// below name the members whose absent form differs.
 pub const ABSENT_VALUE: &str = "null";
 
+/// The members whose absent form is the EMPTY STRING rather than [`ABSENT_VALUE`]: the
+/// success/failure message of the transition and its detailed status are STATUS TEXT, which
+/// an event that reports none states as empty rather than as a value.
+const EMPTY_WHEN_ABSENT: [&str; 2] = ["ResourceStatusReason", "DetailedStatus"];
+
+/// The members a notification states only for an event that HAS one, and leaves out
+/// altogether otherwise: the physical resource an event about a resource nothing has created
+/// yet does not name, and the operating principal, which is stated on an event about the
+/// STACK itself (`PrincipalId` is an attribute of the stack operation, not of a resource's
+/// transition).
+const OMITTED_WHEN_ABSENT: [&str; 2] = ["PhysicalResourceId", "PrincipalId"];
+
+/// How one key's value is rendered when the event carries none.
+fn absent_value(key: &str) -> &'static str {
+    if EMPTY_WHEN_ABSENT.contains(&key) {
+        ""
+    } else {
+        ABSENT_VALUE
+    }
+}
+
 /// The keys one notification body carries, in the order it carries them.
-///
-/// `PrincipalId` is one of them and this emulator has no value for it: it is the IAM
-/// principal id of the caller, and nobody is authenticated here, so it renders as
-/// [`ABSENT_VALUE`] like any other member an event does not carry. The line is there because
-/// the rule is the LINE SET — a subscriber parses the same keys for every event.
-pub const NOTIFICATION_KEYS: [&str; 13] = [
+pub const NOTIFICATION_KEYS: [&str; 14] = [
     "StackId",
     "Timestamp",
     "EventId",
@@ -88,6 +107,7 @@ pub const NOTIFICATION_KEYS: [&str; 13] = [
     "ResourceProperties",
     "ResourceStatus",
     "ResourceStatusReason",
+    "DetailedStatus",
     "ResourceType",
     "StackName",
     "ClientRequestToken",
@@ -143,12 +163,18 @@ pub fn body_of(event: &super::StoredEvent) -> String {
             // "Namespace" is the account the stack belongs to.
             "Namespace" => Some(ACCOUNT_NAMESPACE.get_or_init(account_namespace).as_str()),
             "PhysicalResourceId" => event.physical_resource_id.as_deref(),
-            // The caller's IAM principal, which this emulator holds no value for: nobody is
-            // authenticated here, so the line is rendered absent rather than invented.
-            "PrincipalId" => None,
+            // The IAM principal the stack operation was made by ([`caller_principal_id`]),
+            // which the notification of an event about the STACK itself carries.
+            "PrincipalId" => (event.resource_type == super::STACK_RESOURCE_TYPE)
+                .then(|| CALLER_PRINCIPAL_ID.get_or_init(caller_principal_id).as_str()),
             "ResourceProperties" => event.resource_properties.as_deref(),
             "ResourceStatus" => Some(event.resource_status.as_str()),
             "ResourceStatusReason" => event.resource_status_reason.as_deref(),
+            // `StackEvent$DetailedStatus`, "an optional field that contains information
+            // about the detailed status of the stack event": the event's own value, stated
+            // once for every reader of an event ([`super::detailed_status_of`]), with the
+            // member's empty absent form for an event that reports none.
+            "DetailedStatus" => super::detailed_status_of(event),
             "ResourceType" => Some(event.resource_type.as_str()),
             "StackName" => Some(event.stack_name.as_str()),
             "ClientRequestToken" => event.client_request_token.as_deref(),
@@ -156,10 +182,17 @@ pub fn body_of(event: &super::StoredEvent) -> String {
             // module's own constant, so there is no other key to answer.
             _ => None,
         };
-        let value = value.filter(|value| !value.is_empty()).unwrap_or(ABSENT_VALUE);
+        let rendered = match value.filter(|value| !value.is_empty()) {
+            Some(value) => value,
+            // A member the body states only where the event HAS it carries no line at all
+            // without one ([`OMITTED_WHEN_ABSENT`]); every other member states its own
+            // absent form, so a subscriber parses the same line for it on every event.
+            None if OMITTED_WHEN_ABSENT.contains(&key) => continue,
+            None => absent_value(key),
+        };
         body.push_str(key);
         body.push_str("='");
-        body.push_str(value);
+        body.push_str(rendered);
         body.push_str("'\n");
     }
     body
@@ -172,6 +205,22 @@ static ACCOUNT_NAMESPACE: ::std::sync::OnceLock<String> = ::std::sync::OnceLock:
 /// The account id that namespace is.
 fn account_namespace() -> String {
     ::emulator_server::emulator_account_id().to_string()
+}
+
+/// The IAM principal a notification states as the one that operated the stack, computed once
+/// for the same reason the namespace above is.
+static CALLER_PRINCIPAL_ID: ::std::sync::OnceLock<String> = ::std::sync::OnceLock::new();
+
+/// The unique id of the IAM entity whose credential operates this account's stacks.
+///
+/// The emulator publishes ONE long-term credential, and the principal it speaks for — the
+/// account's single IAM user — is stated once for the whole tree
+/// (`service_common::caller_principal`): the `UserId` STS reports for a caller presenting
+/// that credential, and the id IAM holds for that user. So the principal a notification
+/// names is the one a subscriber that asks for its own identity reads back, rather than an
+/// id nothing resolves.
+fn caller_principal_id() -> String {
+    ::service_common::caller_principal::ambient_user_id()
 }
 
 /// One event's `Timestamp`, as a notification states it: the instant in the

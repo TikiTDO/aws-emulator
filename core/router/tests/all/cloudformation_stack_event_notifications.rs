@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::cloudwatch_alarm_action_reaches_its_subscribed_queue::{
-    given_topic_with_subscriber, router, Grant,
+    authorization, given_topic_with_subscriber, router, Grant,
 };
 use crate::query_wire::{block_of, element, elements, form_encode, members_of, outputs_of};
 
@@ -176,8 +176,10 @@ async fn event_ids(router: &MultiServiceRouter, case: &str, stack: &str) -> Vec<
     elements(&body, "EventId")
 }
 
-/// The `Key='value'` body of one notification as the map a subscriber reads it as.
-fn notification_lines(body: &str) -> std::collections::BTreeMap<String, String> {
+/// The `Key='value'` body of one notification as the FIELDS a subscriber reads it as, in the
+/// order the body states them — which is part of the contract: the body is parsed
+/// positionally as much as by key.
+fn notification_fields(body: &str) -> Vec<(String, String)> {
     body.lines()
         .filter_map(|line| line.split_once("='"))
         .map(|(key, value)| {
@@ -187,6 +189,15 @@ fn notification_lines(body: &str) -> std::collections::BTreeMap<String, String> 
             )
         })
         .collect()
+}
+
+/// The value one notification body states for `key`, or `None` for a body carrying no such
+/// line at all.
+fn field_of(fields: &[(String, String)], key: &str) -> Option<String> {
+    fields
+        .iter()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value.clone())
 }
 
 /// Drain the queue until the events the stack reports have all arrived, or the polls run out,
@@ -200,15 +211,30 @@ async fn delivered_notifications(
     stack: &str,
     url: &str,
 ) -> Vec<std::collections::BTreeMap<String, String>> {
-    let mut arrived: Vec<std::collections::BTreeMap<String, String>> = Vec::new();
+    delivered_fields(router, case, stack, url)
+        .await
+        .into_iter()
+        .map(|fields| fields.into_iter().collect())
+        .collect()
+}
+
+/// [`delivered_notifications`] keeping each body's own LINE ORDER: the one poll-and-drain
+/// loop both readers of the queue are built on.
+async fn delivered_fields(
+    router: &MultiServiceRouter,
+    case: &str,
+    stack: &str,
+    url: &str,
+) -> Vec<Vec<(String, String)>> {
+    let mut arrived: Vec<Vec<(String, String)>> = Vec::new();
     for _ in 0..POLLS {
         let wanted = event_ids(router, case, stack).await;
         for body in drain_bodies(router, case, url).await {
-            arrived.push(notification_lines(&body));
+            arrived.push(notification_fields(&body));
         }
         let delivered: Vec<String> = arrived
             .iter()
-            .filter_map(|lines| lines.get("EventId").cloned())
+            .filter_map(|fields| field_of(fields, "EventId"))
             .collect();
         if wanted.iter().all(|id| delivered.contains(id)) {
             return arrived;
@@ -283,18 +309,17 @@ async fn every_event_of_a_stack_reaches_the_topics_its_notification_arns_name() 
                 "case {case:?}: event {id} was never delivered; the queue had {delivered:?}"
             );
         };
-        // Every line the body carries, so a subscriber reads the same set for every event.
+        // The lines EVERY body carries, so a subscriber reads the same set for every event...
         for key in [
             "StackId",
             "Timestamp",
             "EventId",
             "LogicalResourceId",
             "Namespace",
-            "PhysicalResourceId",
-            "PrincipalId",
             "ResourceProperties",
             "ResourceStatus",
             "ResourceStatusReason",
+            "DetailedStatus",
             "ResourceType",
             "StackName",
             "ClientRequestToken",
@@ -303,6 +328,19 @@ async fn every_event_of_a_stack_reaches_the_topics_its_notification_arns_name() 
                 lines.contains_key(key),
                 "case {case:?}: the notification of {id} must carry {key}, got {lines:?}"
             );
+        }
+        // ...and the two whose line depends on the event itself: `PrincipalId` on an event
+        // about the stack, `PhysicalResourceId` on one that names a physical resource — both
+        // asserted per event, against what the event reports, by
+        // [`every_notification_body_carries_the_whole_field_set_in_order`].
+        if lines.get("ResourceType").map(String::as_str) == Some(STACK_RESOURCE_TYPE) {
+            for key in ["PrincipalId", "PhysicalResourceId"] {
+                assert!(
+                    lines.contains_key(key),
+                    "case {case:?}: the notification of the stack's own event {id} must carry \
+                     {key}, got {lines:?}"
+                );
+            }
         }
         assert_eq!(
             lines.get("StackName"),
@@ -412,6 +450,263 @@ async fn a_change_sets_notification_arns_govern_the_streams_of_its_execution() {
         vec![topic.clone()],
         "case {case:?}: omitting NotificationARNs must keep the stack's topics"
     );
+}
+
+/// The keys one notification body carries, in the order AWS states them — the field set a
+/// subscriber parses, by key or positionally, for one event.
+///
+/// `DetailedStatus` is `StackEvent$DetailedStatus` ("an optional field that contains
+/// information about the detailed status of the stack event", the `DetailedStatus` enum), and
+/// it sits between `ResourceStatusReason` and `ResourceType`: a member the event has nothing
+/// to report for still states its line. The two exceptions are the members a body states only
+/// where the event HAS one — see [`expected_field_order`].
+const NOTIFICATION_FIELD_ORDER: [&str; 14] = [
+    "StackId",
+    "Timestamp",
+    "EventId",
+    "LogicalResourceId",
+    "Namespace",
+    "PhysicalResourceId",
+    "PrincipalId",
+    "ResourceProperties",
+    "ResourceStatus",
+    "ResourceStatusReason",
+    "DetailedStatus",
+    "ResourceType",
+    "StackName",
+    "ClientRequestToken",
+];
+
+/// The resource type an event about the STACK itself carries, which is the event a body
+/// states `PrincipalId` on.
+const STACK_RESOURCE_TYPE: &str = "AWS::CloudFormation::Stack";
+
+/// The keys the body of ONE event's notification carries, in order: [`NOTIFICATION_FIELD_ORDER`]
+/// without `PhysicalResourceId` for an event that names no physical resource, and without
+/// `PrincipalId` for an event that is not about the stack itself.
+fn expected_field_order(event: &ReportedEvent) -> Vec<&'static str> {
+    NOTIFICATION_FIELD_ORDER
+        .into_iter()
+        .filter(|key| match *key {
+            "PhysicalResourceId" => !event.physical_resource_id.is_empty(),
+            "PrincipalId" => event.resource_type == STACK_RESOURCE_TYPE,
+            _ => true,
+        })
+        .collect()
+}
+
+/// A template of TWO resources, so one stack's events cover more than one resource beside the
+/// stack's own events.
+const TWO_RESOURCES: &str = r#"{"Resources":{
+    "First":{"Type":"AWS::CloudFormation::WaitConditionHandle"},
+    "Second":{"Type":"AWS::CloudFormation::WaitConditionHandle"}}}"#;
+
+/// What the API read reports for one stack event — the source of what its notification has to
+/// state: the empty string stands for a member the event reports nothing for.
+#[derive(Debug, Clone, Default)]
+struct ReportedEvent {
+    physical_resource_id: String,
+    resource_type: String,
+    resource_status: String,
+    resource_status_reason: String,
+    detailed_status: String,
+}
+
+/// Every event the stack reports, keyed by `EventId` ([`ReportedEvent`]).
+async fn reported_events(
+    router: &MultiServiceRouter,
+    case: &str,
+    stack: &str,
+) -> std::collections::BTreeMap<String, ReportedEvent> {
+    let body = cfn_ok(router, case, "DescribeStackEvents", &[("StackName", stack)]).await;
+    let events = block_of(&body, "StackEvents").unwrap_or_default();
+    members_of(events)
+        .into_iter()
+        .filter_map(|member| {
+            let id = elements(member, "EventId").into_iter().next()?;
+            let read = |name: &str| {
+                elements(member, name)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default()
+            };
+            Some((
+                id,
+                ReportedEvent {
+                    physical_resource_id: read("PhysicalResourceId"),
+                    resource_type: read("ResourceType"),
+                    resource_status: read("ResourceStatus"),
+                    resource_status_reason: read("ResourceStatusReason"),
+                    detailed_status: read("DetailedStatus"),
+                },
+            ))
+        })
+        .collect()
+}
+
+/// The `UserId` AWS STS reports for the credential every request of this suite is signed
+/// with — "the unique identifier of the calling entity", which is the IAM principal a stack
+/// event's notification names.
+async fn caller_user_id(router: &MultiServiceRouter, case: &str) -> String {
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/")
+        .header("host", format!("sts.{REGION}.amazonaws.com"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("authorization", authorization("sts", REGION))
+        .body(Bytes::from("Action=GetCallerIdentity&Version=2011-06-15"))
+        .expect("the test request is well formed");
+    let response = router.dispatch(request).await;
+    let status = response.status().as_u16();
+    let body = String::from_utf8_lossy(response.body()).to_string();
+    assert_eq!(
+        status, 200,
+        "case {case:?}: expected HTTP 200 from STS GetCallerIdentity, got {status} with {body}"
+    );
+    element(&body, "UserId")
+}
+
+/// EVERY notification body states the field set AWS states for that event, in AWS's order —
+/// `DetailedStatus` among them — with `PrincipalId` the caller's own principal on the stack's
+/// own events and `DetailedStatus` the one the event itself reports.
+///
+/// The rows differ along what the rule generalises over: the operation that recorded the
+/// events (a `CreateStack` over two resources, and the execution of a change set), and within
+/// each row the assertion runs over every delivered message — the stack's own events (whose
+/// `ResourceType` is the stack) and its resources' alike, events that name a physical resource
+/// and events that name none, events with a `ResourceStatusReason` and events without.
+#[tokio::test]
+async fn every_notification_body_carries_the_whole_field_set_in_order() {
+    // (case, the stack, the topic and queue name, whether a change set records the events)
+    let rows: [(&str, &str, &str, bool); 2] = [
+        (
+            "a CreateStack over two resources",
+            "field-set-create",
+            "field-set-create",
+            false,
+        ),
+        (
+            "the execution of a CREATE change set",
+            "field-set-change-set",
+            "field-set-change-set",
+            true,
+        ),
+    ];
+
+    // One emulator for both rows: each row deploys its own stack and subscribes its own
+    // queue to its own topic, so no row reads another's events, and the suite stands up one
+    // service set rather than two.
+    let router = router();
+    let caller = caller_user_id(&router, "the suite's own credential").await;
+    for (case, stack, name, by_change_set) in rows {
+        let (topic, url) =
+            given_topic_with_subscriber(&router, case, REGION, name, Grant::ScopedToTopic).await;
+        if by_change_set {
+            execute(&router, case, stack, "field-set", "CREATE", Some(&[topic.as_str()])).await;
+        } else {
+            cfn_ok(
+                &router,
+                case,
+                "CreateStack",
+                &[
+                    ("StackName", stack),
+                    ("TemplateBody", TWO_RESOURCES),
+                    ("NotificationARNs.member.1", &topic),
+                ],
+            )
+            .await;
+            let (status, body) = settled(&router, case, stack).await;
+            assert_eq!(
+                status, "CREATE_COMPLETE",
+                "case {case:?}: the stack must complete, got {status} with {body}"
+            );
+        }
+
+        // Drained first, so every event the settled stack reports below has had its
+        // notification delivered and each delivered message's event is one the API read
+        // reports.
+        let delivered = delivered_fields(&router, case, stack, &url).await;
+        let reported = reported_events(&router, case, stack).await;
+        assert!(
+            !delivered.is_empty(),
+            "case {case:?}: the stack's events must reach the topic it notifies"
+        );
+        for id in reported.keys() {
+            assert!(
+                delivered
+                    .iter()
+                    .any(|fields| field_of(fields, "EventId").as_ref() == Some(id)),
+                "case {case:?}: event {id} was never delivered; the queue had {delivered:?}"
+            );
+        }
+        for fields in &delivered {
+            let id = field_of(fields, "EventId").unwrap_or_default();
+            // A notification whose event the stack-event stream does not carry at all is a
+            // PRE-DEPLOYMENT validation result, which `DescribeEvents` reports instead: its
+            // body has no reported event here to be asserted against.
+            let Some(event) = reported.get(&id).cloned() else {
+                continue;
+            };
+            let keys: Vec<&str> = fields.iter().map(|(key, _)| key.as_str()).collect();
+            let expected = expected_field_order(&event);
+            assert_eq!(
+                keys, expected,
+                "case {case:?}: the body of event {id} ({event:?}) must state {expected:?} in \
+                 that order, got {fields:?}"
+            );
+            // The members a body states from the event itself, each against what the API read
+            // reports for the same event — with the empty string where it reports none.
+            for (key, reported) in [
+                ("PhysicalResourceId", &event.physical_resource_id),
+                ("ResourceType", &event.resource_type),
+                ("ResourceStatus", &event.resource_status),
+                ("ResourceStatusReason", &event.resource_status_reason),
+                ("DetailedStatus", &event.detailed_status),
+            ] {
+                if key == "PhysicalResourceId" && reported.is_empty() {
+                    // Stated only where the event names one, which the key assertion covers.
+                    continue;
+                }
+                let stated = field_of(fields, key).unwrap_or_default();
+                assert_eq!(
+                    &stated, reported,
+                    "case {case:?}: the {key} of event {id} must be the one the event reports \
+                     ({reported:?}), got {stated:?}"
+                );
+            }
+            if event.resource_type == STACK_RESOURCE_TYPE {
+                let principal = field_of(fields, "PrincipalId").unwrap_or_default();
+                assert_eq!(
+                    principal, caller,
+                    "case {case:?}: the PrincipalId of event {id} must be the caller STS \
+                     reports ({caller:?}), got {principal:?}"
+                );
+            }
+        }
+
+        // The field set is asserted above over the stack's OWN events and over its
+        // resources' events, so both classes have to be among what was delivered — and so
+        // does an event that names no physical resource, whose body states one line fewer.
+        let types: std::collections::BTreeSet<String> = delivered
+            .iter()
+            .filter_map(|fields| field_of(fields, "ResourceType"))
+            .collect();
+        assert!(
+            types.contains(STACK_RESOURCE_TYPE),
+            "case {case:?}: the stack's own events must be among the delivered, got {types:?}"
+        );
+        assert!(
+            types.iter().any(|kind| kind != STACK_RESOURCE_TYPE),
+            "case {case:?}: its resources' events must be among the delivered, got {types:?}"
+        );
+        assert!(
+            delivered
+                .iter()
+                .any(|fields| field_of(fields, "PhysicalResourceId").is_none()),
+            "case {case:?}: an event naming no physical resource must be among the delivered, \
+             got {delivered:?}"
+        );
+    }
 }
 
 /// Create one change set of `change_set_type` and execute it, waiting for both to settle.

@@ -1728,6 +1728,25 @@ pub struct StoredEvent {
     pub owed_notification: Option<u64>,
 }
 
+/// The `DetailedStatus` of an event that reports a PRE-DEPLOYMENT validation failure, from
+/// the model's `DetailedStatus` enum: "template validation failed because of invalid
+/// properties in the template".
+pub const DETAILED_STATUS_VALIDATION_FAILED: &str = "VALIDATION_FAILED";
+
+/// The detailed status one recorded event reports, or `None` for an event that reports none —
+/// `StackEvent$DetailedStatus` and `OperationEvent$DetailedStatus`, "an optional field that
+/// contains information about the detailed status of the stack event".
+///
+/// Stated ONCE for every reader of an event: the `DescribeEvents` view and the Amazon SNS
+/// notification a stack's `NotificationARNs` receive ([`stack_notifications::body_of`])
+/// report the same event's detailed status rather than deciding it twice.
+pub fn detailed_status_of(event: &StoredEvent) -> Option<&'static str> {
+    event
+        .validation
+        .as_ref()
+        .map(|_| DETAILED_STATUS_VALIDATION_FAILED)
+}
+
 /// The bytes of one event that a CALLER sized: its `ResourceProperties` document. Every
 /// other member is an identifier, a status or a timestamp this service minted, so this is
 /// what [`StoredStack::push_event`] meters the log in.
