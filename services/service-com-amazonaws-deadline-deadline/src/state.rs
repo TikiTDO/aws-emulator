@@ -992,6 +992,29 @@ impl ComAmazonawsDeadlineDeadlineState {
             .map(|queue| queue.queue_id.as_str())
             .min()
     }
+
+    /// The queue of `farm_id` that still lists `storage_profile_id` among the storage
+    /// profiles it allows, lowest id first so the answer does not depend on map order.
+    /// `None` when no queue does.
+    pub fn queue_allowing_storage_profile(
+        &self,
+        farm_id: &str,
+        storage_profile_id: &str,
+    ) -> Option<&str> {
+        let farm = self.farms.get(farm_id)?;
+        farm.queues
+            .values()
+            .filter(|queue| {
+                queue
+                    .allowed_storage_profile_ids
+                    .as_deref()
+                    .is_some_and(|allowed| {
+                        allowed.iter().any(|allowed| allowed == storage_profile_id)
+                    })
+            })
+            .map(|queue| queue.queue_id.as_str())
+            .min()
+    }
 }
 
 /// Scope a client token to the operation and the parent resource it was used on, so the
@@ -1121,6 +1144,35 @@ pub fn fleet_associated_with_queue(
         reason: "RESOURCE_IN_USE".to_string(),
         resource_id: fleet_id.to_string(),
         resource_type: RESOURCE_TYPE_FLEET.to_string(),
+        context: None,
+    }
+}
+
+/// The 400 this service answers when a storage profile a queue still allows is deleted.
+///
+/// Same rule as [`fleet_associated_with_queue`] — a resource a queue's configuration still
+/// points at is not deleted out from under it — answered through the only client-input
+/// error `DeleteStorageProfile` models: it declares neither `ConflictException` nor
+/// `ResourceNotFoundException`, so its refusals go out as `ValidationException`
+/// (`smithy_query(query="operation", operation="DeleteStorageProfile")`). The message names
+/// the queue that holds the reference; `queue_id` is read from the store, never from the
+/// request.
+pub fn storage_profile_allowed_by_queue(
+    storage_profile_id: &str,
+    queue_id: &str,
+) -> crate::ops::types::ValidationException {
+    crate::ops::types::ValidationException {
+        message: format!(
+            "The storage profile {storage_profile_id} can't be deleted because it is \
+             associated with the queue {queue_id}."
+        ),
+        // From `smithy_query(query="shape", shape="ValidationExceptionReason")`:
+        // UNKNOWN_OPERATION, CANNOT_PARSE, FIELD_VALIDATION_FAILED, OTHER. Every member of
+        // the request satisfies its own constraints — what is refused is the state the
+        // deletion would leave behind — so no one field is at fault and the refusal
+        // carries no field list.
+        reason: "OTHER".to_string(),
+        field_list: None,
         context: None,
     }
 }
