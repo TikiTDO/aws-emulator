@@ -133,6 +133,8 @@ mod reserved_node_refusal_wording;
 mod reserved_nodes;
 #[path = "all/reset_cluster_parameter_group.rs"]
 mod reset_cluster_parameter_group;
+#[path = "all/restored_cluster_independence.rs"]
+mod restored_cluster_independence;
 #[path = "all/snapshot_access.rs"]
 mod snapshot_access;
 #[path = "all/snapshot_access_denied.rs"]

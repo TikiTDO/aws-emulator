@@ -48,7 +48,15 @@ const DB_USER: &str = "awsuser";
 const WAIT_SECONDS: i32 = 10;
 
 /// Create the cluster `identifier` holding the initial database `database`.
-async fn create_cluster(emulator: &Emulator, case: &str, identifier: &str, database: &str) {
+///
+/// `pub(crate)` so a sibling suite about the same rule drives the Data API
+/// through this harness instead of writing a second copy of it.
+pub(crate) async fn create_cluster(
+    emulator: &Emulator,
+    case: &str,
+    identifier: &str,
+    database: &str,
+) {
     let created = emulator
         .call(
             "CreateCluster",
@@ -68,7 +76,7 @@ async fn create_cluster(emulator: &Emulator, case: &str, identifier: &str, datab
 }
 
 /// Snapshot `cluster` under `snapshot`, and answer the snapshot's ARN.
-async fn create_snapshot(
+pub(crate) async fn create_snapshot(
     emulator: &Emulator,
     case: &str,
     cluster: &str,
@@ -92,7 +100,7 @@ async fn create_snapshot(
 }
 
 /// Restore `snapshot` into the new cluster `identifier`.
-async fn restore(emulator: &Emulator, case: &str, snapshot: &str, identifier: &str) {
+pub(crate) async fn restore(emulator: &Emulator, case: &str, snapshot: &str, identifier: &str) {
     let restored = emulator
         .call(
             "RestoreFromClusterSnapshot",
@@ -112,7 +120,7 @@ async fn restore(emulator: &Emulator, case: &str, snapshot: &str, identifier: &s
 
 /// Run `sql` on `cluster`/`database` through the Data API, requiring it to
 /// finish, and answer the statement's `Id`.
-async fn run_sql(
+pub(crate) async fn run_sql(
     emulator: &Emulator,
     case: &str,
     cluster: &str,
@@ -133,7 +141,7 @@ async fn run_sql(
 /// reports it, WITHOUT requiring it to finish: a read of a table the restored
 /// cluster does not hold fails, and that failure is what proves the data is not
 /// there.
-async fn submit_sql(
+pub(crate) async fn submit_sql(
     emulator: &Emulator,
     case: &str,
     cluster: &str,
@@ -161,7 +169,7 @@ async fn submit_sql(
 }
 
 /// The `Records` `sql` answers on `cluster`/`database`.
-async fn query(
+pub(crate) async fn query(
     emulator: &Emulator,
     case: &str,
     cluster: &str,
@@ -181,7 +189,7 @@ async fn query(
 
 /// Wait out the clock-owed `creating` -> `available` transition a snapshot is
 /// minted with: only an available snapshot can be restored from.
-async fn settle() {
+pub(crate) async fn settle() {
     tokio::time::sleep(state::PROVISIONING_SPAN + Duration::from_millis(250)).await;
 }
 
