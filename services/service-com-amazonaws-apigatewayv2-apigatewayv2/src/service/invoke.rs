@@ -499,18 +499,81 @@ fn is_http(api: &Api) -> bool {
 /// Whether THIS data plane serves the request these parts came from — the HTTP half of
 /// `Service::can_handle`.
 ///
-/// Narrowed to an api this service HOLDS, read from the one shared store, so nothing is
-/// claimed that this service cannot answer about and exactly one service claims a request.
+/// Narrowed to an api this service HOLDS, read from the one shared store, plus the one
+/// address no api of this emulator holds at all ([`claims_an_unresolved_endpoint`]), so
+/// exactly one service claims a request.
 pub fn claims_parts<Eng: Send + Sync + 'static>(
     engine: &Eng,
     parts: &http::request::Parts,
 ) -> bool {
-    claims(engine, &Addressed::of_parts(parts))
+    let addressed = Addressed::of_parts(parts);
+    claims(engine, &addressed)
+        || claims_an_unresolved_endpoint(engine, &addressed, || {
+            ::service_com_amazonaws_apigateway_backplanecontrolservice::service::invoke::claims_parts(
+                engine, parts,
+            )
+        })
 }
 
 /// [`claims_parts`] for the runtime-API request the serving seams are handed.
 pub fn claims_request<Eng: Send + Sync + 'static>(engine: &Eng, req: &RtRequest) -> bool {
-    claims(engine, &Addressed::of_request(req))
+    let addressed = Addressed::of_request(req);
+    claims(engine, &addressed)
+        || claims_an_unresolved_endpoint(engine, &addressed, || {
+            ::service_com_amazonaws_apigateway_backplanecontrolservice::service::invoke::claims_request(
+                engine, req,
+            )
+        })
+}
+
+/// Whether this data plane answers an `execute-api` ENDPOINT that resolves to NO api of this
+/// emulator — the address a client keeps calling after the api behind it was deleted.
+///
+/// AWS serves one `execute-api` endpoint space, and an endpoint whose api id resolves to no
+/// api is answered there rather than by nothing: the answer is `404`
+/// `{"message": "Not Found"}` ([`resolved`]). The endpoint space is SHARED by the two data
+/// planes of API Gateway — a REST api is reached on the same host shape, and that service's
+/// own data plane claims a request it resolves — so an id neither of them holds is claimed by
+/// exactly one of them, which is this one. The REST data plane is asked through its OWN claim
+/// (`rest_claims`), so the two cannot disagree about which requests it answers, and it is
+/// asked with no lock of this service held, in the order every cross-service read of this
+/// crate follows ([`crate::state::rest_endpoint`]).
+///
+/// The api id is read from the two addressings that NAME an endpoint: the host AWS documents
+/// (`{api-id}.execute-api.{region}.amazonaws.com`), and the emulator's own rewriting of it
+/// behind the [`LOCAL_ENDPOINT_PREFIX`] marker, which is the endpoint this service ANNOUNCES
+/// to a client that resolves nothing else (`crate::state::announced_execute_api_endpoint`) —
+/// so the address a client was handed answers the same way whichever of the two it is.
+///
+/// What this does NOT claim, so nothing an api of this service holds changes hands: an
+/// address whose api id this service HOLDS (an api whose default endpoint is disabled, or one
+/// of the other protocol — resolving those is [`resolve`]'s and [`super::websocket`]'s), the
+/// addressings that name NO endpoint (a bare stage path, which names no api id at all), and
+/// the `@connections` path space, which belongs to ApiGatewayManagementApi on this same host.
+fn claims_an_unresolved_endpoint<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    addressed: &Addressed<'_>,
+    rest_claims: impl FnOnce() -> bool,
+) -> bool {
+    if addresses_connections(addressed.path) {
+        return false;
+    }
+    let Some(api_id) = addressed_endpoint_api_id(addressed) else {
+        return false;
+    };
+    if rest_claims() {
+        return false;
+    }
+    crate::state::service_state(engine)
+        .is_some_and(|state| !state.lock().apis.contains_key(api_id))
+}
+
+/// The api id the ENDPOINT `addressed` names, or `None` for an address that names no endpoint
+/// of the `execute-api` space at all.
+fn addressed_endpoint_api_id<'r>(addressed: &Addressed<'r>) -> Option<&'r str> {
+    local_endpoint_path(addressed.path)
+        .map(|(api_id, _)| api_id)
+        .or_else(|| addressed.host.and_then(api_id_of_host))
 }
 
 /// Whether this data plane serves `addressed`.
@@ -594,28 +657,219 @@ pub async fn serve<Eng: Send + Sync + 'static>(
     served
 }
 
-/// [`serve`] from a seam that carries NO in-process transport, so the route's integration
-/// cannot be performed from it: every step up to the integration is the same, and the
-/// integration itself is reported as the class it falls into
+/// [`serve`] from a seam that carries NO request context, so the route's integration cannot
+/// be performed over the transport the request being served would have carried: every step up
+/// to the integration is the same, and the integration is performed over the transport this
+/// service REMEMBERED instead ([`crate::state::invoke_transport`]).
+///
+/// `crate::service`'s module docs state which requests are served here and why. The one that
+/// is — an invoke whose browser-set headers read as cross-site — is exactly the request an
+/// api's `CorsConfiguration` exists for, so it is served like any other: the route's
+/// integration is performed and its response is the answer. Only an invoke that arrives
+/// before this service has ever been handed a transport, or one made on a runtime that
+/// cannot drive it, has its integration reported as the class it falls into instead
 /// ([`dispatch::unperformable`]).
 ///
-/// `crate::service`'s module docs state which requests are served here and why.
+/// `identity` is this service's own vended identity, which the context an integration is
+/// performed under names — the service's, not the request's, so it is the same identity a
+/// named invoke's context carries.
 pub fn serve_without_transport<Eng: Send + Sync + 'static>(
-    engine: &Eng,
+    engine: &::std::sync::Arc<Eng>,
+    identity: &::smithy_server_runtime::ServiceIdentity,
     req: &RtRequest,
 ) -> RtResponse {
     let request_id = proxy_event::mint_request_id();
-    let answered = match resolved(engine, req, &request_id) {
+    let answered = match resolved(&**engine, req, &request_id) {
         Err(answered) => *answered,
         Ok((decoration, Answer::Now(response))) => decorated(*response, &decoration),
-        Ok((decoration, Answer::Dispatch(dispatch))) => {
-            decorated(dispatch::unperformable(engine, &dispatch), &decoration)
-        }
+        Ok((decoration, Answer::Dispatch(dispatch))) => decorated(
+            performed_over_the_remembered_transport(engine, identity, req, *dispatch),
+            &decoration,
+        ),
     };
     // No access-log record is delivered from here: the delivery is a CALL into the
-    // CloudWatch Logs this emulator mounts, and this seam carries no transport to make it
-    // over. The response still names the request it answered.
+    // CloudWatch Logs this emulator mounts, and this seam has no request of its own to
+    // measure or to carry one over. The response still names the request it answered.
     ::service_common::query_error_envelope::with_stated_request_id_header(answered, &request_id)
+}
+
+/// Perform `dispatch` over the transport this service remembered, and answer what the route's
+/// backend produced.
+///
+/// The context the integration is performed under is this service's own identity, the
+/// remembered transport, and the request's own head — rebuilt from the request being served
+/// ([`request_head`]), so every step reads the method, the URI and the headers the client
+/// sent. It carries no request EXTENSION, which is where the front door would have put an
+/// authenticated caller: the requests served from this seam present no credential this
+/// emulator verified, so there is none to carry.
+///
+/// Every such integration holds one [`IntegrationPermit`] for as long as it is in flight,
+/// which is what bounds this seam: how many of these waits exist at once, and how many times
+/// a chain can come back round through here. An integration admitted past no permit is
+/// reported as the class it falls into, with the reason logged and never told to the caller.
+fn performed_over_the_remembered_transport<Eng: Send + Sync + 'static>(
+    engine: &::std::sync::Arc<Eng>,
+    identity: &::smithy_server_runtime::ServiceIdentity,
+    req: &RtRequest,
+    dispatch: dispatch::Dispatch,
+) -> RtResponse {
+    let remembered = crate::state::service_state(&**engine)
+        .and_then(|state| state.lock().invoke_transport.held());
+    let (Some(callback), Some(head)) = (remembered, request_head(req)) else {
+        ::tracing::warn!(
+            api_id = %dispatch.request.api_id,
+            stage = %dispatch.request.stage_name,
+            route_key = %dispatch.route_key,
+            "this invoke was served from a seam with no request context of its own and this \
+             service holds no transport to perform the route's integration over"
+        );
+        return dispatch::unperformable(&**engine, &dispatch);
+    };
+    // The runtime is resolved BEFORE the dispatch is consumed, so an invoke this seam cannot
+    // perform the integration of is still answered everything that needs no transport at all
+    // — the stage's throttle, and the redirect an `HTTP_PROXY` upstream is the caller's to
+    // reach ([`dispatch::unperformable`]).
+    let Some(handle) = drivable_runtime() else {
+        ::tracing::warn!(
+            api_id = %dispatch.request.api_id,
+            stage = %dispatch.request.stage_name,
+            route_key = %dispatch.route_key,
+            "this invoke reached no runtime that can drive the route's integration while this \
+             seam waits for it, so the integration was not performed"
+        );
+        return dispatch::unperformable(&**engine, &dispatch);
+    };
+    let Some(permit) = IntegrationPermit::claim() else {
+        ::tracing::warn!(
+            api_id = %dispatch.request.api_id,
+            stage = %dispatch.request.stage_name,
+            route_key = %dispatch.route_key,
+            in_flight = MAX_INTEGRATIONS_IN_FLIGHT,
+            "as many integrations are in flight from this seam as it performs at once, so \
+             this route's integration was not performed"
+        );
+        return dispatch::unperformable(&**engine, &dispatch);
+    };
+    // Owned, so the work below is a future of its own that the runtime can drive: the engine
+    // handle, the identity and the request's head move into it, and the context is built
+    // inside it from them.
+    let owned_engine = ::std::sync::Arc::clone(engine);
+    let owned_identity = identity.clone();
+    let performed = async move {
+        let ctx = OperationContext::new(&head, &owned_identity, callback);
+        dispatch::perform(&*owned_engine, &ctx, dispatch).await
+    };
+    let answered = awaited(&handle, performed);
+    drop(permit);
+    match answered {
+        Some(response) => *response,
+        None => {
+            // The task panicked or was cancelled, which is an integration that produced no
+            // response. The reason stays in this emulator's own log.
+            ::tracing::warn!(
+                "the task performing this route's integration produced no answer to map"
+            );
+            json_response(UNPLACEABLE_STATUS, INTERNAL_MESSAGE, None)
+        }
+    }
+}
+
+/// How many route integrations this seam performs AT ONCE, across the whole process.
+///
+/// The transport an integration is performed over here is a REMEMBERED one, so the call made
+/// over it carries the re-entrancy count of the call that handed the transport over rather
+/// than of the request being served, and the framework exposes no way to re-stamp a handle
+/// with another count — so the router's own backstop on a re-entrant chain
+/// (`smithy_server_runtime::CALLBACK_RECURSION_LIMIT`) cannot be advanced from here. This is
+/// what takes its place: a chain that comes back round through this seam holds one permit per
+/// lap it is still inside, so it is cut at the same number of laps that backstop would have
+/// cut it at. The same count bounds how many of these waits exist at once.
+const MAX_INTEGRATIONS_IN_FLIGHT: usize =
+    ::smithy_server_runtime::CALLBACK_RECURSION_LIMIT as usize;
+
+/// How many integrations this seam currently has in flight.
+static INTEGRATIONS_IN_FLIGHT: ::std::sync::atomic::AtomicUsize =
+    ::std::sync::atomic::AtomicUsize::new(0);
+
+/// One of the [`MAX_INTEGRATIONS_IN_FLIGHT`] integrations this seam performs at once, given
+/// back when it is dropped — on every path, including one a performed integration panicked
+/// on.
+struct IntegrationPermit;
+
+impl IntegrationPermit {
+    /// One permit, or `None` when this seam already has as many integrations in flight as it
+    /// performs at once.
+    fn claim() -> Option<Self> {
+        let mut held = INTEGRATIONS_IN_FLIGHT.load(::std::sync::atomic::Ordering::Relaxed);
+        loop {
+            if held >= MAX_INTEGRATIONS_IN_FLIGHT {
+                return None;
+            }
+            match INTEGRATIONS_IN_FLIGHT.compare_exchange_weak(
+                held,
+                held.saturating_add(1),
+                ::std::sync::atomic::Ordering::AcqRel,
+                ::std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => return Some(Self),
+                Err(current) => held = current,
+            }
+        }
+    }
+}
+
+impl Drop for IntegrationPermit {
+    fn drop(&mut self) {
+        INTEGRATIONS_IN_FLIGHT.fetch_sub(1, ::std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// The head of the request being served, as the [`OperationContext`] an integration is
+/// performed under reads it: the method, the URI and every header the client sent.
+///
+/// `None` for a head the `http` crate will not build, which no request that reached this
+/// point has — it arrived over that same crate's types.
+fn request_head(req: &RtRequest) -> Option<http::request::Parts> {
+    let mut builder = http::Request::builder()
+        .method(req.method())
+        .uri(req.uri());
+    for (name, value) in req.headers().iter() {
+        builder = builder.header(name, value);
+    }
+    Some(builder.body(()).ok()?.into_parts().0)
+}
+
+/// The runtime an integration can be performed on from a SYNCHRONOUS seam, or `None` when
+/// this process is not on one.
+///
+/// It is the MULTI-THREAD runtime the emulator boots. A current-thread runtime is driven by
+/// the one thread now inside the seam, which is therefore driving nothing while it waits: a
+/// task spawned on it could not be polled and its timers would not advance, so an integration
+/// is not performed from there at all rather than waited on. This is also what keeps
+/// [`awaited`]'s `block_in_place` from the one runtime that refuses it.
+fn drivable_runtime() -> Option<::tokio::runtime::Handle> {
+    let handle = ::tokio::runtime::Handle::try_current().ok()?;
+    (handle.runtime_flavor() == ::tokio::runtime::RuntimeFlavor::MultiThread).then_some(handle)
+}
+
+/// Run `work` to completion on `handle` from a SYNCHRONOUS seam, or `None` for work that
+/// produced no answer because the task performing it panicked or was cancelled.
+///
+/// The route's integration is a call into another service of this emulator, which is
+/// asynchronous, and the seam that asks for it is not — so the work is handed to the runtime
+/// as a TASK rather than driven on the thread that is waiting for it. That is what lets the
+/// deadlines inside it fire while this seam waits: the integration's own `TimeoutInMillis`
+/// ([`dispatch`]) is on the runtime's own timer, and the task stays cancellable.
+/// `block_in_place` hands this worker's queue to a replacement thread while it waits, so the
+/// runtime keeps serving every other request.
+fn awaited(
+    handle: &::tokio::runtime::Handle,
+    work: impl ::std::future::Future<Output = RtResponse> + Send + 'static,
+) -> Option<Box<RtResponse>> {
+    let task = handle.spawn(work);
+    ::tokio::task::block_in_place(|| handle.block_on(task))
+        .ok()
+        .map(Box::new)
 }
 
 /// Everything decided from the STORE for one invoke: the api's CORS decoration, and either
@@ -639,11 +893,18 @@ fn resolved<Eng: Send + Sync + 'static>(
         )));
     };
     let store = state.lock();
-    // Unreachable through the claim, which resolves the same api from the same store; the
-    // api can still have been deleted between the claim and now, which is an api this
-    // endpoint no longer serves.
+    // Either this endpoint resolves to no api of this emulator at all — the address a client
+    // keeps calling after the api behind it was deleted, which this data plane owns
+    // ([`claims_an_unresolved_endpoint`]) — or the api was deleted between the claim and
+    // now, which is the same fact arriving a moment later. API Gateway answers an
+    // `execute-api` endpoint that resolves to no api `404` `{"message": "Not Found"}`, and
+    // an endpoint that resolves to nothing has no CORS configuration to decorate it with.
     let Some(resolved) = resolve(&store, &addressed) else {
-        return Err(Box::new(forbidden()));
+        return Err(Box::new(json_response(
+            NOT_FOUND_STATUS,
+            NOT_FOUND_MESSAGE,
+            None,
+        )));
     };
     // The api's own CORS configuration decides the decoration of WHATEVER is answered
     // below, so it is computed once, from the api and the request alone, before the stage

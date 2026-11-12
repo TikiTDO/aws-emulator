@@ -223,6 +223,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         let mut store = state.lock();
 
+        // The transport this call was handed is kept as the one this api's routes are
+        // performed over when the request being served carries none of its own
+        // ([`crate::state::invoke_transport`]).
+        store.invoke_transport.remember(ctx.callback().clone());
+
         // The same quotas every other writer of these records enforces, checked against
         // what the WHOLE definition asks for before any of it is written: an import is
         // one call, so it either fits or it is refused. `TooManyRequestsException` is the

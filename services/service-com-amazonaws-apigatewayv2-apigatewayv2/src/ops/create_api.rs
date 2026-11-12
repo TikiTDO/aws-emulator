@@ -421,6 +421,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let mut store = state.lock();
+        // The transport this call was handed is kept as the one this api's routes are
+        // performed over when the request being served carries none of its own
+        // ([`crate::state::invoke_transport`]) — the HTTP data plane's counterpart of the
+        // callback a WebSocket api's socket is opened with just above.
+        store.invoke_transport.remember(ctx.callback().clone());
         // The quota is weighed AGAIN under this lock, because the one above was released
         // while the socket was opened: two creates in flight at once must not both pass a
         // check made before either inserted, or the account would come to hold more apis

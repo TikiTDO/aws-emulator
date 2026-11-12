@@ -86,10 +86,12 @@
 //! [`front_door_refuses_as_cross_site`] states why: the router refuses a request it names an
 //! operation for when the browser-set headers say a browser sent it from another site, and
 //! it applies that check to no request it does not name one for. So an invoke carrying such
-//! a header is left unnamed and answered there, where every step up to the integration is
-//! the same and the integration is reported as the class it falls into
-//! ([`invoke::serve_without_transport`]) — rather than refused by the front door before this
-//! service sees it.
+//! a header is left unnamed and answered there ([`invoke::serve_without_transport`]) —
+//! rather than refused by the front door before this service sees it. That invoke is a
+//! CROSS-ORIGIN request to an api's endpoint, which is exactly the request an api's
+//! `CorsConfiguration` exists for, so it is served like any other: the seam carries no
+//! request context of its own, so the route's integration is performed over the transport
+//! this service remembered instead ([`crate::state::invoke_transport`]).
 //!
 //! Beside those two there is a THIRD data plane, addressed on the domain every portal this
 //! service mints reports (`EndpointConfigurationResponse$PortalDefaultDomainName`):
@@ -352,9 +354,9 @@ impl<Eng: Send + Sync + 'static> ErasedOperation for HttpApiDataPlane<Eng> {
 /// (`emulator_server::classify_browser_request` over same-origin-only). So an invoke
 /// carrying such a header is left unnamed and answered through
 /// [`Service::override_routing_error`] below — the one seam that still answers it — where
-/// the api's own `CorsConfiguration` still decorates the answer and every refusal the
-/// gateway owes it is still computed. What it cannot do from there is PERFORM the route's
-/// integration, because that seam carries no transport to perform it over
+/// the api's own `CorsConfiguration` decorates the answer, every refusal the gateway owes it
+/// is computed, and the route's integration is performed over the transport this service
+/// remembered, since that seam is handed no request context to carry one
 /// ([`invoke::serve_without_transport`]).
 fn front_door_refuses_as_cross_site(req: &RtRequest) -> bool {
     let header = |name: &str| req.headers().get(name);
@@ -593,7 +595,11 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
             return Some(websocket::serve(&*self.engine, req));
         }
         if invoke::claims_request(&*self.engine, req) {
-            return Some(invoke::serve_without_transport(&*self.engine, req));
+            return Some(invoke::serve_without_transport(
+                &self.engine,
+                self.definition().identity(),
+                req,
+            ));
         }
         // And a visit to the website a published portal serves on its own domain, which
         // likewise names no modelled operation and carries no AWS credential.

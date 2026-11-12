@@ -662,17 +662,6 @@ async fn what_the_socket_front_door_does_not_claim() {
             )
             .await,
         ),
-        (
-            "a handshake on an execute-api host whose api id this service does not hold",
-            handshake(
-                &emulator,
-                "zzz9999999.execute-api.eu-west-1.amazonaws.com",
-                "/prod",
-                "Upgrade",
-                "websocket",
-            )
-            .await,
-        ),
     ];
 
     for (case, answer) in unclaimed {
@@ -688,6 +677,31 @@ async fn what_the_socket_front_door_does_not_claim() {
             answer.summary()
         );
     }
+
+    // A handshake on an `execute-api` endpoint whose api id no api of this emulator has is
+    // answered by the HTTP data plane (`src/service/invoke.rs`), which owns that address:
+    // the endpoint resolves to no api, so the answer is its `404` rather than this module's
+    // capability refusal. What is pinned here is only that the WEBSOCKET plane did not
+    // answer it.
+    let on_no_api = handshake(
+        &emulator,
+        "zzz9999999.execute-api.eu-west-1.amazonaws.com",
+        "/prod",
+        "Upgrade",
+        "websocket",
+    )
+    .await;
+    assert_ne!(
+        on_no_api.status, NOT_IMPLEMENTED,
+        "a handshake on an endpoint that resolves to no api must not be answered by the \
+         WebSocket data plane, got {}",
+        on_no_api.summary()
+    );
+    assert_eq!(
+        on_no_api.accept, None,
+        "no upgrade happened, so no Sec-WebSocket-Accept is sent, got {}",
+        on_no_api.summary()
+    );
 
     // An upgrade request to an HTTP api's stage is an ordinary HTTP request to that api's
     // routes, so it belongs to the HTTP data plane (`src/service/invoke.rs`) and not to

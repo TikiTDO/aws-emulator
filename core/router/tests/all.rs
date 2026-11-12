@@ -17,13 +17,12 @@
 // else appends to.
 #[path = "all/cloudformation_fifo_resource_generated_names.rs"]
 mod cloudformation_fifo_resource_generated_names;
-// Declared here, in this same head region, for the reason the entry above records: the
-// Amazon SNS notifications an Auto Scaling group's notification configuration publishes
-// span Auto Scaling, Amazon EC2, SNS and Amazon SQS at once, and the publish is addressed
-// the way a client's own `sns`-scoped call is, so no single crate's test target can ask
-// which mounted model claims it.
-#[path = "all/autoscaling_notification_reaches_its_subscribed_queue.rs"]
-mod autoscaling_notification_reaches_its_subscribed_queue;
+// Declared here, in this same head region, for the reason the entry above records: what a
+// client of a CloudFormation-deployed HTTP api's `$default` Lambda route is served, and the
+// CORS decoration that answer carries, spans CloudFormation, API Gateway v2, AWS Lambda and
+// IAM at once, so no single service's test target can ask it.
+#[path = "all/cloudformation_http_api_cors_lambda_default_route.rs"]
+mod cloudformation_http_api_cors_lambda_default_route;
 // Declared here, in this same head region, for the reason the entry above records: a
 // guardrail the Amazon Bedrock control plane creates and the Bedrock Runtime data plane
 // applies spans those two crates at once, so neither crate's own test target can see
@@ -35,7 +34,6 @@ mod bedrock_guardrail_applied_across_planes;
 // bus, which span CloudFormation, EventBridge, Amazon SQS and Systems Manager at once.
 #[path = "all/cloudformation_stackset_status_change_events.rs"]
 mod cloudformation_stackset_status_change_events;
-// Declared here, in this same head region, for the reason the entry above records: what a
 // `Condition`-gated `AWS::IAM::Policy` means for the stack's own function's read of the
 // stack's own secret, which spans CloudFormation, IAM, Secrets Manager, Lambda and STS at
 // once, so no single service's test target can ask it.
@@ -90,12 +88,6 @@ mod cloudformation_rollback_triggers_revert_the_operation;
 // service's span of the sorted list.
 #[path = "all/workspace_lockfile_covers_every_manifest.rs"]
 mod workspace_lockfile_covers_every_manifest;
-// Declared here, in this same head region, beside the suite above it shares its readers with:
-// this one holds the same committed `Cargo.lock` to recording each member's own dependency
-// edges and every registry package's checksum, so it too belongs to no service's span of the
-// sorted list.
-#[path = "all/workspace_lockfile_records_each_member_dependency.rs"]
-mod workspace_lockfile_records_each_member_dependency;
 // Declared here, in this same head region, for the reason the entries above record: what a
 // bucket's Lambda notification configuration DOES, which spans S3, Lambda, IAM and
 // CloudFormation at once.
@@ -142,7 +134,6 @@ mod directory_realm_follows_its_create;
 // Declared here, in this same head region, for the reason the entries above record.
 #[path = "all/directory_data_access_cycle.rs"]
 mod directory_data_access_cycle;
-// Declared here, in this same head region, for the reason the entries above record: the
 #[path = "all/cloudformation_lambda_ssm_sourced_update.rs"]
 mod cloudformation_lambda_ssm_sourced_update;
 // appended tail and the sorted `k…` span are both regions concurrently landing suites add
@@ -201,7 +192,6 @@ mod sagemaker_create_admission;
 #[path = "all/sagemaker_execution_role_admission.rs"]
 mod sagemaker_execution_role_admission;
 // Declared in this same head region, for the reason the entries above record: the appended
-// tail and the sorted `s…` span (where the other sagemaker suites land) are both regions
 #[path = "all/sagemaker_pipeline_role_resolution.rs"]
 mod sagemaker_pipeline_role_resolution;
 // the sorted `g…` span (beside the other greengrass/glue suites) are both regions
@@ -224,7 +214,6 @@ mod cloudformation_provisions_codeartifact_resources;
 // tail and the sorted `c…` span (where every cloudformation suite lands) are both regions
 #[path = "all/cloudformation_provisions_glue_catalog.rs"]
 mod cloudformation_provisions_glue_catalog;
-// Declared in this same head region, for the reason the entries above record: the appended
 // tail and the sorted `s…` span (where every ssm suite would land) are both regions
 #[path = "all/ssm_securestring_ciphertext_decrypts_in_kms.rs"]
 mod ssm_securestring_ciphertext_decrypts_in_kms;
@@ -387,10 +376,6 @@ mod ses_firehose_event_destination_setup;
 // Declared beside its sibling ses suites, at the head, for the reason the entries above
 #[path = "all/ses_v1_receipt_rule_sets_through_the_router.rs"]
 mod ses_v1_receipt_rule_sets_through_the_router;
-// Declared beside the sibling suite whose SES v1 sender it reuses, at the head, for the
-// reason the entries above record.
-#[path = "all/ses_v1_receipt_rule_lambda_invoke_grant.rs"]
-mod ses_v1_receipt_rule_lambda_invoke_grant;
 #[path = "all/ses_identities_shared_across_v1_and_v2.rs"]
 mod ses_identities_shared_across_v1_and_v2;
 #[path = "all/ses_easy_dkim_shared_across_surfaces.rs"]
@@ -688,9 +673,6 @@ mod sfn_management_events;
 // stable.
 #[path = "all/guardduty_runtime_coverage.rs"]
 mod guardduty_runtime_coverage;
-// Declared beside its sibling GuardDuty suite for the reason the lines above give.
-#[path = "all/guardduty_malware_protection_plan_role.rs"]
-mod guardduty_malware_protection_plan_role;
 // tail is where every concurrently landing router suite appends, so a line added there
 // conflicts with all of them, while these neighbouring lines are stable.
 #[path = "all/sagemaker_feature_store_control_plane_handoff.rs"]
@@ -768,8 +750,6 @@ mod lambda_execution_role_session_identity;
 // the head of this file or in its appended tail: both of those are where concurrently
 #[path = "all/lakeformation_catalog_resource_resolution.rs"]
 mod lakeformation_catalog_resource_resolution;
-#[path = "all/lakeformation_grant_principal_resolution.rs"]
-mod lakeformation_grant_principal_resolution;
 // tail is where every concurrently landing router suite appends its line, so a
 // declaration placed there conflicts with every one of them. (The build script requires
 // every suite under `tests/all/` to be declared in this file, so it cannot live anywhere
@@ -1381,7 +1361,6 @@ mod s3_access_point_policy_denial;
 // a bucket a stack created carries, which CloudFormation stamps and Amazon S3 reports.
 #[path = "all/cloudformation_stamps_s3_bucket_stack_provenance.rs"]
 mod cloudformation_stamps_s3_bucket_stack_provenance;
-// Declared in the appended tail, which is where every new suite inserts its lines: the
 // outputs of a stack whose deployment COMPLETED — the create and the revision that swaps
 // which role its deployed domain allows — each carrying the value the owning service holds.
 #[path = "all/cloudformation_updated_stack_outputs.rs"]
@@ -1425,14 +1404,33 @@ mod cloudformation_provisions_braket_spending_limits;
 // queue — S3, SNS and SQS at once.
 #[path = "all/s3_object_events_fan_out_through_sns.rs"]
 mod s3_object_events_fan_out_through_sns;
-// Declared in the appended tail, which is where every new suite inserts its lines: the
 // RECORDED load-balanced Fargate service coming up spans ECS, Elastic Load Balancing v2 and
 // the account's Amazon EC2 records at once (the subnet its interface is created in and the
 // route its image pull takes), so no single service crate's test target can ask it; the table
 // over the counts the rule generalises over is the owning ECS crate's own suite.
 #[path = "all/ecs_fargate_service_converges_to_its_desired_count.rs"]
 mod ecs_fargate_service_converges_to_its_desired_count;
-// Declared in the appended tail, which is where every new suite inserts its lines: the
+// Amazon SNS notifications an Auto Scaling group's notification configuration publishes
+// span Auto Scaling, Amazon EC2, SNS and Amazon SQS at once, and the publish is addressed
+// the way a client's own `sns`-scoped call is, so no single crate's test target can ask
+// which mounted model claims it.
+#[path = "all/autoscaling_notification_reaches_its_subscribed_queue.rs"]
+mod autoscaling_notification_reaches_its_subscribed_queue;
+// Declared here, in this same head region, beside the suite above it shares its readers with:
+// this one holds the same committed `Cargo.lock` to recording each member's own dependency
+// edges and every registry package's checksum, so it too belongs to no service's span of the
+// sorted list.
+#[path = "all/workspace_lockfile_records_each_member_dependency.rs"]
+mod workspace_lockfile_records_each_member_dependency;
+// Declared beside the sibling suite whose SES v1 sender it reuses, at the head, for the
+// reason the entries above record.
+#[path = "all/ses_v1_receipt_rule_lambda_invoke_grant.rs"]
+mod ses_v1_receipt_rule_lambda_invoke_grant;
+// Declared beside its sibling GuardDuty suite for the reason the lines above give.
+#[path = "all/guardduty_malware_protection_plan_role.rs"]
+mod guardduty_malware_protection_plan_role;
+#[path = "all/lakeformation_grant_principal_resolution.rs"]
+mod lakeformation_grant_principal_resolution;
 // deploy -> read-back -> update -> delete round trip of a stack-declared
 // `AWS::MWAA::Environment`, and the refusals Amazon MWAA's own control plane answers for one
 // it will not create — CloudFormation, Amazon MWAA and CloudWatch Logs at once.

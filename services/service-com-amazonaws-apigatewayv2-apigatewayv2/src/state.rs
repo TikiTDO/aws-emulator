@@ -26,6 +26,7 @@ pub mod authorizer_cache;
 pub mod duplicate_identity;
 pub mod ec2_subnets;
 pub mod integration_response_key;
+pub mod invoke_transport;
 mod network;
 pub mod paging;
 pub mod route_request_parameters;
@@ -1044,6 +1045,11 @@ pub struct ComAmazonawsApigatewayv2Apigatewayv2State {
     /// Data-plane state, like [`Self::authorizer_cache`], and held beside the apis under the
     /// same lock so an api's records and the socket it announces cannot drift apart.
     pub websocket_transport: websocket_transport::WebSocketTransport,
+    /// The in-process transport this service performs an HTTP api's integrations over when
+    /// the request being served carries none of its own
+    /// ([`invoke_transport::InvokeTransport`]). Held beside the apis under the same lock, for
+    /// the reason [`Self::websocket_transport`] is.
+    pub invoke_transport: invoke_transport::InvokeTransport,
 }
 
 impl ComAmazonawsApigatewayv2Apigatewayv2State {

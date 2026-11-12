@@ -1148,9 +1148,10 @@ async fn what_the_invoke_endpoint_answers_before_any_route_is_reached() {
 #[tokio::test]
 async fn an_api_this_service_does_not_serve_on_that_host_is_not_claimed() {
     // The claim is narrowed to an api this service HOLDS whose default endpoint still
-    // serves. Everything else is left to the front door — which, with only this service
-    // registered, answers its own `UnknownService`. What is pinned is that this service did
-    // not answer, not the front door's wording.
+    // serves, plus the one address no api of this emulator has at all. Everything else is
+    // left to the front door — which, with only this service registered, answers its own
+    // `UnknownService`. What is pinned is that this service did not answer, not the front
+    // door's wording.
     let emulator = emulator();
     let deployment = deploy(
         &emulator,
@@ -1196,17 +1197,6 @@ async fn an_api_this_service_does_not_serve_on_that_host_is_not_claimed() {
 
     let unclaimed: Vec<(&str, Answer)> = vec![
         (
-            "an execute-api host whose api id this service does not hold",
-            send(
-                &emulator,
-                &format!("zzz9999999.execute-api.{REGION}.amazonaws.com"),
-                "GET",
-                "/hello",
-                &[],
-            )
-            .await,
-        ),
-        (
             "an api that turned its own default endpoint off",
             send(&emulator, &disabled_host, "GET", "/hello", &[]).await,
         ),
@@ -1234,6 +1224,24 @@ async fn an_api_this_service_does_not_serve_on_that_host_is_not_claimed() {
             answer.summary()
         );
     }
+
+    // The one `execute-api` address this data plane DOES answer without holding the api:
+    // an endpoint whose api id resolves to no api of this emulator — the address a client
+    // keeps calling after the api behind it was deleted — which API Gateway answers
+    // `404 {"message": "Not Found"}` rather than leaving to nothing.
+    answered(
+        "an execute-api host whose api id no api of this emulator has",
+        &send(
+            &emulator,
+            &format!("zzz9999999.execute-api.{REGION}.amazonaws.com"),
+            "GET",
+            "/hello",
+            &[],
+        )
+        .await,
+        NOT_FOUND,
+        NOT_FOUND_MESSAGE,
+    );
 }
 
 #[tokio::test]
