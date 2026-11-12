@@ -19,11 +19,12 @@
 //!   what AWS answers for an agent nobody has talked to yet.
 //! * HOW the refusal is worded, so the two operations refuse the same way.
 //!
-//! What WRITES a summary is the agent invocation surface (`InvokeAgent`), which this
-//! emulator does not serve yet — it is one of the operations left modelled-but-unwired in
-//! `src/ops/SKIPPED_STUBS.md`. Nothing here invents a summary in its place: a memory is
-//! reported exactly as the store holds it, so an alias whose sessions were never
-//! summarised reports no memory rather than a fabricated one.
+//! What WRITES a summary is the agent invocation surface
+//! ([`crate::state::agent_invocation`], which `InvokeAgent` drives): an invocation that
+//! ENDS its session under a `memoryId` leaves that session's summary here, and only when
+//! the stored agent is configured to keep one. Nothing here invents a summary in its place:
+//! a memory is reported exactly as the store holds it, so an alias whose sessions were
+//! never summarised reports no memory rather than a fabricated one.
 
 use std::time::SystemTime;
 

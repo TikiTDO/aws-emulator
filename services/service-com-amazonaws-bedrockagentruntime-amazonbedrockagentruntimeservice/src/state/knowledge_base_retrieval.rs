@@ -287,11 +287,11 @@ const KNOWLEDGE_BASE_RESOURCE_TYPE: &str = "knowledge-base";
 ///
 /// The RUNTIME plane's own wording, which is not the build-time plane's sentence for the
 /// same resource (`agent_state::knowledge_base_not_found_message`, "KnowledgeBase with id
-/// <id> is not found."): the two planes refuse in their own words, and the recorded calls
-/// this fix was derived from show the 501 the stub answered rather than either sentence,
-/// so a later recording of this refusal is what would settle it.
+/// <id> is not found."): the two planes refuse in their own words. This is the sentence
+/// the recorded refusals of THIS plane carry, and every operation of it that resolves a
+/// knowledge base states it, so a client matching the rule matches one sentence.
 pub fn knowledge_base_not_found_message(identifier: &str) -> String {
-    format!("Could not find knowledge base {identifier}.")
+    format!("Knowledge Base with id {identifier} does not exist")
 }
 
 /// The resource an identity-based policy for a knowledge-base operation of this plane

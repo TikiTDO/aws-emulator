@@ -230,6 +230,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        self.serve(Self::NAME, &input, ctx)
+    }
+}
+
+impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> RetrieveAndGenerate<Eng> {
+    /// The whole knowledge-base query: read the request, authorize it, retrieve, generate
+    /// and record the turn.
+    ///
+    /// `operation` is the operation the caller invoked, which names the IAM action the call
+    /// is authorized against (`bedrock:<operation>`). It is a parameter because the
+    /// STREAMING sibling of this operation serves the same query — the same input shapes,
+    /// the same retrieval, the same generation and the same session — and differs only in
+    /// how the answer is delivered and in which action a policy has to allow, so
+    /// `crate::ops::retrieve_and_generate_stream` drives this one function rather than
+    /// carrying a second copy of the rule.
+    pub(crate) fn serve(
+        &self,
+        operation: &str,
+        input: &RetrieveAndGenerateInput,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
+    ) -> Result<RetrieveAndGenerateOutput, RetrieveAndGenerateError> {
         // The request is read in full BEFORE anything is looked up: a leg this service
         // cannot compute is refused whatever the stores hold, and that refusal depends on
         // the request alone, so it says nothing about which knowledge bases exist.
@@ -266,12 +287,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // Authorization is decided against the knowledge base the call queries — the
-        // resource an identity-based policy for `bedrock:RetrieveAndGenerate` names — and
-        // before any store is read, so an unauthorized call is answered the same way
-        // whether or not that knowledge base exists.
+        // resource an identity-based policy for `bedrock:<operation>` names — and before
+        // any store is read, so an unauthorized call is answered the same way whether or
+        // not that knowledge base exists.
         let resource =
             retrieval::knowledge_base_resource_arn(ctx, &knowledge_base.knowledge_base_id);
-        if let Err(denied) = crate::state::authorize(&*self.engine, ctx, Self::NAME, &resource) {
+        if let Err(denied) = crate::state::authorize(&*self.engine, ctx, operation, &resource) {
             return Err(RetrieveAndGenerateErrorModeled::AccessDeniedException(denied).into());
         }
 
@@ -280,7 +301,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The session the turn will be recorded in is settled before the work is done, so a
         // request naming a session this service never issued is refused rather than served
         // and then dropped.
-        self.session_preflight(&store, &input)?;
+        self.session_preflight(&store, input)?;
 
         let model = generation::resolve_model(
             &*self.engine,
@@ -338,7 +359,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The turn is recorded under the session that carries it, which is also where a
         // session is OPENED when the request named none: the id the response reports is
         // therefore always the id of a session this store holds.
-        let session_id = self.record_turn(&store, &input, &answer, &model, knowledge_base, query)?;
+        let session_id = self.record_turn(&store, input, &answer, &model, knowledge_base, query)?;
 
         Ok(RetrieveAndGenerateOutput {
             session_id,

@@ -146,6 +146,21 @@ pub struct GeneratedAnswer {
     pub passages: Vec<CitedPassage>,
 }
 
+/// The model a response names when the SERVICE selects it rather than the request: the
+/// managed model AWS picks for an agentic retrieval, which this emulator publishes no
+/// catalogue entry for — so the response says which model generated it without naming one
+/// this emulator does not serve.
+pub const MANAGED_MODEL: &str = "the service-managed model";
+
+/// The response this service generates against the model the SERVICE selects.
+///
+/// No model ceiling bounds it: a ceiling is a property of the model a request named, and
+/// this response is generated against none — what bounds it is the retrieval that answered,
+/// whose page size the request itself chose.
+pub fn compose_managed_answer(chunks: Vec<RetrievedChunk>) -> GeneratedAnswer {
+    compose_answer(MANAGED_MODEL, chunks, u32::MAX, &[])
+}
+
 /// The response this service generates for a query whose retrieval answered `chunks`, most
 /// relevant chunk first.
 ///

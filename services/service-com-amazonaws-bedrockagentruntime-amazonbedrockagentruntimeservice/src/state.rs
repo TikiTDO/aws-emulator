@@ -45,8 +45,14 @@
 /// See the module docs: what an agent alias's memory holds, and how the two memory
 /// operations resolve the alias they address.
 pub mod agent_memory;
+/// See the module docs: the agent alias an invocation reaches, what its response stream
+/// says, and the summary it leaves in that alias's memory.
+pub mod agent_invocation;
 /// See the module docs: where the content of one ingested document lives.
 pub mod document_content;
+/// See the module docs: the flow an alias routes to, and the path a request's input
+/// travels through that flow's own definition.
+pub mod flow_invocation;
 /// See the module docs: the response a knowledge-base query is answered with, and the
 /// model it is generated against.
 pub mod generated_answer;
@@ -98,6 +104,19 @@ pub const MAX_INVOCATIONS_PER_SESSION: usize = 1_000;
 
 /// Resource guard: the most steps one invocation holds. See [`MAX_SESSIONS`].
 pub const MAX_STEPS_PER_INVOCATION: usize = 1_000;
+
+/// Resource guard: the most session summaries one agent memory holds. See
+/// [`MAX_SESSIONS`]; an agent invocation that would exceed it answers its modelled
+/// `ServiceQuotaExceededException` instead of growing the memory.
+pub const MAX_SESSION_SUMMARIES_PER_MEMORY: usize = 1_000;
+
+/// Resource guard: the most retrievers ONE agentic retrieval reads. See [`MAX_SESSIONS`].
+///
+/// The modelled `AgenticRetrievers` carries a length FLOOR and no ceiling, and each
+/// retriever of a request is a separate pass over a vector index — so without this the
+/// request itself would choose how many times that work is done. Past it the retrieval
+/// answers its modelled `ServiceQuotaExceededException` instead of running them.
+pub const MAX_RETRIEVERS_PER_RETRIEVAL: usize = 25;
 
 /// Resource guard: the most tags one session holds, taken from the model's own bound on
 /// a single tagging request (`smithy_query(query="operation",operation="TagResource")` ->

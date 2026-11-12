@@ -40,5 +40,18 @@ written — answers the scaffold's 501.
 `ops/types/optimize_prompt_types.rs`, and is routed the same way. It is IMPLEMENTED:
 its request is validated against the model and its answer is the
 `OptimizedPromptStream`'s two events, framed through
-`service_common::event_stream::frame_event`. The other four are still unwired.
+`service_common::event_stream::frame_event`.
+
+`InvokeAgent`, `InvokeFlow`, `AgenticRetrieveStream` and `RetrieveAndGenerateStream` are
+written by hand too — `ops/invoke_agent.rs`, `ops/invoke_flow.rs`,
+`ops/agentic_retrieve_stream.rs` and `ops/retrieve_and_generate_stream.rs`, with their
+shapes in the `_types` module beside each — and routed the same way. All four are
+IMPLEMENTED. Only `InvokeInlineAgent` still answers the scaffold's 501, for the response
+stream nobody has written.
+
+Note that an operation listed above is unwired only until a file exists for it in
+`ops/`: `build.rs` scans `src/ops/*.rs` and puts every `//! @op <Name>` header it finds in
+the generated `operations(..)` list, which is what puts the operation's route in the
+service's routing table — and therefore what makes a request to it reach this service at
+all.
 

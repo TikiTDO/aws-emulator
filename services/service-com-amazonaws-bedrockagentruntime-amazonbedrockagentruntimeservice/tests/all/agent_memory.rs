@@ -25,9 +25,10 @@
 //! Nothing is seeded into another service's store by hand except the memory itself: the
 //! agents are created through the build-time plane's own `CreateAgent`, the roles through
 //! IAM's `CreateRole`/`PutRolePolicy` and the session credential through STS's `AssumeRole`
-//! — the same path a client takes. The memory is seeded in this service's own store
-//! because the surface that records a session into an agent's memory (`InvokeAgent`) is
-//! still unwired in this emulator (`src/ops/SKIPPED_STUBS.md`).
+//! — the same path a client takes. The memory is seeded in this service's own store so a
+//! case here turns on the memory alone; the surface that really records a session into an
+//! agent's memory is `InvokeAgent`, whose write
+//! `tests/all/agent_and_flow_invocations.rs` drives end to end.
 
 use std::sync::Arc;
 

@@ -885,7 +885,7 @@ async fn an_unknown_knowledge_base_is_refused_as_not_found() {
         );
         assert_eq!(
             body["message"].as_str(),
-            Some(format!("Could not find knowledge base {identifier}.").as_str()),
+            Some(format!("Knowledge Base with id {identifier} does not exist").as_str()),
             "case {case:?}: expected the refusal to name the identifier, got {body:?}"
         );
     }

@@ -54,6 +54,9 @@ hex = { workspace = true }
 # Decodes one `application/vnd.amazon.eventstream` frame, so the prompt-optimization suite
 # reads the response stream back the way an SDK's decoder does.
 aws-smithy-eventstream = "0.60"
+# Decodes the base64 a `@blob` member travels as on the restJson1 wire, so the streaming
+# suite reads an agent response chunk's bytes back the way an SDK does.
+base64 = "0.22"
 
 [lints]
 workspace = true

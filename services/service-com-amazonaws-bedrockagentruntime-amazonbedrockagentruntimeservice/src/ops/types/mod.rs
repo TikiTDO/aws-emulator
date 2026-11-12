@@ -21,6 +21,7 @@
 #[macro_use]
 pub mod date_time_wire;
 
+pub mod agentic_retrieve_stream_types;
 pub mod check_ingested_document_acl_types;
 pub mod create_invocation_types;
 pub mod create_session_types;
@@ -35,6 +36,8 @@ pub mod get_flow_execution_types;
 pub mod get_ingested_document_acl_types;
 pub mod get_invocation_step_types;
 pub mod get_session_types;
+pub mod invoke_agent_types;
+pub mod invoke_flow_types;
 pub mod invoke_inline_agent_types;
 pub mod list_flow_execution_events_types;
 pub mod list_flow_executions_types;
@@ -45,6 +48,7 @@ pub mod list_tags_for_resource_types;
 pub mod optimize_prompt_types;
 pub mod put_invocation_step_types;
 pub mod rerank_types;
+pub mod retrieve_and_generate_stream_types;
 pub mod retrieve_and_generate_types;
 pub mod retrieve_types;
 pub mod shared_types;
@@ -54,6 +58,8 @@ pub mod tag_resource_types;
 pub mod untag_resource_types;
 pub mod update_session_types;
 
+#[allow(ambiguous_glob_reexports, unused_imports)]
+pub use agentic_retrieve_stream_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
 pub use check_ingested_document_acl_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
@@ -83,6 +89,10 @@ pub use get_invocation_step_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
 pub use get_session_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
+pub use invoke_agent_types::*;
+#[allow(ambiguous_glob_reexports, unused_imports)]
+pub use invoke_flow_types::*;
+#[allow(ambiguous_glob_reexports, unused_imports)]
 pub use invoke_inline_agent_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
 pub use list_flow_execution_events_types::*;
@@ -102,6 +112,8 @@ pub use optimize_prompt_types::*;
 pub use put_invocation_step_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
 pub use rerank_types::*;
+#[allow(ambiguous_glob_reexports, unused_imports)]
+pub use retrieve_and_generate_stream_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
 pub use retrieve_and_generate_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]

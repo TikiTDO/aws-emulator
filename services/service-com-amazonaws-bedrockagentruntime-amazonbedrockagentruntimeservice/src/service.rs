@@ -44,8 +44,12 @@ use service_common::event_stream::EventStreamRoute;
 use smithy_server_runtime::{http, ErasedOperation, Refusal, Refused, Service};
 use std::sync::Arc;
 
+use crate::ops::agentic_retrieve_stream::{self, AgenticRetrieveStream};
+use crate::ops::invoke_agent::{self, InvokeAgent};
+use crate::ops::invoke_flow::{self, InvokeFlow};
 use crate::ops::invoke_inline_agent::{self, InvokeInlineAgent};
 use crate::ops::optimize_prompt::{self, OptimizePrompt};
+use crate::ops::retrieve_and_generate_stream::{self, RetrieveAndGenerateStream};
 
 /// The `@pattern` this service PUBLISHES for a member whose on-disk model records a STALE
 /// spelling of the same constraint, keyed by the stale text the generated schema carries.
@@ -115,8 +119,12 @@ fn quoted_pattern(modelled: &str) -> String {
 /// which the router consults FIRST, before the generated table.
 pub struct EmulatedService<Eng: Send + Sync + 'static> {
     entry: crate::ServiceDefinition<Eng>,
+    agentic_retrieve_stream: EventStreamRoute<AgenticRetrieveStream<Eng>>,
+    invoke_agent: EventStreamRoute<InvokeAgent<Eng>>,
+    invoke_flow: EventStreamRoute<InvokeFlow<Eng>>,
     invoke_inline_agent: EventStreamRoute<InvokeInlineAgent<Eng>>,
     optimize_prompt: EventStreamRoute<OptimizePrompt<Eng>>,
+    retrieve_and_generate_stream: EventStreamRoute<RetrieveAndGenerateStream<Eng>>,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -126,8 +134,14 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
             entry: crate::ServiceDefinition::new(engine.clone()),
+            agentic_retrieve_stream: EventStreamRoute(AgenticRetrieveStream::new(engine.clone())),
+            invoke_agent: EventStreamRoute(InvokeAgent::new(engine.clone())),
+            invoke_flow: EventStreamRoute(InvokeFlow::new(engine.clone())),
             invoke_inline_agent: EventStreamRoute(InvokeInlineAgent::new(engine.clone())),
-            optimize_prompt: EventStreamRoute(OptimizePrompt::new(engine)),
+            optimize_prompt: EventStreamRoute(OptimizePrompt::new(engine.clone())),
+            retrieve_and_generate_stream: EventStreamRoute(RetrieveAndGenerateStream::new(
+                engine,
+            )),
         }
     }
 }
@@ -178,11 +192,23 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // declines the request. Each is routed by the one route the operation itself
         // recognises (`<operation>::addresses`), so nothing else is touched — every other
         // request resolves through the generated table.
+        if agentic_retrieve_stream::addresses(req) {
+            return Some(&self.agentic_retrieve_stream);
+        }
+        if invoke_agent::addresses(req) {
+            return Some(&self.invoke_agent);
+        }
+        if invoke_flow::addresses(req) {
+            return Some(&self.invoke_flow);
+        }
         if invoke_inline_agent::addresses(req) {
             return Some(&self.invoke_inline_agent);
         }
         if optimize_prompt::addresses(req) {
             return Some(&self.optimize_prompt);
+        }
+        if retrieve_and_generate_stream::addresses(req) {
+            return Some(&self.retrieve_and_generate_stream);
         }
         None
     }
