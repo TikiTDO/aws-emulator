@@ -145,12 +145,29 @@ pub async fn advance<Eng: Send + Sync + 'static>(
     ctx: &smithy_server_runtime::OperationContext<'_>,
     pipeline_name: &str,
 ) {
+    let region = super::request_region(&ctx.parts().headers);
+    advance_in_region(engine, ctx.callback(), &region, pipeline_name).await;
+}
+
+/// [`advance`] for a caller that states the Region itself rather than having it read
+/// off a signed request's credential scope.
+///
+/// The trigger plane a webhook publishes is reached UNSIGNED — a third-party provider
+/// POSTs the payload it was configured to send and carries no AWS credential — so the
+/// Region the execution it starts is driven in is the one the webhook was defined in
+/// (`crate::service::webhook_trigger`), which is the Region that execution's artifact
+/// store and state-change events belong to.
+pub async fn advance_in_region<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    callback: &smithy_server_runtime::EmbeddedEmulator,
+    region: &str,
+    pipeline_name: &str,
+) {
     let Some(state) = super::service_state(engine) else {
         return;
     };
-    let region = super::request_region(&ctx.parts().headers);
-    advance_pipeline(&state, ctx.callback(), &region, pipeline_name).await;
-    super::clock::drive(&state, ctx.callback(), &region);
+    advance_pipeline(&state, callback, region, pipeline_name).await;
+    super::clock::drive(&state, callback, region);
 }
 
 /// The body of [`advance`] for ONE pipeline, over the store and the callback rather than

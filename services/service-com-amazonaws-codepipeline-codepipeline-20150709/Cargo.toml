@@ -78,15 +78,28 @@ tracing = { workspace = true }
 # (`state::identity_authorization`).
 service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 # Parses a webhook filter's `jsonPath` so `PutWebhook` refuses one that is not a
-# JsonPath expression, rather than this crate hand-writing the grammar.
+# JsonPath expression, rather than this crate hand-writing the grammar, and evaluates it
+# against the payload a trigger request carries
+# (`service::webhook_trigger`).
 serde_json_path = "0.7"
+# The keyed MAC a GITHUB_HMAC webhook's payload is proved with: a provider signs the
+# payload with the webhook's secret token, and the trigger plane verifies that signature
+# with this crate rather than computing a MAC by hand (`service::webhook_trigger`).
+hmac = "0.12"
+# The two digests a provider computes that signature under (`X-Hub-Signature` is
+# HMAC-SHA1, `X-Hub-Signature-256` is HMAC-SHA256).
+sha1 = "0.10"
+sha2 = { workspace = true }
+# Reads the hex digest a signature header carries.
+hex = { workspace = true }
+# `ipnet`: the reading of an IP CIDR range and of whether an address lies in it, which is
+# what an `IP` webhook's `AllowedIPRange` states.
+ipnet = "2"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
-sha2 = { workspace = true }
-hex = { workspace = true }
 # The Lambda deployment package and the CodeCommit file content a test uploads are
 # blobs, which the JSON wire form carries base64-encoded.
 base64 = "0.22"

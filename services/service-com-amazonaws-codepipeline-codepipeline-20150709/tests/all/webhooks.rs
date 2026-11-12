@@ -285,8 +285,11 @@ async fn every_webhook_definition_round_trips_through_list_webhooks() {
         );
         let url = item["url"].as_str().unwrap_or_default();
         assert!(
-            url.starts_with("https://us-east-1.webhooks.aws/trigger?t=") && url.ends_with("&v=1"),
-            "case {case:?}: expected a generated trigger URL, got {url:?}"
+            url.starts_with(
+                "https://emulator.invalid/_aws/codepipeline-webhooks/us-east-1/trigger?t="
+            ) && url.ends_with("&v=1"),
+            "case {case:?}: expected a trigger URL on an address this emulator serves, \
+             got {url:?}"
         );
         // The tags member is always reported — an empty list for a definition that
         // applied none.
@@ -906,7 +909,9 @@ async fn the_signed_region_is_the_one_in_the_arn_and_the_url() {
         );
         let url = put["webhook"]["url"].as_str().unwrap_or_default();
         assert!(
-            url.starts_with(&format!("https://{region}.webhooks.aws/trigger?t=")),
+            url.starts_with(&format!(
+                "https://emulator.invalid/_aws/codepipeline-webhooks/{region}/trigger?t="
+            )),
             "region {region:?}: the trigger URL carries the signed region, got {url:?}"
         );
     }

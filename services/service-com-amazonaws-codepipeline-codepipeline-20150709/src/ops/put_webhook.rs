@@ -9,6 +9,10 @@
 //! name already exists REPLACES its definition in place, keeping the URL and the ARN
 //! the first definition minted.
 //!
+//! The URL is the address a third party POSTs the provider payload to, and it is minted on
+//! an address THIS emulator answers on, where the POST is served
+//! (`crate::service::webhook_trigger`).
+//!
 //! A definition names its pipeline by NAME (`WebhookDefinition$targetPipeline` is "the
 //! name of the pipeline you want to connect to the webhook") and nothing about it is
 //! resolved here: the webhook is stored whether or not the account holds that pipeline,
@@ -263,9 +267,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     )
                     .into());
                 }
+                // The trigger URL is minted on the address this emulator is REACHED at,
+                // because it is the address a third party then POSTs the provider payload
+                // to — and this emulator serves that POST
+                // (`crate::service::webhook_trigger`). The token is the only part that
+                // identifies the webhook and it is minted against the store, never derived
+                // from the request.
+                let token = state.new_webhook_token();
+                let url = crate::service::webhook_trigger::announced_trigger_url(
+                    ctx, &region, &token,
+                );
                 crate::state::Webhook::create(
                     input.webhook,
-                    state.new_webhook_url(&region),
+                    region.clone(),
+                    token,
+                    url,
                     ::engine::emulator_arn(
                         crate::state::ARN_SERVICE,
                         &region,

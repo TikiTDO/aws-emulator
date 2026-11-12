@@ -129,5 +129,7 @@ mod update_pipeline;
 mod validation_and_messages;
 #[path = "all/webhook_definition_rules.rs"]
 mod webhook_definition_rules;
+#[path = "all/webhook_trigger.rs"]
+mod webhook_trigger;
 #[path = "all/webhooks.rs"]
 mod webhooks;

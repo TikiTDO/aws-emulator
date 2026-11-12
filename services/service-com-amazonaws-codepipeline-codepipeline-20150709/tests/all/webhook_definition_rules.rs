@@ -162,9 +162,12 @@ async fn a_definition_is_stored_without_resolving_its_target_pipeline() {
         );
         assert!(
             item["url"].as_str().is_some_and(|url| url
-                .starts_with("https://us-east-1.webhooks.aws/trigger?t=")
+                .starts_with(
+                    "https://emulator.invalid/_aws/codepipeline-webhooks/us-east-1/trigger?t="
+                )
                 && url.ends_with("&v=1")),
-            "case {case:?}: expected a generated trigger URL, got {put}"
+            "case {case:?}: expected a trigger URL on an address this emulator serves \
+             (the unserved base is what an in-process router publishes), got {put}"
         );
         // The tags member is always reported, as an empty list for a webhook carrying
         // none.

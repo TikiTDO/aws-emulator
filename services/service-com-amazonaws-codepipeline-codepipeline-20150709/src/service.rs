@@ -45,10 +45,26 @@
 //! the account's event history where CloudTrail's `LookupEvents` reports it. Recording is
 //! a property of serving a call rather than of any one operation, which is why it is wired
 //! here once instead of in 44 handlers.
+//!
+//! ## The webhook trigger plane
+//!
+//! `ListWebhookItem$url` is an address a THIRD PARTY dials: "when a POST request is made to
+//! this URL, the defined pipeline is started as long as the body of the post request
+//! satisfies the defined authentication and filtering". That POST names no modelled
+//! operation and carries no routing key, so two of the seams above are what serve it:
+//!
+//! - [`Service::can_handle`] also claims a request addressed to that plane
+//!   ([`webhook_trigger::claims_parts`]), which is what routes it here at all;
+//! - [`Service::override_operation`] serves it, through
+//!   [`webhook_trigger::WebhookTriggerPlane`].
+//!
+//! What is served there, and why that plane is unsigned, is documented in
+//! [`webhook_trigger`].
 
 /// The wire form of an `ActionType`: the awsJson shape discriminator its `id` carries.
 pub mod action_type_wire_form;
 pub mod management_events;
+pub mod webhook_trigger;
 
 use service_common::audited_operation::AuditedDefinition;
 use smithy_server_runtime::{
@@ -362,6 +378,15 @@ pub struct EmulatedService<Eng: Send + Sync + 'static> {
     /// Identity, the protocol and every framework error renderer stay the generated
     /// entry's.
     entry: AuditedDefinition<crate::ServiceDefinition<Eng>>,
+    /// Serves the trigger plane a webhook publishes — the wire its `url` advertises. Held
+    /// on the service because [`Service::override_operation`] hands the router a BORROW of
+    /// one of its own operations, and it owns the shared engine so every answer is computed
+    /// from the same store the control-plane handlers write.
+    ///
+    /// It is NOT behind the audit recorder: a third party POSTing a provider payload to a
+    /// published URL makes no AWS API call, so there is no management event of this service
+    /// to record for it.
+    webhook_trigger: webhook_trigger::WebhookTriggerPlane<Eng>,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -374,6 +399,7 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
         // a path that records nothing (see [`management_events::audited_table`]).
         let audited = management_events::audited_table(&engine);
         Self {
+            webhook_trigger: webhook_trigger::WebhookTriggerPlane::new(Arc::clone(&engine)),
             entry: AuditedDefinition::new(crate::ServiceDefinition::new(engine), audited),
         }
     }
@@ -391,10 +417,17 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // Claim a request whose resolved route key is this service's signing
         // name. Edit this for anything the model does not express — a signing
         // name shared by several services, or access-key-id-based routing.
-        match smithy_server_runtime::resolve_route_key(parts) {
-            Some(key) => key == self.entry.identity().signing_name(),
-            None => false,
+        if smithy_server_runtime::resolve_route_key(parts)
+            .is_some_and(|key| key == self.entry.identity().signing_name())
+        {
+            return true;
         }
+        // And a request addressed to the TRIGGER plane a webhook publishes: the URL
+        // `PutWebhook`/`ListWebhooks` hand a third party names no modelled operation and
+        // carries no routing key at all, so without this the router answers `404
+        // UnknownService` for a URL this service handed out. See
+        // [`webhook_trigger`].
+        webhook_trigger::claims_parts(parts)
     }
 
     fn override_operation(
@@ -405,7 +438,15 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // correctly; `None` (the default) lets the generated routing table resolve
         // it. `req` is the whole request, so a decision that depends on the body —
         // the `Action` form field on a query protocol, say — is reachable here.
-        let _ = req;
+        //
+        // A POST to a published webhook trigger URL is the one such request: the third
+        // party's own call names no modelled operation, so it is named here instead and
+        // served by the plane that holds this service's state. Every method addressed to
+        // the plane reaches it, so it answers the method itself rather than falling through
+        // to the router's answer for an unrouted request.
+        if self.webhook_trigger.claims(req) {
+            return Some(&self.webhook_trigger);
+        }
         None
     }
 
