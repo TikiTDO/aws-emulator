@@ -252,10 +252,20 @@ pub const ADDON_WORKER_DAEMON_SQSD: &str = "WorkerDaemon/SQSD";
 
 /// The `CustomAmi$VirtualizationType` values a managed platform version reports
 /// an entry for: the two EC2 virtualization types, in the order the recorded
-/// `DescribePlatformVersion` responses list them. A managed platform version
-/// pins no image of its own, so this is what makes up its `CustomAmiList` (see
-/// [`managed_custom_ami_list`]).
-pub const PLATFORM_VIRTUALIZATION_TYPES: &[&str] = &["pv", "hvm"];
+/// `DescribePlatformVersion` responses list them. See
+/// [`managed_custom_ami_list`], which reports the image each entry names.
+pub const PLATFORM_VIRTUALIZATION_TYPES: &[&str] =
+    &[PLATFORM_VIRTUALIZATION_TYPE_PV, PLATFORM_VIRTUALIZATION_TYPE_HVM];
+
+/// See [`PLATFORM_VIRTUALIZATION_TYPES`]: paravirtual, the legacy EC2
+/// virtualization type, which the instance generations a current platform
+/// version runs on no longer boot.
+pub const PLATFORM_VIRTUALIZATION_TYPE_PV: &str = "pv";
+/// See [`PLATFORM_VIRTUALIZATION_TYPES`]: hardware virtual machine, the
+/// virtualization type every current EC2 instance generation boots — so the one
+/// Elastic Beanstalk builds the machine image of a published platform version
+/// for.
+pub const PLATFORM_VIRTUALIZATION_TYPE_HVM: &str = "hvm";
 
 /// The support life-cycle states a platform branch is HELD in, from
 /// `PlatformBranchSummary$LifecycleState`'s own documentation ("Possible values:

@@ -446,9 +446,10 @@ async fn every_published_version_is_described_in_full_from_the_same_record() {
                  an empty Name and an empty Version, got {member:?}"
             );
         }
-        // One entry per virtualization type, each naming NO image: a managed
-        // version pins no custom AMI, so every `ImageId` is reported empty
-        // rather than as a machine image this service would have invented.
+        // One entry per virtualization type, each naming its type. WHICH entry
+        // names a machine image is the rule
+        // [`crate::published_platform_catalog`] covers; what this suite asserts
+        // is that the list the record projects carries both types, in order.
         let amis: Vec<(String, Option<String>)> = described
             .elements_at("CustomAmiList/member")
             .into_iter()
@@ -472,18 +473,19 @@ async fn every_published_version_is_described_in_full_from_the_same_record() {
             "case {case:?}: expected one entry per virtualization type, got {}",
             described.body
         );
-        // And each entry's `ImageId` is PRESENT and EMPTY, read off the XML for
-        // the same reason the framework entry above is.
+        // And every entry reports an `ImageId` element, read off the XML for the
+        // same reason the framework entry above is: present, with or without a
+        // value.
         let ami_members: Vec<&str> = elements(&described.body, "CustomAmiList")
             .iter()
             .flat_map(|list| elements(list, "member"))
             .collect();
         for member in &ami_members {
             assert_eq!(
-                elements(member, "ImageId"),
-                vec![""],
-                "case {case:?}: the {:?} entry of a managed version must report an empty \
-                 ImageId, got {member:?}",
+                elements(member, "ImageId").len(),
+                1,
+                "case {case:?}: the {:?} entry of a managed version must report an ImageId, got \
+                 {member:?}",
                 elements(member, "VirtualizationType")
             );
         }

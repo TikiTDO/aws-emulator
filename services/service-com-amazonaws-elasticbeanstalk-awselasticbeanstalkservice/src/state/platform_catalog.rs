@@ -214,13 +214,12 @@ impl SolutionStack {
     /// the catalog was published. A stack whose branch the store does not hold
     /// reports neither branch member rather than a guessed one.
     ///
-    /// The two members that describe a platform's own DEFINITION rather than the
-    /// catalog's entry for it — the frameworks it ships and the machine images it
-    /// pins — are what the owner of the platform states in the platform
-    /// definition it built the version from. A version Elastic Beanstalk itself
-    /// publishes has none to state, so it reports no framework at all and reports
-    /// each virtualization type with no image id (see
-    /// [`managed_custom_ami_list`]); neither is invented here.
+    /// `Frameworks` describes the platform's own DEFINITION rather than the
+    /// catalog's entry for it: it is what the owner of the platform states in the
+    /// platform definition it built the version from, and a version Elastic
+    /// Beanstalk itself publishes states none, so it reports no framework at all
+    /// rather than an invented one. The machine images the version runs are the
+    /// service's own ([`managed_custom_ami_list`]).
     pub fn to_description(
         &self,
         region: &str,
@@ -251,7 +250,11 @@ impl SolutionStack {
                 .map(str::to_string),
             programming_languages: Some(self.to_programming_languages()),
             frameworks: Some(managed_frameworks()),
-            custom_ami_list: Some(managed_custom_ami_list()),
+            custom_ami_list: Some(managed_custom_ami_list(
+                region,
+                self.branch_name,
+                platform_version,
+            )),
             supported_tier_list: branch.map(|branch| branch.supported_tiers.clone()),
             // Both lists follow the BRANCH, so a stack whose branch the store
             // does not hold reports neither rather than one of the two.
@@ -259,7 +262,10 @@ impl SolutionStack {
                 .map(|branch| managed_supported_addons(&branch.supported_tiers)),
             // Only the NEWEST version of a branch is its recommended one; the
             // release it superseded is still `Ready` but carries no life-cycle
-            // state at all ("Possible values: `Recommended` | `null`").
+            // state at all on THIS shape, whose member documents "Possible
+            // values: `Recommended` | `null`" — unlike `PlatformSummary`'s,
+            // which documents an empty value (see
+            // [`reported_platform_lifecycle_state`]).
             platform_lifecycle_state: (platform_version == self.platform_version)
                 .then(|| PLATFORM_LIFECYCLE_RECOMMENDED.to_string()),
             platform_branch_lifecycle_state: branch
@@ -293,27 +299,86 @@ pub fn managed_frameworks() -> Vec<PlatformFramework> {
 /// The `CustomAmiList` a MANAGED platform version reports — "the custom AMIs
 /// supported by the platform version": one entry per
 /// [`PLATFORM_VIRTUALIZATION_TYPES`] value, each naming its virtualization type
-/// and NO image.
+/// and the machine image the version runs for it
+/// ([`managed_platform_image_id`]).
 ///
-/// A custom AMI is an image the platform's own definition pins, which is
-/// something the account that BUILT a platform version states. A version Elastic
-/// Beanstalk publishes pins none, so the list says so: every entry carries an
-/// empty `ImageId` rather than a machine image this service would have had to
-/// invent, which is what the real service answers for a managed version. The
-/// list is the same for every published version, so it is derived per call
-/// rather than held in the store.
-pub fn managed_custom_ami_list() -> Vec<CustomAmi> {
+/// The list is the same for every call about one version, so it is derived per
+/// call rather than held in the store; the image it names is derived from the
+/// version itself, so the same version reports the same image on every read and
+/// no two versions report one image.
+pub fn managed_custom_ami_list(
+    region: &str,
+    branch_name: &str,
+    platform_version: &str,
+) -> Vec<CustomAmi> {
     PLATFORM_VIRTUALIZATION_TYPES
         .iter()
         .map(|virtualization_type| CustomAmi {
             virtualization_type: Some((*virtualization_type).to_string()),
-            // Reported and EMPTY: the entry names its virtualization type, and
-            // it names no image — which is what the real service answers for a
-            // version it publishes itself.
-            image_id: Some(String::new()),
+            // Reported for every entry; the image id on the entry whose
+            // virtualization type the version ships an image for, and no value
+            // on an entry whose type it ships none for.
+            image_id: Some(
+                managed_platform_image_id(
+                    region,
+                    branch_name,
+                    platform_version,
+                    virtualization_type,
+                )
+                .unwrap_or_default(),
+            ),
         })
         .collect()
 }
+
+/// The `ImageId` of the machine image the version `platform_version` of the
+/// branch `branch_name` runs in `region` under the virtualization type
+/// `virtualization_type` — and `None` where the version ships no image for that
+/// type.
+///
+/// Elastic Beanstalk builds the machine image of a platform version it publishes
+/// for the HVM virtualization type, the one every current EC2 instance
+/// generation boots ([`PLATFORM_VIRTUALIZATION_TYPE_HVM`]); the paravirtual type
+/// precedes those generations, so a published version ships no image for it and
+/// its entry names none, which is what the recorded `DescribePlatformVersion`
+/// responses of a managed version carry.
+///
+/// An image is a REGIONAL EC2 resource of one platform version, so the id is
+/// derived from exactly what identifies it — the region, the version's ARN
+/// components and the virtualization type — in the form EC2 issues an image id
+/// in ([`MANAGED_IMAGE_ID_PREFIX`] and [`MANAGED_IMAGE_ID_DIGITS`] lowercase
+/// hexadecimal digits under a leading `0`, the published `ami-0123456789abcdef0`
+/// shape). Deriving it means every read of one version reports the same image,
+/// no two versions report one image, and nothing has to mint or store an id.
+/// The digest and its hexadecimal rendering are the `sha2` and `hex` crates', as
+/// in [`super::managed_action_schedule`].
+fn managed_platform_image_id(
+    region: &str,
+    branch_name: &str,
+    platform_version: &str,
+    virtualization_type: &str,
+) -> Option<String> {
+    use ::sha2::Digest;
+
+    if virtualization_type != PLATFORM_VIRTUALIZATION_TYPE_HVM {
+        return None;
+    }
+    let name = format!(
+        "urn:{ARN_NAMESPACE}:{region}:platform/{branch_name}/{platform_version}:\
+         {virtualization_type}"
+    );
+    let digest = ::sha2::Sha256::digest(name.as_bytes());
+    // A leading `0` and the digits the digest supplies, two per byte.
+    let body = ::hex::encode(&digest[..(MANAGED_IMAGE_ID_DIGITS - 1) / 2]);
+    Some(format!("{MANAGED_IMAGE_ID_PREFIX}0{body}"))
+}
+
+/// The prefix EC2 issues an image id under, which is the form an `ImageId`
+/// naming one takes. See [`managed_platform_image_id`].
+const MANAGED_IMAGE_ID_PREFIX: &str = "ami-";
+/// How many hexadecimal digits an image id EC2 has issued carries — the long id
+/// form every current EC2 resource id takes. See [`managed_platform_image_id`].
+const MANAGED_IMAGE_ID_DIGITS: usize = 17;
 
 /// The `SupportedAddonList` of a managed platform version whose branch supports
 /// `supported_tiers` — "the additions associated with the platform version".
@@ -1600,6 +1665,25 @@ pub(super) const MANAGED_PLATFORM_BRANCHES: &[(&str, &str, &str, i32, &[&str])] 
         10000,
         BOTH_TIERS,
     ),
+    // Windows: the legacy IIS-on-Windows-Server branches, published under a
+    // platform name of their own rather than under ".NET on Windows Server" —
+    // the way the legacy Java SE and preconfigured-Docker runtimes are platforms
+    // of their own. The platform has retired whole, and the two branches were
+    // published together, so they share one ordinal.
+    (
+        "Windows",
+        "Legacy - IIS 7.5 running on 64bit Windows Server",
+        RETIRED,
+        9700,
+        WEB_SERVER_ONLY,
+    ),
+    (
+        "Windows",
+        "Legacy - IIS 8 running on 64bit Windows Server",
+        RETIRED,
+        9700,
+        WEB_SERVER_ONLY,
+    ),
 ];
 
 /// [`MANAGED_PLATFORM_BRANCHES`] as stored records, keyed by
@@ -1631,9 +1715,33 @@ pub(super) fn managed_platform_branch_catalog() -> BTreeMap<String, PlatformBran
 /// documents "Possible values: `recommended` | empty", `PlatformDescription`
 /// "Possible values: `Recommended` | `null`" — and the recorded
 /// platform-version responses of the real service carry the CAPITALIZED form on
-/// both shapes, so that is the value a platform version reports. A version that
-/// is not its branch's recommended one reports no value at all.
+/// both shapes, so that is the value a platform version reports. What a version
+/// that is NOT its branch's recommended one reports is the other half of those
+/// two sentences, and differs per shape: see
+/// [`reported_platform_lifecycle_state`].
 pub const PLATFORM_LIFECYCLE_RECOMMENDED: &str = "Recommended";
+
+/// The `PlatformSummary$PlatformLifecycleState` of a published platform version,
+/// given whether it is its branch's recommended one.
+///
+/// The member is reported for EVERY summary: it documents "Possible values:
+/// `recommended` | empty" and "If an empty value is returned, the platform
+/// version is supported but isn't the recommended one for its branch" — so a
+/// version that is not its branch's recommended one is reported with an empty
+/// value rather than with no member at all, which is how a client reading the
+/// summary learns the version is supported and not recommended instead of
+/// learning nothing. The recommended version of a branch carries
+/// [`PLATFORM_LIFECYCLE_RECOMMENDED`].
+///
+/// `PlatformDescription$PlatformLifecycleState` is the other sentence —
+/// "`Recommended` | `null`" — so there the member is absent for a version that
+/// is not recommended (see [`SolutionStack::to_description`]).
+pub fn reported_platform_lifecycle_state(is_recommended: bool) -> String {
+    match is_recommended {
+        true => PLATFORM_LIFECYCLE_RECOMMENDED.to_string(),
+        false => String::new(),
+    }
+}
 
 /// Order two version strings, and more generally two platform attribute values.
 ///
@@ -1719,11 +1827,12 @@ pub fn platform_branch_named<'a>(
 /// operating system it runs on, the add-ons it supports, its branch and the
 /// life-cycle state of version and branch — so a client filtering or displaying
 /// on one of them reads the same value `DescribePlatformVersion` reports.
-/// `PlatformLifecycleState` is [`PLATFORM_LIFECYCLE_RECOMMENDED`] on each
-/// branch's NEWEST release and absent on the release it superseded, which the
-/// catalog publishes beside it ([`SolutionStack::published_versions`]). A stack
-/// whose branch the store does not hold is not published: a version of a branch
-/// nobody can see is not available to the account either.
+/// `PlatformLifecycleState` is reported on every summary
+/// ([`reported_platform_lifecycle_state`]): [`PLATFORM_LIFECYCLE_RECOMMENDED`]
+/// on each branch's NEWEST release and empty on the release it superseded, which
+/// the catalog publishes beside it ([`SolutionStack::published_versions`]). A
+/// stack whose branch the store does not hold is not published: a version of a
+/// branch nobody can see is not available to the account either.
 pub fn managed_platform_listings(
     region: &str,
     branches: &BTreeMap<String, PlatformBranch>,
@@ -1754,9 +1863,9 @@ pub fn managed_platform_listings(
                         &branch.lifecycle_state,
                     )),
                     supported_tier_list: Some(branch.supported_tiers.clone()),
-                    platform_lifecycle_state: version
-                        .is_recommended()
-                        .then(|| PLATFORM_LIFECYCLE_RECOMMENDED.to_string()),
+                    platform_lifecycle_state: Some(reported_platform_lifecycle_state(
+                        version.is_recommended(),
+                    )),
                     platform_category: Some(stack.platform_category.to_string()),
                     operating_system_name: operating_system.map(|(name, _)| name.to_string()),
                     operating_system_version: operating_system

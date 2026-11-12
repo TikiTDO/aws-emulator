@@ -19,11 +19,11 @@
 //!    `Recommended` | `null` … Each platform branch has a single recommended
 //!    platform version").
 //! 3. A managed platform version reports no detail its catalog entry does not
-//!    define: `Frameworks` and `CustomAmiList` describe the platform DEFINITION
-//!    its owner built the version from, which a version the service itself
-//!    publishes has none of — so its one framework entry states neither a name
-//!    nor a version, and each `CustomAmiList` entry names its virtualization
-//!    type with an EMPTY image id.
+//!    define: `Frameworks` describes the platform DEFINITION its owner built the
+//!    version from, which a version the service itself publishes has none of —
+//!    so its one framework entry states neither a name nor a version — while
+//!    each `CustomAmiList` entry names its virtualization type and the image the
+//!    version runs for that type, which is the service's own.
 //!
 //! Every row is read from the service's own published catalog
 //! (`eb::state::SOLUTION_STACKS`, what `ListAvailableSolutionStacks` reports)
@@ -457,8 +457,10 @@ async fn a_managed_version_reports_no_definition_detail_of_its_own() {
                 );
             }
 
-            // One custom-AMI entry per virtualization type, each naming its type
-            // and NO image: a managed version pins no machine image of its own.
+            // One custom-AMI entry per virtualization type, each naming its
+            // type. Which entry names an image is
+            // [`crate::published_platform_catalog`]' rule; here the shape of the
+            // list is what the "no invented detail" rule needs.
             let amis = present(&described, "CustomAmiList", case);
             let members = elements(&amis, "member");
             assert_eq!(
@@ -472,16 +474,6 @@ async fn a_managed_version_reports_no_definition_detail_of_its_own() {
                     .collect::<Vec<String>>(),
                 "case {case:?}: expected one entry per virtualization type, got {amis:?}"
             );
-            for member in &members {
-                let image_id = present(member, "ImageId", case);
-                assert_eq!(
-                    image_id,
-                    String::new(),
-                    "case {case:?}: a managed version pins no custom AMI, so the {} entry must \
-                     report an empty ImageId, got {image_id:?}",
-                    present(member, "VirtualizationType", case)
-                );
-            }
 
             // What the CATALOG does state is still reported, so the rule above
             // is "no invented detail", not "no detail".

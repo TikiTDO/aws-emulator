@@ -99,6 +99,8 @@ mod platform_update_availability;
 mod platform_version_catalog_projection;
 #[path = "all/platform_versions.rs"]
 mod platform_versions;
+#[path = "all/published_platform_catalog.rs"]
+mod published_platform_catalog;
 #[path = "all/published_solution_stack_validation.rs"]
 mod published_solution_stack_validation;
 #[path = "all/record_projections.rs"]
