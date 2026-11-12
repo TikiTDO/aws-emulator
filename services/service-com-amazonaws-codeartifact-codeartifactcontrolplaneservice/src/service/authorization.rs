@@ -23,13 +23,18 @@
 //! ([`authorize_domain_action`]), the repository ([`authorize_repository_action`]) and the
 //! package inside it ([`authorize_package_action`]).
 //!
-//! The PACKAGE-GROUP operations are the one class this does not yet resolve to its own
-//! resource type: they are judged against the domain they address, because the group a
-//! request names is a PATTERN that has to be resolved against the stored hierarchy before the
-//! group it selects — and therefore that group's ARN — is known, which is work for the issue
-//! that owns those operations. The documents in force are the same either way (the domain's
-//! policy is the only one a package group lives under), so what is deferred is which ARN the
-//! decision and the refusal name, not whether the call is authorized.
+//! The PACKAGE-GROUP operations that address a group by PATTERN are the one class this does
+//! not yet resolve to its own resource type: they are judged against the domain they address,
+//! because the pattern a request names has to be resolved against the stored hierarchy before
+//! the group it selects — and therefore that group's ARN — is known, which is work for the
+//! issue that owns those operations. The documents in force are the same either way (the
+//! domain's policy is the only one a package group lives under), so what is deferred is which
+//! ARN the decision and the refusal name, not whether the call is authorized.
+//!
+//! An operation whose subject is named by an ARN rather than by name members
+//! ([`authorize_arn_addressed_action`]) needs no such resolution: the ARN already names one
+//! resource of one kind, a package group included, so the decision is reached against that
+//! resource's own ARN.
 //!
 //! ## Which resource policies are in force
 //!
@@ -98,6 +103,7 @@
 use ::service_common::iam_authorization::{self as iam, Decision};
 
 use crate::ops::types::AccessDeniedException;
+use crate::state::ResourceRef;
 
 /// This service's IAM action prefix: an action is `codeartifact:<OperationName>` ("Actions
 /// defined by AWS CodeArtifact", IAM Service Authorization Reference), which is this
@@ -193,6 +199,60 @@ pub fn authorize_domain_action<Eng: Send + Sync + 'static>(
     let resource = crate::state::domain_arn(&region, domain);
     let action = format!("{ACTION_PREFIX}:{operation}");
     let policies = resource_policies(engine, domain, domain_owner, None);
+    decide(&caller, &action, &resource, &policies)
+}
+
+/// Authorize `operation` on the resource a caller-supplied ARN addressed.
+///
+/// The same decision [`authorize_domain_action`] takes, for the operations whose subject is
+/// named by an ARN rather than by name members: the resource is the one that ARN resolved to
+/// ([`crate::state::ResourceRef`]) and the decision is reached against that resource's OWN
+/// ARN — a domain's, a repository's or a package group's — so a statement naming one of them
+/// decides that resource alone. The documents in force are the ones that resource lives
+/// under: its domain's policy, and for a repository that repository's own.
+///
+/// The ARN is canonicalised through the resource it resolved to rather than taken verbatim,
+/// because an ARN a caller writes out by hand may pin a region or an account the store does
+/// not partition by ([`crate::state::taggable_resource`]); the decision is reached against
+/// the ARN the resource itself reports.
+pub fn authorize_arn_addressed_action<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+    operation: &str,
+    reference: &crate::state::ResourceRef,
+) -> Result<(), AccessDeniedException> {
+    let caller = caller_or_unbounded(engine, ctx);
+    let region = crate::state::request_region(ctx.parts());
+    let (resource, domain, owner, repository) = match reference {
+        ResourceRef::Domain { owner, name } => (
+            crate::state::domain_arn(&region, name),
+            name.as_str(),
+            owner.as_deref(),
+            None,
+        ),
+        ResourceRef::Repository {
+            owner,
+            domain,
+            repository,
+        } => (
+            crate::state::repository_arn(&region, domain, repository),
+            domain.as_str(),
+            owner.as_deref(),
+            Some(repository.as_str()),
+        ),
+        ResourceRef::PackageGroup {
+            owner,
+            domain,
+            pattern,
+        } => (
+            crate::state::package_group_arn(&region, domain, pattern),
+            domain.as_str(),
+            owner.as_deref(),
+            None,
+        ),
+    };
+    let action = format!("{ACTION_PREFIX}:{operation}");
+    let policies = resource_policies(engine, domain, owner, repository);
     decide(&caller, &action, &resource, &policies)
 }
 

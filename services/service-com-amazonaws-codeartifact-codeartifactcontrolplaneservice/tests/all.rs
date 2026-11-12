@@ -119,3 +119,5 @@ mod pypi_data_plane;
 mod repository_endpoint_credentials;
 #[path = "all/package_version_readme.rs"]
 mod package_version_readme;
+#[path = "all/arn_addressed_authorization.rs"]
+mod arn_addressed_authorization;

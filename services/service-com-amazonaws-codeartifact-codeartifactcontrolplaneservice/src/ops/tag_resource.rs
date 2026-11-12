@@ -149,7 +149,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         // The ONE resolution of a caller-supplied `resourceArn`, shared with
         // `ListTagsForResource` (`state::resolve_taggable`): a value that is not a
@@ -177,6 +177,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into());
             }
         };
+
+        // The authorization decision this call takes before anything is read or written: see
+        // [`crate::service::authorization`] for the rule and the callers it does not bound.
+        // It is reached against the resource the ARN named, which is known from the ARN
+        // alone — never from whether this store holds it, so a refused call tells an
+        // unauthorized caller nothing about what exists.
+        crate::service::authorization::authorize_arn_addressed_action(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &reference,
+        )
+        .map_err(TagResourceErrorModeled::AccessDeniedException)?;
 
         // Every path below that cannot find the resource answers with ONE refusal: a
         // well-formed ARN of this namespace either names a record this store holds or

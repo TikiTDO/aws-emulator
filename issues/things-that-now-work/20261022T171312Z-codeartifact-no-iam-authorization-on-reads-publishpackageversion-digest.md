@@ -83,7 +83,13 @@ open work, recorded here so it remains discoverable:
   and is taken at the top of every handler that addresses a repository,
   `src/ops/describe_repository.rs` among them, so a principal allowed by neither its own
   identity policies nor the repository's permissions policy is refused with the modelled
-  `AccessDeniedException` (403).
+  `AccessDeniedException` (403). The same rule now covers the operations whose subject is
+  named by an ARN rather than by name members — `ListTagsForResource`, `TagResource` and
+  `UntagResource` — through `authorize_arn_addressed_action`, which reaches the decision
+  against the domain, repository or package group the ARN resolved to; it is pinned by
+  `tests/all/arn_addressed_authorization.rs`. `ListDomains` and `ListRepositories` stay
+  ungated: their action acts on no resource, so the resource the decision and the refusal
+  name is not determined by the request.
 - Cause 3 (CloudFormation stack Outputs for CodeArtifact resources carry no value, and the
   resources exist in no service) is implemented: both resource types are now provisioned in
   CodeArtifact through its own API and carry their published return values
