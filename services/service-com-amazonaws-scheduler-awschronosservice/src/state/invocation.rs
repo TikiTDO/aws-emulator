@@ -62,17 +62,32 @@
 //! stating `DELETE` is removed from the store then ([`apply_action_after_completion`])
 //! and one stating `NONE` is left where it is.
 //!
-//! The retry policy, the dead-letter route a terminally failed invocation takes, and
-//! the remaining target kinds (the ECS task, the EventBridge bus, the SageMaker
-//! pipeline and the universal `aws-sdk` target) are NOT performed here: an occurrence
-//! whose target kind this does not invoke is recorded as not attempted, and nothing is
-//! reported as delivered that was not.
+//! ## When an invocation does not reach its target
+//!
+//! The invocation is made UNDER the schedule's execution role, so the call it makes is
+//! one that role's permissions allow or it is not made at all; and a call that was
+//! made and failed is made AGAIN, inside both bounds `Target$RetryPolicy` states,
+//! until one of them is exhausted. The invocation that could not be delivered is then
+//! handed to the queue `Target$DeadLetterConfig` names, carrying the payload the
+//! target was to be handed and the detail of the failure that ended it. That half of
+//! the question — which failures are worth another attempt, how many attempts the
+//! policy admits, and what the dead-letter message carries — is [`super::dead_letter`];
+//! the attempts themselves wait on this clock, so nothing sleeps between them either.
+//!
+//! The remaining target kinds (the ECS task, the EventBridge bus, the Kinesis stream,
+//! the SageMaker pipeline and the universal `aws-sdk` target) are NOT invoked here: an
+//! occurrence whose target kind this does not invoke is recorded as not attempted —
+//! never as delivered, and never as a failure of a call nothing made.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 use crate::ops::types::{FlexibleTimeWindow, Target};
 
+use super::dead_letter::{
+    dead_letter_attributes, failure_of, withheld, Attempt, Exhaustion, Failure, Report,
+    RetryBounds, RETRY_INTERVAL,
+};
 use super::{
     occurrence::Occurrences, service_state, ComAmazonawsSchedulerAwschronosserviceState,
     ScheduleRecord, FALLBACK_REGION,
@@ -129,9 +144,14 @@ const EXECUTION_ID_ATTRIBUTE: &str = "<aws.scheduler.execution-id>";
 /// See [`SCHEDULE_ARN_ATTRIBUTE`].
 const ATTEMPT_NUMBER_ATTRIBUTE: &str = "<aws.scheduler.attempt-number>";
 
-/// The attempt an invocation this module performs is: its first. A retry policy is
-/// not applied here, so no delivery is ever a later attempt.
-const FIRST_ATTEMPT: &str = "1";
+/// The most invocations this store keeps unfinished attempts for at once.
+///
+/// An EMULATOR-CHOSEN ceiling: a failure the retry policy admits another attempt after
+/// keeps its invocation — and its payload — on the clock until the policy is
+/// exhausted, and a client can write schedules faster than their targets refuse them.
+/// Past this point a further failed invocation is not retried again but reported at
+/// once, so the bound costs attempts rather than losing the failure.
+const MAX_PENDING_INVOCATIONS: usize = 1_024;
 
 /// What a target with NO `Input` of its own is handed.
 ///
@@ -151,6 +171,20 @@ const LAMBDA_ARN_NAMESPACE: &str = "lambda";
 /// See [`SQS_ARN_NAMESPACE`].
 const STATES_ARN_NAMESPACE: &str = "states";
 
+/// The IAM action a queue's invocation — and the delivery of a dead-letter message,
+/// which reaches its queue the same way — is authorized by.
+///
+/// One per target kind below: each is the action of the single API that kind of target
+/// is invoked by, which is the permission EventBridge Scheduler's execution-role
+/// reference documents for a schedule with that target.
+const SEND_MESSAGE_ACTION: &str = "sqs:SendMessage";
+/// See [`SEND_MESSAGE_ACTION`].
+const PUBLISH_ACTION: &str = "sns:Publish";
+/// See [`SEND_MESSAGE_ACTION`].
+const INVOKE_FUNCTION_ACTION: &str = "lambda:InvokeFunction";
+/// See [`SEND_MESSAGE_ACTION`].
+const START_EXECUTION_ACTION: &str = "states:StartExecution";
+
 /// What the clock has done and which clock is running it: the whole of this
 /// module's state, held in the store so it survives the task that reads it.
 #[derive(Debug, Default)]
@@ -169,6 +203,9 @@ pub struct Invocations {
     /// How many invocations this store has performed, which is what makes each
     /// execution id its own ([`Self::next_execution_id`]).
     performed: u64,
+    /// The invocations this clock has attempted and not finished with, each holding
+    /// the instant its next attempt falls due ([`Pending`]).
+    pending: Vec<Pending>,
 }
 
 /// One schedule's next occurrence, as the clock holds it.
@@ -258,6 +295,36 @@ impl Schedulable {
 struct Firing {
     schedule: Schedulable,
     nominal: SystemTime,
+}
+
+/// One invocation this clock has attempted and not finished with.
+///
+/// It carries everything a FURTHER attempt of that invocation needs, read when the
+/// first attempt was made: an invocation is of the schedule as it stood when the
+/// occurrence fell due, so a schedule re-pointed (or deleted) while one of its
+/// invocations is still being attempted neither re-points nor withdraws it.
+#[derive(Debug, Clone)]
+struct Pending {
+    /// The schedule the invocation belongs to.
+    schedule_arn: String,
+    /// The Region the schedule itself is in, which a target ARN labelled with none is
+    /// reached in.
+    region: String,
+    /// The target as the schedule stated it when the occurrence fell due.
+    target: Target,
+    /// The occurrence's own instant, which is the invocation's scheduled time.
+    nominal: SystemTime,
+    /// The invocation's own execution id, which every attempt of it shares: the
+    /// attempts are one invocation.
+    execution_id: String,
+    /// The instant the FIRST attempt was made at, which the event's age — "the
+    /// maximum amount of time, in seconds, to continue to make retry attempts" — is
+    /// measured from.
+    began: SystemTime,
+    /// How many attempts of this invocation have been MADE.
+    attempts: u32,
+    /// When the next attempt of it falls due.
+    due: SystemTime,
 }
 
 impl Invocations {
@@ -393,6 +460,30 @@ impl Invocations {
             })
             .map(|(arn, _)| arn.clone())
             .collect()
+    }
+
+    /// The further attempts this clock has already made due, taken OFF it.
+    ///
+    /// An unfinished invocation is held only while it waits, so one whose attempt is
+    /// being made is not handed out again, the way a due occurrence's instant moves
+    /// before its delivery ([`Self::take_due`]).
+    fn take_due_attempts(&mut self, now: SystemTime) -> Vec<Pending> {
+        let (due, waiting): (Vec<Pending>, Vec<Pending>) = ::std::mem::take(&mut self.pending)
+            .into_iter()
+            .partition(|pending| pending.due <= now);
+        self.pending = waiting;
+        due
+    }
+
+    /// Hold `pending` until the attempt it is due is performed, answering whether the
+    /// clock took it: one past [`MAX_PENDING_INVOCATIONS`] is not held, and its
+    /// caller reports the failure instead of retrying it.
+    fn hold(&mut self, pending: Pending) -> bool {
+        if self.pending.len() >= MAX_PENDING_INVOCATIONS {
+            return false;
+        }
+        self.pending.push(pending);
+        true
     }
 }
 
@@ -633,7 +724,7 @@ pub fn drive_invocation_clock<Eng: Send + Sync + 'static>(
                 return;
             };
             let now = SystemTime::now();
-            let firing = {
+            let (firing, retrying) = {
                 let mut store = state.lock();
                 if !store.invocations.ticked(generation, now) {
                     return;
@@ -642,10 +733,17 @@ pub fn drive_invocation_clock<Eng: Send + Sync + 'static>(
                 // first, so a schedule whose group has gone is not invoked.
                 store.settle(now);
                 let schedulable = schedulable(&store);
-                store.invocations.take_due(&schedulable, now)
+                let firing = store.invocations.take_due(&schedulable, now);
+                (firing, store.invocations.take_due_attempts(now))
             };
             for occurrence in firing {
                 invoke(&state, &callback, &occurrence).await;
+            }
+            // A further attempt of an invocation is made after this tick's own
+            // occurrences, so a target that keeps refusing never holds up the
+            // schedules whose occurrences are due beside it.
+            for pending in retrying {
+                attempt(&state, &callback, pending).await;
             }
             // A schedule's action is applied only AFTER the occurrences of this
             // tick have been handed to their targets: a schedule completes "after
@@ -658,12 +756,14 @@ pub fn drive_invocation_clock<Eng: Send + Sync + 'static>(
     claimed.lock().invocations.set_running(running);
 }
 
-/// Perform ONE occurrence: act as the schedule's execution role and hand its
-/// target the rendered input.
+/// Perform ONE occurrence: hand the schedule's target the rendered input, acting as
+/// the schedule's execution role.
 ///
 /// The record is read HERE, with the store locked only for as long as reading it
 /// takes: an invocation reaches another service's handler, which takes that
-/// service's own lock.
+/// service's own lock. What is read is what the invocation is OF — the target, and
+/// the execution id that names this invocation — so every attempt of it afterwards
+/// is of the same invocation ([`attempt`]).
 async fn invoke(
     state: &::engine::ServiceState<ComAmazonawsSchedulerAwschronosserviceState>,
     callback: &::smithy_server_runtime::EmbeddedEmulator,
@@ -686,59 +786,298 @@ async fn invoke(
     let region = ::service_common::arn::region_of(&schedule.arn, "scheduler")
         .unwrap_or(FALLBACK_REGION)
         .to_string();
+    let began = SystemTime::now();
+    attempt(
+        state,
+        callback,
+        Pending {
+            schedule_arn: schedule.arn.clone(),
+            region,
+            target,
+            nominal: occurrence.nominal,
+            execution_id,
+            began,
+            attempts: 0,
+            due: began,
+        },
+    )
+    .await;
+}
+
+/// Make ONE attempt of an invocation, and settle what becomes of it.
+///
+/// The input is rendered for THIS attempt, because the attempt-number context
+/// attribute is the attempt being made. A failure the schedule's retry policy still
+/// admits an attempt after is put back on the clock, due one [`RETRY_INTERVAL`] on; a
+/// failure it does not is reported to the schedule's dead-letter queue
+/// ([`dead_letter`]). Nothing sleeps for the wait between two attempts: the due
+/// instant is stored and the clock performs the attempt it has already made due.
+async fn attempt(
+    state: &::engine::ServiceState<ComAmazonawsSchedulerAwschronosserviceState>,
+    callback: &::smithy_server_runtime::EmbeddedEmulator,
+    mut pending: Pending,
+) {
+    pending.attempts = pending.attempts.saturating_add(1);
+    let body = rendered_input(
+        &pending.target.input,
+        &pending.schedule_arn,
+        pending.nominal,
+        &pending.execution_id,
+        pending.attempts,
+    );
+    let failure = match perform(callback, &pending, &body).await {
+        Attempt::Delivered => return,
+        Attempt::NotAttempted(why) => {
+            ::tracing::warn!(
+                schedule = %pending.schedule_arn,
+                target = %pending.target.arn,
+                %why,
+                "an EventBridge Scheduler invocation was not attempted"
+            );
+            return;
+        }
+        Attempt::Failed(failure) => failure,
+    };
+    // The attempts already made BEYOND the first are the retries the policy counts.
+    let retries_made = pending.attempts.saturating_sub(1);
+    let next = after(SystemTime::now(), RETRY_INTERVAL);
+    let exhausted = if failure.retryable {
+        RetryBounds::of(pending.target.retry_policy.as_ref()).exhausted(
+            retries_made,
+            next.duration_since(pending.began).unwrap_or_default(),
+        )
+    } else {
+        // A refusal of the request itself spends neither bound: it is the
+        // invocation's last attempt however many the policy would have admitted.
+        None
+    };
+    if failure.retryable && exhausted.is_none() {
+        let mut held = pending.clone();
+        held.due = next;
+        if state.lock().invocations.hold(held) {
+            return;
+        }
+    }
+    dead_letter(callback, &pending, &body, &failure, exhausted, retries_made).await;
+}
+
+/// Make one attempt's calls: the permissions the invocation is made under, and then
+/// the one API the target's service is invoked by.
+async fn perform(
+    callback: &::smithy_server_runtime::EmbeddedEmulator,
+    pending: &Pending,
+    body: &str,
+) -> Attempt {
+    let arn = pending.target.arn.as_str();
+    let Some(parsed) = ::service_common::arn::parse(arn) else {
+        return Attempt::NotAttempted(format!("the target ARN {arn} names no resource"));
+    };
+    let Some(action) = invoking_action(parsed.vendor) else {
+        return Attempt::NotAttempted(format!(
+            "this emulator does not invoke a target of {}",
+            parsed.vendor
+        ));
+    };
     // The role is assumed BEFORE anything is invoked: "EventBridge Scheduler will
     // use [this role] for this target when the schedule is invoked", so a role this
     // account no longer holds, or one whose trust policy no longer admits the
     // scheduler, invokes nothing.
     if let Some(refusal) =
-        super::execution_role_violation(callback, &region, &target.role_arn).await
+        super::execution_role_violation(callback, &pending.region, &pending.target.role_arn).await
     {
-        ::tracing::warn!(
-            schedule = %schedule.arn,
-            role = %target.role_arn,
-            %refusal,
-            "an EventBridge Scheduler invocation was withheld: its execution role could not \
-             be assumed"
-        );
-        return;
+        return Attempt::Failed(withheld(refusal));
     }
-    let body = rendered_input(&target.input, &schedule.arn, occurrence.nominal, &execution_id);
-    deliver(callback, &region, &schedule.arn, &target, &body).await;
+    if let Some(failure) = withheld_action(callback, pending, action, arn).await {
+        return Attempt::Failed(failure);
+    }
+    // The target is reached in ITS OWN Region — the one its ARN names — falling back
+    // to the schedule's when the ARN carries no Region label.
+    let region = ::service_common::arn::region_of(arn, parsed.vendor).unwrap_or(&pending.region);
+    deliver(callback, region, &parsed, &pending.target, body).await
 }
 
-/// Hand `body` to the target `target.arn` names, through the one API that target's
-/// service is invoked by.
+/// The IAM action a target of this kind's invocation is authorized by, or `None` for
+/// a kind this emulator does not invoke.
+fn invoking_action(vendor: &str) -> Option<&'static str> {
+    match vendor {
+        SQS_ARN_NAMESPACE => Some(SEND_MESSAGE_ACTION),
+        SNS_ARN_NAMESPACE => Some(PUBLISH_ACTION),
+        LAMBDA_ARN_NAMESPACE => Some(INVOKE_FUNCTION_ACTION),
+        STATES_ARN_NAMESPACE => Some(START_EXECUTION_ACTION),
+        _ => None,
+    }
+}
+
+/// The failure a call the invocation's own permissions withhold comes to, or `None`
+/// when nothing withholds it.
 ///
-/// The target is reached in ITS OWN Region — the one its ARN names — falling back
-/// to the schedule's when the ARN carries no Region label.
-async fn deliver(
+/// `Target$RoleArn` is "the IAM role that EventBridge Scheduler will use for this
+/// target when the schedule is invoked", so the call is made UNDER that role and is
+/// authorized against ITS permissions rather than against those of whoever wrote the
+/// schedule. The question goes to the one reading of it this tree has
+/// ([`::service_common::iam_role::role_withholds_action_through`]), which withholds
+/// nothing unless IAM answered that the role's policies do — so an emulator with no
+/// IAM to ask invokes the target, nothing having been established about the role.
+async fn withheld_action(
     callback: &::smithy_server_runtime::EmbeddedEmulator,
-    region: &str,
-    schedule_arn: &str,
-    target: &Target,
+    pending: &Pending,
+    action: &str,
+    resource: &str,
+) -> Option<Failure> {
+    let role_arn = pending.target.role_arn.as_str();
+    if !::service_common::iam_role::role_withholds_action_through(
+        callback,
+        &pending.region,
+        role_arn,
+        action,
+        resource,
+    )
+    .await
+    {
+        return None;
+    }
+    Some(withheld(
+        ::service_common::iam_authorization::not_authorized_by_identity_policy(
+            &invocation_principal(role_arn, &pending.execution_id),
+            action,
+            resource,
+            &::service_common::iam_authorization::no_identity_policy_allows(action),
+        ),
+    ))
+}
+
+/// The principal one invocation's calls are made by: the session the schedule's
+/// execution role is assumed under, which is what an authorization refusal of such a
+/// call names. The session is the invocation's own, so two invocations of one
+/// schedule are not one session.
+fn invocation_principal(role_arn: &str, execution_id: &str) -> String {
+    let parsed = ::service_common::arn::parse_of(role_arn, "iam");
+    let name = ::service_common::iam_role::role_name(role_arn);
+    match (parsed, name) {
+        (Some(parsed), Some(name)) => format!(
+            "arn:{}:sts::{}:assumed-role/{name}/{execution_id}",
+            parsed.partition, parsed.account
+        ),
+        // A value that names no role of this account is named as the schedule
+        // stated it: there is no session to name instead.
+        _ => role_arn.to_string(),
+    }
+}
+
+/// Report an invocation that could not be delivered to the queue the schedule names
+/// for one: "EventBridge Scheduler delivers failed events that could not be
+/// successfully delivered to a target to the queue".
+///
+/// The message body is the payload the target was to be handed, and its attributes
+/// are the failure's own detail ([`dead_letter_attributes`]). The send is made under
+/// the schedule's execution role as well — a dead-letter queue is reached by the same
+/// `sqs:SendMessage` a queue target is, which is the grant AWS documents for one — so
+/// a role that may not write to that queue leaves the failure in this emulator's log
+/// alone, which is also all a schedule naming no such queue leaves behind.
+async fn dead_letter(
+    callback: &::smithy_server_runtime::EmbeddedEmulator,
+    pending: &Pending,
     body: &str,
+    failure: &Failure,
+    exhausted: Option<Exhaustion>,
+    retries: u32,
 ) {
-    let arn = target.arn.as_str();
-    let Some(parsed) = ::service_common::arn::parse(arn) else {
+    let code = failure.code.as_str();
+    let detail = failure.message.as_str();
+    let Some(queue_arn) = pending
+        .target
+        .dead_letter_config
+        .as_ref()
+        .and_then(|config| config.arn.as_deref())
+        .filter(|arn| !arn.is_empty())
+    else {
         ::tracing::warn!(
-            schedule = %schedule_arn,
-            target = %arn,
-            "an EventBridge Scheduler invocation was not attempted: the target ARN names no \
-             resource"
+            schedule = %pending.schedule_arn,
+            target = %pending.target.arn,
+            %code,
+            %detail,
+            "an EventBridge Scheduler invocation failed and its schedule names no dead-letter \
+             queue"
         );
         return;
     };
-    let region = ::service_common::arn::region_of(arn, parsed.vendor).unwrap_or(region);
-    let failure = match parsed.vendor {
+    let region =
+        ::service_common::arn::region_of(queue_arn, SQS_ARN_NAMESPACE).unwrap_or(&pending.region);
+    let url = ::service_common::arn::parse_of(queue_arn, SQS_ARN_NAMESPACE)
+        .and_then(|parsed| queue_url(region, parsed.account, parsed.resource));
+    let Some(url) = url else {
+        ::tracing::warn!(
+            schedule = %pending.schedule_arn,
+            dead_letter_queue = %queue_arn,
+            "an EventBridge Scheduler invocation was not dead-lettered: the dead-letter ARN \
+             names no queue"
+        );
+        return;
+    };
+    if let Some(withheld) = withheld_action(callback, pending, SEND_MESSAGE_ACTION, queue_arn).await
+    {
+        ::tracing::warn!(
+            schedule = %pending.schedule_arn,
+            dead_letter_queue = %queue_arn,
+            refusal = %withheld.message,
+            "an EventBridge Scheduler invocation was not dead-lettered: its execution role may \
+             not write to the dead-letter queue"
+        );
+        return;
+    }
+    let scheduled_time = scheduled_time_text(pending.nominal);
+    let attributes = dead_letter_attributes(&Report {
+        schedule_arn: &pending.schedule_arn,
+        target_arn: &pending.target.arn,
+        execution_id: &pending.execution_id,
+        scheduled_time: &scheduled_time,
+        retries,
+        exhausted,
+        failure,
+    });
+    let mut request = sqs_client(callback, region)
+        .send_message()
+        .queue_url(url)
+        .message_body(body);
+    for attribute in attributes {
+        let value = ::aws_sdk_sqs::types::MessageAttributeValue::builder()
+            .data_type(attribute.data_type)
+            .string_value(attribute.value)
+            .build();
+        match value {
+            Ok(value) => request = request.message_attributes(attribute.name, value),
+            Err(error) => ::tracing::warn!(
+                attribute = %attribute.name,
+                %error,
+                "a dead-letter message attribute could not be built"
+            ),
+        }
+    }
+    if let Err(error) = request.send().await {
+        ::tracing::warn!(
+            schedule = %pending.schedule_arn,
+            dead_letter_queue = %queue_arn,
+            error = ?error,
+            "an EventBridge Scheduler invocation was not dead-lettered: the dead-letter queue \
+             did not accept it"
+        );
+    }
+}
+
+/// Hand `body` to the target `target.arn` names, through the one API that target's
+/// service is invoked by, and answer what the call came to.
+async fn deliver(
+    callback: &::smithy_server_runtime::EmbeddedEmulator,
+    region: &str,
+    parsed: &::service_common::arn::Arn<'_>,
+    target: &Target,
+    body: &str,
+) -> Attempt {
+    let arn = target.arn.as_str();
+    match parsed.vendor {
         SQS_ARN_NAMESPACE => {
             let Some(queue_url) = queue_url(region, parsed.account, parsed.resource) else {
-                ::tracing::warn!(
-                    schedule = %schedule_arn,
-                    target = %arn,
-                    "an EventBridge Scheduler invocation was not attempted: the target ARN \
-                     names no queue"
-                );
-                return;
+                return Attempt::NotAttempted(format!("the target ARN {arn} names no queue"));
             };
             let mut request = sqs_client(callback, region)
                 .send_message()
@@ -754,52 +1093,58 @@ async fn deliver(
             {
                 request = request.message_group_id(group);
             }
-            request.send().await.err().map(render_error)
+            answered(request.send().await)
         }
-        SNS_ARN_NAMESPACE => sns_client(callback, region)
-            .publish()
-            .topic_arn(arn)
-            .message(body)
-            .send()
-            .await
-            .err()
-            .map(render_error),
-        LAMBDA_ARN_NAMESPACE => lambda_client(callback, region)
-            .invoke()
-            .function_name(arn)
-            // A schedule does not wait for its function target's answer.
-            .invocation_type(::aws_sdk_lambda::types::InvocationType::Event)
-            .payload(::aws_sdk_lambda::primitives::Blob::new(body.as_bytes()))
-            .send()
-            .await
-            .err()
-            .map(render_error),
-        STATES_ARN_NAMESPACE => sfn_client(callback, region)
-            .start_execution()
-            .state_machine_arn(arn)
-            .input(body)
-            .send()
-            .await
-            .err()
-            .map(render_error),
-        _ => Some(format!(
-            "this emulator does not invoke a target of {}",
-            parsed.vendor
+        SNS_ARN_NAMESPACE => answered(
+            sns_client(callback, region)
+                .publish()
+                .topic_arn(arn)
+                .message(body)
+                .send()
+                .await,
+        ),
+        LAMBDA_ARN_NAMESPACE => answered(
+            lambda_client(callback, region)
+                .invoke()
+                .function_name(arn)
+                // A schedule does not wait for its function target's answer.
+                .invocation_type(::aws_sdk_lambda::types::InvocationType::Event)
+                .payload(::aws_sdk_lambda::primitives::Blob::new(body.as_bytes()))
+                .send()
+                .await,
+        ),
+        STATES_ARN_NAMESPACE => answered(
+            sfn_client(callback, region)
+                .start_execution()
+                .state_machine_arn(arn)
+                .input(body)
+                .send()
+                .await,
+        ),
+        vendor => Attempt::NotAttempted(format!(
+            "this emulator does not invoke a target of {vendor}"
         )),
-    };
-    if let Some(failure) = failure {
-        ::tracing::warn!(
-            schedule = %schedule_arn,
-            target = %arn,
-            %failure,
-            "an EventBridge Scheduler invocation did not reach its target"
-        );
     }
 }
 
-/// One SDK failure as the sentence a warning carries.
-fn render_error<E: ::std::fmt::Debug>(error: E) -> String {
-    format!("{error:?}")
+/// What one target API's answer came to: a delivery, or the failure it reported
+/// ([`failure_of`]).
+fn answered<T, E>(
+    answer: Result<
+        T,
+        ::aws_smithy_runtime_api::client::result::SdkError<
+            E,
+            ::aws_smithy_runtime_api::client::orchestrator::HttpResponse,
+        >,
+    >,
+) -> Attempt
+where
+    E: ::aws_smithy_types::error::metadata::ProvideErrorMetadata + ::std::error::Error + 'static,
+{
+    match answer {
+        Ok(_) => Attempt::Delivered,
+        Err(error) => Attempt::Failed(failure_of(&error)),
+    }
 }
 
 /// The `QueueUrl` Amazon SQS addresses the queue of `name` in `account` by, or
@@ -870,13 +1215,15 @@ callback_client!(sfn_client, aws_sdk_sfn, "states");
 /// nothing of the schedule is folded into it — except for the context attributes
 /// EventBridge Scheduler substitutes, which are the schedule's ARN, the
 /// occurrence's own scheduled time, this invocation's execution id and the attempt
-/// it is.
+/// it is. `attempt` is the attempt being MADE, counted from one, so what a retried
+/// invocation hands its target says which attempt reached it.
 #[must_use]
 pub fn rendered_input(
     input: &Option<String>,
     schedule_arn: &str,
     scheduled_time: SystemTime,
     execution_id: &str,
+    attempt: u32,
 ) -> String {
     let Some(input) = input.as_deref().filter(|input| !input.is_empty()) else {
         return DEFAULT_INPUT.to_string();
@@ -885,7 +1232,7 @@ pub fn rendered_input(
         .replace(SCHEDULE_ARN_ATTRIBUTE, schedule_arn)
         .replace(SCHEDULED_TIME_ATTRIBUTE, &scheduled_time_text(scheduled_time))
         .replace(EXECUTION_ID_ATTRIBUTE, execution_id)
-        .replace(ATTEMPT_NUMBER_ATTRIBUTE, FIRST_ATTEMPT)
+        .replace(ATTEMPT_NUMBER_ATTRIBUTE, &attempt.to_string())
 }
 
 /// One occurrence's instant as the scheduled-time attribute carries it.
@@ -1181,34 +1528,52 @@ mod tests {
     }
 
     /// The substituted input is the target's own text with the schedule's context
-    /// attributes replaced, and a target stating no input is handed the default.
+    /// attributes replaced, and a target stating no input is handed the default. The
+    /// attempt the invocation is carries into it, so the rows differ along the
+    /// attribute substituted and along the attempt it is substituted for.
     #[test]
     fn an_input_carries_the_schedules_context_attributes() {
         let arn = "arn:aws:scheduler:eu-west-2:000000000000:schedule/default/nightly";
         let at = epoch(1_893_456_000);
-        // (case, the target's Input, what the target is handed)
-        let rows: [(&str, Option<&str>, &str); 6] = [
-            ("no input at all", None, "{}"),
-            ("an empty input", Some(""), "{}"),
-            ("text carrying no attribute", Some("a marker"), "a marker"),
+        // (case, the target's Input, the attempt, what the target is handed)
+        let rows: [(&str, Option<&str>, u32, &str); 8] = [
+            ("no input at all", None, 1, "{}"),
+            ("an empty input", Some(""), 1, "{}"),
+            ("text carrying no attribute", Some("a marker"), 1, "a marker"),
             (
                 "the scheduled time",
                 Some(r#"{"at":"<aws.scheduler.scheduled-time>"}"#),
+                1,
                 r#"{"at":"2030-01-01T00:00:00Z"}"#,
             ),
             (
                 "the execution id and the attempt",
                 Some(r#"{"id":"<aws.scheduler.execution-id>","try":<aws.scheduler.attempt-number>}"#),
+                1,
                 r#"{"id":"EXEC","try":1}"#,
+            ),
+            (
+                "a retried invocation's attempt",
+                Some(r#"{"try":<aws.scheduler.attempt-number>}"#),
+                2,
+                r#"{"try":2}"#,
+            ),
+            (
+                "the last attempt a default policy admits",
+                Some(r#"{"try":<aws.scheduler.attempt-number>}"#),
+                186,
+                r#"{"try":186}"#,
             ),
             (
                 "the schedule's own ARN",
                 Some("<aws.scheduler.schedule-arn>"),
+                1,
                 arn,
             ),
         ];
-        for (case, input, expected) in rows {
-            let rendered = rendered_input(&input.map(ToString::to_string), arn, at, "EXEC");
+        for (case, input, attempt, expected) in rows {
+            let rendered =
+                rendered_input(&input.map(ToString::to_string), arn, at, "EXEC", attempt);
             assert_eq!(
                 rendered, expected,
                 "case {case:?}: expected {expected:?}, got {rendered:?}"
@@ -1261,5 +1626,65 @@ mod tests {
                 "case invocation {index}: the id {id:?} was handed out twice"
             );
         }
+    }
+
+    /// An unfinished invocation waits on the clock until the attempt it is due falls
+    /// due, is then handed out ONCE, and is not held at all past the ceiling on how
+    /// many of them this store keeps: the rows differ along how far ahead the next
+    /// attempt is.
+    #[test]
+    fn a_further_attempt_waits_on_the_clock_until_it_is_due() {
+        let now = epoch(1_893_456_030);
+        let waiting = |due: SystemTime| Pending {
+            schedule_arn: "arn:aws:scheduler:eu-west-2:000000000000:schedule/default/nightly"
+                .to_string(),
+            region: "eu-west-2".to_string(),
+            target: Target::default(),
+            nominal: now,
+            execution_id: "EXEC".to_string(),
+            began: now,
+            attempts: 1,
+            due,
+        };
+        // (case, when the next attempt is due, whether this tick performs it)
+        let rows: [(&str, SystemTime, bool); 4] = [
+            ("an attempt due in the past", epoch(1_893_456_029), true),
+            ("an attempt due at this very tick", now, true),
+            ("an attempt a second ahead", epoch(1_893_456_031), false),
+            ("an attempt an hour ahead", epoch(1_893_459_630), false),
+        ];
+        for (case, due, performed) in rows {
+            let mut invocations = Invocations::default();
+            assert!(
+                invocations.hold(waiting(due)),
+                "case {case:?}: the clock did not hold an unfinished invocation"
+            );
+            let taken = invocations.take_due_attempts(now);
+            assert_eq!(
+                taken.len(),
+                usize::from(performed),
+                "case {case:?}: expected performed={performed}, got {} attempt(s)",
+                taken.len()
+            );
+            // Whatever this tick took is off the clock, so the next tick does not
+            // perform the same attempt again.
+            let again = invocations.take_due_attempts(now);
+            assert!(
+                again.is_empty(),
+                "case {case:?}: the same attempt was handed out twice: {again:?}"
+            );
+        }
+
+        let mut invocations = Invocations::default();
+        for index in 0..MAX_PENDING_INVOCATIONS {
+            assert!(
+                invocations.hold(waiting(epoch(1_893_459_630))),
+                "case the ceiling: invocation {index} was not held"
+            );
+        }
+        assert!(
+            !invocations.hold(waiting(epoch(1_893_459_630))),
+            "case the ceiling: an invocation past {MAX_PENDING_INVOCATIONS} was held"
+        );
     }
 }

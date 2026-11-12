@@ -89,7 +89,28 @@ pub(crate) async fn scheduler(
 
 /// One awsJson1_0 call against Amazon SQS.
 pub(crate) async fn sqs(router: &MultiServiceRouter, operation: &str, body: &Value) -> (u16, Value) {
-    let request = http::Request::builder()
+    let response = sqs_response(router, operation, body, false).await;
+    let status = response.status().as_u16();
+    let payload = response.into_body();
+    let parsed = if payload.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&payload).unwrap_or(Value::Null)
+    };
+    (status, parsed)
+}
+
+/// The same call, answered as the WHOLE response: a refusal is read for the headers
+/// it carries as well as for its body. `query_mode` sends the header a
+/// query-compatible SDK opts into the legacy error report with, which is how such an
+/// SDK — the one an invocation reaches this service through — reads an error code.
+pub(crate) async fn sqs_response(
+    router: &MultiServiceRouter,
+    operation: &str,
+    body: &Value,
+    query_mode: bool,
+) -> http::Response<bytes::Bytes> {
+    let mut request = http::Request::builder()
         .method("POST")
         .uri("/")
         .header("host", format!("sqs.{REGION}.amazonaws.com"))
@@ -101,24 +122,24 @@ pub(crate) async fn sqs(router: &MultiServiceRouter, operation: &str, body: &Val
                 "AWS4-HMAC-SHA256 Credential=AKIDTESTTESTTEST/20260101/{REGION}/sqs/\
                  aws4_request, SignedHeaders=host, Signature=0000"
             ),
-        )
+        );
+    if query_mode {
+        request = request.header("x-amzn-query-mode", "true");
+    }
+    let request = request
         .body(bytes::Bytes::from(body.to_string()))
         .expect("the test request is well formed");
-    let response = router.dispatch(request).await;
-    let status = response.status().as_u16();
-    let payload = response.into_body();
-    let parsed = if payload.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(&payload).unwrap_or(Value::Null)
-    };
-    (status, parsed)
+    router.dispatch(request).await
 }
 
 /// One awsQuery call against IAM, answered as the XML text it is. The form
 /// components are encoded by the harness's own percent-encoder, whose unreserved
 /// set is the one an SDK encodes a query body with.
-async fn iam(router: &MultiServiceRouter, action: &str, params: &[(&str, &str)]) -> (u16, String) {
+pub(crate) async fn iam(
+    router: &MultiServiceRouter,
+    action: &str,
+    params: &[(&str, &str)],
+) -> (u16, String) {
     let mut body = format!("Action={action}&Version=2010-05-08");
     for (name, value) in params {
         body.push('&');
@@ -187,6 +208,17 @@ pub(crate) async fn given_execution_role(
     name: &str,
     queue_arn: &str,
 ) -> String {
+    given_execution_role_for(router, case, name, &[queue_arn]).await
+}
+
+/// The same role, granted `sqs:SendMessage` on each of `queues` — none of them for a
+/// role whose permissions allow the schedule nothing at all.
+pub(crate) async fn given_execution_role_for(
+    router: &MultiServiceRouter,
+    case: &str,
+    name: &str,
+    queues: &[&str],
+) -> String {
     let trust = json!({
         "Version": "2012-10-17",
         "Statement": [{
@@ -219,10 +251,15 @@ pub(crate) async fn given_execution_role(
         "Statement": [{
             "Effect": "Allow",
             "Action": "sqs:SendMessage",
-            "Resource": queue_arn,
+            "Resource": queues,
         }],
     })
     .to_string();
+    if queues.is_empty() {
+        // A role carrying no permissions at all: there is no statement to write, and
+        // what such a role withholds is what the invocation is then refused by.
+        return arn;
+    }
     let (status, written) = iam(
         router,
         "PutRolePolicy",

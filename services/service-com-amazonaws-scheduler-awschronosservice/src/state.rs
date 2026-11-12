@@ -15,8 +15,11 @@
 //! What the control plane persists is only half of this service: a schedule is
 //! also INVOKED. Which instants one runs at lives in [`occurrence`], and the clock
 //! that performs them — and the hand-over that reaches each target — in
-//! [`invocation`], which the operations that write a schedule arm.
+//! [`invocation`], which the operations that write a schedule arm. What becomes of
+//! an invocation that did not reach its target — the attempts its retry policy
+//! admits, and the dead-letter route the last of them takes — is [`dead_letter`].
 
+mod dead_letter;
 mod occurrence;
 mod schedule_definition;
 
