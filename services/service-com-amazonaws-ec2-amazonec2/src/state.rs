@@ -2407,6 +2407,12 @@ mod fleets;
 /// here. Everything it declares is re-exported below, so a handler reaches it as
 /// `crate::state::place_fleet_instances` like any helper of this module.
 mod fleet_placements;
+/// How an EC2 Fleet is DELETED — the states a deletion moves it through, the states one can
+/// be deleted from, the per-fleet codes and sentences a batch delete reports, and the one
+/// writer of a deletion — in a file of its own rather than as more lines here. Everything it
+/// declares is re-exported below, so a handler reaches it as `crate::state::delete_fleet`
+/// like any helper of this module.
+mod fleet_deletion;
 mod network_insights;
 mod nat_gateways_and_vpn_connections;
 mod spot_fleets;
@@ -2518,6 +2524,7 @@ pub use nat_gateways_and_vpn_connections::*;
 pub use network_insights::*;
 pub use fleets::*;
 pub use fleet_placements::*;
+pub use fleet_deletion::*;
 pub use network_acl_store::*;
 pub use account_attributes::*;
 

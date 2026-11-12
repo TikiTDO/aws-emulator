@@ -163,8 +163,6 @@ mod elastic_ip_interface_associations;
 // How EC2 words the `IncorrectInstanceState` refusal across the family of operations that
 // act on an instance only from certain lifecycle states: the instance id the request named,
 // the action its state does not admit, and no disclosure of the state itself. Declared
-// beside `prefix_lists` for the reason the note above gives: the sorted neighbourhood and
-// the tail of this file are where every new ec2 suite inserts its lines.
 #[path = "all/incorrect_instance_state_refusals.rs"]
 mod incorrect_instance_state_refusals;
 // Resolving a launch AMI the documented way out of the published catalog: every variant
@@ -217,8 +215,6 @@ mod vpc_encryption_controls;
 // table created for one VPC with the local route it comes with, one route per destination
 // against a target of that VPC, and a subnet associated with one table of its own VPC — each
 // read back through its own describe. Declared beside `prefix_lists` for the reason the note
-// above gives: the sorted neighbourhood and the tail of this file are where every new ec2
-// suite inserts its lines.
 #[path = "all/vpc_internet_path.rs"]
 mod vpc_internet_path;
 // The create side of the route table slice: the one table `CreateRouteTable` stores for the
@@ -1897,3 +1893,8 @@ mod traffic_mirror_target_creation;
 // has left each generation in — and what it refuses.
 #[path = "all/describe_declarative_policies_reports.rs"]
 mod describe_declarative_policies_reports;
+// `DeleteFleets`: the state a deletion moves an EC2 Fleet to, the instances and Spot Instance
+// requests it ends, the `deleted` it reaches once no instance it placed is left, and the
+// per-fleet errors and request-level refusals it answers. Declared beside `prefix_lists` for
+#[path = "all/delete_fleets.rs"]
+mod delete_fleets;

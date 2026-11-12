@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteFleets
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteFleets`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteFleets::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Deletes the EC2 Fleets a call names, reporting PER FLEET: a fleet deleted with its
+//! instances enters `deleted_terminating` and one deleted without them `deleted_running`, and
+//! an id that names no deletable fleet of the account is one entry of
+//! `UnsuccessfulFleetDeletions` rather than a refusal of the whole call. The ONLY file to
+//! touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -166,18 +162,180 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteFleets` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteFleetsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteFleets"))
+        use crate::scaffolded::Scaffolded;
+        use crate::state::{
+            DELETE_FLEET_ID_DOES_NOT_EXIST, DELETE_FLEET_ID_DOES_NOT_EXIST_MESSAGE,
+            DELETE_FLEET_ID_MALFORMED, DELETE_FLEET_NOT_IN_DELETABLE_STATE,
+            DELETE_FLEET_UNEXPECTED_ERROR, DELETE_FLEET_UNEXPECTED_ERROR_MESSAGE,
+            FLEET_TYPE_INSTANT, MAX_ASYNCHRONOUS_FLEETS_PER_DELETE, MAX_FLEETS_PER_DELETE,
+            MAX_INSTANT_FLEETS_PER_DELETE, deduplicate_ids, delete_fleet_id_malformed_message,
+            fleet_id_is_well_formed, fleet_not_in_deletable_state_message,
+            no_terminate_instances_unsupported, require_service_state,
+        };
+
+        // `ctx` carries request metadata only; this operation reads none of it — a fleet is
+        // deleted by its id, and the store holds EC2 Fleets per account. The store is reached
+        // through the engine held on `self`.
+        let _ = ctx;
+
+        // "You can delete up to 125 fleets in a single request … If you exceed the specified
+        // number of fleets to delete, no fleets are deleted": a batch above the bound is
+        // refused for the WHOLE call, before anything is deleted and before the state lock is
+        // taken.
+        if input.fleet_ids.len() > MAX_FLEETS_PER_DELETE {
+            return Err(Scaffolded::invalid_parameter_value(format!(
+                "FleetIds carries {} ids, above the maximum of {MAX_FLEETS_PER_DELETE}",
+                input.fleet_ids.len()
+            )));
+        }
+        // Naming one fleet twice asks for one deletion, so the ids are deduplicated before
+        // anything is reported about them — otherwise one fleet would appear twice, once
+        // deleted and once in a state it cannot be deleted from.
+        let fleet_ids = deduplicate_ids(&input.fleet_ids);
+        if fleet_ids.is_empty() {
+            return Err(Scaffolded::missing_parameter(
+                "The request must contain the parameter fleetId",
+            ));
+        }
+
+        let state = require_service_state(&*self.engine)?;
+        let mut store = state.lock();
+
+        // The moves the CLOCK already owed are materialised before any state is read, so each
+        // fleet is deleted from the state it is actually in: a `submitted` fleet whose
+        // `active` fell due is deleted from `active`, and one whose deletion has already
+        // completed is seen as `deleted` rather than deleted a second time.
+        store.materialize_due_transitions();
+
+        // The two PER-TYPE bounds the same restriction states — "up to 25 fleets of type
+        // `instant`" and "up to 100 fleets of type `maintain` or `request`" — which only the
+        // store can answer, because the type is a fact of the fleet rather than of the
+        // request. An id that names no fleet has no type and is counted by neither.
+        let instant_named = fleet_ids
+            .iter()
+            .filter(|fleet_id| {
+                store
+                    .fleets
+                    .get(*fleet_id)
+                    .is_some_and(|record| record.fleet_type() == FLEET_TYPE_INSTANT)
+            })
+            .count();
+        if instant_named > MAX_INSTANT_FLEETS_PER_DELETE {
+            return Err(Scaffolded::invalid_parameter_value(format!(
+                "FleetIds names {instant_named} fleets of type instant, above the maximum of \
+                 {MAX_INSTANT_FLEETS_PER_DELETE}"
+            )));
+        }
+        let asynchronous_named = fleet_ids
+            .iter()
+            .filter(|fleet_id| {
+                store
+                    .fleets
+                    .get(*fleet_id)
+                    .is_some_and(|record| record.fleet_type() != FLEET_TYPE_INSTANT)
+            })
+            .count();
+        if asynchronous_named > MAX_ASYNCHRONOUS_FLEETS_PER_DELETE {
+            return Err(Scaffolded::invalid_parameter_value(format!(
+                "FleetIds names {asynchronous_named} fleets of type maintain or request, above \
+                 the maximum of {MAX_ASYNCHRONOUS_FLEETS_PER_DELETE}"
+            )));
+        }
+
+        // "For `instant` fleets, you cannot specify `NoTerminateInstances`. A deleted
+        // `instant` fleet with running instances is not supported"
+        // (`DeleteFleetsRequest$TerminateInstances`): there is no state such a fleet could be
+        // left in, so the call is refused rather than served for its other ids.
+        if !input.terminate_instances && instant_named > 0 {
+            return Err(no_terminate_instances_unsupported());
+        }
+
+        // DryRun sits AFTER every parameter has been validated and before anything is changed:
+        // the flag asks whether the request WOULD have succeeded, and a fleet this call cannot
+        // delete is reported per fleet rather than refusing the call, so a well-formed batch
+        // would have succeeded whatever its ids name.
+        if input.dry_run == Some(true) {
+            return Err(Scaffolded::dry_run_operation());
+        }
+
+        let mut successful: Vec<DeleteFleetSuccessItem> = Vec::new();
+        let mut unsuccessful: Vec<DeleteFleetErrorItem> = Vec::new();
+        for fleet_id in fleet_ids {
+            // Each of the three per-fleet `DeleteFleetErrorCode` members this operation can
+            // report is one fleet that was not deleted, never a refusal of the call: the other
+            // ids of the batch are still deleted.
+            if !fleet_id_is_well_formed(&fleet_id) {
+                unsuccessful.push(deletion_error(
+                    &fleet_id,
+                    DELETE_FLEET_ID_MALFORMED,
+                    delete_fleet_id_malformed_message(&fleet_id),
+                ));
+                continue;
+            }
+            let Some(record) = store.fleets.get(&fleet_id) else {
+                unsuccessful.push(deletion_error(
+                    &fleet_id,
+                    DELETE_FLEET_ID_DOES_NOT_EXIST,
+                    DELETE_FLEET_ID_DOES_NOT_EXIST_MESSAGE.to_string(),
+                ));
+                continue;
+            };
+            let current_state = record.fleet_state().to_string();
+            if !crate::state::fleet_state_is_deletable(&current_state) {
+                unsuccessful.push(deletion_error(
+                    &fleet_id,
+                    DELETE_FLEET_NOT_IN_DELETABLE_STATE,
+                    fleet_not_in_deletable_state_message(&current_state),
+                ));
+                continue;
+            }
+            // "You must also specify whether a deleted EC2 Fleet request should terminate its
+            // instances" (`$TerminateInstances`, which the model makes `@required`): it decides
+            // both the state the fleet enters and whether what it launched is terminated.
+            let Some((previous_state, current_state)) =
+                store.delete_fleet(&fleet_id, input.terminate_instances)
+            else {
+                // The two reasons a deletion does not go through have been answered above, so
+                // this is unreachable — and an id a call named is still reported rather than
+                // left out of both sets, which is what the catalog's `unexpectedError` is for.
+                unsuccessful.push(deletion_error(
+                    &fleet_id,
+                    DELETE_FLEET_UNEXPECTED_ERROR,
+                    DELETE_FLEET_UNEXPECTED_ERROR_MESSAGE.to_string(),
+                ));
+                continue;
+            };
+            // The states are read back OUT of the store, so the caller is told what a later
+            // describe reports rather than the word this handler meant to write.
+            successful.push(DeleteFleetSuccessItem {
+                fleet_id: Some(fleet_id),
+                previous_fleet_state: Some(previous_state),
+                current_fleet_state: Some(current_state),
+            });
+        }
+
+        // Both sets are reported even when empty: EC2's ec2Query XML carries the set element
+        // for an empty list too (`<successfulFleetDeletionSet/>` on a call in which no fleet
+        // was deleted), so a client reading either set finds it where it expects it.
+        Ok(DeleteFleetsOutput {
+            successful_fleet_deletions: Some(successful),
+            unsuccessful_fleet_deletions: Some(unsuccessful),
+        })
+    }
+}
+
+/// One entry of `UnsuccessfulFleetDeletions`: the fleet that was not deleted, and why.
+///
+/// The `code` is a member of the modelled `DeleteFleetErrorCode` catalog
+/// ([`crate::ops::types::DELETE_FLEET_ERROR_CODE_VALUES`]) and the message comes from this
+/// service's own definition of that wording, so a per-fleet error and the request-level
+/// refusal of the same id cannot word it two ways.
+fn deletion_error(fleet_id: &str, code: &'static str, message: String) -> DeleteFleetErrorItem {
+    DeleteFleetErrorItem {
+        fleet_id: Some(fleet_id.to_string()),
+        error: Some(DeleteFleetError {
+            code: Some(code.to_string()),
+            message: Some(message),
+        }),
     }
 }

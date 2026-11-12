@@ -24,8 +24,8 @@ pub const FLEET_STATE_ACTIVE: &str = "active";
 /// of type `maintain` or `request`, which "places an asynchronous request for your desired
 /// capacity" (`FleetData$Type`) — starts, before the clock owes it [`FLEET_STATE_ACTIVE`].
 ///
-/// A fleet stored in this state is the one thing that makes [`FleetRecord::activate_at`]
-/// fall due, so the two cannot disagree about which fleets still owe the move.
+/// A fleet stored in this state is the one thing that gives [`FleetRecord::pending`] its
+/// first move, so the two cannot disagree about which fleets still owe it.
 pub const FLEET_STATE_SUBMITTED: &str = "submitted";
 
 /// The `fulfilled` member of [`FLEET_ACTIVITY_STATUS_VALUES`]: "`fulfilled` when the fleet
@@ -109,13 +109,22 @@ pub struct FleetRecord {
     /// one per launch template and override combination, named by
     /// [`FleetInstanceRecord::pool`].
     pub pools: Vec<FleetPoolView>,
-    /// When the fleet's [`FLEET_STATE_SUBMITTED`] -> [`FLEET_STATE_ACTIVE`] move falls due,
-    /// or `None` for a fleet that owes no move — one stored `active` already, and one whose
-    /// move has been applied. The due instant is stored; nothing sleeps for it, and
-    /// [`ComAmazonawsEc2Amazonec2State::materialize_due_fleets`] is the one place it is
+    /// The move the clock owes this fleet, while one is owed: the
+    /// [`FLEET_STATE_SUBMITTED`] -> [`FLEET_STATE_ACTIVE`] move an asynchronous fleet makes
+    /// once AWS has taken its request on, or the [`FLEET_STATE_DELETED`] a deleted fleet
+    /// reaches once the instances it placed are gone
+    /// ([`ComAmazonawsEc2Amazonec2State::delete_fleet`]). `None` for a fleet that owes
+    /// nothing — one stored `active` already, and one whose move has been applied. The due
+    /// instant is stored; nothing sleeps for it, and
+    /// [`ComAmazonawsEc2Amazonec2State::materialize_due_fleets`] is the one place a move is
     /// applied.
-    pub activate_at: Option<Instant>,
+    pub pending: Option<FleetTransition>,
 }
+
+/// The move the clock owes one EC2 Fleet: a [`ClockTransition`] to the `FleetStateCode`
+/// member it becomes, as a `&'static str` so only a word from this module's own catalog
+/// constants can be stored — never a request's text.
+pub type FleetTransition = ClockTransition<&'static str>;
 
 impl FleetRecord {
     /// This fleet's `FleetId`.
@@ -126,6 +135,62 @@ impl FleetRecord {
     /// This fleet's `FleetType` — one of [`FLEET_TYPE_VALUES`].
     pub fn fleet_type(&self) -> &str {
         self.fleet.r#type.as_deref().unwrap_or_default()
+    }
+
+    /// This fleet's `FleetStateCode` as it was last reported — one of
+    /// [`crate::ops::types::FLEET_STATE_CODE_VALUES`].
+    pub fn fleet_state(&self) -> &str {
+        self.fleet.fleet_state.as_deref().unwrap_or_default()
+    }
+
+    /// Apply what the clock owes this fleet: the state move that has fallen due, and the
+    /// activity status that move leaves the fleet reporting.
+    ///
+    /// Owed to the CLOCK rather than to a caller — the move was due at this instant whether
+    /// or not anybody called — so a reporting operation may apply it.
+    ///
+    /// `running_instances` is whether any instance this fleet placed is still held by the
+    /// account ([`fleet_has_running_instances`]), which is what a DELETED fleet's completion
+    /// waits for: a deleted fleet is [`FLEET_STATE_DELETED`] once it has no instance left, so
+    /// its move is due to the clock AND to those instances, while every other move is due to
+    /// the clock alone.
+    ///
+    /// Called by the clock sweep ([`ComAmazonawsEc2Amazonec2State::materialize_due_fleets`]),
+    /// which hands it the fleets whose move has fallen due, and by the deletion writer
+    /// ([`ComAmazonawsEc2Amazonec2State::delete_fleet`]) for the fleet it has just written, so
+    /// a deletion reports the activity status a describe in the same instant reports.
+    pub(super) fn apply_due_move(&mut self, now: Instant, running_instances: bool) {
+        let due = self
+            .pending
+            .as_ref()
+            .filter(|pending| now >= pending.due_at)
+            .filter(|pending| pending.to != FLEET_STATE_DELETED || !running_instances)
+            .map(|pending| pending.to);
+        if let Some(to) = due {
+            self.fleet.fleet_state = Some(to.to_string());
+            self.pending = None;
+        }
+        // "For fleets of type `instant`, the status is `fulfilled` after all requests are
+        // placed, regardless of whether target capacity is met (this is the only possible
+        // status for `instant` fleets)" (`FleetData$ActivityStatus`), so an `instant` fleet's
+        // status is settled by the call that placed its capacity and nothing here moves it.
+        if self.fleet_type() == FLEET_TYPE_INSTANT {
+            return;
+        }
+        if self.fleet_state() == FLEET_STATE_DELETED_TERMINATING && running_instances {
+            // "`pending_termination` while instances are terminating when fleet size is
+            // decreased": a fleet deleted WITH its instances is where that applies.
+            self.fleet.activity_status =
+                Some(FLEET_ACTIVITY_STATUS_PENDING_TERMINATION.to_string());
+        } else if self.fleet.activity_status.as_deref()
+            == Some(FLEET_ACTIVITY_STATUS_PENDING_TERMINATION)
+        {
+            // The terminations are done, so nothing is terminating any more: the fleet holds
+            // none of the capacity its target asks for, which is `pending_fulfillment` —
+            // "`fulfilled` when the fleet size meets or exceeds target capacity".
+            self.fleet.activity_status =
+                Some(FLEET_ACTIVITY_STATUS_PENDING_FULFILLMENT.to_string());
+        }
     }
 }
 
@@ -356,8 +421,8 @@ impl ComAmazonawsEc2Amazonec2State {
                 // clock-owed move of this crate takes; one stored in any other state owes
                 // nothing. Derived HERE, from the state the fleet is stored in, so no writer
                 // can store a `submitted` fleet that never becomes active.
-                activate_at: (fleet.fleet_state.as_deref() == Some(FLEET_STATE_SUBMITTED))
-                    .then(|| due_instant(TRANSITION_DELAY)),
+                pending: (fleet.fleet_state.as_deref() == Some(FLEET_STATE_SUBMITTED))
+                    .then(|| FleetTransition::starting_now(FLEET_STATE_ACTIVE)),
                 fleet,
                 instances: spec.instances,
                 pools: spec.pools,
@@ -366,8 +431,9 @@ impl ComAmazonawsEc2Amazonec2State {
         Some(fleet_id)
     }
 
-    /// Apply the [`FLEET_STATE_SUBMITTED`] -> [`FLEET_STATE_ACTIVE`] move every EC2 Fleet
-    /// that owed one by `now` has made.
+    /// Apply what the clock owes every stored EC2 Fleet, as of `now`: the
+    /// [`FLEET_STATE_SUBMITTED`] -> [`FLEET_STATE_ACTIVE`] move an asynchronous fleet owed,
+    /// and the [`FLEET_STATE_DELETED`] a deleted one reaches once its instances are gone.
     ///
     /// Reached only through [`Self::materialize_due_transitions`], so a reporting operation
     /// observes the move without having caused it: it was owed at this instant whether or
@@ -376,14 +442,33 @@ impl ComAmazonawsEc2Amazonec2State {
     /// while EC2 takes the request on and `active` once it has; the capacity it placed is a
     /// fact of the CALL that created it, which is why only the state word moves here.
     pub fn materialize_due_fleets(&mut self, now: Instant) {
-        for record in self.fleets.values_mut() {
-            if record.activate_at.is_none_or(|due_at| now < due_at) {
-                continue;
-            }
-            // The move is applied once; nothing is owed on this fleet any more.
-            record.activate_at = None;
-            if record.fleet.fleet_state.as_deref() == Some(FLEET_STATE_SUBMITTED) {
-                record.fleet.fleet_state = Some(FLEET_STATE_ACTIVE.to_string());
+        if self.fleets.is_empty() {
+            return;
+        }
+        // One immutable pass to collect the fleets whose move has fallen due, then one
+        // mutable pass to apply it: a deletion's move waits on the INSTANCE store, which
+        // cannot be read while the fleet is being mutated. Only a fleet that owes a move is
+        // visited, and the instance store is only asked about the fleets whose move waits on
+        // it, so a sweep's cost is proportional to the fleets that owe something rather than
+        // to every fleet the account holds.
+        let due: Vec<(String, bool)> = self
+            .fleets
+            .iter()
+            .filter_map(|(fleet_id, record)| {
+                let pending = record.pending.as_ref()?;
+                if now < pending.due_at {
+                    return None;
+                }
+                let waits_on_instances = pending.to == FLEET_STATE_DELETED;
+                Some((
+                    fleet_id.clone(),
+                    waits_on_instances && fleet_has_running_instances(self, record),
+                ))
+            })
+            .collect();
+        for (fleet_id, running_instances) in due {
+            if let Some(record) = self.fleets.get_mut(&fleet_id) {
+                record.apply_due_move(now, running_instances);
             }
         }
     }
