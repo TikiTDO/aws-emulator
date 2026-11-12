@@ -37,10 +37,11 @@ pub const PRACTICE_CONFIGURATION_REQUIRED_MESSAGE: &str =
     "Resource does not have a practice run configuration. Cannot enable zonal autoshift.";
 
 /// The `ConflictExceptionReason` ARC names for that conflict: the practice run
-/// configuration enabling zonal autoshift requires does not exist
-/// (`smithy_query(query="shape", shape="ConflictExceptionReason")`).
+/// configuration enabling zonal autoshift requires does not exist. It is the reason every
+/// conflict caused by a missing configuration carries, declared once beside the
+/// configuration itself.
 pub const ZONAL_AUTOSHIFT_PRACTICE_CONFIGURATION_MISSING_REASON: &str =
-    "PracticeConfigurationDoesNotExist";
+    super::PRACTICE_CONFIGURATION_MISSING_REASON;
 
 /// The refusal a caller gets for asking ARC to hold `requested` for `resource`, or
 /// `None` when the resource's current state admits it.

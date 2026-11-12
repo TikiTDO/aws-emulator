@@ -32,8 +32,9 @@ pub use published_resources::{managed_resource_registry, published_resources};
 mod practice_runs;
 
 pub use practice_runs::{
-    requested_practice_run_configuration, PracticeRunConfigurationRefused,
-    PRACTICE_CONFIGURATION_EXISTS_MESSAGE,
+    requested_practice_run_configuration, updated_practice_run_configuration,
+    PracticeRunConfigurationRefused, PRACTICE_CONFIGURATION_EXISTS_MESSAGE,
+    PRACTICE_CONFIGURATION_MISSING_MESSAGE, PRACTICE_CONFIGURATION_MISSING_REASON,
 };
 
 /// The zonal autoshift status ARC holds for a resource, and the rule the operation

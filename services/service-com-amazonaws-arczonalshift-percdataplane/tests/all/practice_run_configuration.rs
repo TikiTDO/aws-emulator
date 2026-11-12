@@ -38,20 +38,20 @@ use service_com_amazonaws_arczonalshift_percdataplane::state::{
 
 /// A resource an owning service registers with ARC, so the rule is asserted for a
 /// resource ARC did not create as well as for the ones this store was seeded with.
-const REGISTERED_ARN: &str =
+pub(crate) const REGISTERED_ARN: &str =
     "arn:aws:eks:us-east-1:000000000000:cluster/practice-run-eks";
-const REGISTERED_ZONES: &[&str] = &["use1-az1", "use1-az2", "use1-az3"];
+pub(crate) const REGISTERED_ZONES: &[&str] = &["use1-az1", "use1-az2", "use1-az3"];
 
 /// The ARN of an Amazon CloudWatch alarm, which is what a `ControlCondition` names an
 /// alarm by (`ControlCondition$alarmIdentifier`: "The Amazon Resource Name (ARN) for an
 /// Amazon CloudWatch alarm that you specify as a control condition for a practice run").
-fn alarm_arn(name: &str) -> String {
+pub(crate) fn alarm_arn(name: &str) -> String {
     format!("arn:aws:cloudwatch:us-east-1:000000000000:alarm:{name}")
 }
 
 /// `count` control conditions, each naming an alarm of its own. `CLOUDWATCH` is the only
 /// condition type the model declares (`ControlConditionType`).
-fn alarms(prefix: &str, count: usize) -> Value {
+pub(crate) fn alarms(prefix: &str, count: usize) -> Value {
     Value::Array(
         (0..count)
             .map(|index| {
@@ -68,7 +68,7 @@ fn alarms(prefix: &str, count: usize) -> Value {
 /// `DAY:HH:MM-DAY:HH:MM` format the `blockedWindows` and `allowedWindows` documentation
 /// gives. The days cycle through the seven `BlockedWindow`/`AllowedWindow` pattern
 /// admits, so a row of 15 windows is not 15 copies of one.
-fn windows(count: usize) -> Value {
+pub(crate) fn windows(count: usize) -> Value {
     // The days the model's pattern admits:
     // `^(Mon|Tue|Wed|Thu|Fri|Sat|Sun):[0-9]{2}:[0-9]{2}-...$`
     // (`smithy_query(query="shape", shape="BlockedWindows")`).
@@ -86,7 +86,7 @@ fn windows(count: usize) -> Value {
 
 /// `count` calendar dates in the `YYYY-MM-DD` format `blockedDates` documents, each a
 /// real day of a month.
-fn dates(count: usize) -> Value {
+pub(crate) fn dates(count: usize) -> Value {
     Value::Array(
         (0..count)
             .map(|index| json!(format!("2026-03-{:02}", index + 1)))
@@ -96,8 +96,8 @@ fn dates(count: usize) -> Value {
 
 /// One configuration a caller writes: how many of each list it carries, and whether it
 /// carries the optional ones at all.
-struct Row {
-    case: &'static str,
+pub(crate) struct Row {
+    pub(crate) case: &'static str,
     outcome_alarms: usize,
     blocking_alarms: Option<usize>,
     blocked_windows: Option<usize>,
@@ -110,7 +110,7 @@ struct Row {
 /// `blockedDates` are each 0..15 (`smithy_query(query="operation",
 /// operation="CreatePracticeRunConfiguration")`). Each end of each range is a row, and so
 /// is a configuration that carries only what the model requires.
-const ROWS: &[Row] = &[
+pub(crate) const ROWS: &[Row] = &[
     Row {
         case: "only the one alarm the model requires",
         outcome_alarms: 1,
@@ -148,7 +148,7 @@ const ROWS: &[Row] = &[
 impl Row {
     /// The `practiceRunConfiguration` members this row asks ARC to hold, as the request
     /// and the answer both carry them.
-    fn configuration(&self) -> serde_json::Map<String, Value> {
+    pub(crate) fn configuration(&self) -> serde_json::Map<String, Value> {
         let mut members = serde_json::Map::new();
         members.insert("outcomeAlarms".to_string(), alarms("outcome", self.outcome_alarms));
         if let Some(count) = self.blocking_alarms {
@@ -167,7 +167,7 @@ impl Row {
     }
 
     /// The request body that writes this row's configuration for `resource`.
-    fn create_body(&self, resource: &str) -> String {
+    pub(crate) fn create_body(&self, resource: &str) -> String {
         let mut body = self.configuration();
         body.insert("resourceIdentifier".to_string(), json!(resource));
         Value::Object(body).to_string()
@@ -175,7 +175,7 @@ impl Row {
 }
 
 /// `CreatePracticeRunConfiguration` over the wire.
-async fn create(
+pub(crate) async fn create(
     router: &smithy_server_runtime::MultiServiceRouter,
     body: &str,
 ) -> (u16, Value) {
@@ -183,7 +183,7 @@ async fn create(
 }
 
 /// `GetManagedResource` over the wire.
-async fn get_managed_resource(
+pub(crate) async fn get_managed_resource(
     router: &smithy_server_runtime::MultiServiceRouter,
     arn: &str,
 ) -> (u16, Value) {
@@ -198,7 +198,7 @@ async fn get_managed_resource(
 
 /// The `practiceRunStatus` `ListManagedResources` reports for one resource, walking the
 /// pages it hands out.
-async fn listed_practice_run_status(
+pub(crate) async fn listed_practice_run_status(
     router: &smithy_server_runtime::MultiServiceRouter,
     arn: &str,
 ) -> Option<String> {
@@ -223,7 +223,7 @@ async fn listed_practice_run_status(
 
 /// Every member the request asked ARC to hold is in `actual`, and a member it left out is
 /// either absent or the empty list the model defaults it to.
-fn assert_holds(case: &str, actual: &Value, expected: &serde_json::Map<String, Value>) {
+pub(crate) fn assert_holds(case: &str, actual: &Value, expected: &serde_json::Map<String, Value>) {
     for member in [
         "outcomeAlarms",
         "blockingAlarms",
@@ -368,7 +368,7 @@ async fn creating_a_second_configuration_for_a_resource_is_refused_409() {
 /// `resourceIdentifier`s no managed resource carries, as `(identifier, class)`: ARN-shaped
 /// and not, each end of the modelled `ResourceIdentifier` length range (8..1024), and a
 /// near miss on one the store holds.
-const UNHELD_TARGETS: &[(&str, &str)] = &[
+pub(crate) const UNHELD_TARGETS: &[(&str, &str)] = &[
     (
         "arn:aws:elasticloadbalancing:us-east-1:111111111111:loadbalancer/app/absent/73e2d6bc24d8a067",
         "a load balancer ARN in another account",

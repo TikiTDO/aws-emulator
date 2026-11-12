@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdatePracticeRunConfiguration
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdatePracticeRunConfiguration`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdatePracticeRunConfiguration::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! CHANGES the practice run configuration ARC holds for a managed resource, member by
+//! member, and PERSISTS the result, so the call's own answer and every later read —
+//! `GetManagedResource`, `ListManagedResources` — report the changed configuration.
 //!
 //! ## Shape of an operation
 //!
@@ -114,6 +108,7 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+use crate::state::updated_practice_run_configuration;
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -188,18 +183,79 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdatePracticeRunConfiguration` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdatePracticeRunConfigurationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdatePracticeRunConfiguration"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            UpdatePracticeRunConfigurationError::from(
+                UpdatePracticeRunConfigurationErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: Some("the ARC zonal shift store is unavailable".to_string()),
+                    },
+                ),
+            )
+        })?;
+        // The resources the services that own them have registered with ARC, read before
+        // this store is locked: a resource registered through one of them is as much a
+        // target of this call as one this store was seeded with.
+        let published = crate::state::published_resources(&*self.engine);
+
+        let mut store = state.lock();
+
+        // The caller's authorization on the named target is decided BEFORE the target is
+        // resolved: a resourceIdentifier ARC holds nothing for is refused 403
+        // AccessDeniedException, disclosing nothing about what exists. One helper takes
+        // this branch for every operation that acts on a target.
+        let resource = store
+            .authorized_resource(&published, &input.resource_identifier)
+            .map_err(UpdatePracticeRunConfigurationErrorModeled::AccessDeniedException)?;
+
+        // This operation CHANGES a configuration, so there has to be one to change: a
+        // configuration is created through `CreatePracticeRunConfiguration`, and a
+        // resource that has none is a conflict in the resource's current state.
+        let Some(held) = resource.practice_run_configuration.clone() else {
+            return Err(UpdatePracticeRunConfigurationErrorModeled::ConflictException(
+                ConflictException {
+                    message: crate::state::PRACTICE_CONFIGURATION_MISSING_MESSAGE.to_string(),
+                    reason: crate::state::PRACTICE_CONFIGURATION_MISSING_REASON.to_string(),
+                    // The conflict is about the resource's configuration, not about a
+                    // shift, so there is no `zonalShiftId` to associate it with.
+                    zonal_shift_id: None,
+                },
+            )
+            .into());
+        };
+
+        // The configuration the request asks ARC to hold instead: each member it names
+        // replaces the held one, each member it leaves out stays as held, and the result
+        // is read the one way every write of a configuration reads one.
+        let configuration = updated_practice_run_configuration(
+            held,
+            input.outcome_alarms,
+            input.blocking_alarms,
+            input.blocked_windows,
+            input.allowed_windows,
+            input.blocked_dates,
+        )
+        .map_err(|refused| {
+            UpdatePracticeRunConfigurationErrorModeled::ValidationException(ValidationException {
+                message: refused.message,
+                reason: refused.reason.to_string(),
+            })
+        })?;
+
+        // Stored under the resource's own ARN — the key every reader looks a
+        // configuration up by — so the write stays correct whatever identifier form
+        // resolution accepts.
+        store.set_practice_run_configuration(&resource.arn, configuration.clone());
+
+        Ok(UpdatePracticeRunConfigurationOutput {
+            arn: resource.arn,
+            name: resource.name,
+            // Changing a practice run configuration does not change whether zonal
+            // autoshift is authorized for the resource — `UpdateZonalAutoshiftConfiguration`
+            // is what writes that — so what is reported is the status the resource
+            // carries now.
+            zonal_autoshift_status: resource.zonal_autoshift_status.as_wire().to_string(),
+            practice_run_configuration: configuration,
+        })
     }
 }

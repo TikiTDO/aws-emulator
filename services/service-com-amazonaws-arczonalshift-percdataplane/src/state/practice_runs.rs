@@ -42,6 +42,26 @@ use crate::ops::types::{ControlCondition, PracticeRunConfiguration};
 pub const PRACTICE_CONFIGURATION_EXISTS_MESSAGE: &str =
     "There is already a practice run configuration for the requested resource.";
 
+/// The message ARC answers when a call needs a practice run configuration the resource
+/// it names does not have.
+///
+/// The sentence is ARC's own for this condition — it is the first of the two the service
+/// answers when zonal autoshift is asked to be enabled for a resource that has none
+/// ([`super::PRACTICE_CONFIGURATION_REQUIRED_MESSAGE`]) — without the clause about
+/// enabling autoshift, which is that call's and not this one's. Like the other refusals
+/// of this service it names no identifier and has no variable part: the conflict is a
+/// property of the resource the caller already named, and a resource either has a
+/// configuration or does not.
+pub const PRACTICE_CONFIGURATION_MISSING_MESSAGE: &str =
+    "Resource does not have a practice run configuration.";
+
+/// The `ConflictExceptionReason` ARC names for every conflict whose cause is that a
+/// resource has no practice run configuration
+/// (`smithy_query(query="shape", shape="ConflictExceptionReason")`). Declared once here,
+/// where the configuration is kept, so the operations that need one cannot drift apart on
+/// the reason they report.
+pub const PRACTICE_CONFIGURATION_MISSING_REASON: &str = "PracticeConfigurationDoesNotExist";
+
 /// Why a write of a practice run configuration is refused: the
 /// `ValidationExceptionReason` and the message, which the calling operation lifts into
 /// its own modelled `ValidationException`.
@@ -106,6 +126,40 @@ pub fn requested_practice_run_configuration(
         allowed_windows,
         blocked_dates,
     })
+}
+
+/// The configuration ARC holds for a resource after a request CHANGES the one it already
+/// holds, or the refusal the caller gets instead.
+///
+/// A change is applied member by member on top of `held`: a member the request names
+/// replaces the held one — a member named as the empty list therefore removes what was
+/// held, leaving the member empty — and a member the request does not name is left
+/// exactly as held. That is the whole of what `UpdatePracticeRunConfiguration` documents
+/// it does ("change one or more of the following: add, change, or remove the blocking
+/// alarm; change the outcome alarm; or add, change, or remove blocking dates or time
+/// windows"): removal is a list named empty, which every member but `outcomeAlarms`
+/// admits (`outcomeAlarms` is length 1..10, so it can only be changed).
+///
+/// The merged configuration is then read the ONE way every write of a configuration
+/// reads one ([`requested_practice_run_configuration`]), so a change cannot leave a
+/// resource holding a configuration a create would have refused.
+pub fn updated_practice_run_configuration(
+    held: PracticeRunConfiguration,
+    outcome_alarms: Option<Vec<ControlCondition>>,
+    blocking_alarms: Option<Vec<ControlCondition>>,
+    blocked_windows: Option<Vec<String>>,
+    allowed_windows: Option<Vec<String>>,
+    blocked_dates: Option<Vec<String>>,
+) -> Result<PracticeRunConfiguration, PracticeRunConfigurationRefused> {
+    requested_practice_run_configuration(
+        outcome_alarms.unwrap_or(held.outcome_alarms),
+        blocking_alarms.or(held.blocking_alarms),
+        blocked_windows.or(held.blocked_windows),
+        allowed_windows.or(held.allowed_windows),
+        // `blockedDates` is the one list the model defaults to the empty list rather than
+        // leaving absent, so what is held for it is always a list.
+        Some(blocked_dates.unwrap_or(held.blocked_dates)),
+    )
 }
 
 /// Refuse a window that is not one window of a single day.
