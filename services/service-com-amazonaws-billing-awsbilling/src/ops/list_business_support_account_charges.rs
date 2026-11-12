@@ -1,15 +1,28 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListBusinessSupportAccountCharges
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListBusinessSupportAccountCharges`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListBusinessSupportAccountCharges::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: this operation PRICES the Support-eligible spend persisted in
+//! [`crate::state::ComAmazonawsBillingAwsbillingState::support_eligible_spend`].
+//!
+//! It is a REPORTING operation (`@readonly`): it reads the store and writes
+//! nothing, so a caller cannot change another caller's answer by reading. For
+//! the requested billing month it walks the records of the caller's
+//! consolidated billing family, charges each account's Support-eligible spend
+//! by the published price schedule of the Support plan that account was
+//! subscribed to, and reports the per-account breakdown — filtered to one
+//! account when the request names one, ascending by account and paged by
+//! `maxResults`/`nextToken` — beside the month's own totals and account count,
+//! which the model documents as being "for all accounts in the billing month"
+//! and so are neither filtered nor paged.
+//!
+//! NOTE: nothing in this emulator writes that store yet — spend accrues from a
+//! billing run, and the emulator performs none. So on a running emulator this
+//! reports an empty month until an operation that bills usage exists; the suite
+//! at `tests/all/business_support_account_charges.rs` persists spend through
+//! `ComAmazonawsBillingAwsbillingState::record_support_eligible_spend` to
+//! exercise the pricing, selection, totals and paging rules. Nothing here
+//! synthesises a record.
 //!
 //! ## Shape of an operation
 //!
@@ -144,6 +157,339 @@ pub struct ListBusinessSupportAccountCharges<Eng> {
     engine: ::std::sync::Arc<Eng>,
 }
 
+/// The page size used when the request omits `maxResults`.
+///
+/// From the `maxResults` doc: "The maximum number of results to return per
+/// page. Default is 100."
+const DEFAULT_MAX_RESULTS: usize = 100;
+
+/// The smallest and largest page size the model's `maxResults` range allows
+/// (1..100, the same ceiling the output's `accountCharges` list carries), used
+/// to clamp a size that reached this handler anyway.
+const MIN_MAX_RESULTS: usize = 1;
+const MAX_MAX_RESULTS: usize = 100;
+
+/// One minor unit of currency (a cent), the scale every stored and computed
+/// amount here is held on — see [`crate::state::MINOR_UNITS_PER_UNIT`].
+const MINOR_UNITS_PER_UNIT: i64 = crate::state::MINOR_UNITS_PER_UNIT;
+
+/// Basis points in one whole unit: a rate is held in hundredths of one percent,
+/// so 10_000 of them is the whole amount.
+const BASIS_POINTS_PER_UNIT: i64 = 10_000;
+
+/// One tier of a Support plan's monthly price: the top of the spend slice it
+/// prices and the rate charged inside that slice.
+struct PriceTier {
+    /// The upper bound of the slice, in minor units; `None` for the last tier,
+    /// which prices every minor unit above the tier before it.
+    upper_bound_minor: Option<i64>,
+    /// The rate charged inside the slice, in basis points — the scale
+    /// [`crate::state::SupportDiscount::rate_basis_points`] uses.
+    rate_basis_points: i64,
+}
+
+/// A Support plan's monthly price: the minimum monthly charge and the tiers the
+/// account's Support-eligible spend is sliced into. A subscribed account is
+/// charged the GREATER of the minimum and the summed tier charges.
+struct PriceSchedule {
+    minimum_charge_minor: i64,
+    tiers: &'static [PriceTier],
+}
+
+/// The price schedule of the Support plan named `support_plan_name`.
+///
+/// Source: the Support plan prices AWS publishes at
+/// <https://aws.amazon.com/premiumsupport/pricing/>. Business Support costs the
+/// greater of 100 a month or a tiered percentage of monthly Support-eligible
+/// spend — 10% of the first 10,000, 7% of 10,000 to 80,000, 5% of 80,000 to
+/// 250,000 and 3% above 250,000; Developer Support the greater of 29 a month or
+/// 3% of that spend; Basic Support nothing. The plan names are the model's own
+/// (see [`crate::state::SUPPORT_PLAN_NAMES`]).
+///
+/// A stored plan this service has no schedule for is reported with its spend
+/// and no charge, rather than priced by another plan's schedule.
+fn price_schedule(support_plan_name: &str) -> PriceSchedule {
+    match support_plan_name {
+        crate::state::SUPPORT_PLAN_BUSINESS => PriceSchedule {
+            minimum_charge_minor: 100 * MINOR_UNITS_PER_UNIT,
+            tiers: &[
+                PriceTier {
+                    upper_bound_minor: Some(10_000 * MINOR_UNITS_PER_UNIT),
+                    rate_basis_points: 1_000,
+                },
+                PriceTier {
+                    upper_bound_minor: Some(80_000 * MINOR_UNITS_PER_UNIT),
+                    rate_basis_points: 700,
+                },
+                PriceTier {
+                    upper_bound_minor: Some(250_000 * MINOR_UNITS_PER_UNIT),
+                    rate_basis_points: 500,
+                },
+                PriceTier {
+                    upper_bound_minor: None,
+                    rate_basis_points: 300,
+                },
+            ],
+        },
+        crate::state::SUPPORT_PLAN_DEVELOPER => PriceSchedule {
+            minimum_charge_minor: 29 * MINOR_UNITS_PER_UNIT,
+            tiers: &[PriceTier {
+                upper_bound_minor: None,
+                rate_basis_points: 300,
+            }],
+        },
+        _ => PriceSchedule {
+            minimum_charge_minor: 0,
+            tiers: &[],
+        },
+    }
+}
+
+/// A basis-point rate applied to an amount of minor units, rounded half up —
+/// integer arithmetic throughout, so a charge is never a binary float's
+/// approximation of one. Computed at a width the product cannot overflow.
+fn apply_rate(amount_minor: i64, rate_basis_points: i64) -> i64 {
+    let scaled = i128::from(amount_minor) * i128::from(rate_basis_points)
+        + i128::from(BASIS_POINTS_PER_UNIT / 2);
+    i64::try_from(scaled.div_euclid(i128::from(BASIS_POINTS_PER_UNIT))).unwrap_or(i64::MAX)
+}
+
+/// An amount of minor units as the decimal string the modeled money members
+/// carry (`totalCharge`, `usageSlice`, `discountAmount`, ...), with the two
+/// fraction digits [`MINOR_UNITS_PER_UNIT`] gives it.
+fn amount(minor: i64) -> String {
+    let sign = if minor < 0 { "-" } else { "" };
+    let magnitude = minor.unsigned_abs();
+    let scale = MINOR_UNITS_PER_UNIT.unsigned_abs();
+    format!(
+        "{sign}{}.{:02}",
+        magnitude / scale,
+        magnitude % scale
+    )
+}
+
+/// A basis-point rate as the decimal fraction the modeled rate members carry.
+///
+/// From the `discountPercentage` doc: "expressed as a decimal (for example,
+/// 0.12 for a 12% discount)" — the form `tierRate`, the rate applied to the
+/// spend inside a tier, carries too. Two fraction digits for a rate that is a
+/// whole percent, four for a finer one, so no rate is reported rounded.
+fn rate_decimal(rate_basis_points: i64) -> String {
+    let whole = rate_basis_points / BASIS_POINTS_PER_UNIT;
+    let fraction = (rate_basis_points % BASIS_POINTS_PER_UNIT).unsigned_abs();
+    if fraction.is_multiple_of(100) {
+        format!("{whole}.{:02}", fraction / 100)
+    } else {
+        format!("{whole}.{fraction:04}")
+    }
+}
+
+/// A basis-point rate as the percentage a tier description reads with: `10`, or
+/// `10.50` for a rate finer than a whole percent.
+fn rate_percent(rate_basis_points: i64) -> String {
+    let whole = rate_basis_points / 100;
+    let fraction = (rate_basis_points % 100).unsigned_abs();
+    if fraction == 0 {
+        format!("{whole}")
+    } else {
+        format!("{whole}.{fraction:02}")
+    }
+}
+
+/// The human-readable `tierDescription`: "a description of the pricing tier,
+/// including the spend range and percentage rate applied" — built from the
+/// tier's own bounds and rate, so a description can never name a range the
+/// charge beside it was not computed from.
+fn tier_description(tier: &PriceTier, lower_minor: i64, currency_code: &str) -> String {
+    match tier.upper_bound_minor {
+        Some(upper) => format!(
+            "{}% of monthly Support-eligible spend from {} to {} {currency_code}",
+            rate_percent(tier.rate_basis_points),
+            amount(lower_minor),
+            amount(upper),
+        ),
+        None => format!(
+            "{}% of monthly Support-eligible spend over {} {currency_code}",
+            rate_percent(tier.rate_basis_points),
+            amount(lower_minor),
+        ),
+    }
+}
+
+/// The year and month of a modeled `BusinessSupportBillingMonth` (`YYYY-MM`).
+fn parse_month(billing_month: &str) -> Option<(i32, i32)> {
+    let (year, month) = billing_month.split_once('-')?;
+    Some((year.parse().ok()?, month.parse().ok()?))
+}
+
+/// A month as the count of whole calendar months before it, so two months
+/// compare and subtract.
+fn month_index((year, month): (i32, i32)) -> i32 {
+    year * 12 + month - 1
+}
+
+/// The first instant of a month, read off the UTC civil calendar.
+///
+/// `None` for a year the modeled `Timestamp` cannot render at four digits,
+/// which only the month after the last `YYYY-MM` month is.
+fn first_instant_of(year: i32, month: i32) -> Option<::aws_smithy_types::DateTime> {
+    ::aws_smithy_types::DateTime::from_str(
+        &format!("{year:04}-{month:02}-01T00:00:00Z"),
+        ::aws_smithy_types::date_time::Format::DateTime,
+    )
+    .ok()
+}
+
+/// The half-open UTC period a billing month's charges accrue in: the first
+/// instant of the month, and the first instant of the month after it.
+///
+/// AWS bills on UTC calendar months, so both bounds come from the month's own
+/// position on the civil calendar — never from a fixed month length.
+fn month_period(
+    billing_month: &str,
+) -> Option<(::aws_smithy_types::DateTime, ::aws_smithy_types::DateTime)> {
+    let (year, month) = parse_month(billing_month)?;
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    Some((
+        first_instant_of(year, month)?,
+        first_instant_of(next_year, next_month)?,
+    ))
+}
+
+/// Refuse a request member as invalid, in the modeled `ValidationException`
+/// shape (HTTP 400) this operation declares.
+///
+/// `constraint` continues the sentence the member name starts, so the refusal
+/// names the member and the constraint the request broke without echoing the
+/// offending value back — the form this service's other paginated reads of a
+/// billing month use.
+fn invalid_field(member: &str, constraint: &str) -> ListBusinessSupportAccountChargesError {
+    ListBusinessSupportAccountChargesErrorModeled::ValidationException(ValidationException {
+        message: format!("InvalidArgument: {member} (DetailedCode={member} {constraint})"),
+        reason: crate::state::VALIDATION_REASON_FIELD.to_string(),
+        field_list: Some(vec![ValidationExceptionField {
+            name: member.to_string(),
+            message: format!("Member {constraint}"),
+        }]),
+    })
+    .into()
+}
+
+/// The store key a `nextToken` resumes after, or a `ValidationException` when
+/// the token is not one this service issued. The token format and the refusal's
+/// wording live in `crate::state`, shared with this service's other paginated
+/// reads.
+fn resume_key(token: &str) -> Result<String, ListBusinessSupportAccountChargesError> {
+    crate::state::decode_page_token(token).ok_or_else(|| {
+        ListBusinessSupportAccountChargesErrorModeled::ValidationException(ValidationException {
+            message: crate::state::PAGE_TOKEN_REFUSAL.to_string(),
+            reason: crate::state::VALIDATION_REASON_CANNOT_PARSE.to_string(),
+            field_list: Some(vec![ValidationExceptionField {
+                name: "nextToken".to_string(),
+                message: crate::state::PAGE_TOKEN_FIELD_REFUSAL.to_string(),
+            }]),
+        })
+        .into()
+    })
+}
+
+/// Price one account-month of Support-eligible spend into the modeled
+/// `BusinessSupportAccountCharge`, and answer that account's charge and usage
+/// basis in minor units beside it, so the month's totals are the sum of exactly
+/// what the entries report.
+///
+/// The tiers are walked lowest first, each pricing the part of the account's
+/// usage basis that falls inside it; a tier the basis does not reach reports
+/// nothing. The plan's monthly minimum is a FLOOR on the result, so a
+/// subscribed account with no spend is still charged it, and the discount the
+/// record carries — a percentage of that charge — is subtracted to give the
+/// account's total.
+fn account_charge(
+    spend: &crate::state::SupportEligibleSpend,
+) -> (BusinessSupportAccountCharge, i64, i64) {
+    let schedule = price_schedule(&spend.support_plan_name);
+    let usage_basis_minor = spend.usage_basis_minor();
+    let (charge_period_start_date, charge_period_end_date) = match month_period(&spend.billing_month)
+    {
+        Some((start, end)) => (Some(start), Some(end)),
+        None => (None, None),
+    };
+
+    let mut tier_charges: Vec<BusinessSupportTierCharge> = Vec::new();
+    let mut tiered_minor = 0_i64;
+    let mut lower_minor = 0_i64;
+    for tier in schedule.tiers {
+        if usage_basis_minor <= lower_minor {
+            break;
+        }
+        let upper_minor = tier
+            .upper_bound_minor
+            .map_or(usage_basis_minor, |bound| bound.min(usage_basis_minor));
+        let slice_minor = upper_minor - lower_minor;
+        if slice_minor > 0 {
+            let tier_charge_minor = apply_rate(slice_minor, tier.rate_basis_points);
+            tiered_minor = tiered_minor.saturating_add(tier_charge_minor);
+            tier_charges.push(BusinessSupportTierCharge {
+                tier_description: tier_description(tier, lower_minor, &spend.currency_code),
+                tier_rate: rate_decimal(tier.rate_basis_points),
+                usage_slice: amount(slice_minor),
+                tier_charge: amount(tier_charge_minor),
+                charge_period_start_date,
+                charge_period_end_date,
+            });
+        }
+        match tier.upper_bound_minor {
+            Some(bound) => lower_minor = bound,
+            None => break,
+        }
+    }
+
+    let gross_minor = tiered_minor.max(schedule.minimum_charge_minor);
+    let discount_minor = spend
+        .discount
+        .as_ref()
+        .map_or(0, |discount| apply_rate(gross_minor, discount.rate_basis_points));
+    let support_discount = spend.discount.as_ref().map(|discount| BusinessSupportDiscount {
+        // "This value is negative, representing a reduction in the charge."
+        discount_amount: Some(amount(-discount_minor)),
+        discount_percentage: Some(rate_decimal(discount.rate_basis_points)),
+        discount_type: Some(discount.discount_type.clone()),
+        discount_source: discount.discount_source.clone(),
+    });
+    // A discount reduces a charge; it never turns one into a payment.
+    let total_charge_minor = (gross_minor - discount_minor).max(0);
+
+    (
+        BusinessSupportAccountCharge {
+            account_id: spend.account_id.clone(),
+            support_plan_name: spend.support_plan_name.clone(),
+            total_charge: amount(total_charge_minor),
+            total_usage_basis: amount(usage_basis_minor),
+            tier_charges: Some(tier_charges),
+            support_discount,
+            support_eligible_spend_by_service: Some(
+                spend
+                    .by_service
+                    .iter()
+                    .map(|line| BusinessSupportServiceSpend {
+                        contributing_service: line.contributing_service.clone(),
+                        item_type: line.item_type.clone(),
+                        description: line.description.clone(),
+                        charge_amount: amount(line.charge_amount_minor),
+                        currency: spend.currency_code.clone(),
+                    })
+                    .collect(),
+            ),
+        },
+        total_charge_minor,
+        usage_basis_minor,
+    )
+}
+
 impl<Eng> ListBusinessSupportAccountCharges<Eng> {
     /// Construct the operation from the shared engine. INFALLIBLE — the engine is a
     /// construction-time dependency, so engine access is guaranteed by the time any
@@ -170,18 +516,107 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListBusinessSupportAccountCharges` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListBusinessSupportAccountChargesErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListBusinessSupportAccountCharges"))
+        // Every modeled constraint (the `billingMonth` and `accountId`
+        // patterns, `maxResults` 1..100, the `nextToken` pattern and length) is
+        // refused by the boundary validator before this runs; what is checked
+        // here is which months the operation documents answers for.
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            ListBusinessSupportAccountChargesErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: "the Support charge store is unavailable".to_string(),
+                },
+            )
+        })?;
+        // A reporting operation: the guard is only read through, so two callers
+        // reading the same month see the same answer.
+        let state = state.lock();
+
+        let requested = parse_month(&input.billing_month)
+            .ok_or_else(|| invalid_field("billingMonth", "must name a calendar month"))?;
+        let current = crate::state::billing_period(::std::time::SystemTime::now()).ok_or_else(
+            || {
+                ListBusinessSupportAccountChargesErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: "the current billing month is unavailable".to_string(),
+                    },
+                )
+            },
+        )?;
+        // The `billingMonth` doc: "You can request the current month (charges
+        // will be estimated) or a past month (charges will be finalized)" — a
+        // month that has not begun is neither, so it is refused rather than
+        // answered with an empty one, and the current month is exactly the one
+        // whose charges are still estimated.
+        if month_index(requested) > month_index(current) {
+            return Err(invalid_field(
+                "billingMonth",
+                "must be the current billing month or an earlier one",
+            ));
+        }
+        let is_estimated = month_index(requested) == month_index(current);
+
+        let resume_after = match input.next_token.as_deref() {
+            Some(token) => Some(resume_key(token)?),
+            None => None,
+        };
+        let limit = input
+            .max_results
+            .and_then(|max| usize::try_from(max).ok())
+            .unwrap_or(DEFAULT_MAX_RESULTS)
+            .clamp(MIN_MAX_RESULTS, MAX_MAX_RESULTS);
+
+        // Every account the month holds a bill for is priced, whichever one the
+        // request asked about: the month's `totalSupportCharge`,
+        // `totalSupportEligibleSpend` and `accountCount` are documented as
+        // being for ALL accounts in the billing month, so they are the sum over
+        // the month and move with neither the `accountId` filter nor the page.
+        let mut total_support_charge_minor = 0_i64;
+        let mut total_support_eligible_spend_minor = 0_i64;
+        let mut account_count = 0_i32;
+        let mut selected: Vec<(&String, BusinessSupportAccountCharge)> = Vec::new();
+        for (key, spend) in state
+            .support_eligible_spend_for_month(crate::state::caller_account_id(), &input.billing_month)
+        {
+            let (charge, charge_minor, basis_minor) = account_charge(spend);
+            total_support_charge_minor = total_support_charge_minor.saturating_add(charge_minor);
+            total_support_eligible_spend_minor =
+                total_support_eligible_spend_minor.saturating_add(basis_minor);
+            account_count = account_count.saturating_add(1);
+            if input
+                .account_id
+                .as_deref()
+                .is_none_or(|filter| filter == spend.account_id)
+            {
+                selected.push((key, charge));
+            }
+        }
+
+        // The page resumes strictly after the account the previous page ended
+        // on, so a bill written or removed between pages cannot make the walk
+        // skip or repeat another account. One extra match is read to learn
+        // whether a further page exists.
+        let mut remaining = selected
+            .into_iter()
+            .filter(|(key, _)| resume_after.as_ref().is_none_or(|after| *key > after));
+        let page: Vec<(&String, BusinessSupportAccountCharge)> =
+            remaining.by_ref().take(limit).collect();
+        let has_more = remaining.next().is_some();
+        let next_token = if has_more {
+            page.last()
+                .map(|(key, _)| crate::state::encode_page_token(key))
+        } else {
+            None
+        };
+
+        Ok(ListBusinessSupportAccountChargesOutput {
+            billing_month: input.billing_month.clone(),
+            is_estimated,
+            total_support_charge: amount(total_support_charge_minor),
+            total_support_eligible_spend: amount(total_support_eligible_spend_minor),
+            account_count,
+            account_charges: page.into_iter().map(|(_, charge)| charge).collect(),
+            next_token,
+        })
     }
 }

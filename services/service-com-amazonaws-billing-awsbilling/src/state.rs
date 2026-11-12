@@ -23,6 +23,11 @@
 //! applied to an account's bills, keyed by [`CreditAllocation::key`] so a
 //! reverse walk is the `billingMonth`-descending order
 //! `GetCreditAllocationHistory` documents.
+//!
+//! [`ComAmazonawsBillingAwsbillingState::support_eligible_spend`] holds the
+//! Support-eligible spend of each linked account and billing month, from which
+//! `ListBusinessSupportAccountCharges` PRICES the Support charges it reports —
+//! see the `support_charges` module below.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -33,6 +38,11 @@ use crate::ops::types::{
     AccessDeniedException, BillingViewHealthStatus, BillingViewHealthStatusException, Expression,
     ValidationException, ValidationExceptionField, BILLING_FEATURE_VALUES,
 };
+
+/// The Support-eligible spend `ListBusinessSupportAccountCharges` prices.
+mod support_charges;
+
+pub use support_charges::*;
 
 /// `CUSTOM`, the `BillingViewType` a view created through `CreateBillingView`
 /// carries (one of `BILLING_VIEW_TYPE_VALUES` in `ops::types`).
@@ -613,6 +623,16 @@ pub struct ComAmazonawsBillingAwsbillingState {
     /// family, keyed and ordered by `creditId`, so `GetCredits` answers in a
     /// deterministic order. Bounded by [`MAX_CREDITS`].
     pub credits: BTreeMap<String, Credit>,
+    /// Every persisted account-month of Support-eligible spend, keyed and
+    /// ordered by [`SupportEligibleSpend::key`] (billing month, then account)
+    /// so `ListBusinessSupportAccountCharges` seeks straight to one month and
+    /// its page boundaries are stable. Bounded by
+    /// [`SupportEligibleSpend::MAX_RESIDENT`].
+    ///
+    /// Empty on a fresh emulator: spend accrues from a billing run, which this
+    /// emulator does not perform. The Support CHARGE is not held here — it is
+    /// computed from this spend by the subscribed plan's price schedule.
+    pub support_eligible_spend: BTreeMap<String, SupportEligibleSpend>,
     /// The `BillingFeature` values whose preferences this account's caller may
     /// reach — read through `GetBillingPreferences` and write through
     /// `UpdateBillingPreferences`.
@@ -675,6 +695,10 @@ impl Default for ComAmazonawsBillingAwsbillingState {
             // A fresh account holds no credits: the modeled `GetCredits`
             // response "returns an empty list when no credits exist".
             credits: BTreeMap::new(),
+            // Nothing has been billed yet, so no account has Support-eligible
+            // spend: AWS documents no charge every account carries by
+            // default, the way it documents the PRIMARY billing view.
+            support_eligible_spend: BTreeMap::new(),
             // Every feature except the ones behind the Billing-console access
             // activation this account does not have.
             feature_access: BILLING_FEATURE_VALUES
