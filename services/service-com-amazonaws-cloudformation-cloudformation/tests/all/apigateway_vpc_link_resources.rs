@@ -91,7 +91,14 @@ fn elb_arn(resource: &str) -> String {
 /// One Amazon API Gateway call over the `restJson1` wire its model declares, on the method and
 /// URI that operation's own `@http` binding names, signed for `apigateway` in the Region the
 /// stack's resources live in.
-async fn apigateway(router: &MultiServiceRouter, method: &str, uri: &str) -> (u16, Value) {
+///
+/// `pub(crate)` because `sam_api_stages.rs` reads a deployed REST API and its stages through
+/// the same wire: the calling convention for this service is spelled once.
+pub(crate) async fn apigateway(
+    router: &MultiServiceRouter,
+    method: &str,
+    uri: &str,
+) -> (u16, Value) {
     let request = http::Request::builder()
         .method(method)
         .uri(format!("https://apigateway.{REGION}.amazonaws.com{uri}"))
@@ -137,9 +144,15 @@ async fn get_vpc_link(router: &MultiServiceRouter, vpc_link_id: &str) -> (u16, V
     apigateway(router, "GET", &format!("/vpclinks/{vpc_link_id}")).await
 }
 
-/// The text of one member of a VPC link as API Gateway reports it.
-fn member_text(link: &Value, member: &str) -> Option<String> {
-    link.get(member).and_then(Value::as_str).map(str::to_string)
+/// The text of one member of a record as API Gateway reports it.
+///
+/// `pub(crate)` because `sam_api_stages.rs` reads the members of an api and of its stages the
+/// same way: one reading of a `restJson1` answer's member, shared with the wire helper above.
+pub(crate) fn member_text(record: &Value, member: &str) -> Option<String> {
+    record
+        .get(member)
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// The `targetArns` a reported VPC link carries, in the order it reports them.
@@ -155,13 +168,23 @@ fn reported_targets(link: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Whether `value` is an identifier of the form API Gateway mints for a record of the account:
-/// exactly [`VPC_LINK_ID_CHARACTERS`] lowercase alphanumeric characters.
-fn is_vpc_link_id(value: &str) -> bool {
-    value.len() == VPC_LINK_ID_CHARACTERS
+/// Whether `value` is an identifier of the form API Gateway mints: exactly `width` lowercase
+/// alphanumeric characters.
+///
+/// `pub(crate)` over an explicit width because every record API Gateway assigns an identifier
+/// to carries that shape — a VPC link, a REST API (`sam_api_stages.rs`) — and the width is the
+/// only thing that differs.
+pub(crate) fn is_api_gateway_id(value: &str, width: usize) -> bool {
+    value.chars().count() == width
         && value
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+/// Whether `value` is an identifier of the form API Gateway mints for a VPC link: exactly
+/// [`VPC_LINK_ID_CHARACTERS`] of them.
+fn is_vpc_link_id(value: &str) -> bool {
+    is_api_gateway_id(value, VPC_LINK_ID_CHARACTERS)
 }
 
 /// One `AWS::ApiGateway::VpcLink` declaration, as a row writes it.

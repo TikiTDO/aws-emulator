@@ -369,6 +369,8 @@ mod s3vectors_resource_types;
 mod resolved_properties;
 #[path = "all/sam_api_definitions.rs"]
 mod sam_api_definitions;
+#[path = "all/sam_api_stages.rs"]
+mod sam_api_stages;
 #[path = "all/sam_deployed_resources.rs"]
 mod sam_deployed_resources;
 #[path = "all/sam_layer_version_references.rs"]

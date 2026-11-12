@@ -28,8 +28,9 @@
 //!   ONE `AWS::ApiGateway::RestApi` (`ServerlessRestApi`) whose OpenAPI body carries the
 //!   path and method of every such event in the template, and deploys it — an
 //!   `AWS::ApiGateway::Deployment` and an `AWS::ApiGateway::Stage` for the implicit `Prod`
-//!   stage. A `HttpApi` event does the same through `AWS::ApiGatewayV2::Api` and its
-//!   `$default` stage.
+//!   stage. That deployment declares a `StageName` of its own ([`EXTRA_STAGE`]), so the
+//!   deployed REST API carries that stage beside the one its stage resource serves. A
+//!   `HttpApi` event does the same through `AWS::ApiGatewayV2::Api` and its `$default` stage.
 //! * `AWS::Serverless::Api` and `AWS::Serverless::HttpApi` become that same API trio from
 //!   the definition the declaration states — and "if neither `DefinitionUri` nor
 //!   `DefinitionBody` are specified, AWS SAM generates [one] based on your template
@@ -126,6 +127,24 @@ const IMPLICIT_HTTP_API: &str = "ServerlessHttpApi";
 /// The stage the implicit REST API is deployed to ("the implicit API … is deployed to a
 /// stage called `Prod`").
 const IMPLICIT_STAGE: &str = "Prod";
+
+/// The stage name the `AWS::ApiGateway::Deployment` generated for a REST API declares, which
+/// is a stage of its own beside the one that deployment's stage resource serves: "AWS SAM
+/// creates a stage called `Stage` by default", which is the stage that deployment's
+/// `StageName` makes API Gateway create (`CreateDeployment$stageName` is "the name of the
+/// Stage resource for the Deployment resource to create"). A REST API the transform expands
+/// therefore carries TWO stages — this one and the stage the declaration's `StageName`
+/// names — unless the declaration suppresses it ([`OPEN_API_VERSION_PROPERTY`]).
+const EXTRA_STAGE: &str = "Stage";
+
+/// `AWS::Serverless::Api$OpenApiVersion`: "the version of OpenApi to use … Setting this
+/// property to any valid value will prevent the creation of the stage `Stage`". So the
+/// generated deployment declares [`EXTRA_STAGE`] exactly when the declaration (or the
+/// `Globals` section that stands in for it) states no version of its own — a property written
+/// as `null` states nothing, so it reads as an absent one. A value that is no published
+/// OpenAPI version fails the macro itself, which this module does not model, so the property's
+/// PRESENCE is what the expansion reads.
+const OPEN_API_VERSION_PROPERTY: &str = "OpenApiVersion";
 
 /// The stage an HTTP API is deployed to by default, and the suffix its logical id carries:
 /// `AWS::ApiGatewayV2` deploys to the `$default` stage, whose name is not a logical-id
@@ -1405,19 +1424,26 @@ fn expand_rest_api(
     // `AWS::ApiGateway::Stage` for the API."
     let digest = digest(&definition);
     let deployment_id = format!("{logical_id}Deployment{digest}");
+    let mut deployment = Map::from_iter([
+        (
+            "Description".to_string(),
+            json!(format!("RestApi deployment id: {digest}")),
+        ),
+        ("RestApiId".to_string(), json!({ "Ref": logical_id })),
+    ]);
+    // The deployment declares a stage of its own ([`EXTRA_STAGE`]) unless the declaration
+    // states an OpenAPI version, which is what suppresses it. A property written as `null`
+    // states nothing, so it reads as an absent one.
+    let states_open_api_version = properties
+        .get(OPEN_API_VERSION_PROPERTY)
+        .is_some_and(|version| !version.is_null());
+    if !states_open_api_version {
+        deployment.insert(STAGE_NAME_PROPERTY.to_string(), json!(EXTRA_STAGE));
+    }
     added.insert(
         deployment_id.clone(),
         conditioned(
-            resource(
-                "AWS::ApiGateway::Deployment",
-                Map::from_iter([
-                    (
-                        "Description".to_string(),
-                        json!(format!("RestApi deployment id: {digest}")),
-                    ),
-                    ("RestApiId".to_string(), json!({ "Ref": logical_id })),
-                ]),
-            ),
+            resource("AWS::ApiGateway::Deployment", deployment),
             condition,
         ),
     );
