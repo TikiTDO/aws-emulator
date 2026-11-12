@@ -235,8 +235,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = ctx;
+        // request metadata — the credential scope this call is authorized against.
+        //
+        // IAM decides a signed call ahead of the service, so a caller whose own policies
+        // do not allow `kinesisvideo:GetClip` on the stream this request names is refused
+        // here, before the stream, its retention or its archive is read.
+        if let Some(refused) = crate::service::authorization::refused(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            input.stream_name.as_deref(),
+            input.stream_arn.as_deref(),
+        ) {
+            return Err(refused);
+        }
 
         let invalid = |message: String| -> Self::Error {
             GetClipErrorModeled::InvalidArgumentException(InvalidArgumentException {

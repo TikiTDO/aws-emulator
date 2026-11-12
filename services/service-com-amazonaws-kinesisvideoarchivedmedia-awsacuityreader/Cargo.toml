@@ -11,7 +11,8 @@ engine = { workspace = true }
 # `validation_message`: the shared wording of a framework-level constraint refusal —
 # AWS's envelope, its clauses, and the element constraint set a collection member's
 # clause states — so this service's `override_refusal` chooses the rendering rather
-# than re-implementing it.
+# than re-implementing it. `iam_authorization`: the one evaluation of IAM policy
+# documents against an action on a resource, which decides every read of this plane.
 service-common = { path = "../common" }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }
@@ -31,6 +32,12 @@ tracing = { workspace = true }
 # retention are read from that state in the shared engine rather than kept a second
 # time here.
 service-com-amazonaws-kinesisvideo-kinesisvideo-20170930 = { workspace = true }
+# The STS store, for the identity an access key id speaks for: the principal
+# `sts:GetCallerIdentity` answers for the credentials a request signed with.
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+# The IAM store, for the identity-based policy documents in force on that principal, which
+# decide whether the caller may perform the action a read asks for.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 # Decodes the frame a fragment's archived bytes carry and re-encodes it in the format
 # `GetImages` was asked for (PNG, JPEG, at a requested size and JPEG quality).
 image = { version = "0.25", default-features = false, features = [

@@ -45,6 +45,14 @@ use smithy_server_runtime::{
 };
 use std::sync::Arc;
 
+/// Whether the CALLER may perform the action a request asks for, decided against the
+/// identity-based IAM policies in force on the principal its credentials name.
+///
+/// IAM decides a signed call ahead of the service, so every operation of this read plane
+/// asks this gate before it resolves the stream the request addresses; it lives beside
+/// this file rather than in one handler because the decision is the same rule for all six.
+pub mod authorization;
+
 /// Every INPUT shape of this service, as the generated schema statics.
 ///
 /// What they are read for: a constraint broken by the ELEMENTS of a collection member is

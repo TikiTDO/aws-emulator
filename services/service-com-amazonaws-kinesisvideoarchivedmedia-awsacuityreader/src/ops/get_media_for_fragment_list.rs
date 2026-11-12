@@ -194,7 +194,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
+        // IAM decides a signed call ahead of the service, so a caller whose own policies
+        // do not allow `kinesisvideo:GetMediaForFragmentList` on the stream this request
+        // names is refused here, before the stream or its fragments are read.
+        if let Some(refused) = crate::service::authorization::refused(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            input.stream_name.as_deref(),
+            input.stream_arn.as_deref(),
+        ) {
+            return Err(refused);
+        }
 
         // Which stream the request names is resolved through the control plane,
         // whose store this service's own resolver reads.

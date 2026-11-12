@@ -15,6 +15,8 @@
 mod archived_media_read_path;
 #[path = "all/control_plane_stream_resolution.rs"]
 mod control_plane_stream_resolution;
+#[path = "all/data_plane_identity_authorization.rs"]
+mod data_plane_identity_authorization;
 #[path = "all/get_dash_streaming_session_url.rs"]
 mod get_dash_streaming_session_url;
 #[path = "all/get_images_generation.rs"]
