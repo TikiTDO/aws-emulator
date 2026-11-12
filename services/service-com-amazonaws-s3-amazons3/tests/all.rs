@@ -29,6 +29,8 @@ mod bucket_analytics_configuration;
 mod bucket_analytics_configuration_listing;
 #[path = "all/bucket_configuration_id_addressing.rs"]
 mod bucket_configuration_id_addressing;
+#[path = "all/bucket_configuration_listing_result_element.rs"]
+mod bucket_configuration_listing_result_element;
 #[path = "all/bucket_cors.rs"]
 mod bucket_cors;
 #[path = "all/bucket_cors_delete.rs"]

@@ -198,19 +198,40 @@ pub const UNWRAPPED_XML_OUTPUT_OPERATIONS: &[&str] = &["GetBucketLocation"];
 pub const JSON_PAYLOAD_OUTPUT_OPERATIONS: &[&str] = &["GetBucketPolicy"];
 
 /// The operations whose response document names its ROOT element something other than the
-/// `xmlName` this model declares for the output shape, as `(operation, modelled, served)`.
+/// name the model resolves for the output shape, as `(operation, modelled, served)`.
 ///
-/// The root element of a restXml response is the output shape's `xmlName`, and for the
-/// analytics listing the model declares `ListBucketAnalyticsConfigurationResult`
-/// (`smithy_query(query="shape",shape="ListBucketAnalyticsConfigurationsOutput")`) where the
-/// service answers the PLURAL `ListBucketAnalyticsConfigurationsResult`. A client reads the
-/// result out of the element the service sends, so the served name is the contract and the
-/// modelled one is what this table corrects; nothing else about the document changes.
-const SERVED_OUTPUT_ROOT_ELEMENTS: &[(&str, &str, &str)] = &[(
-    "ListBucketAnalyticsConfigurations",
-    "ListBucketAnalyticsConfigurationResult",
-    "ListBucketAnalyticsConfigurationsResult",
-)];
+/// The root element of a restXml response is the output shape's `xmlName`, else the shape's
+/// own name ([`root_element_name`]) — and for two of the four bucket-configuration listings
+/// neither is the element the service sends. A client reads the result out of the element the
+/// service SENDS, so the served name is the contract and the resolved one is what this table
+/// corrects; nothing else about the document changes.
+///
+/// The two rows, and why the other two listings need none:
+///
+/// * the analytics listing's output shape declares `ListBucketAnalyticsConfigurationResult`
+///   (`smithy_query(query="shape",shape="ListBucketAnalyticsConfigurationsOutput")`) where
+///   the service answers the PLURAL `ListBucketAnalyticsConfigurationsResult`;
+/// * the S3 Intelligent-Tiering listing's output shape declares NO `xmlName`
+///   (`smithy_query(query="shape",shape="ListBucketIntelligentTieringConfigurationsOutput")`),
+///   so the resolved name is the shape's own —
+///   `ListBucketIntelligentTieringConfigurationsOutput`, which is no element S3 sends — where
+///   the service answers `ListIntelligentTieringConfigurationsResult`, the `List…Result` form
+///   its sibling listings' output shapes declare for themselves;
+/// * the metrics and S3 Inventory listings declare `ListMetricsConfigurationsResult` and
+///   `ListInventoryConfigurationsResult`, which ARE the elements the service sends, so their
+///   documents go out as the model resolves them.
+const SERVED_OUTPUT_ROOT_ELEMENTS: &[(&str, &str, &str)] = &[
+    (
+        "ListBucketAnalyticsConfigurations",
+        "ListBucketAnalyticsConfigurationResult",
+        "ListBucketAnalyticsConfigurationsResult",
+    ),
+    (
+        "ListBucketIntelligentTieringConfigurations",
+        "ListBucketIntelligentTieringConfigurationsOutput",
+        "ListIntelligentTieringConfigurationsResult",
+    ),
+];
 
 /// The `content-type` a response whose body is a JSON document carries — see
 /// [`JSON_PAYLOAD_OUTPUT_OPERATIONS`].
