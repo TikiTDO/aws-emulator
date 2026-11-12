@@ -19,6 +19,10 @@ mod checker_ip_ranges;
 mod cidr_collections;
 #[path = "all/cidr_collection_blocks.rs"]
 mod cidr_collection_blocks;
+// Declared beside the block suite: this one is the metadata-only read over a
+// collection's locations — what it reports, how it pages and what it refuses.
+#[path = "all/cidr_location_listing.rs"]
+mod cidr_location_listing;
 #[path = "all/delegation_set_deletion.rs"]
 mod delegation_set_deletion;
 #[path = "all/delegation_set_limits.rs"]

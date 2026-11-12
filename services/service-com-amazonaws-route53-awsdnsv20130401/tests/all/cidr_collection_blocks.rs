@@ -42,8 +42,11 @@ use service_com_amazonaws_route53_awsdnsv20130401::state::MAX_CIDR_BLOCKS_PER_CO
 use crate::hosted_zone_records::{call, escape_xml, router, Reply};
 
 /// The two `Action` values a change carries (`CidrCollectionChangeAction`).
-const PUT: &str = "PUT";
-const DELETE_IF_EXISTS: &str = "DELETE_IF_EXISTS";
+///
+/// `pub(crate)` so the sibling suite over the location listing names the same two
+/// actions rather than growing a second copy of them.
+pub(crate) const PUT: &str = "PUT";
+pub(crate) const DELETE_IF_EXISTS: &str = "DELETE_IF_EXISTS";
 
 /// The wire error codes the refusals in this suite carry, each the shape name the model
 /// declares for that error.
@@ -56,7 +59,9 @@ const INVALID_INPUT: &str = "InvalidInput";
 const LIMITS_EXCEEDED: &str = "LimitsExceeded";
 
 /// Create a CIDR collection and answer its id.
-async fn create_collection(router: &MultiServiceRouter, name: &str) -> String {
+///
+/// `pub(crate)` so a sibling suite seeds a collection through the SAME harness.
+pub(crate) async fn create_collection(router: &MultiServiceRouter, name: &str) -> String {
     let created = call(
         router,
         "POST",
@@ -84,7 +89,9 @@ async fn create_collection(router: &MultiServiceRouter, name: &str) -> String {
 
 /// One `<member>` of a change request: the list member carries no `xmlName`, so each change
 /// is a `member` element of `Changes`.
-fn change(location: &str, action: &str, blocks: &[&str]) -> String {
+///
+/// `pub(crate)` for the same reason [`create_collection`] is.
+pub(crate) fn change(location: &str, action: &str, blocks: &[&str]) -> String {
     let list: String = blocks
         .iter()
         .map(|block| format!("<Cidr>{}</Cidr>", escape_xml(block)))
@@ -97,7 +104,9 @@ fn change(location: &str, action: &str, blocks: &[&str]) -> String {
 }
 
 /// Apply `changes` to the collection `id`, at the `CollectionVersion` the caller states.
-async fn change_collection(
+///
+/// `pub(crate)` for the same reason [`create_collection`] is.
+pub(crate) async fn change_collection(
     router: &MultiServiceRouter,
     id: &str,
     version: Option<&str>,
