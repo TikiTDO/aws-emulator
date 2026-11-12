@@ -113,5 +113,7 @@ mod update_report_group;
 mod webhook_access_token;
 #[path = "all/webhook_lifecycle.rs"]
 mod webhook_lifecycle;
+#[path = "all/webhook_project_resolution.rs"]
+mod webhook_project_resolution;
 #[path = "all/webhook_secret_is_minted_once.rs"]
 mod webhook_secret_is_minted_once;
