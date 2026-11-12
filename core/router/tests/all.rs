@@ -45,6 +45,12 @@ mod cloudformation_condition_gated_secrets_policy;
 // Functions, Lambda, Amazon SQS and IAM at once.
 #[path = "all/cloudformation_sfn_lambda_published_handles.rs"]
 mod cloudformation_sfn_lambda_published_handles;
+// Declared here, in this same head region, for the reason the entries above record: the
+// metric-stream export pipeline a stack deploys, which only moves data if CloudFormation,
+// IAM, CloudWatch, Firehose and Amazon S3 all agree, so no single crate's test target can
+// follow a published datapoint to the object it lands in.
+#[path = "all/cloudformation_metric_stream_exports_to_s3.rs"]
+mod cloudformation_metric_stream_exports_to_s3;
 // Declared here, in this same head region, for the reason the entry above records: what
 // LAMBDA makes of an access point EFS minted, which neither crate's own test target can
 // ask, since the ARN has to cross from one service to the other.
