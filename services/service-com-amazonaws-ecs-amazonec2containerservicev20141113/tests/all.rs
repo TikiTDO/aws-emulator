@@ -97,6 +97,8 @@ mod inactive_cluster_refusals;
 mod integer_bound_refusals;
 #[path = "all/invalid_request_refusals.rs"]
 mod invalid_request_refusals;
+#[path = "all/launch_steps_before_start.rs"]
+mod launch_steps_before_start;
 #[path = "all/list_attributes.rs"]
 mod list_attributes;
 #[path = "all/list_clusters.rs"]

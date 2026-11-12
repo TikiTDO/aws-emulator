@@ -667,9 +667,9 @@ pub fn drive_task_clock<Eng: Send + Sync + 'static>(
             // lookup in that emulated service's own in-memory store through the shared engine
             // handle, so nothing is dialled, resolved or opened. Done BEFORE the clock
             // materialises what is due, because both steps happen where the task would
-            // otherwise start.
-            super::settle_task_launches(&*engine);
-            state.lock().advance_clock(SystemTime::now());
+            // otherwise start — and again after it, for the tasks that pass placed
+            // ([`super::advance_task_clock`], the same prologue every operation runs).
+            super::advance_task_clock(&*engine, SystemTime::now());
             // A task the clock has just started or stopped is one the load balancers its
             // service binds have to be brought in line with — the same side effect the door
             // that wrote a status settles, owed here for the statuses NO door wrote

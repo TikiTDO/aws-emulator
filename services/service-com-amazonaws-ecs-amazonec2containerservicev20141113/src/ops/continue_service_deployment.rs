@@ -216,7 +216,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // this call acts on is the one that is waiting as of NOW.
         guard.advance_clock(now);
 
-        match guard.act_on_lifecycle_hook(&deployment_arn, &hook_id, &action, now) {
+        let acted = guard.act_on_lifecycle_hook(&deployment_arn, &hook_id, &action, now);
+        // An action that ROLLS the service back puts the previous revision's task set in
+        // place, so this call has placed tasks: their launch steps are taken here, with the
+        // guard dropped, exactly as every other call that places a task takes them
+        // ([`crate::state::settle_task_launches`]).
+        drop(guard);
+        crate::state::settle_task_launches(&*self.engine);
+
+        match acted {
             Ok(()) => Ok(ContinueServiceDeploymentOutput {
                 // "The ARN of the service deployment that was continued or rolled back."
                 service_deployment_arn: Some(deployment_arn),

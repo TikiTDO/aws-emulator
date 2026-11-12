@@ -185,7 +185,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // already owed it has happened whether or not anybody called to look.
         guard.advance_clock(now);
 
-        match guard.request_service_deployment_stop(&deployment_arn, &stop_type, now) {
+        let stopped = guard.request_service_deployment_stop(&deployment_arn, &stop_type, now);
+        // A stop that ROLLS the service back puts the previous revision's task set in place,
+        // so this call has placed tasks: their launch steps are taken here, with the guard
+        // dropped, exactly as every other call that places a task takes them
+        // ([`crate::state::settle_task_launches`]).
+        drop(guard);
+        crate::state::settle_task_launches(&*self.engine);
+
+        match stopped {
             Ok(()) => Ok(StopServiceDeploymentOutput {
                 // "The ARN of the stopped service deployment."
                 service_deployment_arn: Some(deployment_arn),

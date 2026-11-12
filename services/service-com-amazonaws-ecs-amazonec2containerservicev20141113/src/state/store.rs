@@ -82,7 +82,15 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
                 }
             }
             if let Some(due) = task.running_due_at {
-                if due <= now {
+                // The start of a task whose launch steps have NOT been taken yet is not
+                // owed to anybody: Amazon ECS assumes the roles the launch resolved and
+                // fetches the images its containers run before any container of it starts
+                // ([`TaskRecord::launch_steps_taken`]), so a pass that has not taken those
+                // steps withholds the start rather than reporting a task running that
+                // nothing has decided it may. The instant it falls due is kept, so the pass
+                // that HAS taken them materialises the transition at the instant it was
+                // owed at rather than at its own.
+                if due <= now && task.launch_steps_taken() {
                     task.running_due_at = None;
                     // The images a task's containers run are fetched where the task is
                     // placed, and this placement reaches no registry that holds one

@@ -29,6 +29,16 @@
 //! task whose role it could not assume never reaches the registry, which is why such a task
 //! records no pull instants.
 //!
+//! The decision is what the START of a task waits for, not the other way round: until this
+//! pass has run for a task, no clock pass reports it `RUNNING`
+//! ([`TaskRecord::launch_steps_taken`]). A task whose containers started before anything
+//! decided whether Amazon ECS may run them would be a task launched under a role it was
+//! refused, so the start is withheld instead. The withholding is never a stall: every call
+//! that places a task takes the steps before it answers, and the clock pump takes them on
+//! every wake-up ahead of the clock pass it drives ([`advance_task_clock`]) — so the start of
+//! a task the CLOCK placed, which no call was there to take them for, follows within one pump
+//! tick of the instant it was owed at.
+//!
 //! LOCK ORDER: the IAM store's lock is taken with no guard of this service's store held, and
 //! hands back owned values — the same contract [`evaluate_image_pulls`] has, which is what
 //! keeps a lock cycle between the stores unreachable.
@@ -43,9 +53,47 @@ use super::*;
 /// pump calls for a task the CLOCK placed; it is called with NO guard of this service's store
 /// held, because each half reads another service's store under that store's own lock
 /// ([`evaluate_launch_role_assumptions`], [`evaluate_image_pulls`]).
+///
+/// A task this pass has run for is one the clock may then start
+/// ([`TaskRecord::launch_steps_taken`]).
 pub fn settle_task_launches<Eng: Send + Sync + 'static>(engine: &Eng) {
     evaluate_launch_role_assumptions(engine);
     evaluate_image_pulls(engine);
+}
+
+/// Materialise everything the clock owes, as of `now`, with the launch steps outstanding
+/// taken around it — the whole pass, for a caller that is not one of this service's own
+/// operations: the clock pump, which drives the lifecycle between calls, and another service
+/// asking this one whether the capacity a movement set is in effect.
+///
+/// The order is the one Amazon ECS takes the steps in:
+///
+/// 1. the steps outstanding are taken, so the pass below starts no task whose launch nothing
+///    has decided ([`TaskRecord::launch_steps_taken`]) — the roles a launch resolved are put
+///    to the account's IAM records before any container of it runs, not after;
+/// 2. the clock pass materialises what was owed at `now`, which is also where the service
+///    scheduler places the tasks a service is short of ([`super::service_steady_state`]);
+/// 3. and the steps of the tasks THAT placement produced are taken, so a task the clock
+///    placed is launched by the pass that placed it, exactly as a task a call places is.
+///
+/// What ONE call costs is bounded by what the store HOLDS, not by the request: each step is a
+/// pass over the task map, which is capped at [`MAX_TASKS`] however many calls arrive, and
+/// nothing here takes a size, a count or a wait from a request. Nothing is dialled, resolved
+/// or opened either: the facts the steps are decided against are read out of the emulated IAM,
+/// Amazon EC2 and Amazon ECR services' OWN in-memory stores through the shared engine handle
+/// ([`settle_task_launches`], [`evaluate_image_pulls`]), so the registry an image reference
+/// names is answered by the emulated registry rather than reached over a network.
+///
+/// Called with NO guard of this service's store held, which is also what keeps the lock order
+/// one-way: each pass takes this store's lock itself and releases it before the launch steps
+/// take another store's, so no two of them are ever held at once (see the module's LOCK ORDER
+/// note).
+pub fn advance_task_clock<Eng: Send + Sync + 'static>(engine: &Eng, now: SystemTime) {
+    settle_task_launches(engine);
+    if let Some(state) = service_state(engine) {
+        state.lock().advance_clock(now);
+    }
+    settle_task_launches(engine);
 }
 
 /// Attempt the role assumes of every task that has just been launched, and record the stop a
@@ -82,6 +130,31 @@ pub fn evaluate_launch_role_assumptions<Eng: Send + Sync + 'static>(engine: &Eng
         return;
     }
     state.lock().record_unassumable_role_refusals(&refusals);
+}
+
+impl TaskRecord {
+    /// Whether the launch steps Amazon ECS takes before this task's containers can start have
+    /// been taken for it: the roles the launch resolved put to the account's IAM records
+    /// ([`evaluate_launch_role_assumptions`]) and the images its containers run fetched
+    /// ([`evaluate_image_pulls`]).
+    ///
+    /// Read off what those steps RECORDED rather than off a flag beside them, so the two
+    /// cannot drift. The fetch is the LAST of them and it stamps the instants it took on
+    /// every task it was made for, whether or not it succeeded
+    /// ([`ComAmazonawsEcsAmazonec2containerservicev20141113State::record_image_pulls`]); a
+    /// launch the pass refused carries the reason instead ([`TaskRecord::launch_failure`]),
+    /// which is why the fetch was not attempted for it. So either one is the pass having run
+    /// for this task.
+    ///
+    /// A task that has only just been PLACED carries neither, because the pass that places a
+    /// task holds none of the facts these steps are decided against: they are read out of the
+    /// other services' own stores, outside this store's lock ([`settle_task_launches`]). The
+    /// clock therefore WITHHOLDS the start of such a task — a task that reports `RUNNING` is
+    /// one whose containers have started, which cannot have happened before the steps that
+    /// decide whether they may.
+    pub fn launch_steps_taken(&self) -> bool {
+        self.launch_failure.is_some() || self.pull_started_at.is_some()
+    }
 }
 
 impl ComAmazonawsEcsAmazonec2containerservicev20141113State {

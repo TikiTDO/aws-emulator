@@ -168,9 +168,12 @@ fn owner_has_fulfilled<Eng: Send + Sync + 'static>(
 /// of the scheduler's own ever catches up), and one whose desired count is no longer the
 /// capacity this movement set, which something else has moved on from.
 ///
-/// The owning service's clock is advanced first: the tasks its scheduler placed start at an
-/// instant of their own, which arrives whether or not anybody calls that service, and
-/// `advance_clock` is the pass that materialises exactly what it has already made due.
+/// The owning service's clock is advanced first, through the pass that service exposes for
+/// it: the tasks its scheduler placed start at an instant of their own, which arrives whether
+/// or not anybody calls that service, and that pass materialises exactly what the clock has
+/// already made due — including the launch steps a task's start waits on, which is why it is
+/// made with no guard of that store held and through the owner's own entry point rather than
+/// by calling its clock pass directly.
 fn ecs_has_fulfilled<Eng: Send + Sync + 'static>(
     engine: &Eng,
     resource_id: &str,
@@ -181,11 +184,11 @@ fn ecs_has_fulfilled<Eng: Send + Sync + 'static>(
     let Some((cluster, service_name)) = super::split_ecs_resource_id(resource_id) else {
         return true;
     };
+    ecs::state::advance_task_clock(engine, SystemTime::now());
     let Some(store) = ecs::state::service_state(engine) else {
         return true;
     };
-    let mut store = store.lock();
-    store.advance_clock(SystemTime::now());
+    let store = store.lock();
     let Some((places_tasks, desired_count)) = store
         .services
         .get(&(cluster.to_string(), service_name.to_string()))
