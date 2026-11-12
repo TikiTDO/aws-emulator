@@ -69,6 +69,8 @@ mod image_set_version_listing;
 mod import_job_datastore_conflicts;
 #[path = "all/import_job_idempotent_replay.rs"]
 mod import_job_idempotent_replay;
+#[path = "all/import_job_image_set_delivery.rs"]
+mod import_job_image_set_delivery;
 #[path = "all/import_job_listing.rs"]
 mod import_job_listing;
 #[path = "all/list_element_refusal_paths.rs"]

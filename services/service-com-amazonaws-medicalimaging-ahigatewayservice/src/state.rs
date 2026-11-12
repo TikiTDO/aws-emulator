@@ -1127,10 +1127,8 @@ pub struct ImageFrame {
     /// nothing recorded which instance it belongs to.
     ///
     /// Carried wherever a frame is: a copy clones the frames it delivers, so the
-    /// destination reports them under the same instances. The DICOM import that will
-    /// RECORD an instance while minting frames from imported content is still to be
-    /// written (`issues/things-that-do-not-work/20261024T002353Z-medical-imaging-startdicomimportjob-event-propagation.md`),
-    /// which is why nothing in this crate sets it to `Some` yet.
+    /// destination reports them under the same instances, and a DICOM import records the
+    /// instance each frame's pixel data was read from ([`imported_image_sets`]).
     pub sop_instance_uid: Option<String>,
     /// The DICOM transfer syntax UID the pixel data is STORED in, `None` when the
     /// instance it came from declared none. `GetImageFrame`'s `contentType` is computed
