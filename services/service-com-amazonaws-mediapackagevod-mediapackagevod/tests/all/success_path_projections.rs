@@ -62,7 +62,11 @@ const ASSET_SHALLOW_PROJECTION: [&str; 6] = [
 /// The host labels an egress origin of this service is built from, asserted as a
 /// structure rather than as one recorded string: the TLS scheme, then
 /// `<group>.egress.<service name>.<region>.amazonaws.com`.
-fn assert_egress_domain(case: &str, domain: &str) {
+///
+/// Shared with `super::announced_egress_domain`, which asserts the same structure for the
+/// one case that still announces this form — a caller on an AWS hostname talking to an
+/// emulator served on no port at all.
+pub(crate) fn assert_egress_domain(case: &str, domain: &str) {
     use service_com_amazonaws_mediapackagevod_mediapackagevod::state as vod;
 
     let Some(host) = domain.strip_prefix(vod::EGRESS_ORIGIN_PREFIX) else {

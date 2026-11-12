@@ -67,12 +67,26 @@ pub(crate) async fn call_raw(
     path: &str,
     body: Option<Value>,
 ) -> http::Response<bytes::Bytes> {
-    let payload = body.map(|value| value.to_string()).unwrap_or_default();
     let host = format!("mediapackage-vod.{REGION}.amazonaws.com");
-    let request = http::Request::builder()
+    call_raw_addressed(router, method, path, body, &host, Some(&host)).await
+}
+
+/// The same request, sent to an ADDRESS the caller chooses: the authority its URI names
+/// and the `Host` header it carries (`None` sends none at all). The SigV4 scope still
+/// routes it, so a test can drive these routes as a client that talks to the emulator's
+/// own endpoint rather than to one of AWS's hostnames.
+pub(crate) async fn call_raw_addressed(
+    router: &MultiServiceRouter,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    authority: &str,
+    host_header: Option<&str>,
+) -> http::Response<bytes::Bytes> {
+    let payload = body.map(|value| value.to_string()).unwrap_or_default();
+    let mut builder = http::Request::builder()
         .method(method)
-        .uri(format!("https://{host}{path}"))
-        .header("host", host.clone())
+        .uri(format!("https://{authority}{path}"))
         .header("content-type", "application/json")
         .header(
             "authorization",
@@ -80,7 +94,11 @@ pub(crate) async fn call_raw(
                 "AWS4-HMAC-SHA256 Credential=AKIDTESTONLY/20260101/{REGION}\
                  /mediapackage-vod/aws4_request, SignedHeaders=host, Signature=unverified"
             ),
-        )
+        );
+    if let Some(host) = host_header {
+        builder = builder.header("host", host);
+    }
+    let request = builder
         .body(bytes::Bytes::from(payload))
         .expect("a well-formed test request");
 

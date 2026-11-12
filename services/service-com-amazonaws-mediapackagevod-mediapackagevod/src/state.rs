@@ -43,6 +43,13 @@ use crate::ops::types::{
 // `state/ingest_source.rs`.
 pub mod ingest_source;
 
+// WHERE a packaging group's egress is announced — the address its `DomainName` names, and
+// the root of every playback URL beneath it — lives in `state/egress_addressing.rs`.
+pub mod egress_addressing;
+
+pub use egress_addressing::{
+    announced_egress_origin, packaging_group_domain_name, EGRESS_ORIGIN_PREFIX,
+};
 pub use ingest_source::SourceReadability;
 
 /// The region an unsigned request is served in. A signed request names its own
@@ -292,12 +299,14 @@ fn region_slice<'map, V>(
 pub struct PackagingGroupRecord {
     /// The caller-chosen `Id` this group is addressed by.
     pub id: String,
-    /// The Region this group was created in — the one its ARN and its egress domain
-    /// name carry, and the only one it resolves in. See [`ResourceKey`].
+    /// The Region this group was created in — the one its ARN carries, and the only
+    /// one it resolves in. See [`ResourceKey`].
     pub region: String,
     /// `arn:aws:mediapackage-vod:<region>:<account>:packaging-groups/<Id>`.
     pub arn: String,
-    /// The egress domain name assets in this group are played back from.
+    /// The egress origin assets in this group are played back from, resolved ONCE when
+    /// the group was created ([`announced_egress_origin`]) so every projection of the
+    /// group announces the same address.
     pub domain_name: String,
     /// ISO-8601 instant this group was created, as returned by every read.
     pub created_at: String,
@@ -688,7 +697,7 @@ fn egress_status(
 /// The parent-manifest URL one packaging configuration exposes one asset at.
 ///
 /// It is rooted at the group's `DomainName` (which carries its own scheme — see
-/// [`packaging_group_domain_name`]), the path segment is derived from the (group,
+/// [`announced_egress_origin`]), the path segment is derived from the (group,
 /// asset, configuration) triple so it is stable across reads and distinct per
 /// endpoint, and the file name is the configuration's manifest name plus the
 /// extension that configuration's packaging format uses.
@@ -839,33 +848,6 @@ fn dash_manifest_apply_defaults(manifest: &mut DashManifest) {
     manifest
         .scte_markers_source
         .get_or_insert_with(|| DEFAULT_SCTE_MARKERS_SOURCE.to_string());
-}
-
-/// The scheme-and-separator prefix a packaging group's `DomainName` carries.
-///
-/// `DomainName` is documented as "The fully qualified domain name for Assets in the
-/// PackagingGroup", but what this service puts on the wire for it is the egress
-/// ORIGIN a player fetches from — scheme included — as the recorded create and
-/// describe responses of this service show, and as every `EgressEndpoint$Url` built
-/// from it needs. Playback is TLS-only, so the prefix is always this one. It carries
-/// the `://` separator, so a caller building a URL beneath the origin (see
-/// [`playback_url`]) appends a path and never re-adds a scheme.
-pub const EGRESS_ORIGIN_PREFIX: &str = "https://";
-
-/// The egress origin assets in a packaging group are played back from, which is what
-/// this service reports as the group's `DomainName` — an ORIGIN, not a bare hostname,
-/// so it is used as the root of a URL rather than as a host.
-///
-/// Shaped like the real one: [`EGRESS_ORIGIN_PREFIX`] followed by an opaque per-group
-/// host label, the `egress` data-plane label, this service's own name, the region and
-/// `amazonaws.com`. The label is DERIVED from the group's identity, never minted per
-/// call, so the value is stable across reads and distinct per group.
-pub fn packaging_group_domain_name(group_id: &str, region: &str) -> String {
-    let label = digest_hex(
-        &format!("{}/{region}/{group_id}", engine::emulator_account_id()),
-        16,
-    );
-    format!("{EGRESS_ORIGIN_PREFIX}{label}.egress.{ARN_NAMESPACE}.{region}.amazonaws.com")
 }
 
 /// The first `len` hex characters of the SHA-256 of `input`.

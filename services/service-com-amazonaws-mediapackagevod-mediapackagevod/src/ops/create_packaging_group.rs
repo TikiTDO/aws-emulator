@@ -174,8 +174,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
-        // The ARN and the egress domain name carry the region this request was
-        // signed for, so a group created in one region is not reported in another.
+        // The ARN carries the region this request was signed for, so a group created
+        // in one region is not reported in another.
         let region = crate::state::request_region(ctx.parts());
         let mut state = store.lock();
 
@@ -239,7 +239,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             id: input.id.clone(),
             region: region.clone(),
             arn: arn.clone(),
-            domain_name: crate::state::packaging_group_domain_name(&input.id, &region),
+            // The address a player, a CDN origin or a probe DIALS for this group's
+            // egress, resolved from the endpoint THIS request reached so the group is
+            // announced where it can be reached, and persisted so every later read of
+            // the group reports the one address the create published. See
+            // `crate::state::egress_addressing`.
+            domain_name: crate::state::announced_egress_origin(
+                ctx.parts(),
+                ctx.endpoint().as_str(),
+                &region,
+                &input.id,
+            ),
             created_at: crate::state::now_iso8601(),
             authorization: input.authorization,
             egress_access_logs: input.egress_access_logs,
