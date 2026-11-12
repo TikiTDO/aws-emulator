@@ -46,6 +46,27 @@ impl UserStatus {
             Self::ExternalProvider => "EXTERNAL_PROVIDER",
         }
     }
+
+    /// The status `wire` names, or `None` for a value `UserStatusType` does not
+    /// define.
+    ///
+    /// The inverse of [`UserStatus::as_str`], for the one place a status
+    /// arrives as text from outside this service: the `finalUserStatus` a
+    /// migrate-user function answers with.
+    pub fn named(wire: &str) -> Option<Self> {
+        [
+            Self::Unconfirmed,
+            Self::Confirmed,
+            Self::Archived,
+            Self::Compromised,
+            Self::Unknown,
+            Self::ResetRequired,
+            Self::ForceChangePassword,
+            Self::ExternalProvider,
+        ]
+        .into_iter()
+        .find(|status| status.as_str() == wire)
+    }
 }
 
 /// One stored user of a user pool.

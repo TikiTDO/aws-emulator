@@ -275,6 +275,8 @@ mod user_attribute_verification_code;
 mod user_auth_event_history;
 #[path = "all/user_import_job_lifecycle.rs"]
 mod user_import_job_lifecycle;
+#[path = "all/user_migration_trigger.rs"]
+mod user_migration_trigger;
 #[path = "all/user_pool_auth_metrics.rs"]
 mod user_pool_auth_metrics;
 #[path = "all/user_pool_domain.rs"]

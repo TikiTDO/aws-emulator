@@ -599,78 +599,35 @@ async fn password_sign_in(
         .ok_or_else(|| missing_auth_parameter("PASSWORD", USER_PASSWORD_AUTH))?;
 
     let outcome = {
-        let state = &mut *store.lock();
-        let pool = state
-            .pool_of_client(client_id)
-            .ok_or_else(|| client_not_found(client_id))?;
-        let client = pool
-            .clients
-            .get(client_id)
-            .ok_or_else(|| client_not_found(client_id))?;
-        if !client.allows_user_password_auth() {
-            return Err(invalid_parameter(
-                crate::state::auth_flow_not_enabled_message(USER_PASSWORD_AUTH),
-            ));
+        let mut decided = decide_password_sign_in(store, client_id, username, password, now, true)?;
+        // A pool whose `LambdaConfig` names a migrate-user function has not decided a
+        // username it does not hold yet: that trigger "can create user profiles when users
+        // sign in ... with credentials that don't exist yet"
+        // (`LambdaConfigType$UserMigration`), so the function is asked about the username
+        // this request presented, with the password it presented, and the sign-in is then
+        // decided again over the state that migration left. A username the function
+        // declined is left as unknown as it was.
+        if let Decided::MigrateUser { user_pool_id } = &decided {
+            let user_pool_id = user_pool_id.clone();
+            crate::state::lambda_triggers::user_migration::fire_user_migration(
+                ctx,
+                store,
+                &user_pool_id,
+                username,
+                crate::state::lambda_triggers::user_migration::MigrationSource::Authentication,
+                Some(password),
+                caller,
+                client_metadata,
+            )
+            .await
+            .map_err(trigger_failed)?;
+            decided =
+                decide_password_sign_in(store, client_id, username, password, now, false)?;
         }
-        let hides_user_existence = client.hides_user_existence();
-        let session_validity = client.auth_session_validity();
-        let temporary_password_validity = pool.temporary_password_validity();
-        let user_pool_id = pool.id.clone();
-
-        let user = pool.user(username).ok_or_else(|| {
-            // `PreventUserExistenceErrors=ENABLED` "suppresses messages that might
-            // indicate a valid user exists"; `LEGACY` answers `UserNotFoundException`.
-            if hides_user_existence {
-                incorrect_credentials()
-            } else {
-                user_not_found()
-            }
-        })?;
-        // The stored user's own state is read FIRST, as the administrative sign-in
-        // reads it: a user that never confirmed its sign-up, one Amazon Cognito put in
-        // `RESET_REQUIRED` and a disabled one cannot sign in whatever credential the
-        // request presents, so each is reported for what it is rather than as a wrong
-        // password. The credential therefore decides nothing about the ANSWER for such a
-        // user, which is what keeps the error code from telling a caller whether the
-        // password it presented was the right one.
-        refuse_unusable_user(user)?;
-        // The stored credential, actually checked. A user that exists and may sign in
-        // gets the one refusal a wrong password owes, which is also what an absent user
-        // gets where the app client hides user existence: nothing in that answer
-        // distinguishes a user that exists from one that does not.
-        if user.password.as_deref() != Some(password.as_str()) {
-            return Err(incorrect_credentials());
-        }
-        if user.temporary_password_expired(temporary_password_validity, now) {
-            return Err(not_authorized(
-                "Temporary password has expired and must be reset by an administrator.",
-            ));
-        }
-
-        if user.status == crate::state::UserStatus::ForceChangePassword {
-            Outcome::Challenge {
-                user_pool_id,
-                username: user.username.clone(),
-                required_attributes: pool.missing_required_attributes(user),
-                user_attributes: user.attributes.clone(),
-                session_validity,
-            }
-        } else if pool.requires_mfa() && user.mfa_setting_list.is_empty() {
-            // The pool requires a second factor from every sign-in and this user
-            // has activated none, so the sign-in cannot complete: it is answered
-            // with the challenge to SET one up, naming the methods the pool
-            // offers for it, and no token is minted until that is done.
-            Outcome::MfaSetup {
-                user_pool_id,
-                username: user.username.clone(),
-                settings_can_setup: pool.mfa_settings_available_for_setup(user),
-                session_validity,
-            }
-        } else {
-            Outcome::Authenticate {
-                user_pool_id,
-                username: user.username.clone(),
-            }
+        match decided {
+            Decided::Outcome(outcome) => outcome,
+            // The second pass asks for no migration, so this cannot be reached.
+            Decided::MigrateUser { .. } => return Err(user_not_found()),
         }
     };
 
@@ -819,6 +776,116 @@ async fn password_sign_in(
             Ok(authenticated(authentication_result))
         }
     }
+}
+
+/// What the stored state decided a password sign-in is, or that it cannot be decided
+/// without the pool's migrate-user function.
+enum Decided {
+    /// The sign-in itself, as the stored state settles it.
+    Outcome(Outcome),
+    /// The pool holds no such user and names a migrate-user function, so the function
+    /// decides whether this username names a user at all.
+    MigrateUser { user_pool_id: String },
+}
+
+/// Decide the password sign-in of `username` through `client_id` from the STORED state,
+/// before anything is written.
+///
+/// `may_migrate` is whether a username the pool does not hold may still be migrated: the
+/// first pass of a pool that configures a migrate-user function asks for that migration, and
+/// the pass that follows it decides over the state the migration left.
+///
+/// Everything here happens under this service's lock, which this call OWNS: the lock is
+/// taken and released inside it, so its caller holds none of it while it invokes a trigger
+/// function.
+fn decide_password_sign_in(
+    store: &Store,
+    client_id: &str,
+    username: &str,
+    password: &str,
+    now: ::std::time::SystemTime,
+    may_migrate: bool,
+) -> Result<Decided, InitiateAuthError> {
+    let state = &mut *store.lock();
+    let pool = state
+        .pool_of_client(client_id)
+        .ok_or_else(|| client_not_found(client_id))?;
+    let client = pool
+        .clients
+        .get(client_id)
+        .ok_or_else(|| client_not_found(client_id))?;
+    if !client.allows_user_password_auth() {
+        return Err(invalid_parameter(
+            crate::state::auth_flow_not_enabled_message(USER_PASSWORD_AUTH),
+        ));
+    }
+    let hides_user_existence = client.hides_user_existence();
+    let session_validity = client.auth_session_validity();
+    let temporary_password_validity = pool.temporary_password_validity();
+    let user_pool_id = pool.id.clone();
+
+    let Some(user) = pool.user(username) else {
+        // A pool that names a migrate-user function has not decided this username yet:
+        // the function is asked about it before the sign-in is refused.
+        if may_migrate && pool.migrates_absent_users() {
+            return Ok(Decided::MigrateUser { user_pool_id });
+        }
+        // `PreventUserExistenceErrors=ENABLED` "suppresses messages that might
+        // indicate a valid user exists"; `LEGACY` answers `UserNotFoundException`.
+        return Err(if hides_user_existence {
+            incorrect_credentials()
+        } else {
+            user_not_found()
+        });
+    };
+    // The stored user's own state is read FIRST, as the administrative sign-in
+    // reads it: a user that never confirmed its sign-up, one Amazon Cognito put in
+    // `RESET_REQUIRED` and a disabled one cannot sign in whatever credential the
+    // request presents, so each is reported for what it is rather than as a wrong
+    // password. The credential therefore decides nothing about the ANSWER for such a
+    // user, which is what keeps the error code from telling a caller whether the
+    // password it presented was the right one.
+    refuse_unusable_user(user)?;
+    // The stored credential, actually checked. A user that exists and may sign in
+    // gets the one refusal a wrong password owes, which is also what an absent user
+    // gets where the app client hides user existence: nothing in that answer
+    // distinguishes a user that exists from one that does not.
+    if user.password.as_deref() != Some(password) {
+        return Err(incorrect_credentials());
+    }
+    if user.temporary_password_expired(temporary_password_validity, now) {
+        return Err(not_authorized(
+            "Temporary password has expired and must be reset by an administrator.",
+        ));
+    }
+
+    Ok(Decided::Outcome(
+        if user.status == crate::state::UserStatus::ForceChangePassword {
+            Outcome::Challenge {
+                user_pool_id,
+                username: user.username.clone(),
+                required_attributes: pool.missing_required_attributes(user),
+                user_attributes: user.attributes.clone(),
+                session_validity,
+            }
+        } else if pool.requires_mfa() && user.mfa_setting_list.is_empty() {
+            // The pool requires a second factor from every sign-in and this user
+            // has activated none, so the sign-in cannot complete: it is answered
+            // with the challenge to SET one up, naming the methods the pool
+            // offers for it, and no token is minted until that is done.
+            Outcome::MfaSetup {
+                user_pool_id,
+                username: user.username.clone(),
+                settings_can_setup: pool.mfa_settings_available_for_setup(user),
+                session_validity,
+            }
+        } else {
+            Outcome::Authenticate {
+                user_pool_id,
+                username: user.username.clone(),
+            }
+        },
+    ))
 }
 
 /// `AuthFlow=USER_AUTH` with `PREFERRED_CHALLENGE=EMAIL_OTP`: the choice-based entry

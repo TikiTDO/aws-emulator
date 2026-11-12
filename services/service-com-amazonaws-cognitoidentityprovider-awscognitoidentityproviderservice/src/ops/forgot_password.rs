@@ -281,7 +281,41 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> ForgotPassword<En
         // The code is issued under this service's lock, and that lock is RELEASED before
         // the pool's custom email sender is invoked: nothing else of this service can be
         // served while a function is being waited for.
-        let asked = self.ask_for_reset(input)?;
+        //
+        // A pool whose `LambdaConfig` names a migrate-user function resolves a username it
+        // does not hold through that function first — the trigger "can create user profiles
+        // when users ... attempt to reset their password with credentials that don't exist
+        // yet" (`LambdaConfigType$UserMigration`) — so the reset is decided again over the
+        // state that migration left, and a username the function declined is the one this
+        // operation refuses as unknown.
+        let asked = match self.ask_for_reset(input, true)? {
+            Asked::Reset(asked) => asked,
+            Asked::MigrateUser { user_pool_id } => {
+                crate::state::lambda_triggers::user_migration::fire_user_migration(
+                    ctx,
+                    &state,
+                    &user_pool_id,
+                    &input.username,
+                    crate::state::lambda_triggers::user_migration::MigrationSource::ForgotPassword,
+                    // "Amazon Cognito doesn't send this value in a request for the
+                    // `UserMigration_ForgotPassword` trigger source" (the migrate-user
+                    // event's `password`): a reset presents no password at all.
+                    None,
+                    crate::state::lambda_triggers::Caller::of(
+                        ctx.parts(),
+                        Some(&input.client_id),
+                    ),
+                    input.client_metadata.as_ref(),
+                )
+                .await
+                .map_err(migration_failed)?;
+                match self.ask_for_reset(input, false)? {
+                    Asked::Reset(asked) => asked,
+                    // The second pass asks for no migration, so this cannot be reached.
+                    Asked::MigrateUser { .. } => return Err(user_not_found()),
+                }
+            }
+        };
 
         // A pool that routes its email to a custom sender delivers this code by handing
         // it to that function instead of mailing it, with the app client this request
@@ -307,6 +341,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> ForgotPassword<En
     }
 }
 
+/// What the stored state decided a reset request is, read under the state lock.
+enum Asked {
+    /// The reset itself: the answer it owes and the code it issued.
+    Reset(AskedForReset),
+    /// The pool holds no such user and names a migrate-user function, so the function
+    /// decides whether this username names a user at all.
+    MigrateUser { user_pool_id: String },
+}
+
 /// What a reset request left behind: the answer it owes its caller, and the code it issued
 /// for the pool's custom email sender to deliver.
 struct AskedForReset {
@@ -326,10 +369,18 @@ struct IssuedCode {
 impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> ForgotPassword<Eng> {
     /// Issue the reset code `input` asks for, and report what that left behind.
     ///
+    /// `may_migrate` is whether a username the pool does not hold may still be migrated:
+    /// the first pass of a pool that configures a migrate-user function asks for that
+    /// migration, and the pass that follows it decides over the state the migration left.
+    ///
     /// Everything here happens under this service's lock, which this call OWNS: the lock
     /// is taken and released inside it, so its caller holds none of it while it invokes a
     /// trigger function.
-    fn ask_for_reset(&self, input: &ForgotPasswordInput) -> Result<AskedForReset, ForgotPasswordError> {
+    fn ask_for_reset(
+        &self,
+        input: &ForgotPasswordInput,
+        may_migrate: bool,
+    ) -> Result<Asked, ForgotPasswordError> {
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(internal_error());
         };
@@ -358,6 +409,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> ForgotPassword<En
         let hides_user_existence = client.hides_user_existence();
 
         let Some(user) = pool.user(&input.username) else {
+            // A pool that names a migrate-user function has not decided this username yet:
+            // the function is asked about it before the request is refused, and this
+            // request is decided again over whatever that migration stored.
+            if may_migrate && pool.migrates_absent_users() {
+                return Ok(Asked::MigrateUser { user_pool_id });
+            }
             // `PreventUserExistenceErrors = ENABLED` "suppresses messages that might
             // indicate a valid user exists" (this service's model), so a request
             // naming a user nobody registered is answered the way a request naming
@@ -365,12 +422,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> ForgotPassword<En
             // destination, since nothing was sent and no code is stored for a user
             // that does not exist. `LEGACY` answers `UserNotFoundException`.
             if hides_user_existence {
-                return Ok(AskedForReset {
+                return Ok(Asked::Reset(AskedForReset {
                     answer: ForgotPasswordOutput {
                         code_delivery_details: crate::state::simulated_code_delivery_details(),
                     },
                     issued: None,
-                });
+                }));
             }
             return Err(user_not_found());
         };
@@ -427,7 +484,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> ForgotPassword<En
 
         // Rendered from the record just stored: the destination is the stored attribute
         // value, reported masked, and the medium is the one that value is reached over.
-        Ok(AskedForReset {
+        Ok(Asked::Reset(AskedForReset {
             answer: ForgotPasswordOutput {
                 code_delivery_details: stored.delivery_details(),
             },
@@ -436,7 +493,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> ForgotPassword<En
                 username,
                 code: stored.code,
             }),
-        })
+        }))
     }
 }
 
@@ -456,6 +513,34 @@ fn trigger_failed(failure: crate::state::lambda_triggers::Failure) -> ForgotPass
                     message: Some(message),
                 },
             )
+            .into()
+        }
+        crate::state::lambda_triggers::Failure::NotInvokable(message) => {
+            ForgotPasswordErrorModeled::UnexpectedLambdaException(UnexpectedLambdaException {
+                message: Some(message),
+            })
+            .into()
+        }
+    }
+}
+
+/// What a failure of the pool's MIGRATE-USER trigger is for this operation.
+///
+/// That trigger decides whether the username this request named is a user at all: "this
+/// trigger can create user profiles when users ... attempt to reset their password with
+/// credentials that don't exist yet" (`LambdaConfigType$UserMigration`). So a function that
+/// RAN and reported an error migrated nobody, and what this operation then holds for the
+/// username is still nothing — which is `UserNotFoundException`, carrying what the trigger
+/// failed with rather than the sentence of a request that never reached a function, so a
+/// caller can tell a migration that failed from a username no migration was attempted for.
+/// A function Lambda could not invoke at all is "an unexpected exception with Lambda" (this
+/// service's model), as it is for every other trigger.
+fn migration_failed(failure: crate::state::lambda_triggers::Failure) -> ForgotPasswordError {
+    match failure {
+        crate::state::lambda_triggers::Failure::Reported(message) => {
+            ForgotPasswordErrorModeled::UserNotFoundException(UserNotFoundException {
+                message: Some(message),
+            })
             .into()
         }
         crate::state::lambda_triggers::Failure::NotInvokable(message) => {

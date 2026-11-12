@@ -573,6 +573,22 @@ impl UserPool {
             .find(|name| *name == shape)
     }
 
+    /// Whether this pool resolves a username it does not hold through its
+    /// migrate-user function before a request naming that username is refused.
+    ///
+    /// `LambdaConfig.UserMigration` configures a trigger that "can create user
+    /// profiles when users sign in or attempt to reset their password with
+    /// credentials that don't exist yet" (`LambdaConfigType$UserMigration` in
+    /// this service's model), so in a pool that configures one an absent
+    /// username is not an unknown user until that function says so
+    /// ([`crate::state::lambda_triggers::user_migration`]).
+    pub fn migrates_absent_users(&self) -> bool {
+        self.lambda_config
+            .user_migration
+            .as_deref()
+            .is_some_and(|function_arn| !function_arn.is_empty())
+    }
+
     /// Whether this pool remembers devices at all: `DeviceConfigurationType` is
     /// "the device-remembering configuration for a user pool", and "when you
     /// provide a value for any property of `DeviceConfiguration`, you activate

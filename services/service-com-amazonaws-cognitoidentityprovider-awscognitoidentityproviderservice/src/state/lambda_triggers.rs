@@ -45,6 +45,10 @@ pub mod custom_email;
 /// The encrypted message a custom sender's code travels in.
 pub mod esdk;
 
+/// The migrate-user trigger, which a pool that configures one resolves a username it does
+/// not hold through before the request naming it is refused.
+pub mod user_migration;
+
 /// This service's state, as the operation that fires a trigger holds it under the lock.
 type State = super::ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState;
 
