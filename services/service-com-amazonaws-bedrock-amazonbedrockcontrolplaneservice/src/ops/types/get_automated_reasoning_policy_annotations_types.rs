@@ -18,7 +18,15 @@ pub struct GetAutomatedReasoningPolicyAnnotationsInput {
     pub build_workflow_id: String,
 }
 
-#[smithy_macros::smithy(shape = "com.amazonaws.bedrock#GetAutomatedReasoningPolicyAnnotationsResponse")]
+/// `GetAutomatedReasoningPolicyAnnotationsResponse`. Its schema and codec come from
+/// [`bedrock_schema_and_codec!`] rather than `#[smithy_macros::smithy(shape = ...)]`
+/// because `updatedAt` carries `@timestampFormat("date-time")`
+/// (`smithy_query(query="operation",
+/// operation="GetAutomatedReasoningPolicyAnnotations")`), which the derive does not put on
+/// a member schema — see `types/date_time_wire.rs` for that whole story.
+///
+/// The member list below is the model's, member for member: same shape ids, same wire
+/// names, same order, same shape types.
 #[derive(Debug, Clone)]
 pub struct GetAutomatedReasoningPolicyAnnotationsOutput {
     pub policy_arn: String,
@@ -28,4 +36,42 @@ pub struct GetAutomatedReasoningPolicyAnnotationsOutput {
     pub annotation_set_hash: String,
     pub updated_at: ::aws_smithy_types::DateTime,
 }
+
+bedrock_schema_and_codec!(
+    GetAutomatedReasoningPolicyAnnotationsOutput,
+    GET_AUTOMATED_REASONING_POLICY_ANNOTATIONS_OUTPUT_SCHEMA,
+    "com.amazonaws.bedrock#GetAutomatedReasoningPolicyAnnotationsResponse",
+    "com.amazonaws.bedrock",
+    "GetAutomatedReasoningPolicyAnnotationsResponse",
+    (M_POLICY_ARN, policy_arn, "policyArn", 0, req, string),
+    (M_NAME, name, "name", 1, req, string),
+    (
+        M_BUILD_WORKFLOW_ID,
+        build_workflow_id,
+        "buildWorkflowId",
+        2,
+        req,
+        string
+    ),
+    // A list whose ELEMENT is a union: the vendored codegen writes a union exactly as it
+    // writes a structure (`write_struct` against the element shape's own `SCHEMA`), which
+    // is what this member kind emits per element.
+    (
+        M_ANNOTATIONS,
+        annotations,
+        "annotations",
+        3,
+        req,
+        list_of_struct(AutomatedReasoningPolicyAnnotation)
+    ),
+    (
+        M_ANNOTATION_SET_HASH,
+        annotation_set_hash,
+        "annotationSetHash",
+        4,
+        req,
+        string
+    ),
+    (M_UPDATED_AT, updated_at, "updatedAt", 5, req, date_time),
+);
 

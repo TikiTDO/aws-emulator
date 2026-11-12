@@ -19,6 +19,8 @@ mod advanced_prompt_optimization_jobs;
 mod arn_inputs;
 #[path = "all/automated_reasoning_policies.rs"]
 mod automated_reasoning_policies;
+#[path = "all/automated_reasoning_policy_annotations.rs"]
+mod automated_reasoning_policy_annotations;
 #[path = "all/automated_reasoning_policy_build_workflow_deletion.rs"]
 mod automated_reasoning_policy_build_workflow_deletion;
 #[path = "all/automated_reasoning_policy_build_workflow_progression.rs"]

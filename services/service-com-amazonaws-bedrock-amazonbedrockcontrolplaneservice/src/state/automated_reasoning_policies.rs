@@ -302,6 +302,25 @@ pub struct AutomatedReasoningPolicyBuildWorkflowRecord {
     pub document_content_type: Option<String>,
     /// `documentDescription` of that same document, absent when the document carried none.
     pub document_description: Option<String>,
+    /// The workflow's ANNOTATION SET: the corrections to the policy's rules, variables and
+    /// types this build carries, which `GetAutomatedReasoningPolicyAnnotations` reports
+    /// with the hash of the set ([`annotation_set_hash`]).
+    ///
+    /// The annotations a start carried, or the EMPTY set when it carried none —
+    /// `AutomatedReasoningPolicyAnnotationList` is `@length(min: 0, max: 10)`
+    /// (`smithy_query(query="shape",shape="AutomatedReasoningPolicyAnnotationList")`), so a
+    /// workflow nothing has annotated holds a set the shape admits rather than no set.
+    ///
+    /// The hash is NOT held beside the set: it is a function of the set's content alone, so
+    /// deriving it on each read is what keeps the two from ever disagreeing.
+    pub annotations: Vec<AutomatedReasoningPolicyAnnotation>,
+    /// When [`Self::annotations`] was last written — the instant the start recorded them,
+    /// until a write to the set replaces them.
+    ///
+    /// Beside the set rather than taken from [`Self::updated_at`], because the workflow's
+    /// own clock moves that instant on every status transition while the annotations stay
+    /// as they were written.
+    pub annotations_updated_at: SystemTime,
     pub created_at: SystemTime,
     /// When the workflow last changed: the start instant until the clock moves its status.
     pub updated_at: SystemTime,

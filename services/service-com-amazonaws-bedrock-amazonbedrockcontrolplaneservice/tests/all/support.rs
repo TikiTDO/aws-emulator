@@ -409,6 +409,8 @@ pub fn seed_build_workflow(
         document_name: None,
         document_content_type: None,
         document_description: None,
+        annotations: Vec::new(),
+        annotations_updated_at: created_at,
         created_at,
         updated_at: created_at,
     };

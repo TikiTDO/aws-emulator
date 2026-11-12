@@ -4,10 +4,11 @@
 //!
 //! Starts a build workflow for a stored Automated Reasoning policy and PERSISTS it in
 //! [`crate::state`]: the minted `buildWorkflowId`, the policy it builds, the workflow type
-//! the request named, and the name, content type and description of the source document
-//! that request carried. The workflow the caller is told about is read back out of the
-//! stored record, so what this answers is exactly what
-//! `GetAutomatedReasoningPolicyBuildWorkflow` finds.
+//! the request named, the name, content type and description of the source document
+//! that request carried, and the annotation set its repair content carried. The workflow
+//! the caller is told about is read back out of the stored record, so what this answers is
+//! exactly what `GetAutomatedReasoningPolicyBuildWorkflow` finds, and the annotations it
+//! recorded are what `GetAutomatedReasoningPolicyAnnotations` finds.
 //!
 //! A workflow starts `SCHEDULED` and the clock owes it the whole progression a build runs
 //! through — `PREPROCESSING`, `BUILDING`, `TESTING` and then `COMPLETED`
@@ -259,6 +260,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let id = store.mint_build_workflow_id(now);
         let document = source_document(&input.source_content);
+        let annotations = source_annotations(&input.source_content);
         // The build runs after this call returns, so the workflow is reported as scheduled
         // now and the start arms every later transition at once: each status of the
         // progression is owed at an instant fixed HERE, on this start's own timeline, so the
@@ -283,6 +285,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             document_content_type: document
                 .map(|document| document.document_content_type.clone()),
             document_description: document.and_then(|document| document.document_description.clone()),
+            // The corrections this build was started with are the annotation set
+            // `GetAutomatedReasoningPolicyAnnotations` reports for it, so the set is
+            // recorded here and the instant it was written with it.
+            annotations,
+            annotations_updated_at: now,
             created_at: now,
             updated_at: now,
         };
@@ -329,6 +336,35 @@ fn source_document(
             content.documents.first()
         }
         AutomatedReasoningPolicyWorkflowTypeContent::policyRepairAssets(_) => None,
+    }
+}
+
+/// The ANNOTATION SET a start's `sourceContent` carries: the annotations of whichever
+/// repair content its `workflowContent` names, and the empty set for every other form that
+/// member takes.
+///
+/// `policyRepairAssets` is the ONE member of
+/// `AutomatedReasoningPolicyWorkflowTypeContent` that carries annotations — the others
+/// carry documents — and its own `annotations` member is `@required`
+/// (`smithy_query(query="shape",shape="AutomatedReasoningPolicyBuildWorkflowRepairContent")`),
+/// so a repair's set is exactly the list the request sent and a build started from anything
+/// else begins with no corrections at all.
+fn source_annotations(
+    source: &AutomatedReasoningPolicyBuildWorkflowSource,
+) -> Vec<AutomatedReasoningPolicyAnnotation> {
+    match source.workflow_content.as_ref() {
+        Some(AutomatedReasoningPolicyWorkflowTypeContent::policyRepairAssets(repair)) => {
+            repair.annotations.clone()
+        }
+        // Named rather than caught, so a member of this union that comes to carry
+        // annotations is a compile error here rather than a silently empty set: every form
+        // below carries documents, and a source naming no workflow content carries neither.
+        Some(
+            AutomatedReasoningPolicyWorkflowTypeContent::Documents(_)
+            | AutomatedReasoningPolicyWorkflowTypeContent::generateFidelityReportContent(_)
+            | AutomatedReasoningPolicyWorkflowTypeContent::iterativeRefinementContent(_),
+        )
+        | None => Vec::new(),
     }
 }
 

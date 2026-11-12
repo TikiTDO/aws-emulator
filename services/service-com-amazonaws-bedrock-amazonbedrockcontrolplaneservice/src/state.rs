@@ -109,7 +109,11 @@
 //! `ops/get_automated_reasoning_policy_build_workflow.rs` reads them back — each with the
 //! document the start named and the instant each status of the build's progression —
 //! `PREPROCESSING`, `BUILDING`, `TESTING` and then `COMPLETED` — is owed at, or the instant
-//! `CANCELLED` is owed once a cancel has asked for it.
+//! `CANCELLED` is owed once a cancel has asked for it. Each of those records also holds the
+//! ANNOTATION SET of its workflow — the corrections to the policy's rules, variables and
+//! types the start carried, which `ops/get_automated_reasoning_policy_annotations.rs` reads
+//! back with the hash of that set ([`annotations`]) — so the annotations one request
+//! carried are the annotations every later read of that workflow reports.
 //!
 //! And it holds the Automated Reasoning policy tests
 //! `ops/create_automated_reasoning_policy_test_case.rs` mints,
@@ -200,6 +204,7 @@ use ::service_com_amazonaws_bedrockruntime_amazonbedrockfrontendservice::state::
 
 use crate::ops::types::{
     AdvancedPromptOptimizationInputConfig, AdvancedPromptOptimizationOutputConfig,
+    AutomatedReasoningPolicyAnnotation,
     AutomatedReasoningPolicyDefinition, AutomatedReasoningPolicyTestCase,
     AutomatedReasoningPolicyTestResult, CustomModelDataSource,
     CustomModelDeploymentSummary,
@@ -283,6 +288,11 @@ mod store_access;
 /// The Automated Reasoning policy family: its quotas, statuses, spans, refusal sentences
 /// and stored records.
 mod automated_reasoning_policies;
+
+/// The annotation set of an Automated Reasoning policy build workflow: its canonical
+/// rendering and the `annotationSetHash` that rendering is digested into.
+mod annotations;
+pub use annotations::*;
 
 /// The stored record of each model, endpoint and job resource, with the lifecycle its own
 /// clock owes it.
