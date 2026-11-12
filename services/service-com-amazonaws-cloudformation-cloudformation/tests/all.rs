@@ -559,3 +559,5 @@ mod deletion_policy_snapshot;
 mod expired_wait_rollback;
 #[path = "all/ssm_parameter_types.rs"]
 mod ssm_parameter_types;
+#[path = "all/mwaa_environment_resource_type.rs"]
+mod mwaa_environment_resource_type;

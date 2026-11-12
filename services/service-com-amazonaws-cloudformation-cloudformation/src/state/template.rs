@@ -2665,6 +2665,11 @@ pub fn replacement_properties(resource_type: &str) -> &'static [&'static str] {
         // the limit's amount and its period and no device at all, so a declaration naming
         // another device asks for a different limit.
         BRAKET_SPENDING_LIMIT => &["DeviceArn"],
+        // An environment's encryption key and who manages its VPC endpoints are fixed when
+        // Amazon MWAA makes it: both are members of `CreateEnvironment` and of no member of
+        // `UpdateEnvironment`, so a declaration restating either asks for a different
+        // environment.
+        MWAA_ENVIRONMENT => &["EndpointManagement", "KmsKey"],
         // An AppConfig environment and configuration profile belong to the application their
         // `ApplicationId` names, and a profile reads its configuration from the source its
         // `LocationUri` and `Type` fix: each is a member of that type's create and of no
@@ -2892,6 +2897,7 @@ pub const IMPLEMENTED_RESOURCE_TYPES: &[&str] = &[
     MQ_BROKER,
     MSK_CLUSTER,
     MSK_SERVERLESS_CLUSTER,
+    MWAA_ENVIRONMENT,
     "AWS::RDS::DBCluster",
     "AWS::RDS::DBInstance",
     "AWS::RUM::AppMonitor",

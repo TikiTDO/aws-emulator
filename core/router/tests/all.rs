@@ -1420,3 +1420,9 @@ mod s3_object_events_fan_out_through_sns;
 // over the counts the rule generalises over is the owning ECS crate's own suite.
 #[path = "all/ecs_fargate_service_converges_to_its_desired_count.rs"]
 mod ecs_fargate_service_converges_to_its_desired_count;
+// Declared in the appended tail, which is where every new suite inserts its lines: the
+// deploy -> read-back -> update -> delete round trip of a stack-declared
+// `AWS::MWAA::Environment`, and the refusals Amazon MWAA's own control plane answers for one
+// it will not create — CloudFormation, Amazon MWAA and CloudWatch Logs at once.
+#[path = "all/cloudformation_provisions_mwaa_environments.rs"]
+mod cloudformation_provisions_mwaa_environments;

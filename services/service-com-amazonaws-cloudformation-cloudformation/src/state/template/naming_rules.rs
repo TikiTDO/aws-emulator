@@ -278,6 +278,12 @@ pub(super) fn naming_rules(resource_type: &str) -> Option<NameRules> {
         // Smithy model), which admits no upper case and no character a generated name
         // carries beyond letters, digits and the hyphen.
         OPENSEARCH_DOMAIN => rules(28, Characters::LowercaseAlphanumeric),
+        // Amazon MWAA `CreateEnvironment.Name`: `EnvironmentName`,
+        // `@length(min: 1, max: 80)` with pattern `^[a-zA-Z][0-9a-zA-Z-_]*$` (that service's
+        // own Smithy model), which a generated name is already inside — letters, digits and
+        // the hyphen are all admitted, and it starts with a letter because a stack name does
+        // — but may be longer than.
+        MWAA_ENVIRONMENT => rules(80, Characters::AsGenerated),
         // AWS X-Ray `CreateSamplingRule.SamplingRule.RuleName`: `RuleName`,
         // `@length(min: 1, max: 32)` (X-Ray's own Smithy model), which a generated name is
         // already inside — letters, digits and the hyphen are all admitted — but is far

@@ -497,7 +497,7 @@ use super::template::{
     KINESIS_STREAM,
     KMS_ALIAS, KMS_KEY,
     MQ_BROKER, MSK_CLUSTER,
-    MSK_SERVERLESS_CLUSTER, OPENSEARCH_DOMAIN, PIPES_PIPE, REDSHIFT_CLUSTER,
+    MSK_SERVERLESS_CLUSTER, MWAA_ENVIRONMENT, OPENSEARCH_DOMAIN, PIPES_PIPE, REDSHIFT_CLUSTER,
     REDSHIFT_CLUSTER_SUBNET_GROUP, ROUTE53RESOLVER_ENDPOINT,
     ROUTE53RESOLVER_FIREWALL_DOMAIN_LIST, ROUTE53RESOLVER_FIREWALL_RULE_GROUP,
     ROUTE53RESOLVER_FIREWALL_RULE_GROUP_ASSOCIATION,
@@ -894,6 +894,14 @@ pub(super) enum Provisioner {
     /// the `spendingLimitArn` the type publishes — the handle every spending-limit API takes
     /// — so it is read off that create's own answer and is the identity a `Ref` resolves to.
     BraketSpendingLimit,
+    /// `AWS::MWAA::Environment`: the Apache Airflow environment Amazon Managed Workflows for
+    /// Apache Airflow's `CreateEnvironment` creates under the name the template states,
+    /// `UpdateEnvironment` reconfigures and `DeleteEnvironment` removes. The name IS the
+    /// handle every operation on one takes, so it is the physical id the naming rules already
+    /// compute for the type; both of those lifecycle changes are asynchronous, so the
+    /// resource's creation and its deletion are each held open on that service's own report
+    /// of the environment.
+    MwaaEnvironment,
     /// `AWS::XRay::SamplingRule`: a sampling rule of AWS X-Ray, which
     /// `CreateSamplingRule` creates under the rule name its declaration states and
     /// `DeleteSamplingRule` deletes. X-Ray mints the `RuleARN` that type's `Ref`
@@ -1051,6 +1059,7 @@ pub(super) fn provisioner_for(resource_type: &str) -> Option<Provisioner> {
             Some(Provisioner::BedrockAgentCoreWorkloadIdentity)
         }
         BRAKET_SPENDING_LIMIT => Some(Provisioner::BraketSpendingLimit),
+        MWAA_ENVIRONMENT => Some(Provisioner::MwaaEnvironment),
         XRAY_SAMPLING_RULE => Some(Provisioner::XraySamplingRule),
         CONFIG_CONFIGURATION_RECORDER => Some(Provisioner::ConfigConfigurationRecorder),
         CONFIG_DELIVERY_CHANNEL => Some(Provisioner::ConfigDeliveryChannel),
@@ -1531,6 +1540,13 @@ impl Provisioner {
             Self::XraySamplingRule => {
                 create_sampling_rule(ctx, region, resource, propagated).await
             }
+            // `AWS::MWAA::Environment` publishes `Tags` as a MAP, which is the shape
+            // `CreateEnvironment`'s own `Tags` member takes, so an environment a stack
+            // creates carries the tags CloudFormation gives it beside the ones the
+            // declaration asks for.
+            Self::MwaaEnvironment => {
+                create_mwaa_environment(ctx, region, resource, propagated).await
+            }
             // None of the three `AWS::Config::*` types publishes a `Tags` property — AWS
             // Config holds tags on a recorder and on a rule through its own tagging call
             // and takes none on either put — so no tags are propagated to one.
@@ -1638,6 +1654,11 @@ impl Provisioner {
                 // a prefix for keys; it's reserved for Amazon Web Services use") — so a
                 // sampling rule carries the stack's own tags without the three.
                 | Self::XraySamplingRule
+                // Amazon MWAA refuses a tag key in the reserved namespace on every call that
+                // takes tags — `CreateEnvironment`'s `Tags` map and `TagResource` alike, in
+                // the one check its own crate's tag validation makes — so an environment
+                // carries the stack's own tags without the three.
+                | Self::MwaaEnvironment
         );
         propagated
             .iter()
@@ -1797,6 +1818,14 @@ impl Provisioner {
             // the configuration the declaration asked for, so the resource is held open
             // until EventBridge Pipes reports it resting ([`event_pipes::readiness`]).
             Self::PipesPipe => event_pipes::readiness(ctx, region, physical_resource_id).await,
+            // A created environment is `CREATING` — "the request to create the environment is
+            // in progress" — and one whose VPC endpoints the caller owns is `PENDING` until
+            // they exist, while an accepted update walks `CREATING_SNAPSHOT` and `UPDATING`;
+            // in none of those does the environment carry what the deployment asked for, so
+            // the resource is held open until Amazon MWAA reports it `AVAILABLE`.
+            Self::MwaaEnvironment => {
+                mwaa_environment_readiness(ctx, region, physical_resource_id).await
+            }
             _ => Ok(Readiness::Ready),
         }
     }
@@ -1853,6 +1882,13 @@ impl Provisioner {
             Self::PipesPipe => {
                 event_pipes::ready_attributes(ctx, region, physical_resource_id).await
             }
+            // An environment's web server host, the queue of its Celery Executor, its two VPC
+            // endpoint services and the log group of each enabled Apache Airflow log type are
+            // values Amazon MWAA fills in as it brings the environment up, so the type's
+            // attributes are read off the environment again once it reports it `AVAILABLE`.
+            Self::MwaaEnvironment => {
+                mwaa_environment_ready_attributes(ctx, region, physical_resource_id).await
+            }
             _ => Ok(BTreeMap::new()),
         }
     }
@@ -1900,6 +1936,12 @@ impl Provisioner {
             // answers and the deletion is finished once that service no longer holds it.
             Self::BedrockKnowledgeBase => {
                 knowledge_base_removal(ctx, region, physical_resource_id).await
+            }
+            // `DeleteEnvironment` leaves the environment `DELETING` — "the request to delete
+            // the environment is in progress" — so it is still there when the delete answers
+            // and the deletion is finished once Amazon MWAA no longer holds it.
+            Self::MwaaEnvironment => {
+                mwaa_environment_removal(ctx, region, physical_resource_id).await
             }
             _ => Ok(Removal::Gone),
         }
@@ -2169,6 +2211,11 @@ impl Provisioner {
             Self::BraketSpendingLimit => update_braket_spending_limit(ctx, region, resource, declared)
                 .await
                 .map(Some),
+            // `UpdateEnvironment` reconfigures the environment the stack created, by the name
+            // Amazon MWAA knows it by, taking every member of the create but the ones fixed
+            // when an environment is made — which replace the resource instead — so a changed
+            // declaration is applied to that environment rather than replacing it.
+            Self::MwaaEnvironment => update_mwaa_environment(ctx, region, resource, declared).await,
             // Every other type's in-place update is its own entry here, exactly as its
             // create and delete are: until one is written, nothing is asked of the owning
             // service and the deployment says so.
@@ -2237,6 +2284,13 @@ impl Provisioner {
             // set a stream is to end up carrying is reconciled.
             Self::KinesisStream => {
                 retag_kinesis_stream(ctx, region, resource, declared, propagated).await
+            }
+            // An environment's tags are Amazon MWAA's own `TagResource` and `UntagResource`:
+            // `CreateEnvironment`'s `Tags` member applies to the environment that call
+            // creates, and `UpdateEnvironment` carries no tags at all, so this is where the
+            // set an environment is to end up carrying is reconciled.
+            Self::MwaaEnvironment => {
+                retag_mwaa_environment(ctx, region, resource, declared, propagated).await
             }
             // Every other type's re-tagging is its own entry here, for the same reason its
             // create, update and delete are: the tag set is the same for every type, but the
@@ -2673,6 +2727,11 @@ impl Provisioner {
             Self::BraketSpendingLimit => {
                 delete_braket_spending_limit(ctx, region, physical_resource_id).await
             }
+            // The delete addresses the environment by the name Amazon MWAA keyed it by,
+            // which is this resource's physical id.
+            Self::MwaaEnvironment => {
+                delete_mwaa_environment(ctx, region, physical_resource_id).await
+            }
             // A rule is addressed by its name or by the ARN X-Ray minted — "either name
             // or ARN, but not both" — and the ARN is this resource's physical id.
             Self::XraySamplingRule => delete_sampling_rule(ctx, region, resource).await,
@@ -3101,6 +3160,10 @@ impl Provisioner {
             Self::BraketSpendingLimit => {
                 describe_braket_spending_limit(ctx, region, physical_resource_id).await
             }
+            // Amazon MWAA's own read of the environment, by the name it was created under.
+            Self::MwaaEnvironment => {
+                describe_mwaa_environment(ctx, region, physical_resource_id).await
+            }
             // X-Ray publishes no read of ONE sampling rule, so the rule is read out of the
             // account's own listing, by the identity that service minted for it.
             Self::XraySamplingRule => describe_sampling_rule(ctx, region, resource).await,
@@ -3134,6 +3197,7 @@ mod event_pipes;
 mod bedrock_guardrails;
 mod bedrock_knowledge_bases;
 mod braket_spending_limits;
+mod mwaa_environments;
 mod data_and_storage;
 mod iam_identities;
 mod application_services;
@@ -3152,6 +3216,7 @@ use config_recording::*;
 use bedrock_guardrails::*;
 use bedrock_knowledge_bases::*;
 use braket_spending_limits::*;
+use mwaa_environments::*;
 use iam_identities::*;
 use data_and_storage::*;
 

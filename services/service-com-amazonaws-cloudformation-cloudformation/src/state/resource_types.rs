@@ -81,6 +81,7 @@
 use super::template::{
     DeclaredResource, Template, ACMPCA_CERTIFICATE, ACMPCA_CERTIFICATE_AUTHORITY,
     ACMPCA_CERTIFICATE_AUTHORITY_ACTIVATION, APIGATEWAY_DOMAIN_NAME, BRAKET_SPENDING_LIMIT,
+    MWAA_ENVIRONMENT,
 };
 
 /// The namespace Amazon Web Services' own resource types live under: a type spelled with
@@ -656,6 +657,10 @@ pub const AWS_RESOURCE_TYPES: &[&str] = &[
     "AWS::MSK::Replicator",
     "AWS::MSK::ServerlessCluster",
     "AWS::MSK::VpcConnection",
+    // Amazon Managed Workflows for Apache Airflow. The environment itself is created in the
+    // owning service (`super::provisioner`), which is the one resource type that namespace
+    // publishes.
+    MWAA_ENVIRONMENT,
     // Amazon Macie
     "AWS::Macie::AllowList",
     "AWS::Macie::CustomDataIdentifier",

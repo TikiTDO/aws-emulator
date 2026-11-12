@@ -1326,6 +1326,36 @@ pub(super) fn return_values(
             attributes.insert("SpendingLimitArn".to_string(), arn.clone());
             (arn, attributes)
         }
+        // Amazon Managed Workflows for Apache Airflow's own control plane: the environment an
+        // `AWS::MWAA::Environment` declares. "Ref returns the name of the Amazon MWAA
+        // environment", which is the handle every Amazon MWAA operation on one takes, so the
+        // physical id is that name; Fn::GetAtt reads the ten values
+        // [`MWAA_ENVIRONMENT_ATTRIBUTES`] names. The ARN is the one of them these rules can
+        // compute — both this and that service build it from the one account id this emulator
+        // mints and the environment's name (`environment_arn` in its own state module) — and
+        // every other is a value only Amazon MWAA produces, so each stands in until
+        // `super::provisioning` has reported what that service really answered
+        // ([`super::provisioner::Provisioner::MwaaEnvironment`]).
+        MWAA_ENVIRONMENT => {
+            attributes.insert(
+                MWAA_ENVIRONMENT_ARN_ATTRIBUTE.to_string(),
+                ::emulator_server::emulator_arn(
+                    MWAA_ARN_NAMESPACE,
+                    region,
+                    &format!("{MWAA_ENVIRONMENT_PATH}/{name}"),
+                ),
+            );
+            for attribute in MWAA_ENVIRONMENT_ATTRIBUTES
+                .iter()
+                .filter(|attribute| **attribute != MWAA_ENVIRONMENT_ARN_ATTRIBUTE)
+            {
+                attributes.insert(
+                    (*attribute).to_string(),
+                    service_assigned_document(name, attribute),
+                );
+            }
+            (name.to_string(), attributes)
+        }
         // "Ref returns the name"; Fn::GetAtt: Name, WorkloadIdentityArn. A workload
         // identity is named, not id'd: `CreateWorkloadIdentity` takes a `name`
         // (`^[A-Za-z0-9_.-]+$`) and answers that name plus the ARN, whose shape the model
@@ -1928,6 +1958,7 @@ pub fn published_attribute_names(resource_type: &str) -> &'static [&'static str]
         // service's own report of the limit rather than from here, exactly as a knowledge
         // base's instants do.
         BRAKET_SPENDING_LIMIT => &["SpendingLimitArn"],
+        MWAA_ENVIRONMENT => MWAA_ENVIRONMENT_ATTRIBUTES,
         "AWS::BedrockAgentCore::Memory" => &["MemoryArn", "MemoryId"],
         "AWS::BedrockAgentCore::Runtime" => {
             &["AgentRuntimeArn", "AgentRuntimeId", "AgentRuntimeVersion"]
@@ -2413,6 +2444,56 @@ pub const BRAKET_ARN_NAMESPACE: &str = "braket";
 /// The resource path a spending-limit ARN carries before the identifier Amazon Braket minted
 /// for it, from that same pattern.
 const BRAKET_SPENDING_LIMIT_PATH: &str = "spending-limit";
+
+/// The `AWS::<cloudFormationName>::<Resource>` type of an Amazon Managed Workflows for
+/// Apache Airflow ENVIRONMENT: the Apache Airflow deployment that service's own
+/// `CreateEnvironment` makes. The middle segment is that model's own `awsService.sdkId`
+/// (`MWAA`).
+///
+/// "Ref returns the name of the Amazon MWAA environment", which is the name the owning
+/// service creates the environment under — so a GENERATED one is held to that service's own
+/// rules for it ([`naming_rules`]) and the identity is not service-assigned.
+pub const MWAA_ENVIRONMENT: &str = "AWS::MWAA::Environment";
+
+/// Amazon MWAA's ARN namespace (that model's `awsService.arnNamespace`), which is `airflow`
+/// rather than the `MWAA` its resource type is spelled with — the namespace an environment
+/// ARN carries (`EnvironmentArn`:
+/// `^arn:aws(-[a-z]+)?:airflow:[a-z0-9\-]+:\d{12}:environment/\w+`).
+const MWAA_ARN_NAMESPACE: &str = "airflow";
+
+/// The resource path an environment ARN carries before the environment's name, from that
+/// same pattern.
+const MWAA_ENVIRONMENT_PATH: &str = "environment";
+
+/// Every `Fn::GetAtt` attribute an `AWS::MWAA::Environment` publishes, in the sorted order a
+/// resource's own attribute map holds them in.
+///
+/// Source: the type's own "Return values" section — the environment's ARN, the Apache Airflow
+/// web server's URL, the Celery Executor's queue, the two VPC endpoint services, and the
+/// CloudWatch Logs group each Apache Airflow log type publishes to, which that section spells
+/// `LoggingConfiguration.<log type>.CloudWatchLogGroupArn`.
+///
+/// Only the ARN is a value these naming rules can compute. Every other one is Amazon MWAA's
+/// own — the web server host it brings up, the queue and the endpoint services it makes for
+/// the environment, the log groups it creates for the log types the declaration enabled — so
+/// each stands in ([`service_assigned_document`]) until that service has reported what it
+/// really answered.
+const MWAA_ENVIRONMENT_ATTRIBUTES: &[&str] = &[
+    "Arn",
+    "CeleryExecutorQueue",
+    "DatabaseVpcEndpointService",
+    "LoggingConfiguration.DagProcessingLogs.CloudWatchLogGroupArn",
+    "LoggingConfiguration.SchedulerLogs.CloudWatchLogGroupArn",
+    "LoggingConfiguration.TaskLogs.CloudWatchLogGroupArn",
+    "LoggingConfiguration.WebserverLogs.CloudWatchLogGroupArn",
+    "LoggingConfiguration.WorkerLogs.CloudWatchLogGroupArn",
+    "WebserverUrl",
+    "WebserverVpcEndpointService",
+];
+
+/// The one attribute of [`MWAA_ENVIRONMENT_ATTRIBUTES`] these naming rules compute rather
+/// than stand in for.
+const MWAA_ENVIRONMENT_ARN_ATTRIBUTE: &str = "Arn";
 
 /// The `AWS::<cloudFormationName>::<Resource>` types of the two OpenSearch Serverless
 /// resources a stack creates. The middle segment is that service's own
