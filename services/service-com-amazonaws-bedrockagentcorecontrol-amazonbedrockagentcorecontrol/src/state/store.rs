@@ -1133,4 +1133,22 @@ impl ComAmazonawsBedrockagentcorecontrolAmazonbedrockagentcorecontrolState {
                 .map(|policy| (engine.policy_engine_id.as_str(), policy.policy_id.as_str()))
         })
     }
+
+    /// Remove every policy whose deletion the clock has already made due, from
+    /// whichever engine held it.
+    ///
+    /// `DeletePolicy` ACCEPTS the deletion (202) and reports the policy
+    /// `DELETING`; the record itself goes when the span it owes passes, so a
+    /// caller polling it sees `DELETING` and then the modelled 404, and the name
+    /// it held is free again. The removal is owed by the CLOCK — it was due at
+    /// this instant whether or not anybody called — so every operation that
+    /// reads the policy plane materialises it first, and nothing ever sleeps for
+    /// it.
+    pub fn expire_deleted_policies(&mut self, now: SystemTime) {
+        for engine in self.policy_engines.values_mut() {
+            engine
+                .policies
+                .retain(|_, policy| policy.removal_due_at.is_none_or(|at| now < at));
+        }
+    }
 }

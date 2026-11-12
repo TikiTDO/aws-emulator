@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeletePolicy
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeletePolicy`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeletePolicy::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Accepts the deletion of a policy held by the engine the path names (HTTP 202) and
+//! reports the policy `DELETING`, the status an accepted-but-unfinished deletion carries
+//! ("This is an asynchronous operation. Use the GetPolicy operation to poll the status
+//! field to track completion"). The record stays readable for the span the clock owes it
+//! and is then gone, so a caller polling the policy sees `DELETING` and then the modelled
+//! `ResourceNotFoundException`. An engine the path names and this account does not hold,
+//! and a policy that engine does not hold, are each refused that same modelled 404.
 //!
 //! ## Shape of an operation
 //!
@@ -190,18 +189,49 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeletePolicy` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeletePolicyErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeletePolicy"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            DeletePolicyErrorModeled::InternalServerException(InternalServerException {
+                message: Some("the policy store is unavailable".to_string()),
+            })
+        })?;
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+        // A policy whose own earlier deletion the clock has already made due is
+        // gone before this call looks for it, so a repeat past the span is the
+        // modelled 404 rather than a second acceptance.
+        store.expire_deleted_policies(now);
+
+        // A policy is addressed only THROUGH the engine that evaluates it, so an
+        // engine id this account does not hold is reported in its own sentence
+        // before the policy is looked at — the same order `GetPolicy` resolves
+        // the pair in.
+        let engine = store
+            .policy_engines
+            .get_mut(&input.policy_engine_id)
+            .ok_or_else(|| {
+                DeletePolicyErrorModeled::ResourceNotFoundException(
+                    crate::state::policy_engine_not_found(&input.policy_engine_id),
+                )
+            })?;
+        let record = engine.policies.get_mut(&input.policy_id).ok_or_else(|| {
+            DeletePolicyErrorModeled::ResourceNotFoundException(crate::state::policy_not_found(
+                &input.policy_id,
+            ))
+        })?;
+
+        // The deletion is ACCEPTED here (202) and the policy reports `DELETING`
+        // from now on; the record is removed when the span the clock owes passes.
+        // `DeletePolicy` is `@idempotent`, so a repeat while the deletion is
+        // still under way reports that same policy instead of re-arming the
+        // clock.
+        record.accept_deletion(now);
+        let output = record.delete_output(now);
+
+        // The engine's contents changed, so the engine was touched too — the same
+        // bookkeeping `CreatePolicy` does when it adds one.
+        engine.updated_at = now;
+
+        Ok(output)
     }
 }

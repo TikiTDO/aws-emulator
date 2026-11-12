@@ -18,7 +18,15 @@ pub struct DeletePolicyInput {
     pub policy_id: String,
 }
 
-#[smithy_macros::smithy(shape = "com.amazonaws.bedrockagentcorecontrol#DeletePolicyResponse")]
+/// `DeletePolicyResponse`. Its schema and codec come from
+/// [`agentcore_schema_and_codec!`] rather than `#[smithy_macros::smithy(shape = ...)]`
+/// because `createdAt` and `updatedAt` target `DateTimestamp`, which carries
+/// `@timestampFormat("date-time")`
+/// (`smithy_query(query="operation", operation="DeletePolicy")`), and the derive does not
+/// put that trait on a member schema — see `types/date_time_wire.rs`.
+///
+/// The member list below is the model's, member for member: same shape ids, same wire
+/// names, same order, same shape types.
 #[derive(Debug, Clone)]
 pub struct DeletePolicyOutput {
     pub policy_id: String,
@@ -33,4 +41,23 @@ pub struct DeletePolicyOutput {
     pub description: Option<String>,
     pub status_reasons: Vec<String>,
 }
+
+agentcore_schema_and_codec!(
+    DeletePolicyOutput,
+    DELETE_POLICY_OUTPUT_SCHEMA,
+    "com.amazonaws.bedrockagentcorecontrol#DeletePolicyResponse",
+    "com.amazonaws.bedrockagentcorecontrol",
+    "DeletePolicyResponse",
+    (M_POLICY_ID, policy_id, "policyId", 0, req, string),
+    (M_NAME, name, "name", 1, req, string),
+    (M_POLICY_ENGINE_ID, policy_engine_id, "policyEngineId", 2, req, string),
+    (M_CREATED_AT, created_at, "createdAt", 3, req, date_time),
+    (M_UPDATED_AT, updated_at, "updatedAt", 4, req, date_time),
+    (M_POLICY_ARN, policy_arn, "policyArn", 5, req, string),
+    (M_STATUS, status, "status", 6, req, string),
+    (M_ENFORCEMENT_MODE, enforcement_mode, "enforcementMode", 7, req, string),
+    (M_DEFINITION, definition, "definition", 8, req, union_of(PolicyDefinition)),
+    (M_DESCRIPTION, description, "description", 9, opt, string),
+    (M_STATUS_REASONS, status_reasons, "statusReasons", 10, req, list_of_string),
+);
 

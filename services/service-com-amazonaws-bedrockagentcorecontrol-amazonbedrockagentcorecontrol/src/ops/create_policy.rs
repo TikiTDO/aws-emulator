@@ -236,6 +236,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx.parts());
         let now = ::std::time::SystemTime::now();
         let mut store = state.lock();
+        // A policy whose deletion the clock has already made due is gone before
+        // this create runs, so the quota it counted against and the name it held
+        // are free again.
+        store.expire_deleted_policies(now);
 
         // A replayed request carrying the same `clientToken` answers with the
         // policy that token first produced: "If you retry a request with the same

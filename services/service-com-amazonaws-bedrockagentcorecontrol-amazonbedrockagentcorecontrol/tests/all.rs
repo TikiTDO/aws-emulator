@@ -97,6 +97,8 @@ mod oauth2_credential_provider_configuration;
 mod payment_manager_lifecycle;
 #[path = "all/payment_credential_provider.rs"]
 mod payment_credential_provider;
+#[path = "all/policy_deletion.rs"]
+mod policy_deletion;
 #[path = "all/policy_engine_creation.rs"]
 mod policy_engine_creation;
 #[path = "all/policy_plane.rs"]

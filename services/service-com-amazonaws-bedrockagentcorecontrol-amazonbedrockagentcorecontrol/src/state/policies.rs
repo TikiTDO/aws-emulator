@@ -16,7 +16,8 @@ use std::time::{Duration, SystemTime};
 
 use crate::ops::types::{
     CreatePolicyEngineInput, CreatePolicyEngineOutput, CreatePolicyInput, CreatePolicyOutput,
-    GetPolicyEngineOutput, GetPolicyOutput, PolicyDefinition, ResourceNotFoundException,
+    DeletePolicyOutput, GetPolicyEngineOutput, GetPolicyOutput, PolicyDefinition,
+    ResourceNotFoundException,
 };
 
 use super::{sorted_map, timestamp};
@@ -33,16 +34,18 @@ const ARN_TYPE_POLICY: &str = "policy";
 /// shape=PolicyEngineStatus,PolicyStatus`).
 pub const POLICY_STATUS_CREATING: &str = "CREATING";
 pub const POLICY_STATUS_ACTIVE: &str = "ACTIVE";
+pub const POLICY_STATUS_DELETING: &str = "DELETING";
 
 /// How long a freshly created policy engine or policy stays `CREATING` before
-/// the clock owes it `ACTIVE`.
+/// the clock owes it `ACTIVE`, and how long a policy whose deletion was accepted
+/// stays readable in `DELETING` before the clock owes its removal.
 ///
-/// Both creates are asynchronous — "This is an asynchronous operation. Use the
-/// GetPolicy operation to poll the status field to track completion"
-/// (`smithy_query doc shape=CreatePolicy`) — and AWS documents no duration for
-/// the transition, so the span is chosen: long enough that a caller polling
-/// straight after the call still observes `CREATING`, short enough to keep a
-/// client script quick.
+/// The creates and the delete are all asynchronous — "This is an asynchronous
+/// operation. Use the GetPolicy operation to poll the status field to track
+/// completion" (`smithy_query doc shape=CreatePolicy,DeletePolicy`) — and AWS
+/// documents no duration for either transition, so the span is chosen: long
+/// enough that a caller polling straight after the call still observes
+/// `CREATING` or `DELETING`, short enough to keep a client script quick.
 pub const POLICY_SETTLE_DELAY: Duration = Duration::from_secs(3);
 
 /// How many policy engines this emulator will hold, and how many policies one
@@ -219,6 +222,12 @@ pub struct PolicyRecord {
     /// The instant the transient status is owed its transition. Stored, never
     /// slept on: a read materialises the transition the clock already made due.
     pub settles_at: SystemTime,
+    /// The instant an accepted deletion removes this record, once `DeletePolicy`
+    /// has accepted one; `None` for a policy nobody has deleted. Stored, never
+    /// slept on: the removal is the clock's, materialised by
+    /// [`expire_deleted_policies`](crate::state::ComAmazonawsBedrockagentcorecontrolAmazonbedrockagentcorecontrolState::expire_deleted_policies)
+    /// on the next call that reads the policy plane.
+    pub removal_due_at: Option<SystemTime>,
 }
 
 impl PolicyRecord {
@@ -250,7 +259,31 @@ impl PolicyRecord {
             transient_status: POLICY_STATUS_CREATING.to_string(),
             settled_status: POLICY_STATUS_ACTIVE.to_string(),
             settles_at: now + POLICY_SETTLE_DELAY,
+            removal_due_at: None,
         }
+    }
+
+    /// Whether a deletion has been accepted for this policy: it reports
+    /// `DELETING` and the clock owes its removal.
+    pub fn is_deleting(&self) -> bool {
+        self.removal_due_at.is_some()
+    }
+
+    /// Accept a deletion at `now`: the policy reports `DELETING` from this
+    /// instant on and the clock owes its removal one settle span later.
+    ///
+    /// Idempotent, as `DeletePolicy` is (`@idempotent`): a repeat while the
+    /// deletion is still under way leaves the record and the instant it is owed
+    /// alone rather than re-arming the clock.
+    pub fn accept_deletion(&mut self, now: SystemTime) {
+        if self.is_deleting() {
+            return;
+        }
+        self.transient_status = POLICY_STATUS_DELETING.to_string();
+        self.settled_status = POLICY_STATUS_DELETING.to_string();
+        self.settles_at = now;
+        self.removal_due_at = Some(now + POLICY_SETTLE_DELAY);
+        self.updated_at = now;
     }
 
     /// The status this policy reports at `now`, on the same clock-owed rule the
@@ -283,6 +316,27 @@ impl PolicyRecord {
             description: self.description.clone(),
             // Nothing failed, so the status carries no reason of its own.
             status_reasons: Vec::new(),
+        }
+    }
+
+    /// This policy as `DeletePolicy`'s response envelope — `DeletePolicyResponse`
+    /// declares the same members as `CreatePolicyResponse`, so it too is
+    /// rendered from the one stored record: what the deletion reports about the
+    /// policy is the policy, with the status the accepted deletion left on it.
+    pub fn delete_output(&self, now: SystemTime) -> DeletePolicyOutput {
+        let created = self.create_output(now);
+        DeletePolicyOutput {
+            policy_id: created.policy_id,
+            name: created.name,
+            policy_engine_id: created.policy_engine_id,
+            created_at: created.created_at,
+            updated_at: created.updated_at,
+            policy_arn: created.policy_arn,
+            status: created.status,
+            enforcement_mode: created.enforcement_mode,
+            definition: created.definition,
+            description: created.description,
+            status_reasons: created.status_reasons,
         }
     }
 

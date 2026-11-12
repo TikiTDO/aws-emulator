@@ -186,7 +186,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })
         })?;
         let now = ::std::time::SystemTime::now();
-        let store = state.lock();
+        let mut store = state.lock();
+        // A policy whose deletion the clock has already made due is gone before
+        // this read looks for it: the removal was owed at this instant whether or
+        // not anybody called, so the read materialises it rather than reporting a
+        // policy that no longer exists.
+        store.expire_deleted_policies(now);
 
         // The engine is resolved first and reported missing in its own sentence:
         // a policy is addressed only through the engine that evaluates it, so an
