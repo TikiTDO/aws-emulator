@@ -61,6 +61,8 @@ pub fn record_rollback(
     let compute_platform = deployment.compute_platform.clone();
     let deployment_style = deployment.deployment_style.clone();
     let auto_rollback_configuration = deployment.auto_rollback_configuration.clone();
+    // A rollback runs in the Region the deployment it rolls back ran in.
+    let region = deployment.region.clone();
     // A rollback goes to the SAME deployment group, so it resolves the same
     // deployment targets as the deployment it rolls back, and its terminal status
     // follows from them the same way.
@@ -164,6 +166,10 @@ pub fn record_rollback(
             // deployment it rolls back was walking.
             traffic_increments: traffic_shift::single_shift(),
             traffic_increments_applied: 0,
+            region,
+            // The rollback is a deployment of its own, so its own lifecycle
+            // events are published as it reaches them.
+            published_trigger_events: Vec::new(),
         });
     }
 

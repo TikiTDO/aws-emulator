@@ -164,7 +164,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         // `deploymentId` is @required but carries no modelled length or pattern, so
         // both an empty one and a malformed one reach the handler — the same reading
         // `GetDeployment` uses, so the two agree about one id: an absent or empty id
@@ -251,8 +250,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // here: it owes its own alias restoration and its terminal status whether
         // or not anybody calls CodeDeploy again.
         if rollback_info.is_some() {
-            crate::state::deployment_clock::drive_deployment_clock(&self.engine);
+            crate::state::deployment_clock::drive_deployment_clock(&self.engine, ctx.callback());
         }
+        // The stop is a lifecycle event of the deployment, and the rollback it
+        // created is one too: both were queued by the pass above, and are
+        // published here with the store unlocked.
+        crate::state::trigger_notifications::deliver(&*self.engine, ctx.callback()).await;
 
         // `StopStatus` is Pending | Succeeded
         // (`smithy_query(query="shape",shape="StopStatus")`), where Pending means

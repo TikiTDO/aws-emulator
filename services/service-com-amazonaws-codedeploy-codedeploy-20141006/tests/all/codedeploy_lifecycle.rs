@@ -27,7 +27,7 @@ pub(crate) struct Emulator {
 
 impl Emulator {
     pub(crate) fn new() -> Self {
-        Self::mounted(false, false, false)
+        Self::mounted(false, false, false, false)
     }
 
     /// One emulator with IAM mounted beside CodeDeploy on the SAME engine.
@@ -36,7 +36,7 @@ impl Emulator {
     /// role creates it through IAM's own front door rather than reaching into its
     /// store.
     pub(crate) fn with_iam() -> Self {
-        Self::mounted(false, false, true)
+        Self::mounted(false, false, true, false)
     }
 
     /// One emulator with CloudWatch mounted beside CodeDeploy on the SAME engine.
@@ -45,7 +45,7 @@ impl Emulator {
     /// them drives both services through this one front door — the way the router
     /// mounts them — rather than reaching into either store.
     pub(crate) fn with_cloudwatch() -> Self {
-        Self::mounted(true, false, false)
+        Self::mounted(true, false, false, false)
     }
 
     /// One emulator with AWS Lambda mounted beside CodeDeploy on the SAME engine.
@@ -54,19 +54,31 @@ impl Emulator {
     /// suite about that shift creates the function and reads the alias through
     /// Lambda's own front door rather than reaching into its store.
     pub(crate) fn with_lambda() -> Self {
-        Self::mounted(false, true, false)
+        Self::mounted(false, true, false, false)
     }
 
     /// One emulator with CloudWatch *and* AWS Lambda mounted beside CodeDeploy on
     /// the SAME engine, for a suite about a shift an ALARM interrupts: the alarm
     /// belongs to one of them and the alias to the other.
     pub(crate) fn with_lambda_and_cloudwatch() -> Self {
-        Self::mounted(true, true, false)
+        Self::mounted(true, true, false, false)
+    }
+
+    /// One emulator with Amazon SNS and Amazon SQS mounted beside CodeDeploy on
+    /// the SAME engine.
+    ///
+    /// The topic a deployment group's trigger publishes to belongs to SNS and the
+    /// queue subscribed to that topic to SQS, so a suite about those notifications
+    /// creates both through their own front doors and reads a notification where a
+    /// client reads it: off the queue.
+    pub(crate) fn with_sns_and_sqs() -> Self {
+        Self::mounted(false, false, false, true)
     }
 
     /// The one constructor behind all of them: CodeDeploy, and each of CloudWatch,
-    /// AWS Lambda and IAM the caller asks for, on one shared engine.
-    fn mounted(cloudwatch: bool, lambda: bool, iam: bool) -> Self {
+    /// AWS Lambda, IAM and the Amazon SNS/Amazon SQS pair the caller asks for, on
+    /// one shared engine.
+    fn mounted(cloudwatch: bool, lambda: bool, iam: bool, notifications: bool) -> Self {
         let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
         let mut router = MultiServiceRouter::new();
         // The suite signs nothing; routing is by `X-Amz-Target`.
@@ -96,6 +108,16 @@ impl Emulator {
                     Arc::clone(&engine),
                 ),
             );
+        }
+        if notifications {
+            router.register_service(
+                service_com_amazonaws_sns_amazonsimplenotificationservice::EmulatedService::new(
+                    Arc::clone(&engine),
+                ),
+            );
+            router.register_service(service_com_amazonaws_sqs_amazonsqs::EmulatedService::new(
+                Arc::clone(&engine),
+            ));
         }
         Self { router, engine }
     }
@@ -216,6 +238,84 @@ impl Emulator {
         let response = self.router.dispatch(request).await;
         let status = response.status().as_u16();
         (status, String::from_utf8_lossy(response.body()).to_string())
+    }
+
+    /// One `awsQuery` request against the Amazon SNS emulator through the same
+    /// front door, answering its HTTP status and XML body.
+    ///
+    /// SNS's model declares `awsQuery` (`smithy_query(query="service_info")`), so
+    /// its parameters travel as a form body and its answer comes back as XML; the
+    /// SigV4 credential scope is what routes it to the `sns` signing name, and the
+    /// suite verifies no signature. Only meaningful on an
+    /// [`Emulator::with_sns_and_sqs`].
+    pub(crate) async fn sns_query(
+        &self,
+        region: &str,
+        action: &str,
+        params: &[(&str, &str)],
+    ) -> (u16, String) {
+        let mut body = format!("Action={action}&Version=2010-03-31");
+        for (name, value) in params {
+            body.push('&');
+            body.push_str(&form_encode(name));
+            body.push('=');
+            body.push_str(&form_encode(value));
+        }
+        let request = ::http::Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("host", format!("sns.{region}.amazonaws.com"))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header(
+                "authorization",
+                format!(
+                    "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/{region}/sns/\
+                     aws4_request, SignedHeaders=host, Signature=0000"
+                ),
+            )
+            .body(bytes::Bytes::from(body))
+            .expect("the request is well formed");
+        let response = self.router.dispatch(request).await;
+        let status = response.status().as_u16();
+        (status, String::from_utf8_lossy(response.body()).to_string())
+    }
+
+    /// One `awsJson1_0` request against the Amazon SQS emulator through the same
+    /// front door, answering its HTTP status and parsed body.
+    ///
+    /// SQS's model declares `awsJson1_0` with an `AmazonSQS.<Operation>` target
+    /// (`smithy_query(query="service_info")`), and the SigV4 credential scope is
+    /// what routes the request to the `sqs` signing name; the suite verifies no
+    /// signature. Only meaningful on an [`Emulator::with_sns_and_sqs`].
+    pub(crate) async fn sqs_json(
+        &self,
+        region: &str,
+        operation: &str,
+        body: Value,
+    ) -> (u16, Value) {
+        let request = ::http::Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("host", format!("sqs.{region}.amazonaws.com"))
+            .header("content-type", "application/x-amz-json-1.0")
+            .header("x-amz-target", format!("AmazonSQS.{operation}"))
+            .header(
+                "authorization",
+                format!(
+                    "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/{region}/sqs/\
+                     aws4_request, SignedHeaders=host, Signature=0000"
+                ),
+            )
+            .body(bytes::Bytes::from(body.to_string()))
+            .expect("the request is well formed");
+        let response = self.router.dispatch(request).await;
+        let status = response.status().as_u16();
+        let parsed = if response.body().is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(response.body()).unwrap_or(Value::Null)
+        };
+        (status, parsed)
     }
 
     /// One `restJson1` request against the LAMBDA emulator through the same front

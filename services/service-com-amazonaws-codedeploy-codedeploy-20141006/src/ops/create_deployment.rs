@@ -281,7 +281,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
+        // The Region this request was signed for: the Region the deployment runs
+        // in, which is what its group's trigger notifications report it in.
+        let region = crate::state::request_region(ctx.parts());
         // How long a comment this service accepts is not modelled on `Description`, so
         // it is refused here — with the `DescriptionTooLongException` this operation
         // models for exactly that, the same bound every operation carrying a
@@ -545,6 +547,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 traffic_shift: crate::state::lambda_traffic_shift::TrafficShiftProgress::Declared,
                 traffic_increments: increments,
                 traffic_increments_applied: 0,
+                region: region.clone(),
+                // No lifecycle event of this deployment has been published yet:
+                // the clock owes it its start and then its outcome, and each is
+                // published as it is reached.
+                published_trigger_events: Vec::new(),
             });
             // Deploying a revision is also how CodeDeploy learns it: the
             // application's registry records this use, registering the revision
@@ -563,7 +570,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // traffic increment, the stop an alarm asks for, its terminal status — is
         // owed whether or not anybody calls CodeDeploy again: a client watching the
         // alias for the first increment makes no further call here.
-        crate::state::deployment_clock::drive_deployment_clock(&self.engine);
+        crate::state::deployment_clock::drive_deployment_clock(&self.engine, ctx.callback());
+        // Whatever this pass already came to owe the group's triggers — nothing,
+        // for a deployment that has only just been created — is published here;
+        // the clock publishes what its own transitions owe.
+        crate::state::trigger_notifications::deliver(&*self.engine, ctx.callback()).await;
 
         Ok(CreateDeploymentOutput {
             deployment_id: Some(deployment_id),

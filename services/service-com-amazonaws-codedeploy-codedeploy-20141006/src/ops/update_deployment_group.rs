@@ -300,7 +300,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         // Everything that can be judged from the request alone is judged here,
         // before the store is touched, so a refused update changes nothing.
         //
@@ -562,8 +561,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             if let Some(groups) = input.auto_scaling_groups {
                 group.auto_scaling_groups = groups;
             }
+            let mut triggers_were_set = false;
             if let Some(triggers) = input.trigger_configurations {
                 group.trigger_configurations = triggers;
+                triggers_were_set = true;
             }
             if let Some(services) = input.ecs_services {
                 group.ecs_services = services;
@@ -626,6 +627,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
 
             let final_name = group.deployment_group_name.clone();
+            // The verification notification each trigger this request STORED owes
+            // its topic: the same one-time notification `CreateDeploymentGroup`
+            // publishes, owed by the write that configures the trigger on the
+            // topic. An update that named no trigger list changed no trigger, so
+            // it owes none.
+            let verifications = if triggers_were_set {
+                crate::state::trigger_notifications::owed_for_stored_triggers(&group)
+            } else {
+                Vec::new()
+            };
             application
                 .deployment_groups
                 .insert(final_name.clone(), group);
@@ -653,12 +664,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     }
                 }
             }
+            state.queue_trigger_notifications(verifications);
             Ok(())
         })
         .ok_or_else(|| {
             crate::scaffolded::Scaffolded::validation(crate::state::STATE_UNAVAILABLE)
         })?;
         outcome?;
+        // Published with the store unlocked: a publish reaches Amazon SNS's own
+        // handler, which takes that service's lock.
+        crate::state::trigger_notifications::deliver(&*self.engine, ctx.callback()).await;
 
         Ok(UpdateDeploymentGroupOutput {
             // `hooksNotCleanedUp` reports the Auto Scaling groups whose

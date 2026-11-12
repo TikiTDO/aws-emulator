@@ -49,6 +49,12 @@ service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 # JSON, so one parser reads both forms); yaml-rust2 is the pure-Rust one the
 # other services that read caller-supplied YAML already use.
 yaml-rust2 = { version = "0.10", default-features = false }
+# A deployment group's `triggerConfigurations` are PUBLISHED to the Amazon SNS
+# topics they name, over the in-process callback into this same emulator
+# (`state::trigger_notifications`); `default-features = false` keeps the SDK's own
+# transport, sleep and credential machinery out, since the callback supplies all
+# three.
+aws-sdk-sns = { version = "1", default-features = false }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -61,6 +67,11 @@ tokio = { workspace = true, features = ["time"] }
 # Percent-encodes the query-protocol form fields the IAM fixture in the shared test
 # harness sends (`Emulator::iam_query`).
 percent-encoding = "2.3"
+# A deployment group's triggers publish to Amazon SNS topics, and the queue
+# subscribed to such a topic is where the end-to-end suite reads the notification:
+# both are mounted beside CodeDeploy on one engine by the shared test harness.
+service-com-amazonaws-sns-amazonsimplenotificationservice = { workspace = true }
+service-com-amazonaws-sqs-amazonsqs = { workspace = true }
 
 [lints]
 workspace = true

@@ -304,7 +304,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
+        // The Region this request was signed for: the Region the group — and every
+        // deployment to it — runs in, which is what its triggers' notifications
+        // report.
+        let region = crate::state::request_region(ctx.parts());
         // `applicationName` and `deploymentGroupName` carry modelled length and
         // pattern constraints the boundary has already enforced. `serviceRoleArn` is
         // @required but carries none, so an empty one — and one that is no role
@@ -591,21 +594,34 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 managed_hook_execution_role_arn: None,
                 tags: input.tags.unwrap_or_default(),
                 create_time_ms: crate::state::now_ms(),
+                region,
             };
+            // The verification notification each trigger just stored owes its
+            // topic: the trigger is configured on it from this instant, which is
+            // the only thing there is to tell that topic yet.
+            let verifications = crate::state::trigger_notifications::owed_for_stored_triggers(
+                &group,
+            );
             application
                 .deployment_groups
                 .insert(deployment_group_name.clone(), group);
             application
                 .deployment_group_order
                 .push(deployment_group_name);
+            state.queue_trigger_notifications(verifications);
             Ok(deployment_group_id)
         })
         .ok_or_else(|| {
             crate::scaffolded::Scaffolded::validation(crate::state::STATE_UNAVAILABLE)
         })?;
 
+        let deployment_group_id = outcome?;
+        // Published with the store unlocked: a publish reaches Amazon SNS's own
+        // handler, which takes that service's lock.
+        crate::state::trigger_notifications::deliver(&*self.engine, ctx.callback()).await;
+
         Ok(CreateDeploymentGroupOutput {
-            deployment_group_id: Some(outcome?),
+            deployment_group_id: Some(deployment_group_id),
         })
     }
 }

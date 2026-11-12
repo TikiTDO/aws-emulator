@@ -10,7 +10,10 @@
 //! built-in deployment configurations once, and materialising the deployment
 //! transitions the clock already owes — the stop a sounding alarm asks for, the
 //! traffic increment a shift in flight owes its alias, and the status a
-//! deployment has reached.
+//! deployment has reached — and queueing the trigger notifications those
+//! transitions owe the deployment group's Amazon SNS topics
+//! ([`trigger_notifications`]), which the caller then publishes with this store
+//! unlocked.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -47,6 +50,10 @@ pub mod lambda_traffic_shift;
 /// The in-process task that drives a deployment in flight while nobody is calling
 /// this service.
 pub mod deployment_clock;
+
+/// The Amazon SNS notifications a deployment group's stored
+/// `triggerConfigurations` publish: the one place a trigger is ACTED on.
+pub mod trigger_notifications;
 
 /// The service role a deployment group runs under, resolved against the
 /// account's own IAM records: the one place a `serviceRoleArn` is asked about.
@@ -834,6 +841,16 @@ pub const MAX_DEPLOYMENT_CONFIGS: usize = 1_000;
 /// deployments, oldest first, so a caller cannot grow the store without limit.
 pub const MAX_DEPLOYMENT_HISTORY: usize = 500;
 
+/// How many trigger notifications may wait to be published at once; see
+/// [`ComAmazonawsCodedeployCodedeploy20141006State::queue_trigger_notifications`].
+///
+/// EMULATOR-CHOSEN, and only a safety bound: the queue is drained by the publish
+/// that follows the pass which filled it, so it holds the notifications of one
+/// pass. It bounds a store nothing can publish from — no Amazon SNS mounted
+/// beside this service, so no pass ever drains it — at a few lifecycle events for
+/// each deployment the history retains.
+pub const MAX_QUEUED_TRIGGER_NOTIFICATIONS: usize = 4 * MAX_DEPLOYMENT_HISTORY;
+
 /// How many names or ids one `BatchGet*` request may carry.
 ///
 /// The model states the figure on the refusal itself — every `BatchGet*`
@@ -1355,6 +1372,9 @@ pub struct DeploymentGroup {
     pub managed_hook_execution_role_arn: Option<String>,
     pub tags: Vec<Tag>,
     pub create_time_ms: i64,
+    /// The Region the group was created in ([`request_region`]), which is the
+    /// Region its triggers' notifications report ([`trigger_notifications`]).
+    pub region: String,
 }
 
 /// A deployment. `revision` is held exactly as the request supplied it: nothing
@@ -1449,6 +1469,15 @@ pub struct Deployment {
     pub traffic_increments: Vec<traffic_shift::Increment>,
     /// How many of those increments have been carried out on the alias.
     pub traffic_increments_applied: usize,
+    /// The Region the deployment was created in ([`request_region`]), which is
+    /// the Region its group's trigger notifications report it in
+    /// ([`trigger_notifications`]).
+    pub region: String,
+    /// The trigger events of this deployment that have already been queued for
+    /// publication, so one lifecycle event is published once however many passes
+    /// run over the record; see
+    /// [`ComAmazonawsCodedeployCodedeploy20141006State::queue_due_trigger_notifications`].
+    pub published_trigger_events: Vec<&'static str>,
 }
 
 /// The result a validation function reported for one of a deployment's
@@ -1750,6 +1779,14 @@ pub struct ComAmazonawsCodedeployCodedeploy20141006State {
     /// Which task, if any, is driving this store's deployments while nobody calls
     /// this service; see [`deployment_clock`].
     deployment_clock: deployment_clock::DeploymentClock,
+    /// The trigger notifications this store has queued and not yet published; see
+    /// [`trigger_notifications`]. They are published with the store UNLOCKED, so
+    /// they wait here between the pass that owed them and the publish.
+    trigger_notifications: Vec<trigger_notifications::PendingNotification>,
+    /// The deployments that may still owe a trigger notification, creation-ordered.
+    /// Only these are walked per pass, so the cost of publishing what a deployment
+    /// owes does not grow with the deployment history.
+    notifying_deployments: Vec<String>,
 }
 
 /// One of the built-in deployment configurations CodeDeploy ships.
@@ -2217,7 +2254,8 @@ impl ComAmazonawsCodedeployCodedeploy20141006State {
         let id = deployment.deployment_id.clone();
         self.deployments.insert(id.clone(), deployment);
         self.deployment_order.push(id.clone());
-        self.pending_deployments.push(id);
+        self.pending_deployments.push(id.clone());
+        self.notifying_deployments.push(id);
         let Some(excess) = self
             .deployment_order
             .len()
@@ -2229,7 +2267,110 @@ impl ComAmazonawsCodedeployCodedeploy20141006State {
         for oldest in dropped {
             self.deployments.remove(&oldest);
             self.pending_deployments.retain(|pending| pending != &oldest);
+            self.notifying_deployments
+                .retain(|pending| pending != &oldest);
         }
+    }
+
+    /// Queue every trigger notification the deployments of this store have come
+    /// to owe: one per lifecycle event each of them has REACHED and not yet been
+    /// published for, against its deployment group's stored trigger list.
+    ///
+    /// Runs on every pass through the store, right after the transitions the
+    /// clock owed have been materialised ([`Self::advance_clock`]), so an event
+    /// is owed its notification at the instant the deployment reaches it however
+    /// it got there — the clock settling it, a caller stopping it, or a failed
+    /// validation function failing it. Each event is marked on the deployment as
+    /// it is queued, so no pass can queue it twice and a deployment drops out of
+    /// the walked set once it is terminal and every event it reached is queued.
+    ///
+    /// Only QUEUED here: the publish itself reaches Amazon SNS's own handler, so
+    /// it happens with this store unlocked ([`trigger_notifications::deliver`]).
+    fn queue_due_trigger_notifications(&mut self) {
+        if self.notifying_deployments.is_empty() {
+            return;
+        }
+        // Phase one: which (deployment, event) pairs are newly due. Reads the
+        // deployment records only, so the walked set can be pruned in place.
+        let deployments = &self.deployments;
+        let mut due: Vec<(String, &'static str)> = Vec::new();
+        self.notifying_deployments.retain(|id| {
+            let Some(deployment) = deployments.get(id) else {
+                // Dropped from the history; there is nothing left to publish.
+                return false;
+            };
+            let reached = trigger_notifications::events_reached(deployment);
+            for event in &reached {
+                if !deployment.published_trigger_events.contains(event) {
+                    due.push((id.clone(), event));
+                }
+            }
+            // A deployment that has reached an outcome reaches no further event,
+            // so once every event it reached is queued it is owed nothing more.
+            !deployment_is_terminal(&deployment.status)
+        });
+        // Phase two: the notifications those events owe, against the group each
+        // deployment went to as it stands at this instant.
+        let mut notifications = Vec::new();
+        for (id, event) in &due {
+            let Some(deployment) = self.deployments.get(id) else {
+                continue;
+            };
+            let group = deployment
+                .deployment_group_name
+                .as_deref()
+                .and_then(|group_name| {
+                    self.applications
+                        .get(&deployment.application_name)
+                        .and_then(|application| application.deployment_groups.get(group_name))
+                });
+            let Some(group) = group else {
+                continue;
+            };
+            notifications.extend(trigger_notifications::owed_for_event(
+                group,
+                deployment,
+                event,
+            ));
+        }
+        // Phase three: the events are published-or-dropped from here, whether or
+        // not the group held a trigger for them, so no later pass reconsiders
+        // them.
+        for (id, event) in due {
+            if let Some(deployment) = self.deployments.get_mut(&id) {
+                deployment.published_trigger_events.push(event);
+            }
+        }
+        self.queue_trigger_notifications(notifications);
+    }
+
+    /// Queue `notifications` for publication, dropping what does not fit under
+    /// [`MAX_QUEUED_TRIGGER_NOTIFICATIONS`]: the queue is drained by the very next
+    /// publish, so the bound is only there to keep a store that has nothing to
+    /// publish to (no Amazon SNS mounted beside this service) from growing.
+    pub fn queue_trigger_notifications(
+        &mut self,
+        notifications: Vec<trigger_notifications::PendingNotification>,
+    ) {
+        for notification in notifications {
+            if self.trigger_notifications.len() >= MAX_QUEUED_TRIGGER_NOTIFICATIONS {
+                ::tracing::debug!(
+                    topic = %notification.topic_arn,
+                    "the queue of trigger notifications waiting to be published is full; this \
+                     notification is dropped"
+                );
+                return;
+            }
+            self.trigger_notifications.push(notification);
+        }
+    }
+
+    /// Take every queued trigger notification, leaving the queue empty, so each
+    /// one is published exactly once.
+    pub fn take_trigger_notifications(
+        &mut self,
+    ) -> Vec<trigger_notifications::PendingNotification> {
+        ::std::mem::take(&mut self.trigger_notifications)
     }
 
     /// Re-key the application stored under `current` as `new`, carrying every
@@ -4059,7 +4200,14 @@ pub fn with_state<Eng: Send + Sync + 'static, R>(
     let now = now_ms();
     guard.ensure_seeded(now);
     guard.advance_clock(now);
-    Some(body(&mut guard))
+    let answered = body(&mut guard);
+    // The notifications this pass came to owe the deployment groups' triggers:
+    // what the clock materialised above, and what the operation itself did — a
+    // stop, a failed validation function — so one place sees every lifecycle
+    // event of the pass. Queued here and published by the caller with this store
+    // unlocked (`trigger_notifications::deliver`).
+    guard.queue_due_trigger_notifications();
+    Some(answered)
 }
 
 #[cfg(test)]
@@ -4104,6 +4252,7 @@ mod tests {
             managed_hook_execution_role_arn: None,
             tags: Vec::new(),
             create_time_ms: 0,
+            region: "us-east-1".to_string(),
         }
     }
 

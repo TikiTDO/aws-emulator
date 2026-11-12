@@ -22,6 +22,11 @@
 //! unit test that drives a handler directly; there nothing is waiting for an
 //! increment either, and the next call through the store still materialises what
 //! the clock owed.
+//!
+//! One thing the tick does beyond that pass: it PUBLISHES the trigger
+//! notifications the pass came to owe ([`super::trigger_notifications`]), because
+//! a deployment group's topic is told about an outcome whether or not anybody
+//! called CodeDeploy to observe it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -112,7 +117,15 @@ impl DeploymentClock {
 /// Call it from an operation that leaves a deployment in flight — creating one, or
 /// stopping one in a way that creates its rollback — with that handler's own
 /// engine handle.
-pub fn drive_deployment_clock<Eng: Send + Sync + 'static>(engine: &Arc<Eng>) {
+///
+/// `callback` is the in-process emulator the trigger notifications this clock's own
+/// transitions owe are published through ([`super::trigger_notifications`]), cloned
+/// from the request that started the clock: the publishes it makes reach the same
+/// Amazon SNS handlers a client's own calls reach.
+pub fn drive_deployment_clock<Eng: Send + Sync + 'static>(
+    engine: &Arc<Eng>,
+    callback: &::smithy_server_runtime::EmbeddedEmulator,
+) {
     let Some(state) = service_state(&**engine) else {
         return;
     };
@@ -123,6 +136,7 @@ pub fn drive_deployment_clock<Eng: Send + Sync + 'static>(engine: &Arc<Eng>) {
         return;
     };
     let engine = Arc::clone(engine);
+    let callback = callback.clone();
     let claimed = ::engine::ServiceState::clone(&state);
     let task = runtime.spawn(async move {
         for _ in 0..MAX_CLOCK_TICKS {
@@ -136,6 +150,11 @@ pub fn drive_deployment_clock<Eng: Send + Sync + 'static>(engine: &Arc<Eng>) {
             // The pass every handler performs: the alarm gate, the traffic
             // increments the clock owes, and the status transitions.
             let in_flight = with_state(&*engine, |store| store.deployments_in_flight());
+            // The trigger notifications that pass came to owe, published before
+            // the loop can end: a deployment's LAST transition is the one that
+            // takes it out of flight, so a drain only on the next tick would
+            // never happen for it.
+            super::trigger_notifications::deliver(&*engine, &callback).await;
             if in_flight != Some(true) {
                 break;
             }
