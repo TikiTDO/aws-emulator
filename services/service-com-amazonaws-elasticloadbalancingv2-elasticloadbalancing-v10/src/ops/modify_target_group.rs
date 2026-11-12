@@ -275,6 +275,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::state::check_layer_7_health_check(resulting_path, resulting_matcher)
                 .map_err(crate::scaffolded::Scaffolded::validation_error)?;
         }
+        // The two members that TIME the check have to fit together as well, on the same
+        // reading of the call: the schedule this modify would LEAVE BEHIND — each member
+        // as the request carries it, else as the group already stores it — has to be one
+        // the load balancer can run, so its timeout may not outlast its interval (see
+        // [`crate::state::check_health_check_schedule`]). The model bounds each member
+        // alone, so naming only one of them is what would land a target group with a
+        // timeout past its interval; the service refuses the pair under its own
+        // `ValidationError`, as it does every other value rule the model states in prose.
+        crate::state::check_health_check_schedule(
+            input
+                .health_check_interval_seconds
+                .unwrap_or(group.health_check.interval_seconds),
+            input
+                .health_check_timeout_seconds
+                .unwrap_or(group.health_check.timeout_seconds),
+        )
+        .map_err(crate::scaffolded::Scaffolded::validation_error)?;
 
         // Each member the request carries replaces the stored one; each it omits keeps
         // the value the target group already had.

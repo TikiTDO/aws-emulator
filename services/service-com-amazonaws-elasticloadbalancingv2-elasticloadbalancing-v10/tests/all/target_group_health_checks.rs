@@ -16,11 +16,27 @@
 //! The wire harness is `provisioning_loop`'s, and the target-group helpers are the ones
 //! the sibling `target_group_health_check_port` suite owns; nothing here restates
 //! either.
+//!
+//! Each row starts from a group whose stored interval and timeout sit at OPPOSITE ends of
+//! their ranges, so the value under test is the only thing that decides the call: the
+//! schedule rule the two members answer together (the interval has to exceed the timeout)
+//! is the subject of `target_group_health_check_schedule`, not of this table.
 
 use crate::provisioning_loop::{action, call, emulator, p};
 use crate::target_group_health_check_port::{
     create_group, describe, health_check_of, http_group_fields,
 };
+
+/// An HTTP target group whose stored health-check schedule leaves room for every value in
+/// [`NUMERIC_CASES`]: the interval at the high bound of its range and the timeout at the
+/// low bound of its, so no row is refused for the schedule it would leave behind rather
+/// than for the bound it is testing.
+fn widest_schedule_group_fields() -> Vec<(String, String)> {
+    let mut fields = http_group_fields();
+    fields.push(p("HealthCheckIntervalSeconds", "300"));
+    fields.push(p("HealthCheckTimeoutSeconds", "2"));
+    fields
+}
 
 /// One row: the member, the value, and whether the model's range admits it.
 type NumericCase = (&'static str, &'static str, bool);
@@ -56,7 +72,7 @@ async fn a_numeric_health_check_member_round_trips_inside_its_range_and_is_refus
     for (index, (member, value, accepted)) in NUMERIC_CASES.iter().enumerate() {
         let case = format!("{member}={value}");
         let name = format!("mtg-num-{index}");
-        let arn = create_group(&router, &case, &name, &http_group_fields()).await;
+        let arn = create_group(&router, &case, &name, &widest_schedule_group_fields()).await;
         let before = health_check_of(&describe(&router, &arn).await);
 
         let mut form = action("ModifyTargetGroup");

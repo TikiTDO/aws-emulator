@@ -112,6 +112,12 @@ pub use ca_certificates_bundle::{
     CA_CERTIFICATES_BUNDLE_NOT_FOUND_MESSAGE, INVALID_CA_CERTIFICATES_BUNDLE_MESSAGE,
 };
 
+/// Whether the two members that TIME a target group's health check fit together, read
+/// once for every operation that writes a health check.
+pub mod health_check_schedule;
+
+pub use health_check_schedule::{check_health_check_schedule, HEALTH_CHECK_SCHEDULE_MESSAGE};
+
 /// The ADDRESS a load balancer publishes as its `DNSName`, and the socket of this
 /// emulator's own that answers there.
 pub mod load_balancer_endpoint;

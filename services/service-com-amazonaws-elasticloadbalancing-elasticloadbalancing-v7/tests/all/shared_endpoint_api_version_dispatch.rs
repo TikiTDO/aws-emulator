@@ -220,6 +220,19 @@ async fn a_value_outside_a_modelled_bound_is_a_validation_failure_not_an_unknown
                 params.push(param("Port", "80"));
             }
             params.push(param(member, &value.to_string()));
+            // A target group's health check also has to have an interval that exceeds its
+            // timeout, so a row about one of those two members names the OTHER at its far
+            // bound: what this table is about is the modelled range of one member, not the
+            // pair (that rule has its own suite in the ELBv2 crate).
+            match member {
+                "HealthCheckIntervalSeconds" => {
+                    params.push(param("HealthCheckTimeoutSeconds", "2"))
+                }
+                "HealthCheckTimeoutSeconds" => {
+                    params.push(param("HealthCheckIntervalSeconds", "300"))
+                }
+                _ => {}
+            }
 
             let (status, body) = v2_call(&router, "CreateTargetGroup", &params).await;
             if accepted {

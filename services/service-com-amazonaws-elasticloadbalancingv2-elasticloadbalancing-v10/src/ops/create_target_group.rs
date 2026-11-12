@@ -293,6 +293,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         } else {
             None
         };
+        let health_check = health_check_config(
+            &input,
+            &target_type,
+            crate::state::protocol_family(protocol.as_deref()),
+        );
+        // The check the create would persist has to be one the load balancer can run:
+        // its timeout may not outlast its interval (see
+        // [`crate::state::check_health_check_schedule`]). Both values are the EFFECTIVE
+        // ones the record above settled — what the request carried, else the default the
+        // member documents — so a request naming only one of the two is judged against
+        // the default the other takes. It is refused under this service's own
+        // `ValidationError`, the code every value rule the model states in prose answers
+        // under, and before the insert, so a refused create persists nothing.
+        crate::state::check_health_check_schedule(
+            health_check.interval_seconds,
+            health_check.timeout_seconds,
+        )
+        .map_err(crate::scaffolded::Scaffolded::validation_error)?;
         let mut candidate = TargetGroupRecord {
             arn: String::new(),
             name: input.name.clone(),
@@ -300,11 +318,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             protocol_version,
             port: input.port.filter(|_| !lambda),
             vpc_id: input.vpc_id.clone().filter(|_| !lambda),
-            health_check: health_check_config(
-                &input,
-                &target_type,
-                crate::state::protocol_family(protocol.as_deref()),
-            ),
+            health_check,
             target_type,
             // "The IP address type. The default value is ipv4."
             ip_address_type: Some(

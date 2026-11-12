@@ -1208,6 +1208,16 @@ async fn health_check_values_are_accepted_on_their_published_bounds_and_refused_
         form.push(p("Port", "80"));
         form.push(p("VpcId", "vpc-1"));
         form.push(p(member, value));
+        // A create settles the WHOLE health check, and its interval has to exceed its
+        // timeout, so a row moving one of those two members to a published bound names
+        // the other at its far bound: what this table is about is the bound of ONE
+        // member, and the schedule rule itself is the subject of
+        // `target_group_health_check_schedule`.
+        match member {
+            "HealthCheckIntervalSeconds" => form.push(p("HealthCheckTimeoutSeconds", "2")),
+            "HealthCheckTimeoutSeconds" => form.push(p("HealthCheckIntervalSeconds", "300")),
+            _ => {}
+        }
         let created = call(&router, &form).await;
         assert_eq!(
             created.status, 200,

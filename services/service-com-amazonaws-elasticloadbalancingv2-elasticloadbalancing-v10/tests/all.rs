@@ -111,6 +111,8 @@ mod target_group_attributes_and_modification;
 mod target_group_health_check_port;
 #[path = "all/target_group_health_check_port_refusal.rs"]
 mod target_group_health_check_port_refusal;
+#[path = "all/target_group_health_check_schedule.rs"]
+mod target_group_health_check_schedule;
 #[path = "all/target_group_health_checks.rs"]
 mod target_group_health_checks;
 #[path = "all/target_group_in_use_refusal.rs"]
