@@ -59,6 +59,9 @@ ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed2
 ssh-encoding = { version = "0.2", features = ["alloc"] }
 # The keyed digest that file's integrity line carries.
 hmac = "0.12"
+# The civil-calendar arithmetic the Athena integration template's daily partitions are laid
+# out on: the days a partition range covers, and their year/month/day prefixes.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 # The shared XML rendering of a floating-point member, which AWS writes as a decimal
 # carrying a fractional part where Rust's own rendering drops it, and the ONE
 # evaluation of IAM policy documents the authorization gate decides a request with.

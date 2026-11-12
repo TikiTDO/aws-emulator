@@ -1893,6 +1893,13 @@ mod traffic_mirror_target_creation;
 // has left each generation in — and what it refuses.
 #[path = "all/describe_declarative_policies_reports.rs"]
 mod describe_declarative_policies_reports;
+// The CloudFormation template `GetFlowLogsIntegrationTemplate` generates for one stored flow
+// log: the Athena table its own record format implies, the named queries that table can
+// answer, the partition loader its frequency asks for, the partitions between the two
+// timestamps, and what it refuses. Declared at the tail of this file, where every new ec2
+// suite lands.
+#[path = "all/get_flow_logs_integration_template.rs"]
+mod get_flow_logs_integration_template;
 // `DeleteFleets`: the state a deletion moves an EC2 Fleet to, the instances and Spot Instance
 // requests it ends, the `deleted` it reaches once no instance it placed is left, and the
 // per-fleet errors and request-level refusals it answers. Declared beside `prefix_lists` for

@@ -12192,6 +12192,7 @@ dependencies = [
  "aws-smithy-types",
  "base64 0.22.1",
  "bytes",
+ "chrono",
  "font8x8",
  "hex",
  "hmac 0.12.1",
