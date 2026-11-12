@@ -1062,11 +1062,11 @@ impl Stream {
         }
         let hash = match explicit_hash_key {
             // `ExplicitHashKey` is modelled `^(0|([1-9]\d{0,38}))$`, which admits values
-            // past `u128::MAX`; one of those lands in no shard's range, which is the same
-            // refusal as a value between two ranges.
+            // past `u128::MAX`: such a value is outside the key space a hash key lives in,
+            // which the service range-checks itself.
             Some(explicit) => explicit
                 .parse::<u128>()
-                .map_err(|_| RecordPlacementFailure::OutsideTheShardMap(explicit.to_string()))?,
+                .map_err(|_| RecordPlacementFailure::HashKeyOutOfRange(explicit.to_string()))?,
             None => {
                 let Some(partition_key) = partition_key else {
                     return Err(RecordPlacementFailure::PartitionKeyRequired);
@@ -2019,14 +2019,19 @@ impl ComAmazonawsKinesisKinesis20131202State {
                 .stream_by_arn(now, region, arn)
                 .ok_or(StreamLookupFailure::NotFound),
             (Some(name), Some(arn)) => {
-                let stream = self
-                    .stream_by_arn(now, region, arn)
-                    .ok_or(StreamLookupFailure::NotFound)?;
-                if stream.name == name {
-                    Ok(stream)
-                } else {
-                    Err(StreamLookupFailure::Mismatch)
+                // The pair is reconciled FROM THE REQUEST, before any stream is looked up:
+                // what has to agree is the `StreamName` and the name the `StreamARN` carries
+                // in its `stream/<name>` segment, so a disagreeing pair is refused as an
+                // invalid argument whichever of the two names a held stream — and an agreeing
+                // pair is resolved by the ARN exactly as one naming the ARN alone is.
+                if stream_name_in(arn) != name {
+                    return Err(StreamLookupFailure::Mismatch {
+                        name: name.to_string(),
+                        arn: arn.to_string(),
+                    });
                 }
+                self.stream_by_arn(now, region, arn)
+                    .ok_or(StreamLookupFailure::NotFound)
             }
         }
     }
@@ -2512,8 +2517,13 @@ pub enum RecordPlacementFailure {
     /// The stream's records are placed by the producer's partition key, and the request
     /// carried none ([`PARTITION_KEY_REQUIRED_MESSAGE`]).
     PartitionKeyRequired,
-    /// The hash key the request named — explicitly, or through its partition key — lies in
-    /// no open shard's range ([`hash_key_outside_the_shard_map_message`]).
+    /// The request named an `ExplicitHashKey` outside the 128-bit key space hash keys live
+    /// in ([`hash_key_out_of_range_message`]), so it names no position in any shard map at
+    /// all.
+    HashKeyOutOfRange(String),
+    /// The hash key the request named — explicitly, or through its partition key — is inside
+    /// the key space but lies in no open shard's range
+    /// ([`hash_key_outside_the_shard_map_message`]).
     OutsideTheShardMap(String),
     /// Every shard of the stream is closed, so nothing can be written to it.
     NoOpenShard,
@@ -2521,12 +2531,19 @@ pub enum RecordPlacementFailure {
 
 /// Why a request's `StreamName` / `StreamARN` pair names no stream a store holds. Each
 /// operation maps it onto the error ITS model declares.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamLookupFailure {
     /// The request named neither member, so it names no stream at all.
     Unspecified,
-    /// The request named both, and they name different streams.
-    Mismatch,
+    /// The request named both, and the name it gave disagrees with the one its ARN carries.
+    /// Both halves travel with the failure, since the refusal names them
+    /// ([`stream_identifier_mismatch_message`]).
+    Mismatch {
+        /// The `StreamName` the request carried.
+        name: String,
+        /// The `StreamARN` the request carried.
+        arn: String,
+    },
     /// The members are well formed, but this account and region hold no such stream.
     NotFound,
 }
@@ -2564,10 +2581,22 @@ pub const STREAM_IDENTIFIER_REQUIRED_MESSAGE: &str =
 /// that can name a stream at all.
 pub const STREAM_ARN_REQUIRED_MESSAGE: &str = "you must use the StreamARN parameter";
 
-/// How a request whose `StreamName` and `StreamARN` name different streams is refused.
-pub const STREAM_IDENTIFIER_MISMATCH_MESSAGE: &str =
-    "StreamName and StreamARN name different streams; name one stream or supply only one \
-     of them";
+/// How a request whose `StreamName` disagrees with its `StreamARN` is refused, worded the
+/// way this service words that error class: "Input stream name `<streamName>` doesn't match
+/// the inferred name in stream arn `<nameFromArn>`".
+///
+/// Built FROM the request: the `StreamName` it carried, and the stream NAME its `StreamARN`
+/// carries in the `stream/<name>` resource segment ([`stream_name_in`]). Those two are what
+/// the pair is reconciled against each other — "you must use either the StreamARN or the
+/// StreamName parameter, or both" (`DescribeStream`), so a pair that AGREES is served and
+/// only one that disagrees is refused — which is why the refusal names BOTH halves rather
+/// than asking the caller to drop one of them.
+pub fn stream_identifier_mismatch_message(stream_name: &str, stream_arn: &str) -> String {
+    format!(
+        "Input stream name {stream_name} doesn't match the inferred name in stream arn {}",
+        stream_name_in(stream_arn)
+    )
+}
 
 /// How an operation states that this account and region hold no stream under the identifier
 /// the request named, worded the way this service words that error class: "Stream `<name>`
@@ -2581,6 +2610,32 @@ pub fn stream_not_found_message(identifier: &str) -> String {
         "Stream {} under account {} not found.",
         stream_name_in(identifier),
         ::engine::emulator_account_id()
+    )
+}
+
+/// How an operation that distinguishes two streams of one name by the instant they were
+/// created states that this account and region hold no stream of that name created THEN:
+/// "Stream `<name>` under account `<account>` with creation time `<timestamp>` not found."
+///
+/// The same error class [`stream_not_found_message`] words, for the one member that narrows
+/// the lookup past the name — "Specify this input parameter to distinguish data streams that
+/// have the same name" (`ListShardsInput$StreamCreationTimestamp`) — so the sentence carries
+/// the instant the request asked for beside the name and the account. Built FROM the request:
+/// the identifier it addressed the stream by, and the instant it supplied taken at its WHOLE
+/// SECONDS (`asked_secs`) and spelled the way the wire spells a modelled `Timestamp`
+/// ([`instant_at`]).
+///
+/// Second precision is what the sentence states, not a rounding of this crate's choosing: a
+/// read of a stream reports its creation instant with a finer fraction, so that is the value a
+/// client sends back here, and the recorded answer to such a request spells the creation time
+/// to the second. Taking the instant's seconds is also what keeps the sentence an instant at
+/// all for a value no finer unit could hold.
+pub fn stream_creation_time_not_found_message(identifier: &str, asked_secs: i64) -> String {
+    format!(
+        "Stream {} under account {} with creation time {} not found.",
+        stream_name_in(identifier),
+        ::engine::emulator_account_id(),
+        instant_at(asked_secs.saturating_mul(1_000))
     )
 }
 
@@ -2682,6 +2737,14 @@ fn record_encryption_change(instants: &mut Vec<SystemTime>, at: SystemTime) {
     instants.retain(|instant| *instant >= from);
     instants.push(at);
 }
+
+/// How `CreateStream` refuses a request that names BOTH the on-demand capacity mode and a
+/// `ShardCount`: "Kinesis Data Streams automatically manages the shards" of an on-demand
+/// stream, so the member is not one such a create may carry. One sentence of fixed text,
+/// with nothing taken from the request \u2014 the member and the mode it is refused for are the
+/// only two things the refusal is about, and both are the same every time.
+pub const ON_DEMAND_SHARD_COUNT_MESSAGE: &str =
+    "ShardCount cannot be set while creating stream in On-Demand StreamMode";
 
 /// How an operation that only serves a provisioned stream refuses one whose shard count
 /// the service manages itself: "specifies that you tried to invoke this API for a data
@@ -3671,12 +3734,48 @@ pub fn partition_key_hash(partition_key: &str) -> u128 {
     u128::from_be_bytes(bytes)
 }
 
+/// The largest hash key a stream's shard map can hold a record at, as the refusal below
+/// writes it: "the hash key range of a shard" spans the 128-bit integers an MD5 digest
+/// produces (`PutRecordInput$PartitionKey`), so the key space is `[0, 2^128-1]`.
+const HASH_KEY_SPACE: &str = "[0, 2^128-1]";
+
+/// How a write refuses a hash-key member whose value lies outside the 128-bit key space
+/// altogether: "Invalid `<member>`. `<member>` must be in the range: [0, 2^128-1]. Specified
+/// value was `<value>`".
+///
+/// `HashKey` is modelled `^(0|([1-9]\d{0,38}))$`, which admits 39-digit values past
+/// `2^128-1`, so the model cannot catch this one and the service range-checks the value
+/// itself. Built FROM the request: the member that carried the value and the value as sent.
+/// This is a RANGE violation of the member, which is a different fault from a value inside
+/// the key space that no open shard covers ([`hash_key_outside_the_shard_map_message`]).
+pub fn hash_key_out_of_range_message(member: &str, value: &str) -> String {
+    format!(
+        "Invalid {member}. {member} must be in the range: {HASH_KEY_SPACE}. Specified value \
+         was {value}"
+    )
+}
+
 /// How a write states that the request's `ExplicitHashKey` or `PartitionKey` lands in no
 /// shard of the stream. Built FROM the request, so the value at fault names it.
 pub fn hash_key_outside_the_shard_map_message(hash_key: &str) -> String {
     format!(
         "the hash key {hash_key} lies in no open shard of the stream; an ExplicitHashKey \
          must fall inside one shard's HashKeyRange"
+    )
+}
+
+/// How a data-plane operation refuses a request that asked to be judged without being
+/// served: "Checks if your request will succeed. DryRun is an optional parameter"
+/// (`PutRecordInput$DryRun`, and the same sentence on `PutRecords`, `GetShardIterator` and
+/// `GetRecords`), so the refusal has to say that the request WOULD have succeeded \u2014 which is
+/// what tells it apart from a real refusal \u2014 and which operation judged it.
+///
+/// Built FROM the call: the only variable part is the name of the operation the request
+/// named, so one sentence serves every operation that models the member.
+pub fn dry_run_succeeded_message(operation: &str) -> String {
+    format!(
+        "DryRunOperation validation succeeded while calling {operation} operation.: Request \
+         would have succeeded, but DryRun flag is set."
     )
 }
 
@@ -4449,11 +4548,17 @@ impl ShardIteratorToken {
 }
 
 /// How a read states that the stream the request named holds no shard under the `ShardId`
-/// it named. Built FROM the request, so the shard and the stream at fault name it, the way
+/// it named, worded the way this service words that error class: "Shard `<shardId>` in
+/// stream `<streamName>` under account `<account>` does not exist".
+///
+/// Built FROM the request and the emulator's own account: the shard id at fault, and the
+/// stream NAME, which an identifier that is a `StreamARN` carries in its resource segment
+/// ([`stream_name_in`]) and one that is a `StreamName` already is — the way
 /// [`stream_not_found_message`] names a missing stream.
 pub fn shard_not_found_message(shard_id: &str, stream_identifier: &str) -> String {
     format!(
-        "shard {shard_id} of stream {stream_identifier} not found under account {}",
+        "Shard {shard_id} in stream {} under account {} does not exist",
+        stream_name_in(stream_identifier),
         ::engine::emulator_account_id()
     )
 }
@@ -4481,7 +4586,7 @@ pub const TIMESTAMP_NOT_AN_EPOCH_DATE_MESSAGE: &str =
 
 /// How a read refuses a request whose `StreamARN` names a different stream than its
 /// `ShardIterator` does: the iterator already names the stream its position is in, so the
-/// pair has to name ONE stream — the same rule [`STREAM_IDENTIFIER_MISMATCH_MESSAGE`]
+/// pair has to name ONE stream — the same rule [`stream_identifier_mismatch_message`]
 /// states for a request that names a stream twice.
 pub const ITERATOR_STREAM_MISMATCH_MESSAGE: &str =
     "StreamARN names a different stream than the ShardIterator does; the iterator already \
@@ -4489,7 +4594,7 @@ pub const ITERATOR_STREAM_MISMATCH_MESSAGE: &str =
 
 /// How a listing refuses a request whose `StreamARN` names a different stream than its
 /// `NextToken` does: the token already names the stream whose listing it resumes, so the
-/// pair has to name ONE stream — the same rule [`STREAM_IDENTIFIER_MISMATCH_MESSAGE`]
+/// pair has to name ONE stream — the same rule [`stream_identifier_mismatch_message`]
 /// states for a request that names a stream twice.
 pub const NEXT_TOKEN_STREAM_MISMATCH_MESSAGE: &str =
     "StreamARN names a different stream than the NextToken does; the token already \
@@ -4514,7 +4619,12 @@ pub fn iterator_expired_message(issued_at_millis: u128, now_millis: u128) -> Str
 /// An instant as a refusal spells one out, in the date-time form the wire carries a
 /// modelled `Timestamp` in.
 fn instant_text(millis: u128) -> String {
-    let millis = i64::try_from(millis).unwrap_or(i64::MAX);
+    instant_at(i64::try_from(millis).unwrap_or(i64::MAX))
+}
+
+/// [`instant_text`] for an instant a REQUEST carried, which the wire admits on either side
+/// of the epoch.
+fn instant_at(millis: i64) -> String {
     ::aws_smithy_types::DateTime::from_millis(millis)
         .fmt(::aws_smithy_types::date_time::Format::DateTime)
         .unwrap_or_default()

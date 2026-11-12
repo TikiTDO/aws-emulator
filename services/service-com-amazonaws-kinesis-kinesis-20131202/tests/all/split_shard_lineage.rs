@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 use service_com_amazonaws_kinesis_kinesis_20131202::state::{
     retention_period_not_longer_message, retention_period_not_shorter_message,
     shard_not_found_message, stream_not_found_message, DEFAULT_RETENTION_PERIOD_HOURS,
-    STREAM_ACTIVE, STREAM_IDENTIFIER_MISMATCH_MESSAGE, STREAM_IDENTIFIER_REQUIRED_MESSAGE,
+    STREAM_ACTIVE, stream_identifier_mismatch_message, STREAM_IDENTIFIER_REQUIRED_MESSAGE,
     STREAM_MODE_PROVISIONED, STREAM_UPDATING,
 };
 
@@ -757,7 +757,12 @@ async fn a_split_naming_no_one_stream_is_refused() {
             name: |case| Some(format!("{case}-other")),
             arn: |case| Some(stream_arn(REGION, case)),
             code: "InvalidArgumentException",
-            says: |_| STREAM_IDENTIFIER_MISMATCH_MESSAGE.to_string(),
+            says: |case| {
+                stream_identifier_mismatch_message(
+                    &format!("{case}-other"),
+                    &stream_arn(REGION, case),
+                )
+            },
         },
         Refusal {
             case: "address-an-arn-nothing-holds",

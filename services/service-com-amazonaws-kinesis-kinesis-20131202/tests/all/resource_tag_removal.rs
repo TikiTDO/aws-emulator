@@ -639,12 +639,18 @@ async fn a_tag_keys_list_outside_its_modelled_bounds_is_refused() {
             "case tag-keys-{count}: a TagKeys list outside the modelled bounds is refused as \
              a ValidationException, got {status} with body {response}"
         );
-        // The framework's refusal names the member at fault in its wire casing and the size
-        // it rejected.
+        // AWS's clause for a COLLECTION that broke its `@length` names the member at fault
+        // in its wire casing and the bound it broke, and quotes no value: a list has no
+        // scalar rendering to echo.
+        let bound = if count == 0 {
+            "Member must have length greater than or equal to 1".to_string()
+        } else {
+            format!("Member must have length less than or equal to {MAX_TAG_KEYS_PER_REMOVAL}")
+        };
         let message = error_message(&response);
         assert!(
-            message.contains("tagKeys") && message.contains(&format!("{count} items")),
-            "case tag-keys-{count}: the refusal names the member and the size at fault, got \
+            message.contains("tagKeys") && message.contains(&bound),
+            "case tag-keys-{count}: the refusal names the member and the bound at fault, got \
              {response}"
         );
     }

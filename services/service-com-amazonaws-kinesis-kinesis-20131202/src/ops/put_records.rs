@@ -222,8 +222,8 @@ fn lookup_refusal(failure: crate::state::StreamLookupFailure, identifier: &str) 
         crate::state::StreamLookupFailure::Unspecified => {
             invalid_argument(crate::state::STREAM_IDENTIFIER_REQUIRED_MESSAGE.to_string())
         }
-        crate::state::StreamLookupFailure::Mismatch => {
-            invalid_argument(crate::state::STREAM_IDENTIFIER_MISMATCH_MESSAGE.to_string())
+        crate::state::StreamLookupFailure::Mismatch { name, arn } => {
+            invalid_argument(crate::state::stream_identifier_mismatch_message(&name, &arn))
         }
         crate::state::StreamLookupFailure::NotFound => {
             not_found(crate::state::stream_not_found_message(identifier))
@@ -242,6 +242,14 @@ fn placement_refusal(failure: crate::state::RecordPlacementFailure, index: usize
             "record {position} of the batch: {}",
             crate::state::PARTITION_KEY_REQUIRED_MESSAGE
         )),
+        // A value outside the 128-bit key space is a RANGE violation of the member that
+        // carried it, not a gap in the shard map, so it is stated as one.
+        crate::state::RecordPlacementFailure::HashKeyOutOfRange(value) => {
+            invalid_argument(format!(
+                "record {position} of the batch: {}",
+                crate::state::hash_key_out_of_range_message(EXPLICIT_HASH_KEY, &value)
+            ))
+        }
         crate::state::RecordPlacementFailure::OutsideTheShardMap(hash_key) => {
             invalid_argument(format!(
                 "record {position} of the batch: {}",
@@ -254,6 +262,10 @@ fn placement_refusal(failure: crate::state::RecordPlacementFailure, index: usize
         )),
     }
 }
+
+/// The input member a hash-key range refusal names, as the API spells it inside one entry
+/// of the batch.
+const EXPLICIT_HASH_KEY: &str = "ExplicitHashKey";
 
 impl<Eng> PutRecords<Eng> {
     /// Construct the operation from the shared engine. INFALLIBLE — the engine is a
@@ -394,14 +406,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "Checks if your request will succeed. DryRun is an optional parameter"
         // (`PutRecordsInput$DryRun`): the batch is judged in full above and then refused
-        // with the error the model declares for it, so a dry run stores no record.
+        // with the error the model declares for it, stating that it WOULD have succeeded, so
+        // a dry run stores no record.
         if input.dry_run.unwrap_or(false) {
             return Err(PutRecordsErrorModeled::DryRunOperationException(
                 DryRunOperationException {
-                    message: Some(
-                        "The request was rejected because the DryRun parameter was specified."
-                            .to_string(),
-                    ),
+                    message: Some(crate::state::dry_run_succeeded_message(Self::NAME)),
                 },
             )
             .into());

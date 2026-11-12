@@ -29,7 +29,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use serde_json::{json, Value};
 use service_com_amazonaws_kinesis_kinesis_20131202::state::{
-    shard_id, shard_not_found_message, stream_not_found_message, ShardIteratorToken, ShardPosition,
+    shard_id, shard_not_found_message, ShardIteratorToken, ShardPosition,
     ACTIVATION_DELAY, SHARD_ITERATOR_TYPE_AFTER_SEQUENCE_NUMBER,
     SHARD_ITERATOR_TYPE_AT_SEQUENCE_NUMBER, SHARD_ITERATOR_TYPE_AT_TIMESTAMP,
     SHARD_ITERATOR_TYPE_LATEST, SHARD_ITERATOR_TYPE_TRIM_HORIZON,
@@ -477,8 +477,9 @@ async fn a_request_that_names_no_position_or_no_shard_is_refused() {
         );
     }
 
-    // The two not-found refusals name what was missing, so a client can tell a bad stream
-    // from a bad shard.
+    // The two not-found refusals are both phrased at the SHARD this read asked for: a shard
+    // of a stream this account does not hold does not exist either, so a client reads one
+    // sentence for "that shard is not there", whichever half was missing.
     let (_, missing_stream_message) = emulator
         .refused(
             "the missing stream is named",
@@ -492,8 +493,8 @@ async fn a_request_that_names_no_position_or_no_shard_is_refused() {
         .await;
     assert_eq!(
         missing_stream_message,
-        stream_not_found_message("iterators-no-such-stream"),
-        "a missing stream is refused with the service's stream-not-found sentence"
+        shard_not_found_message(&shard_id(0), "iterators-no-such-stream"),
+        "a shard of a missing stream is refused with the service's shard-not-found sentence"
     );
     let (_, missing_shard_message) = emulator
         .refused(

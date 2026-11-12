@@ -37,7 +37,7 @@ use bytes::Bytes;
 use serde_json::{json, Map, Value};
 use service_com_amazonaws_kinesis_kinesis_20131202::state::{
     stream_not_found_message, ACTIVATION_DELAY, MAX_LIST_TAGS_FOR_STREAM_LIMIT, MAX_STREAM_TAGS,
-    STREAM_ACTIVE, STREAM_CREATING, STREAM_DELETING, STREAM_IDENTIFIER_MISMATCH_MESSAGE,
+    STREAM_ACTIVE, STREAM_CREATING, STREAM_DELETING, stream_identifier_mismatch_message,
     STREAM_IDENTIFIER_REQUIRED_MESSAGE,
 };
 use service_com_amazonaws_kinesis_kinesis_20131202::state::ComAmazonawsKinesisKinesis20131202State;
@@ -895,7 +895,10 @@ async fn a_request_naming_no_stream_of_this_account_and_region_is_refused() {
             label: "name-and-arn-naming-different-streams",
             identifiers: json!({ "StreamName": name, "StreamARN": stream_arn(REGION, other) }),
             expected_code: "InvalidArgumentException",
-            expected_message: STREAM_IDENTIFIER_MISMATCH_MESSAGE.to_string(),
+            expected_message: stream_identifier_mismatch_message(
+                name,
+                &stream_arn(REGION, other),
+            ),
         },
         RefusalCase {
             label: "a-name-no-stream-holds",

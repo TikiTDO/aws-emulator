@@ -39,10 +39,11 @@ use std::time::{Duration, SystemTime};
 use bytes::Bytes;
 use serde_json::{json, Value};
 use service_com_amazonaws_kinesis_kinesis_20131202::state::{
-    next_token_expired_message, shard_id, stream_not_active_message, stream_not_found_message,
+    next_token_expired_message, shard_id, stream_creation_time_not_found_message,
+    stream_identifier_mismatch_message, stream_not_active_message, stream_not_found_message,
     ComAmazonawsKinesisKinesis20131202State, ShardPageToken, ACTIVATION_DELAY,
     DEFAULT_LIST_SHARDS_LIMIT, INVALID_NEXT_TOKEN_MESSAGE, LIST_SHARDS_TOKEN_TTL,
-    MAX_LIST_SHARDS_LIMIT, STREAM_CREATING, STREAM_IDENTIFIER_MISMATCH_MESSAGE,
+    MAX_LIST_SHARDS_LIMIT, NEXT_TOKEN_STREAM_MISMATCH_MESSAGE, STREAM_CREATING,
     STREAM_IDENTIFIER_REQUIRED_MESSAGE, STREAM_MODE_ON_DEMAND, STREAM_MODE_PROVISIONED,
 };
 use service_com_amazonaws_kinesis_kinesis_20131202::EmulatedService;
@@ -736,7 +737,7 @@ async fn list_shards_refuses_what_it_cannot_serve() {
             label: "a StreamName and a StreamARN naming different streams",
             body: json!({ "StreamName": stream, "StreamARN": other_arn }),
             expected_code: "InvalidArgumentException",
-            expected_message: Some(STREAM_IDENTIFIER_MISMATCH_MESSAGE.to_string()),
+            expected_message: Some(stream_identifier_mismatch_message(stream, &other_arn)),
         },
         RefusalCase {
             label: "a stream name this account and region do not hold",
@@ -847,13 +848,15 @@ async fn list_shards_refuses_what_it_cannot_serve() {
             label: "a live NextToken paired with a StreamARN naming another stream",
             body: json!({ "NextToken": live, "StreamARN": other_arn }),
             expected_code: "InvalidArgumentException",
-            expected_message: Some(STREAM_IDENTIFIER_MISMATCH_MESSAGE.to_string()),
+            expected_message: Some(NEXT_TOKEN_STREAM_MISMATCH_MESSAGE.to_string()),
         },
         RefusalCase {
             label: "a StreamCreationTimestamp that is not this stream's",
             body: json!({ "StreamName": stream, "StreamCreationTimestamp": 1.0_f64 }),
             expected_code: "ResourceNotFoundException",
-            expected_message: Some(stream_not_found_message(stream)),
+            // The refusal names the creation time the request asked for, which is the
+            // member that narrowed the lookup past the name.
+            expected_message: Some(stream_creation_time_not_found_message(stream, 1)),
         },
     ];
 

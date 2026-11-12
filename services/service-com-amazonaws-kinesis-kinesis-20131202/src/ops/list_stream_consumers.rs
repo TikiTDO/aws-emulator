@@ -207,7 +207,7 @@ fn lookup_refusal(
 ) -> ListStreamConsumersError {
     match failure {
         crate::state::StreamLookupFailure::Unspecified
-        | crate::state::StreamLookupFailure::Mismatch => {
+        | crate::state::StreamLookupFailure::Mismatch { .. } => {
             invalid_argument(crate::state::STREAM_ARN_REQUIRED_MESSAGE.to_string())
         }
         crate::state::StreamLookupFailure::NotFound => not_found(identifier),

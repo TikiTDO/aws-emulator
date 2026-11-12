@@ -206,7 +206,10 @@ fn not_found(message: String) -> GetShardIteratorError {
 /// The modelled refusal for a request whose `StreamName` / `StreamARN` pair names no stream
 /// of this account and region: the rule the operation's own doc publishes for a request that
 /// names neither ("you must use either the StreamARN or the StreamName parameter, or both"),
-/// and `ResourceNotFoundException` for one that names a stream nothing created.
+/// and `ResourceNotFoundException` for one that names a stream nothing created — which this
+/// operation words at the SHARD it was asked for, since a shard of a stream this account does
+/// not hold is a shard that does not exist ([`crate::state::shard_not_found_message`]), the
+/// same sentence a shard missing from a stream that IS held is refused with.
 fn lookup_refusal(
     failure: crate::state::StreamLookupFailure,
     input: &GetShardIteratorInput,
@@ -215,11 +218,12 @@ fn lookup_refusal(
         crate::state::StreamLookupFailure::Unspecified => {
             invalid_argument(crate::state::STREAM_IDENTIFIER_REQUIRED_MESSAGE.to_string())
         }
-        crate::state::StreamLookupFailure::Mismatch => {
-            invalid_argument(crate::state::STREAM_IDENTIFIER_MISMATCH_MESSAGE.to_string())
+        crate::state::StreamLookupFailure::Mismatch { name, arn } => {
+            invalid_argument(crate::state::stream_identifier_mismatch_message(&name, &arn))
         }
         crate::state::StreamLookupFailure::NotFound => not_found(
-            crate::state::stream_not_found_message(
+            crate::state::shard_not_found_message(
+                &input.shard_id,
                 input
                     .stream_name
                     .as_deref()
@@ -430,15 +434,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "Checks if your request will succeed. DryRun is an optional parameter"
         // (`GetShardIteratorInput$DryRun`): the request is judged in full above and then
-        // refused with the error the model declares for it ("The request was rejected
-        // because the DryRun parameter was specified"), so a dry run hands out no iterator.
+        // refused with the error the model declares for it, stating that it WOULD have
+        // succeeded, so a dry run hands out no iterator.
         if input.dry_run.unwrap_or(false) {
             return Err(GetShardIteratorErrorModeled::DryRunOperationException(
                 DryRunOperationException {
-                    message: Some(
-                        "The request was rejected because the DryRun parameter was specified."
-                            .to_string(),
-                    ),
+                    message: Some(crate::state::dry_run_succeeded_message(Self::NAME)),
                 },
             )
             .into());

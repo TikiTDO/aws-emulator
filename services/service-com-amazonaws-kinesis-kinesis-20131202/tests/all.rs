@@ -33,6 +33,8 @@ mod channel_removal;
 mod consumer_deregistration;
 #[path = "all/consumer_listing.rs"]
 mod consumer_listing;
+#[path = "all/constraint_refusal_wording.rs"]
+mod constraint_refusal_wording;
 #[path = "all/data_records.rs"]
 mod data_records;
 #[path = "all/encrypted_records.rs"]
@@ -41,6 +43,8 @@ mod encrypted_records;
 mod encryption_key_resolution;
 #[path = "all/enhanced_monitoring.rs"]
 mod enhanced_monitoring;
+#[path = "all/handler_refusal_wording.rs"]
+mod handler_refusal_wording;
 #[path = "all/manual_resharding.rs"]
 mod manual_resharding;
 #[path = "all/max_record_size.rs"]

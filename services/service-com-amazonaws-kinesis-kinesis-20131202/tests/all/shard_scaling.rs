@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 use service_com_amazonaws_kinesis_kinesis_20131202::state::{
     scale_down_below_half_message, scale_up_over_double_message, stream_not_found_message,
     stream_on_demand_message, MAX_RESHARDS_PER_WINDOW, RESHARD_DELAY, STREAM_ACTIVE,
-    STREAM_IDENTIFIER_MISMATCH_MESSAGE, STREAM_IDENTIFIER_REQUIRED_MESSAGE,
+    stream_identifier_mismatch_message, STREAM_IDENTIFIER_REQUIRED_MESSAGE,
     STREAM_MODE_ON_DEMAND, STREAM_MODE_PROVISIONED, STREAM_UPDATING,
 };
 
@@ -475,7 +475,12 @@ async fn update_shard_count_refuses_what_the_limits_forbid() {
                 })
             },
             code: "InvalidArgumentException",
-            says: |_| STREAM_IDENTIFIER_MISMATCH_MESSAGE.to_string(),
+            says: |name| {
+                stream_identifier_mismatch_message(
+                    &format!("{name}-other"),
+                    &stream_arn(REGION, name),
+                )
+            },
         },
     ];
 

@@ -164,7 +164,7 @@ fn lookup_refusal(
         // documented "Not Implemented. Reserved for future use", so it names nothing
         // either. A pair cannot disagree here, since there is no second identifier.
         crate::state::StreamLookupFailure::Unspecified
-        | crate::state::StreamLookupFailure::Mismatch => {
+        | crate::state::StreamLookupFailure::Mismatch { .. } => {
             invalid_argument(crate::state::STREAM_ARN_REQUIRED_MESSAGE.to_string())
         }
         crate::state::StreamLookupFailure::NotFound => {

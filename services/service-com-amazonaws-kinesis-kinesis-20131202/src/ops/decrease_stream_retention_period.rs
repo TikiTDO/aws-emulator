@@ -182,8 +182,8 @@ fn lookup_refusal(
         crate::state::StreamLookupFailure::Unspecified => {
             invalid_argument(crate::state::STREAM_IDENTIFIER_REQUIRED_MESSAGE.to_string())
         }
-        crate::state::StreamLookupFailure::Mismatch => {
-            invalid_argument(crate::state::STREAM_IDENTIFIER_MISMATCH_MESSAGE.to_string())
+        crate::state::StreamLookupFailure::Mismatch { name, arn } => {
+            invalid_argument(crate::state::stream_identifier_mismatch_message(&name, &arn))
         }
         crate::state::StreamLookupFailure::NotFound => {
             DecreaseStreamRetentionPeriodErrorModeled::ResourceNotFoundException(

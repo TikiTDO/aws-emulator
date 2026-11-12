@@ -38,11 +38,11 @@ use std::time::Duration;
 use bytes::Bytes;
 use serde_json::{json, Value};
 use service_com_amazonaws_kinesis_kinesis_20131202::state::{
-    stream_not_found_message, ACTIVATION_DELAY, DEFAULT_MAX_RECORD_SIZE_KI_B,
-    DEFAULT_RETENTION_PERIOD_HOURS, ENCRYPTION_TYPE_NONE, MAX_DESCRIBE_STREAM_SHARD_LIMIT,
-    MAX_SHARDS_PER_REGION, MAX_SHARDS_TOTAL, MAX_STREAM_TAGS, ON_DEMAND_INITIAL_SHARDS,
-    SHARD_WRITE_MI_BPS, STREAM_ACTIVE, STREAM_CREATING, STREAM_IDENTIFIER_REQUIRED_MESSAGE,
-    STREAM_MODE_ON_DEMAND, STREAM_MODE_PROVISIONED,
+    stream_identifier_mismatch_message, stream_not_found_message, ACTIVATION_DELAY,
+    DEFAULT_MAX_RECORD_SIZE_KI_B, DEFAULT_RETENTION_PERIOD_HOURS, ENCRYPTION_TYPE_NONE,
+    MAX_DESCRIBE_STREAM_SHARD_LIMIT, MAX_SHARDS_PER_REGION, MAX_SHARDS_TOTAL, MAX_STREAM_TAGS,
+    ON_DEMAND_INITIAL_SHARDS, SHARD_WRITE_MI_BPS, STREAM_ACTIVE, STREAM_CREATING,
+    STREAM_IDENTIFIER_REQUIRED_MESSAGE, STREAM_MODE_ON_DEMAND, STREAM_MODE_PROVISIONED,
 };
 use service_com_amazonaws_kinesis_kinesis_20131202::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
@@ -730,14 +730,6 @@ async fn a_read_naming_an_unknown_or_no_stream_is_refused() {
             json!({ "StreamARN": expected_arn(REGION, "sim2real-stream-absent") }),
             stream_not_found_message(&expected_arn(REGION, "sim2real-stream-absent")),
         ),
-        (
-            "name-and-arn-naming-different-streams-where-neither-exists",
-            json!({
-                "StreamName": "sim2real-stream-absent",
-                "StreamARN": expected_arn(REGION, "sim2real-stream-other"),
-            }),
-            stream_not_found_message("sim2real-stream-absent"),
-        ),
     ];
 
     for (label, body, message) in not_found_cases {
@@ -762,7 +754,9 @@ async fn a_read_naming_an_unknown_or_no_stream_is_refused() {
         }
     }
 
-    // A pair that names two DIFFERENT streams is refused even when both exist.
+    // A pair whose two halves DISAGREE is reconciled from the request itself, before any
+    // stream is looked up: whether or not either half names a held stream, the refusal is the
+    // modelled invalid-argument naming both the name sent and the one the ARN carries.
     let other = "sim2real-stream-held-too";
     emulator
         .ok(
@@ -771,21 +765,41 @@ async fn a_read_naming_an_unknown_or_no_stream_is_refused() {
             &json!({ "StreamName": other, "ShardCount": 1 }),
         )
         .await;
-    let (status, response) = emulator
-        .call(
-            "DescribeStreamSummary",
-            &json!({ "StreamName": held, "StreamARN": expected_arn(REGION, other) }),
-        )
-        .await;
-    assert_eq!(
-        status, 400,
-        "case mismatched-pair: expected a client error, got {status} with body {response}"
-    );
-    assert_eq!(
-        error_code(&response),
-        "InvalidArgumentException",
-        "case mismatched-pair: a pair naming two streams names none, got {response}"
-    );
+    let mismatched: Vec<(&str, &str, String)> = vec![
+        ("both-held", held, expected_arn(REGION, other)),
+        (
+            "neither-held",
+            "sim2real-stream-absent",
+            expected_arn(REGION, "sim2real-stream-other"),
+        ),
+        (
+            "an-arn-of-another-region",
+            held,
+            expected_arn("us-west-2", other),
+        ),
+    ];
+    for (label, name, arn) in mismatched {
+        let (status, response) = emulator
+            .call(
+                "DescribeStreamSummary",
+                &json!({ "StreamName": name, "StreamARN": arn }),
+            )
+            .await;
+        assert_eq!(
+            status, 400,
+            "case {label}: expected a client error, got {status} with body {response}"
+        );
+        assert_eq!(
+            error_code(&response),
+            "InvalidArgumentException",
+            "case {label}: a pair whose halves disagree names no stream, got {response}"
+        );
+        assert_eq!(
+            error_message(&response),
+            stream_identifier_mismatch_message(name, &arn),
+            "case {label}: the refusal names both halves of the pair, got {response}"
+        );
+    }
 
     // And a request that names no stream at all: `StreamId` is modelled "Not Implemented.
     // Reserved for future use", so it names no stream either.

@@ -347,14 +347,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "Checks if your request will succeed. DryRun is an optional parameter"
         // (`GetRecordsInput$DryRun`): the request is judged in full above and then refused
-        // with the error the model declares for it, so a dry run reads no record.
+        // with the error the model declares for it, stating that it WOULD have succeeded, so
+        // a dry run reads no record.
         if input.dry_run.unwrap_or(false) {
             return Err(GetRecordsErrorModeled::DryRunOperationException(
                 DryRunOperationException {
-                    message: Some(
-                        "The request was rejected because the DryRun parameter was specified."
-                            .to_string(),
-                    ),
+                    message: Some(crate::state::dry_run_succeeded_message(Self::NAME)),
                 },
             )
             .into());

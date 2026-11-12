@@ -43,7 +43,7 @@ use serde_json::{json, Value};
 use service_com_amazonaws_kinesis_kinesis_20131202::state::{
     stream_not_found_message, RegionalName, ENCRYPTION_CHANGE_WINDOW, ENCRYPTION_TYPE_KMS,
     ENCRYPTION_TYPE_NONE, ENCRYPTION_UPDATE_DELAY, MAX_ENCRYPTION_CHANGES_PER_WINDOW,
-    STREAM_ACTIVE, STREAM_CREATING, STREAM_DELETING, STREAM_IDENTIFIER_MISMATCH_MESSAGE,
+    STREAM_ACTIVE, STREAM_CREATING, STREAM_DELETING, stream_identifier_mismatch_message,
     STREAM_IDENTIFIER_REQUIRED_MESSAGE, STREAM_MODE_ON_DEMAND, STREAM_UPDATING,
     UNENCRYPTED_STREAM_MESSAGE,
 };
@@ -622,10 +622,10 @@ async fn a_refused_stop_answers_the_modelled_error_and_changes_nothing() {
         "case mismatch: expected InvalidArgumentException, got {response}"
     );
     let message = error_message(&response);
+    let mismatch = stream_identifier_mismatch_message(other, &stream_arn(REGION, wrong_type));
     assert!(
-        message.contains(STREAM_IDENTIFIER_MISMATCH_MESSAGE),
-        "case mismatch: expected the message to name the rule \
-         {STREAM_IDENTIFIER_MISMATCH_MESSAGE:?}, got {message:?}"
+        message.contains(&mismatch),
+        "case mismatch: expected the message to name the rule {mismatch:?}, got {message:?}"
     );
 
     // "For successful operation, the resource must be in the ACTIVE state"

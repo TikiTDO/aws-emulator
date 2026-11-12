@@ -174,7 +174,7 @@ fn lookup_refusal(
 ) -> UpdateStreamModeError {
     match failure {
         crate::state::StreamLookupFailure::Unspecified
-        | crate::state::StreamLookupFailure::Mismatch => {
+        | crate::state::StreamLookupFailure::Mismatch { .. } => {
             invalid_argument(crate::state::STREAM_IDENTIFIER_REQUIRED_MESSAGE.to_string())
         }
         crate::state::StreamLookupFailure::NotFound => {

@@ -43,7 +43,7 @@ use serde_json::{json, Value};
 use service_com_amazonaws_kinesis_kinesis_20131202::state::{
     stream_not_found_message, stream_not_active_message, stream_provisioned_message,
     warm_throughput_over_ceiling_message, MAX_WARM_THROUGHPUT_MI_BPS, MODE_UPDATE_DELAY,
-    STREAM_ACTIVE, STREAM_CREATING, STREAM_DELETING, STREAM_IDENTIFIER_MISMATCH_MESSAGE,
+    STREAM_ACTIVE, STREAM_CREATING, STREAM_DELETING, stream_identifier_mismatch_message,
     STREAM_IDENTIFIER_REQUIRED_MESSAGE, STREAM_MODE_ON_DEMAND, STREAM_MODE_PROVISIONED,
     STREAM_UPDATING, WARM_THROUGHPUT_UPDATE_DELAY,
 };
@@ -685,7 +685,7 @@ async fn a_request_naming_no_one_stream_of_this_account_and_region_is_refused() 
             name: Some(first.to_string()),
             arn: Some(stream_arn(REGION, second)),
             code: "InvalidArgumentException",
-            message: STREAM_IDENTIFIER_MISMATCH_MESSAGE.to_string(),
+            message: stream_identifier_mismatch_message(first, &stream_arn(REGION, second)),
         },
         Refusal {
             label: "a name nothing created",

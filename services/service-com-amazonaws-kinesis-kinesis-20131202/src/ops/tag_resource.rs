@@ -188,7 +188,7 @@ fn lookup_refusal(
         // `ResourceARN` is required, so a request reaching here always names one; the arm
         // is the modelled refusal rather than a panic.
         crate::state::StreamLookupFailure::Unspecified
-        | crate::state::StreamLookupFailure::Mismatch => {
+        | crate::state::StreamLookupFailure::Mismatch { .. } => {
             TagResourceErrorModeled::InvalidArgumentException(InvalidArgumentException {
                 message: Some(crate::state::STREAM_IDENTIFIER_REQUIRED_MESSAGE.to_string()),
             })

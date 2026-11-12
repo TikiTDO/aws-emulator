@@ -312,11 +312,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let shard_count = match (on_demand, input.shard_count) {
             (true, Some(_)) => {
                 audit(&akid, &region, "refused");
-                return Err(invalid_argument(format!(
-                    "ShardCount cannot be specified for a {} stream; its shard count is \
-                     managed by the service",
-                    crate::state::STREAM_MODE_ON_DEMAND
-                )));
+                return Err(invalid_argument(
+                    crate::state::ON_DEMAND_SHARD_COUNT_MESSAGE.to_string(),
+                ));
             }
             (true, None) => crate::state::ON_DEMAND_INITIAL_SHARDS,
             (false, None) => {

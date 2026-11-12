@@ -362,8 +362,8 @@ fn lookup_refusal(
         crate::state::StreamLookupFailure::Unspecified => {
             invalid_argument(crate::state::STREAM_IDENTIFIER_REQUIRED_MESSAGE.to_string())
         }
-        crate::state::StreamLookupFailure::Mismatch => {
-            invalid_argument(crate::state::STREAM_IDENTIFIER_MISMATCH_MESSAGE.to_string())
+        crate::state::StreamLookupFailure::Mismatch { name, arn } => {
+            invalid_argument(crate::state::stream_identifier_mismatch_message(&name, &arn))
         }
         crate::state::StreamLookupFailure::NotFound => not_found(
             input
@@ -486,14 +486,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 let resume = crate::state::ShardPageToken::resume(token, now)
                     .map_err(next_token_refusal)?;
                 // A `StreamARN` the request carries beside the token has to name the
-                // stream the token names, or the two name different streams.
+                // stream the token names, or the two name different streams — the refusal
+                // every listing of this service states for that pair.
                 if input
                     .stream_arn
                     .as_deref()
                     .is_some_and(|arn| arn != resume.stream_arn)
                 {
                     return Err(invalid_argument(
-                        crate::state::STREAM_IDENTIFIER_MISMATCH_MESSAGE.to_string(),
+                        crate::state::NEXT_TOKEN_STREAM_MISMATCH_MESSAGE.to_string(),
                     ));
                 }
                 let stream = store
@@ -506,7 +507,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "Specify this input parameter to distinguish data streams that have the same
         // name" (`ListShardsInput$StreamCreationTimestamp`): a timestamp that is not this
-        // stream's names another stream, which this account and region do not hold.
+        // stream's names another stream, which this account and region do not hold — so the
+        // refusal names the creation time it was asked for beside the stream and the account.
         let identifier = input
             .stream_name
             .as_deref()
@@ -515,7 +517,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if let Some(asked) = input.stream_creation_timestamp {
             let created = crate::state::timestamp(stream.created_at);
             if asked.to_millis().ok() != created.to_millis().ok() {
-                return Err(not_found(identifier));
+                return Err(ListShardsErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: Some(crate::state::stream_creation_time_not_found_message(
+                            identifier,
+                            // The instant's own seconds, which is the precision the sentence
+                            // states and the one value every timestamp the wire carries has.
+                            asked.secs(),
+                        )),
+                    },
+                )
+                .into());
             }
         }
 

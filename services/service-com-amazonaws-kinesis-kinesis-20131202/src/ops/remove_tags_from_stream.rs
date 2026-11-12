@@ -182,9 +182,9 @@ fn lookup_refusal(
                 message: Some(crate::state::STREAM_IDENTIFIER_REQUIRED_MESSAGE.to_string()),
             })
         }
-        crate::state::StreamLookupFailure::Mismatch => {
+        crate::state::StreamLookupFailure::Mismatch { name, arn } => {
             RemoveTagsFromStreamErrorModeled::InvalidArgumentException(InvalidArgumentException {
-                message: Some(crate::state::STREAM_IDENTIFIER_MISMATCH_MESSAGE.to_string()),
+                message: Some(crate::state::stream_identifier_mismatch_message(&name, &arn)),
             })
         }
         crate::state::StreamLookupFailure::NotFound => {
