@@ -2193,24 +2193,54 @@ pub fn tagged_resource_not_found(arn: &str) -> ResourceNotFoundException {
     }
 }
 
+/// The `resourceType` an error reports for an ARN that names no resource of a
+/// kind this service mints — another service's ARN, a value that is not an ARN
+/// at all, or one of this service's own whose deepest type segment is not a type
+/// this service has.
+pub const GENERIC_RESOURCE_TYPE: &str = "Resource";
+
 /// The kind of resource an ARN names, from the LAST type segment of its
-/// resource part: `…:appbundle/<id>/ingestion/<id>` names an ingestion.
+/// resource field: `…:appbundle/<id>/ingestion/<id>` names an ingestion.
 ///
-/// The segment names are the ones this service's own ARNs are built from (see
-/// `CreateAppBundle` and `CreateIngestion`); any other ARN — another service's,
-/// or a malformed one — is reported as the generic `Resource`.
+/// Only an ARN in THIS service's namespace can name one of its resources: the
+/// third field of an ARN is the service namespace, and it is what says whose
+/// resource the value addresses, so an ARN whose namespace is another service's
+/// — and a value that is not a well-formed ARN at all — names nothing here
+/// however its text reads, and is reported as the generic
+/// [`GENERIC_RESOURCE_TYPE`].
+///
+/// Inside this service's own ARNs the resource field is a chain of `<type>/<id>`
+/// pairs (AWS also writes the pair as `<type>:<id>`), so the type segments are
+/// the EVEN ones: an identifier that happens to read like a type name sits in an
+/// odd slot and names no type. That alternation is what this service's ARNs are
+/// built from — the type segments are `appbundle`, `ingestion`,
+/// `ingestiondestination` and `appauthorization` (see `CreateAppBundle`,
+/// `CreateIngestion`, `CreateIngestionDestination` and
+/// `CreateAppAuthorization`), each followed by a UUID, which carries neither
+/// separator. The chain's last type segment is the resource the ARN names; a
+/// segment naming none of those kinds is a kind this service does not have — the
+/// generic type again, not the kind of the enclosing resource — so an ARN whose
+/// resource field does not spell one of those chains is reported generically
+/// too. An empty segment is no segment at all (a resource field written with a
+/// doubled or trailing separator still spells the same chain), so it takes no
+/// slot in the alternation.
 pub fn arn_resource_type(arn: &str) -> &'static str {
-    let mut kind = "Resource";
-    for segment in arn.split('/') {
-        // The first segment carries the ARN head, whose last `:`-separated
-        // piece is the resource type (`…:000000000000:appbundle`).
-        match segment.split(':').next_back().unwrap_or(segment) {
-            "appbundle" => kind = "AppBundle",
-            "ingestion" => kind = "Ingestion",
-            "ingestiondestination" => kind = "IngestionDestination",
-            "appauthorization" => kind = "AppAuthorization",
-            _ => {}
-        }
+    let Some(parsed) = ::service_common::arn::parse_of(arn, ARN_SERVICE) else {
+        return GENERIC_RESOURCE_TYPE;
+    };
+    let mut kind = GENERIC_RESOURCE_TYPE;
+    let segments = parsed
+        .resource
+        .split(['/', ':'])
+        .filter(|segment| !segment.is_empty());
+    for segment in segments.step_by(2) {
+        kind = match segment {
+            "appbundle" => "AppBundle",
+            "ingestion" => "Ingestion",
+            "ingestiondestination" => "IngestionDestination",
+            "appauthorization" => "AppAuthorization",
+            _ => GENERIC_RESOURCE_TYPE,
+        };
     }
     kind
 }

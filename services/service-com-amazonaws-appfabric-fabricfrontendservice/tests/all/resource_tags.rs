@@ -51,7 +51,7 @@ pub(crate) async fn list_tags(emulator: &Emulator, arn: &str) -> Answer {
 
 /// `DELETE /tags/{resourceArn}?tagKeys=…` — `tagKeys` is an `@httpQuery` list,
 /// which an AWS SDK renders as the parameter repeated once per key.
-async fn untag_resource(emulator: &Emulator, arn: &str, keys: &[&str]) -> Answer {
+pub(crate) async fn untag_resource(emulator: &Emulator, arn: &str, keys: &[&str]) -> Answer {
     let query = keys
         .iter()
         .map(|key| format!("tagKeys={}", encode(key)))

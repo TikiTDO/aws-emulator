@@ -27,10 +27,12 @@ sha2 = { workspace = true }
 # Renders a digest as hex, rather than this crate hand-coding the encoding — see
 # `crate::state::render_credential`.
 hex = { workspace = true }
-# `addresses_modeled_http_route`: the one reader that answers which operation a
-# request ADDRESSES — the method and URI pattern of that operation's own `@http`
-# binding — for a request the REST router's route lookup withheld a route from. See
-# `crate::service::request_validation`.
+# Two shared readers: `addresses_modeled_http_route` — the one reader that answers
+# which operation a request ADDRESSES (the method and URI pattern of that
+# operation's own `@http` binding) for a request the REST router's route lookup
+# withheld a route from (see `crate::service::request_validation`) — and `arn`, the
+# one parse of a caller-supplied resource ARN's fields, which says whether an ARN is
+# in this service's namespace at all (see `crate::state::arn_resource_type`).
 service-common = { path = "../common" }
 
 [build-dependencies]
