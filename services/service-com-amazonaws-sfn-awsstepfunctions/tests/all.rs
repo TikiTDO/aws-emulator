@@ -161,6 +161,8 @@ mod payload_byte_limits;
 mod refusal_message_fidelity;
 #[path = "all/refusal_message_wording.rs"]
 mod refusal_message_wording;
+#[path = "all/refusal_request_value_templates.rs"]
+mod refusal_request_value_templates;
 #[path = "all/refusal_vocabulary.rs"]
 mod refusal_vocabulary;
 #[path = "all/refused_invocation_series.rs"]
