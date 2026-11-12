@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListProfileResourceAssociations
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListProfileResourceAssociations`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListProfileResourceAssociations::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: reports the resource associations the store holds for the Profile
+//! named, narrowed by `ResourceType` when the request names one, a page at a time.
 //!
 //! ## Shape of an operation
 //!
@@ -166,18 +159,96 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListProfileResourceAssociations` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListProfileResourceAssociationsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListProfileResourceAssociations"))
+        // `@readonly`: paging a list never changes what a later caller sees.
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(
+                ListProfileResourceAssociationsErrorModeled::InternalServiceErrorException(
+                    InternalServiceErrorException {
+                        message: Some(crate::state::NO_STORE.to_string()),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        // No token starts at the beginning; a token resumes strictly after the last
+        // association the page that issued it returned.
+        let resume_after = match input.next_token.as_deref() {
+            None => None,
+            Some(token) => Some(
+                crate::state::decode_next_token(TOKEN_MARKER, token).ok_or_else(|| {
+                    ListProfileResourceAssociationsErrorModeled::InvalidNextTokenException(
+                        crate::state::invalid_next_token(token),
+                    )
+                })?,
+            ),
+        };
+
+        // `MaxResults` is modelled `range 1..100`, so the boundary validator has
+        // already refused anything outside it; an absent one pages at that maximum.
+        let page_size = crate::state::page_size(input.max_results);
+        // One instant for the whole page, so every association on it is reported as
+        // of the same clock reading.
+        let now = ::std::time::Instant::now();
+
+        let store = state.lock();
+        // The Profile is a required path label, so a Profile this account does not
+        // hold is an id that names nothing rather than an empty listing.
+        if !store.profiles.contains_key(&input.profile_id) {
+            return Err(
+                ListProfileResourceAssociationsErrorModeled::ResourceNotFoundException(
+                    crate::state::profile_not_found(&input.profile_id),
+                )
+                .into(),
+            );
+        }
+
+        // A range query, not a scan: resuming costs O(log n) + O(page) rather than
+        // walking every stored association on each page.
+        let start = match resume_after.as_deref() {
+            Some(after) => ::std::ops::Bound::Excluded(after),
+            None => ::std::ops::Bound::Unbounded,
+        };
+        // The Profile and the optional `ResourceType` narrow the set BEFORE the page
+        // is cut, so a page is `MaxResults` matching associations rather than
+        // whatever matched within an unfiltered page.
+        let mut remaining = store
+            .profile_resource_associations
+            .range::<str, _>((start, ::std::ops::Bound::Unbounded))
+            .map(|(_, association)| association)
+            .filter(|association| {
+                association.profile_id == input.profile_id
+                    && input
+                        .resource_type
+                        .as_deref()
+                        .is_none_or(|wanted| association.resource_type == wanted)
+            });
+
+        let page: Vec<&crate::state::ProfileResourceAssociation> =
+            remaining.by_ref().take(page_size).collect();
+        // A token is emitted only when something is actually left to return.
+        let next_token = match page.last() {
+            Some(last) if remaining.next().is_some() => {
+                Some(crate::state::encode_next_token(TOKEN_MARKER, &last.id))
+            }
+            _ => None,
+        };
+
+        Ok(ListProfileResourceAssociationsOutput {
+            profile_resource_associations: Some(
+                page.into_iter()
+                    .map(|association| {
+                        crate::state::profile_resource_association_shape(association, now)
+                    })
+                    .collect(),
+            ),
+            next_token,
+        })
     }
 }
+
+/// The marker every token this operation issues carries, so a token it did not
+/// issue is recognisable rather than being read as some other resume point.
+/// Without it any hex-decodable string would be accepted as a continuation.
+const TOKEN_MARKER: &str = "ListProfileResourceAssociations/1/";

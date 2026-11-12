@@ -207,6 +207,44 @@ impl Emulator {
             .await
     }
 
+    /// `AssociateResourceToProfile`, with `ResourceProperties` on the request only
+    /// when the case names a document.
+    pub(crate) async fn associate_resource(
+        &self,
+        profile_id: &str,
+        resource_arn: &str,
+        name: &str,
+        properties: Option<&str>,
+    ) -> Reply {
+        let mut body = json!({
+            "ProfileId": profile_id,
+            "ResourceArn": resource_arn,
+            "Name": name,
+        });
+        if let Some(properties) = properties {
+            body["ResourceProperties"] = json!(properties);
+        }
+        self.call("POST", "/profileresourceassociation", Some(body))
+            .await
+    }
+
+    pub(crate) async fn get_resource_association(&self, id: &str) -> Reply {
+        self.call("GET", &format!("/profileresourceassociation/{id}"), None)
+            .await
+    }
+
+    /// `ListProfileResourceAssociations`: the Profile is a path label and
+    /// `ResourceType`, `MaxResults` and `NextToken` are query parameters, so
+    /// `query` is appended as given (`""` for none).
+    pub(crate) async fn list_resource_associations(&self, profile_id: &str, query: &str) -> Reply {
+        self.call(
+            "GET",
+            &format!("/profileresourceassociations/profileid/{profile_id}{query}"),
+            None,
+        )
+        .await
+    }
+
     pub(crate) async fn disassociate(&self, profile_id: &str, resource_id: &str) -> Reply {
         self.call(
             "DELETE",

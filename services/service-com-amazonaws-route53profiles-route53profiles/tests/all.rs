@@ -19,5 +19,7 @@ mod harness;
 mod profile_lifecycle;
 #[path = "all/resource_association_lifecycle.rs"]
 mod resource_association_lifecycle;
+#[path = "all/resource_association_listing.rs"]
+mod resource_association_listing;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
