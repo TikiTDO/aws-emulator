@@ -12,8 +12,9 @@
 //!
 //! 1. `CreateInvestigation` PERSISTS an investigation whose every reported member is
 //!    read back by `GetInvestigation`: the prompt verbatim and the account that
-//!    initiated it. `Investigation.Cloud` is NOT among them — it carries a detail the
-//!    investigation itself resolved, and nothing analysed this one's environment.
+//!    initiated it. `Investigation.Cloud` is NOT among them — it carries the
+//!    environment the investigation itself resolves when its pass ends, which the
+//!    `investigation_cloud_environment` suite is about.
 //! 2. A created investigation starts `RUNNING` and reaches its terminal status only
 //!    when the CLOCK owes it (`state::INVESTIGATION_TRANSITION_MILLIS`), after which
 //!    it never moves again; a read never moves it early and never changes what a
@@ -181,14 +182,18 @@ async fn an_investigation_reports_back_everything_the_create_stored() {
             json!(account),
             "case {case}: expected the initiating account, got {got:?}"
         );
-        // `Investigation.Cloud` carries a detail the investigation itself resolved, and
-        // nothing analysed this one's environment, so the member is absent rather than
-        // rebuilt from the request's endpoint context.
-        assert_eq!(
-            got["cloud"],
-            Value::Null,
-            "case {case}: expected no cloud block on an investigation that resolved none, got {got:?}"
-        );
+        // `Investigation.Cloud` carries the environment the investigation itself
+        // resolved, so an investigation whose pass is still RUNNING reports none; the
+        // member is never rebuilt from the request's endpoint context. The
+        // `investigation_cloud_environment` suite is where the whole rule, both
+        // phases, is asserted over a table.
+        if got["status"] == json!(RUNNING) {
+            assert_eq!(
+                got["cloud"],
+                Value::Null,
+                "case {case}: expected no cloud block on an investigation that resolved none, got {got:?}"
+            );
+        }
         assert!(
             got["startTime"].as_f64().unwrap_or_default() > 0.0,
             "case {case}: expected a startTime instant, got {:?}",

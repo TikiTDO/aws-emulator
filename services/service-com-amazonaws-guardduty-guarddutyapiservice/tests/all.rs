@@ -105,6 +105,8 @@ mod free_trial_days;
 mod identity_authorization;
 #[path = "all/investigation_clock_coupling.rs"]
 mod investigation_clock_coupling;
+#[path = "all/investigation_cloud_environment.rs"]
+mod investigation_cloud_environment;
 #[path = "all/investigation_detector_timestamp.rs"]
 mod investigation_detector_timestamp;
 #[path = "all/investigation_lifecycle.rs"]

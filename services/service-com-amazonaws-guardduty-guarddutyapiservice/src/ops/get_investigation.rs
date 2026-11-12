@@ -5,8 +5,9 @@
 //! [`crate::state`], the read side of that create.
 //!
 //! A REPORTING operation: the only thing it writes is the status change the CLOCK
-//! already made due ([`crate::state::InvestigationRecord::settle`]), which was owed at
-//! that instant whether or not anybody called.
+//! already made due ([`crate::state::InvestigationRecord::settle`]) — together with
+//! the environment that ended pass resolved — which was owed at that instant whether
+//! or not anybody called.
 //!
 //! This is the ONLY file to touch for this operation.
 //!
@@ -200,13 +201,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // "Details about the cloud environment in which the investigation
                 // was performed"
                 // (`smithy_query(query="doc",shape="Investigation",member="Cloud")`):
-                // the member carries a DETAIL the investigation itself resolved,
-                // and this one has resolved none — nothing analysed the
-                // environment (see `crate::state::INVESTIGATION_ENGINE_UNAVAILABLE`)
-                // — so it stays absent rather than being rebuilt from the request's
-                // own endpoint context, which would assert a finding of the
-                // investigation that no investigation made.
-                cloud: None,
+                // reported from the environment THIS investigation resolved and
+                // stored ([`crate::state::InvestigationCloud`]), so the member is
+                // absent for as long as the record holds none — an investigation
+                // whose pass has not ended. It is never rebuilt from the request's
+                // own endpoint or caller context, which would assert an environment
+                // of whatever endpoint the read happened to arrive on rather than
+                // the one the investigation covered.
+                cloud: investigation.cloud_details(),
                 // The assessment members stay absent while no analysis produced
                 // one: see `crate::state::INVESTIGATION_ENGINE_UNAVAILABLE`.
                 risk_level: None,

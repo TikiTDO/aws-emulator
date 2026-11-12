@@ -96,6 +96,34 @@ pub fn investigation_total_limit_message() -> String {
     )
 }
 
+/// `CloudProvider`'s only member — "The cloud provider. Currently, only `AWS` is
+/// supported" (`smithy_query(query="doc",shape="CloudDetails",member="Provider")`).
+pub const CLOUD_PROVIDER_AWS: &str = "AWS";
+const _: () = assert!(enum_carries(
+    crate::ops::types::shared_types::CLOUD_PROVIDER_VALUES,
+    CLOUD_PROVIDER_AWS
+));
+
+/// The cloud environment ONE investigation covered, held on that investigation's own
+/// record: the three `CloudDetails` members — the provider, the Region and the
+/// account of the environment the analysis pass ran over
+/// (`smithy_query(shape="CloudDetails")`).
+///
+/// It is resolved exactly once, when the pass ENDS
+/// ([`InvestigationRecord::settle`]), and read back from the record afterwards, so
+/// the environment a reader reports is the one THIS investigation covered rather
+/// than anything about the request the read arrives on: an investigation that has
+/// not finished its pass has resolved no environment and holds none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvestigationCloud {
+    /// `CloudDetails$Provider` — see [`CLOUD_PROVIDER_AWS`].
+    pub provider: String,
+    /// `CloudDetails$Region`: the Region whose resources the pass covered.
+    pub region: String,
+    /// `CloudDetails$Account`: the account whose resources the pass covered.
+    pub account: String,
+}
+
 /// Why an investigation this emulator accepted ends [`INVESTIGATION_FAILED`].
 ///
 /// A GuardDuty investigation is produced by Amazon Bedrock models over the
@@ -131,6 +159,9 @@ pub struct InvestigationRecord {
     /// `Error`: "Details about the error if the investigation status is FAILED"
     /// (`smithy_query(shape="Investigation")`).
     pub error: Option<String>,
+    /// `Cloud`: the environment this investigation's pass covered, once the pass has
+    /// ended and resolved it. See [`InvestigationCloud`].
+    pub cloud: Option<InvestigationCloud>,
 }
 
 impl InvestigationRecord {
@@ -154,7 +185,23 @@ impl InvestigationRecord {
             terminal_due_millis: now.saturating_add(INVESTIGATION_TRANSITION_MILLIS),
             ended_at_millis: None,
             error: None,
+            // The pass has not run yet, so it has resolved no environment: a reader
+            // reports no `Cloud` member for an investigation still
+            // [`INVESTIGATION_RUNNING`].
+            cloud: None,
         }
+    }
+
+    /// The `Cloud` member a reader reports for this investigation: the environment
+    /// stored on the record, and NOTHING while the record has resolved none.
+    pub fn cloud_details(&self) -> Option<crate::ops::types::CloudDetails> {
+        self.cloud
+            .as_ref()
+            .map(|cloud| crate::ops::types::CloudDetails {
+                provider: cloud.provider.clone(),
+                region: cloud.region.clone(),
+                account: cloud.account.clone(),
+            })
     }
 
     /// Apply the status change the CLOCK already made due, if any.
@@ -169,6 +216,17 @@ impl InvestigationRecord {
         self.status = INVESTIGATION_FAILED.to_string();
         self.ended_at_millis = Some(self.terminal_due_millis);
         self.error = Some(INVESTIGATION_ENGINE_UNAVAILABLE.to_string());
+        // The pass covered ONE environment — the account the investigation was
+        // initiated for, through the Region its endpoint served, both persisted on
+        // this record when the create minted it — so that environment is resolved
+        // the instant the pass ends. Storing it here is what lets every later read
+        // report the same provider/Region/account for this investigation, whatever
+        // endpoint or caller the read arrives on.
+        self.cloud = Some(InvestigationCloud {
+            provider: CLOUD_PROVIDER_AWS.to_string(),
+            region: self.region.clone(),
+            account: self.triggered_by.clone(),
+        });
     }
 }
 
