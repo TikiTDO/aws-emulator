@@ -398,37 +398,34 @@ fn composite_component_summary(
 
 /// One property of a component as the modelled `PropertyResponse`.
 ///
-/// Every member is read through the projection its kind of reader shares, so one
-/// property says the same thing here as it does through `ListProperties` and
-/// `GetPropertyValue`: the definition that gives the property its meaning —
+/// Every member is read through the projection its kind of reader shares
+/// ([`crate::state::property_projection`]), so one property says the same thing
+/// here as it does through `ListProperties` and `GetPropertyValue`: the
+/// definition that gives the property its meaning —
 /// the component's own where it declared one, else the one it inherits from the
 /// component type it instantiates, marked `isInherited` whenever the type it
 /// instantiates or a type that type extends declares the property
 /// ([`crate::state::Workspace::property_definition_is_inherited`]) — the value the
 /// property reads as ([`crate::state::latest_property_value`]), and whether
 /// every value of a list- or map-typed one was reported
-/// ([`crate::state::all_property_values_returned`]).
+/// ([`crate::state::all_property_values_returned`]). This wrapper is all that is
+/// this operation's own.
 fn property_response(
     workspace: &crate::state::Workspace,
     component_type_id: Option<&str>,
     properties: &::std::collections::BTreeMap<String, crate::state::PropertyRecord>,
     property_name: &str,
 ) -> PropertyResponse {
-    let definition =
-        workspace.effective_property_definition(component_type_id, properties, property_name);
-    let value =
-        crate::state::latest_property_value(properties.get(property_name), definition.as_ref());
+    let projection = crate::state::property_projection(
+        workspace,
+        component_type_id,
+        properties,
+        property_name,
+    );
     PropertyResponse {
-        definition: definition.as_ref().and_then(|definition| {
-            crate::state::property_definition_response(
-                definition,
-                workspace.property_definition_is_inherited(component_type_id, property_name),
-            )
-        }),
-        are_all_property_values_returned: Some(crate::state::all_property_values_returned(
-            value.as_ref(),
-        )),
-        value,
+        definition: projection.definition,
+        are_all_property_values_returned: Some(projection.are_all_property_values_returned),
+        value: projection.value,
     }
 }
 

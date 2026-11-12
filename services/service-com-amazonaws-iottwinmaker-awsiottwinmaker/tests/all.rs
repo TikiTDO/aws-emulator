@@ -176,6 +176,9 @@ mod property_group_refinement;
 #[path = "all/property_listing.rs"]
 mod property_listing;
 
+#[path = "all/property_projection_sharing.rs"]
+mod property_projection_sharing;
+
 #[path = "all/property_value_data_type.rs"]
 mod property_value_data_type;
 

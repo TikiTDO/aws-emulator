@@ -684,20 +684,21 @@ fn property_group_names(
 /// written to it — the last value of its time series where the data plane has
 /// written one — else the default declared by the definition that gives it its
 /// meaning — the component's own, else the one it inherits from the component
-/// type it instantiates. The one rule every answer here is built from.
+/// type it instantiates. The one rule every answer here is built from, read
+/// through the projection every reader of a property shares
+/// ([`crate::state::effective_property_value`]), so a property reads the same
+/// here as it does beside its definition through `GetEntity` and
+/// `ListProperties`.
 fn property_value(
     workspace: &crate::state::Workspace,
     component: &ScopedComponent<'_>,
     property_name: &str,
 ) -> Option<DataValue> {
-    let definition = workspace.effective_property_definition(
+    crate::state::effective_property_value(
+        workspace,
         component.component_type_id,
         component.properties,
         property_name,
-    );
-    crate::state::latest_property_value(
-        component.properties.get(property_name),
-        definition.as_ref(),
     )
 }
 

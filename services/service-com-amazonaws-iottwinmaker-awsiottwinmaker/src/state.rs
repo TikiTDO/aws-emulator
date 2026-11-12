@@ -61,8 +61,11 @@ use std::time::{Duration, SystemTime};
 mod identity;
 /// The opaque pagination tokens this service's listings mint and read.
 mod page_tokens;
+/// The one projection of a stored property every reader of one reports through.
+mod property_projection;
 pub use identity::*;
 pub use page_tokens::*;
+pub use property_projection::*;
 
 /// The `ParentEntityId` sentinel the service uses for an entity with no parent.
 /// Taken from the `ParentEntityId` pattern, which admits the literal `$ROOT`
