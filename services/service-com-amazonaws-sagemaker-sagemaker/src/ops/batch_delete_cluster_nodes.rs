@@ -215,7 +215,7 @@ fn delete(cluster: &mut crate::state::Cluster, logical_id: Option<String>) -> Ou
     }
     match cluster.nodes.get(&logical_id) {
         None => Outcome::NotFound,
-        Some(node) if node.is_replacing() => Outcome::InUse,
+        Some(node) if node.operation_in_flight() => Outcome::InUse,
         Some(node) if !node.is_settled() => Outcome::InvalidStatus,
         Some(_) => {
             cluster.remove_node(&logical_id);

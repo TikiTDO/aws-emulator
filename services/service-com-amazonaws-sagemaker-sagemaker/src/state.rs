@@ -2018,6 +2018,11 @@ pub struct ClusterNode {
     /// Until then the node reports `ShuttingDown` on the instance being terminated, and
     /// past it it reports `Running` on a freshly minted instance id.
     pub replacement_due_at: Option<SystemTime>,
+    /// The instant the clock owes this node its return from a REBOOT, set by
+    /// [`ClusterNode::begin_reboot`]; `None` while no reboot is in flight. Until then the
+    /// node is not available to a workload, and past it it reports `Running` again on the
+    /// instance it was already running on.
+    pub reboot_due_at: Option<SystemTime>,
     /// The volumes attached to this node, keyed by `VolumeId`.
     pub volume_attachments: BTreeMap<String, VolumeAttachment>,
 }
@@ -2036,6 +2041,18 @@ impl ClusterNode {
     /// `ShuttingDown` -> `Running` one of a node whose replacement hardware is due — and
     /// with it the node's instance id. Answers whether this call made a transition.
     pub fn settle_status(&mut self, now: SystemTime) -> bool {
+        // A reboot restarts the operating system of the instance the node ALREADY runs on,
+        // so the node comes back on the same instance id and with the same launch time —
+        // which is why it is judged before the provisioning transition below, the one that
+        // mints an instance id for a node that has none yet.
+        if let Some(due) = self.reboot_due_at {
+            if now < due {
+                return false;
+            }
+            self.status = NODE_STATUS_RUNNING.to_string();
+            self.reboot_due_at = None;
+            return true;
+        }
         if self.status == NODE_STATUS_PENDING && now >= self.running_at {
             self.status = NODE_STATUS_RUNNING.to_string();
             self.instance_id = Some(mint_instance_id());
@@ -2062,7 +2079,7 @@ impl ClusterNode {
     /// still coming up, shutting down, updating or being health-checked is mid-change,
     /// which is the condition the per-node invalid-status codes describe.
     pub fn is_settled(&self) -> bool {
-        self.status == NODE_STATUS_RUNNING && self.replacement_due_at.is_none()
+        self.status == NODE_STATUS_RUNNING && !self.operation_in_flight()
     }
 
     /// Whether this node's hardware may be replaced right now: its status is a settled
@@ -2071,10 +2088,33 @@ impl ClusterNode {
         self.is_settled()
     }
 
-    /// Whether a replacement is already in flight on this node, i.e. another operation is
-    /// in progress for it.
-    pub fn is_replacing(&self) -> bool {
-        self.replacement_due_at.is_some()
+    /// Whether the service has a change of its own already under way on this node, i.e.
+    /// "another operation is already in progress for this node" — the condition
+    /// [`NODE_OPERATION_IN_FLIGHT_MESSAGE`] words. A node's hardware replacement and its
+    /// reboot are both such a change, so one in-flight node operation is told apart from
+    /// another request's by this one predicate rather than by naming a single kind.
+    pub fn operation_in_flight(&self) -> bool {
+        self.replacement_due_at.is_some() || self.reboot_due_at.is_some()
+    }
+
+    /// Whether this node may be rebooted right now: its status is a settled one, so the
+    /// restart interrupts nothing the service is already doing to the node.
+    pub fn accepts_reboot(&self) -> bool {
+        self.is_settled()
+    }
+
+    /// Start the soft reboot `BatchRebootClusterNodes` asked for: the node's operating
+    /// system restarts on the instance it is already running on, so the node is
+    /// unavailable until the clock owes it back [`TRANSIENT_STATE_SETTLES_AFTER`] later,
+    /// materialised by [`ClusterNode::settle_status`].
+    ///
+    /// The instance is NOT replaced — its id, its launch time and every volume it holds
+    /// survive the restart, which is what a soft recovery preserves and a replacement does
+    /// not. `ClusterInstanceStatus` models no reboot member, so the node carries the
+    /// member it carries whenever it is coming up and not yet serving.
+    pub fn begin_reboot(&mut self, now: SystemTime) {
+        self.status = NODE_STATUS_PENDING.to_string();
+        self.reboot_due_at = Some(now + TRANSIENT_STATE_SETTLES_AFTER);
     }
 
     /// Start the replacement `BatchReplaceClusterNodes` asked for: the instance the node

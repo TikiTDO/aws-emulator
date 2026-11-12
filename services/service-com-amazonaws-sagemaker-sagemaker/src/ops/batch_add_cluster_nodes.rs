@@ -358,6 +358,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         running_at: now + crate::state::TRANSIENT_STATE_SETTLES_AFTER,
                         // Nothing has asked for this node's hardware to be replaced.
                         replacement_due_at: None,
+                        // Nothing has asked for this node to be rebooted.
+                        reboot_due_at: None,
                         volume_attachments: ::std::collections::BTreeMap::new(),
                     },
                 );

@@ -546,6 +546,8 @@ impl Cluster {
                         running_at: now,
                         // Nothing has asked for this node's hardware to be replaced.
                         replacement_due_at: None,
+                        // Nothing has asked for this node to be rebooted.
+                        reboot_due_at: None,
                         volume_attachments: BTreeMap::new(),
                     },
                 );
@@ -636,6 +638,30 @@ pub const SLURM_CONTROLLER_NOT_REPLACEABLE: &str =
 pub const ALL_NODES_FAILED_VALIDATION: &str =
     "All provided nodes failed validation. Please ensure the nodes exist, are not part of \
      the controller group for the Slurm cluster, and are in a removable state.";
+
+/// How a batch node operation words an identifier that names no node of the cluster, in
+/// the terms the failure list carrying it documents its subject in: the instance-id list
+/// speaks of the INSTANCE the identifier named and the logical-id list of the NODE, as the
+/// per-list error shapes of `BatchRebootClusterNodes` and `BatchReplaceClusterNodes` do.
+///
+/// Fixed text with no variable part: the entry it sits in already carries the identifier it
+/// is about. Stated once here so the operations reporting this one condition cannot word it
+/// differently.
+pub const INSTANCE_NOT_IN_CLUSTER: &str = "The instance does not exist in the specified cluster.";
+/// See [`INSTANCE_NOT_IN_CLUSTER`].
+pub const NODE_NOT_IN_CLUSTER: &str = "The node does not exist in the specified cluster.";
+
+/// How a batch node operation refuses a request NONE of whose identifiers names a node of
+/// the cluster at all — a client working from a stale node list, say.
+///
+/// The per-node failure lists report the nodes a call could not act on ALONGSIDE the ones
+/// it could; a request that names no node the cluster holds asked for nothing such a call
+/// can do, so it is refused outright instead of answering a 200 whose every entry is a
+/// failure. Entirely fixed text: the request named nothing for the sentence to be about.
+/// Stated once here so the operations that refuse this one shape cannot word it
+/// differently.
+pub const ALL_NODES_MISSING: &str =
+    "All provided nodes do not exist. Please check the input and try again.";
 
 /// How many instances of ONE ML instance type an account may run in its HyperPod
 /// clusters, for a type whose published default is not zero.

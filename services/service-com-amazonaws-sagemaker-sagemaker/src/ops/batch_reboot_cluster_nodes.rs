@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op BatchRebootClusterNodes
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `BatchRebootClusterNodes`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`BatchRebootClusterNodes::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: resolves the `ClusterName` (name or ARN) in `crate::state`, refuses a
+//! cluster that does not exist with the modelled `ResourceNotFound`, and otherwise starts
+//! the soft reboot of each node the request names — reporting the identifiers whose reboot
+//! it initiated in `Successful`/`SuccessfulNodeLogicalIds` IN THE ORDER THE REQUEST LISTED
+//! THEM, and a node it cannot reboot in `Failed`/`FailedNodeLogicalIds` with the modelled
+//! per-node error code rather than failing the whole batch — while a request NONE of whose
+//! identifiers names a node of the cluster is refused outright. This is the ONLY file to
+//! touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -134,6 +133,79 @@ impl From<BatchRebootClusterNodesErrorModeled> for BatchRebootClusterNodesError 
     }
 }
 
+/// `BatchRebootClusterNodesErrorCode`'s members this operation can report, from the
+/// model's enum of the same name (both failure lists target it).
+///
+/// The remaining member, `InternalServerError`, reports a fault inside the service while
+/// it processed one node; nothing here faults, so nothing reports it.
+const ERROR_INSTANCE_ID_NOT_FOUND: &str = "InstanceIdNotFound";
+/// See [`ERROR_INSTANCE_ID_NOT_FOUND`].
+const ERROR_INVALID_INSTANCE_STATUS: &str = "InvalidInstanceStatus";
+/// See [`ERROR_INSTANCE_ID_NOT_FOUND`].
+const ERROR_INSTANCE_ID_IN_USE: &str = "InstanceIdInUse";
+
+/// The most nodes one call may reboot: "You can reboot up to 25 nodes in a single
+/// request."
+///
+/// The bound is on the nodes the request NAMES, so the two identifier lists count
+/// together — the model bounds each of them at 25 on its own, which a request naming both
+/// can satisfy while naming fifty nodes.
+const REBOOT_BATCH_MAX: usize = 25;
+
+/// How a per-node failure is worded, from `BatchRebootClusterNodesErrorCode`'s own account
+/// of each code. The instance-id list and the logical-id list name their subject as the
+/// model's two error shapes document it — an "instance" for the first, a "node" for the
+/// second — so a caller reads the failure in the terms it asked in. The two not-found
+/// sentences are worded from `crate::state`, where the condition the batch node operations
+/// share is stated, so none of them words it on its own.
+const MESSAGE_INSTANCE_NOT_FOUND: &str = crate::state::INSTANCE_NOT_IN_CLUSTER;
+/// See [`MESSAGE_INSTANCE_NOT_FOUND`].
+const MESSAGE_NODE_NOT_FOUND: &str = crate::state::NODE_NOT_IN_CLUSTER;
+/// See [`MESSAGE_INSTANCE_NOT_FOUND`].
+const MESSAGE_INSTANCE_INVALID_STATUS: &str = "The instance is in a state that does not \
+     allow rebooting. Wait for the instance to finish any ongoing changes before retrying.";
+/// See [`MESSAGE_INSTANCE_NOT_FOUND`].
+const MESSAGE_NODE_INVALID_STATUS: &str = "The node is in a state that does not allow \
+     rebooting. Wait for the node to finish any ongoing changes before retrying.";
+/// See [`MESSAGE_INSTANCE_NOT_FOUND`]: the one condition every batch node operation
+/// describes, worded from `crate::state` so none of them words it on its own.
+const MESSAGE_IN_USE: &str = crate::state::NODE_OPERATION_IN_FLIGHT_MESSAGE;
+
+/// How this operation refuses a request NONE of whose identifiers names a node of the
+/// cluster: the one shape every batch node operation refuses, worded from `crate::state`
+/// so none of them words it on its own. A node deleted since the caller listed it is the
+/// recorded instance of that shape.
+const MESSAGE_NONE_EXIST: &str = crate::state::ALL_NODES_MISSING;
+
+/// What this call did with the node one identifier named.
+enum Outcome {
+    /// The node's reboot was initiated, so the identifier is reported as successful.
+    Rebooted,
+    /// No node of the cluster answers to the identifier.
+    NotFound,
+    /// Another operation is already in flight on the node.
+    InUse,
+    /// The node is mid-change, so it cannot take a reboot right now.
+    InvalidStatus,
+}
+
+/// Start the reboot of the node an identifier resolved to, when its state admits one, and
+/// answer what this call reports for that identifier.
+///
+/// The ONE decision both identifier lists are classified by, so the same node named by its
+/// instance id and by its logical id is never judged two different ways.
+fn reboot(node: Option<&mut crate::state::ClusterNode>, now: ::std::time::SystemTime) -> Outcome {
+    match node {
+        None => Outcome::NotFound,
+        Some(node) if node.operation_in_flight() => Outcome::InUse,
+        Some(node) if !node.accepts_reboot() => Outcome::InvalidStatus,
+        Some(node) => {
+            node.begin_reboot(now);
+            Outcome::Rebooted
+        }
+    }
+}
+
 /// The `BatchRebootClusterNodes` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -170,18 +242,149 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `BatchRebootClusterNodes` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(BatchRebootClusterNodesErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("BatchRebootClusterNodes"))
+        let state = crate::state::service_state(&*self.engine)
+            .ok_or_else(|| crate::scaffolded::Scaffolded::validation(crate::state::NO_STATE))?;
+
+        // Documented on both identifier members: "Either NodeIds or NodeLogicalIds must be
+        // provided (or both), but at least one is required." A request naming neither names
+        // no node to reboot — a combination the model cannot express, so the service is
+        // what refuses it.
+        let BatchRebootClusterNodesInput {
+            cluster_name,
+            node_ids,
+            node_logical_ids,
+        } = input;
+        let node_ids = node_ids.unwrap_or_default();
+        let logical_ids = node_logical_ids.unwrap_or_default();
+        if node_ids.is_empty() && logical_ids.is_empty() {
+            return Err(crate::scaffolded::Scaffolded::validation(
+                "Either NodeIds or NodeLogicalIds must be provided.",
+            ));
+        }
+        if node_ids.len() + logical_ids.len() > REBOOT_BATCH_MAX {
+            return Err(crate::scaffolded::Scaffolded::validation(format!(
+                "You can reboot up to {REBOOT_BATCH_MAX} nodes in a single request."
+            )));
+        }
+
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+        // The cluster is this call's subject, so a name or ARN this account holds no
+        // cluster for is the modelled `ResourceNotFound` and no node is rebooted — the
+        // top-level refusal, above the per-node failure lists, which report only about
+        // nodes of a cluster that exists.
+        let Some(cluster) = store.cluster_by_name_or_arn_mut(&cluster_name) else {
+            return Err(BatchRebootClusterNodesErrorModeled::ResourceNotFound(ResourceNotFound {
+                message: Some(crate::state::cluster_not_found(&cluster_name)),
+            })
+            .into());
+        };
+        // Transitions the clock already owes this cluster and its nodes, so the state this
+        // call decides against is the one a describe would report at the same instant: a
+        // node whose provisioning, replacement or earlier reboot is already due is
+        // rebootable.
+        cluster.settle_status(now);
+        for node in cluster.nodes.values_mut() {
+            node.settle_status(now);
+        }
+        // A cluster being torn down takes no node change: its instances are going away with
+        // it, so nothing is rebooted and the request is refused for the cluster's status
+        // rather than reporting a restart of instances that are being terminated.
+        if !cluster.accepts_node_changes() {
+            return Err(crate::scaffolded::Scaffolded::validation(
+                crate::state::cluster_rejects_node_change(&cluster.arn),
+            ));
+        }
+
+        // Both lists are walked IN REQUEST ORDER and answered in that order: the response
+        // lists carry the identifiers the request listed, so a caller can line its request
+        // up against the answer without re-sorting it.
+        let mut successful: Vec<String> = Vec::new();
+        let mut failed: Vec<BatchRebootClusterNodesError2> = Vec::new();
+        // How many of the request's identifiers named no node of this cluster at all,
+        // which decides the all-or-nothing refusal below.
+        let mut missing = 0usize;
+        for node_id in &node_ids {
+            // An `InstanceId` names the node that RUNS on that instance, which is the only
+            // node this identifier can reboot.
+            let (error_code, message) = match reboot(cluster.node_by_instance_id_mut(node_id), now) {
+                Outcome::Rebooted => {
+                    successful.push(node_id.clone());
+                    continue;
+                }
+                Outcome::NotFound => {
+                    missing += 1;
+                    (ERROR_INSTANCE_ID_NOT_FOUND, MESSAGE_INSTANCE_NOT_FOUND)
+                }
+                Outcome::InUse => (ERROR_INSTANCE_ID_IN_USE, MESSAGE_IN_USE),
+                Outcome::InvalidStatus => {
+                    (ERROR_INVALID_INSTANCE_STATUS, MESSAGE_INSTANCE_INVALID_STATUS)
+                }
+            };
+            failed.push(BatchRebootClusterNodesError2 {
+                node_id: node_id.clone(),
+                error_code: error_code.to_string(),
+                message: message.to_string(),
+            });
+        }
+
+        let mut successful_logical: Vec<String> = Vec::new();
+        let mut failed_logical: Vec<BatchRebootClusterNodeLogicalIdsError> = Vec::new();
+        for logical_id in &logical_ids {
+            // A `NodeLogicalId` is the node's own key, the identifier that "persists
+            // throughout the node's lifecycle", so it resolves a node that has no instance
+            // id yet.
+            let (error_code, message) = match reboot(cluster.nodes.get_mut(logical_id), now) {
+                Outcome::Rebooted => {
+                    successful_logical.push(logical_id.clone());
+                    continue;
+                }
+                Outcome::NotFound => {
+                    missing += 1;
+                    (ERROR_INSTANCE_ID_NOT_FOUND, MESSAGE_NODE_NOT_FOUND)
+                }
+                Outcome::InUse => (ERROR_INSTANCE_ID_IN_USE, MESSAGE_IN_USE),
+                Outcome::InvalidStatus => (ERROR_INVALID_INSTANCE_STATUS, MESSAGE_NODE_INVALID_STATUS),
+            };
+            failed_logical.push(BatchRebootClusterNodeLogicalIdsError {
+                node_logical_id: logical_id.clone(),
+                error_code: error_code.to_string(),
+                message: message.to_string(),
+            });
+        }
+
+        // A request EVERY identifier of which names no node of the cluster — a client
+        // working from a node list a delete has already made stale, say — asked for nothing
+        // this call can do, so it is refused rather than answered with a 200 whose every
+        // entry is a failure. Nothing was mutated on the way here, since every identifier
+        // resolved to no node.
+        if missing == node_ids.len() + logical_ids.len() {
+            return Err(crate::scaffolded::Scaffolded::validation(MESSAGE_NONE_EXIST));
+        }
+
+        // Whether this call changed the cluster at all: a batch whose every identifier
+        // landed in a failure list rebooted nothing.
+        let rebooted = !successful.is_empty() || !successful_logical.is_empty();
+        let answer = BatchRebootClusterNodesOutput {
+            // `Successful` and `SuccessfulNodeLogicalIds` are modelled from a minimum
+            // length of one, so a call that accepted no identifier of that kind reports no
+            // list rather than an empty one.
+            successful: (!successful.is_empty()).then_some(successful),
+            successful_node_logical_ids: (!successful_logical.is_empty())
+                .then_some(successful_logical),
+            // The failure lists report what the request asked about: each is present when
+            // the request carried that kind of identifier, empty when every one of them was
+            // accepted. `FailedNodeLogicalIds` documents exactly that ("only present when
+            // NodeLogicalIds were provided in the request").
+            failed: (!node_ids.is_empty()).then_some(failed),
+            failed_node_logical_ids: (!logical_ids.is_empty()).then_some(failed_logical),
+        };
+        let arn = cluster.arn.clone();
+        drop(store);
+
+        if rebooted {
+            crate::state::record_state_change(Self::NAME, &arn, ctx);
+        }
+        Ok(answer)
     }
 }

@@ -23,7 +23,7 @@
 //!   and so is one naming a cluster this account does not hold.
 
 use std::collections::BTreeSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -33,6 +33,14 @@ use crate::inference_deployment_lifecycle::{error_code, message, str_field, Emul
 /// cluster its instances, and a replaced node its fresh hardware, by the time the next
 /// call runs.
 pub(crate) const PAST_SETTLE_DUE: Duration = Duration::from_millis(600);
+
+/// How long a poll loop keeps looking for a transition the clock owes before giving up:
+/// far more room than the span itself, so a slow or loaded host cannot decide a case.
+/// Nothing is asserted about how long a transition actually took.
+pub(crate) const SETTLE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How often a poll loop looks again while it waits for the condition it is waiting on.
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// The per-node failure messages, as `BatchReplaceClusterNodesErrorCode` accounts for each
 /// code (smithy_query shape=BatchReplaceClusterNodesError,
@@ -112,6 +120,10 @@ pub(crate) async fn nodes_of(emulator: &Emulator, cluster: &str) -> Vec<Node> {
 
 /// Create `cluster` holding one instance group per `(name, type, count)` row, wait for the
 /// instances its groups asked for, and answer its `ClusterArn` beside its nodes.
+///
+/// The instances come up WITH the cluster, so the nodes exist only once the
+/// `Creating` -> `InService` transition the clock owes has fallen due: that CONDITION is
+/// polled for rather than waited out, so no case depends on how fast the host runs.
 pub(crate) async fn in_service_cluster(
     emulator: &Emulator,
     cluster: &str,
@@ -128,21 +140,24 @@ pub(crate) async fn in_service_cluster(
         )
         .await;
     let arn = str_field(&created, "ClusterArn");
-    // The groups' instances come up with the cluster, so the nodes exist only once the
-    // `Creating` -> `InService` transition the clock owes has fallen due.
-    tokio::time::sleep(PAST_SETTLE_DUE).await;
-    let nodes = nodes_of(emulator, cluster).await;
     let expected: i64 = groups.iter().map(|(_, _, count)| *count).sum();
-    assert_eq!(
-        i64::try_from(nodes.len()).expect("a node count that fits"),
-        expected,
-        "case {cluster}: the cluster must hold the instances its groups asked for, got {nodes:?}"
-    );
-    (arn, nodes)
+    let deadline = Instant::now() + SETTLE_DEADLINE;
+    loop {
+        let nodes = nodes_of(emulator, cluster).await;
+        if i64::try_from(nodes.len()).expect("a node count that fits") == expected {
+            return (arn, nodes);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "case {cluster}: the cluster must hold the {expected} instances its groups asked \
+             for, got {nodes:?}"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
 }
 
 /// The `NodeDetails` `DescribeClusterNode` replays for the node `logical_id` names.
-async fn describe(emulator: &Emulator, cluster: &str, logical_id: &str) -> Value {
+pub(crate) async fn describe(emulator: &Emulator, cluster: &str, logical_id: &str) -> Value {
     let described = emulator
         .ok(
             "DescribeClusterNode",

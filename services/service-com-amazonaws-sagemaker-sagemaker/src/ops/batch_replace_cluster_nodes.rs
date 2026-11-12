@@ -168,10 +168,12 @@ const REPLACE_BATCH_MAX: usize = 25;
 /// How a per-node failure is worded, from `BatchReplaceClusterNodesErrorCode`'s own
 /// account of each code. The instance-id list and the logical-id list name their subject
 /// as the model's two error shapes document it — an "instance" for the first, a "node" for
-/// the second — so a caller reads the failure in the terms it asked in.
-const MESSAGE_INSTANCE_NOT_FOUND: &str = "The instance does not exist in the specified cluster.";
+/// the second — so a caller reads the failure in the terms it asked in. The two not-found
+/// sentences are worded from `crate::state`, where the condition the batch node operations
+/// share is stated, so none of them words it on its own.
+const MESSAGE_INSTANCE_NOT_FOUND: &str = crate::state::INSTANCE_NOT_IN_CLUSTER;
 /// See [`MESSAGE_INSTANCE_NOT_FOUND`].
-const MESSAGE_NODE_NOT_FOUND: &str = "The node does not exist in the specified cluster.";
+const MESSAGE_NODE_NOT_FOUND: &str = crate::state::NODE_NOT_IN_CLUSTER;
 /// See [`MESSAGE_INSTANCE_NOT_FOUND`].
 const MESSAGE_INSTANCE_INVALID_STATUS: &str = "The instance is in a state that does not \
      allow replacement. Wait for the instance to finish any ongoing changes before \
@@ -188,9 +190,9 @@ const MESSAGE_IN_USE: &str = crate::state::NODE_OPERATION_IN_FLIGHT_MESSAGE;
 /// The per-node failure lists report the nodes a call could not replace ALONGSIDE the ones
 /// it could; a request that names no node the cluster holds asked for nothing this call
 /// can do, so it is refused outright instead of answering a 200 whose every entry is a
-/// failure. Fixed text with no variable part: the request named nothing to report about.
-const MESSAGE_NONE_EXIST: &str =
-    "All provided nodes do not exist. Please check the input and try again.";
+/// failure. Worded from `crate::state`, where the one shape the batch node operations all
+/// refuse is stated, so none of them words it on its own.
+const MESSAGE_NONE_EXIST: &str = crate::state::ALL_NODES_MISSING;
 
 /// What this call did with the node one identifier named.
 enum Outcome {
@@ -212,7 +214,7 @@ enum Outcome {
 fn replace(node: Option<&mut crate::state::ClusterNode>, now: ::std::time::SystemTime) -> Outcome {
     match node {
         None => Outcome::NotFound,
-        Some(node) if node.is_replacing() => Outcome::InUse,
+        Some(node) if node.operation_in_flight() => Outcome::InUse,
         Some(node) if !node.accepts_replacement() => Outcome::InvalidStatus,
         Some(node) => {
             node.begin_replacement(now);

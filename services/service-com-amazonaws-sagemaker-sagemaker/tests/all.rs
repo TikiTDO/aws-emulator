@@ -276,6 +276,8 @@ mod hyperpod_cluster_deletion;
 mod hyperpod_cluster_node_replacement;
 #[path = "all/hyperpod_cluster_node_deletion.rs"]
 mod hyperpod_cluster_node_deletion;
+#[path = "all/hyperpod_cluster_node_reboot.rs"]
+mod hyperpod_cluster_node_reboot;
 #[path = "all/hyperpod_node_identity_reporting.rs"]
 mod hyperpod_node_identity_reporting;
 #[path = "all/hyperpod_slurm_node_convergence.rs"]
