@@ -21,7 +21,9 @@
 //! 4. CANCELLING: "you can only cancel a report while it has the running status. Reports
 //!    with other statuses (complete, cancelled, or error) can't be canceled" — a running
 //!    report is cancelled and answers `true`, and a cancelled or completed one is refused
-//!    `IncorrectState`;
+//!    `IncorrectState`; the cancel moves exactly the report its id names, so every other
+//!    report the organization holds is left where it was, and the word it leaves is what
+//!    every later reader of that report answers;
 //! 5. THE ID: a report id this service cannot resolve is refused — the summary reports every
 //!    one not found, and the cancel tells a value that does not carry the `report-` prefix
 //!    every report id has (`InvalidDeclarativePoliciesReportId.Malformed`) from one that does
@@ -48,7 +50,7 @@ use service_com_amazonaws_ec2_amazonec2 as ec2;
 use smithy_server_runtime::MultiServiceRouter;
 
 use super::ec2_query::{as_timestamp, call, error_code, error_message, member};
-use super::wire::{Param, param};
+use super::wire::{Param, child_text, document, param, set_items};
 
 /// The Region every call here is signed for; a report is a resource of the organization, so
 /// the Region only selects the ec2Query envelope.
@@ -664,5 +666,149 @@ async fn a_dry_run_answers_the_probe_and_changes_nothing() {
         stored_status(&engine, &report_id).as_deref(),
         Some(REPORT_STATE_RUNNING),
         "a probe must cancel nothing"
+    );
+}
+
+/// The status each report the organization holds is REPORTED with, by report id, read through
+/// `DescribeDeclarativePoliciesReports` — the reader of the whole set, so a status a cancel
+/// wrote is checked where a caller would see it rather than only in the store.
+async fn reported_statuses(
+    router: &MultiServiceRouter,
+    case: &str,
+) -> std::collections::BTreeMap<String, Option<String>> {
+    let (status, body) = call(
+        router,
+        REGION,
+        "DescribeDeclarativePoliciesReports",
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "case {case:?}: DescribeDeclarativePoliciesReports must succeed, got {status}: {body}"
+    );
+    let parsed = document(case, &body);
+    set_items(parsed.root_element(), "reportSet")
+        .into_iter()
+        .map(|item| {
+            (
+                child_text(item, "reportId").unwrap_or_else(|| {
+                    panic!("case {case:?}: every reported report must name its id: {body}")
+                }),
+                child_text(item, "status"),
+            )
+        })
+        .collect()
+}
+
+/// RULE 4, across a SET of reports: the cancel moves exactly the report its id names, and only
+/// out of `running` — so the other reports the organization holds keep the status they had,
+/// and each report's word is what every later reader answers.
+#[tokio::test]
+async fn a_cancel_moves_only_the_report_its_id_names() {
+    let (router, engine) = emulator();
+
+    // Three reports, each of a different target form and each started over the wire: "only one
+    // report per organization can be generated at a time", so each start waits for the one
+    // before it to have left `running` — the first by the clock, the second by a cancel.
+    let completed = started(&router, "a completed report", TARGETS[0].1).await;
+    past_the_generation().await;
+    let already_cancelled = started(&router, "an already cancelled report", TARGETS[1].1).await;
+    let (status, body) = cancel(&router, &already_cancelled, &[]).await;
+    assert_eq!(
+        status, 200,
+        "an already cancelled report: expected HTTP 200 from the first cancel, got {status}: {body}"
+    );
+    let running = started(&router, "a running report", TARGETS[2].1).await;
+
+    // The cancel of the running report is the ONE move under test.
+    let (status, body) = cancel(&router, &running, &[]).await;
+    assert_eq!(
+        status, 200,
+        "a running report: expected HTTP 200, got {status} with body {body}"
+    );
+    assert_eq!(
+        member(&body, "return").as_deref(),
+        Some("true"),
+        "a running report: expected the cancel to answer true, got {body}"
+    );
+
+    // Rows differ in the status the report had when that cancel ran: the one it named, one the
+    // clock had completed, and one an earlier cancel had already stopped.
+    let rows: [(&str, &String, &str); 3] = [
+        ("the report the cancel named", &running, REPORT_STATE_CANCELLED),
+        ("a report the clock completed", &completed, REPORT_STATE_COMPLETE),
+        (
+            "a report an earlier cancel stopped",
+            &already_cancelled,
+            REPORT_STATE_CANCELLED,
+        ),
+    ];
+
+    let reported = reported_statuses(&router, "after the cancel").await;
+    assert_eq!(
+        reported.len(),
+        3,
+        "the organization holds all three reports, got {reported:?}"
+    );
+    for (case, report_id, expected) in rows {
+        assert_eq!(
+            stored_status(&engine, report_id).as_deref(),
+            Some(expected),
+            "case {case:?}: expected the stored status {expected:?} for {report_id}"
+        );
+        assert_eq!(
+            reported.get(report_id.as_str()).and_then(Option::as_deref),
+            Some(expected),
+            "case {case:?}: expected the describe to report {expected:?}, got {reported:?}"
+        );
+        let body = summarised(&router, case, report_id).await;
+        assert!(
+            member(&body, "endTime")
+                .as_deref()
+                .and_then(as_timestamp)
+                .is_some(),
+            "case {case:?}: a generation that has ended reports when it did, got {body}"
+        );
+
+        // None of the three is running any more, so every one of them refuses a cancel now,
+        // and the refusal names the id and the status it found.
+        let (status, body) = cancel(&router, report_id, &[]).await;
+        assert_eq!(
+            status, 400,
+            "case {case:?}: expected HTTP 400 cancelling a {expected} report, got {status}: {body}"
+        );
+        assert_eq!(
+            error_code(&body),
+            "IncorrectState",
+            "case {case:?}: expected IncorrectState, got {body}"
+        );
+        let message = error_message(&body);
+        assert!(
+            message.contains(report_id.as_str()) && message.contains(expected),
+            "case {case:?}: expected the refusal to name {report_id} and {expected}, got {message:?}"
+        );
+        assert_eq!(
+            stored_status(&engine, report_id).as_deref(),
+            Some(expected),
+            "case {case:?}: a refused cancel must leave the report where it was"
+        );
+    }
+
+    // The completion the clock owed the cancelled reports never happens, and the refused
+    // cancels left the completed one alone.
+    past_the_generation().await;
+    let reported = reported_statuses(&router, "a span after the cancel").await;
+    for (case, report_id, expected) in rows {
+        assert_eq!(
+            reported.get(report_id.as_str()).and_then(Option::as_deref),
+            Some(expected),
+            "case {case:?}: expected {expected:?} a span later as well, got {reported:?}"
+        );
+    }
+    assert_eq!(
+        stored_count(&engine),
+        3,
+        "cancelling removes no report: all three are still held"
     );
 }
