@@ -342,11 +342,15 @@ pub fn bad_request(message: impl Into<String>) -> BadRequestException {
     }
 }
 
-/// The modelled 404 `NotFoundException`, carrying `message`.
-pub fn not_found(message: impl Into<String>) -> NotFoundException {
+/// The modelled 404 `NotFoundException`.
+///
+/// Takes NO message on purpose: this service words every absent-resource refusal with
+/// the one [`NOT_FOUND_MESSAGE`], so no handler can compose a per-resource sentence or
+/// copy an identifier out of the request into the error body.
+pub fn not_found() -> NotFoundException {
     NotFoundException {
         code: Some(ERROR_CODE_NOT_FOUND.to_string()),
-        message: Some(message.into()),
+        message: Some(NOT_FOUND_MESSAGE.to_string()),
         request_id: Some(next_request_id()),
     }
 }
@@ -379,11 +383,13 @@ pub fn forbidden(message: impl Into<String>) -> ForbiddenException {
 /// variable parts — it names neither the account, the pipeline nor the task.
 pub const VOICE_ANALYTICS_NOT_ENABLED_MESSAGE: &str = "AWS account is not enabled";
 
-/// The `message` this service's `NotFoundException` carries.
+/// The `message` this service's `NotFoundException` carries, on every operation and for
+/// every resource kind it can report absent.
 ///
 /// The model states no text for it, so this is RECORDED behaviour: one fixed string for
-/// every operation and every resource kind, with no variable parts — in particular it
-/// echoes NO identifier from the request.
+/// every operation and every resource kind, with no variable parts — no resource-kind
+/// noun, no name, no id, no ARN. In particular it echoes NO identifier from the request,
+/// so a caller's identifier never appears in a 404 body.
 pub const NOT_FOUND_MESSAGE: &str = "Unable to find the requested identifier";
 
 /// The modelled 400 `ResourceLimitExceededException`, carrying `message`.
@@ -413,13 +419,6 @@ pub fn conflict(message: impl Into<String>) -> ConflictException {
 
 /// The `message` a refused pagination token is reported with.
 pub const INVALID_NEXT_TOKEN_MESSAGE: &str = "The next-token value is not a valid pagination token.";
-
-/// `NotFoundException`'s payload for a tagging call whose `ResourceARN` names no resource
-/// this service holds. Read by all three generic tagging operations, so the three cannot
-/// word one refusal three ways.
-pub fn tagged_resource_not_found(resource_arn: &str) -> NotFoundException {
-    not_found(format!("resource {resource_arn} does not exist"))
-}
 
 /// The message a tagging call that would take a resource past
 /// [`MAX_TAGS_PER_RESOURCE`] tags is refused with; `requested` is how many tags the

@@ -189,10 +189,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         Err(GetMediaPipelineErrorModeled::NotFoundException(
-            crate::state::not_found(format!(
-                "No media pipeline with the ID {} exists.",
-                input.media_pipeline_id
-            )),
+            crate::state::not_found(),
         )
         .into())
     }

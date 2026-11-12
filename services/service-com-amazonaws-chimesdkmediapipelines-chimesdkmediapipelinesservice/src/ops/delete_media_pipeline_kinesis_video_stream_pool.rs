@@ -198,10 +198,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(arn) = removed_arn else {
             return Err(
                 DeleteMediaPipelineKinesisVideoStreamPoolErrorModeled::NotFoundException(
-                    crate::state::not_found(format!(
-                        "No Kinesis Video Stream pool identified by {} exists.",
-                        input.identifier
-                    )),
+                    crate::state::not_found(),
                 )
                 .into(),
             );

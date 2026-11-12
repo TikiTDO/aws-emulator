@@ -164,10 +164,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let Some(pipeline) = store.capture_pipeline(&input.media_pipeline_id) else {
             return Err(GetMediaCapturePipelineErrorModeled::NotFoundException(
-                crate::state::not_found(format!(
-                    "No media capture pipeline with the ID {} exists.",
-                    input.media_pipeline_id
-                )),
+                crate::state::not_found(),
             )
             .into());
         };

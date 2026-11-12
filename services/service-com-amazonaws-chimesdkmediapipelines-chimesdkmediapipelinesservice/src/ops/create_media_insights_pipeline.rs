@@ -204,10 +204,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .map(|configuration| configuration.arn.clone())
         else {
             return Err(CreateMediaInsightsPipelineErrorModeled::NotFoundException(
-                crate::state::not_found(format!(
-                    "No media insights pipeline configuration identified by {} exists.",
-                    input.media_insights_pipeline_configuration_arn
-                )),
+                crate::state::not_found(),
             )
             .into());
         };

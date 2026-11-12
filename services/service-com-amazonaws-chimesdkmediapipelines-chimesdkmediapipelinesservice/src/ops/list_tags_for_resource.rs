@@ -159,7 +159,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         if !state.lock().taggable(&input.resource_arn) {
             return Err(ListTagsForResourceErrorModeled::NotFoundException(
-                crate::state::tagged_resource_not_found(&input.resource_arn),
+                crate::state::not_found(),
             )
             .into());
         }

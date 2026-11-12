@@ -196,10 +196,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 speaker_search_task: Some(task.as_modeled()),
             })
             .ok_or_else(|| {
-                GetSpeakerSearchTaskErrorModeled::NotFoundException(crate::state::not_found(
-                    crate::state::NOT_FOUND_MESSAGE,
-                ))
-                .into()
+                GetSpeakerSearchTaskErrorModeled::NotFoundException(crate::state::not_found())
+                    .into()
             })
     }
 }

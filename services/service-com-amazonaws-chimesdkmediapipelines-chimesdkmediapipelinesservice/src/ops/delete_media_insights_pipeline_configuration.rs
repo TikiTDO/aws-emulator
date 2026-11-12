@@ -201,7 +201,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // The identifier resolves a configuration by its name or its ARN; nothing in
         // the store means nothing to delete, which is this operation's modelled 404 and
-        // the normal outcome of a delete-if-exists cleanup path.
+        // the normal outcome of a delete-if-exists cleanup path. The refusal carries this
+        // service's one fixed not-found message, which names no resource and echoes no
+        // part of the requested `Identifier`.
         let removed_arn = {
             let mut store = state.lock();
             let arn = store
@@ -210,10 +212,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             if !store.remove_insights_configuration(&input.identifier) {
                 return Err(
                     DeleteMediaInsightsPipelineConfigurationErrorModeled::NotFoundException(
-                        crate::state::not_found(format!(
-                            "No media insights pipeline configuration identified by {} exists.",
-                            input.identifier
-                        )),
+                        crate::state::not_found(),
                     )
                     .into(),
                 );

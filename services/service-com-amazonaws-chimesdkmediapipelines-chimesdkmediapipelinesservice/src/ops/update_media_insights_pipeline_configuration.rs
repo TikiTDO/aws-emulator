@@ -202,9 +202,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }),
             Err(crate::state::InsightsConfigurationUpdateRefused::NoSuchConfiguration) => Err(
                 UpdateMediaInsightsPipelineConfigurationErrorModeled::NotFoundException(
-                    crate::state::not_found(format!(
-                        "No media insights pipeline configuration identified by {identifier} exists."
-                    )),
+                    crate::state::not_found(),
                 )
                 .into(),
             ),

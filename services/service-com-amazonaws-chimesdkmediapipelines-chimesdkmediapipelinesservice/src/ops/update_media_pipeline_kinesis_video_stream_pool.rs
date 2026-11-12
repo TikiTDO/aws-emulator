@@ -178,10 +178,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(updated) = store.update_stream_pool(&input.identifier, retention, now) else {
             return Err(
                 UpdateMediaPipelineKinesisVideoStreamPoolErrorModeled::NotFoundException(
-                    crate::state::not_found(format!(
-                        "No Kinesis Video Stream pool identified by {} exists.",
-                        input.identifier
-                    )),
+                    crate::state::not_found(),
                 )
                 .into(),
             );

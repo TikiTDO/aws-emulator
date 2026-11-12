@@ -207,10 +207,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // outcome of a not-found probe.
             Err(crate::state::StatusUpdateRefused::NoSuchPipeline) => Err(
                 UpdateMediaInsightsPipelineStatusErrorModeled::NotFoundException(
-                    crate::state::not_found(format!(
-                        "No media insights pipeline identified by {} exists.",
-                        input.identifier
-                    )),
+                    crate::state::not_found(),
                 )
                 .into(),
             ),

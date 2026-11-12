@@ -191,10 +191,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .map(|pipeline| pipeline.media_pipeline_arn.clone());
             if !store.remove_capture_pipeline(&input.media_pipeline_id) {
                 return Err(DeleteMediaCapturePipelineErrorModeled::NotFoundException(
-                    crate::state::not_found(format!(
-                        "No media capture pipeline with the ID {} exists.",
-                        input.media_pipeline_id
-                    )),
+                    crate::state::not_found(),
                 )
                 .into());
             }

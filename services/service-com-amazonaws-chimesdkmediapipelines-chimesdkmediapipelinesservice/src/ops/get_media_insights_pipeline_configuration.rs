@@ -172,10 +172,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }),
             None => Err(
                 GetMediaInsightsPipelineConfigurationErrorModeled::NotFoundException(
-                    crate::state::not_found(format!(
-                        "No media insights pipeline configuration identified by {} exists.",
-                        input.identifier
-                    )),
+                    crate::state::not_found(),
                 )
                 .into(),
             ),

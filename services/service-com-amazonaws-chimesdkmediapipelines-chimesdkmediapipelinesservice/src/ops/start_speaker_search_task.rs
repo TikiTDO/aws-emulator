@@ -219,7 +219,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .map(|pipeline| pipeline.media_pipeline_id.clone())
         else {
             return Err(StartSpeakerSearchTaskErrorModeled::NotFoundException(
-                crate::state::not_found(crate::state::NOT_FOUND_MESSAGE),
+                crate::state::not_found(),
             )
             .into());
         };
