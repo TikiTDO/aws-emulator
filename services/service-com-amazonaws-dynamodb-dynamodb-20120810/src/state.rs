@@ -2201,18 +2201,18 @@ fn units_as_f64(units: i64) -> f64 {
 /// for a resource created with no provisioned capacity at all.
 ///
 /// The pair is STORED rather than derived on every read: it is set when a request names
-/// one and when the resource's provisioned capacity is set ([`Self::tracking_capacity`]),
-/// and WITHDRAWING that capacity leaves it alone — what the resource was keeping warm
-/// stays warm. `Status` is the status of this SETTING, not of the table: `UPDATING` while
-/// an `UpdateTable` that changed it is still in flight, `ACTIVE` once the pair is in
-/// force.
+/// one and RAISED when the resource is provisioned for more capacity than it keeps warm
+/// ([`Self::tracking_capacity`]); a capacity LOWERED or WITHDRAWN leaves it alone — what
+/// the resource was keeping warm stays warm. `Status` is the status of this SETTING, not
+/// of the table: `UPDATING` while an `UpdateTable` that changed it is still in flight,
+/// `ACTIVE` once the pair is in force.
 #[derive(Debug, Clone)]
 pub struct WarmThroughputSettings {
     pub read_units_per_second: i64,
     pub write_units_per_second: i64,
-    /// Whether a REQUEST named this pair. A pair nobody named follows the capacity the
-    /// resource is provisioned for, so provisioning it differently moves the pair along;
-    /// a named one stands until another request names a new one.
+    /// Whether a REQUEST named this pair. A pair nobody named is raised by the capacity
+    /// the resource is provisioned for, so provisioning it for more moves the pair up; a
+    /// named one stands until another request names a new one.
     pub named: bool,
     /// When the clock makes this pair `ACTIVE`. Equal to the creation instant for the
     /// pair a table is created with, so a table never reports a warm throughput that is
@@ -2241,19 +2241,27 @@ impl WarmThroughputSettings {
 
     /// These settings after the resource's provisioned capacity was SET to `provisioned`.
     ///
-    /// A pair nobody named follows the capacity, because warm throughput is "the minimum
-    /// provisioned capacity maintained for immediate data access" (the
-    /// `TableWarmThroughputDescription` doc) — the recorded description of a provisioned
-    /// table and of its index report their own units. A capacity WITHDRAWN (`None`, which
-    /// is what a switch to `PAY_PER_REQUEST` leaves table and index with) changes nothing:
-    /// the capacity that was being kept warm stays warm, so the resource goes on
-    /// reporting the pair last in force rather than the pair a resource created on-demand
-    /// starts with. A named pair is untouched either way.
+    /// Warm throughput is "the minimum provisioned capacity maintained for immediate data
+    /// access" (the `TableWarmThroughputDescription` doc), so it is a FLOOR, and a
+    /// capacity change only ever raises it: a pair nobody named rises, per dimension, to
+    /// the capacity the resource is provisioned for where that is higher — which is the
+    /// pair the recorded description of a table and an index created provisioned report —
+    /// and a capacity that is lower, or WITHDRAWN (`None`, which is what a switch to
+    /// `PAY_PER_REQUEST` leaves table and index with), leaves the pair exactly as it is:
+    /// what was being kept warm stays warm, so the resource goes on reporting the pair
+    /// last in force. That is what the recorded description of a table switched from
+    /// on-demand to a single-digit provisioned capacity reports — the thousands-scale pair
+    /// it was keeping warm, not the capacity it has just been given. A named pair is
+    /// untouched either way.
     pub fn tracking_capacity(&self, provisioned: Option<&ProvisionedThroughput>) -> Self {
         match (self.named, provisioned) {
             (false, Some(capacity)) => Self {
-                read_units_per_second: capacity.read_capacity_units,
-                write_units_per_second: capacity.write_capacity_units,
+                read_units_per_second: self
+                    .read_units_per_second
+                    .max(capacity.read_capacity_units),
+                write_units_per_second: self
+                    .write_units_per_second
+                    .max(capacity.write_capacity_units),
                 ..self.clone()
             },
             _ => self.clone(),

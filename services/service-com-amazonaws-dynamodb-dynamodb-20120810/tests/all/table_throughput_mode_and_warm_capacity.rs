@@ -13,12 +13,12 @@
 //!    the same answer, from `CreateTable`, `DescribeTable`, `UpdateTable` and `DeleteTable`
 //!    alike;
 //! 2. warm throughput is "the minimum provisioned capacity maintained for immediate data
-//!    access" (the `TableWarmThroughputDescription` doc), so a table — and every global
-//!    secondary index on it — keeps warm the capacity it is provisioned for; WITHDRAWING
-//!    that capacity (a switch to `PAY_PER_REQUEST`, which leaves table and indexes with
-//!    none) does not un-warm it, so the pair last in force is what each goes on
-//!    reporting, and provisioning capacity again moves an unnamed pair to the new
-//!    capacity while a pair a request NAMED stands.
+//!    access" (the `TableWarmThroughputDescription` doc), so it is a FLOOR that a capacity
+//!    change only ever RAISES: a table — and every global secondary index on it — keeps
+//!    warm the capacity it is created with, and provisioning MORE capacity later raises an
+//!    unnamed pair per dimension, while withdrawing that capacity (a switch to
+//!    `PAY_PER_REQUEST`, which leaves table and indexes with none) or provisioning LESS
+//!    leaves the pair last in force exactly as it is, and a pair a request NAMED stands.
 //!
 //! Each rule is asserted over a TABLE of inputs spanning what it generalises over: the
 //! mode a table is created in (named either way, or left out), the mode it is switched to
@@ -286,15 +286,19 @@ struct WarmRow {
     /// back to `PROVISIONED`.
     restored_table_capacity: (i64, i64),
     restored_index_capacity: (i64, i64),
-    /// What the table then keeps warm: the new capacity when nobody named a pair, and the
-    /// named pair where a request did name one — a named pair stands until another
-    /// request names a new one.
+    /// What the table then keeps warm: each dimension of the new capacity where it is
+    /// HIGHER than the pair in force, the pair in force where it is not, and the named
+    /// pair where a request did name one — a named pair stands until another request
+    /// names a new one.
     restored_table_warm: (i64, i64),
+    /// The same for its index, which no request here names a pair for.
+    restored_index_warm: (i64, i64),
 }
 
 /// The rows span what the rule generalises over: equal and unequal capacities on the
-/// table and on its index, each dimension moving independently, and a warm pair named in
-/// full, in part or not at all.
+/// table and on its index, each dimension moving independently, a capacity restored above
+/// and below the pair being kept warm, and a warm pair named in full, in part or not at
+/// all.
 const WARM_TABLE: &[WarmRow] = &[
     WarmRow {
         case: "equal capacities, no warm pair named",
@@ -306,7 +310,9 @@ const WARM_TABLE: &[WarmRow] = &[
         index_warm: (5, 5),
         restored_table_capacity: (9, 9),
         restored_index_capacity: (6, 6),
+        // Both dimensions are restored ABOVE the pair being kept warm, so both rise.
         restored_table_warm: (9, 9),
+        restored_index_warm: (6, 6),
     },
     WarmRow {
         case: "capacities differing per level and per dimension",
@@ -318,7 +324,10 @@ const WARM_TABLE: &[WarmRow] = &[
         index_warm: (1, 9),
         restored_table_capacity: (3, 11),
         restored_index_capacity: (8, 1),
-        restored_table_warm: (3, 11),
+        // Only the dimension restored HIGHER than the pair in force moves: the read half
+        // comes back below what the table was keeping warm, which stays warm.
+        restored_table_warm: (7, 11),
+        restored_index_warm: (8, 9),
     },
     WarmRow {
         case: "a warm pair named for the table in full",
@@ -332,6 +341,7 @@ const WARM_TABLE: &[WarmRow] = &[
         restored_index_capacity: (5, 5),
         // The pair the request named stands: no later request named another one.
         restored_table_warm: (24_000, 8_000),
+        restored_index_warm: (5, 5),
     },
     WarmRow {
         case: "a warm pair named only in its read half",
@@ -346,6 +356,7 @@ const WARM_TABLE: &[WarmRow] = &[
         restored_table_capacity: (12, 4),
         restored_index_capacity: (7, 7),
         restored_table_warm: (30_000, 3),
+        restored_index_warm: (7, 7),
     },
 ];
 
@@ -471,8 +482,9 @@ async fn a_withdrawn_provisioned_capacity_leaves_the_warm_throughput_it_kept_in_
             row.index_warm,
         );
 
-        // Provisioning capacity again moves an unnamed pair to the new capacity, at both
-        // levels; a pair a request named stands.
+        // Provisioning capacity again raises an unnamed pair to the new capacity in each
+        // dimension where that is higher, at both levels; a dimension restored lower, and
+        // a pair a request named, stand.
         let restored = ok(
             &router,
             "UpdateTable",
@@ -502,7 +514,7 @@ async fn a_withdrawn_provisioned_capacity_leaves_the_warm_throughput_it_kept_in_
             "the restoring UpdateTable",
             &restored["TableDescription"],
             row.restored_table_warm,
-            row.restored_index_capacity,
+            row.restored_index_warm,
         );
         wait_out_transition();
 
@@ -513,7 +525,7 @@ async fn a_withdrawn_provisioned_capacity_leaves_the_warm_throughput_it_kept_in_
             "DeleteTable",
             &deleted["TableDescription"],
             row.restored_table_warm,
-            row.restored_index_capacity,
+            row.restored_index_warm,
         );
         wait_out_transition();
     }

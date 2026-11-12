@@ -183,6 +183,8 @@ mod scan_filter_value_types_and_segments;
 mod scan_indexes_and_projections;
 #[path = "all/scan_segment_partitions.rs"]
 mod scan_segment_partitions;
+#[path = "all/schema_duplicates_and_capacity_floors.rs"]
+mod schema_duplicates_and_capacity_floors;
 #[path = "all/select_rules_and_policy_resources.rs"]
 mod select_rules_and_policy_resources;
 #[path = "all/result_filter_expressions.rs"]

@@ -486,18 +486,22 @@ async fn last_update_to_pay_per_request_records_when_on_demand_was_last_set() {
         json!("PROVISIONED"),
         "case \"switched back to provisioned\": expected the new mode, got {back}"
     );
-    // Coming back from on-demand SETS initial provisioned values ("initial provisioned
-    // capacity values must be set" — `UpdateTable$BillingMode`) rather than raising
-    // existing ones, so it is no increase; the day's decrease count stands.
+    // Coming back from on-demand raises the capacity the table REPORTS from zero ("on-demand
+    // mode does not use provisioned throughput" — `ProvisionedThroughputDescription`), so it
+    // is an increase and is stamped as one; the day's decrease count stands, because
+    // withdrawing capacity never spent one of them.
     let throughput = &back["TableDescription"]["ProvisionedThroughput"];
     assert_eq!(
         (
             throughput["NumberOfDecreasesToday"].clone(),
-            throughput.get("LastIncreaseDateTime").cloned(),
+            throughput
+                .get("LastIncreaseDateTime")
+                .and_then(Value::as_f64)
+                .is_some(),
         ),
-        (json!(0), None),
-        "case \"switched back to provisioned\": expected no counted decrease and no \
-         increase to have been recorded, got {throughput}"
+        (json!(0), true),
+        "case \"switched back to provisioned\": expected no counted decrease and the \
+         increase from zero recorded, got {throughput}"
     );
 }
 

@@ -598,13 +598,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // throughput" — `ProvisionedThroughputDescription$ReadCapacityUnits`). So going
         // on-demand WITHDRAWS the capacity: the reported pair drops to zero, which is the
         // last time it went down, without spending one of the day's counted decreases.
-        // Coming BACK from on-demand is no increase either: it SETS the table's initial
-        // values ("When switching from pay-per-request to provisioned capacity, initial
-        // provisioned capacity values must be set" — `UpdateTable$BillingMode`), and a
-        // value set for the first time has moved from nothing, not up from something.
+        // Coming BACK from on-demand raises the reported pair from that zero, which is an
+        // INCREASE of the capacity the table reports — the instant the recorded
+        // description of such a switch carries under `LastIncreaseDateTime`.
         match (&table.provisioned_throughput, &table_throughput) {
             (Some(_), None) => table.throughput_history.record_capacity_withdrawal(now),
-            (None, Some(_)) => {}
             (before, after) => {
                 let before = crate::state::reported_capacity(before.as_ref());
                 let after = crate::state::reported_capacity(after.as_ref());
@@ -1370,11 +1368,19 @@ fn retained_definitions(
 /// already holds: the sentence is that `AttributeDefinitions` must include the new
 /// index's key elements, so an update that leaves the member out — or leaves one of the
 /// new key attributes out of it — has not declared the index's key, whatever the table
-/// happens to define already. The refusal is the one sentence a key attribute with no
-/// definition is stated with wherever a schema declares one
-/// ([`super::create_table::undefined_schema_keys`]), over the index's own key schema and
-/// the definitions the request declared — the two lists the rule is about.
+/// happens to define already.
+///
+/// WHICH refusal it earns follows from what the request declared. A request that declares
+/// no definition at all states nothing for the two lists to be compared over, so AWS
+/// names the MEMBER that is missing and the index that needed it
+/// ([`definitions_required_message`]) — the wording every member an index of this service
+/// requires is stated with ([`crate::state::index_capacity_required_message`] for its
+/// capacity pair). A request that declares some, but not the index's key attributes, is
+/// told what each of the two lists holds, which is the one sentence a key attribute with
+/// no definition earns wherever a schema declares one
+/// ([`super::create_table::undefined_schema_keys`]).
 fn check_index_definitions(
+    index_name: &str,
     key_schema: &[KeySchemaElement],
     requested_definitions: &[AttributeDefinition],
 ) -> Result<(), crate::state::RequestError> {
@@ -1389,10 +1395,26 @@ fn check_index_definitions(
     {
         return Ok(());
     }
+    if requested_definitions.is_empty() {
+        return Err(crate::state::RequestError::Validation(
+            definitions_required_message(index_name),
+        ));
+    }
     Err(super::create_table::undefined_schema_keys(
         key_schema,
         requested_definitions,
     ))
+}
+
+/// AWS's fixed text for an index this request CREATES whose key attributes the request
+/// declares no `AttributeDefinitions` for at all: the sentence names the member the
+/// request has to carry and the index that needs it, and nothing of the key schema — with
+/// no definition declared there is no list to report.
+fn definitions_required_message(index_name: &str) -> String {
+    format!(
+        "One or more parameter values were invalid: AttributeDefinitions is not specified for \
+         index: {index_name}"
+    )
 }
 
 /// The table's global secondary indexes after the update.
@@ -1446,7 +1468,11 @@ fn resolve_indexes(
                     crate::state::MAX_GLOBAL_SECONDARY_INDEXES
                 )));
             }
-            check_index_definitions(&create.key_schema, requested_definitions)?;
+            check_index_definitions(
+                &create.index_name,
+                &create.key_schema,
+                requested_definitions,
+            )?;
             super::create_table::validated_index_key_schema(
                 &create.index_name,
                 &create.key_schema,
@@ -1551,9 +1577,13 @@ fn resolve_indexes(
                     ));
                 }
             }
-            if let (Some(before), Some(after)) = (&index.provisioned_throughput, &throughput) {
-                index.throughput_history.record(now, before, after);
-            }
+            // One rule for both levels: the move is measured against the capacity the
+            // description REPORTS (0/0 for an index with none), so an index given
+            // capacity it did not have reports that as an increase, exactly as the
+            // table's own move does.
+            let before = crate::state::reported_capacity(index.provisioned_throughput.as_ref());
+            let after = crate::state::reported_capacity(throughput.as_ref());
+            index.throughput_history.record(now, &before, &after);
             index.provisioned_throughput = throughput;
             // An index nobody has named a warm throughput for keeps warm the capacity it
             // is now provisioned for; one the request names it for takes what it asked.

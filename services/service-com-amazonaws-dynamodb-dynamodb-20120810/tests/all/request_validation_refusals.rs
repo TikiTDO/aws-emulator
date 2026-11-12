@@ -493,21 +493,31 @@ async fn an_index_a_request_adds_declares_its_key_attributes() {
             continue;
         }
         let stated = refusal(&router, case, "UpdateTable", request).await;
-        // AWS's sentence for a key attribute with no definition names BOTH lists: the
-        // index's whole key schema, and the attributes the request declared.
         let keys: Vec<String> = schema_names
             .iter()
             .map(|element| element["AttributeName"].as_str().unwrap_or_default().to_string())
             .collect();
-        assert_eq!(
-            stated,
+        // WHICH refusal it earns follows from what the request DECLARED. A request that
+        // declares no definition at all states nothing for the two lists to be compared
+        // over, so AWS names the MEMBER that is missing and the index that needed it; one
+        // that declares some names both lists — the index's whole key schema, and the
+        // attributes the request declared.
+        let expected = if declared_names.is_empty() {
+            format!(
+                "One or more parameter values were invalid: AttributeDefinitions is not \
+                 specified for index: {index}"
+            )
+        } else {
             format!(
                 "One or more parameter values were invalid: Some index key attributes are not \
                  defined in AttributeDefinitions. Keys: [{}], AttributeDefinitions: [{}]",
                 keys.join(", "),
                 declared_names.join(", ")
-            ),
-            "case {case:?}: expected the sentence naming both lists, got {stated:?}"
+            )
+        };
+        assert_eq!(
+            stated, expected,
+            "case {case:?}: expected AWS's refusal for what this request declared, got {stated:?}"
         );
     }
 }

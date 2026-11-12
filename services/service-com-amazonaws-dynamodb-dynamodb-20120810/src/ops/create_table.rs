@@ -900,10 +900,19 @@ fn element_ordinal(position: usize) -> String {
 /// for the sort key" (`CreateTable$KeySchema`) — so one attribute cannot be both, and a
 /// schema that uses it twice leaves one element with nothing of its own to key on.
 ///
-/// DynamoDB states that fact with a fixed sentence per schema KIND, which is what
-/// `duplicated` carries: the recorded refusal for a TABLE's own primary key states the
-/// key-definition sentence ([`UNDEFINED_TABLE_KEY_MESSAGE`]) and the one for a secondary
-/// index names the two roles ([`DUPLICATE_INDEX_KEY_ATTRIBUTE_MESSAGE`]).
+/// DynamoDB states that fact with one fixed sentence, which is what `duplicated` carries,
+/// and which of them it is follows from the COUNT of `AttributeDefinitions` the request
+/// declared against the number of elements the schema has. Fewer definitions than elements
+/// cannot be one per element, so the repeat is told the element left without a definition
+/// ([`KEY_WITHOUT_DEFINITION_MESSAGE`]) — the state a secondary index's key schema is
+/// always in, since the definitions it is resolved against are the ones its OWN elements
+/// name. A TABLE's primary key whose request declared at least as many definitions as it
+/// has elements is the one schema with a check of the two key ROLES, and it names them
+/// ([`DUPLICATE_KEY_ATTRIBUTE_MESSAGE`]); each caller decides that for its own schema.
+///
+/// Every caller settles it AFTER pairing the schema's elements with their definitions, so
+/// a schema that both repeats an attribute and names one `AttributeDefinitions` does not
+/// declare is refused for the key nothing declares.
 fn check_distinct_key_attributes(
     key_schema: &[KeySchemaElement],
     duplicated: &str,
@@ -919,9 +928,10 @@ fn check_distinct_key_attributes(
     Ok(())
 }
 
-/// AWS's fixed text for a SECONDARY INDEX key schema whose partition key and sort key
-/// are one attribute.
-pub(crate) const DUPLICATE_INDEX_KEY_ATTRIBUTE_MESSAGE: &str =
+/// AWS's fixed text for a TABLE's own primary key whose partition key and sort key are
+/// one attribute: the sentence names the two key ROLES the one attribute was given, and
+/// nothing of the attribute or of the table.
+pub(crate) const DUPLICATE_KEY_ATTRIBUTE_MESSAGE: &str =
     "Both the Hash Key and the Range Key element in the KeySchema have the same name";
 
 /// Refuse a key schema whose element at some position does not carry the key type that
@@ -1009,11 +1019,6 @@ pub(crate) fn validated_key_schema(
     // composite, "another KeySchemaElement for the sort key": position 1 holds the only
     // HASH element and position 2, when present, the only RANGE one.
     validated_key_type_order(None, &key_schema, crate::state::MAX_TABLE_PARTITION_KEYS)?;
-    // Each element of the key addresses a DIFFERENT attribute, which is settled over the
-    // SCHEMA before its elements are paired with their definitions: a schema that uses
-    // one attribute twice leaves an element with nothing of its own to key on, which is
-    // the fact DynamoDB states for a TABLE's own key with the sentence below.
-    check_distinct_key_attributes(&key_schema, UNDEFINED_TABLE_KEY_MESSAGE)?;
     // The key attributes of every requested index, collected ONCE: the loop below asks
     // whether each definition is used, and a per-definition scan of every index's key
     // schema would be the product of two request-chosen counts. Both index kinds declare
@@ -1064,7 +1069,7 @@ pub(crate) fn validated_key_schema(
             // secondary index's key schema earns.
             return Err(match every_definition_used {
                 true => crate::state::RequestError::Validation(
-                    UNDEFINED_TABLE_KEY_MESSAGE.to_string(),
+                    KEY_WITHOUT_DEFINITION_MESSAGE.to_string(),
                 ),
                 false => undefined_schema_keys(&key_schema, &definitions),
             });
@@ -1076,6 +1081,27 @@ pub(crate) fn validated_key_schema(
             )));
         }
     }
+    // Every element now resolves to a definition, so what is left to settle is that they
+    // do not all address the SAME attribute. Settled AFTER the definitions, as it is for a
+    // secondary index's key schema ([`validated_index_key_schema`]), so a schema with both
+    // defects is refused for the key nothing declares.
+    //
+    // WHICH sentence a repeat earns follows from the COUNT the request declared: the
+    // number of `AttributeDefinitions` entries it carries, against the number of elements
+    // this schema has. A request that declares fewer definitions than there are key
+    // elements cannot have one per element, so it is told the element left without a
+    // definition ([`KEY_WITHOUT_DEFINITION_MESSAGE`]) — the same sentence an element with
+    // nothing declared for it earns above. A request that declared at least as many is
+    // told what is actually wrong with the schema instead: the table's primary key is the
+    // one schema with a check of the two key ROLES, so it names them. The count is over
+    // the whole declared list, which is the member the rule is about and the one every
+    // schema of the table draws its definitions from.
+    let duplicated = if definitions.len() >= key_schema.len() {
+        DUPLICATE_KEY_ATTRIBUTE_MESSAGE
+    } else {
+        KEY_WITHOUT_DEFINITION_MESSAGE
+    };
+    check_distinct_key_attributes(&key_schema, duplicated)?;
     for definition in &definitions {
         // "Some AttributeDefinitions are not used in any KeySchema": every defined
         // attribute must be consumed by a schema of the table — its own key, the key of
@@ -1415,7 +1441,11 @@ pub(crate) fn validated_index_key_schema(
             )));
         }
     }
-    check_distinct_key_attributes(key_schema, DUPLICATE_INDEX_KEY_ATTRIBUTE_MESSAGE)?;
+    // A secondary index has no two-role check of its own: the attributes its key is
+    // resolved against are the ones its OWN elements name, so a repeat leaves it with
+    // fewer definitions than elements however many the request declared, and that is the
+    // sentence it earns.
+    check_distinct_key_attributes(key_schema, KEY_WITHOUT_DEFINITION_MESSAGE)?;
     Ok(())
 }
 
@@ -1518,10 +1548,13 @@ pub(crate) const THROUGHPUT_WITHOUT_PROVISIONED_MESSAGE: &str =
     "One or more parameter values were invalid: ProvisionedThroughput must be specified when \
      BillingMode is PROVISIONED";
 
-/// AWS's fixed text for a TABLE whose own `KeySchema` names an attribute
-/// `AttributeDefinitions` does not declare — "The attributes in KeySchema must also be
-/// defined in the AttributeDefinitions array" (`CreateTable$KeySchema`).
-pub(crate) const UNDEFINED_TABLE_KEY_MESSAGE: &str =
+/// AWS's fixed text for a key schema left with fewer attribute definitions than it has
+/// elements: a TABLE's own `KeySchema` naming an attribute `AttributeDefinitions` does not
+/// declare — "The attributes in KeySchema must also be defined in the AttributeDefinitions
+/// array" (`CreateTable$KeySchema`) — and a SECONDARY INDEX's key schema that names one
+/// attribute in two of its elements, which leaves one of them with no definition of its
+/// own ([`check_distinct_key_attributes`]). The sentence interpolates nothing.
+pub(crate) const KEY_WITHOUT_DEFINITION_MESSAGE: &str =
     "Invalid KeySchema: Some index key attribute have no definition";
 
 /// AWS's fixed text for a key schema whose partition keys do not all precede its sort
@@ -1540,7 +1573,7 @@ pub(crate) const HASH_AFTER_RANGE_MESSAGE: &str =
 /// the caller which of the two lists to extend — and the definitions are the ones the
 /// request declared. Neither list is in the order the request stated it
 /// ([`hash_table_order`]). A TABLE's own key schema is refused with its own fixed
-/// sentence instead ([`UNDEFINED_TABLE_KEY_MESSAGE`]).
+/// sentence instead ([`KEY_WITHOUT_DEFINITION_MESSAGE`]).
 pub(crate) fn undefined_schema_keys(
     key_schema: &[KeySchemaElement],
     definitions: &[AttributeDefinition],
