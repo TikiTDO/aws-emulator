@@ -3,17 +3,19 @@
 //! A server's ACTIVE host key is one of that server's host-key resources.
 //!
 //! RULE: the key whose fingerprint `DescribeServer` reports as the server's own is a
-//! host key of that server, so `ListHostKeys` enumerates it and `DescribeHostKey` reports
-//! it — whether the service generated it for a server created without one, or the create
+//! host key of that server, so `ListHostKeys` enumerates it and `DescribeHostKey`
+//! reports it — whether the service GENERATED it for a server created without one (an
+//! RSA key, as the service's own documented generation command writes), or the create
 //! supplied it, or an update rotated it. A server therefore never reports a fingerprint
-//! none of its host keys has, which is what lets a client that audits or rotates a
-//! server's keys find the one it is actually serving with.
+//! none of its host keys has, and every key it holds reports the algorithm of its OWN
+//! material: a reader of a generated key sees `ssh-rsa`, a reader of a supplied one sees
+//! what that material is.
 //!
 //! The rows differ along what sets that key: a create that supplies none (the service
-//! generates it), a create that supplies one, and an update that rotates it — and, for the
-//! supplied cases, along the key material itself. A key a caller IMPORTS beside it is
-//! `crate::host_key_lifecycle`'s subject; what this suite asserts is that the server's own
-//! key is in the same collection.
+//! generates it), a create that supplies one, and an update that rotates it — and, for
+//! the supplied cases, along the key material itself. A key a caller IMPORTS beside it is
+//! [`crate::host_key_lifecycle`]'s subject; what this suite asserts is that the server's
+//! own key is in the same collection, under its own algorithm.
 
 use serde_json::{json, Value};
 
@@ -33,6 +35,12 @@ const DOCUMENTED_HOST_KEY_TYPES: [&str; 5] = [
     "ecdsa-sha2-nistp384",
     "ecdsa-sha2-nistp521",
 ];
+
+/// The algorithm of the key the SERVICE generates for a server created without one:
+/// `CreateServer`'s `HostKey` documents `ssh-keygen -t rsa -b 2048 -N "" -m PEM` as the
+/// way to make a host key for a server, and the key the service makes for itself is one
+/// of those.
+const GENERATED_HOST_KEY_TYPE: &str = "ssh-rsa";
 
 /// The fingerprint a server reports as its own.
 async fn active_fingerprint(emulator: &Emulator, case: &str, server_id: &str) -> String {
@@ -82,7 +90,7 @@ async fn assert_active_key_is_a_resource(
     emulator: &Emulator,
     case: &str,
     server_id: &str,
-    expected_type: Option<&str>,
+    expected_type: &str,
 ) -> String {
     let fingerprint = active_fingerprint(emulator, case, server_id).await;
     let entry = listed_with_fingerprint(emulator, case, server_id, &fingerprint).await;
@@ -112,13 +120,11 @@ async fn assert_active_key_is_a_resource(
         "case {case:?}: expected one of the documented host key types \
          {DOCUMENTED_HOST_KEY_TYPES:?}, got {reported_type:?}"
     );
-    if let Some(expected) = expected_type {
-        assert_eq!(
-            reported_type, expected,
-            "case {case:?}: expected the supplied key's own algorithm {expected:?}, got \
-             {reported_type:?}"
-        );
-    }
+    assert_eq!(
+        reported_type, expected_type,
+        "case {case:?}: expected the key's own algorithm {expected_type:?}, got \
+         {reported_type:?}"
+    );
 
     // The same record, read through the other reader.
     let described = emulator
@@ -139,6 +145,11 @@ async fn assert_active_key_is_a_resource(
         Some(fingerprint.as_str()),
         "case {case:?}: expected the described key to report the active fingerprint, got {record}"
     );
+    assert_eq!(
+        member_of(&record, "Type").as_str(),
+        Some(expected_type),
+        "case {case:?}: expected both readers to report the same algorithm, got {record}"
+    );
     assert!(
         member_of(&record, "DateImported").is_number(),
         "case {case:?}: expected a DateImported on the server's own key, got {record}"
@@ -147,43 +158,42 @@ async fn assert_active_key_is_a_resource(
 }
 
 /// RULE (see the module docs): every server's active host key is one of its host keys,
-/// whichever call set it.
+/// whichever call set it, and it reports the algorithm of its own material.
 ///
-/// The rows differ along what set the key: a create carrying no `HostKey` at all, one
-/// carrying generated material, and one carrying different generated material — the
-/// material is what the rule generalises over, so a renamed server is not a row.
+/// The rows differ along what set the key: a create carrying no `HostKey` at all (the
+/// service generates an RSA one), and creates carrying two different generated keys.
 #[tokio::test]
 async fn a_servers_active_host_key_is_one_of_its_host_keys() {
     let emulator = Emulator::new();
 
-    // (case, the CreateServer request, the algorithm the row expects back when the
-    // request supplied the material)
+    // (case, the CreateServer request, the algorithm the row expects back, the
+    // fingerprint it expects when the request supplied the material)
     let (first_material, first_fingerprint) = generated_host_key();
     let (second_material, second_fingerprint) = generated_host_key();
-    let rows: Vec<(&str, Value, Option<String>, Option<String>)> = vec![
+    let rows: Vec<(&str, Value, String, Option<String>)> = vec![
         (
             "a server created with no host key at all",
             json!({}),
-            None,
+            GENERATED_HOST_KEY_TYPE.to_string(),
             None,
         ),
         (
             "a server created with no host key and an explicit SFTP configuration",
             json!({"EndpointType": "PUBLIC", "IdentityProviderType": "SERVICE_MANAGED",
                    "Protocols": ["SFTP"]}),
-            None,
+            GENERATED_HOST_KEY_TYPE.to_string(),
             None,
         ),
         (
             "a server created with supplied host key material",
             json!({"HostKey": &first_material}),
-            Some(host_key_algorithm(&first_material)),
+            host_key_algorithm(&first_material),
             Some(first_fingerprint.clone()),
         ),
         (
             "a server created with other supplied host key material",
             json!({"HostKey": &second_material}),
-            Some(host_key_algorithm(&second_material)),
+            host_key_algorithm(&second_material),
             Some(second_fingerprint.clone()),
         ),
     ];
@@ -198,8 +208,7 @@ async fn a_servers_active_host_key_is_one_of_its_host_keys() {
                  fingerprint {expected:?}, got {reported:?}"
             );
         }
-        assert_active_key_is_a_resource(&emulator, case, &server_id, expected_type.as_deref())
-            .await;
+        assert_active_key_is_a_resource(&emulator, case, &server_id, &expected_type).await;
 
         // The server's own key is the ONLY key it holds before any import: materialising
         // it adds one record, not a second copy of it.
@@ -299,13 +308,14 @@ async fn a_rotation_a_server_has_no_room_for_is_refused() {
         accepted.status, 200,
         "case \"the refused rotation after a delete\": expected UpdateServer 200, got {} \
          with body {}",
-        accepted.status, accepted.body
+        accepted.status,
+        accepted.body
     );
     assert_active_key_is_a_resource(
         &emulator,
         "the refused rotation after a delete",
         &server_id,
-        None,
+        &host_key_algorithm(&material),
     )
     .await;
 }
@@ -321,7 +331,7 @@ async fn rotating_a_servers_host_key_keeps_it_among_its_host_keys() {
         &emulator,
         "the generated key before any rotation",
         &server_id,
-        None,
+        GENERATED_HOST_KEY_TYPE,
     )
     .await;
 
@@ -349,7 +359,7 @@ async fn rotating_a_servers_host_key_keeps_it_among_its_host_keys() {
             &emulator,
             case,
             &server_id,
-            Some(&host_key_algorithm(&material)),
+            &host_key_algorithm(&material),
         )
         .await;
         assert_ne!(

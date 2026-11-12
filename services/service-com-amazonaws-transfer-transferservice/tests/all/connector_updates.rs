@@ -191,11 +191,11 @@ async fn an_update_replaces_the_members_it_names_and_leaves_the_rest() {
             "the other IpAddressType value, and a FIPS policy from the published catalog",
             json!({
                 "IpAddressType": "IPV4",
-                "SecurityPolicyName": "TransferSFTPConnectorSecurityPolicy-FIPS-2023-07",
+                "SecurityPolicyName": "TransferSFTPConnectorSecurityPolicy-FIPS-2024-10",
             }),
             json!({
                 "IpAddressType": "IPV4",
-                "SecurityPolicyName": "TransferSFTPConnectorSecurityPolicy-FIPS-2023-07",
+                "SecurityPolicyName": "TransferSFTPConnectorSecurityPolicy-FIPS-2024-10",
             }),
         ),
         (

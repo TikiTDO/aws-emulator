@@ -405,6 +405,74 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })?;
         let now = ::std::time::Instant::now();
 
+        // The server's HOST KEY, resolved once, here — BEFORE the store is locked: the
+        // key the request supplied, or one generated for this server, as the service
+        // does for a server whose host key it manages. Every property the server reports
+        // about it — the fingerprint, the algorithm a host-key reader reports and the
+        // public half a client connecting to the server is presented with — comes from
+        // REAL key material (`state::read_host_key` / `state::mint_host_key`), never
+        // from the request's text.
+        let supplied = match input.host_key.as_deref() {
+            Some(material) => match st::read_host_key(material) {
+                Some(key) => Some(key),
+                // Material the emulator cannot read is REFUSED rather than replaced by
+                // a key the caller did not supply: a server whose host key is not the
+                // one its create named serves a key no client of it expects. The text
+                // is the service's own fixed one for malformed key material, the same
+                // refusal `ImportHostKey` answers the same material with.
+                None => {
+                    return Err(CreateServerErrorModeled::InvalidRequestException(
+                        InvalidRequestException {
+                            message: st::INVALID_HOST_KEY_FORMAT.to_string(),
+                        },
+                    )
+                    .into())
+                }
+            },
+            None => None,
+        };
+        // Generating a host key is hundreds of milliseconds of CPU, so it runs on the
+        // blocking pool with the store lock NOT YET taken: `spawn_blocking(..).await` is
+        // a real await point, so one key cannot starve the worker that serves health
+        // checks and every other request, and no other request waits on the store while
+        // it runs. The same construct every other service in this workspace mints a key
+        // pair through.
+        let host_key = match supplied.clone() {
+            Some(key) => key,
+            None => match ::tokio::task::spawn_blocking(st::mint_host_key).await {
+                Ok(Some(generated)) => generated,
+                // No key material was produced, or none this service can read, so this
+                // is reported as the server fault it is rather than answered with a
+                // server serving a key of another algorithm than the one the service
+                // makes.
+                Ok(None) => {
+                    return Err(CreateServerErrorModeled::InternalServiceError(
+                        InternalServiceError {
+                            message: "the server's host key could not be generated".to_string(),
+                        },
+                    )
+                    .into())
+                }
+                // A panic or a cancellation on the pool says nothing about the request,
+                // and a server with no host key is not a server this service has, so
+                // this is reported as the server fault it is.
+                Err(error) => {
+                    ::tracing::error!(
+                        operation = Self::NAME,
+                        error = %error,
+                        "the host key generation did not complete"
+                    );
+                    return Err(CreateServerErrorModeled::InternalServiceError(
+                        InternalServiceError {
+                            message: "the server's host key could not be generated"
+                                .to_string(),
+                        },
+                    )
+                    .into());
+                }
+            },
+        };
+
         let mut guard = state.lock();
 
         // The store is BOUNDED: past its capacity a create is refused rather than
@@ -428,19 +496,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let (due, next_state) =
             crate::state::ComAmazonawsTransferTransferserviceState::server_start_due(now);
 
-        // The server's HOST KEY, resolved once, here: the key the request supplied when
-        // the emulator can read it, otherwise one minted for this server, as the
-        // service does for a server whose host key it manages. Every property the
-        // server reports about it — the fingerprint, the algorithm a host-key reader
-        // reports and the public half a client connecting to the server is presented
-        // with — comes from REAL key material (`state::read_host_key` /
-        // `state::mint_host_key`), never from the request's text.
-        let host_key = input
-            .host_key
-            .as_deref()
-            .and_then(st::read_host_key)
-            .unwrap_or_else(st::mint_host_key);
-
         let server = st::Server {
             arn: st::server_arn(&region, &server_id),
             domain,
@@ -461,6 +516,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             pre_authentication_login_banner: input.pre_authentication_login_banner,
             post_authentication_login_banner: input.post_authentication_login_banner,
             host_key_fingerprint: host_key.fingerprint.clone(),
+            host_key_public: host_key.public_key.clone(),
             structured_log_destinations: st::configured_log_destinations(
                 input.structured_log_destinations,
             ),
@@ -480,8 +536,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // materialised into the collection `ListHostKeys` and `DescribeHostKey` read:
         // a client that enumerates a server's keys to audit or rotate them finds the
         // key the server is actually serving with, under the same fingerprint the
-        // server reports. Written under the SAME lock as the server itself, so no read
-        // can see one without the other.
+        // server reports — whether the create supplied it or the service generated it.
+        // Written under the SAME lock as the server itself, so no read can see one
+        // without the other.
         guard.materialise_host_key(&region, &server_id, &host_key);
         drop(guard);
 

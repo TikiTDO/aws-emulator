@@ -368,17 +368,38 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
+        // The host key this update would ROTATE to, read out of the material BEFORE the
+        // store is locked and before anything is written: material the emulator cannot
+        // read is REFUSED rather than dropped, because an update that answered success
+        // while leaving the server serving the key it had is indistinguishable from the
+        // rotation the caller asked for. The text is the service's own fixed one for
+        // malformed key material, the same refusal `ImportHostKey` and `CreateServer`
+        // answer the same material with.
+        let rotation = match input.host_key.as_deref() {
+            Some(material) => match st::read_host_key(material) {
+                Some(key) => Some(key),
+                None => {
+                    return Err(UpdateServerErrorModeled::InvalidRequestException(
+                        InvalidRequestException {
+                            message: st::INVALID_HOST_KEY_FORMAT.to_string(),
+                        },
+                    )
+                    .into())
+                }
+            },
+            None => None,
+        };
+
         let mut guard = state.lock();
 
-        // The host key this update would ROTATE to, read out of the material before
-        // anything is written: the key becomes one of the server's host keys
-        // (`state::materialise_host_key`), and a server's key set is BOUNDED, so a
-        // rotation the server has no room for is refused here rather than applied
-        // without the key it names being readable. A key the server already holds needs
-        // no room — it is the same key. The refusal is the modelled
-        // `InvalidRequestException`, as it is for an import past the same bound, and the
-        // capacity is released by `DeleteHostKey`.
-        let rotation = input.host_key.as_deref().and_then(st::read_host_key);
+        // The key becomes one of the server's host keys
+        // (`state::ComAmazonawsTransferTransferserviceState::materialise_host_key` — the
+        // caller supplied it, so it is one of the keys the server's readers report), and
+        // a server's key set is BOUNDED, so a rotation the server has no room for is
+        // refused here rather than applied without the key it names being readable. A
+        // key the server already holds needs no room — it is the same key. The refusal
+        // is the modelled `InvalidRequestException`, as it is for an import past the
+        // same bound, and the capacity is released by `DeleteHostKey`.
         if let Some(rotating_to) = rotation.as_ref() {
             let holds_it = guard
                 .host_keys_of(&input.server_id)
@@ -543,17 +564,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             stored.ip_address_type = ip_address_type;
         }
         // A readable host key replaces the server's own, so the fingerprint it reports
-        // becomes that key's — and that key is then one of the server's HOST KEYS, on
-        // the rule `state::materialise_host_key` states, so a client enumerating them
-        // still finds the one the server serves with. The room for it was checked above,
+        // and the public half it presents become that key's — and that key, supplied by
+        // the caller, is then one of the server's HOST KEYS, so a client enumerating
+        // them finds the one the server serves with. The room for it was checked above,
         // before anything was written.
-        let rotated = rotation.inspect(|key| {
+        if let Some(key) = rotation.as_ref() {
             stored.host_key_fingerprint = key.fingerprint.clone();
-        });
+            stored.host_key_public = key.public_key.clone();
+        }
 
         let server_id = stored.server_id.clone();
-        if let Some(key) = rotated {
-            guard.materialise_host_key(&region, &server_id, &key);
+        if let Some(key) = rotation.as_ref() {
+            guard.materialise_host_key(&region, &server_id, key);
         }
         drop(guard);
 

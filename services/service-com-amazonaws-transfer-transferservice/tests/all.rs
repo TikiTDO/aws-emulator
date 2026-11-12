@@ -39,6 +39,8 @@ mod error_message_rules;
 // churn settles.
 #[path = "all/workflow_step_contract.rs"]
 mod workflow_step_contract;
+#[path = "all/feature_probe.rs"]
+mod feature_probe;
 #[path = "all/harness.rs"]
 mod harness;
 #[path = "all/host_key_material_formats.rs"]
@@ -187,3 +189,15 @@ mod tag_plane_resource_kinds;
 // store no longer holds has gone, on every plane that could still answer for it.
 #[path = "all/agreement_removal_propagation.rs"]
 mod agreement_removal_propagation;
+// `host_key_scope`, appended for the same reason: WHICH keys of a server the host-key
+// readers report.
+#[path = "all/host_key_scope.rs"]
+mod host_key_scope;
+// `security_policy_publication`, likewise: the published algorithm sets and their order,
+// per policy.
+#[path = "all/security_policy_publication.rs"]
+mod security_policy_publication;
+// `host_key_private_key_containers`, likewise: the private-key containers host key
+// material may arrive in.
+#[path = "all/host_key_private_key_containers.rs"]
+mod host_key_private_key_containers;

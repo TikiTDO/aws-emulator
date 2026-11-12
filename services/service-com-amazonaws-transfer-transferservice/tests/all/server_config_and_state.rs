@@ -377,8 +377,9 @@ async fn a_supplied_host_key_is_the_fingerprint_the_server_reports() {
     );
     assert_well_formed_fingerprint("no HostKey", &json!(reported));
 
-    // Row 5: material the emulator cannot read is no key at all — the call succeeds and
-    // the server keeps the key it has, so the fingerprint it reports does not move.
+    // Row 5: material the emulator cannot read is REFUSED — an update that answered
+    // success while leaving the server serving the key it had would be indistinguishable
+    // from the rotation the caller asked for — and the server keeps the key it has.
     let before = fingerprint_of(&emulator, &minted).await;
     let unreadable = emulator
         .call(
@@ -387,9 +388,12 @@ async fn a_supplied_host_key_is_the_fingerprint_the_server_reports() {
         )
         .await;
     assert_eq!(
-        unreadable.status, 200,
-        "case \"unreadable HostKey\": expected 200, got {} with body {}",
-        unreadable.status, unreadable.body
+        (unreadable.status, unreadable.error_code().as_str()),
+        (400, "InvalidRequestException"),
+        "case \"unreadable HostKey\": expected 400 InvalidRequestException, got {} with \
+         body {}",
+        unreadable.status,
+        unreadable.body
     );
     let after = fingerprint_of(&emulator, &minted).await;
     assert_eq!(
@@ -802,7 +806,7 @@ async fn update_server_changes_only_the_members_it_names() {
                 "IdentityProviderType": "API_GATEWAY",
                 "IdentityProviderDetails": {"Url": "https://example.invalid/auth"},
                 "Certificate": "arn:aws:acm:us-east-1:000000000000:certificate/abcd",
-                "SecurityPolicyName": "TransferSecurityPolicy-FIPS-2024-05",
+                "SecurityPolicyName": "TransferSecurityPolicy-FIPS-2025-03",
             }),
             json!({
                 "S3StorageOptions": {"DirectoryListingOptimization": "ENABLED"},
@@ -812,7 +816,7 @@ async fn update_server_changes_only_the_members_it_names() {
                 "IdentityProviderType": "API_GATEWAY",
                 "IdentityProviderDetails": {"Url": "https://example.invalid/auth"},
                 "Certificate": "arn:aws:acm:us-east-1:000000000000:certificate/abcd",
-                "SecurityPolicyName": "TransferSecurityPolicy-FIPS-2024-05",
+                "SecurityPolicyName": "TransferSecurityPolicy-FIPS-2025-03",
                 "PreAuthenticationLoginBanner": "the updated banner",
             }),
         ),
@@ -834,7 +838,7 @@ async fn update_server_changes_only_the_members_it_names() {
                 "PreAuthenticationLoginBanner": "the updated banner",
                 "Protocols": ["SFTP", "FTPS"],
                 "S3StorageOptions": {"DirectoryListingOptimization": "ENABLED"},
-                "SecurityPolicyName": "TransferSecurityPolicy-FIPS-2024-05",
+                "SecurityPolicyName": "TransferSecurityPolicy-FIPS-2025-03",
                 "Tags": [{"Key": "env", "Value": "dev"}],
             }),
         ),

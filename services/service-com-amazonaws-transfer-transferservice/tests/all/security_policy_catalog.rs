@@ -260,18 +260,21 @@ async fn each_policy_generation_reports_its_own_algorithms() {
             &["chacha20-poly1305@openssh.com"],
             &[],
         ),
-        // 2022-03 narrowed the ciphers to AES.
+        // 2025-03 enables the AES ciphers only, as every generation since 2022 does.
         (
-            "TransferSecurityPolicy-2022-03",
+            "TransferSecurityPolicy-2025-03",
             "SshCiphers",
             &["aes256-gcm@openssh.com"],
             &["chacha20-poly1305@openssh.com"],
         ),
-        // The TLS 1.3 suites arrived with 2023-05 and are in the current default.
+        // The current default enables the AEAD suites and no SHA1 one.
         (
             DEFAULT_SECURITY_POLICY_NAME,
             "TlsCiphers",
-            &["TLS_AES_128_GCM_SHA256", "TLS_AES_256_GCM_SHA384"],
+            &[
+                "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+                "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+            ],
             &["TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA"],
         ),
         // A connector policy reports the host key algorithms a connector accepts.
@@ -413,11 +416,11 @@ async fn the_policy_a_server_carries_is_describable() {
         ("create-time default", json!({})),
         (
             "explicit non-FIPS policy",
-            json!({"SecurityPolicyName": "TransferSecurityPolicy-2022-03"}),
+            json!({"SecurityPolicyName": "TransferSecurityPolicy-2025-03"}),
         ),
         (
             "explicit FIPS policy",
-            json!({"SecurityPolicyName": "TransferSecurityPolicy-FIPS-2024-05"}),
+            json!({"SecurityPolicyName": "TransferSecurityPolicy-FIPS-2025-03"}),
         ),
     ];
 

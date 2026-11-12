@@ -24,8 +24,22 @@ tracing = { workspace = true }
 # Codec for the opaque `NextToken` the List* operations hand out (see `src/state.rs`).
 hex = { workspace = true }
 # OpenSSH key formats: generates a server's host key and computes the Base64 SHA256
-# fingerprint `DescribedServer.HostKeyFingerprint` reports (see `src/state.rs`).
-ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519", "getrandom"] }
+# fingerprint `DescribedServer.HostKeyFingerprint` reports (see `src/state.rs`). The
+# `ecdsa` feature is what lets it read the ECDSA keys `ImportHostKey` documents.
+ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ecdsa", "ed25519", "getrandom"] }
+# Reads the SEC1 DER of an EC private key — the form `ssh-keygen -t ecdsa -m PEM` writes
+# (see `src/state/host_key_material.rs`).
+sec1 = { version = "0.7", default-features = false, features = ["der", "alloc"] }
+# Reads the PKCS#1 DER of a PEM private key — the form `ssh-keygen -m PEM` writes, which
+# is what the documented host-key commands produce — so an RSA host key's algorithm and
+# fingerprint are the key's own (see `src/state/host_key_material.rs`).
+pkcs1 = { version = "0.7", features = ["pem"] }
+# Reads the algorithm identifier of a PKCS#8 private key, which says which kind of key
+# its octets hold (see `src/state/host_key_material.rs`).
+pkcs8 = "0.10"
+# Generates the RSA 2048 host key the service creates for a server whose host key it
+# manages (see `src/state/host_key_material.rs`).
+aws-lc-rs = "1"
 # Decodes the base64 key payload of an `SshPublicKeyBody`, which is what says whether
 # the body carries key material at all (see `src/state/ssh_public_key_body.rs`).
 base64 = "0.22"
@@ -64,7 +78,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 # Generates the OpenSSH host key the HostKey round-trip test supplies, and computes the
 # fingerprint it expects back, independently of the handler under test.
-ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519", "getrandom"] }
+ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ecdsa", "ed25519", "getrandom"] }
 # `time` for the clock-due start-transition test's `tokio::time::sleep`.
 tokio = { workspace = true, features = ["time"] }
 # Generates the real certificates and key pairs the certificate suite imports, so the

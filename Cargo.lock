@@ -8087,6 +8087,7 @@ dependencies = [
  "base16ct 0.2.0",
  "der 0.7.10",
  "generic-array",
+ "pkcs8 0.10.2",
  "zeroize",
 ]
 
@@ -19581,6 +19582,7 @@ dependencies = [
  "aws-emulator-smithy-macros",
  "aws-emulator-smithy-schema-server",
  "aws-emulator-smithy-server-runtime",
+ "aws-lc-rs",
  "aws-sdk-lambda",
  "aws-sdk-s3",
  "aws-sdk-secretsmanager",
@@ -19591,7 +19593,10 @@ dependencies = [
  "bytes",
  "hex",
  "http",
+ "pkcs1",
+ "pkcs8 0.10.2",
  "rcgen",
+ "sec1 0.7.3",
  "serde_json",
  "service-com-amazonaws-iam-awsidentitymanagementv20100508",
  "service-com-amazonaws-s3-amazons3",
@@ -20464,6 +20469,7 @@ checksum = "3b86f5297f0f04d08cabaa0f6bff7cb6aec4d9c3b49d87990d63da9d9156a8c3"
 dependencies = [
  "ed25519-dalek",
  "rand_core 0.6.4",
+ "sec1 0.7.3",
  "sha2 0.10.9",
  "signature",
  "ssh-cipher",

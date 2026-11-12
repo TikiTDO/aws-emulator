@@ -6,8 +6,9 @@
 //! names — "a list of host keys for the server that's specified by the ServerId
 //! parameter" — one entry per stored key, each projected from the SAME record
 //! `DescribeHostKey` reports, in `HostKeyId` order, paged through the opaque
-//! `NextToken` every `List*` in this service hands out. A server that holds none lists
-//! none, a key that is deleted stops being listed, and an unknown server is refused.
+//! `NextToken` every `List*` in this service hands out. A server holds the key it serves
+//! with and every key imported into it, a key that is deleted stops being listed, and an
+//! unknown server is refused.
 //!
 //! The rows differ along what the import carried (description, tags, storage type, the
 //! key's own material), which server is read, and whether the key is still stored — the
