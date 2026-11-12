@@ -1137,8 +1137,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutObject<Eng> {
             Some(object) => event.of_object(object),
             None => event,
         };
-        let pending =
-            crate::state::notifications::pending(&store, &input.bucket, &[created], &correlation);
+        let pending = crate::state::notifications::pending(
+            &store,
+            &input.bucket,
+            &[created],
+            &correlation,
+            &crate::state::notifications::request_source_address(ctx.parts()),
+        );
 
         let output = PutObjectOutput {
             e_tag: Some(etag),

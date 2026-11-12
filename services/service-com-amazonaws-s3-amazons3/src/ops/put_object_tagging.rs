@@ -365,8 +365,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutObjectTagging<
             None => tagged,
         };
         let acted_on = written.and_then(|object| object.version_id.clone());
-        let pending =
-            crate::state::notifications::pending(&store, &input.bucket, &[tagged], correlation);
+        let pending = crate::state::notifications::pending(
+            &store,
+            &input.bucket,
+            &[tagged],
+            correlation,
+            &crate::state::notifications::request_source_address(ctx.parts()),
+        );
         drop(store);
         crate::state::notifications::publish(ctx, pending);
 

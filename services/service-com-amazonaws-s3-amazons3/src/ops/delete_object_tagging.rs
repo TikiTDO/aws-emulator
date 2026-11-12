@@ -362,8 +362,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteObjectTaggi
             None => untagged,
         };
         let acted_on = untagged_object.and_then(|object| object.version_id.clone());
-        let pending =
-            crate::state::notifications::pending(&store, &input.bucket, &[untagged], correlation);
+        let pending = crate::state::notifications::pending(
+            &store,
+            &input.bucket,
+            &[untagged],
+            correlation,
+            &crate::state::notifications::request_source_address(ctx.parts()),
+        );
         drop(store);
         crate::state::notifications::publish(ctx, pending);
 

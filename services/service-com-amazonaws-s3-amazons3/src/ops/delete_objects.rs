@@ -638,8 +638,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteObjects<Eng
 
         // Published with the store released, the way `DeleteObject` publishes the one
         // event its own delete produced.
-        let pending =
-            crate::state::notifications::pending(&store, &input.bucket, &events, correlation);
+        let pending = crate::state::notifications::pending(
+            &store,
+            &input.bucket,
+            &events,
+            correlation,
+            &crate::state::notifications::request_source_address(ctx.parts()),
+        );
         drop(store);
         crate::state::notifications::publish(ctx, pending);
 

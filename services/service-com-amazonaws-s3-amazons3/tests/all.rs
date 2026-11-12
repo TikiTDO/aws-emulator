@@ -377,6 +377,8 @@ mod version_listing_echoed_members;
 mod version_listing_owner;
 #[path = "all/version_listing_resume_markers.rs"]
 mod version_listing_resume_markers;
+#[path = "all/versioned_removal_event_split.rs"]
+mod versioned_removal_event_split;
 #[path = "all/write_checksum_header_count.rs"]
 mod write_checksum_header_count;
 #[path = "all/write_response_identity.rs"]

@@ -562,6 +562,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteObject<Eng>
                         &input.bucket,
                         &[removed],
                         correlation,
+                        &crate::state::notifications::request_source_address(ctx.parts()),
                     );
                     drop(store);
                     crate::state::notifications::publish(ctx, pending);
@@ -645,8 +646,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteObject<Eng>
             | crate::state::ObjectDeletion::VersionCountReached
             | crate::state::ObjectDeletion::TotalVersionCountReached => Vec::new(),
         };
-        let pending =
-            crate::state::notifications::pending(&store, &input.bucket, &events, correlation);
+        let pending = crate::state::notifications::pending(
+            &store,
+            &input.bucket,
+            &events,
+            correlation,
+            &crate::state::notifications::request_source_address(ctx.parts()),
+        );
         drop(store);
         crate::state::notifications::publish(ctx, pending);
 

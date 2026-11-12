@@ -750,8 +750,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CompleteMultipart
             Some(object) => created.of_object(object),
             None => created,
         };
-        let pending =
-            crate::state::notifications::pending(&store, &input.bucket, &[created], correlation);
+        let pending = crate::state::notifications::pending(
+            &store,
+            &input.bucket,
+            &[created],
+            correlation,
+            &crate::state::notifications::request_source_address(ctx.parts()),
+        );
 
         let output = CompleteMultipartUploadOutput {
             // "The URI that identifies the newly created object"

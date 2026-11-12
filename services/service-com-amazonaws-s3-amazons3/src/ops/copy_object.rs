@@ -1214,8 +1214,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CopyObject<Eng> {
             Some(object) => created.of_object(object),
             None => created,
         };
-        let pending =
-            crate::state::notifications::pending(&store, &input.bucket, &[created], correlation);
+        let pending = crate::state::notifications::pending(
+            &store,
+            &input.bucket,
+            &[created],
+            correlation,
+            &crate::state::notifications::request_source_address(ctx.parts()),
+        );
 
         // The checksum the DESTINATION object carries, read back off the stored object the
         // way every other reader of it reports one: "this checksum is only present if the

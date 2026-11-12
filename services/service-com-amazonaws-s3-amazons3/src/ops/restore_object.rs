@@ -555,6 +555,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> RestoreObject<Eng
             &input.bucket,
             &[restore_initiated],
             correlation,
+            &crate::state::notifications::request_source_address(ctx.parts()),
         );
         drop(store);
         crate::state::notifications::publish(ctx, pending);

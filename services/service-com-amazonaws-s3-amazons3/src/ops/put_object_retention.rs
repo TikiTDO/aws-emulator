@@ -468,6 +468,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &input.bucket,
             &[retention_put],
             &correlation,
+            &crate::state::notifications::request_source_address(ctx.parts()),
         );
         drop(store);
         crate::state::notifications::publish(ctx, pending);

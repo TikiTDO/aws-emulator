@@ -30,6 +30,10 @@
 //! call's own response carries ([`super::request_ids`]): the `Records` envelope reports
 //! both in its `responseElements` and the EventBridge detail reports the request id as
 //! its `request-id`, which is how a consumer tells which API call produced which event.
+//! It also names WHERE that call was made from — the `Records` envelope under
+//! `requestParameters.sourceIPAddress` and the EventBridge detail under
+//! `source-ip-address` — read off the request's own connection
+//! ([`request_source_address`]) rather than from anything the request said about itself.
 //!
 //! The SAME destinations are resolved when the configuration is INSTALLED, which is the
 //! one thing a notification configuration does before any object changes: S3 "first
@@ -85,6 +89,43 @@ const EVENT_DETAIL_SEPARATOR: char = ':';
 
 /// The `s3:<Type>:*` suffix that stands for every event of one type.
 const EVENT_WILDCARD_SUFFIX: &str = ":*";
+
+/// The header a proxy in front of this emulator states the address it forwarded a request
+/// for in, whose FIRST entry is the client's own — the same reading every other service in
+/// this tree takes of a request's source address.
+const FORWARDED_FOR_HEADER: &str = "x-forwarded-for";
+
+/// The address a request carries when nothing forwarded it: this emulator serves its API
+/// over the loopback interface, so a connection that reached it came from the local host.
+const LOOPBACK_SOURCE_ADDRESS: &str = "127.0.0.1";
+
+/// The address the request `parts` was made from, as a published event states it.
+///
+/// Read from the CONNECTION rather than from anything the request body says: the first
+/// entry of [`FORWARDED_FOR_HEADER`] when a proxy stated the client it forwarded for, and
+/// otherwise [`LOOPBACK_SOURCE_ADDRESS`], the host every connection to this emulator is
+/// made from — the same reading this tree's other services take of a request's source
+/// address.
+///
+/// The member this fills is an ADDRESS ("`sourceIPAddress`: IP address where request came
+/// from"), so the forwarded entry is published only when it IS one: a header carrying
+/// anything else names no address this event could report and is answered with the
+/// loopback host, which also bounds the value a record carries to one parsed address
+/// however long a header the transport accepted.
+#[must_use]
+pub fn request_source_address(parts: &::http::request::Parts) -> String {
+    parts
+        .headers
+        .get(FORWARDED_FOR_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .and_then(|address| address.parse::<::std::net::IpAddr>().ok())
+        .map_or_else(
+            || LOOPBACK_SOURCE_ADDRESS.to_string(),
+            |address| address.to_string(),
+        )
+}
 
 /// Which object change happened, which is what decides the `Event` value a configuration
 /// has to name to be notified, the EventBridge detail-type the event is published under,
@@ -440,7 +481,9 @@ impl Pending {
 pub const MAX_DELIVERIES_PER_REQUEST: usize = 1_000;
 
 /// The notifications `events` owe on the bucket named `bucket`, according to the
-/// configuration that bucket carries, each naming the call they came of by `correlation`.
+/// configuration that bucket carries, each naming the call they came of by `correlation`
+/// and the address that call was made from (`source_address`, which
+/// [`request_source_address`] reads off the request).
 ///
 /// Computed while the caller still holds the store, because what is notified depends on
 /// the bucket's configuration and on the object the change left behind. A bucket this
@@ -452,6 +495,7 @@ pub fn pending(
     bucket: &str,
     events: &[ObjectEvent],
     correlation: &RequestCorrelation,
+    source_address: &str,
 ) -> Pending {
     let Some(record) = store.bucket(bucket) else {
         return Pending::default();
@@ -476,7 +520,8 @@ pub fn pending(
                 deliveries.push(Delivery::EventBridge {
                     region: bucket_region.clone(),
                     detail_type,
-                    detail: event_bridge_detail(bucket, event, correlation).to_string(),
+                    detail: event_bridge_detail(bucket, event, correlation, source_address)
+                        .to_string(),
                     resource: bucket_arn(bucket),
                 });
             }
@@ -493,8 +538,15 @@ pub fn pending(
             // destination ARN carries one (`super::validate_notification_configuration`
             // refuses one that does not) — falling back to the bucket's Region.
             let region = destination_region(&target.arn).unwrap_or(&bucket_region);
-            let body =
-                records_envelope(bucket, &bucket_region, target, event, correlation).to_string();
+            let body = records_envelope(
+                bucket,
+                &bucket_region,
+                target,
+                event,
+                correlation,
+                source_address,
+            )
+            .to_string();
             deliveries.push(match destination {
                 super::NotificationDestination::Queue => match queue_url(&target.arn) {
                     Some(url) => Delivery::Queue {
@@ -562,6 +614,7 @@ fn records_envelope(
     target: &NotificationTarget,
     event: &ObjectEvent,
     correlation: &RequestCorrelation,
+    source_address: &str,
 ) -> ::serde_json::Value {
     let mut object = ::serde_json::json!({
         "key": record_key(&event.key),
@@ -587,6 +640,13 @@ fn records_envelope(
             // this emulator serves one account, named by the canonical user id every
             // other S3 response names an owner by.
             "userIdentity": { "principalId": canonical_user_id() },
+            // "The request parameters" of the call the event came of, whose one member is
+            // the address it was made from: "`sourceIPAddress`: IP address where request
+            // came from" (Amazon S3 User Guide, *Event message structure*). Read off the
+            // request's own connection ([`request_source_address`]), so a consumer that
+            // reads it is told where the change was made from rather than finding the
+            // member absent.
+            "requestParameters": { "sourceIPAddress": source_address },
             // "The response elements … useful if you want to trace a request by
             // following up with AWS Support": the pair the response of the call that
             // produced this event carried.
@@ -615,14 +675,13 @@ fn records_envelope(
 ///
 /// The members are the ones the EventBridge reference publishes for an `aws.s3` event:
 /// the detail version, the bucket's name, the object's key with the facts S3 holds about
-/// it, the account that made the change, the request that made it and the reason it
-/// happened. Nothing is filled in that this emulator does not know — a source IP address
-/// belongs to the socket the request arrived on, which no handler of this emulator is
-/// given, so it is omitted rather than invented.
+/// it, the account that made the change, the request that made it, the address that
+/// request was made from and the reason it happened.
 fn event_bridge_detail(
     bucket: &str,
     event: &ObjectEvent,
     correlation: &RequestCorrelation,
+    source_address: &str,
 ) -> ::serde_json::Value {
     let mut object = ::serde_json::json!({
         "key": event.key,
@@ -643,6 +702,9 @@ fn event_bridge_detail(
         "object": object,
         "request-id": correlation.request_id.clone(),
         "requester": ::engine::emulator_account_id(),
+        // The address the call was made from, which this envelope states under the name
+        // the EventBridge reference gives it for an `aws.s3` event.
+        "source-ip-address": source_address,
         "reason": event.kind.event_bridge_reason(),
     });
     if let Some(deletion_type) = event.kind.deletion_type() {
@@ -1608,7 +1670,8 @@ mod tests {
             filter_rules: None,
         };
 
-        let envelope = records_envelope("bucket", "us-east-1", &target, &event, &correlation);
+        let envelope =
+            records_envelope("bucket", "us-east-1", &target, &event, &correlation, "198.51.100.7");
         let record = &envelope["Records"][0];
         assert_eq!(
             record["responseElements"]["x-amz-request-id"],
@@ -1629,7 +1692,22 @@ mod tests {
             record["s3"]["object"]["eTag"]
         );
 
-        let detail = event_bridge_detail("bucket", &event, &correlation);
+        assert_eq!(
+            record["requestParameters"]["sourceIPAddress"],
+            ::serde_json::json!("198.51.100.7"),
+            "case \"the records envelope\": expected the address the call was made from, got \
+             {:?}",
+            record["requestParameters"]["sourceIPAddress"]
+        );
+
+        let detail = event_bridge_detail("bucket", &event, &correlation, "198.51.100.7");
+        assert_eq!(
+            detail["source-ip-address"],
+            ::serde_json::json!("198.51.100.7"),
+            "case \"the EventBridge detail\": expected the address the call was made from, got \
+             {:?}",
+            detail["source-ip-address"]
+        );
         assert_eq!(
             detail["request-id"],
             ::serde_json::json!(correlation.request_id),
