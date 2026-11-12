@@ -91,3 +91,5 @@ mod state_roundtrip;
 mod tag_content_judged_before_the_lookup;
 #[path = "all/tag_key_length_is_one_rule.rs"]
 mod tag_key_length_is_one_rule;
+#[path = "all/tag_resolution_is_one_rule.rs"]
+mod tag_resolution_is_one_rule;

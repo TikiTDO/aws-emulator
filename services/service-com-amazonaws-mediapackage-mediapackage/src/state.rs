@@ -2550,6 +2550,39 @@ pub struct ComAmazonawsMediapackageMediapackageState {
     pub minted: u64,
 }
 
+/// The ONE resolution of a tagging operation's `ResourceArn` to the stored tag map of the
+/// resource that ARN names, written once over the BORROW KIND.
+///
+/// [`ComAmazonawsMediapackageMediapackageState::tags`] and
+/// [`ComAmazonawsMediapackageMediapackageState::tags_mut`] are this one rule read-only and
+/// read-write: each expands it with the record accessors of its own borrow kind
+/// (`channel`/`origin_endpoint` against `channel_mut`/`origin_endpoint_mut`) and with the
+/// projection of such a borrow to the record's `tags`. So which resource types a
+/// `ResourceArn` can name, and the condition under which one resolves — the record is held
+/// by the request's own Region AND carries exactly the ARN the caller sent — are stated in
+/// this single place: a third taggable resource type, or a change to the ARN-match rule, is
+/// one edit here, and the reporting path and the writing path cannot come to disagree about
+/// which resource an ARN resolves to.
+macro_rules! resolve_tag_map {
+    (
+        $state:expr, $region:expr, $arn:expr, $target:expr,
+        channel = $channel:ident,
+        origin_endpoint = $origin_endpoint:ident,
+        tags = $tags:expr
+    ) => {
+        match $target {
+            TaggedResource::Channel(id) => $state
+                .$channel($region, id)
+                .filter(|record| record.arn == $arn)
+                .map($tags),
+            TaggedResource::OriginEndpoint(id) => $state
+                .$origin_endpoint($region, id)
+                .filter(|record| record.arn == $arn)
+                .map($tags),
+        }
+    };
+}
+
 impl ComAmazonawsMediapackageMediapackageState {
     /// The Channel `id` names IN `region`, for a reporting operation. `None` for an id
     /// only another Region holds: that channel does not exist here.
@@ -2715,46 +2748,48 @@ impl ComAmazonawsMediapackageMediapackageState {
     /// carries — so an ARN naming another Region, another account or another partition
     /// resolves to nothing rather than to this Region's resource of the same id.
     ///
-    /// The same lookup as [`tags_mut`](Self::tags_mut), without the write capability: a
-    /// read must not be able to change what a later caller sees.
+    /// The same lookup as [`tags_mut`](Self::tags_mut) — the one [`resolve_tag_map`]
+    /// states — without the write capability: a read must not be able to change what a
+    /// later caller sees.
     pub fn tags(
         &self,
         region: &str,
         arn: &str,
         target: &TaggedResource,
     ) -> Option<&BTreeMap<String, String>> {
-        match target {
-            TaggedResource::Channel(id) => self
-                .channel(region, id)
-                .filter(|record| record.arn == arn)
-                .map(|record| &record.tags),
-            TaggedResource::OriginEndpoint(id) => self
-                .origin_endpoint(region, id)
-                .filter(|record| record.arn == arn)
-                .map(|record| &record.tags),
-        }
+        resolve_tag_map!(
+            self,
+            region,
+            arn,
+            target,
+            channel = channel,
+            origin_endpoint = origin_endpoint,
+            tags = |record| &record.tags
+        )
     }
 
     /// The stored tag set of the resource a tagging operation's `ResourceArn` named, for
     /// that operation to change in place. `None` when this request resolves no such
     /// resource, which is what tells `TagResource`/`UntagResource` to report a 404
-    /// instead of writing. Scoped exactly as [`tags`](Self::tags) is.
+    /// instead of writing.
+    ///
+    /// Scoped exactly as [`tags`](Self::tags) is, because both expand the one
+    /// [`resolve_tag_map`] — this one over the mutable borrow of the same record.
     pub fn tags_mut(
         &mut self,
         region: &str,
         arn: &str,
         target: &TaggedResource,
     ) -> Option<&mut BTreeMap<String, String>> {
-        match target {
-            TaggedResource::Channel(id) => self
-                .channel_mut(region, id)
-                .filter(|record| record.arn == arn)
-                .map(|record| &mut record.tags),
-            TaggedResource::OriginEndpoint(id) => self
-                .origin_endpoint_mut(region, id)
-                .filter(|record| record.arn == arn)
-                .map(|record| &mut record.tags),
-        }
+        resolve_tag_map!(
+            self,
+            region,
+            arn,
+            target,
+            channel = channel_mut,
+            origin_endpoint = origin_endpoint_mut,
+            tags = |record| &mut record.tags
+        )
     }
 
     /// How many stored origin endpoints OF `region` package `channel_id`.
