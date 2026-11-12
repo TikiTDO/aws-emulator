@@ -10961,6 +10961,7 @@ dependencies = [
  "http",
  "pkcs1",
  "pkcs8 0.10.2",
+ "rcgen",
  "ring",
  "serde_json",
  "service-com-amazonaws-cloudwatch-graniteserviceversion20100801",
@@ -10974,8 +10975,10 @@ dependencies = [
  "service-com-amazonaws-wafv2-awswaf-20190729",
  "service-common",
  "subtle",
+ "time",
  "tokio",
  "tracing",
+ "x509-cert",
  "zip",
 ]
 

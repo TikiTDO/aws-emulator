@@ -213,6 +213,8 @@ mod revoke_token;
 mod revoked_session_refusal_sentence;
 #[path = "all/risk_configuration.rs"]
 mod risk_configuration;
+#[path = "all/saml_signing_certificate.rs"]
+mod saml_signing_certificate;
 #[path = "all/self_service_refusal_wire.rs"]
 mod self_service_refusal_wire;
 #[path = "all/self_service_sign_up.rs"]

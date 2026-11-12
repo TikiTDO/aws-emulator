@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetSigningCertificate
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetSigningCertificate`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetSigningCertificate::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the stored SAML 2.0 signing certificate of the user pool the request
+//! names: the certificate was issued to that pool when the pool was created
+//! (`crate::state::issue_signing_certificate`) and is rendered here, so repeated
+//! reads of one pool answer one certificate and a pool this service does not
+//! hold is refused.
 //!
 //! ## Shape of an operation
 //!
@@ -156,18 +153,54 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetSigningCertificate` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetSigningCertificateErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetSigningCertificate"))
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(internal_error());
+        };
+
+        // A pure read: the certificate the pool was issued is rendered, and
+        // nothing about the pool moves. A renewal hands out a SECOND certificate
+        // rather than changing this one — "this renewal process returns a new
+        // value in the response to GetSigningCertificate, but doesn't invalidate
+        // the original certificate" — so reading one never issues one.
+        let guard = state.lock();
+        let pool = guard
+            .pool(&input.user_pool_id)
+            .ok_or_else(|| user_pool_not_found(&input.user_pool_id))?;
+        let certificate = pool
+            .saml_signing_certificate()
+            .ok_or_else(certificate_not_issued)?;
+        Ok(GetSigningCertificateOutput {
+            certificate: Some(certificate.to_string()),
+        })
     }
+}
+
+/// This operation's `ResourceNotFoundException` for an absent user pool.
+fn user_pool_not_found(user_pool_id: &str) -> GetSigningCertificateError {
+    GetSigningCertificateErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+        message: Some(format!("User pool {user_pool_id} does not exist.")),
+    })
+    .into()
+}
+
+/// The modelled server error for a stored pool that holds no certificate: the
+/// one it was issued did not generate, which is this service's own failure
+/// rather than anything about the request.
+fn certificate_not_issued() -> GetSigningCertificateError {
+    GetSigningCertificateErrorModeled::InternalErrorException(InternalErrorException {
+        message: Some(
+            "the cognito-idp emulator could not issue the user pool's signing certificate"
+                .to_string(),
+        ),
+    })
+    .into()
+}
+
+/// The modelled server error for an engine this service cannot reach.
+fn internal_error() -> GetSigningCertificateError {
+    GetSigningCertificateErrorModeled::InternalErrorException(InternalErrorException {
+        message: Some("the cognito-idp emulator could not reach its state store".to_string()),
+    })
+    .into()
 }

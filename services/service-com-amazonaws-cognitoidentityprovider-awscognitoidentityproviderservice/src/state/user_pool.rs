@@ -145,6 +145,17 @@ pub struct UserPool {
     /// for its lifetime, so every token the pool ever issued stays verifiable
     /// against the key set it publishes now.
     pub signing_keys: PoolSigningKeys,
+    /// The X.509 certificate this pool signs its SAML 2.0 authentication
+    /// requests with, as `GetSigningCertificate` reports it — issued to this
+    /// pool when the pool was created ([`issue_signing_certificate`]) and kept
+    /// for its lifetime, so every read of one pool answers the same certificate
+    /// and the identity provider an operator installed it at keeps verifying
+    /// against it.
+    ///
+    /// `None` only when the certificate did not issue, which the operation that
+    /// reports it answers its modelled server error for rather than reporting a
+    /// certificate nothing signed.
+    pub saml_signing_certificate: Option<String>,
     /// The `DeviceGroupKey` every device of this pool is reported under:
     /// "an identifier used in generating the `DEVICE_PASSWORD_VERIFIER` for
     /// device SRP authentication" (`NewDeviceMetadataType.DeviceGroupKey`).
@@ -341,6 +352,25 @@ impl UserPool {
         &self.signing_keys
     }
 
+    /// This pool's SAML 2.0 signing certificate, issued when the pool was
+    /// created, or `None` when it did not issue.
+    ///
+    /// A pure read: it renders the stored certificate and issues nothing.
+    pub fn saml_signing_certificate(&self) -> Option<&str> {
+        self.saml_signing_certificate.as_deref()
+    }
+
+    /// Issue this pool's SAML 2.0 signing certificate, to the entity id its
+    /// CURRENT id implies and dated from its creation.
+    ///
+    /// Called where a pool's id is settled — when the pool is built, and again
+    /// when a minted id turned out to be taken ([`UserPool::with_new_id`]) —
+    /// because the certificate is issued to the pool's SAML service-provider
+    /// entity id, which is derived from that id.
+    pub(super) fn issue_saml_signing_certificate(&mut self) {
+        self.saml_signing_certificate = issue_signing_certificate(&self.id, self.creation_date);
+    }
+
     /// This pool's JSON Web Key Set (RFC 7517 §5): the public half of every key
     /// its tokens are signed with, each entry found by the `kid` the token
     /// header carries. This is the document a verifier reads from
@@ -353,10 +383,15 @@ impl UserPool {
 
     /// This pool with a freshly minted id, and the ARN that id implies. Used
     /// when a minted id turns out to name a pool that already exists.
+    ///
+    /// The pool's SAML signing certificate is issued again with it: the
+    /// certificate names the pool's SAML service-provider entity id, which the
+    /// new id changes.
     #[must_use]
     pub fn with_new_id(mut self, region: &str) -> Self {
         self.id = new_pool_id(region);
         self.arn = ::engine::emulator_arn(SIGNING_NAME, region, &format!("userpool/{}", self.id));
+        self.issue_saml_signing_certificate();
         self
     }
 

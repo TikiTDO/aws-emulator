@@ -30,6 +30,9 @@ mod identity_providers;
 mod attributes;
 /// The tokens a pool issues, and the key its JWTs are signed with.
 mod tokens;
+/// The X.509 certificate a pool signs its SAML 2.0 federation traffic with, and
+/// the SAML name it is issued to.
+mod saml_signing_certificate;
 /// The form a refresh token travels in: the JWE compact serialization it is vended as,
 /// and the key this service seals one under.
 mod refresh_token_jwe;
@@ -46,6 +49,7 @@ pub use openid_discovery::*;
 pub use pool_preconditions::*;
 pub use pool_resources::*;
 pub use refresh_token_jwe::*;
+pub use saml_signing_certificate::*;
 pub use tokens::*;
 pub use user_pool::*;
 pub use users::*;
@@ -3729,6 +3733,11 @@ pub fn undetermined_attribute_type_message(attribute_name: &str) -> String {
 /// milliseconds of CPU per key ([`PoolSigningKeys::generate`]), so the caller
 /// runs that on the blocking pool and only after the store's own bound has
 /// admitted the pool.
+///
+/// The pool's SAML signing certificate IS issued here, once its id is settled:
+/// the certificate is issued to the SAML entity id that id implies, and the key
+/// pair it is signed with is an elliptic-curve one, generated in microseconds
+/// rather than in the milliseconds an RSA key pair costs.
 pub fn new_user_pool(
     name: String,
     region: &str,
@@ -3738,7 +3747,7 @@ pub fn new_user_pool(
     let region = sanitize_region(region);
     let id = new_pool_id(&region);
     let arn = ::engine::emulator_arn(SIGNING_NAME, &region, &format!("userpool/{id}"));
-    UserPool {
+    let mut pool = UserPool {
         id,
         name,
         arn,
@@ -3789,9 +3798,17 @@ pub fn new_user_pool(
         // pair per token type, minted by the caller before the pool is built and
         // never again.
         signing_keys,
+        // Issued below, once the pool's id — the name the certificate is issued
+        // to — is settled.
+        saml_signing_certificate: None,
         device_group_key: new_device_group_key(),
         risk_configuration: None,
-    }
+    };
+    // A pool's SAML signing certificate exists from the moment the pool does, as
+    // on AWS: `GetSigningCertificate` answers one for a pool nothing has
+    // federated yet, and the pool keeps the certificate it was issued.
+    pool.issue_saml_signing_certificate();
+    pool
 }
 
 /// The region the request was signed for, or [`DEFAULT_REGION`] when it carries
