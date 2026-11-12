@@ -1245,3 +1245,299 @@ async fn a_failed_deliverys_record_reports_the_digest_too() {
         "case {case:?}: expected the body's digest, got {record}"
     );
 }
+
+/// Every log group CloudWatch Logs reports whose name starts with `prefix`, as a client
+/// DISCOVERS the groups a feedback role created (`logs:DescribeLogGroups`, whose
+/// `logGroupNamePrefix` "matches the beginning of a log group name") — the empty list for a
+/// prefix no group is under.
+async fn described_groups(emulator: &Emulator, prefix: &str) -> Vec<String> {
+    let (status, described) = logs(
+        emulator,
+        "DescribeLogGroups",
+        &json!({"logGroupNamePrefix": prefix}),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "DescribeLogGroups {prefix}: expected HTTP 200, got {status} with {described}"
+    );
+    described["logGroups"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|group| group["logGroupName"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// Wait until CloudWatch Logs reports a group under `prefix`, and answer the ones it reported —
+/// or the empty list once `budget` is spent, which is what says nothing was created.
+async fn described_groups_within(
+    emulator: &Emulator,
+    prefix: &str,
+    budget: Duration,
+) -> Vec<String> {
+    let deadline = Instant::now() + budget;
+    loop {
+        let groups = described_groups(emulator, prefix).await;
+        if !groups.is_empty() || Instant::now() >= deadline {
+            return groups;
+        }
+        tokio::time::sleep(LOOK_INTERVAL).await;
+    }
+}
+
+/// Wait until Lambda holds the asynchronous invocation a delivery to `function` makes, and
+/// answer how many it holds: the evidence that a delivery was attempted at all, which is what a
+/// row expecting NO record needs before it can read an absent log group as a decision rather
+/// than as an attempt that has not been made yet.
+async fn invocations_within(emulator: &Emulator, function: &str) -> usize {
+    let deadline = Instant::now() + RECORD_BUDGET;
+    loop {
+        let held = {
+            let state = emulator
+                .engine
+                .state::<ComAmazonawsLambdaAwsgirapiserviceState>();
+            let store = state.lock();
+            store
+                .functions
+                .get(function)
+                .map(|record| record.async_invocations.len())
+                .unwrap_or_default()
+        };
+        if held > 0 || Instant::now() >= deadline {
+            return held;
+        }
+        tokio::time::sleep(LOOK_INTERVAL).await;
+    }
+}
+
+/// What one row of the `lambda` feedback table configures, and what must come of it.
+struct FunctionRow {
+    case: &'static str,
+    /// The topic's own name, which is the last field of the log group's name: the rows differ
+    /// along it, because the group's name is built from the topic rather than fixed.
+    topic_name: &'static str,
+    /// The feedback attributes the topic is given, with the role ARN substituted for
+    /// [`ROLE_PLACEHOLDER`].
+    attributes: &'static [(&'static str, &'static str)],
+    /// Whether the subscribed function's own policy grants this service the invoke, which is
+    /// what decides whether the delivery succeeds.
+    grants: bool,
+    /// The `status` the record must report, and `None` for a configuration under which no
+    /// group may be created at all.
+    status: Option<&'static str>,
+}
+
+/// The attribute names below are this service's own closed set for the delivery-status feature
+/// (`SetTopicAttributesInput$AttributeName`), whose per-protocol prefixes are `Application`,
+/// `Firehose`, `HTTP`, `Lambda` and `SQS` — the rows exercise the `Lambda` pair against a
+/// `lambda` delivery, and the `SQS` and `HTTP` pairs against it, which must log nothing.
+fn function_rows() -> Vec<FunctionRow> {
+    vec![
+        FunctionRow {
+            case: "a full sample of successes over the delivery's own protocol",
+            topic_name: "lambda-feedback",
+            attributes: &[
+                ("LambdaSuccessFeedbackRoleArn", ROLE_PLACEHOLDER),
+                ("LambdaSuccessFeedbackSampleRate", "100"),
+            ],
+            grants: true,
+            status: Some("SUCCESS"),
+        },
+        FunctionRow {
+            case: "the same, for a topic whose name carries digits and hyphens",
+            topic_name: "ops-alerts-2",
+            attributes: &[
+                ("LambdaSuccessFeedbackRoleArn", ROLE_PLACEHOLDER),
+                ("LambdaSuccessFeedbackSampleRate", "100"),
+            ],
+            grants: true,
+            status: Some("SUCCESS"),
+        },
+        FunctionRow {
+            case: "a failure role, and a function this service may not invoke",
+            topic_name: "WithheldDeliveries",
+            attributes: &[
+                ("LambdaFailureFeedbackRoleArn", ROLE_PLACEHOLDER),
+                ("LambdaSuccessFeedbackSampleRate", "100"),
+            ],
+            grants: false,
+            status: Some("FAILURE"),
+        },
+        FunctionRow {
+            case: "both roles of the protocol, and a delivery the function took",
+            topic_name: "both-roles",
+            attributes: &[
+                ("LambdaSuccessFeedbackRoleArn", ROLE_PLACEHOLDER),
+                ("LambdaFailureFeedbackRoleArn", ROLE_PLACEHOLDER),
+                ("LambdaSuccessFeedbackSampleRate", "100"),
+            ],
+            grants: true,
+            status: Some("SUCCESS"),
+        },
+        FunctionRow {
+            case: "a full sample, but set for the sqs protocol",
+            topic_name: "sqs-prefixed",
+            attributes: &[
+                ("SQSSuccessFeedbackRoleArn", ROLE_PLACEHOLDER),
+                ("SQSSuccessFeedbackSampleRate", "100"),
+            ],
+            grants: true,
+            status: None,
+        },
+        FunctionRow {
+            case: "a full sample, but set for the http protocol",
+            topic_name: "http-prefixed",
+            attributes: &[
+                ("HTTPSuccessFeedbackRoleArn", ROLE_PLACEHOLDER),
+                ("HTTPSuccessFeedbackSampleRate", "100"),
+            ],
+            grants: true,
+            status: None,
+        },
+        FunctionRow {
+            case: "the protocol's own success role, sampling none of its successes",
+            topic_name: "unsampled",
+            attributes: &[
+                ("LambdaSuccessFeedbackRoleArn", ROLE_PLACEHOLDER),
+                ("LambdaSuccessFeedbackSampleRate", "0"),
+            ],
+            grants: true,
+            status: None,
+        },
+        FunctionRow {
+            case: "a failure role only, and a delivery the function took",
+            topic_name: "failures-only",
+            attributes: &[("LambdaFailureFeedbackRoleArn", ROLE_PLACEHOLDER)],
+            grants: true,
+            status: None,
+        },
+    ]
+}
+
+/// RULE: a topic that names a feedback role for the protocol a delivery went over has this
+/// service assume that role and write the delivery's record into the CloudWatch Logs group
+/// named `sns/<region>/<account-id>/<topic-name>` from the topic's own ARN — a SUCCESS into
+/// that group, at the sampled percentage, and a FAILURE into its `/Failure` child — so a client
+/// DISCOVERS the group under that name through `logs:DescribeLogGroups` and reads a record there
+/// naming the endpoint delivered to. A topic that names a role only for ANOTHER protocol, or
+/// that samples none of its successes, leaves no group of either kind.
+///
+/// The rows differ along what the rule generalises over: the topic's name (which the group's
+/// name is built from), which of the protocol's feedback attributes the topic carries, the
+/// protocol those attributes were set for as against the one the delivery went over, the sample
+/// rate, and whether the subscribed function's own policy admits the delivery.
+#[tokio::test]
+async fn a_lambda_delivery_is_logged_in_the_topics_own_log_group() {
+    for (index, row) in function_rows().iter().enumerate() {
+        let case = row.case;
+        let emulator = emulator();
+        let topic = element(
+            &sns(&emulator, "CreateTopic", &[("Name", row.topic_name)]).await,
+            "TopicArn",
+        );
+        let role = given_role(
+            &emulator,
+            &format!("sns-lambda-feedback-{index}"),
+            SNS_PRINCIPAL,
+            Permissions::WritesLogs,
+        )
+        .await;
+        let function = format!("notified-{index}");
+        let endpoint = given_function(&emulator, &function, row.grants).await;
+        sns(
+            &emulator,
+            "Subscribe",
+            &[
+                ("TopicArn", &topic),
+                ("Protocol", "lambda"),
+                ("Endpoint", &endpoint),
+            ],
+        )
+        .await;
+        for (name, value) in row.attributes {
+            let value = value.replace(ROLE_PLACEHOLDER, &role);
+            sns(
+                &emulator,
+                "SetTopicAttributes",
+                &[
+                    ("TopicArn", &topic),
+                    ("AttributeName", name),
+                    ("AttributeValue", &value),
+                ],
+            )
+            .await;
+        }
+
+        sns(
+            &emulator,
+            "Publish",
+            &[("TopicArn", &topic), ("Message", "a notification")],
+        )
+        .await;
+
+        // The group every record of this topic goes into, and the prefix both it and its
+        // `/Failure` child are under — spelled out from the template rather than through the
+        // helpers above, so the assertions below bind the name the SERVICE created to the
+        // Region every call here is signed for, the account the topic belongs to and this
+        // row's own topic name.
+        let account = topic
+            .split(':')
+            .nth(4)
+            .expect("a topic ARN names the account it belongs to");
+        let base = format!("sns/{REGION}/{account}/{}", row.topic_name);
+        let Some(expected) = row.status else {
+            // The DELIVERY itself happened — the subscribed function holds the asynchronous
+            // invocation it was made with — so a group that is not there is one this
+            // configuration never asked for, rather than an attempt still outstanding.
+            let invocations = invocations_within(&emulator, &function).await;
+            assert_eq!(
+                invocations, 1,
+                "case {case:?}: expected the delivery to have invoked {function} once, got \
+                 {invocations}"
+            );
+            let groups = described_groups_within(&emulator, &base, QUIET_BUDGET).await;
+            assert!(
+                groups.is_empty(),
+                "case {case:?}: this topic asks for no record of a lambda delivery, so no \
+                 group under {base} may be created, got {groups:?}"
+            );
+            continue;
+        };
+        let log_group = if expected == "SUCCESS" {
+            base.clone()
+        } else {
+            format!("{base}/Failure")
+        };
+        let groups = described_groups_within(&emulator, &base, RECORD_BUDGET).await;
+        assert_eq!(
+            groups,
+            vec![log_group.clone()],
+            "case {case:?}: expected CloudWatch Logs to report exactly the group \
+             {log_group}, got {groups:?}"
+        );
+        let records = records_within(&emulator, &log_group, RECORD_BUDGET).await;
+        assert_eq!(
+            records.len(),
+            1,
+            "case {case:?}: expected one delivery-status record in {log_group}, got {records:?}"
+        );
+        let record = &records[0];
+        assert_eq!(
+            record["status"].as_str(),
+            Some(expected),
+            "case {case:?}: expected status {expected:?}, got {record}"
+        );
+        assert_eq!(
+            record["delivery"]["destination"].as_str(),
+            Some(endpoint.as_str()),
+            "case {case:?}: the record must name the function delivered to, got {record}"
+        );
+        assert_eq!(
+            record["notification"]["topicArn"].as_str(),
+            Some(topic.as_str()),
+            "case {case:?}: the record must name the topic published to, got {record}"
+        );
+    }
+}
