@@ -212,9 +212,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             None => None,
             Some(token) => Some(
                 crate::state::decode_page_token(&page_token_key, &scope, token).map_err(
-                    |error| {
+                    |_| {
                         ListVmEntitlementsErrorModeled::ValidationException(
-                            crate::state::invalid_next_token(error),
+                            crate::state::invalid_next_token(),
                         )
                     },
                 )?,

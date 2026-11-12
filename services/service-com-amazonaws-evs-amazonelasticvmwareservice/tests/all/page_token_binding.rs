@@ -33,6 +33,10 @@
 //! * the AGE of a token this service did issue for the listing, on each side of the
 //!   documented 24 hours.
 //!
+//! The WORDING of the refusal — one fixed message for every token a listing cannot
+//! resume — is `tests/all/refusal_wording.rs`'s rule; this suite asserts it through the
+//! service's own constant so the two cannot drift apart.
+//!
 //! The cursor each forged envelope carries sorts ABOVE every item of the listing it is
 //! handed to, so a cursor honoured without being checked would answer HTTP 200 with an
 //! empty page rather than the refusal asserted here.
@@ -71,11 +75,14 @@ const WINDOWS_SERVER: &str = "WINDOWS_SERVER";
 /// what the `state` filter of one of the two `ListEnvironments` listings names.
 const CREATED: &str = "CREATED";
 
-/// The sentence a refusal of a token this service did not issue for the listing states.
-const NOT_ISSUED: &str = "is not a pagination token this service issued";
-
-/// The sentence a refusal of a token too old to resume states.
-const EXPIRED: &str = "has expired; pagination tokens are valid for 24 hours";
+/// The message a refusal of a `nextToken` a listing cannot resume states — the same one
+/// for a token this service never issued and for a token too old to resume, since Amazon
+/// EVS reports both with one sentence and one remedy. Read from the service's own
+/// constant, so this suite and the handlers cannot drift apart over the wording; that it
+/// is AWS's wording is `tests/all/pagination_refusal_message.rs`'s row.
+fn refusal_message() -> &'static str {
+    evs::state::INVALID_NEXT_TOKEN_MESSAGE
+}
 
 /// One listing: an operation, the endpoint it is called at, the request that addresses
 /// the collection it pages over, and the scope a token of it belongs to.
@@ -195,7 +202,7 @@ fn with_a_changed_byte(case: &str, token: &str, index: usize) -> String {
 
 /// What every refusal of a token asserts: the documented status, the modelled error, the
 /// sentence the refusal states against the member it names, and no page at all.
-fn assert_refused(case: &str, listing: &Listing, status: u16, body: &Value, problem: &str) {
+fn assert_refused(case: &str, listing: &Listing, status: u16, body: &Value) {
     assert_eq!(
         status, 400,
         "case {case}: expected HTTP 400, got {status} ({}) {body}",
@@ -206,12 +213,11 @@ fn assert_refused(case: &str, listing: &Listing, status: u16, body: &Value, prob
         "case {case}: expected a ValidationException, got {} in {body}",
         error_type(body)
     );
-    let sentence = format!("nextToken {problem}");
-    assert!(
-        body["message"]
-            .as_str()
-            .is_some_and(|message| message.contains(&sentence)),
-        "case {case}: expected a message stating {sentence:?}, got {}",
+    let sentence = refusal_message();
+    assert_eq!(
+        body["message"].as_str(),
+        Some(sentence),
+        "case {case}: expected the message {sentence:?}, got {}",
         body["message"]
     );
     assert_eq!(
@@ -435,7 +441,7 @@ async fn a_token_resumes_the_listing_that_issued_it_and_no_other() {
                     .unwrap_or_else(|| panic!("case {case}: the fixture holds a second item"));
                 assert_resumed(&case, target, status, &body, expected);
             } else {
-                assert_refused(&case, target, status, &body, NOT_ISSUED);
+                assert_refused(&case, target, status, &body);
             }
         }
     }
@@ -518,7 +524,7 @@ async fn a_token_this_service_did_not_issue_is_refused_by_every_listing() {
         for (form, token) in rows {
             let case = format!("{form}, handed to {}", listing.case);
             let (status, body) = page(&router, listing, Some(1), Some(&token)).await;
-            assert_refused(&case, listing, status, &body, NOT_ISSUED);
+            assert_refused(&case, listing, status, &body);
         }
     }
 }
@@ -576,7 +582,7 @@ async fn a_token_resumes_its_listing_until_the_documented_day_is_up() {
             if resumes {
                 assert_resumed(&case, listing, status, &body, &second);
             } else {
-                assert_refused(&case, listing, status, &body, EXPIRED);
+                assert_refused(&case, listing, status, &body);
             }
         }
     }

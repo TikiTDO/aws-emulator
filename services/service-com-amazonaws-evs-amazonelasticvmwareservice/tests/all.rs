@@ -124,6 +124,8 @@ mod put_account_settings_due_transitions;
 mod record_stamp_backwards_guard;
 #[path = "all/record_stamp_monotonicity.rs"]
 mod record_stamp_monotonicity;
+#[path = "all/refusal_wording.rs"]
+mod refusal_wording;
 #[path = "all/reserved_tag_keys.rs"]
 mod reserved_tag_keys;
 #[path = "all/route_server_peer_references.rs"]

@@ -192,14 +192,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             None => None,
             Some(token) => {
                 let cursor = crate::state::decode_page_token(&page_token_key, &scope, token)
-                    .map_err(|error| {
+                    .map_err(|_| {
                         ListEnvironmentVlansErrorModeled::ValidationException(
-                            crate::state::invalid_next_token(error),
+                            crate::state::invalid_next_token(),
                         )
                     })?;
                 Some(cursor.parse::<i32>().map_err(|_| {
                     ListEnvironmentVlansErrorModeled::ValidationException(
-                        crate::state::invalid_next_token(crate::state::PageTokenError::Malformed),
+                        crate::state::invalid_next_token(),
                     )
                 })?)
             }

@@ -2650,12 +2650,21 @@ fn exceeds(digits: &str, maximum: u64) -> bool {
 /// [`ACCOUNT_SETTINGS`] documents, as `fieldList` entries — empty for a request this
 /// service accepts.
 ///
-/// Each entry names the member path the boundary validator names a list element's member
-/// by (`settings.<1-based index>.member.<member>`), so a caller reads one member path
-/// whether the setting was refused for its SHAPE or for its DOMAIN, and states the
-/// requirement without quoting the rejected value back (the rule
-/// [`constraint_validation_error`] keeps for the modelled constraints). Every failure is
-/// reported, not just the first, exactly as [`aggregate_validation_error`] does.
+/// Each clause states the SETTING, quoted by the name the request gave it, and the
+/// requirement that setting's own documentation gives it — never the wire member path of
+/// the list element it arrived in, which shifts with the order the request happened to
+/// list its settings in and names no setting a caller can act on. A value above the
+/// setting's documented maximum is the clause Amazon EVS states as
+/// `Setting '<name>' must not exceed <maximum>.`: fixed text, with the name taken from
+/// the request and the maximum from [`ACCOUNT_SETTINGS`], and the rejected value is not
+/// quoted back (the rule [`constraint_validation_error`] keeps for the modelled
+/// constraints too).
+///
+/// The entry's `name` still carries the member path the boundary validator names a list
+/// element's member by (`settings.<1-based index>.member.<member>`), so a client that
+/// reads `fieldList` learns WHICH element it must correct whether the setting was refused
+/// for its SHAPE or for its DOMAIN. Every failure is reported, not just the first, exactly
+/// as [`aggregate_validation_error`] does.
 pub fn account_setting_failures(
     settings: &[AccountSetting],
 ) -> Vec<crate::ops::types::ValidationExceptionField> {
@@ -2669,27 +2678,27 @@ pub fn account_setting_failures(
         // The element's path, as the framework builds it: 1-based index, then the step
         // into the element.
         let element = format!("settings.{}.{COLLECTION_STEP}", index + 1);
+        // How every clause below opens: the setting the request named, quoted.
+        let named = format!("Setting '{}'", setting.name);
         let Some(spec) = account_setting_spec(&setting.name) else {
             // An unrecognised name has no documented domain, so nothing is said about
-            // its value: the name is the failure.
-            failures.push(field_failure(
+            // its value: the name is the failure, and the clause states the names there
+            // are instead.
+            failures.push(field_failure_stated(
                 &format!("{element}.name"),
-                &format!("must name a supported EVS account setting: {supported}"),
+                format!("{named} is not a supported EVS setting: {supported}."),
             ));
             continue;
         };
         if setting.value.is_empty() || !setting.value.bytes().all(|byte| byte.is_ascii_digit()) {
-            failures.push(field_failure(
+            failures.push(field_failure_stated(
                 &format!("{element}.value"),
-                &format!("must be a numeric string, the type of the {} setting", spec.name),
+                format!("{named} must be a numeric string."),
             ));
         } else if exceeds(&setting.value, spec.maximum) {
-            failures.push(field_failure(
+            failures.push(field_failure_stated(
                 &format!("{element}.value"),
-                &format!(
-                    "must be at most {}, the maximum value of the {} setting",
-                    spec.maximum, spec.name
-                ),
+                format!("{named} must not exceed {}.", spec.maximum),
             ));
         }
     }
@@ -3781,19 +3790,39 @@ pub fn decode_page_token(
     Ok(cursor.to_string())
 }
 
+/// What Amazon EVS states for a `nextToken` a paginated read cannot resume.
+///
+/// Fixed text in full: it names the member in its own words, echoes no token back and
+/// carries nothing else from the request or the store. It states ONE sentence for both
+/// ways a token fails to name a position — a token this service never issued and a token
+/// it issued too long ago — because the remedy it names is the same for both: retry with
+/// a token the service issued, or start the listing again.
+///
+/// It is also stated WITHOUT the [`VALIDATION_FAILURE_PREFIX`] the aggregated refusals of
+/// this service open with: this refusal reports no list of failed request members, so
+/// there is nothing for that envelope to introduce.
+pub const INVALID_NEXT_TOKEN_MESSAGE: &str = "The provided nextToken is malformed or has \
+     expired. Please retry with a valid token or start a new list operation.";
+
 /// The refusal a `@paginated` operation answers for a `nextToken` it cannot resume.
 ///
 /// The documented answer to an expired token is "an HTTP 400 InvalidToken error", but
 /// this service's model declares no `InvalidToken` shape, so the refusal is carried by
 /// the only client-input error these operations do declare — at the documented status.
-pub fn invalid_next_token(error: PageTokenError) -> ValidationException {
-    field_validation_error(
-        "nextToken",
-        match error {
-            PageTokenError::Malformed => "is not a pagination token this service issued",
-            PageTokenError::Expired => "has expired; pagination tokens are valid for 24 hours",
-        },
-    )
+///
+/// Why a token could not be resumed ([`PageTokenError`]) decides nothing here: Amazon EVS
+/// answers [`INVALID_NEXT_TOKEN_MESSAGE`] for every token a listing cannot resume. The
+/// `fieldList` entry still names `nextToken`, so a client that reads it learns which
+/// member to correct.
+pub fn invalid_next_token() -> ValidationException {
+    ValidationException {
+        message: INVALID_NEXT_TOKEN_MESSAGE.to_string(),
+        reason: REASON_FIELD_VALIDATION_FAILED.to_string(),
+        field_list: Some(vec![field_failure_stated(
+            "nextToken",
+            INVALID_NEXT_TOKEN_MESSAGE,
+        )]),
+    }
 }
 
 // =============================================================================

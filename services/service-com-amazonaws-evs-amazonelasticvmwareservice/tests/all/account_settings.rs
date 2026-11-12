@@ -34,6 +34,11 @@
 //! zeros), whether a name is new or already held, a name repeated inside one call, the
 //! number of settings in a call, how a name falls outside the documented set, and the
 //! Region the caller addressed.
+//!
+//! A refusal states the SETTING it is about — `Setting '<name>' must not exceed
+//! <maximum>.`, quoting the name the request gave and the maximum that setting is
+//! documented with — and `tests/all/refusal_wording.rs` owns that wording rule across
+//! the catalog and the request positions a setting can arrive in.
 
 use serde_json::{json, Value};
 
@@ -225,14 +230,45 @@ async fn a_put_writes_exactly_the_named_settings_and_a_get_reads_the_region_back
 }
 
 /// One `PutAccountSettings` call this service refuses: the member path the refusal names,
-/// and the settings the call carries.
+/// the clauses its message states, and the settings the call carries.
 struct Refused {
     /// What this row is a case of.
     case: &'static str,
-    /// The member path the refusal must name.
+    /// The member path the `fieldList` entry must name.
     member: String,
+    /// The clauses the refusal's message must state, in order.
+    clauses: Vec<String>,
     /// The settings the call carries, in request order.
     settings: Vec<(String, String)>,
+}
+
+/// What the top-level `message` of a refused request opens with, and what joins its
+/// clauses when a request fails more than one check — the envelope Amazon EVS states this
+/// refusal in: `Request validation failure: Setting '<name>' must not exceed <maximum>.`
+const REFUSAL_PREFIX: &str = "Request validation failure: ";
+/// See [`REFUSAL_PREFIX`].
+const CLAUSE_JOINER: &str = " | ";
+
+/// The clause Amazon EVS states for a value above the maximum a setting's own
+/// documentation gives it: fixed text, with the setting named as the request named it and
+/// the maximum that setting is documented with.
+fn above_maximum(name: &str, maximum: u64) -> String {
+    format!("Setting '{name}' must not exceed {maximum}.")
+}
+
+/// The clause for a value that is not of the TYPE the setting is documented with
+/// (`vcfPortedCoreCount` is "type: numeric string"), stated about the same quoted setting.
+fn not_the_documented_type(name: &str) -> String {
+    format!("Setting '{name}' must be a numeric string.")
+}
+
+/// The clause for a name that is no documented setting at all, stated about the same
+/// quoted setting and naming the settings there are.
+fn not_a_setting(name: &str) -> String {
+    format!(
+        "Setting '{name}' is not a supported EVS setting: {}.",
+        only_setting().name
+    )
 }
 
 #[tokio::test]
@@ -263,56 +299,70 @@ async fn a_setting_outside_the_documented_domain_is_refused_and_stored_nowhere()
         Refused {
             case: "one core past the documented maximum",
             member: value_member.clone(),
+            clauses: vec![above_maximum(name, spec.maximum)],
             settings: vec![setting(name, &past_maximum)],
         },
         Refused {
             case: "far past the documented maximum",
             member: value_member.clone(),
+            clauses: vec![above_maximum(name, spec.maximum)],
             settings: vec![setting(name, "50000000")],
         },
         Refused {
             case: "a value with more digits than any integer type holds",
             member: value_member.clone(),
+            clauses: vec![above_maximum(name, spec.maximum)],
             settings: vec![setting(name, &"9".repeat(128))],
         },
         Refused {
             case: "a value that is not a numeric string at all",
             member: value_member.clone(),
+            clauses: vec![not_the_documented_type(name)],
             settings: vec![setting(name, "manycores")],
         },
         Refused {
             case: "a numeric string with a unit stuck to it",
             member: value_member.clone(),
+            clauses: vec![not_the_documented_type(name)],
             settings: vec![setting(name, "100cores")],
         },
         Refused {
             case: "an exponent is not a numeric string either",
             member: value_member.clone(),
+            clauses: vec![not_the_documented_type(name)],
             settings: vec![setting(name, "1e6")],
         },
         Refused {
             case: "a name the model does not document",
             member: name_member.clone(),
+            clauses: vec![not_a_setting("vcfPortedSocketCount")],
             settings: vec![setting("vcfPortedSocketCount", "100")],
         },
         Refused {
             case: "the documented name with something appended",
             member: name_member.clone(),
+            clauses: vec![not_a_setting(&format!("{name}X"))],
             settings: vec![setting(&format!("{name}X"), "100")],
         },
         Refused {
             case: "the documented name in another case",
             member: name_member,
+            clauses: vec![not_a_setting(&name.to_uppercase())],
             settings: vec![setting(&name.to_uppercase(), "100")],
         },
         Refused {
             case: "a bad setting in the second position names that position",
             member: "settings.2.member.value".to_string(),
+            clauses: vec![above_maximum(name, spec.maximum)],
             settings: vec![setting(name, "200"), setting(name, &past_maximum)],
         },
         Refused {
             case: "the first of two failures, ordered as the request named them",
             member: value_member,
+            clauses: vec![
+                not_the_documented_type(name),
+                not_a_setting("notASetting"),
+            ],
             settings: vec![setting(name, "manycores"), setting("notASetting", "1")],
         },
     ];
@@ -321,6 +371,7 @@ async fn a_setting_outside_the_documented_domain_is_refused_and_stored_nowhere()
         let Refused {
             case,
             member,
+            clauses,
             settings,
         } = row;
         let (status, answer) = call(&router, "PutAccountSettings", &put_body(&settings)).await;
@@ -335,10 +386,13 @@ async fn a_setting_outside_the_documented_domain_is_refused_and_stored_nowhere()
             "case {case:?}: expected ValidationException, got {answer}"
         );
         let message = answer["message"].as_str().unwrap_or_default();
-        assert!(
-            message.contains(&member),
-            "case {case:?}: the refusal must name the member path {member:?}, got \
-             {message:?}"
+        // The refusal states the SETTING, by the name the request gave it, and the
+        // requirement its documentation gives it — one clause per failed setting, in
+        // request order, and no wire member path.
+        let expected = format!("{REFUSAL_PREFIX}{}", clauses.join(CLAUSE_JOINER));
+        assert_eq!(
+            message, expected,
+            "case {case:?}: expected the message {expected:?}, got {message:?}"
         );
         let fields = answer["fieldList"].as_array().unwrap_or_else(|| {
             panic!("case {case:?}: the refusal must carry a fieldList, got {answer}")
