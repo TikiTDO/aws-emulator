@@ -15,6 +15,13 @@
 // exactly that. The lines above are the file header, which no landing edits.
 #[path = "all/prefix_lists.rs"]
 mod prefix_lists;
+// The ONE projection of a network ACL's rule table: every reader reports the ACL's stored
+// rules egress-first by ascending rule number, each carrying the port range and the ICMP type
+// and code as present-but-empty members where the protocol has no use for them. Declared
+// beside `prefix_lists` for the reason the note above gives: the sorted neighbourhood and the
+// tail of this file are where every new ec2 suite inserts its lines.
+#[path = "all/network_acl_entry_set_projection.rs"]
+mod network_acl_entry_set_projection;
 // The MODELLED MEMBERS a successful response carries: the Region display data a zone
 // reports, a volume's snapshot/zone id/operator, a launch's reservation groups and the
 // member set of every instance, a launch template's version counters and operator, and
