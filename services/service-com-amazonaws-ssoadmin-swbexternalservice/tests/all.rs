@@ -145,6 +145,8 @@ mod instance_write_stamp_instant;
 mod list_application_access_scopes;
 #[path = "all/list_instances_pagination.rs"]
 mod list_instances_pagination;
+#[path = "all/listed_instance_projection_matches_describe.rs"]
+mod listed_instance_projection_matches_describe;
 #[path = "all/listed_instance_state_after_instance_writes.rs"]
 mod listed_instance_state_after_instance_writes;
 #[path = "all/listed_instance_state_every_entry.rs"]
