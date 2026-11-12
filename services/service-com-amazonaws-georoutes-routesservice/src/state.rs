@@ -37,6 +37,12 @@
 //! Nothing in here reads a clock or a random source except [`now`], so a request repeated
 //! with the same inputs computes the same distances, durations and geometry.
 
+/// Whether the caller's own identity-based IAM policies let a request perform the action it
+/// asks for — the decision every operation of this service takes before it computes
+/// anything. It is a fact of the CREDENTIAL the request presented rather than of the road
+/// model, so it lives beside this module rather than inside it.
+pub mod identity_authorization;
+
 use std::collections::HashMap;
 
 use std::sync::OnceLock;

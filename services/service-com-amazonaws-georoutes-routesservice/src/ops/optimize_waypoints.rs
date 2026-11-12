@@ -49,12 +49,16 @@
 //!
 //! ## Authorization
 //!
-//! The emulator verifies every request's signature before any handler runs, so this
-//! handler checks no credentials. The modelled `Key` (API key) member is consequently not
-//! consulted and the modelled `AccessDeniedException` is unreachable here by construction:
-//! this emulator holds no API-key records to authorize a key against, and refusing a
-//! correctly signed request for want of one would refuse a valid caller. A test must not
-//! read acceptance here as a successful key authorization.
+//! The emulator verifies every request's SIGNATURE before any handler runs, so this handler
+//! checks no credential. What it does check is whether the caller MAY perform the action:
+//! AWS decides a signed call against the calling principal's identity-based IAM policies at
+//! the IAM layer, ahead of the service reading the request, so the handler takes that
+//! decision first through [`crate::state::identity_authorization`] and answers the modelled
+//! `AccessDeniedException` (HTTP 403) with IAM's own sentence for a caller no readable
+//! statement grants the action to, or one an explicit `Deny` refuses. The modelled `Key`
+//! (API key) member is still not consulted: this emulator holds no API-key records to
+//! authorize a key against, and refusing a correctly signed request for want of one would
+//! refuse a valid caller.
 //!
 //! ## Reaching this service's state
 //!
@@ -235,7 +239,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
+        // AWS decides authorization at the IAM layer, ahead of the service looking at the
+        // request's own input, so this is the FIRST thing this handler does: a caller whose
+        // identity-based policies do not allow this action is refused and nothing is
+        // computed for it.
+        if let Some(denial) = crate::state::identity_authorization::refusal(
+            &*self.engine,
+            ctx,
+            <Self as smithy_server_runtime::Operation>::NAME,
+        ) {
+            return Err(access_denied(denial));
+        }
 
         if input.driver.as_ref().is_some_and(|driver| driver.rest_profile.is_some()) {
             return Err(crate::scaffolded::Scaffolded::not_implemented(
@@ -1345,6 +1359,13 @@ fn invalid(member: &str, message: String) -> OptimizeWaypointsError {
         }],
     })
     .into()
+}
+
+/// The model's own `AccessDeniedException` (HTTP 403) for a caller the IAM policies in
+/// force do not permit to perform this action, carrying IAM's own sentence
+/// ([`crate::state::identity_authorization`]).
+fn access_denied(message: String) -> OptimizeWaypointsError {
+    OptimizeWaypointsErrorModeled::AccessDeniedException(AccessDeniedException { message }).into()
 }
 
 /// The model's `InternalServerException` (HTTP 500), for a failure of this emulator

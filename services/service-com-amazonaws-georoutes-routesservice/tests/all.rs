@@ -13,6 +13,8 @@
 // points it into `tests/all/`.
 #[path = "all/data_plane.rs"]
 mod data_plane;
+#[path = "all/identity_authorization.rs"]
+mod identity_authorization;
 #[path = "all/isolines.rs"]
 mod isolines;
 #[path = "all/modelled_constraint_refusals.rs"]

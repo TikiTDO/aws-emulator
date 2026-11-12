@@ -21,6 +21,15 @@ bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# The caller's own identity-based IAM policies decide every call to this service
+# (`state::identity_authorization`): the shared evaluation of a policy document and the
+# wording of a refusal live in `service-common`, the principal an access key id speaks for
+# in the token service's store, and the documents in force on it in the IAM emulator's.
+# Both stores are reached through the one shared engine, which needs the owning services'
+# state TYPES.
+service-common = { path = "../common" }
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 # Offline reverse country geocoding, with the boundary data embedded: tells the road
 # model where a road network exists (land) and where none does (open water). The crate is
 # Apache-2.0; the boundary data it embeds is ODbL, whose attribution terms are its own.
