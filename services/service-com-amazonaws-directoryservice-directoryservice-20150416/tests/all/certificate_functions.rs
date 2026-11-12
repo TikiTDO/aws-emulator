@@ -67,7 +67,14 @@ impl DirectoryKind {
 }
 
 /// The certificate ids `ListCertificates` reports for `directory_id`.
-async fn listed(router: &MultiServiceRouter, directory_id: &str, case: &str) -> Vec<String> {
+///
+/// Shared with the sibling suite `certificate_writes_during_a_build`, so both read a
+/// directory's inventory the one way.
+pub(crate) async fn listed(
+    router: &MultiServiceRouter,
+    directory_id: &str,
+    case: &str,
+) -> Vec<String> {
     let answer = ok(
         router,
         "ListCertificates",

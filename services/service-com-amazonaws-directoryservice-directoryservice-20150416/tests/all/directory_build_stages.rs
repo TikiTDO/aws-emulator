@@ -39,7 +39,20 @@ const REQUEST_ID_SEPARATOR: &str = " : RequestId: ";
 
 /// Long enough to be past the first transition a create owes and comfortably short of the
 /// build window that follows it, so a read lands inside the stage the build happens in.
-const INSIDE_THE_BUILD: Duration = Duration::from_millis(1200);
+///
+/// Shared with the sibling suite `certificate_writes_during_a_build`, so both land in that
+/// stage the one way.
+pub(crate) const INSIDE_THE_BUILD: Duration = Duration::from_millis(1200);
+
+/// The `DirectoryUnavailableException` sentence this service states for a directory a call
+/// cannot reach (`state::directory_unavailable`): fixed text around the `DirectoryId` the
+/// request named, which is its only variable part.
+///
+/// Shared with the sibling suite `certificate_writes_during_a_build`, so both expect that
+/// class's sentence from the one place.
+pub(crate) fn directory_unavailable(directory_id: &str) -> String {
+    format!("Operation could not be performed because directory {directory_id} is unavailable.")
+}
 
 /// The administrator account a Managed Microsoft AD directory is created with, from
 /// `CreateMicrosoftADRequest$Password`'s own documentation: "The password for the default
@@ -68,7 +81,10 @@ fn diagnostic(body: &Value, case: &str) -> String {
 
 /// A call that must be refused with HTTP 400, the given modelled error code AND the given
 /// diagnostic, so a client that branches on either reads what AWS states for the class.
-async fn refused_with(
+///
+/// Shared with the sibling suite `certificate_writes_during_a_build`, so both assert a
+/// refusal the one way.
+pub(crate) async fn refused_with(
     router: &MultiServiceRouter,
     operation: &str,
     body: Value,
@@ -328,7 +344,7 @@ async fn the_build_stages_gate_the_operations_that_need_a_directory_in_service()
                 "RegisterCertificate",
                 json!({ "DirectoryId": &id, "CertificateData": &pem }),
                 "DirectoryUnavailableException",
-                format!("Operation could not be performed because directory {id} is unavailable."),
+                directory_unavailable(&id),
             ),
             (
                 "ResetUserPassword",

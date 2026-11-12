@@ -27,6 +27,8 @@ mod certificate_deregistration;
 mod certificate_functions;
 #[path = "all/certificate_listing.rs"]
 mod certificate_listing;
+#[path = "all/certificate_writes_during_a_build.rs"]
+mod certificate_writes_during_a_build;
 #[path = "all/certificates.rs"]
 mod certificates;
 #[path = "all/computer_account_unavailable_wording.rs"]
