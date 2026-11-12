@@ -1213,6 +1213,10 @@ mod codepipeline_build_action_invokes_codebuild;
 // of each stands — the same resolution the note further up records for five others.
 #[path = "all/zz_opensearch_fgac_probe.rs"]
 mod zz_opensearch_fgac_probe;
+// Declared because the build enforces that every file under `tests/all/` is: the file this
+// names is EMPTY (see its own note) and compiles to nothing.
+#[path = "all/zz_diag.rs"]
+mod zz_diag;
 // Declared here, in this same head region, for the reason the entries above record: this
 // suite holds THIS list to one declaration per suite, so it belongs to no service's span of
 // the sorted list either.

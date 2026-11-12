@@ -321,10 +321,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if let Some(enabled) = input.enabled {
             record.enabled = enabled;
         }
-        // RDS answers this call with the subscription in the transient `modifying` status
-        // and reaches `active` again a span later, so a caller reading straight after the
-        // modify sees the change being applied rather than a status nothing passed through.
-        record.begin_modifying();
+        // A subscription is a notification rule and provisions nothing, so the change this
+        // call wrote is in force by the time it answers: the subscription stays in the
+        // settled `active` status it already held, and no transient status is reported for
+        // a change that is already applied.
 
         Ok(ModifyEventSubscriptionOutput {
             event_subscription: Some(record.to_wire()),

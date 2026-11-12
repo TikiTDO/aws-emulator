@@ -203,11 +203,9 @@ fn assert_reported(
          {reported_status:?} in {xml}"
     );
     let created_at = text(xml, "SubscriptionCreationTime");
-    assert!(
-        created_at.len() >= "2026-01-01T00:00:00Z".len() && created_at.ends_with('Z'),
-        "case {case:?}: expected an ISO-8601 SubscriptionCreationTime, got {created_at:?} \
-         in {xml}"
-    );
+    // The one form this service renders the member in; `event_subscription_envelope` is
+    // where that form is stated and asserted over the instant classes.
+    crate::event_subscription_envelope::assert_creation_time_form(&case, &created_at);
 }
 
 #[tokio::test]

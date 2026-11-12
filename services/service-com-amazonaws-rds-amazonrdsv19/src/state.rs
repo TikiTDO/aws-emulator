@@ -701,21 +701,9 @@ impl ComAmazonawsRdsAmazonrdsv19State {
         for key in gone {
             self.custom_db_engine_versions.remove(&key);
         }
-        let mut gone: Vec<RegionalKey> = Vec::new();
-        for (key, subscription) in self
-            .event_subscriptions
-            .range_mut((region.to_string(), String::new())..)
-        {
-            if key.0 != region {
-                break;
-            }
-            if subscription.settle(now) {
-                gone.push(key.clone());
-            }
-        }
-        for key in gone {
-            self.event_subscriptions.remove(&key);
-        }
+        // An event subscription is in no transient status and owes the clock no
+        // transition: it is a notification rule, so a create, a modify and a delete of one
+        // are all in force by the time that call answers (see `EventSubscriptionRecord`).
         // A global cluster is ACCOUNT-scoped, so it sits in no region's range: the whole
         // map is walked, bounded by [`GLOBAL_CLUSTER_QUOTA_PER_ACCOUNT`], which is what
         // makes the transition a modify owes due whichever region the next request is

@@ -244,3 +244,6 @@ mod listed_instance_state_across_read_edge_cases;
 // `listed_instance_state_every_entry` is declared once, in the sorted list
 // above: two branches each added a declaration of it, and the merge of both
 // left the file loaded as a module twice.
+// `listed_instance_state_every_entry` is declared ONCE, in the sorted run above: a second
+// `mod` item for the same file loads it twice, which the lint the build denies
+// (`clippy::duplicate_mod`) refuses, so the duplicate that stood here is gone.

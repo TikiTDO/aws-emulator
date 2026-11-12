@@ -13,7 +13,8 @@
 //! wrote, the subscription it leaves behind has to satisfy the same constraints a create
 //! of it would (a category belongs to the resulting source type, which a category needs),
 //! a refused modify changes nothing at all, and the answer reports the subscription in the
-//! transient `modifying` status it reaches `active` again from a span later.
+//! settled `active` status it keeps, since a change to a notification rule is in force by
+//! the time the call answers.
 //!
 //! The tables below span the classes that rule generalises over: which members the request
 //! names (none, each one alone, and all of them at once), both settings of `Enabled` from
@@ -434,15 +435,16 @@ async fn modify_writes_the_members_it_names_and_leaves_the_rest_alone() {
             )
             .await,
         );
-        // RDS answers the modify with the subscription in the transient `modifying`
-        // status, which it reaches `active` again from a span later.
+        // RDS answers the modify with the subscription in the `active` status it keeps:
+        // the change is applied before the call answers, so no transient status is
+        // reported for it.
         assert_reported(
             &format!("{} (ModifyEventSubscription)", row.case),
             &modified,
             REGION,
             row.name,
             &row.expected,
-            &["modifying"],
+            &["active"],
             created_at,
         );
         // The round trip is what proves the change was PERSISTED rather than echoed.
@@ -456,13 +458,13 @@ async fn modify_writes_the_members_it_names_and_leaves_the_rest_alone() {
             REGION,
             row.name,
             &row.expected,
-            &["modifying", "active"],
+            &["active"],
             created_at,
         );
     }
 
-    // A transition span later every modified subscription is active again, and still
-    // reports exactly what the modify wrote.
+    // A transition span later every modified subscription is still active, and still
+    // reports exactly what the modify wrote: no change was owed for it.
     wait_for_settle();
     for (row, created_at) in MODIFY_CASES.iter().zip(&created_times) {
         let described = expect_ok(row.case, describe_in(&router, REGION, row.name).await);

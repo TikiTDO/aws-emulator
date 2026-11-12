@@ -432,11 +432,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CreateEventSubscr
             region,
             sns_topic_arn,
             // `SubscriptionCreationTime` is the instant this subscription was created,
-            // which the model types as a STRING: rendered in the ISO-8601 form the
-            // service's timestamp members carry, from the clock rather than the request.
-            crate::state::now_as_wire_timestamp()
-                .fmt(::aws_smithy_types::date_time::Format::DateTime)
-                .unwrap_or_default(),
+            // which the model types as a STRING: taken from the clock rather than the
+            // request, and rendered by the one renderer every operation that answers with
+            // this subscription then reports it from.
+            crate::state::event_subscription_creation_time(crate::state::now_as_wire_timestamp()),
             source_type,
             source_ids,
             event_categories,

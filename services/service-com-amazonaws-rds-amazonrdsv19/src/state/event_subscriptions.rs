@@ -19,7 +19,8 @@ pub struct EventSubscriptionRecord {
     /// no-permission | topic-not-exist" (`EventSubscription$Status`).
     pub status: String,
     /// `SubscriptionCreationTime`, which the model types as a STRING rather than a
-    /// timestamp, so the record carries the rendered form its writer chose.
+    /// timestamp, so the record carries the instant already rendered — by the ONE renderer
+    /// this service writes it with, [`event_subscription_creation_time`].
     pub subscription_creation_time: String,
     /// `SourceType`, absent when the subscription covers every source type.
     pub source_type: Option<String>,
@@ -29,10 +30,6 @@ pub struct EventSubscriptionRecord {
     pub event_categories: Vec<String>,
     /// `Enabled`.
     pub enabled: bool,
-    /// The status this record owes, and when; see [`PendingStatus`]. A subscription is
-    /// `active` from its create onwards and only a modify puts it in a transient status,
-    /// so this is `None` for a subscription nothing has changed.
-    pub pending_status: Option<PendingStatus>,
     /// The tags `CreateEventSubscription$Tags` assigned to the subscription. The modelled
     /// `EventSubscription` shape carries no tag member, so nothing reports them yet —
     /// `ListTagsForResource`, which does, is still scaffolded — but the caller's input is
@@ -42,8 +39,9 @@ pub struct EventSubscriptionRecord {
 
 impl EventSubscriptionRecord {
     /// A subscription as `CreateEventSubscription` mints it: RDS answers the create with
-    /// the subscription already [`EVENT_SUBSCRIPTION_STATUS_ACTIVE`], so there is no
-    /// transient status to owe and nothing for the clock to settle later.
+    /// the subscription already [`EVENT_SUBSCRIPTION_STATUS_ACTIVE`] — a subscription is a
+    /// notification rule and provisions nothing — so it is in no transient status, and a
+    /// later change to it is in force by the time that call answers too.
     #[allow(clippy::too_many_arguments)]
     pub fn active(
         subscription_name: String,
@@ -66,41 +64,8 @@ impl EventSubscriptionRecord {
             source_ids,
             event_categories,
             enabled,
-            pending_status: None,
             tags,
         }
-    }
-
-    /// Accept a modify: the subscription reports [`EVENT_SUBSCRIPTION_STATUS_MODIFYING`]
-    /// while the change is applied, and the clock owes it
-    /// [`EVENT_SUBSCRIPTION_STATUS_ACTIVE`] [`STATUS_TRANSITION_DELAY`] later — so a
-    /// caller reading straight after the modify sees the transient status the real
-    /// service reports.
-    pub fn begin_modifying(&mut self) {
-        self.status = EVENT_SUBSCRIPTION_STATUS_MODIFYING.to_string();
-        self.pending_status = Some(PendingStatus::in_a_moment(
-            EVENT_SUBSCRIPTION_STATUS_ACTIVE,
-        ));
-    }
-
-    /// Apply a change whose due instant has passed. Returns whether the record is now
-    /// gone, exactly as [`DbInstanceRecord::settle`] does.
-    pub(super) fn settle(&mut self, now: Instant) -> bool {
-        let due = self
-            .pending_status
-            .as_ref()
-            .is_some_and(|pending| now >= pending.due_at);
-        if !due {
-            return false;
-        }
-        match self.pending_status.take().map(|pending| pending.change) {
-            Some(PendingChange::Status(status)) => self.status = status,
-            Some(PendingChange::Removal) => return true,
-            // Unreachable: the change was there a line ago, under this one `&mut self`.
-            // Answered as "nothing was due" rather than with a panic in a request path.
-            None => {}
-        }
-        false
     }
 
     /// Accept a delete: the subscription's own answer reports the `deleting` status that
@@ -139,4 +104,26 @@ impl EventSubscriptionRecord {
             event_subscription_arn: Some(self.arn()),
         }
     }
+}
+
+/// The form an event subscription's `SubscriptionCreationTime` is rendered in: the
+/// calendar date, then the time of day in 24-hour form to the MILLISECOND, separated by a
+/// space and carrying no zone marker — `2026-10-29 21:33:43.917`, in UTC.
+///
+/// Read by `chrono`'s formatter, so the calendar, the zero padding and the fixed count of
+/// fractional digits are library-rendered rather than written here.
+const SUBSCRIPTION_CREATION_TIME_FORM: &str = "%Y-%m-%d %H:%M:%S%.3f";
+
+/// The instant `at` as an `EventSubscription$SubscriptionCreationTime` carries it.
+///
+/// The member is a STRING rather than a timestamp, so its form is the service's own rather
+/// than one the model's `@timestampFormat` picks: the instant in UTC, to the millisecond,
+/// in [`SUBSCRIPTION_CREATION_TIME_FORM`]. Every operation that answers with an
+/// `EventSubscription` reports the stored string this produced, so the create, the
+/// modify, the source-identifier changes, the delete and the describe cannot disagree
+/// about one subscription's creation time.
+pub fn event_subscription_creation_time(at: ::aws_smithy_types::DateTime) -> String {
+    ::chrono::DateTime::from_timestamp(at.secs(), at.subsec_nanos())
+        .map(|utc| utc.format(SUBSCRIPTION_CREATION_TIME_FORM).to_string())
+        .unwrap_or_default()
 }

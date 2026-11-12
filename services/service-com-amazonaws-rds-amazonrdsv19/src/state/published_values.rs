@@ -584,7 +584,8 @@ pub const DB_CLUSTER_STATUS_PROMOTING: &str = "promoting";
 /// It is the status a subscription has from its create onwards: RDS answers
 /// `CreateEventSubscription` with the subscription already active — creating one writes a
 /// notification rule and provisions no resource — so no transient status is owed for it
-/// and the clock owes it no transition.
+/// and the clock owes it no transition. A later `ModifyEventSubscription` leaves it here
+/// too: the change is in force by the time that call answers.
 pub const EVENT_SUBSCRIPTION_STATUS_ACTIVE: &str = "active";
 
 /// The status an Aurora global database cluster reports once it is usable, as
@@ -602,7 +603,7 @@ pub const GLOBAL_CLUSTER_STATUS_DELETING: &str = "deleting";
 
 /// The status an Aurora global database cluster reports while a change to it is being
 /// applied, the `modifying` status the other modify paths of this service report
-/// ([`DB_CLUSTER_STATUS_MODIFYING`], [`EVENT_SUBSCRIPTION_STATUS_MODIFYING`]).
+/// ([`DB_CLUSTER_STATUS_MODIFYING`]).
 ///
 /// Transient: `ModifyGlobalCluster` "modifies a setting for an Amazon Aurora global
 /// database cluster" and answers before the setting is in force, so the clock owes the
@@ -615,14 +616,6 @@ pub const GLOBAL_CLUSTER_STATUS_MODIFYING: &str = "modifying";
 /// The status an event notification subscription reports in the answer to the delete that
 /// was accepted for it, from `EventSubscription$Status`'s published list.
 pub const EVENT_SUBSCRIPTION_STATUS_DELETING: &str = "deleting";
-
-/// The status an event notification subscription reports while a change to it is being
-/// applied, from `EventSubscription$Status`'s published list ("creating | modifying |
-/// deleting | active | no-permission | topic-not-exist").
-///
-/// `ModifyEventSubscription` answers with the subscription in this status, so the clock
-/// owes it [`EVENT_SUBSCRIPTION_STATUS_ACTIVE`] [`STATUS_TRANSITION_DELAY`] later.
-pub const EVENT_SUBSCRIPTION_STATUS_MODIFYING: &str = "modifying";
 
 /// `GlobalCluster$StorageEncryptionType` for one encrypted under the key the service
 /// applies itself: "`sse-rds` - The global database cluster is encrypted using an Amazon
