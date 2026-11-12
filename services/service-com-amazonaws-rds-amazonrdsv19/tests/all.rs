@@ -109,6 +109,8 @@ mod db_proxy_modification;
 mod db_proxy_target_group_readiness;
 #[path = "all/db_proxy_target_groups.rs"]
 mod db_proxy_target_groups;
+#[path = "all/db_proxy_target_registration.rs"]
+mod db_proxy_target_registration;
 #[path = "all/db_recommendations.rs"]
 mod db_recommendations;
 #[path = "all/db_security_group_deletion.rs"]

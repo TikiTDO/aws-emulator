@@ -231,10 +231,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     return Err(
                         DeregisterDBProxyTargetsErrorModeled::DBProxyTargetNotFoundFault(
                             DBProxyTargetNotFoundFault {
-                                message: Some(format!(
-                                    "{identifier} is not registered with DB proxy {}",
-                                    input.db_proxy_name
-                                )),
+                                message: Some(
+                                    crate::state::MISSING_DB_PROXY_TARGETS_MESSAGE.to_string(),
+                                ),
                             },
                         )
                         .into(),

@@ -12,7 +12,7 @@
 
 use std::time::Instant;
 
-use super::{PendingChange, PendingStatus, ARN_NAMESPACE};
+use super::{PendingChange, PendingStatus, ARN_NAMESPACE, STATUS_TRANSITION_DELAY};
 use crate::ops::types::{
     ConnectionPoolConfiguration, ConnectionPoolConfigurationInfo, DBProxy, DBProxyTarget,
     DBProxyTargetGroup, Tag, TargetHealth, UserAuthConfig, UserAuthConfigInfo,
@@ -204,8 +204,17 @@ pub const DEFAULT_AUTH_SCHEME_NONE: &str = "NONE";
 pub const NETWORK_TYPE_IPV4: &str = "IPV4";
 
 /// `TargetHealth$State` — "`AVAILABLE`", the state of a registered target whose database
-/// this service still holds.
+/// this service still holds and whose registration has come into force.
 pub const TARGET_STATE_AVAILABLE: &str = "AVAILABLE";
+
+/// `TargetHealth$State` — "`REGISTERING`", the state a registration reports while this
+/// service is still putting it in force.
+///
+/// `TargetHealth$State` publishes the lifecycle a target walks — "`registering` >
+/// `unavailable` > `available`" — so the state a registration is made in is not the state
+/// it settles on: a caller that polls the target right after registering it sees this one
+/// first, and [`TARGET_STATE_AVAILABLE`] [`STATUS_TRANSITION_DELAY`] later.
+pub const TARGET_STATE_REGISTERING: &str = "REGISTERING";
 
 /// `TargetHealth$State` — "`UNAVAILABLE`", the state of a registered target whose database
 /// is gone.
@@ -223,6 +232,10 @@ pub const TARGET_TYPE_TRACKED_CLUSTER: &str = "TRACKED_CLUSTER";
 
 /// `TargetRole` — "`READ_WRITE`", the role of the writer a proxy connects to.
 pub const TARGET_ROLE_READ_WRITE: &str = "READ_WRITE";
+
+/// `TargetRole` — "`READ_ONLY`", the role of a reader a proxy connects to: a DB instance
+/// of a tracked DB cluster that is not that cluster's writer serves read-only operations.
+pub const TARGET_ROLE_READ_ONLY: &str = "READ_ONLY";
 
 /// The ARN resource type of a proxy, as AWS writes it under the `rds` namespace.
 const ARN_RESOURCE_TYPE: &str = "db-proxy";
@@ -320,6 +333,27 @@ pub fn db_proxy_already_exists_message(named: &str) -> String {
 pub const MISSING_DB_PROXY_TARGET_IDENTIFIER_MESSAGE: &str =
     "Missing DB instance or DB cluster identifier.";
 
+/// The sentence `DeregisterDBProxyTargets` refuses a request naming a database that the
+/// proxy's target group does not have registered with — `DBProxyTargetNotFoundFault`,
+/// "the specified RDS DB instance or Aurora DB cluster isn't available for a proxy owned
+/// by your Amazon Web Services account".
+///
+/// Amazon RDS words it as a fixed statement about the SET of targets the request named and
+/// the group does not hold, interpolating nothing from the request: one call can name
+/// several databases, and the fault reports that targets of it are missing rather than
+/// which one was looked up first.
+pub const MISSING_DB_PROXY_TARGETS_MESSAGE: &str = "Missing targets";
+
+/// The sentence `RegisterDBProxyTargets` refuses a registration that would make the proxy
+/// reach a database it already reaches with — `DBProxyTargetAlreadyRegisteredFault`.
+///
+/// It is the statement the fault itself publishes ("The proxy is already associated with
+/// the specified RDS DB instance or Aurora DB cluster"), fixed text naming the two KINDS of
+/// database and interpolating nothing from the request, as the other fixed refusals of
+/// these operations do.
+pub const DB_PROXY_TARGET_ALREADY_REGISTERED_MESSAGE: &str =
+    "The proxy is already associated with the specified RDS DB instance or Aurora DB cluster";
+
 /// Refuse a `TargetGroupName` that is not the one target group a proxy has.
 ///
 /// "Currently, this name must be `default`" — each proxy has exactly one target group and
@@ -376,6 +410,30 @@ pub struct DbProxyTargetRecord {
     pub identifier: String,
     /// Whether the registration names a DB CLUSTER rather than a DB instance.
     pub is_cluster: bool,
+    /// The instant from which this registration is in force, so the target reports
+    /// [`TARGET_STATE_AVAILABLE`] rather than [`TARGET_STATE_REGISTERING`]. Nothing
+    /// sleeps and nothing writes it back: the health a target reports is read from this
+    /// instant when the target is projected, so it is the clock alone that moves it.
+    pub healthy_at: Instant,
+}
+
+impl DbProxyTargetRecord {
+    /// The registration of `identifier` this call makes: in force
+    /// [`STATUS_TRANSITION_DELAY`] from now, which is the span this service takes to put
+    /// one into force. The span is never zero, so the caller that registered a target
+    /// still observes the `registering` state its health lifecycle starts in.
+    pub fn registering(identifier: String, is_cluster: bool) -> Self {
+        Self {
+            identifier,
+            is_cluster,
+            healthy_at: Instant::now() + STATUS_TRANSITION_DELAY,
+        }
+    }
+
+    /// Whether the registration is in force at `now`.
+    pub fn is_in_force(&self, now: Instant) -> bool {
+        now >= self.healthy_at
+    }
 }
 
 /// A persisted RDS proxy.
@@ -564,62 +622,178 @@ impl DbProxyRecord {
     }
 }
 
-/// Project a registration onto the modelled `DBProxyTarget`, with everything about the
-/// database behind it read from `database`.
+/// WHICH database a proxy target reports: the identifier it is reported under and whether
+/// that identifier names a DB CLUSTER.
 ///
-/// `database` is `None` when the registered DB instance or DB cluster is no longer in the
-/// store: the registration stands, and the target reports the health of one whose database
-/// cannot be reached rather than an endpoint that answers nothing.
-pub fn target_to_wire(
-    target: &DbProxyTargetRecord,
+/// Both halves are needed because the two kinds of database are separate namespaces — a DB
+/// instance and a DB cluster of one and the same identifier are two databases — so this,
+/// and not the identifier alone, is what decides whether two targets report the same
+/// database.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ProxyTargetKey {
+    /// `RdsResourceId`.
+    pub identifier: String,
+    /// Whether the target reports a DB cluster rather than a DB instance.
+    pub is_cluster: bool,
+}
+
+/// One row of a proxy's target report: the database the target reports, how the proxy
+/// reaches it, and whether the registration behind it is in force yet.
+///
+/// A row is built either from a registration itself ([`Self::registration`]) or from a DB
+/// instance that a registered DB cluster tracks ([`Self::tracked_instance`]), so every
+/// target — however it came to be in the report — carries ONE identity rule and ONE health
+/// rule.
+#[derive(Debug, Clone)]
+pub struct ProxyTargetRow {
+    /// `RdsResourceId`: "the identifier representing the target. It can be the instance
+    /// identifier for an RDS DB instance, or the cluster identifier for an Aurora DB
+    /// cluster" — never a server-assigned id the caller never named.
+    identifier: String,
+    /// `Type`.
+    target_type: &'static str,
+    /// `TrackedClusterId`: the DB cluster the target is reached through, which only a
+    /// target that came from a registered cluster has.
+    tracked_cluster_id: Option<String>,
+    /// `Role`.
+    role: &'static str,
+    /// What the database behind the target reports, read from that database's own record,
+    /// or `None` when this service no longer holds it.
     database: Option<RegisteredDatabase>,
-) -> DBProxyTarget {
-    let target_type = if target.is_cluster {
-        TARGET_TYPE_TRACKED_CLUSTER
-    } else {
-        TARGET_TYPE_RDS_INSTANCE
-    };
-    match database {
-        Some(database) => DBProxyTarget {
-            target_arn: Some(database.arn),
-            endpoint: Some(database.endpoint),
-            tracked_cluster_id: target
-                .is_cluster
-                .then(|| target.identifier.clone()),
-            rds_resource_id: Some(database.resource_id),
-            port: Some(database.port),
-            r#type: Some(target_type.to_string()),
-            role: Some(TARGET_ROLE_READ_WRITE.to_string()),
-            target_health: Some(TargetHealth {
-                state: Some(TARGET_STATE_AVAILABLE.to_string()),
-                reason: None,
-                description: None,
-            }),
-        },
-        None => DBProxyTarget {
-            target_arn: None,
-            endpoint: None,
-            tracked_cluster_id: target
-                .is_cluster
-                .then(|| target.identifier.clone()),
-            rds_resource_id: Some(target.identifier.clone()),
-            port: None,
-            r#type: Some(target_type.to_string()),
-            role: Some(TARGET_ROLE_READ_WRITE.to_string()),
-            target_health: Some(TargetHealth {
-                state: Some(TARGET_STATE_UNAVAILABLE.to_string()),
-                reason: Some(TARGET_HEALTH_REASON_UNREACHABLE.to_string()),
-                description: Some(format!(
-                    "{} {} is no longer available",
-                    if target.is_cluster {
-                        "DB cluster"
+    /// Whether the registration behind the target is in force (see
+    /// [`DbProxyTargetRecord::is_in_force`]).
+    in_force: bool,
+}
+
+impl ProxyTargetRow {
+    /// The target for the registration itself: the DB instance or the DB cluster the
+    /// caller named, reported under the identifier it was registered as.
+    ///
+    /// `database` is `None` when that DB instance or DB cluster is no longer in the store:
+    /// the registration stands, and the target reports the health of one whose database
+    /// cannot be reached rather than an endpoint that answers nothing.
+    pub fn registration(
+        target: &DbProxyTargetRecord,
+        database: Option<RegisteredDatabase>,
+        now: Instant,
+    ) -> Self {
+        Self {
+            identifier: target.identifier.clone(),
+            target_type: if target.is_cluster {
+                TARGET_TYPE_TRACKED_CLUSTER
+            } else {
+                TARGET_TYPE_RDS_INSTANCE
+            },
+            // "The DB cluster identifier when the target represents an Aurora DB cluster.
+            // This field is blank when the target represents an RDS DB instance"
+            // (`DBProxyTarget$TrackedClusterId`).
+            tracked_cluster_id: target.is_cluster.then(|| target.identifier.clone()),
+            role: TARGET_ROLE_READ_WRITE,
+            database,
+            in_force: target.is_in_force(now),
+        }
+    }
+
+    /// The target for one DB instance a registered DB cluster tracks: "a proxy that is
+    /// associated with a DB cluster can connect to any of its DB instances"
+    /// (`TargetType$TRACKED_CLUSTER` — the proxy tracks the cluster's instances), so the
+    /// report carries one `RDS_INSTANCE` target per member beside the cluster's own
+    /// target, each naming the cluster it is reached through and the operations it can
+    /// serve: the writer "can be used for read/write" and every reader for read-only ones
+    /// (`DBProxyTarget$Role`).
+    ///
+    /// The members are read from the cluster's CURRENT membership rather than stored, so a
+    /// member added to or taken out of the cluster after the registration is reported
+    /// exactly as the cluster reports it.
+    pub fn tracked_instance(
+        tracked_cluster_id: &str,
+        identifier: &str,
+        database: Option<RegisteredDatabase>,
+        writes: bool,
+        in_force: bool,
+    ) -> Self {
+        Self {
+            identifier: identifier.to_string(),
+            target_type: TARGET_TYPE_RDS_INSTANCE,
+            tracked_cluster_id: Some(tracked_cluster_id.to_string()),
+            role: if writes {
+                TARGET_ROLE_READ_WRITE
+            } else {
+                TARGET_ROLE_READ_ONLY
+            },
+            database,
+            in_force,
+        }
+    }
+
+    /// WHICH database this target reports, as everything that has to tell two targets
+    /// apart keys it: the identifier AND whether it is a DB cluster, because a DB instance
+    /// and a DB cluster are separate namespaces and may carry one and the same identifier.
+    pub fn database_key(&self) -> ProxyTargetKey {
+        ProxyTargetKey {
+            identifier: self.identifier.clone(),
+            is_cluster: self.target_type == TARGET_TYPE_TRACKED_CLUSTER,
+        }
+    }
+
+    /// The key the report pages on — one database is one target, so this is
+    /// [`Self::database_key`] written as the opaque text a `Marker` carries.
+    pub fn page_key(&self) -> String {
+        format!("{}:{}", self.target_type, self.identifier)
+    }
+
+    /// Project the row onto the modelled `DBProxyTarget`.
+    pub fn to_wire(self) -> DBProxyTarget {
+        let tracked_cluster_id = self.tracked_cluster_id;
+        let rds_resource_id = Some(self.identifier.clone());
+        let r#type = Some(self.target_type.to_string());
+        let role = Some(self.role.to_string());
+        match self.database {
+            Some(database) => DBProxyTarget {
+                target_arn: Some(database.arn),
+                endpoint: Some(database.endpoint),
+                tracked_cluster_id,
+                rds_resource_id,
+                port: Some(database.port),
+                r#type,
+                role,
+                // A registration this service has not finished putting in force is still
+                // `registering`; only the clock moves it on, and "if the State is
+                // AVAILABLE, a description is not included"
+                // (`TargetHealth$Description`).
+                target_health: Some(TargetHealth {
+                    state: Some(if self.in_force {
+                        TARGET_STATE_AVAILABLE.to_string()
                     } else {
-                        "DB instance"
-                    },
-                    target.identifier
-                )),
-            }),
-        },
+                        TARGET_STATE_REGISTERING.to_string()
+                    }),
+                    reason: None,
+                    description: None,
+                }),
+            },
+            None => DBProxyTarget {
+                target_arn: None,
+                endpoint: None,
+                tracked_cluster_id,
+                rds_resource_id,
+                port: None,
+                r#type,
+                role,
+                target_health: Some(TargetHealth {
+                    state: Some(TARGET_STATE_UNAVAILABLE.to_string()),
+                    reason: Some(TARGET_HEALTH_REASON_UNREACHABLE.to_string()),
+                    description: Some(format!(
+                        "{} {} is no longer available",
+                        if self.target_type == TARGET_TYPE_TRACKED_CLUSTER {
+                            "DB cluster"
+                        } else {
+                            "DB instance"
+                        },
+                        self.identifier
+                    )),
+                }),
+            },
+        }
     }
 }
 
@@ -631,8 +805,6 @@ pub struct RegisteredDatabase {
     pub arn: String,
     /// The writer endpoint a client connects to.
     pub endpoint: String,
-    /// The database's immutable resource id.
-    pub resource_id: String,
     /// The port the proxy connects to the database on.
     pub port: i32,
 }

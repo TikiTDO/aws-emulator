@@ -211,18 +211,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // The registrations are reported in registration order, each keyed by the
-        // database it names so a page boundary is a stable cursor.
-        let targets: Vec<(String, DBProxyTarget)> = proxy
-            .targets
-            .clone()
-            .into_iter()
-            .map(|target| {
-                (
-                    target.identifier.clone(),
-                    store.proxy_target_to_wire(&region, &target),
-                )
-            })
-            .collect();
+        // database it names so a page boundary is a stable cursor; a registered DB cluster
+        // is TRACKED, so it contributes the targets of the DB instances the proxy reaches
+        // through it beside its own.
+        let targets: Vec<(String, DBProxyTarget)> =
+            store.proxy_report_targets(&region, &proxy.targets.clone());
 
         // A `Marker` is placed in the report's own order and the page resumes BEYOND it; a
         // token this codec could not have produced is refused: see `crate::state::paginate`.

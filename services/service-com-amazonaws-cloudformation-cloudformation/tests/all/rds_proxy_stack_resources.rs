@@ -97,6 +97,33 @@ async fn describe_targets(router: &MultiServiceRouter, name: &str) -> (u16, Stri
     rds(router, "DescribeDBProxyTargets", &[("DBProxyName", name)]).await
 }
 
+/// How often this suite re-reads a proxy's targets while they are still being put in
+/// force, and how many times. The product bounds the wait, so a health that never settles
+/// fails the test instead of hanging.
+const TARGET_HEALTH_CHECK_INTERVAL: ::std::time::Duration = ::std::time::Duration::from_millis(25);
+const TARGET_HEALTH_CHECKS: usize = 40;
+
+/// `DescribeDBProxyTargets` on one proxy name, once every target it reports has finished
+/// being put in force.
+///
+/// Amazon RDS answers a registration with the target `REGISTERING` and settles its health
+/// on `AVAILABLE` on its own — `TargetHealth$State` publishes that lifecycle — so a client
+/// reading a deployment's targets waits for the health it needs, which is what this does.
+async fn describe_settled_targets(router: &MultiServiceRouter, name: &str) -> (u16, String) {
+    for _ in 0..TARGET_HEALTH_CHECKS {
+        let (status_code, targets) = describe_targets(router, name).await;
+        if status_code != 200
+            || xml_texts(&targets, "State")
+                .iter()
+                .all(|state| state == TARGET_AVAILABLE)
+        {
+            return (status_code, targets);
+        }
+        tokio::time::sleep(TARGET_HEALTH_CHECK_INTERVAL).await;
+    }
+    describe_targets(router, name).await
+}
+
 /// The `OutputValue` the stack reports for `key`, read as the pair of lists the response
 /// carries (every output of every template here resolves, so the pairing cannot slip).
 fn output_value(xml: &str, key: &str) -> String {
@@ -419,7 +446,7 @@ async fn a_proxy_a_stack_declares_exists_in_rds_once_the_stack_reports_it_create
 
         // Every database the target group declared is registered in it, as the kind of
         // target it is and with the health of one whose database the proxy can reach.
-        let (status_code, targets) = describe_targets(&router, &name).await;
+        let (status_code, targets) = describe_settled_targets(&router, &name).await;
         assert_eq!(
             status_code, 200,
             "case {:?}: DescribeDBProxyTargets({name}) must answer 200, got {status_code} \
@@ -537,7 +564,7 @@ async fn a_target_group_registers_a_database_the_stack_did_not_create() {
         "the proxy's target group must be ready, got {groups}"
     );
 
-    let (status_code, targets) = describe_targets(&router, "emu-standing-proxy").await;
+    let (status_code, targets) = describe_settled_targets(&router, "emu-standing-proxy").await;
     assert_eq!(
         status_code, 200,
         "DescribeDBProxyTargets must answer 200, got {status_code} {targets}"

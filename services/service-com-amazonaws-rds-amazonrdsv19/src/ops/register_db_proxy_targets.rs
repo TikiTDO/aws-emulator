@@ -7,7 +7,16 @@
 //! A registration stores WHICH database was registered and nothing else: everything a
 //! target reports about that database — its ARN, its endpoint, its port — is read from the
 //! database's own record when `DescribeDBProxyTargets` projects it, so the two cannot
-//! disagree.
+//! disagree. A registered DB CLUSTER is TRACKED, so the proxy reaches the cluster's DB
+//! instances through that one registration and the report carries a target for each of
+//! them beside the cluster's own.
+//!
+//! Registering a database the proxy's target group already holds the registration for asks
+//! for exactly the registration that exists, so it is served with the target the group has
+//! and adds nothing — the recorded behaviour of a client that registers the same DB
+//! instance twice. `DBProxyTargetAlreadyRegisteredFault` is for a registration that would
+//! make the proxy reach a database it ALREADY reaches another way: a proxy reaches one
+//! database one way.
 //!
 //! ## Shape of an operation
 //!
@@ -234,20 +243,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         }
-        if proxy.targets.len() + instances.len() + clusters.len()
-            > crate::state::DB_PROXY_TARGET_QUOTA_PER_PROXY
-        {
-            return Err(RegisterDBProxyTargetsError::invalid_parameter_value(format!(
-                "DB proxy {} holds at most {} targets",
-                input.db_proxy_name,
-                crate::state::DB_PROXY_TARGET_QUOTA_PER_PROXY
-            )));
-        }
 
         // Every database the request names is resolved BEFORE anything is registered, so a
         // request naming one that does not exist leaves the proxy's target group exactly as
-        // it was. The identifiers are stored lowercased, as both database types' are.
-        let mut registering: Vec<crate::state::DbProxyTargetRecord> = Vec::new();
+        // it was. The identifiers are stored lowercased, as both database types' are, and a
+        // request naming one database twice asks for one registration: one database is one
+        // target.
+        let mut requested: Vec<crate::state::DbProxyTargetRecord> = Vec::new();
         for identifier in &instances {
             let identifier = identifier.to_ascii_lowercase();
             if !store
@@ -261,10 +263,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
                 .into());
             }
-            registering.push(crate::state::DbProxyTargetRecord {
-                identifier,
-                is_cluster: false,
-            });
+            if !requested
+                .iter()
+                .any(|held| held.identifier == identifier && !held.is_cluster)
+            {
+                requested.push(crate::state::DbProxyTargetRecord::registering(
+                    identifier, false,
+                ));
+            }
         }
         for named in &clusters {
             let identifier = named.to_ascii_lowercase();
@@ -279,44 +285,102 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
                 .into());
             }
-            registering.push(crate::state::DbProxyTargetRecord {
-                identifier,
-                is_cluster: true,
-            });
+            if !requested
+                .iter()
+                .any(|held| held.identifier == identifier && held.is_cluster)
+            {
+                requested.push(crate::state::DbProxyTargetRecord::registering(
+                    identifier, true,
+                ));
+            }
         }
+
+        // What each database the request names is already to this proxy decides what the
+        // call does with it:
+        //
+        // * a registration the group already HOLDS is the one the request asks for, so
+        //   there is nothing to add — the call reports the target the group has for it and
+        //   leaves the registration, and its health, exactly as they were;
+        // * a registration that would make the proxy reach a database it ALREADY reaches
+        //   through another registration is refused: a proxy reaches one database one way,
+        //   and the registration asked for is not the one it has. That covers both
+        //   directions, and the registrations this same call would add as well as the ones
+        //   the group already holds — a DB instance whose DB cluster is tracked, and a DB
+        //   cluster one of whose member instances is registered on its own. This is what
+        //   `DBProxyTargetAlreadyRegisteredFault` reports;
+        // * everything else is registered.
+        //
+        // Nothing is written until every database the request names has been classified, so
+        // a refused request leaves the group exactly as it was.
         let proxy = &store.db_proxies[&key];
-        for target in &registering {
-            if proxy
+        let mut reporting: Vec<crate::state::DbProxyTargetRecord> = Vec::new();
+        let mut registering: Vec<crate::state::DbProxyTargetRecord> = Vec::new();
+        for target in requested {
+            if let Some(held) = proxy
                 .target_position(&target.identifier, target.is_cluster)
-                .is_some()
+                .and_then(|position| proxy.targets.get(position))
+            {
+                reporting.push(held.clone());
+                continue;
+            }
+            let reaches = store.proxy_reached_databases(&region, &target);
+            if proxy
+                .targets
+                .iter()
+                .chain(registering.iter())
+                .any(|held| {
+                    store
+                        .proxy_reached_databases(&region, held)
+                        .iter()
+                        .any(|reached| reaches.contains(reached))
+                })
             {
                 return Err(
                     RegisterDBProxyTargetsErrorModeled::DBProxyTargetAlreadyRegisteredFault(
                         DBProxyTargetAlreadyRegisteredFault {
-                            message: Some(format!(
-                                "{} is already registered with DB proxy {}",
-                                target.identifier, input.db_proxy_name
-                            )),
+                            message: Some(
+                                crate::state::DB_PROXY_TARGET_ALREADY_REGISTERED_MESSAGE
+                                    .to_string(),
+                            ),
                         },
                     )
                     .into(),
                 );
             }
+            reporting.push(target.clone());
+            registering.push(target);
+        }
+        // A proxy's target group holds at most what this store caps it at, counted over the
+        // registrations the call would ADD: a call that adds nothing cannot exceed it.
+        if proxy.targets.len() + registering.len()
+            > crate::state::DB_PROXY_TARGET_QUOTA_PER_PROXY
+        {
+            return Err(RegisterDBProxyTargetsError::invalid_parameter_value(format!(
+                "DB proxy {} holds at most {} targets",
+                input.db_proxy_name,
+                crate::state::DB_PROXY_TARGET_QUOTA_PER_PROXY
+            )));
         }
 
-        // The targets this call registered are what it answers with, each projected from
-        // the database behind it.
-        let db_proxy_targets: Vec<DBProxyTarget> = registering
-            .iter()
-            .map(|target| store.proxy_target_to_wire(&region, target))
+        // The targets for the databases the request named are what it answers with, each
+        // projected from the database behind it — a registered DB cluster is tracked, so
+        // its answer carries the DB instances the proxy reaches through it too.
+        let db_proxy_targets: Vec<DBProxyTarget> = store
+            .proxy_report_targets(&region, &reporting)
+            .into_iter()
+            .map(|(_, target)| target)
             .collect();
-        let now = crate::state::now_as_wire_timestamp();
-        let proxy = store
-            .db_proxies
-            .get_mut(&key)
-            .expect("the proxy was found above and the store is locked");
-        proxy.targets.extend(registering);
-        proxy.updated_date = now;
+        // A call that added nothing changed nothing: the proxy's `UpdatedDate` moves only
+        // where a registration was actually made.
+        if !registering.is_empty() {
+            let now = crate::state::now_as_wire_timestamp();
+            let proxy = store
+                .db_proxies
+                .get_mut(&key)
+                .expect("the proxy was found above and the store is locked");
+            proxy.targets.extend(registering);
+            proxy.updated_date = now;
+        }
 
         Ok(RegisterDBProxyTargetsOutput {
             db_proxy_targets: Some(db_proxy_targets),

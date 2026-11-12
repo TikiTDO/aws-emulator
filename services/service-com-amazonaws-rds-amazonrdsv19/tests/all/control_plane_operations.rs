@@ -35,7 +35,8 @@ use service_com_amazonaws_rds_amazonrdsv19::state::{
     engine_log, BLUE_GREEN_IDENTIFIER_PREFIX, BLUE_GREEN_STATUS_AVAILABLE,
     BLUE_GREEN_STATUS_DELETING, BLUE_GREEN_STATUS_PROVISIONING,
     DB_CLUSTER_AUTOMATED_BACKUP_STATUS_ACTIVE, DB_CLUSTER_STATUS_AVAILABLE,
-    DB_CLUSTER_STATUS_MODIFYING, DB_PROXY_STATUS_AVAILABLE, DEFAULT_DB_PROXY_TARGET_GROUP,
+    DB_CLUSTER_STATUS_MODIFYING, DB_PROXY_STATUS_AVAILABLE,
+    DB_PROXY_TARGET_ALREADY_REGISTERED_MESSAGE, DEFAULT_DB_PROXY_TARGET_GROUP,
     DEFAULT_IDLE_CLIENT_TIMEOUT, INTEGRATION_STATUS_ACTIVE, INVALID_TARGET_TYPE_MESSAGE,
     TENANT_DATABASE_STATUS_AVAILABLE, TENANT_DATABASE_STATUS_DELETING,
 };
@@ -1674,25 +1675,46 @@ async fn proxy_targets_are_registered_reported_and_deregistered() {
             target_type,
             "case {case:?}: the target reports the kind of database it is: {registered}"
         );
-        assert!(
-            !text(&registered, "RdsResourceId").is_empty(),
-            "case {case:?}: the target reports the database's resource id: {registered}"
+        assert_eq!(
+            text(&registered, "RdsResourceId"),
+            identifier,
+            "case {case:?}: the target reports the identifier it was registered under: \
+             {registered}"
         );
-        // Registering the same database twice is the modelled already-registered fault.
-        expect_error(
-            &format!("{case}, twice"),
+        // A registration this service has not finished putting in force is still
+        // `registering`, the state the target's health lifecycle starts in.
+        assert_eq!(
+            text(&registered, "State"),
+            "REGISTERING",
+            "case {case:?}: a just-made registration is still being put in force: \
+             {registered}"
+        );
+        // Registering the same database again asks for the registration the group already
+        // holds, so the call reports the target the group has for it and adds nothing —
+        // the recorded behaviour of a client that registers one DB instance twice. The
+        // registration the proxy CANNOT take is asserted at the end of this test.
+        let again = expect_ok(
+            &format!("{case}, again"),
             call(
                 &router,
                 "RegisterDBProxyTargets",
                 &[("DBProxyName", "emu-proxy"), (member, identifier)],
             )
             .await,
-            400,
-            "DBProxyTargetAlreadyRegisteredFault",
         );
+        for element in ["RdsResourceId", "Type", "TargetArn"] {
+            assert_eq!(
+                texts(&again, element),
+                texts(&registered, element),
+                "case {case:?}: registering the same database again reports the target the \
+                 group already has, by {element}: {again}"
+            );
+        }
     }
 
-    // The describe reports both registrations, each projected from its database.
+    // The describe reports both registrations, each projected from its database, and each
+    // registration is in force a moment after it was made.
+    wait_for_settle();
     let targets = expect_ok(
         "describe the proxy's targets",
         call(
@@ -1787,6 +1809,37 @@ async fn proxy_targets_are_registered_reported_and_deregistered() {
         texts(&left, "Type"),
         vec!["TRACKED_CLUSTER".to_string()],
         "the deregistered instance is gone and the cluster is left: {left}"
+    );
+
+    // The registration the proxy cannot take is the modelled already-registered fault: a
+    // DB instance the proxy ALREADY REACHES, because the DB cluster that instance belongs
+    // to is registered, cannot be registered on its own — the proxy is already associated
+    // with that database, by a different registration than the one asked for.
+    create_available_instance(
+        &router,
+        "emu-proxy-member",
+        "aurora-mysql",
+        &[("DBClusterIdentifier", "emu-proxy-cluster")],
+    )
+    .await;
+    let refused = expect_error(
+        "a DB instance the tracked cluster already reaches",
+        call(
+            &router,
+            "RegisterDBProxyTargets",
+            &[
+                ("DBProxyName", "emu-proxy"),
+                ("DBInstanceIdentifiers.member.1", "emu-proxy-member"),
+            ],
+        )
+        .await,
+        400,
+        "DBProxyTargetAlreadyRegisteredFault",
+    );
+    assert_eq!(
+        text(&refused, "Message"),
+        DB_PROXY_TARGET_ALREADY_REGISTERED_MESSAGE,
+        "expected the fault's own statement about the association, got {refused}"
     );
 }
 

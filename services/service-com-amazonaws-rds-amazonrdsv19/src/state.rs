@@ -193,15 +193,19 @@ pub use custom_engine_versions::{
 pub use db_proxies::{
     check_target_group_name, check_user_auth_config, db_proxy_already_exists_message,
     db_proxy_not_found_message, default_connection_pool_config, merged_connection_pool_config,
-    target_to_wire, user_auth_config_to_info, DbProxyRecord, DbProxyTargetGroupRecord,
-    DbProxyTargetRecord, RegisteredDatabase, DEFAULT_AUTH_SCHEME_NONE,
+    user_auth_config_to_info, DbProxyRecord, DbProxyTargetGroupRecord,
+    DbProxyTargetRecord, ProxyTargetKey, ProxyTargetRow, RegisteredDatabase,
+    DB_PROXY_TARGET_ALREADY_REGISTERED_MESSAGE, DEFAULT_AUTH_SCHEME_NONE,
     DEFAULT_CONNECTION_BORROW_TIMEOUT, DEFAULT_DB_PROXY_TARGET_GROUP,
     DEFAULT_IDLE_CLIENT_TIMEOUT, DEFAULT_MAX_CONNECTIONS_PERCENT,
     DEFAULT_MAX_CONNECTIONS_PERCENT_SQLSERVER, DEFAULT_TARGET_GROUP_RENAME_MESSAGE,
     DB_PROXY_QUOTA_PER_REGION, DB_PROXY_STATUS_AVAILABLE, DB_PROXY_STATUS_CREATING,
     DB_PROXY_STATUS_DELETING, DB_PROXY_STATUS_MODIFYING, DB_PROXY_TARGET_QUOTA_PER_PROXY,
     ENGINE_FAMILY_SQLSERVER, MAX_SESSION_PINNING_FILTERS,
-    MAX_USER_AUTH_CONFIGS, MISSING_DB_PROXY_TARGET_IDENTIFIER_MESSAGE, NETWORK_TYPE_IPV4,
+    MAX_USER_AUTH_CONFIGS, MISSING_DB_PROXY_TARGETS_MESSAGE,
+    MISSING_DB_PROXY_TARGET_IDENTIFIER_MESSAGE, NETWORK_TYPE_IPV4, TARGET_ROLE_READ_ONLY,
+    TARGET_ROLE_READ_WRITE, TARGET_STATE_AVAILABLE, TARGET_STATE_REGISTERING,
+    TARGET_STATE_UNAVAILABLE, TARGET_TYPE_RDS_INSTANCE, TARGET_TYPE_TRACKED_CLUSTER,
 };
 pub use engine_log::InstanceLog;
 pub use events::{
@@ -1455,7 +1459,6 @@ impl ComAmazonawsRdsAmazonrdsv19State {
             return Some(RegisteredDatabase {
                 arn: cluster.arn(),
                 endpoint: cluster.endpoint(),
-                resource_id: cluster.resource_id.clone(),
                 // The address and port a client reaches the cluster on, as for an
                 // instance below.
                 port: cluster.published_port(),
@@ -1467,7 +1470,6 @@ impl ComAmazonawsRdsAmazonrdsv19State {
         Some(RegisteredDatabase {
             arn: instance.arn(),
             endpoint: instance.endpoint_address(),
-            resource_id: instance.dbi_resource_id.clone(),
             // The address and port a client reaches the instance on, which is what a
             // proxy target reports: for an instance whose engine this emulator serves,
             // that is its engine listener's (`data_plane`).
@@ -1475,14 +1477,88 @@ impl ComAmazonawsRdsAmazonrdsv19State {
         })
     }
 
-    /// The modelled `DBProxyTarget` for one registration in `region`: the registration
-    /// itself, with everything about its database read from that database's record.
-    pub fn proxy_target_to_wire(
+    /// What one registration contributes to a proxy's target report in `region`, each
+    /// target keyed by the database it reports (which is the key the report pages on).
+    ///
+    /// A registered DB INSTANCE contributes exactly itself. A registered DB CLUSTER is
+    /// TRACKED: the proxy reaches the cluster's DB instances through it, so the
+    /// registration contributes the cluster's own target and one `RDS_INSTANCE` target per
+    /// member instance — the writer first, as the cluster reports its members — computed
+    /// from the cluster's CURRENT membership, so a member added or removed after the
+    /// registration is reported exactly as the cluster reports it.
+    fn proxy_target_rows(&self, region: &str, target: &DbProxyTargetRecord) -> Vec<ProxyTargetRow> {
+        let now = Instant::now();
+        let mut rows = vec![ProxyTargetRow::registration(
+            target,
+            self.registered_database(region, target),
+            now,
+        )];
+        if target.is_cluster {
+            if let Some(cluster) = self
+                .db_clusters
+                .get(&(region.to_string(), target.identifier.clone()))
+            {
+                let in_force = target.is_in_force(now);
+                for (position, member) in self.cluster_members(cluster).into_iter().enumerate() {
+                    rows.push(ProxyTargetRow::tracked_instance(
+                        &target.identifier,
+                        &member.identifier,
+                        Some(RegisteredDatabase {
+                            arn: member.arn(),
+                            endpoint: member.endpoint_address(),
+                            port: member.published_port(),
+                        }),
+                        // `cluster_members` reports the writer first, which is the member
+                        // `DBClusterMembers` reports `IsClusterWriter` for.
+                        position == 0,
+                        in_force,
+                    ));
+                }
+            }
+        }
+        rows
+    }
+
+    /// The databases a proxy reaches through one registration: the DB instance or DB
+    /// cluster the registration names and, for a tracked cluster, the member instances the
+    /// proxy reaches through it — the database every target that registration contributes
+    /// to the report reports, keyed as [`ProxyTargetKey`] documents.
+    pub fn proxy_reached_databases(
         &self,
         region: &str,
-        target: &DbProxyTargetRecord,
-    ) -> crate::ops::types::DBProxyTarget {
-        target_to_wire(target, self.registered_database(region, target))
+        registration: &DbProxyTargetRecord,
+    ) -> Vec<ProxyTargetKey> {
+        self.proxy_target_rows(region, registration)
+            .iter()
+            .map(ProxyTargetRow::database_key)
+            .collect()
+    }
+
+    /// The targets a proxy's registrations contribute to its report in `region`, in
+    /// registration order, each keyed by the database it reports.
+    ///
+    /// One database is ONE target, so a database that two registrations both reach is
+    /// reported once, under the first registration that reaches it; the key is the
+    /// database's, so a DB instance and a DB cluster of one and the same identifier stay
+    /// two targets and each key a page can resume after stays unique.
+    ///
+    /// The walk is bounded by what the store already caps: a proxy holds at most
+    /// [`DB_PROXY_TARGET_QUOTA_PER_PROXY`] registrations and a region at most
+    /// [`DB_INSTANCE_QUOTA_PER_REGION`] DB instances, so neither the work nor the list a
+    /// request can ask for grows without a bound.
+    pub fn proxy_report_targets(
+        &self,
+        region: &str,
+        registrations: &[DbProxyTargetRecord],
+    ) -> Vec<(String, crate::ops::types::DBProxyTarget)> {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        registrations
+            .iter()
+            .flat_map(|target| self.proxy_target_rows(region, target))
+            .map(|row| (row.page_key(), row))
+            .filter(|(key, _)| seen.insert(key.clone()))
+            .map(|(key, row)| (key, row.to_wire()))
+            .collect()
     }
 
     /// The DB subnet group `name` resolves to in `region`, or `None` when nothing of
