@@ -39,6 +39,8 @@ mod endpoint_discovery_reachability;
 mod fleet_index_description;
 #[path = "all/indexing_configuration.rs"]
 mod indexing_configuration;
+#[path = "all/job_cancellation.rs"]
+mod job_cancellation;
 #[path = "all/job_description.rs"]
 mod job_description;
 #[path = "all/job_document_read.rs"]

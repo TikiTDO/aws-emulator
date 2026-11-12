@@ -1,15 +1,22 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CancelJob
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CancelJob`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CancelJob::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Cancels the job the request names: the job's own status becomes `CANCELED` — a
+//! status it never leaves, so it rolls out to nothing further — and the EXECUTIONS it
+//! already created in the shared store the IoT Jobs data plane serves are cancelled
+//! with it, so a targeted device polling after this call is handed no work for the
+//! cancelled job. Which executions the cancel reaches is the `force` flag: "If true job
+//! executions with status IN_PROGRESS and QUEUED are canceled, otherwise only job
+//! executions with status QUEUED are canceled"; an execution that has already finished
+//! is terminal and is left exactly as it stands.
+//!
+//! `reasonCode` and `comment` are "why the job was canceled", so they are persisted on
+//! the job beside the force flag and a later `DescribeJob` reports them. A `jobId` the
+//! account does not hold is the modelled 404, and a job that has already reached a
+//! status it never leaves (`CANCELED`, or a snapshot job every target has `COMPLETED`)
+//! is the modelled 400: there is no rollout left to stop, and nothing is written on
+//! either refusal.
 //!
 //! ## Shape of an operation
 //!
@@ -157,18 +164,82 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CancelJob` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CancelJobErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CancelJob"))
+        // `ctx` carries request metadata only; this operation needs none of it.
+        let _ = ctx;
+        let unavailable = || -> CancelJobError {
+            CancelJobErrorModeled::ServiceUnavailableException(ServiceUnavailableException {
+                message: Some("the IoT emulator has no state store attached".to_string()),
+            })
+            .into()
+        };
+        // The job lives in the SHARED jobs store every creator of an IoT job records one
+        // in, so this cancel moves the very record the create wrote.
+        let Some(jobs) = crate::state::job_store(&*self.engine) else {
+            return Err(unavailable());
+        };
+        // "Cancels a job": the work the job handed its targets is the executions in the
+        // shared store the IoT Jobs data plane serves, so the cancel reaches into it.
+        let Some(executions) = crate::state::job_execution_store(&*self.engine) else {
+            return Err(unavailable());
+        };
+
+        let now = ::service_common::iot_job_executions::now_epoch_seconds();
+
+        // LOCK ORDER: the shared jobs store first, the shared execution store second, as
+        // `crate::state::job_store` documents. ONE lookup of the job, held for the whole
+        // decision, so what this call reads and what it writes are the same record.
+        let mut registry = jobs.lock();
+        let Some(job) = registry.job_mut(&input.job_id) else {
+            return Err(CancelJobErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: Some(crate::state::missing_job_message(&input.job_id)),
+                },
+            )
+            .into());
+        };
+        let mut pending = executions.lock();
+        // The `TIMED_OUT` transition every execution's own deadline already made due is
+        // materialised first, so an execution the clock finished is not cancelled by this
+        // call: that move was owed at the deadline whether or not anybody called.
+        pending.time_out_due_executions_of_job(&input.job_id, now);
+
+        // Which status the job IS in is the status a reader reports for it, counted from
+        // its executions (`crate::state::job_progress`) and not only from the record — so
+        // a snapshot job every target has completed is as terminal here as a job that was
+        // already cancelled. A job in a status it never leaves has no rollout left to
+        // stop, and this operation models no state-transition error, so the refusal is
+        // the modelled client error for a request the service cannot act on.
+        let reached = crate::state::job_progress(job, &pending).status;
+        if ::service_common::iot_jobs::is_terminal_job_status(&reached) {
+            return Err(CancelJobErrorModeled::InvalidRequestException(
+                InvalidRequestException {
+                    message: Some(crate::state::uncancelable_job_message(
+                        &input.job_id,
+                        &reached,
+                    )),
+                },
+            )
+            .into());
+        }
+
+        // `force`: "If true job executions with status IN_PROGRESS and QUEUED are
+        // canceled, otherwise only job executions with status QUEUED are canceled."
+        pending.cancel_job_executions(&input.job_id, input.force, now);
+
+        // The job's own lifecycle reaches CANCELED, carrying why it was cancelled and
+        // whether the cancel was forced — which is what a later `DescribeJob` reports.
+        job.cancel(
+            input.force,
+            input.reason_code.clone(),
+            input.comment.clone(),
+            now,
+        );
+        // The response is built from the record this call just wrote, so what the cancel
+        // reports and what a later reader reads are one value.
+        Ok(CancelJobOutput {
+            job_arn: Some(job.job_arn.clone()),
+            job_id: Some(job.job_id.clone()),
+            description: job.description.clone(),
+        })
     }
 }

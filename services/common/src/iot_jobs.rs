@@ -113,6 +113,18 @@ pub struct IotJob {
     /// When the job record was last written, in epoch seconds — `Job$lastUpdatedAt`.
     /// Equal to [`Self::created_at`] until something updates the job.
     pub last_updated_at: i64,
+    /// `Job$forceCanceled`: "Will be true if the job was canceled with the optional
+    /// force parameter set to true." `None` until something cancels the job, so a job
+    /// nobody cancelled reports nothing about a force-cancel rather than `false`.
+    pub force_canceled: Option<bool>,
+    /// The `reasonCode` the call that last moved the job's own lifecycle carried — "a
+    /// reason code string that explains why the job was canceled" — or `None` when it
+    /// named none.
+    pub reason_code: Option<String>,
+    /// The `comment` the call that last moved the job's own lifecycle carried — "an
+    /// optional comment string describing why the job was canceled" — or `None` when it
+    /// named none.
+    pub comment: Option<String>,
 }
 
 impl IotJob {
@@ -135,6 +147,9 @@ impl IotJob {
             status: JOB_STATUS_IN_PROGRESS.to_string(),
             created_at,
             last_updated_at: created_at,
+            force_canceled: None,
+            reason_code: None,
+            comment: None,
         }
     }
 
@@ -161,6 +176,28 @@ impl IotJob {
     pub fn set_status(&mut self, status: &str, now: i64) {
         self.status = status.to_string();
         self.last_updated_at = now;
+    }
+
+    /// Record that the job was CANCELLED at `now`: it reaches
+    /// [`JOB_STATUS_CANCELED`] — a status it never leaves, so it rolls out to nothing
+    /// further — and carries why it was cancelled and whether the cancel was forced.
+    ///
+    /// The executions the job already created live in
+    /// [`crate::iot_job_executions`], and a canceller moves the ones its `force` flag
+    /// reaches there
+    /// ([`crate::iot_job_executions::JobExecutionStore::cancel_job_executions`]), so
+    /// what the JOB says and what each DEVICE's execution says are written in one call.
+    pub fn cancel(
+        &mut self,
+        force: bool,
+        reason_code: Option<String>,
+        comment: Option<String>,
+        now: i64,
+    ) {
+        self.set_status(JOB_STATUS_CANCELED, now);
+        self.force_canceled = Some(force);
+        self.reason_code = reason_code;
+        self.comment = comment;
     }
 }
 
@@ -385,5 +422,75 @@ mod tests {
             "a refused register stores nothing, got len {}",
             store.len()
         );
+    }
+
+    /// RULE: cancelling a job moves it to the terminal `CANCELED` status at the instant
+    /// of the cancel, and records whether the cancel was forced and what it stated about
+    /// itself — which is what a reader of the job then reports.
+    ///
+    /// The rows span the force flag and whether the cancel stated a reason, a comment,
+    /// both or neither.
+    #[test]
+    fn cancelling_a_job_records_the_cancel_on_the_record() {
+        // (case, force, reasonCode, comment)
+        let rows: [(&str, bool, Option<&str>, Option<&str>); 4] = [
+            ("an unforced cancel stating nothing", false, None, None),
+            ("a forced cancel stating a reason", true, Some("RECALLED"), None),
+            (
+                "an unforced cancel stating a comment",
+                false,
+                None,
+                Some("no longer needed"),
+            ),
+            (
+                "a forced cancel stating both",
+                true,
+                Some("SUPERSEDED_1"),
+                Some("replaced by the next rollout"),
+            ),
+        ];
+
+        for (case, force, reason_code, comment) in rows {
+            let mut cancelled = job("deploy-1");
+            assert!(
+                cancelled.force_canceled.is_none()
+                    && cancelled.reason_code.is_none()
+                    && cancelled.comment.is_none(),
+                "case {case:?}: a job nobody cancelled states nothing about a cancel, \
+                 got {cancelled:?}"
+            );
+
+            cancelled.cancel(
+                force,
+                reason_code.map(str::to_string),
+                comment.map(str::to_string),
+                1_700_000_500,
+            );
+            assert_eq!(
+                (cancelled.status.as_str(), cancelled.last_updated_at),
+                (JOB_STATUS_CANCELED, 1_700_000_500),
+                "case {case:?}: expected {JOB_STATUS_CANCELED} stamped at the cancel, \
+                 got {cancelled:?}"
+            );
+            assert!(
+                cancelled.is_terminal(),
+                "case {case:?}: a cancelled job rolls out to nothing further, got {cancelled:?}"
+            );
+            assert_eq!(
+                (
+                    cancelled.force_canceled,
+                    cancelled.reason_code.as_deref(),
+                    cancelled.comment.as_deref()
+                ),
+                (Some(force), reason_code, comment),
+                "case {case:?}: expected the cancel's own members on the record, \
+                 got {cancelled:?}"
+            );
+            assert_eq!(
+                cancelled.created_at, 1_700_000_000,
+                "case {case:?}: a cancel never moves when the job was created, \
+                 got {cancelled:?}"
+            );
+        }
     }
 }

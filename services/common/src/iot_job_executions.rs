@@ -42,6 +42,12 @@ pub const STATUS_TIMED_OUT: &str = "TIMED_OUT";
 /// status an execution can only be moved to while it is still `QUEUED` — a device
 /// rejects work it has not started ("Only queued jobs can be rejected").
 pub const STATUS_REJECTED: &str = "REJECTED";
+/// The status an execution reaches when the JOB it belongs to is cancelled (`iot`:
+/// `CancelJob`, which "cancels a job" and with it the executions its `force` flag
+/// reaches) or when that one execution is (`iot`: `CancelJobExecution`). It is a
+/// terminal `JobExecutionStatus` value of both IoT models, so a cancelled execution is
+/// no longer pending and its device is handed no further work for that job.
+pub const STATUS_CANCELED: &str = "CANCELED";
 
 /// The two statuses an execution is PENDING in — the ones
 /// `GetPendingJobExecutions` documents as "not in a terminal status" and
@@ -460,6 +466,11 @@ pub struct JobExecutionRecord {
     /// `GetCommandExecution$executionTimeoutSeconds`). `None` for an execution started
     /// without a timeout and for every execution a JOB created.
     pub command_execution_timeout_seconds: Option<i64>,
+    /// `JobExecution$forceCanceled`: "Will be true if the job execution was canceled
+    /// with the optional force parameter set to true." `None` until something cancels
+    /// the execution, so an execution nobody cancelled reports nothing about a
+    /// force-cancel rather than `false`.
+    pub force_canceled: Option<bool>,
     /// The store-wide position this execution was enqueued at, stamped by
     /// [`JobExecutionStore::try_insert_execution`] from the store's monotonic
     /// counter: strictly increasing over every execution the store holds, whatever
@@ -501,6 +512,7 @@ impl JobExecutionRecord {
             job_document,
             command_arn: None,
             command_execution_timeout_seconds: None,
+            force_canceled: None,
             // Stamped by the store when it accepts the record; see the field.
             enqueue_sequence: 0,
         }
@@ -626,6 +638,23 @@ impl JobExecutionRecord {
                     Some(now.saturating_add(minutes.saturating_mul(SECONDS_PER_MINUTE)));
             }
         }
+    }
+
+    /// Move the execution to [`STATUS_CANCELED`] at `now`, recording whether the
+    /// cancel was forced.
+    ///
+    /// `CANCELED` is terminal, so the armed timers are disarmed with it: a cancelled
+    /// execution has no deadline left to reach and can never be reported `TIMED_OUT`
+    /// afterwards. `versionNumber` is left alone — "Job execution versions are
+    /// incremented each time they are updated by a device"
+    /// (`JobExecution$versionNumber`), and a cancel is the service's write, not a
+    /// device's.
+    pub fn cancel(&mut self, force: bool, now: i64) {
+        self.status = STATUS_CANCELED.to_string();
+        self.last_updated_at = now;
+        self.force_canceled = Some(force);
+        self.step_timeout_expires_at = None;
+        self.execution_timeout_expires_at = None;
     }
 
     /// Move the execution to `IN_PROGRESS` at `now`, recording the start and arming
@@ -1031,6 +1060,30 @@ impl JobExecutionStore {
             }
         }
         moved
+    }
+
+    /// Cancel the executions of `job_id` that a cancel of the JOB reaches, and answer
+    /// how many moved.
+    ///
+    /// Which ones it reaches is the `force` flag of the cancel: `CancelJob$force` is
+    /// "If true job executions with status IN_PROGRESS and QUEUED are canceled,
+    /// otherwise only job executions with status QUEUED are canceled". An execution
+    /// that has already finished is left exactly as it stands — it is terminal, and a
+    /// cancel of the job moves nothing that is no longer running.
+    pub fn cancel_job_executions(&mut self, job_id: &str, force: bool, now: i64) -> usize {
+        let mut canceled = 0usize;
+        for record in self.things.values_mut().flatten() {
+            if record.job_id != job_id {
+                continue;
+            }
+            let reached = record.status == STATUS_QUEUED
+                || (force && record.status == STATUS_IN_PROGRESS);
+            if reached {
+                record.cancel(force, now);
+                canceled += 1;
+            }
+        }
+        canceled
     }
 
     /// How many COMMAND executions `thing_name` currently holds in a non-terminal
@@ -2009,6 +2062,97 @@ mod tests {
                 "case {case:?}: expected a sequence above {previous}, got {sequence}"
             );
             previous = sequence;
+        }
+    }
+
+    /// RULE: cancelling a JOB cancels the executions its `force` flag reaches —
+    /// `QUEUED` always, `IN_PROGRESS` only when forced — and leaves every execution
+    /// that has already finished, and every execution of another job, exactly as it
+    /// stands.
+    ///
+    /// The rows span every status an execution can be stored in, on both sides of the
+    /// flag.
+    #[test]
+    fn a_job_cancel_reaches_the_executions_its_force_flag_names() {
+        // (stored status, the status after an UNFORCED cancel, after a FORCED one)
+        let rows: &[(&str, &str, &str)] = &[
+            (STATUS_QUEUED, STATUS_CANCELED, STATUS_CANCELED),
+            (STATUS_IN_PROGRESS, STATUS_IN_PROGRESS, STATUS_CANCELED),
+            ("SUCCEEDED", "SUCCEEDED", "SUCCEEDED"),
+            ("FAILED", "FAILED", "FAILED"),
+            (STATUS_REJECTED, STATUS_REJECTED, STATUS_REJECTED),
+            ("REMOVED", "REMOVED", "REMOVED"),
+            (STATUS_TIMED_OUT, STATUS_TIMED_OUT, STATUS_TIMED_OUT),
+        ];
+
+        for force in [false, true] {
+            let mut store = JobExecutionStore::default();
+            // One device per stored status, plus one holding ANOTHER job's execution
+            // that no cancel of this job may touch.
+            for (stored, _, _) in rows {
+                let thing = format!("thing-{}", stored.to_lowercase());
+                enqueue(&mut store, &thing, "job-1", 1_000);
+                store
+                    .record_mut(&thing, 0)
+                    .expect("the execution was just enqueued")
+                    .status = (*stored).to_string();
+            }
+            enqueue(&mut store, "thing-other", "job-2", 1_000);
+
+            let expected_moves = rows
+                .iter()
+                .filter(|(stored, unforced, forced)| {
+                    *stored != if force { *forced } else { *unforced }
+                })
+                .count();
+            let moved = store.cancel_job_executions("job-1", force, 2_000);
+            assert_eq!(
+                moved, expected_moves,
+                "case force={force}: expected {expected_moves} execution(s) to move, got {moved}"
+            );
+
+            for (stored, unforced, forced) in rows {
+                let expected = if force { *forced } else { *unforced };
+                let thing = format!("thing-{}", stored.to_lowercase());
+                let record = store
+                    .resolve_record(&thing, "job-1", None)
+                    .unwrap_or_else(|| panic!("case {stored:?}: the execution must be held"));
+                assert_eq!(
+                    record.status, expected,
+                    "case {stored:?} (force={force}): expected {expected}, got {:?}",
+                    record.status
+                );
+                // Only an execution this cancel MOVED carries the force flag and the
+                // instant of the cancel; one it left alone keeps what it had.
+                let moved_here = *stored != expected;
+                assert_eq!(
+                    record.force_canceled,
+                    moved_here.then_some(force),
+                    "case {stored:?} (force={force}): expected forceCanceled {:?}, got {:?}",
+                    moved_here.then_some(force),
+                    record.force_canceled
+                );
+                assert_eq!(
+                    record.last_updated_at,
+                    if moved_here { 2_000 } else { 1_000 },
+                    "case {stored:?} (force={force}): only a cancelled execution is \
+                     stamped at the cancel, got {record:?}"
+                );
+                assert_eq!(
+                    record.version_number, FIRST_VERSION_NUMBER,
+                    "case {stored:?} (force={force}): a cancel is not a device update, \
+                     got {record:?}"
+                );
+            }
+
+            let other = store
+                .resolve_record("thing-other", "job-2", None)
+                .expect("the other job's execution must be held");
+            assert_eq!(
+                (other.status.as_str(), other.force_canceled),
+                (STATUS_QUEUED, None),
+                "case force={force}: another job's execution must be untouched, got {other:?}"
+            );
         }
     }
 }

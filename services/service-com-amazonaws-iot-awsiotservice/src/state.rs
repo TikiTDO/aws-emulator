@@ -1294,6 +1294,16 @@ pub fn job_arn(region: &str, job_id: &str) -> String {
     ::emulator_server::emulator_arn("iot", region, &format!("job/{job_id}"))
 }
 
+/// How this plane states that a job's own lifecycle leaves nothing to cancel: a job in a
+/// status it never leaves rolls out to nothing further, so a cancel of it is refused
+/// rather than moving a terminal record.
+///
+/// The fixed text is the class's; the variable parts are the `jobId` the request named
+/// and the `JobStatus` the job is reported in.
+pub fn uncancelable_job_message(job_id: &str, status: &str) -> String {
+    format!("Job {job_id} in status {status} cannot be canceled.")
+}
+
 /// The resource type an IoT target ARN names, and the name it gives it.
 ///
 /// `CreateJob$targets` is "A list of things and thing groups to which the job should
@@ -3015,9 +3025,9 @@ pub fn job_progress(job: &RegisteredJob, executions: &JobExecutionStore) -> JobP
 /// `destinationPackageVersions`) are left OUT rather than reported empty: nothing
 /// stages a rollout here, so reporting them would claim data no record carries.
 /// `forceCanceled` is "true if the job was canceled with the optional force parameter
-/// set to true" and nothing force-cancels a job yet, so there is no stored force-cancel
-/// to report; `reasonCode` and `comment` are "if the job was updated" and `UpdateJob`
-/// is still a scaffold.
+/// set to true", and `reasonCode` / `comment` are what the call that moved the job's own
+/// lifecycle stated about it, so all three come from the stored record and are reported
+/// only once something cancelled the job — a job nobody cancelled carries none of them.
 pub fn to_job(job: &RegisteredJob, executions: &JobExecutionStore) -> Job {
     let progress = job_progress(job, executions);
     Job {
@@ -3025,9 +3035,9 @@ pub fn to_job(job: &RegisteredJob, executions: &JobExecutionStore) -> Job {
         job_id: Some(job.job_id.clone()),
         target_selection: job.target_selection.clone(),
         status: Some(progress.status),
-        force_canceled: None,
-        reason_code: None,
-        comment: None,
+        force_canceled: job.force_canceled,
+        reason_code: job.reason_code.clone(),
+        comment: job.comment.clone(),
         // `JobTargets` is modelled `len 1..`, so a job with no stored target reports
         // no list rather than an empty one.
         targets: (!job.targets.is_empty()).then(|| job.targets.clone()),
@@ -3080,14 +3090,13 @@ pub fn to_job(job: &RegisteredJob, executions: &JobExecutionStore) -> Job {
 /// [`JobExecutionRecord::approximate_seconds_before_timed_out`] answers.
 ///
 /// `forceCanceled` is "true if the job execution was canceled with the optional force
-/// parameter set to true", and nothing in this emulator force-cancels an execution yet
-/// (`CancelJobExecution` is still a scaffold, its own issue), so there is no stored
-/// force-cancel to report and the member is left out rather than reported `false`.
+/// parameter set to true", which is what the cancel that moved this execution recorded on
+/// it, so an execution nothing cancelled reports no force-cancel at all.
 pub fn to_job_execution(record: &JobExecutionRecord, region: &str, now: i64) -> JobExecution {
     JobExecution {
         job_id: Some(record.job_id.clone()),
         status: Some(record.status.clone()),
-        force_canceled: None,
+        force_canceled: record.force_canceled,
         status_details: (!record.status_details.is_empty()).then(|| JobExecutionStatusDetails {
             details_map: Some(record.status_details_map()),
         }),
