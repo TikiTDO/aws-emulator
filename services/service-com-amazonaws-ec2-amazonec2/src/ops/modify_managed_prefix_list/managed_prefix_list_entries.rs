@@ -64,18 +64,23 @@ use crate::state::{
     INVALID_PREFIX_LIST_ID_NOT_FOUND, MAX_PREFIX_LIST_ENTRY_DESCRIPTION_CHARS,
     MAX_STORED_RECORDS_PER_STORE, PREFIX_LIST_ADDRESS_FAMILY_IPV6,
     PREFIX_LIST_STATE_CREATE_COMPLETE, canonical_cidr_block, invalid_parameter_value,
+    managed_prefix_list_payload_bytes,
 };
 
 /// Refuse a request that named an id no prefix list the caller can see carries: HTTP 400
 /// [`INVALID_PREFIX_LIST_ID_NOT_FOUND`], worded the way EC2 words THIS class — `Prefix List
 /// <id> not found.`
 ///
-/// The ONE wording of that refusal, which every operation resolving a `PrefixListId` answers
+/// The wording of that refusal every operation that REPORTS or REVISES a prefix list answers
 /// with, so two reports of one unresolvable id cannot say different things. It is a wording of
 /// its own rather than the generic `The <kind> ID '<id>' does not exist`
 /// ([`crate::state::id_not_found`]) because EC2 words a prefix list's not-found that way and
 /// not the generic way — the same reason the Client VPN, IPAM and transit gateway surfaces of
 /// this crate each keep their own.
+///
+/// `DeleteManagedPrefixList` is NOT one of its callers: EC2 words the same code differently for
+/// that operation (`The prefix list (<id>) does not exist.`), which is the recorded contract of
+/// the delete, so that wording lives with the handler that answers it.
 pub fn prefix_list_not_found<E>(prefix_list_id: &str) -> Scaffolded<E> {
     Scaffolded::service_error(
         INVALID_PREFIX_LIST_ID_NOT_FOUND,
@@ -94,8 +99,8 @@ pub const PREFIX_LIST_STATE_MODIFY_IN_PROGRESS: &str = "modify-in-progress";
 /// after the call that started it, whether or not anybody calls again.
 pub const PREFIX_LIST_STATE_MODIFY_COMPLETE: &str = "modify-complete";
 
-/// The states a prefix list of this emulator may be MODIFIED in: the settled states, the ones
-/// no clock-owed move is still due from.
+/// The states a prefix list of this emulator may be MODIFIED or DELETED in: the settled
+/// states, the ones no clock-owed move is still due from.
 ///
 /// A list whose creation or whose last revision is still in progress is not one a further
 /// revision has a defined entry set to start from, so it is refused with the state it is in
@@ -207,6 +212,31 @@ impl PrefixListVersions {
     pub fn record(&mut self, prefix_list_id: &str, version: i64, entries: Vec<PrefixListEntry>) {
         self.entry_sets
             .insert((prefix_list_id.to_string(), version), entries);
+    }
+
+    /// Forget every superseded entry set of the prefix list `prefix_list_id`, and answer the
+    /// caller-supplied bytes they held.
+    ///
+    /// Called by the delete of a prefix list: the versions a revision superseded belong to that
+    /// list, so a list that is on its way out of the main store takes them with it rather than
+    /// leaving entry sets nothing can ever be asked for. The bytes come back out because the
+    /// revision that retained them charged them against the MAIN store's budget, which is where
+    /// the caller of this gives them back — this store's own ceiling is on the count alone
+    /// ([`Self::has_capacity`]).
+    ///
+    /// The entries of the version the list STANDS AT are not here — they live on the list's own
+    /// record — so a report of the current version still answers while the removal is owed.
+    pub fn purge(&mut self, prefix_list_id: &str) -> usize {
+        let mut released = 0usize;
+        self.entry_sets.retain(|(id, _), entries| {
+            if id != prefix_list_id {
+                return true;
+            }
+            released = released
+                .saturating_add(managed_prefix_list_payload_bytes("", entries, &[], None));
+            false
+        });
+        released
     }
 
     /// The entry set version `version` of the prefix list `prefix_list_id` had, or `None` when

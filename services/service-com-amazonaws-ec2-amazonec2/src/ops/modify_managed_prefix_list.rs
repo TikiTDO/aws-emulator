@@ -287,16 +287,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     // itself, and nothing adds or withdraws an entry of one. That is a
                     // refusal about the resource rather than about the id, so it is
                     // `UnsupportedOperation` and not the not-found every unresolvable id
-                    // earns.
-                    if state::managed_prefix_lists_in_region(&region)
-                        .iter()
-                        .any(|published| published.prefix_list_id == input.prefix_list_id)
-                    {
-                        return Err(state::unsupported_operation(format!(
-                            "The prefix list '{prefix_list_id}' is an Amazon Web Services-managed \
-                             prefix list, which cannot be modified",
-                            prefix_list_id = input.prefix_list_id,
-                        )));
+                    // earns — answered through the crate's one reader of the set a Region
+                    // publishes and its one wording of that refusal, which the delete of such
+                    // a list answers too.
+                    if state::region_publishes_prefix_list(&region, &input.prefix_list_id) {
+                        return Err(state::published_prefix_list_unsupported(
+                            &input.prefix_list_id,
+                            "modified",
+                        ));
                     }
                     return Err(prefix_list_not_found(&input.prefix_list_id));
                 }
@@ -505,8 +503,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // the clock — not a later call — owes the list the settled one, so a caller reading
             // straight after this call still sees `modify-in-progress`.
             record.view.state = Some(PREFIX_LIST_STATE_MODIFY_IN_PROGRESS.to_string());
-            record.pending = Some(state::ClockTransition::starting_now(
-                PREFIX_LIST_STATE_MODIFY_COMPLETE,
+            record.pending = Some(state::ManagedPrefixListTransition::starting_now(
+                state::ManagedPrefixListMove::Settled(PREFIX_LIST_STATE_MODIFY_COMPLETE),
             ));
             (superseded, record.view.clone())
         };

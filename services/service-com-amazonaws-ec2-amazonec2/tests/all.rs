@@ -1911,3 +1911,9 @@ mod delete_fleets;
 // every new ec2 suite lands, for the reason the note at the top records.
 #[path = "all/get_associated_ipv6_pool_cidrs.rs"]
 mod get_associated_ipv6_pool_cidrs;
+// `DeleteManagedPrefixList`: the stored list a delete answers in `delete-in-progress`, the
+// removal the clock then owes it, the references that refuse it and what else it refuses.
+// Declared beside `prefix_lists` for the reason the note above gives: the sorted neighbourhood
+// and the tail of this file are where every new ec2 suite inserts its lines.
+#[path = "all/delete_managed_prefix_list.rs"]
+mod delete_managed_prefix_list;

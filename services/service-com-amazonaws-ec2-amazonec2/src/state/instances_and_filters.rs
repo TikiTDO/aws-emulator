@@ -502,17 +502,31 @@ impl ComAmazonawsEc2Amazonec2State {
         // reaches `create-complete` once its due instant has passed, whether or not anybody
         // called — the same contract as a `create-in-progress` IPAM scope's move below, and
         // the reason the list's due instant is kept beside the modelled shape rather than on
-        // it.
-        for record in self.managed_prefix_lists.values_mut() {
+        // it. A list `DeleteManagedPrefixList` answered as `delete-in-progress` is REMOVED at
+        // its own due instant: the deletion was carried out at that instant whether or not
+        // anybody called, and a list whose deletion has been carried out is not reported at
+        // all.
+        let mut deleted: Vec<String> = Vec::new();
+        for (prefix_list_id, record) in &mut self.managed_prefix_lists {
             let due = record
                 .pending
                 .as_ref()
                 .filter(|pending| now >= pending.due_at)
                 .map(|pending| pending.to);
-            if let Some(state) = due {
-                record.view.state = Some(state.to_string());
-                record.pending = None;
+            match due {
+                Some(ManagedPrefixListMove::Settled(state)) => {
+                    record.view.state = Some(state.to_string());
+                    record.pending = None;
+                }
+                Some(ManagedPrefixListMove::Removed) => deleted.push(prefix_list_id.clone()),
+                None => {}
             }
+        }
+        // Taken out after the walk rather than inside it, so the removal goes through the one
+        // place a prefix list stops being stored — which is also what gives its bytes back to
+        // the budget and forgets the client token that named it.
+        for prefix_list_id in deleted {
+            self.remove_managed_prefix_list(&prefix_list_id);
         }
         // A permission granted over a network interface is recorded `pending` and reaches
         // `granted` at its due instant, whether or not anybody called — the permission

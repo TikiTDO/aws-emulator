@@ -46,6 +46,10 @@ pub const PREFIX_LIST_STATE_CREATE_IN_PROGRESS: &str = "create-in-progress";
 /// the call that created it — the same contract as a `create-in-progress` IPAM scope's move.
 pub const PREFIX_LIST_STATE_CREATE_COMPLETE: &str = "create-complete";
 
+/// A prefix list whose deletion has been asked for and has not been carried out yet: that
+/// enum's `delete-in-progress` member, which is what `DeleteManagedPrefixList` answers with.
+pub const PREFIX_LIST_STATE_DELETE_IN_PROGRESS: &str = "delete-in-progress";
+
 /// The `Version` a newly created prefix list carries: "The version of the prefix list"
 /// (`ManagedPrefixList$Version`) counts the revisions of its entry set, and a create is the
 /// first of them.
@@ -110,6 +114,33 @@ pub fn prefix_list_limit_exceeded<E>(message: impl Into<String>) -> Scaffolded<E
     Scaffolded::service_error(PREFIX_LIST_LIMIT_EXCEEDED, 400, message)
 }
 
+/// Does the Region `region` PUBLISH a prefix list carrying the id `prefix_list_id`?
+///
+/// The one question an operation that writes a prefix list asks about an id its own store holds
+/// no list for: "Describes your managed prefix lists and any Amazon Web Services-managed prefix
+/// lists" (`DescribeManagedPrefixLists`), so such a list is visible to the caller but is not the
+/// account's to change. Answered off [`managed_prefix_lists_in_region`], the one derivation of
+/// the set a Region publishes.
+pub fn region_publishes_prefix_list(region: &str, prefix_list_id: &str) -> bool {
+    managed_prefix_lists_in_region(region)
+        .iter()
+        .any(|published| published.prefix_list_id == prefix_list_id)
+}
+
+/// Refuse a change to a prefix list the REGION publishes: HTTP 400 `UnsupportedOperation`,
+/// naming the list and the change it cannot take (`modified`, `deleted`).
+///
+/// "The ID of the owner of the prefix list" (`ManagedPrefixList$OwnerId`) is Amazon Web Services
+/// itself for such a list, so this is a refusal about the RESOURCE rather than about the id —
+/// which is why it is not the not-found an unresolvable id earns. The ONE wording of it, so the
+/// operations that refuse it cannot word the same refusal differently.
+pub fn published_prefix_list_unsupported<E>(prefix_list_id: &str, change: &str) -> Scaffolded<E> {
+    unsupported_operation(format!(
+        "The prefix list '{prefix_list_id}' is an Amazon Web Services-managed prefix list, \
+         which cannot be {change}"
+    ))
+}
+
 /// What one managed prefix list is created with, beyond everything the service itself derives
 /// ([`ComAmazonawsEc2Amazonec2State::insert_managed_prefix_list`] mints the id, builds the
 /// ARN, fills in the owning account, and sets the first version and the state the list starts
@@ -137,9 +168,32 @@ pub struct ManagedPrefixListSpec {
     pub client_token: Option<String>,
 }
 
+/// What the clock owes one stored managed prefix list next.
+///
+/// A word of the modelled `PrefixListState` catalog for a move that leaves the list stored,
+/// and [`ManagedPrefixListMove::Removed`] for the one that does not: the catalog's
+/// `delete-complete` member is the deletion HAVING BEEN CARRIED OUT, and a list whose deletion
+/// has been carried out is not one `DescribeManagedPrefixLists` reports at all — the same
+/// reading as [`PrefixListReferenceMove::Removed`] has of a route that is no longer in its
+/// table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedPrefixListMove {
+    /// The state of the catalog the list settles into:
+    /// [`PREFIX_LIST_STATE_CREATE_COMPLETE`] after a create, `modify-complete` after a
+    /// revision.
+    Settled(&'static str),
+    /// The list is reported no longer: the record goes out of the store, its caller-supplied
+    /// bytes go back to the budget and the client token that named it is forgotten.
+    Removed,
+}
+
+/// The move the clock owes one managed prefix list: a [`ClockTransition`] to the next
+/// [`ManagedPrefixListMove`].
+pub type ManagedPrefixListTransition = ClockTransition<ManagedPrefixListMove>;
+
 /// One stored managed prefix list: the modelled shape every operation that reports one
 /// answers with, plus the facts that shape carries no member for.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ManagedPrefixListRecord {
     /// The list as `CreateManagedPrefixList` answered it and `DescribeManagedPrefixLists`
     /// reports it.
@@ -150,10 +204,11 @@ pub struct ManagedPrefixListRecord {
     /// [`ComAmazonawsEc2Amazonec2State::visible_prefix_list_entries`] — so the entries a
     /// create accepted are kept here rather than dropped.
     pub entries: Vec<crate::ops::types::PrefixListEntry>,
-    /// The `create-in-progress` -> `create-complete` move the clock owes the list, until
+    /// The move the clock owes the list — the `create-in-progress` -> `create-complete`
+    /// settle, the one a revision starts, or the REMOVAL a delete starts — until
     /// [`ComAmazonawsEc2Amazonec2State::materialize_due_transitions`] applies it. `None` on a
     /// list that has nothing owed.
-    pub pending: Option<ClockTransition<&'static str>>,
+    pub pending: Option<ManagedPrefixListTransition>,
 }
 
 /// The caller-chosen bytes one stored managed prefix list holds for the process's lifetime:
@@ -231,8 +286,8 @@ impl ComAmazonawsEc2Amazonec2State {
                 ipam_prefix_list_resolver_sync_enabled: None,
             },
             entries: spec.entries,
-            pending: Some(ClockTransition::starting_now(
-                PREFIX_LIST_STATE_CREATE_COMPLETE,
+            pending: Some(ManagedPrefixListTransition::starting_now(
+                ManagedPrefixListMove::Settled(PREFIX_LIST_STATE_CREATE_COMPLETE),
             )),
         };
         if let Some(token) = spec.client_token {
@@ -242,6 +297,69 @@ impl ComAmazonawsEc2Amazonec2State {
         self.managed_prefix_lists
             .insert(prefix_list_id.clone(), record);
         prefix_list_id
+    }
+
+    /// Start the delete of the managed prefix list `prefix_list_id`, and answer it as it now
+    /// stands — or `None` when the store holds no list with that id.
+    ///
+    /// The ONE place a prefix list's delete is started, on the same contract as
+    /// [`Self::begin_transit_gateway_prefix_list_reference_delete`]: the list goes into
+    /// [`PREFIX_LIST_STATE_DELETE_IN_PROGRESS`] NOW, with its REMOVAL owed to the clock one
+    /// [`TRANSITION_DELAY`] later ([`ManagedPrefixListMove::Removed`], applied by
+    /// [`Self::materialize_due_transitions`], which is what takes the record out). The span is
+    /// never zero, so a caller reading straight after the delete still sees the list in its
+    /// `delete-in-progress` state rather than gone.
+    ///
+    /// A list whose removal is ALREADY owed is answered as it stands and its due instant is
+    /// left where it was: the list is on its way out either way, so a second delete does not
+    /// push its removal further off.
+    pub fn begin_managed_prefix_list_delete(
+        &mut self,
+        prefix_list_id: &str,
+    ) -> Option<crate::ops::types::ManagedPrefixList> {
+        let record = self.managed_prefix_lists.get_mut(prefix_list_id)?;
+        if record
+            .pending
+            .as_ref()
+            .is_none_or(|pending| pending.to != ManagedPrefixListMove::Removed)
+        {
+            record.view.state = Some(PREFIX_LIST_STATE_DELETE_IN_PROGRESS.to_string());
+            record.pending = Some(ManagedPrefixListTransition::starting_now(
+                ManagedPrefixListMove::Removed,
+            ));
+        }
+        Some(record.view.clone())
+    }
+
+    /// Take the managed prefix list `prefix_list_id` out of the store, and answer the record
+    /// that was removed — or `None` when the store held no list with that id.
+    ///
+    /// The ONE place a prefix list stops being stored, the counterpart of
+    /// [`Self::insert_managed_prefix_list`]: it gives the caller-supplied bytes the record
+    /// retained back to the store's budget — counted by the same one definition of that charge
+    /// ([`managed_prefix_list_payload_bytes`]) the insert charged — and forgets the
+    /// `ClientToken` that named the list, so a create replaying that token mints a new list
+    /// rather than naming one nothing holds any more.
+    pub fn remove_managed_prefix_list(
+        &mut self,
+        prefix_list_id: &str,
+    ) -> Option<ManagedPrefixListRecord> {
+        let record = self.managed_prefix_lists.remove(prefix_list_id)?;
+        let client_token = self
+            .managed_prefix_list_client_tokens
+            .iter()
+            .find(|(_, minted)| minted.as_str() == prefix_list_id)
+            .map(|(token, _)| token.clone());
+        if let Some(token) = client_token.as_deref() {
+            self.managed_prefix_list_client_tokens.remove(token);
+        }
+        self.release_stored_bytes(managed_prefix_list_payload_bytes(
+            record.view.prefix_list_name.as_deref().unwrap_or_default(),
+            &record.entries,
+            record.view.tags.as_deref().unwrap_or_default(),
+            client_token.as_deref(),
+        ));
+        Some(record)
     }
 
     /// The entries of the prefix list `prefix_list_id` as a caller signed for `region` can

@@ -278,7 +278,12 @@ const MIN_MAX_RESULTS: usize = 5;
 /// reference. Keying the rows by resource id is both what collapses them and the ascending order
 /// the page cursor names a position in: an id is unique across the account's resources, so that
 /// order is total and a token always advances.
-fn prefix_list_associations(
+///
+/// Reachable inside the crate rather than private to this operation, because this set is also
+/// what "you must first remove all references to the prefix list in your resources"
+/// (`DeleteManagedPrefixList`) is about: the delete refuses while this answers anything, so the
+/// references a report names and the ones a delete is refused for are ONE derivation.
+pub(crate) fn prefix_list_associations(
     store: &crate::state::ComAmazonawsEc2Amazonec2State,
     prefix_list_id: &str,
 ) -> Vec<PrefixListAssociation> {

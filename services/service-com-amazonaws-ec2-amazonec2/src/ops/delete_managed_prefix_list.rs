@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteManagedPrefixList
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteManagedPrefixList`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteManagedPrefixList::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Deletes ONE managed prefix list of the account from [`crate::state`]: the list is answered
+//! in the non-terminal `delete-in-progress` state the model publishes, and the clock — not a
+//! later call — owes its REMOVAL one [`crate::state::TRANSITION_DELAY`] later. "You must first
+//! remove all references to the prefix list in your resources", so a list any resource of the
+//! account still references is refused rather than deleted.
 //!
 //! ## Shape of an operation
 //!
@@ -98,6 +94,23 @@ impl From<DeleteManagedPrefixListErrorModeled> for DeleteManagedPrefixListError 
     }
 }
 
+/// Refuse a delete that named an id no prefix list of the account carries: HTTP 400
+/// [`crate::state::INVALID_PREFIX_LIST_ID_NOT_FOUND`], worded the way EC2 words that code FOR
+/// THIS OPERATION — `The prefix list (<id>) does not exist.`
+///
+/// A wording of its own rather than a second caller of the crate's shared one
+/// (`managed_prefix_list_entries::prefix_list_not_found`, `Prefix List <id> not found.`): the
+/// operations that REPORT or REVISE a prefix list word the code that way and the delete words it
+/// this way, so each answers the message its own caller is told. The id is the one the request
+/// named and nothing else is in the text.
+fn prefix_list_does_not_exist(prefix_list_id: &str) -> DeleteManagedPrefixListError {
+    crate::scaffolded::Scaffolded::service_error(
+        crate::state::INVALID_PREFIX_LIST_ID_NOT_FOUND,
+        400,
+        format!("The prefix list ({prefix_list_id}) does not exist."),
+    )
+}
+
 /// The `DeleteManagedPrefixList` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -134,18 +147,151 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteManagedPrefixList` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteManagedPrefixListErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteManagedPrefixList"))
+        use crate::ops::get_managed_prefix_list_associations::prefix_list_associations;
+        use crate::ops::modify_managed_prefix_list::managed_prefix_list_entries::{
+            PREFIX_LIST_STATES_ADMITTING_A_REVISION, require_prefix_list_versions,
+        };
+        use crate::state;
+
+        // The request's own FORM first, before anything is resolved: "not a prefix list id at
+        // all" is a fact about the request, while "no such prefix list" is a fact about what
+        // the caller can see — the order every resource of this crate asks the two questions
+        // in (`crate::state::require_well_formed_id`).
+        state::require_well_formed_id(
+            state::PREFIX_LIST_ID_PREFIX,
+            &input.prefix_list_id,
+            state::INVALID_PREFIX_LIST_ID_MALFORMED,
+        )?;
+
+        // EC2 is a regional service reached through a regional endpoint: the Region the caller
+        // signed for is the Region whose PUBLISHED prefix lists it can see beside its own, and
+        // one of those is a list this operation cannot delete.
+        let region = state::request_region(ctx.parts());
+
+        // The whole delete — what it is refused for, and the write itself — happens under ONE
+        // hold of the store, so what the request was validated against is what it writes.
+        let prefix_list = {
+            let state_handle = state::require_service_state(&*self.engine)?;
+            let mut store = state_handle.lock();
+            // The clock-owed moves a stored list may already be due: a list an earlier call
+            // answered `create-in-progress` or `modify-in-progress` is settled once its due
+            // instant has passed, and one an earlier delete answered `delete-in-progress` is
+            // gone once its own has — whether or not anybody called. Applying them here is
+            // what keeps this delete from being refused for a state the list has already
+            // left, and from deleting a list `DescribeManagedPrefixLists` no longer reports.
+            store.materialize_due_transitions();
+
+            let record = match store.managed_prefix_lists.get(&input.prefix_list_id) {
+                Some(record) => record,
+                None => {
+                    // A list the REGION publishes for one of its services is visible to this
+                    // caller but is not the account's to delete: "the ID of the owner of the
+                    // prefix list" (`ManagedPrefixList$OwnerId`) is Amazon Web Services
+                    // itself, and nothing the account calls removes one. Both the set it is
+                    // looked for in and the wording of that refusal are the crate's one
+                    // reading of them, which `ModifyManagedPrefixList` answers for such a
+                    // list too.
+                    if state::region_publishes_prefix_list(&region, &input.prefix_list_id) {
+                        return Err(state::published_prefix_list_unsupported(
+                            &input.prefix_list_id,
+                            "deleted",
+                        ));
+                    }
+                    return Err(prefix_list_does_not_exist(&input.prefix_list_id));
+                }
+            };
+
+            // A list whose removal is ALREADY owed to the clock is on its way out: this call
+            // asks for exactly what the earlier one started, so it is answered with the list
+            // as it stands rather than refused for the state that delete put it in, and the
+            // removal keeps its own due instant — the same reading a repeated delete of a
+            // transit gateway prefix list reference has.
+            let current_state = record.view.state.clone().unwrap_or_default();
+            let already_deleting = record
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.to == state::ManagedPrefixListMove::Removed);
+
+            if !already_deleting {
+                // A list whose creation or whose last revision is still owed to the clock has
+                // not settled into the list this delete would remove, so it is refused with
+                // the state it is in — EC2's `IncorrectState`, worded the way every refusal of
+                // this crate that turns solely on a resource's state is.
+                if !PREFIX_LIST_STATES_ADMITTING_A_REVISION.contains(&current_state.as_str()) {
+                    return Err(state::incorrect_state_of(
+                        "Prefix list",
+                        &input.prefix_list_id,
+                        &current_state,
+                    ));
+                }
+
+                // "You must first remove all references to the prefix list in your resources"
+                // (`DeleteManagedPrefixList`): the references are the ones
+                // `GetManagedPrefixListAssociations` reports — a security group rule's grant, a
+                // route of a route table, a prefix list reference of a transit gateway route
+                // table — read through that operation's own derivation, so the set a report
+                // names and the set a delete is refused for cannot drift apart. A reference the
+                // account still holds makes this EC2's `DependencyViolation`, worded the way
+                // every delete of this crate words that class: the resource the request named
+                // and nothing else.
+                let referencing = prefix_list_associations(&store, &input.prefix_list_id);
+                // "When set, this prefix list becomes an IPAM managed prefix list"
+                // (`ManagedPrefixList$IpamPrefixListResolverTargetId`): a resolver target names
+                // this list as the prefix list whose entries it writes, which is a reference
+                // held by another resource of the account just as a route or a grant is, so the
+                // target has to go before the list it targets.
+                let resolver_target = store
+                    .ipam_prefix_list_resolver_target_of_prefix_list(&input.prefix_list_id)
+                    .is_some();
+                if !referencing.is_empty() || resolver_target {
+                    return Err(state::dependency_violation(format!(
+                        "The prefixList '{prefix_list_id}' has dependencies and cannot be \
+                         deleted.",
+                        prefix_list_id = input.prefix_list_id,
+                    )));
+                }
+            }
+
+            // DryRun sits AFTER every parameter has been validated and BEFORE the first write:
+            // the flag asks whether the request WOULD have worked, so one that would have been
+            // refused is refused with that reason instead, and one that would have succeeded
+            // leaves the store untouched. "If you have the required permissions, the error
+            // response is DryRunOperation" (`DeleteManagedPrefixListRequest$DryRun`), and
+            // every caller of this emulator holds them.
+            if input.dry_run == Some(true) {
+                return Err(state::dry_run_operation());
+            }
+
+            // The one place a prefix list's delete is started: the list goes into
+            // `delete-in-progress` now and the clock owes its removal, so the answer is read
+            // out of the store rather than built here — what this caller sees is what a
+            // `DescribeManagedPrefixLists` straight after it sees.
+            store
+                .begin_managed_prefix_list_delete(&input.prefix_list_id)
+                .ok_or_else(|| {
+                    state::internal_error(format!(
+                        "the prefix list '{prefix_list_id}' this request resolved could not be \
+                         deleted",
+                        prefix_list_id = input.prefix_list_id,
+                    ))
+                })?
+        };
+
+        // The entry sets of the versions a revision of this list superseded go with the list:
+        // nothing can be asked for them once it is gone, and the bytes they hold are charged
+        // against the main store's budget, so they come back to it. Taken after the main
+        // store's lock has been let go of and given back under a second hold of it: the two
+        // stores are never held at once.
+        let versions = require_prefix_list_versions(&*self.engine)?;
+        let released = versions.lock().purge(&input.prefix_list_id);
+        drop(versions);
+        if released > 0 {
+            let state_handle = state::require_service_state(&*self.engine)?;
+            state_handle.lock().release_stored_bytes(released);
+        }
+
+        Ok(DeleteManagedPrefixListOutput {
+            prefix_list: Some(prefix_list),
+        })
     }
 }
