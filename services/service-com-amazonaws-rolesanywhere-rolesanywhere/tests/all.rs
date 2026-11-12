@@ -39,5 +39,7 @@ mod state_roundtrip;
 mod trust_anchor_and_profile_lifecycle;
 #[path = "all/trust_anchor_enablement.rs"]
 mod trust_anchor_enablement;
+#[path = "all/trust_anchor_reenablement.rs"]
+mod trust_anchor_reenablement;
 #[path = "all/trust_anchor_source_replacement.rs"]
 mod trust_anchor_source_replacement;

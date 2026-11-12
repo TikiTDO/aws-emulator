@@ -4,7 +4,7 @@
 //!
 //! The trust-anchor, profile and certificate-revocation-list lifecycles
 //! (`CreateTrustAnchor`, `UpdateTrustAnchor`, `GetTrustAnchor`, `ListTrustAnchors`,
-//! `DeleteTrustAnchor`, `DisableTrustAnchor`, `PutNotificationSettings`,
+//! `DeleteTrustAnchor`, `DisableTrustAnchor`, `EnableTrustAnchor`, `PutNotificationSettings`,
 //! `ResetNotificationSettings`,
 //! `CreateProfile`, `GetProfile`, `ListProfiles`, `DisableProfile`, `DeleteProfile`,
 //! `PutAttributeMapping`, `DeleteAttributeMapping`, `ImportCrl`,
