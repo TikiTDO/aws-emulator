@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteKnowledgeBaseDocuments
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteKnowledgeBaseDocuments`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteKnowledgeBaseDocuments::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Deletes documents the data source the URI names holds: each document the
+//! request identifies is marked as being deleted and the clock alone carries it
+//! on to being gone, which is the status every later read reports for it. This
+//! is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -163,18 +159,114 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteKnowledgeBaseDocuments` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteKnowledgeBaseDocumentsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteKnowledgeBaseDocuments"))
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(
+                DeleteKnowledgeBaseDocumentsErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: Some("the bedrock-agent store is unavailable".to_string()),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        let now = ::std::time::SystemTime::now();
+        let mut state = state.lock();
+        state.materialise_due_transitions(now);
+
+        // The documents belong to one data source of one knowledge base, so
+        // both have to exist and neither may be on its way out of the store: a
+        // data source is identified by the pair, which makes an id of another
+        // knowledge base's data source as absent here as one nothing holds.
+        if state.live_knowledge_base(&input.knowledge_base_id).is_none() {
+            return Err(
+                DeleteKnowledgeBaseDocumentsErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: Some(crate::state::knowledge_base_not_found_message(
+                            &input.knowledge_base_id,
+                        )),
+                    },
+                )
+                .into(),
+            );
+        }
+        if state
+            .live_data_source_of(&input.knowledge_base_id, &input.data_source_id)
+            .is_none()
+        {
+            return Err(
+                DeleteKnowledgeBaseDocumentsErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: Some(crate::state::data_source_not_found_message(
+                            &input.data_source_id,
+                        )),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // An identifier names the kind of data source its document lives in,
+        // and that kind names which member carries the document's own id; an
+        // identifier carrying neither names no document at all, which is a bad
+        // request rather than a document that is missing. Nothing is deleted
+        // for a request carrying one.
+        let mut keys = Vec::with_capacity(input.document_identifiers.len());
+        for (index, identifier) in input.document_identifiers.iter().enumerate() {
+            let Some(key) = crate::state::DocumentKey::from_identifier(identifier) else {
+                let data_source_type = identifier.data_source_type.as_str();
+                // The modelled `ContentDataSourceType` admits only the kinds
+                // the table names, so a kind that reaches here has a member.
+                let member =
+                    crate::state::document_content_member(data_source_type).unwrap_or_default();
+                return Err(
+                    DeleteKnowledgeBaseDocumentsErrorModeled::ValidationException(
+                        ValidationException {
+                            message: Some(crate::state::document_member_required_message(
+                                &format!("documentIdentifiers[{index}]"),
+                                member,
+                                data_source_type,
+                            )),
+                            field_list: None,
+                        },
+                    )
+                    .into(),
+                );
+            };
+            keys.push(key);
+        }
+
+        // One detail per identifier asked about, in the order asked: the
+        // document the deletion was accepted for, now on its way out of the
+        // data source, and otherwise the detail the model gives an identifier
+        // nothing is stored for — a document this data source does not hold is
+        // not a missing RESOURCE, it is a document whose status is that it was
+        // not found. `clientToken` needs no index of its own: a document
+        // already on its way out is not deleted a second time, so a retried
+        // request reports exactly the documents the first one deleted.
+        let document_details = keys
+            .iter()
+            .map(|key| {
+                state
+                    .begin_document_deletion(
+                        &input.knowledge_base_id,
+                        &input.data_source_id,
+                        key,
+                        now,
+                    )
+                    .unwrap_or_else(|| {
+                        crate::state::not_found_document_detail(
+                            &input.knowledge_base_id,
+                            &input.data_source_id,
+                            key,
+                        )
+                    })
+            })
+            .collect();
+
+        Ok(DeleteKnowledgeBaseDocumentsOutput {
+            document_details: Some(document_details),
+        })
     }
 }

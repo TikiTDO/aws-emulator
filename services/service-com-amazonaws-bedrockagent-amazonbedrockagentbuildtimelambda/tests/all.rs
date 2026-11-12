@@ -49,6 +49,8 @@ mod ingestion_index;
 mod ingestion_crawl;
 #[path = "all/ingestion_job_lifecycle.rs"]
 mod ingestion_job_lifecycle;
+#[path = "all/knowledge_base_document_kinds_and_deletion.rs"]
+mod knowledge_base_document_kinds_and_deletion;
 #[path = "all/knowledge_base_document_listing.rs"]
 mod knowledge_base_document_listing;
 #[path = "all/knowledge_base_documents.rs"]

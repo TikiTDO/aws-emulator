@@ -101,14 +101,17 @@
 //! beside this one.
 //!
 //! The documents pushed straight into a data source
-//! (`IngestKnowledgeBaseDocuments`, `GetKnowledgeBaseDocuments`) are backed by
+//! (`IngestKnowledgeBaseDocuments`, `GetKnowledgeBaseDocuments`,
+//! `ListKnowledgeBaseDocuments`, `DeleteKnowledgeBaseDocuments`) are backed by
 //! the
 //! [`documents`](ComAmazonawsBedrockagentAmazonbedrockagentbuildtimelambdaState::documents)
 //! map, keyed by the knowledge base, the data source and the document's own
 //! identity ([`DocumentKey`]), with [`DocumentRecord::to_detail`] and
 //! [`not_found_document_detail`] as the only two projections any document
 //! operation reports. A document's status advances on the CLOCK alone, through
-//! the same `materialise_due_transitions`.
+//! the same `materialise_due_transitions` — including the chain an accepted
+//! deletion starts, which ends at the `NOT_FOUND` status the record keeps
+//! reporting rather than at a record the store drops.
 //!
 //! A flow's aliases (`CreateFlowAlias`, `GetFlowAlias`, `ListFlowAliases`) are
 //! backed by the
@@ -1618,6 +1621,55 @@ pub fn connects_to_an_external_source(configuration: &DataSourceConfiguration) -
     }
 }
 
+/// The `DataSourceType` of a data source the SERVICE connects to its source: a
+/// managed knowledge base connector, whose `connectorParameters` name which
+/// connector it runs.
+pub const MANAGED_CONNECTOR_DATA_SOURCE_TYPE: &str = "MANAGED_KNOWLEDGE_BASE_CONNECTOR";
+
+/// Which connector a managed knowledge base connector data source runs, from
+/// the `type` member of its `connectorParameters`; `None` when its parameters
+/// name none.
+fn connector_kind(configuration: &DataSourceConfiguration) -> Option<String> {
+    let parameters = configuration
+        .managed_knowledge_base_connector_configuration
+        .as_ref()?
+        .connector_parameters
+        .as_ref()
+        .and_then(connector_parameter_members)?;
+    match parameters.get(CONNECTOR_TYPE_PARAMETER) {
+        Some(Document::String(connector)) => Some(connector.clone()),
+        _ => None,
+    }
+}
+
+/// The kind of document CONTENT a data source holds — one of the modelled
+/// `ContentDataSourceType` values — or `None` for a data source that holds no
+/// directly ingestible document at all.
+///
+/// A data source's own `DataSourceType` and a document's
+/// `ContentDataSourceType` are two different enums: the content kind is the kind
+/// of SOURCE the document comes from, and a managed knowledge base connector
+/// data source is the connector its `connectorParameters` name rather than a
+/// kind of source of its own — so its content kind is that connector's. For
+/// every other data source the two enums spell the same kind, and a kind no
+/// `ContentDataSourceType` value names (a crawler over a source of its own) is
+/// a data source no document's content can correspond to.
+///
+/// Source: the `ContentDataSourceType` and `DataSourceType` enums and the
+/// `DataSourceConfiguration` structure of this service's Smithy model
+/// (`smithy_query(query="shape",shape="ContentDataSourceType,DataSourceType,DataSourceConfiguration")`).
+pub fn ingestible_content_type(configuration: &DataSourceConfiguration) -> Option<&'static str> {
+    let kind = if configuration.r#type == MANAGED_CONNECTOR_DATA_SOURCE_TYPE {
+        connector_kind(configuration)?
+    } else {
+        configuration.r#type.clone()
+    };
+    DOCUMENT_CONTENT_MEMBERS
+        .iter()
+        .find(|(name, _)| *name == kind)
+        .map(|(name, _)| *name)
+}
+
 /// How long after `CreateDataSource` a data source whose connector has a source
 /// outside the service to reach leaves `CREATING` for the outcome of bringing
 /// that connection up, and how long after `UpdateDataSource` a data source
@@ -1978,6 +2030,25 @@ pub const DOCUMENT_INGESTION_SPAN: Duration = INGESTION_JOB_START_SPAN;
 /// [`INGESTION_JOB_RUN_SPAN`] for the same reason.
 pub const DOCUMENT_INDEXING_SPAN: Duration = INGESTION_JOB_RUN_SPAN;
 
+/// How long after `DeleteKnowledgeBaseDocuments` a document leaves `DELETING`
+/// for `DELETE_IN_PROGRESS`.
+///
+/// CHOSEN, not documented: AWS publishes no duration for the deletion of a
+/// document. It is deliberately non-zero so a caller that reads the document
+/// back immediately still observes the transient `DELETING` status the modelled
+/// `DocumentStatus` declares, and it is the span the submission of an ingestion
+/// takes ([`DOCUMENT_INGESTION_SPAN`]) so that both chains of one document
+/// converge on the same scale.
+pub const DOCUMENT_DELETION_START_SPAN: Duration = DOCUMENT_INGESTION_SPAN;
+
+/// How long after a document reaches `DELETE_IN_PROGRESS` it reaches
+/// `NOT_FOUND`.
+///
+/// CHOSEN, not documented, and non-zero for the same reason as
+/// [`DOCUMENT_DELETION_START_SPAN`]: `DELETE_IN_PROGRESS` is a status the model
+/// declares, so a poller has to be able to observe it.
+pub const DOCUMENT_DELETION_SPAN: Duration = DOCUMENT_INDEXING_SPAN;
+
 /// The `DocumentStatus` a document operation reports for an identifier this
 /// store holds no document for, which the modelled member documents as
 /// "NOT_FOUND – The document wasn't found."
@@ -2054,10 +2125,11 @@ pub fn document_member_required_message(path: &str, member: &str, data_source_ty
 /// The `DocumentStatus` values a directly ingested document passes through,
 /// named as the model's `DocumentStatus` enum names them on the wire.
 ///
-/// `IngestKnowledgeBaseDocuments` mints only [`DocumentStatus::Starting`]; the
-/// rest of the chain is owed by the clock. The modelled enum declares further
-/// values this slice never reaches — nothing here fails, is ignored, is only
-/// partially indexed or is being deleted.
+/// `IngestKnowledgeBaseDocuments` mints only [`DocumentStatus::Starting`] and
+/// `DeleteKnowledgeBaseDocuments` only [`DocumentStatus::Deleting`]; the rest of
+/// each chain is owed by the clock. The modelled enum declares further values
+/// this slice never reaches — nothing here fails, is ignored or is only
+/// partially indexed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentStatus {
     /// The ingestion carrying the document was submitted; it reaches
@@ -2068,9 +2140,20 @@ pub enum DocumentStatus {
     /// [`DocumentStatus::Indexed`] once [`DOCUMENT_INDEXING_SPAN`] more has
     /// elapsed.
     InProgress,
-    /// The document was indexed — a terminal status, so the clock owes it
-    /// nothing more.
+    /// The document was indexed — the terminal status of an ingestion, so the
+    /// clock owes it nothing more.
     Indexed,
+    /// The deletion carrying the document was submitted; it reaches
+    /// [`DocumentStatus::DeleteInProgress`] once
+    /// [`DOCUMENT_DELETION_START_SPAN`] has elapsed.
+    Deleting,
+    /// The document is being deleted; it reaches [`DocumentStatus::NotFound`]
+    /// once [`DOCUMENT_DELETION_SPAN`] more has elapsed.
+    DeleteInProgress,
+    /// The document is gone from the data source — the terminal status of a
+    /// deletion, which the modelled member documents as the status of a document
+    /// that "wasn't found", so the clock owes it nothing more.
+    NotFound,
 }
 
 impl DocumentStatus {
@@ -2080,6 +2163,9 @@ impl DocumentStatus {
             Self::Starting => "STARTING",
             Self::InProgress => "IN_PROGRESS",
             Self::Indexed => "INDEXED",
+            Self::Deleting => "DELETING",
+            Self::DeleteInProgress => "DELETE_IN_PROGRESS",
+            Self::NotFound => DOCUMENT_STATUS_NOT_FOUND,
         }
     }
 
@@ -2089,8 +2175,16 @@ impl DocumentStatus {
         match self {
             Self::Starting => Some((DOCUMENT_INGESTION_SPAN, Self::InProgress)),
             Self::InProgress => Some((DOCUMENT_INDEXING_SPAN, Self::Indexed)),
-            Self::Indexed => None,
+            Self::Deleting => Some((DOCUMENT_DELETION_START_SPAN, Self::DeleteInProgress)),
+            Self::DeleteInProgress => Some((DOCUMENT_DELETION_SPAN, Self::NotFound)),
+            Self::Indexed | Self::NotFound => None,
         }
+    }
+
+    /// Whether a deletion has already been accepted for a document in this
+    /// status: it is on its way out of the data source, or already out of it.
+    fn is_being_deleted(self) -> bool {
+        matches!(self, Self::Deleting | Self::DeleteInProgress | Self::NotFound)
     }
 }
 
@@ -2271,6 +2365,25 @@ impl DocumentRecord {
             // source's source.
             client_token: None,
         }
+    }
+
+    /// Accept the deletion of this document: it reports `DELETING` from now on,
+    /// and the clock owes it the rest of the chain down to `NOT_FOUND`.
+    ///
+    /// The record STAYS in the store: a deleted document is a document whose
+    /// status says it is gone, which is what every document read reports for it
+    /// from here on. The digest of the source object it was taken from goes,
+    /// because the data source no longer holds this document's content — so a
+    /// later crawl that finds that object again ingests it anew rather than
+    /// taking it for one already held.
+    pub fn begin_deletion(&mut self, now: SystemTime) {
+        self.status = DocumentStatus::Deleting;
+        self.pending_status = Some((
+            now + DOCUMENT_DELETION_START_SPAN,
+            DocumentStatus::DeleteInProgress,
+        ));
+        self.source_digest = None;
+        self.updated_at = now;
     }
 
     /// This record as the modelled `KnowledgeBaseDocumentDetail` shape: every
@@ -2680,6 +2793,33 @@ impl ComAmazonawsBedrockagentAmazonbedrockagentbuildtimelambdaState {
             data_source_id.to_string(),
             key.clone(),
         ))
+    }
+
+    /// Accept the deletion of one document of this data source: it reports the
+    /// modelled `DELETING` status from now on and the clock owes it the rest of
+    /// the chain, which ends at `NOT_FOUND` — the status every later read of it
+    /// reports. `None` when this data source holds no such document, which is
+    /// not a document to delete at all.
+    ///
+    /// A deletion already accepted is not accepted again: the document is
+    /// already on its way out, so a repeat of the same delete reports it as it
+    /// stands rather than restarting the chain.
+    pub fn begin_document_deletion(
+        &mut self,
+        knowledge_base_id: &str,
+        data_source_id: &str,
+        key: &DocumentKey,
+        now: SystemTime,
+    ) -> Option<KnowledgeBaseDocumentDetail> {
+        let record = self.documents.get_mut(&(
+            knowledge_base_id.to_string(),
+            data_source_id.to_string(),
+            key.clone(),
+        ))?;
+        if !record.status.is_being_deleted() {
+            record.begin_deletion(now);
+        }
+        Some(record.to_detail())
     }
 
     /// How many documents this data source already holds, the count the

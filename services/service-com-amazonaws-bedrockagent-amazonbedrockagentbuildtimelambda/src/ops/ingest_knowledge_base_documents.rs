@@ -207,7 +207,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into(),
             );
         };
-        let data_source_type = data_source.data_source_configuration.r#type.clone();
+        // A data source holds documents of ONE kind: the kind of source its
+        // documents come from. For a managed knowledge base connector that is
+        // the connector the service runs for it rather than the data source's
+        // own `DataSourceType`, which names no kind of content at all.
+        let content_kind =
+            crate::state::ingestible_content_type(&data_source.data_source_configuration);
 
         // `clientToken` is an @idempotencyToken: a repeat of the same request
         // reports the documents it already ingested rather than starting their
@@ -248,18 +253,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // Each document's content names the kind of data source it comes from,
         // and `IngestKnowledgeBaseDocuments` requires that kind to be the kind
-        // of the data source the URI addresses. The comparison holds for every
-        // kind of data source: a content kind is one of the two
-        // `ContentDataSourceType` values, so a data source of any other kind
-        // matches no document's content and takes none. The kind also names
-        // which member carries the document's own details, so content that
-        // carries none of them identifies no document. Both are bad requests,
-        // and nothing is written for any document of a request carrying one.
+        // the addressed data source holds. The comparison holds for every kind
+        // of data source: a data source that holds no directly ingestible
+        // content — one whose documents the service crawls from a source of its
+        // own — corresponds to no document's content and takes none. The kind
+        // also names which member carries the document's own details, so
+        // content that carries none of them identifies no document. Both are
+        // bad requests, and nothing is written for any document of a request
+        // carrying one.
         let mut keys: Vec<crate::state::DocumentKey> = Vec::with_capacity(input.documents.len());
         for (index, document) in input.documents.iter().enumerate() {
             let path = format!("documents[{index}].content");
             let content_type = document.content.data_source_type.as_str();
-            if content_type != data_source_type {
+            if content_kind != Some(content_type) {
                 return Err(
                     IngestKnowledgeBaseDocumentsErrorModeled::ValidationException(
                         ValidationException {
