@@ -45,6 +45,12 @@ aws-sdk-ec2 = { version = "1", default-features = false, features = ["behavior-v
 # belong to Amazon S3, so `src/state/s3_export.rs` writes it where that service holds
 # it. Only the generated client is needed — the emulator supplies the transport.
 aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# The AWS SDK for Amazon SNS, driven over the same in-process callback: a cache
+# cluster's events are published to the topic its `NotificationConfiguration`
+# names, and topics and their subscriptions belong to Amazon SNS, so
+# `src/state/event_notifications.rs` publishes where that service holds them.
+# Only the generated client is needed — the emulator supplies the transport.
+aws-sdk-sns = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
 # `arn::region_label`: the ONE reading of a caller-supplied Region as a Region
 # LABEL, which is what the endpoint the EC2 call above is made at is built from.
 service-common = { path = "../common" }
@@ -65,6 +71,16 @@ service-com-amazonaws-ec2-amazonec2 = { workspace = true }
 # serverless cache snapshot writes is read back through that service's OWN operations,
 # so what the export reports is what the owner of objects really holds.
 service-com-amazonaws-s3-amazons3 = { workspace = true }
+# Amazon SNS, mounted beside this one in the test harness: the notification a cluster
+# event owes is delivered by Amazon SNS, so what this service publishes is read back
+# from the service that owns topics and their deliveries.
+service-com-amazonaws-sns-amazonsimplenotificationservice = { workspace = true }
+# Amazon SQS, mounted beside Amazon SNS in the same harness: the subscriber's end of
+# the delivery path a notification travels, so the suite reads the envelope a client
+# really receives off a queue rather than only what was published.
+service-com-amazonaws-sqs-amazonsqs = { workspace = true }
+# The SQS client that harness drives the subscriber's end with.
+aws-sdk-sqs = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
 
 [lints]
 workspace = true

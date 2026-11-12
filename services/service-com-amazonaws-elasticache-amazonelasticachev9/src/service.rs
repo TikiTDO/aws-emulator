@@ -40,7 +40,7 @@
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
 //!
-//! Two of those seams are taken here, both for the one reason named in
+//! Two of those seams are taken here. Both are for the reason named in
 //! [`query_error_envelope`]: an awsQuery error response carries a `<RequestId>` element
 //! in its `<ErrorResponse>` envelope, which the framework's renderers omit.
 //! `override_operation` wraps the operation the routing table names, so the element
@@ -48,7 +48,9 @@
 //! serving it, and the [`ElastiCacheDefinition`] this file hands back from `definition`
 //! adds it to a routing failure, a transport failure and a pre-dispatch refusal.
 //! Everything else about those paths — status, `<Type>`, `<Code>`, `<Message>` — stays
-//! with the framework.
+//! with the framework. That same operation wrapper is also where the work that belongs to
+//! no single operation is done: the notifications this call's cluster events owe their
+//! clusters' Amazon SNS topics are published once the response has been rendered.
 //!
 //! # How this service words five of its refusals
 //!
@@ -92,7 +94,7 @@ pub struct EmulatedService<Eng: Send + Sync + 'static> {
     entry: ElastiCacheDefinition<Eng>,
     /// The envelope wrapper every routable request is served through. Held in a field,
     /// built once, because `override_operation` hands back a reference to it.
-    envelope: RequestIdEnvelopeOperation,
+    envelope: RequestIdEnvelopeOperation<Eng>,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -101,8 +103,8 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// operation's behaviour lives in that operation's own `impl Operation`.
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
-            entry: ElastiCacheDefinition::new(engine),
-            envelope: RequestIdEnvelopeOperation,
+            entry: ElastiCacheDefinition::new(Arc::clone(&engine)),
+            envelope: RequestIdEnvelopeOperation::new(engine),
         }
     }
 }

@@ -179,6 +179,7 @@ use crate::ops::types::{
 pub mod ec2_client;
 pub mod ec2_security_groups;
 pub mod ec2_subnets;
+mod event_notifications;
 pub mod kms_key;
 pub mod s3_export;
 mod store;
@@ -200,6 +201,7 @@ pub use shard_configuration::*;
 pub use cache_clusters::*;
 pub use reserved_nodes::*;
 pub use parameters::*;
+pub use event_notifications::*;
 
 /// The region a request is treated as having been made in when its SigV4
 /// credential scope does not name one (an unsigned or anonymous request).
@@ -867,17 +869,13 @@ pub const PARAMETER_APPLY_STATUS_PENDING_REBOOT: &str = "pending-reboot";
 /// membership is reported in the one state a created cluster's membership has.
 pub const SECURITY_GROUP_STATUS: &str = "active";
 
-/// The `NotificationConfiguration$TopicStatus` of the SNS topic a cluster was
-/// given. The emulator models no SNS subscription lifecycle, so a configured
-/// topic is reported in the one state a configured topic has.
-pub const NOTIFICATION_TOPIC_STATUS: &str = "active";
-
 /// `NotificationTopicStatus`'s two documented values: "The status of the Amazon
 /// SNS notification topic … Notifications are sent only if the status is active.
 /// Valid values: active | inactive." The member is a plain `String`, so these
-/// are the spellings a request is held to; [`NOTIFICATION_TOPIC_STATUS`] is the
-/// state a CONFIGURED topic is reported in, which is the `active` one.
-pub const NOTIFICATION_STATUS_ACTIVE: &str = NOTIFICATION_TOPIC_STATUS;
+/// are the spellings a request is held to, and the status is held PER CLUSTER
+/// ([`CacheClusterRecord::notification_topic_status`]) because a modify moves a
+/// configured topic between the two without detaching it.
+pub const NOTIFICATION_STATUS_ACTIVE: &str = "active";
 /// See [`NOTIFICATION_STATUS_ACTIVE`].
 pub const NOTIFICATION_STATUS_INACTIVE: &str = "inactive";
 
@@ -3691,6 +3689,12 @@ pub struct ComAmazonawsElasticacheAmazonelasticachev9State {
     /// The counter that breaks the tie between two events recorded in the same
     /// millisecond; see [`event_key`].
     pub event_seq: u64,
+    /// The notifications recorded cluster events owe their clusters' topics and
+    /// that have not been published yet, oldest first — written through
+    /// [`Self::record_cluster_event`] and drained by
+    /// [`deliver_cluster_notifications`], which every call this service serves
+    /// runs once it has answered.
+    pub pending_cluster_notifications: Vec<ClusterNotification>,
     /// Every stored RBAC user, keyed by its (lowercased) `UserId` — the
     /// resource's identity in this API — including the built-in `default` user
     /// [`built_in_users`] stocks the store with. A `BTreeMap`, so `DescribeUsers`
@@ -3775,6 +3779,7 @@ impl Default for ComAmazonawsElasticacheAmazonelasticachev9State {
             update_actions: BTreeMap::new(),
             events: BTreeMap::new(),
             event_seq: 0,
+            pending_cluster_notifications: Vec::new(),
             users: built_in_users(),
             cache_engine_versions: published_cache_engine_versions(),
             dns_token_seq: 0,

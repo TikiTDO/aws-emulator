@@ -387,7 +387,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 now,
             },
         );
-        cluster.begin_transition(crate::state::STATUS_SNAPSHOTTING, now);
+        // The completion of the snapshot is the event the cluster's notification
+        // topic is owed, raised when the clock settles the cluster back to
+        // `available`.
+        cluster.begin_transition(
+            crate::state::STATUS_SNAPSHOTTING,
+            now,
+            Some(crate::state::EVENT_SNAPSHOT_COMPLETE),
+        );
         let subnet_group_name = cluster.cache_subnet_group_name.clone();
 
         let mut record = record;

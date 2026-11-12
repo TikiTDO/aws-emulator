@@ -264,6 +264,87 @@ impl Emulator {
         }
     }
 
+    /// The same emulator with Amazon SNS and Amazon SQS mounted BESIDE this
+    /// service on the one shared engine, the way the assembled emulator mounts
+    /// them.
+    ///
+    /// Both because they are the DELIVERY PATH a notification travels: a cluster
+    /// event is published to the topic the cluster's notification configuration
+    /// names, and Amazon SNS fans that publish out to the queue subscribed to the
+    /// topic. A suite about an event notification therefore reads what it
+    /// published back from the services that own topics, subscriptions and
+    /// queues, rather than from this service's own state.
+    pub fn with_sns() -> Self {
+        let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+        let mut router = MultiServiceRouter::new();
+        router.set_request_authentication(false);
+        router.register_service(EmulatedService::new(Arc::clone(&engine)));
+        router.register_service(service_com_amazonaws_ec2_amazonec2::EmulatedService::new(
+            Arc::clone(&engine),
+        ));
+        router.register_service(
+            service_com_amazonaws_sns_amazonsimplenotificationservice::EmulatedService::new(
+                Arc::clone(&engine),
+            ),
+        );
+        router.register_service(service_com_amazonaws_sqs_amazonsqs::EmulatedService::new(
+            Arc::clone(&engine),
+        ));
+        let callback = EmbeddedEmulator::from_router(router.clone());
+        Self {
+            router,
+            engine,
+            callback,
+        }
+    }
+
+    /// An Amazon SNS client for `region` over the in-process callback this
+    /// emulator routes on — the same seam the service itself publishes a
+    /// notification through, so a suite's setup reaches SNS exactly where the
+    /// handler does.
+    pub fn sns(&self, region: &str) -> ::aws_sdk_sns::Client {
+        let config = ::aws_sdk_sns::Config::builder()
+            .behavior_version(::aws_sdk_sns::config::BehaviorVersion::latest())
+            .region(::aws_sdk_sns::config::Region::new(region.to_string()))
+            .endpoint_url(format!("https://sns.{region}.amazonaws.com"))
+            .credentials_provider(self.callback.aws_credentials_provider())
+            .http_client(self.callback.http_client())
+            .retry_config(::aws_sdk_sns::config::retry::RetryConfig::disabled())
+            .timeout_config(::aws_sdk_sns::config::timeout::TimeoutConfig::disabled())
+            .identity_cache(::aws_sdk_sns::config::IdentityCache::no_cache())
+            .stalled_stream_protection(
+                ::aws_sdk_sns::config::StalledStreamProtectionConfig::disabled(),
+            )
+            .build();
+        ::aws_sdk_sns::Client::from_conf(config)
+    }
+
+    /// An Amazon SQS client for `region` over the same in-process callback — the
+    /// subscriber's end of the delivery path above.
+    pub fn sqs(&self, region: &str) -> ::aws_sdk_sqs::Client {
+        let config = ::aws_sdk_sqs::Config::builder()
+            .behavior_version(::aws_sdk_sqs::config::BehaviorVersion::latest())
+            .region(::aws_sdk_sqs::config::Region::new(region.to_string()))
+            .endpoint_url(format!("https://sqs.{region}.amazonaws.com"))
+            .credentials_provider(self.callback.aws_credentials_provider())
+            .http_client(self.callback.http_client())
+            .retry_config(::aws_sdk_sqs::config::retry::RetryConfig::disabled())
+            .timeout_config(::aws_sdk_sqs::config::timeout::TimeoutConfig::disabled())
+            .identity_cache(::aws_sdk_sqs::config::IdentityCache::no_cache())
+            .stalled_stream_protection(
+                ::aws_sdk_sqs::config::StalledStreamProtectionConfig::disabled(),
+            )
+            .build();
+        ::aws_sdk_sqs::Client::from_conf(config)
+    }
+
+    /// The ONE engine every service mounted here shares — for a suite that reads
+    /// back what ANOTHER service holds (the deliveries Amazon SNS made) through
+    /// that service's own store.
+    pub fn engine(&self) -> &Arc<engine::InMemoryEngine> {
+        &self.engine
+    }
+
     /// An Amazon S3 client for `region` over the in-process callback this
     /// emulator routes on: no socket is opened, and the endpoint URL is only the
     /// address that transport routes by.

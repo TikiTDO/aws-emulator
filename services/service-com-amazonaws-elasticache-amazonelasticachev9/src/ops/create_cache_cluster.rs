@@ -924,12 +924,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Creating a cluster is one of the events this service records; see
         // `crate::state::EventRecord`. It is dated at the instant the cluster
         // was created, which is also the instant its transition span starts.
-        store.record_event(
-            crate::state::SOURCE_TYPE_CACHE_CLUSTER,
-            &cache_cluster_id,
-            "Cache cluster created",
-            now,
-        );
+        // The published event a client is NOTIFIED of is the completion of the
+        // provisioning this call starts, which the clock raises when the cluster
+        // reaches `available` (see `crate::state::insert_cluster`).
+        store.record_cluster_event(&cache_cluster_id, None, "Cache cluster created", now);
         Ok(CreateCacheClusterOutput {
             cache_cluster: Some(cache_cluster),
         })

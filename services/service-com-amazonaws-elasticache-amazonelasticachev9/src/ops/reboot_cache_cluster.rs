@@ -228,10 +228,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 node.parameter_group_status = crate::state::PARAMETER_APPLY_STATUS.to_string();
             }
         }
-        cluster.begin_transition(crate::state::STATUS_REBOOTING_NODES, now);
+        // "When the reboot is complete, a cluster event is created": the
+        // completion is the event the cluster's notification topic is owed, and
+        // the clock owes the cluster `available` again after the transition span
+        // (see `CacheClusterRecord::settle`).
+        cluster.begin_transition(
+            crate::state::STATUS_REBOOTING_NODES,
+            now,
+            Some(crate::state::EVENT_CACHE_NODES_REBOOTED),
+        );
 
-        // The cluster event the reboot's completion creates belongs to
-        // `DescribeEvents`, which records it from the clock-owed transition.
+        // The cluster event the reboot's completion creates is recorded — and
+        // published to the cluster's topic — when the clock materialises that
+        // completion, which is where `DescribeEvents` reads it from.
         Ok(RebootCacheClusterOutput {
             cache_cluster: Some(cluster.to_modeled(true)),
         })

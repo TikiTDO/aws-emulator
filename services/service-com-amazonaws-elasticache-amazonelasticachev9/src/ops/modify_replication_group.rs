@@ -1183,11 +1183,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             if let Some(arn) = member_topic.clone() {
                 cluster.notification_topic_arn = Some(arn);
+                cluster.notification_topic_status =
+                    crate::state::NOTIFICATION_STATUS_ACTIVE.to_string();
             }
-            // `NotificationTopicStatus` is how a topic is detached: the status is
-            // set to `inactive` to stop publishing.
-            if member_topic_status.as_deref() == Some(crate::state::NOTIFICATION_STATUS_INACTIVE) {
-                cluster.notification_topic_arn = None;
+            // "Notifications are sent only if the status is active": the status
+            // PAUSES the publishing and leaves the topic bound, so a member
+            // cluster keeps reporting the same `TopicArn` and a later `active`
+            // sets the same configuration going again.
+            if let Some(status) = member_topic_status.as_deref() {
+                cluster.notification_topic_status = status.to_string();
             }
             if let Some(enabled) = auth_token_applied {
                 cluster.auth_token_enabled = enabled;
@@ -1207,7 +1211,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     Some(!cluster.log_delivery_configurations.is_empty());
             }
             if applies_async_change {
-                cluster.begin_transition(crate::state::STATUS_MODIFYING, now);
+                // The GROUP's own completion is what a group-scoped event
+                // reports, so a member cluster's transition raises no cluster
+                // event of its own.
+                cluster.begin_transition(crate::state::STATUS_MODIFYING, now, None);
             }
         });
 

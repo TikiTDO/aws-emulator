@@ -714,23 +714,33 @@ async fn a_group_wide_setting_is_carried_into_the_member_clusters() {
     }
 
     // "The status of the Amazon SNS notification topic … Notifications are sent
-    // only if the status is active": `inactive` is how a topic is detached.
-    modify_accepted(
-        &emulator,
-        "members",
-        "member-wide",
-        &[("NotificationTopicStatus", "inactive")],
-    )
-    .await;
-    std::thread::sleep(PAST_TRANSITION);
-    for member in ["member-wide-001", "member-wide-002"] {
-        let described = describe_cluster(&emulator, "members", member).await;
-        assert_eq!(
-            described.text("NotificationConfiguration/TopicArn"),
-            None,
-            "case {member}: an inactive topic status detaches the topic, got {:?}",
-            described.text("NotificationConfiguration/TopicArn")
-        );
+    // only if the status is active": `inactive` PAUSES the notifications on each
+    // member cluster and leaves the topic bound, so a later `active` resumes the
+    // same configuration.
+    for (status, expected) in [("inactive", "inactive"), ("active", "active")] {
+        modify_accepted(
+            &emulator,
+            "members",
+            "member-wide",
+            &[("NotificationTopicStatus", status)],
+        )
+        .await;
+        std::thread::sleep(PAST_TRANSITION);
+        for member in ["member-wide-001", "member-wide-002"] {
+            let described = describe_cluster(&emulator, "members", member).await;
+            assert_reports(
+                member,
+                "the member cluster",
+                &described,
+                &[
+                    (
+                        "NotificationConfiguration/TopicArn",
+                        "arn:aws:sns:us-east-1:000000000000:cache",
+                    ),
+                    ("NotificationConfiguration/TopicStatus", expected),
+                ],
+            );
+        }
     }
 }
 

@@ -1614,8 +1614,10 @@ async fn modify_applies_the_members_pending_modified_values_cannot_hold() {
         described.body
     );
 
-    // `NotificationTopicStatus: inactive` is how the topic is detached.
-    let detached = emulator
+    // `NotificationTopicStatus: inactive` PAUSES the notifications and leaves the
+    // topic bound: "notifications are sent only if the status is active", so the
+    // cluster still reports the same `TopicArn`, now `inactive`.
+    let paused = emulator
         .call(
             "ModifyCacheCluster",
             &params(&[
@@ -1625,16 +1627,60 @@ async fn modify_applies_the_members_pending_modified_values_cannot_hold() {
         )
         .await;
     assert_eq!(
-        detached.status, 200,
-        "the detach must answer 200, got {}",
-        detached.body
+        paused.status, 200,
+        "the pause must answer 200, got {}",
+        paused.body
     );
     let after = describe_cluster(&emulator, "applied-at-once").await;
-    assert!(
-        after.all("NotificationConfiguration/TopicArn").is_empty(),
-        "an inactive topic status detaches the topic, got {}",
-        after.body
+    for (member, expected) in [
+        (
+            "NotificationConfiguration/TopicArn",
+            "arn:aws:sns:us-east-1:000000000000:later",
+        ),
+        ("NotificationConfiguration/TopicStatus", "inactive"),
+    ] {
+        assert_eq!(
+            after.text(member),
+            Some(expected),
+            "case {member}: a paused notification configuration keeps its topic and reports \
+             the status asked for, got {:?} in {}",
+            after.text(member),
+            after.body
+        );
+    }
+
+    // And `active` sets the SAME configuration going again, without the caller
+    // re-supplying the ARN.
+    let resumed = emulator
+        .call(
+            "ModifyCacheCluster",
+            &params(&[
+                ("CacheClusterId", "applied-at-once"),
+                ("NotificationTopicStatus", "active"),
+            ]),
+        )
+        .await;
+    assert_eq!(
+        resumed.status, 200,
+        "the resume must answer 200, got {}",
+        resumed.body
     );
+    let resumed = describe_cluster(&emulator, "applied-at-once").await;
+    for (member, expected) in [
+        (
+            "NotificationConfiguration/TopicArn",
+            "arn:aws:sns:us-east-1:000000000000:later",
+        ),
+        ("NotificationConfiguration/TopicStatus", "active"),
+    ] {
+        assert_eq!(
+            resumed.text(member),
+            Some(expected),
+            "case {member}: a re-activated configuration is the same topic, got {:?} in {}",
+            resumed.text(member),
+            resumed.body
+        );
+    }
 
     // `AuthTokenUpdateStrategy: DELETE` clears the flag.
     let deleted = emulator

@@ -174,6 +174,9 @@ impl ComAmazonawsElasticacheAmazonelasticachev9State {
                 due: new.now + CLUSTER_TRANSITION,
                 status: STATUS_AVAILABLE.to_string(),
             }),
+            // The completion of provisioning is the event this cluster's
+            // configured topic is owed once the clock owes it `available`.
+            pending_event: Some(EVENT_CACHE_CLUSTER_PROVISIONING_COMPLETE),
             created_at: new.now,
             dns_token,
             endpoint_address,
@@ -190,6 +193,11 @@ impl ComAmazonawsElasticacheAmazonelasticachev9State {
             auto_minor_version_upgrade: new.auto_minor_version_upgrade,
             security_group_ids: new.security_group_ids,
             notification_topic_arn: new.notification_topic_arn,
+            // A topic a create configures is ACTIVE: "notifications are sent
+            // only if the status is active", and `CreateCacheCluster` has no
+            // member to create one paused — only `ModifyCacheCluster` moves a
+            // configured topic to `inactive`.
+            notification_topic_status: NOTIFICATION_STATUS_ACTIVE.to_string(),
             auth_token_enabled: new.auth_token_enabled,
             auth_token_last_modified: new.auth_token_enabled.then_some(new.now),
             transit_encryption_enabled: new.transit_encryption_enabled,
@@ -407,14 +415,32 @@ impl ComAmazonawsElasticacheAmazonelasticachev9State {
                 .map(|settled| (cluster.cache_cluster_id.clone(), settled))
         };
         if let Some((cache_cluster_id, settled)) = settled {
-            self.record_transition(
-                SOURCE_TYPE_CACHE_CLUSTER,
-                &cache_cluster_id,
-                "Cache cluster",
-                &settled,
-            );
+            self.record_settled_cluster_transition(&cache_cluster_id, &settled);
         }
         self.cache_clusters.get_mut(id)
+    }
+
+    /// Record the event a cluster's materialised transition is, and queue the
+    /// notification its topic is owed for the completion.
+    ///
+    /// The one place both halves of a settled cluster transition are written, so
+    /// the two callers that settle a cluster ([`Self::settled_cluster_mut`] and
+    /// [`Self::settle_all`]) cannot disagree about what a completion records or
+    /// who is told about it.
+    fn record_settled_cluster_transition(
+        &mut self,
+        cache_cluster_id: &str,
+        settled: &SettledClusterTransition,
+    ) {
+        self.record_transition(
+            SOURCE_TYPE_CACHE_CLUSTER,
+            cache_cluster_id,
+            "Cache cluster",
+            &settled.transition,
+        );
+        if let Some(event) = settled.event {
+            self.queue_cluster_notification(cache_cluster_id, event);
+        }
     }
 
     /// The snapshot `name` names (the stored, lowercased name), with any status
@@ -489,7 +515,7 @@ impl ComAmazonawsElasticacheAmazonelasticachev9State {
         // anything is reported from it.
         self.purge_deleted_serverless_caches(now);
         self.purge_deleted_snapshots(now);
-        let mut settled: Vec<(String, SettledTransition)> = Vec::new();
+        let mut settled: Vec<(String, SettledClusterTransition)> = Vec::new();
         for cluster in self.cache_clusters.values_mut() {
             if let Some(transition) = cluster.settle(now) {
                 settled.push((cluster.cache_cluster_id.clone(), transition));
@@ -534,12 +560,7 @@ impl ComAmazonawsElasticacheAmazonelasticachev9State {
             reservation.settle(now);
         }
         for (cache_cluster_id, transition) in settled {
-            self.record_transition(
-                SOURCE_TYPE_CACHE_CLUSTER,
-                &cache_cluster_id,
-                "Cache cluster",
-                &transition,
-            );
+            self.record_settled_cluster_transition(&cache_cluster_id, &transition);
         }
         for (name, transition) in caches {
             self.record_transition(

@@ -206,16 +206,33 @@ fn modeled_operation<'s>(svc: &'s dyn Service, req: &RtRequest) -> Option<&'s dy
 }
 
 /// Serves a modelled operation through the framework exactly as the routing table would,
-/// then adds the envelope's `<RequestId>` to the response.
+/// then adds the envelope's `<RequestId>` to the response and publishes the notifications
+/// the call's own cluster events owe.
 ///
 /// It stores no operation of its own: the one it delegates to is the one the service's
 /// routing table names for the request, resolved from the `svc` the framework passes into
 /// [`ErasedOperation::run`]. So the framework still owns the whole
 /// deserialize → validate → handle → serialize sequence (and every status, code and
-/// message it answers with), and this wrapper owns one element of the envelope.
-pub struct RequestIdEnvelopeOperation;
+/// message it answers with), and this wrapper owns one element of the envelope — plus the
+/// one piece of work that belongs to NO single operation: a cache cluster's event is
+/// published to the Amazon SNS topic its notification configuration names, and an event is
+/// recorded by the lifecycle calls AND by every call that materialises a change the clock
+/// made due, so the delivery is made here rather than repeated in each of them. It runs
+/// after the response has been rendered, so it cannot change what this call answers.
+pub struct RequestIdEnvelopeOperation<Eng: Send + Sync + 'static> {
+    /// The shared engine this service's store lives in — the one the notifications are
+    /// taken from. Held rather than reached through `svc`, which is engine-erased.
+    engine: std::sync::Arc<Eng>,
+}
 
-impl ErasedOperation for RequestIdEnvelopeOperation {
+impl<Eng: Send + Sync + 'static> RequestIdEnvelopeOperation<Eng> {
+    /// Build the wrapper over the shared engine, as `EmulatedService::new` does.
+    pub fn new(engine: std::sync::Arc<Eng>) -> Self {
+        Self { engine }
+    }
+}
+
+impl<Eng: Send + Sync + 'static> ErasedOperation for RequestIdEnvelopeOperation<Eng> {
     fn run<'r>(
         &'r self,
         svc: &'r dyn Service,
@@ -223,7 +240,7 @@ impl ErasedOperation for RequestIdEnvelopeOperation {
         ctx: &'r OperationContext<'r>,
     ) -> BoxFuture<'r, RtResponse> {
         Box::pin(async move {
-            match modeled_operation(svc, req) {
+            let answered = match modeled_operation(svc, req) {
                 Some(op) => with_request_id(op.run(svc, req, ctx).await),
                 // Unreachable through `Service::override_operation`, which claims a
                 // request only when the routing table holds its key; answered as the
@@ -232,7 +249,9 @@ impl ErasedOperation for RequestIdEnvelopeOperation {
                 // [`ElastiCacheDefinition::routing_error_response`], which already adds
                 // it, so there is exactly one writer on this path.
                 None => svc.definition().routing_error_response(req),
-            }
+            };
+            crate::state::deliver_cluster_notifications(&self.engine, ctx).await;
+            answered
         })
     }
 

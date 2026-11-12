@@ -162,12 +162,29 @@ impl PendingValues {
     }
 }
 
-/// A status change the clock owes a cluster: the instant it falls due, and the
-/// status the cluster carries from then on.
+/// A status change the clock owes a resource: the instant it falls due, and the
+/// status the resource carries from then on.
 #[derive(Debug, Clone)]
 pub struct PendingTransition {
     pub due: SystemTime,
     pub status: String,
+}
+
+/// A cluster's materialised status change: what the clock did, and the published
+/// ElastiCache event its completion raises.
+///
+/// The event is the one named by the call that BEGAN the transition — only that
+/// call knows what the work was — so it travels on the record
+/// ([`CacheClusterRecord::pending_event`]) and comes back out here, where the
+/// store records the event and queues the notification the cluster's topic is
+/// owed.
+#[derive(Debug, Clone)]
+pub struct SettledClusterTransition {
+    /// The change the clock made.
+    pub transition: SettledTransition,
+    /// The published `ElastiCache:<Event>` name of the completion, or `None`
+    /// where the published event list names no event for this work.
+    pub event: Option<&'static str>,
 }
 
 /// One cache cluster, as this emulator persists it.
@@ -183,6 +200,9 @@ pub struct CacheClusterRecord {
     pub status: String,
     /// The status change the clock owes this cluster, if any.
     pub pending_status: Option<PendingTransition>,
+    /// The published ElastiCache event the completion of that change raises, as
+    /// the call that began it named it; see [`SettledClusterTransition`].
+    pub pending_event: Option<&'static str>,
     pub created_at: SystemTime,
     /// The DNS label every endpoint of this cluster carries, minted once by
     /// [`ComAmazonawsElasticacheAmazonelasticachev9State::mint_dns_token`] and
@@ -220,6 +240,15 @@ pub struct CacheClusterRecord {
     pub security_group_ids: Vec<String>,
     /// The SNS topic ElastiCache publishes this cluster's events to.
     pub notification_topic_arn: Option<String>,
+    /// That topic's `NotificationConfiguration$TopicStatus`:
+    /// [`NOTIFICATION_STATUS_ACTIVE`] while ElastiCache publishes this cluster's
+    /// events to it, [`NOTIFICATION_STATUS_INACTIVE`] once a modify has paused
+    /// them. Held beside the ARN rather than derived from it, because
+    /// "notifications are sent only if the status is active" pauses the
+    /// publishing without detaching the topic — so a deactivated configuration
+    /// still reports its `TopicArn` and a later modify re-activates the same
+    /// one.
+    pub notification_topic_status: String,
     /// Whether an `AuthToken` was set. The token itself is a SECRET and is NOT
     /// stored: the model reports only `AuthTokenEnabled` and
     /// `AuthTokenLastModifiedDate`, so those are the only two things kept.
@@ -399,7 +428,7 @@ impl CacheClusterRecord {
     /// This is the ONE write a reporting operation may make: the transition was
     /// owed at this instant whether or not anybody called. Nothing else about
     /// the cluster moves. `None` means the clock owed nothing.
-    pub fn settle(&mut self, now: SystemTime) -> Option<SettledTransition> {
+    pub fn settle(&mut self, now: SystemTime) -> Option<SettledClusterTransition> {
         let pending = self.pending_status.as_ref()?;
         if now < pending.due {
             return None;
@@ -414,13 +443,22 @@ impl CacheClusterRecord {
         if self.status == STATUS_AVAILABLE {
             self.set_node_status(STATUS_AVAILABLE);
         }
-        Some(settled)
+        Some(SettledClusterTransition {
+            transition: settled,
+            event: self.pending_event.take(),
+        })
     }
 
     /// Start the span after which the clock owes this cluster `available`,
     /// leaving it in `status` until then.
-    pub fn begin_transition(&mut self, status: &str, now: SystemTime) {
+    ///
+    /// `event` is the published ElastiCache event the COMPLETION of this work
+    /// raises, which only the caller knows (a reboot's completion and a node
+    /// addition's completion are different events of one transition shape), or
+    /// `None` where the published event list names no event for it.
+    pub fn begin_transition(&mut self, status: &str, now: SystemTime, event: Option<&'static str>) {
         self.status = status.to_string();
+        self.pending_event = event;
         self.pending_status = Some(PendingTransition {
             due: now + CLUSTER_TRANSITION,
             status: STATUS_AVAILABLE.to_string(),
@@ -495,7 +533,11 @@ impl CacheClusterRecord {
             notification_configuration: self.notification_topic_arn.as_ref().map(|arn| {
                 NotificationConfiguration {
                     topic_arn: Some(arn.clone()),
-                    topic_status: Some(NOTIFICATION_TOPIC_STATUS.to_string()),
+                    // The STORED status, not a constant: "notifications are sent
+                    // only if the status is active", and a modify that pauses
+                    // them leaves the topic configured and reports it
+                    // `inactive`.
+                    topic_status: Some(self.notification_topic_status.clone()),
                 }
             }),
             // Cache security groups (the pre-VPC, EC2-Classic mechanism) cannot

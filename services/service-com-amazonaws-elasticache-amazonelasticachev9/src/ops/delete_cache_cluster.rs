@@ -227,20 +227,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // removed so a following describe answers `CacheClusterNotFoundFault`.
         cluster.status = crate::state::STATUS_DELETING.to_string();
         cluster.pending_status = None;
+        cluster.pending_event = None;
         cluster.set_node_status(crate::state::STATUS_DELETING);
+        // Deleting a cluster is one of the events this service records; see
+        // `crate::state::EventRecord`. The log outlives the record, so the
+        // events of a deleted cluster are still reported — and the notification
+        // the cluster's topic is owed is queued while the record that names that
+        // topic is still here, which is why this precedes the removal below.
+        store.record_cluster_event(
+            &cache_cluster_id,
+            Some(crate::state::EVENT_DELETE_CACHE_CLUSTER_COMPLETE),
+            "Cache cluster deleted",
+            now,
+        );
         let deleted = store
             .cache_clusters
             .remove(&cache_cluster_id)
             .map(|cluster| cluster.to_modeled(true));
-        // Deleting a cluster is one of the events this service records; see
-        // `crate::state::EventRecord`. The log outlives the record, so the
-        // events of a deleted cluster are still reported.
-        store.record_event(
-            crate::state::SOURCE_TYPE_CACHE_CLUSTER,
-            &cache_cluster_id,
-            "Cache cluster deleted",
-            now,
-        );
 
         Ok(DeleteCacheClusterOutput {
             cache_cluster: deleted,

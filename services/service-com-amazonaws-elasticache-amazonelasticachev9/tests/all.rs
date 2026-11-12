@@ -275,3 +275,9 @@ mod auth_token_refusal_wording;
 // object the export wrote back through Amazon S3's own operations.
 #[path = "all/serverless_cache_snapshot_export.rs"]
 mod serverless_cache_snapshot_export;
+
+// Appended for the same reason: the cluster event-notification suite, which reads the
+// notifications a cluster's events are delivered as back through Amazon SNS, the service
+// that owns topics and their deliveries.
+#[path = "all/cluster_event_notifications.rs"]
+mod cluster_event_notifications;

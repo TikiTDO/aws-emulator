@@ -419,6 +419,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         }
 
+        // "The status of the Amazon SNS notification topic … Valid values:
+        // active | inactive." The member is a plain `String`, so the two
+        // documented values are enforced here — before anything is written, so a
+        // refused request leaves the cluster's notification configuration as it
+        // stands.
+        if let Some(status) = input.notification_topic_status.as_deref() {
+            if status != crate::state::NOTIFICATION_STATUS_ACTIVE
+                && status != crate::state::NOTIFICATION_STATUS_INACTIVE
+            {
+                return Err(
+                    ModifyCacheClusterErrorModeled::InvalidParameterValueException(
+                        InvalidParameterValueException {
+                            message: Some(format!(
+                                "Invalid value {status} for NotificationTopicStatus: valid values \
+                                 are {} | {}.",
+                                crate::state::NOTIFICATION_STATUS_ACTIVE,
+                                crate::state::NOTIFICATION_STATUS_INACTIVE
+                            )),
+                        },
+                    )
+                    .into(),
+                );
+            }
+        }
+
         // `Engine` and `NumCacheNodes` interact: the legal node count depends on
         // the engine the cluster will be running after this call.
         let engine = match input.engine.as_deref() {
@@ -699,6 +724,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Every member `PendingModifiedValues` does NOT model has nowhere to be
         // reported as pending, so it is applied at once; the ones it does model
         // are governed by `ApplyImmediately`.
+        //
+        // The published ElastiCache events this call's changes raise, collected
+        // as they are applied: a change applied here raises its event now, and a
+        // change the clock works through raises its own when it completes (the
+        // `pending_event` of the transition begun below).
+        let mut immediate_events: Vec<&'static str> = Vec::new();
         cluster.engine = engine;
         if let Some(window) = input.preferred_maintenance_window {
             cluster.preferred_maintenance_window = window;
@@ -714,9 +745,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
         if let Some((name, _)) = requested_parameter_group {
             cluster.cache_parameter_group_name = name;
+            // "A change to the parameters a cluster runs": applied at once, so
+            // the event it raises is this call's.
+            immediate_events.push(crate::state::EVENT_CACHE_CLUSTER_PARAMETERS_CHANGED);
         }
         if let Some(ids) = input.security_group_ids {
             cluster.security_group_ids = ids;
+            immediate_events.push(crate::state::EVENT_CACHE_CLUSTER_SECURITY_GROUP_MODIFIED);
         }
         if let Some(discovery) = input.ip_discovery {
             cluster.ip_discovery = Some(discovery);
@@ -724,13 +759,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if input.az_mode.is_some() {
             cluster.az_mode = input.az_mode;
         }
-        // `NotificationTopicStatus` is how a topic is detached: the member
-        // "notification topic status" is set to `inactive` to stop publishing.
+        // The notification configuration: a topic ARN names where this cluster's
+        // events go, and the STATUS says whether they are sent — "notifications
+        // are sent only if the status is active". A status of `inactive`
+        // therefore PAUSES the publishing and leaves the topic bound, so the
+        // cluster keeps reporting the same `TopicArn` and a later `active` sets
+        // the very same configuration going again without the caller re-supplying
+        // the ARN.
         if let Some(arn) = input.notification_topic_arn {
             cluster.notification_topic_arn = Some(arn);
+            // A topic this request configures is active unless the same request
+            // asks for it paused, which the assignment below then applies.
+            cluster.notification_topic_status =
+                crate::state::NOTIFICATION_STATUS_ACTIVE.to_string();
         }
-        if input.notification_topic_status.as_deref() == Some("inactive") {
-            cluster.notification_topic_arn = None;
+        if let Some(status) = input.notification_topic_status.as_deref() {
+            cluster.notification_topic_status = status.to_string();
         }
         // The token itself is never stored; a `DELETE` strategy clears the flag,
         // anything else sets it and stamps the modification.
@@ -769,6 +813,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             || input.auth_token.is_some()
             || input.auth_token_update_strategy.is_some()
             || log_delivery_requested;
+
+        // The published event the COMPLETION of that asynchronous work raises:
+        // nodes added, nodes removed, or a cluster moved onto another node type
+        // (its scaling). Read before the members are moved into the record
+        // below. A change the published event list names no event for completes
+        // without one.
+        let completion_event = if adding > 0 {
+            Some(crate::state::EVENT_ADD_CACHE_NODE_COMPLETE)
+        } else if removing > 0 {
+            Some(crate::state::EVENT_REMOVE_CACHE_NODE_COMPLETE)
+        } else if input.cache_node_type.is_some() {
+            Some(crate::state::EVENT_CACHE_CLUSTER_SCALING_COMPLETE)
+        } else {
+            None
+        };
 
         let deferred = !input.apply_immediately.unwrap_or(false);
         // `PendingModifiedValues` is the only place the model reports a
@@ -837,19 +896,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // next state-gated call on the cluster. A `ScaleConfig` moves
             // nothing either: it has no applied home and stays pending.
             if applies_async_change {
-                cluster.begin_transition(crate::state::STATUS_MODIFYING, now);
+                cluster.begin_transition(crate::state::STATUS_MODIFYING, now, completion_event);
             }
         }
 
         let cache_cluster = cluster.to_modeled(true);
         // Modifying a cluster is one of the events this service records; see
-        // `crate::state::EventRecord`.
-        store.record_event(
-            crate::state::SOURCE_TYPE_CACHE_CLUSTER,
-            &cache_cluster_id,
-            "Cache cluster modified",
-            now,
-        );
+        // `crate::state::EventRecord`. The published events the changes this call
+        // APPLIED raise go with it, so the cluster's notification topic is told
+        // about them (`crate::state::record_cluster_event`); the ones the clock
+        // is still working through are raised by their own completion.
+        store.record_cluster_event(&cache_cluster_id, None, "Cache cluster modified", now);
+        for event in immediate_events {
+            store.queue_cluster_notification(&cache_cluster_id, event);
+        }
         Ok(ModifyCacheClusterOutput {
             cache_cluster: Some(cache_cluster),
         })
