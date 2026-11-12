@@ -1,0 +1,34 @@
+Issue-Severity: HIGH
+Issue-Corpus: simparity-behavioral-aws-v1
+Issue-Corpus-Kind: behavioral
+Issue-Trace-Ids: bedrock-data-automation.ingestion-job-delete-operation-removes-entity bedrock-data-automation.ingestion-job-inline-upsert-completes-and-entity-retrievable
+Issue-Shape-Id: com.amazonaws.bedrockdataautomation#AmazonBedrockKeystoneBuildTimeService
+Issue-Key: bedrock-data-automation|GetDataAutomationLibraryEntity|NotImplemented
+Issue-Commit: c068b04c9070a7dffb3e8c7bd93f77709d5e2d9a
+
+# Implement bedrock-data-automation GetDataAutomationLibraryEntity: unimplemented scaffold stub
+
+> _Note: this issue was identified against the code base at commit `c068b04c9070a7dffb3e8c7bd93f77709d5e2d9a`. If you are an issue fixer working on this, the code base you are currently working in can have drifted, so you might need to trace the issue back to the current code base._
+
+## Operation
+GetDataAutomationLibraryEntity
+
+## Description
+`GetDataAutomationLibraryEntity` is an unmodified scaffold stub, so it answers HTTP 501 and persists nothing. Implement it in `services/service-com-amazonaws-bedrockdataautomation-amazonbedrockkeystonebuildtimeservice/src/ops/get_data_automation_library_entity.rs`: replace the `Err(crate::scaffolded::Scaffolded::not_implemented(..))` with a real handler that reads and writes the service's state, then DELETE that file's `//! SCAFFOLDED, NOT IMPLEMENTED:` header line.
+
+That header line is the stub census — the one record of which operations are still scaffolds. Deleting it without implementing the handler, or leaving it in place on a handler you did implement, corrupts that record rather than closing this issue. A stub's 501 is also CORRECT for a stub: this issue asks you to implement the operation, never to change the error it returns while unimplemented.
+
+2 recorded unit(s) fail on their `GetDataAutomationLibraryEntity` call, so each one unblocks only when `GetDataAutomationLibraryEntity` works: `bedrock-data-automation.ingestion-job-delete-operation-removes-entity`, `bedrock-data-automation.ingestion-job-inline-upsert-completes-and-entity-retrievable`.
+
+## Evidence
+The handler carries the scaffold marker `//! SCAFFOLDED, NOT IMPLEMENTED:` at the top of `services/service-com-amazonaws-bedrockdataautomation-amazonbedrockkeystonebuildtimeservice/src/ops/get_data_automation_library_entity.rs`. Replaying the corpus, the emulator refused the `GetDataAutomationLibraryEntity` call: File "context.py", line 123, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "client.py", line 1094, in _make_api_call
+    raise error_class(parsed_response, operation_name)
+botocore.exceptions.ClientError: An error occurred (NotImplemented) when calling the GetDataAutomationLibraryEntity operation: operation GetDataAutomationLibraryEntity is scaffolded but not implemented in this emulator
+
+## Steps to Reproduce
+Boot the bedrock-data-automation emulator
+Call GetDataAutomationLibraryEntity and observe HTTP 501 with no state persisted
+Replay any of the blocked units above and observe it fail on that refusal
