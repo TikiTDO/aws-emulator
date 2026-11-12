@@ -171,6 +171,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
+        // Who the request speaks for, read BEFORE this service's store is locked: the
+        // stores that answer for a caller belong to other services.
+        let caller = crate::state::authorization::caller(&*self.engine, ctx);
+
         let region = crate::state::request_region(ctx);
         let mut state = state.lock();
         let key = match state.resolve_mut(&region, &input.key_id) {
@@ -198,6 +202,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into());
             }
         };
+
+        // A key Amazon Web Services manages is administered by the service that owns it
+        // rather than by this account, so a call that would change its key state holds no
+        // permission for it and the key is left as it was
+        // (`crate::state::authorization::authorize_key_administration`). Judged before the
+        // key state, because whether this caller may change the key at all is settled
+        // before what the change would do to it.
+        crate::state::authorization::check_key_administration(&caller, key, Self::NAME)?;
 
         // "Cancels the deletion of a KMS key": there is nothing to cancel unless the
         // key really is pending deletion, so that is the only key state this operation

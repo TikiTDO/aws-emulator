@@ -255,6 +255,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         };
 
+        // A key Amazon Web Services manages is administered by the service that owns it
+        // rather than by this account, so a call that would replace its key policy holds no
+        // permission for it and the key keeps the policy it had
+        // (`crate::state::authorization::authorize_key_administration`).
+        crate::state::authorization::check_key_administration(&caller, key, Self::NAME)?;
+
         // A key holds a policy under one name only, so any other name asks for a
         // policy the key does not have. This precedence is deliberate: the name is
         // about WHICH resource the request addresses, so it is judged before the key

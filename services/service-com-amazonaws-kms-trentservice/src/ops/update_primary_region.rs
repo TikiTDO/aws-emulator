@@ -224,6 +224,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
+        // Who the request speaks for, read BEFORE this service's store is locked: the
+        // stores that answer for a caller belong to other services.
+        let caller = crate::state::authorization::caller(&*self.engine, ctx);
+
         let region = crate::state::request_region(ctx);
         let mut state = state.lock();
 
@@ -262,6 +266,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into());
             }
         };
+
+        // A key Amazon Web Services manages is administered by the service that owns it
+        // rather than by this account, so a call that would move its multi-Region
+        // designation holds no permission for it and the key is left as it was
+        // (`crate::state::authorization::authorize_key_administration`). Judged before the
+        // key's own topology and state, because whether this caller may administer the key
+        // at all is settled before what the call would do with it.
+        crate::state::authorization::check_key_administration(&caller, key, Self::NAME)?;
 
         // Only a multi-Region key HAS a primary Region to move: this operation
         // "changes the primary key of a multi-Region key"

@@ -311,6 +311,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(internal("the KMS state store is unavailable"));
         };
 
+        // Who the request speaks for, read BEFORE this service's store is locked: the
+        // stores that answer for a caller belong to other services.
+        let caller = crate::state::authorization::caller(&*self.engine, ctx);
+
         let region = crate::state::request_region(ctx);
         let mut state = state.lock();
 
@@ -338,18 +342,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ever_imported_material,
             symmetric_encryption,
         } = match state.resolve(&region, &input.key_id) {
-            crate::state::KeyRef::Found(key) => KeyFacts {
-                key_id: key.key_id.clone(),
-                key_arn: key.arn.clone(),
-                origin: key.origin.clone(),
-                key_state: key.reported_key_state().to_string(),
-                state_message: crate::state::invalid_state_message(key),
-                key_spec: key.key_spec.clone(),
-                held_material_id: key.reported_key_material_id(),
-                holds_material: key.has_key_material(),
-                ever_imported_material: key.has_imported_material_history(),
-                symmetric_encryption: key.is_symmetric_encryption(),
-            },
+            crate::state::KeyRef::Found(key) => {
+                // A key Amazon Web Services manages is administered by the service that
+                // owns it rather than by this account, so a call that would install key
+                // material in it holds no permission for it and the key is left as it was
+                // (`crate::state::authorization::authorize_key_administration`). Judged
+                // before what the key's own origin and state allow, because whether this
+                // caller may change the key at all is settled before what the change would
+                // do to it.
+                crate::state::authorization::check_key_administration(&caller, key, Self::NAME)?;
+                KeyFacts {
+                    key_id: key.key_id.clone(),
+                    key_arn: key.arn.clone(),
+                    origin: key.origin.clone(),
+                    key_state: key.reported_key_state().to_string(),
+                    state_message: crate::state::invalid_state_message(key),
+                    key_spec: key.key_spec.clone(),
+                    held_material_id: key.reported_key_material_id(),
+                    holds_material: key.has_key_material(),
+                    ever_imported_material: key.has_imported_material_history(),
+                    symmetric_encryption: key.is_symmetric_encryption(),
+                }
+            }
             crate::state::KeyRef::UnauthorizedAccount => {
                 return Err(crate::state::unauthorized_account(Self::NAME));
             }

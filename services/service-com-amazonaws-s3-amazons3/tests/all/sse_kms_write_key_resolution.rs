@@ -72,8 +72,11 @@ const KEY_MANAGER_AWS: &str = "AWS";
 
 /// The codes S3 answers a write whose SSE-KMS key KMS will not mint a data key under, and the
 /// status they carry. Recorded behaviour: the s3 model binds no error shape for the relay.
+/// WHICH of the two state codes a key draws is the key state's own, which
+/// [`super::sse_kms_relay_error_class`] spans.
 const KMS_NOT_FOUND_CODE: &str = "KMS.NotFoundException";
 const KMS_INVALID_STATE_CODE: &str = "KMS.KMSInvalidStateException";
+const KMS_DISABLED_CODE: &str = "KMS.DisabledException";
 const KMS_RELAY_STATUS: u16 = 400;
 
 /// The bytes every write in this suite carries.
@@ -455,7 +458,7 @@ async fn refused_rows(router: &MultiServiceRouter) -> Vec<RefusedRow> {
         (
             "a key that is disabled",
             disabled_arn.clone(),
-            KMS_INVALID_STATE_CODE,
+            KMS_DISABLED_CODE,
             format!("{disabled_arn} is disabled."),
         ),
     ]

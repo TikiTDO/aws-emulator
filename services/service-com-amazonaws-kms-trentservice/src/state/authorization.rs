@@ -538,6 +538,59 @@ pub fn authorize_account_action(
     }
 }
 
+/// Whether the authorities in force let `caller` ADMINISTER `key` — change the key itself
+/// rather than use it — and the refusal message when they do not.
+///
+/// A key whose `KeyManager` is Amazon Web Services ([`super::KEY_MANAGER_AWS`]) is one
+/// Amazon Web Services manages rather than one the customer created: "KMS keys in your
+/// Amazon Web Services account are either customer managed or Amazon Web Services managed"
+/// (`smithy_query(query="doc",shape="KeyMetadata",member="KeyManager")`), and the manager of
+/// a key is who administers it. The key policy such a key carries is the owning service's
+/// own, written to let that service use the key for the account's resources and to let the
+/// account READ the key — so it delegates no administration of the key to the account, and a
+/// call from the account that would CHANGE the key is refused for want of permission with
+/// the sentence AWS words for an action no resource-based policy allows
+/// ([`no_resource_policy_message`]), leaving the key as it was.
+///
+/// Which calls those are is what the key record holds: a call that writes the key's key
+/// state, its key material, its key policy, its description, its tags or its multi-Region
+/// layout administers it, while reading its metadata and using it in a cryptographic
+/// operation do not and are decided by [`authorize_use`] like any other use.
+///
+/// A key the CUSTOMER manages is administered by the account that created it, so this
+/// refuses nothing on one. One function for every operation that administers a key, so no
+/// two of them decide the same key differently.
+pub fn authorize_key_administration(
+    caller: &Caller,
+    key: &super::Cmk,
+    operation: &str,
+) -> Result<(), String> {
+    if key.key_manager != super::KEY_MANAGER_AWS {
+        return Ok(());
+    }
+    Err(no_resource_policy_message(
+        &caller.arn,
+        &format!("{}:{operation}", super::ARN_SERVICE),
+        &key.arn,
+    ))
+}
+
+/// [`authorize_key_administration`] on an operation's own error channel: the
+/// `AccessDeniedException` (HTTP 400) that refuses a caller who may not administer the key,
+/// which is what AWS answers whatever this service's model declares.
+///
+/// `caller` is read BEFORE this service's store is locked ([`caller`] reaches other
+/// services' stores); `key` is the record the request resolved, so the decision is made
+/// about the key the call would change.
+pub fn check_key_administration<E>(
+    caller: &Caller,
+    key: &super::Cmk,
+    operation: &str,
+) -> Result<(), crate::scaffolded::Scaffolded<E>> {
+    authorize_key_administration(caller, key, operation)
+        .map_err(crate::scaffolded::Scaffolded::access_denied)
+}
+
 /// The resource an ACCOUNT-LEVEL action is judged against: every KMS resource of this
 /// account in `region`, which is what an action carrying no resource type is written
 /// against in a policy. Built through [`super::ARN_SERVICE`] and the engine's one ARN

@@ -21,6 +21,8 @@ mod aliases;
 mod asymmetric_decrypt;
 #[path = "all/asymmetric_encrypt.rs"]
 mod asymmetric_encrypt;
+#[path = "all/aws_managed_key_administration.rs"]
+mod aws_managed_key_administration;
 #[path = "all/aws_managed_keys.rs"]
 mod aws_managed_keys;
 #[path = "all/client_error_status.rs"]

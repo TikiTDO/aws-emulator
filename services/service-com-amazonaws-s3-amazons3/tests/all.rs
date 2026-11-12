@@ -365,6 +365,8 @@ mod sse_kms_data_key_authorization;
 mod sse_kms_decrypt_authorization;
 #[path = "all/sse_kms_key_identity.rs"]
 mod sse_kms_key_identity;
+#[path = "all/sse_kms_relay_error_class.rs"]
+mod sse_kms_relay_error_class;
 #[path = "all/sse_kms_write_key_resolution.rs"]
 mod sse_kms_write_key_resolution;
 #[path = "all/state_roundtrip.rs"]

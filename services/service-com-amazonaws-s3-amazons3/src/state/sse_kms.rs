@@ -231,17 +231,36 @@ pub const KMS_NOT_FOUND_STATUS: u16 = 400;
 /// The wire error code S3 answers a WRITE whose SSE-KMS key is in a state KMS will not mint
 /// a data key under, and the status it carries.
 ///
-/// The envelope call behind the write fails inside KMS — a key awaiting deletion or disabled
-/// refuses every cryptographic operation with `KMSInvalidStateException` — so S3 relays that
-/// failure under the KMS exception's name qualified by the service that raised it, exactly as
-/// it relays an absent key ([`KMS_NOT_FOUND_CODE`]). Recorded behaviour: the s3 model binds no
-/// error shape for the relay, so neither the code nor the status can come from it; the message
-/// is KMS's own ([`kms_store::invalid_state_message`]).
+/// The envelope call behind the write fails inside KMS — a key whose key state refuses
+/// cryptographic operations mints no data key — so S3 relays that failure under the KMS
+/// exception's name qualified by the service that raised it, exactly as it relays an absent
+/// key ([`KMS_NOT_FOUND_CODE`]). WHICH exception KMS raised is the key state's own: a key that
+/// is merely DISABLED is [`KMS_DISABLED_CODE`], and this code is the one for every other
+/// unusable state ([`unusable`]). Recorded behaviour: the s3 model binds no error shape for
+/// the relay, so neither the code nor the status can come from it; the message is KMS's own
+/// ([`kms_store::invalid_state_message`]).
 pub const KMS_INVALID_STATE_CODE: &str = "KMS.KMSInvalidStateException";
 
 /// The HTTP status [`KMS_INVALID_STATE_CODE`] is answered with — the status of this relay
 /// family, the one [`KMS_NOT_FOUND_STATUS`] carries.
 pub const KMS_INVALID_STATE_STATUS: u16 = KMS_NOT_FOUND_STATUS;
+
+/// The wire error code S3 answers a WRITE whose SSE-KMS key is DISABLED.
+///
+/// A disabled key is the one unusable key state KMS words its own exception for: every
+/// cryptographic operation on such a key raises `DisabledException`, "the request was
+/// rejected because the specified KMS key is not enabled"
+/// (`smithy_query(query="shape",shape="DisabledException",model_path="services/service-com-amazonaws-kms-trentservice/smithy-model/com-amazonaws-kms-trentservice.json")`),
+/// which KMS's data-key operations declare beside `KMSInvalidStateException` — so the envelope
+/// call behind the write fails with that exception and S3 relays it under its name, qualified
+/// by the service that raised it, rather than under the one for the other unusable states. The
+/// distinction is what a client branches on: a disabled key is re-enabled and the write
+/// retried, while a key pending deletion is in a lifecycle state no retry recovers.
+pub const KMS_DISABLED_CODE: &str = "KMS.DisabledException";
+
+/// The HTTP status [`KMS_DISABLED_CODE`] is answered with — the status of this relay family,
+/// the one [`KMS_NOT_FOUND_STATUS`] carries.
+pub const KMS_DISABLED_STATUS: u16 = KMS_NOT_FOUND_STATUS;
 
 /// The Amazon Web Services managed key for Amazon S3, named by the predefined Amazon Web
 /// Services alias AWS publishes for it.
@@ -260,7 +279,8 @@ pub const AWS_MANAGED_KEY_ALIAS: &str = "alias/aws/s3";
 /// channel unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relay {
-    /// The wire error code — [`KMS_NOT_FOUND_CODE`] or [`KMS_INVALID_STATE_CODE`].
+    /// The wire error code — [`KMS_NOT_FOUND_CODE`], [`KMS_DISABLED_CODE`] or
+    /// [`KMS_INVALID_STATE_CODE`].
     pub code: &'static str,
     /// The HTTP status that code is answered with.
     pub status: u16,
@@ -297,8 +317,8 @@ pub enum WriteKey {
 ///   ([`kms_store::key_not_found_message`]) rather than recorded under a key that does not
 ///   exist;
 /// * a key whose key state refuses cryptographic operations — one awaiting deletion, or
-///   disabled — mints no data key either, so the write is refused with the sentence KMS words
-///   for that state ([`kms_store::invalid_state_message`]);
+///   disabled — mints no data key either, so the write is refused under the exception that
+///   state raises inside KMS, with the sentence KMS words for it ([`unusable`]);
 /// * a reference KMS DOES resolve names ONE key whatever form the reference took, so what the
 ///   object records is that key's ARN: "you can specify the key ID, key alias, or the Amazon
 ///   Resource Name (ARN) of the KMS key" (`PutObjectRequest$SSEKMSKeyId`) are three spellings
@@ -348,16 +368,37 @@ pub fn write_key<Eng: Send + Sync + 'static>(
         };
     }
     match store.resolve(region, reference) {
-        kms_store::KeyRef::Found(key) if !key.is_usable() => WriteKey::Refused(Relay {
-            code: KMS_INVALID_STATE_CODE,
-            status: KMS_INVALID_STATE_STATUS,
-            message: kms_store::invalid_state_message(key),
-        }),
+        kms_store::KeyRef::Found(key) if !key.is_usable() => WriteKey::Refused(unusable(key)),
         kms_store::KeyRef::Found(key) => WriteKey::Resolved(key.arn.clone()),
         kms_store::KeyRef::NotFound => WriteKey::Refused(not_found(region, reference)),
         kms_store::KeyRef::MalformedArn | kms_store::KeyRef::UnauthorizedAccount => {
             WriteKey::Unasked
         }
+    }
+}
+
+/// The relay for a key whose key state mints no data key, worded by KMS for that state.
+///
+/// The exception is the key state's own, because it is KMS that raises it: a DISABLED key
+/// refuses a cryptographic operation with `DisabledException` ([`KMS_DISABLED_CODE`]), and a
+/// key in any other state outside `Enabled` — one awaiting deletion, one awaiting imported
+/// material — with `KMSInvalidStateException` ([`KMS_INVALID_STATE_CODE`]), which is the same
+/// split KMS's own data-key handler makes. The sentence is KMS's for the state the key is
+/// actually in, whichever of the two it is.
+fn unusable(key: &kms_store::Cmk) -> Relay {
+    let disabled = key.key_state == kms_store::KEY_STATE_DISABLED;
+    Relay {
+        code: if disabled {
+            KMS_DISABLED_CODE
+        } else {
+            KMS_INVALID_STATE_CODE
+        },
+        status: if disabled {
+            KMS_DISABLED_STATUS
+        } else {
+            KMS_INVALID_STATE_STATUS
+        },
+        message: kms_store::invalid_state_message(key),
     }
 }
 

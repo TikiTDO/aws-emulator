@@ -309,6 +309,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         };
 
+        // A key Amazon Web Services manages is administered by the service that owns it
+        // rather than by this account, so a call that would replicate it holds no
+        // permission for it and nothing is created
+        // (`crate::state::authorization::authorize_key_administration`). Judged before the
+        // key's own topology and state, because whether this caller may administer the key
+        // at all is settled before what the call would do with it.
+        crate::state::authorization::check_key_administration(&caller, key, Self::NAME)?;
+
         // Only a key of a multi-Region set can be replicated, and only from the
         // Region holding the set's PRIMARY key: "this operation creates a
         // multi-Region replica key based on a multi-Region primary key in a different
