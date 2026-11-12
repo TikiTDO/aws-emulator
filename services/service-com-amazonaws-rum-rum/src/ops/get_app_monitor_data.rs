@@ -170,26 +170,37 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // token is scoped to as well.
         let region = crate::state::request_region(ctx.parts());
 
-        // No token starts at the beginning of the matching events; a token resumes after
-        // the ones the pages before it already returned. A token this operation never
-        // issued — or issued for ANOTHER app monitor's query, at another region's
-        // endpoint — is refused rather than read as some other resume point.
-        let already_returned = match input.next_token.as_deref() {
-            None => 0,
-            Some(token) => decode_next_token(&region, &input.name, token).ok_or_else(|| {
-                GetAppMonitorDataErrorModeled::ValidationException(ValidationException {
-                    message: format!(
-                        "NextToken {token} is not a pagination token this service issued \
-                         for app monitor {}.",
-                        input.name
-                    ),
-                })
-            })?,
+        // What the request actually selects on, read once rather than per event: the
+        // filters that name both a key and at least one value. They are read before the
+        // token because they are part of the query a token is honoured by.
+        let filters = input.filters.unwrap_or_default();
+        let selections: Vec<Selection<'_>> = filters.iter().filter_map(Selection::read).collect();
+        let selected = selections_digest(&selections);
+
+        // No token starts at the beginning of the matching events; a token resumes strictly
+        // after the event whose rank the page that issued it ended on, against the query
+        // that issued it. A token this operation never issued — or issued for ANOTHER app
+        // monitor's query, at another region's endpoint, or for another time window or
+        // another set of selections — is refused rather than read as some other resume
+        // point.
+        let resumed = match input.next_token.as_deref() {
+            None => None,
+            Some(token) => Some(
+                decode_next_token(&region, &input.name, &input.time_range, &selected, token)
+                    .ok_or_else(|| {
+                        GetAppMonitorDataErrorModeled::ValidationException(ValidationException {
+                            message: format!(
+                                "NextToken {token} is not a pagination token this service issued \
+                                 for app monitor {}.",
+                                input.name
+                            ),
+                        })
+                    })?,
+            ),
         };
 
         // Every filter key is checked before anything is read, so a request naming a key
         // this operation does not search is refused rather than quietly selecting nothing.
-        let filters = input.filters.unwrap_or_default();
         if let Some(unknown) = filters
             .iter()
             .filter_map(|filter| filter.name.as_deref())
@@ -234,12 +245,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        let window = Window::from(&input.time_range);
+        // The window every page of ONE query is answered against: the call that STARTED
+        // the query resolved it and its tokens carry it, so a continuation reports the
+        // query it is continuing rather than a query of its own.
+        let window = match &resumed {
+            Some(resumed) => resumed.window,
+            None => Window::from(&input.time_range),
+        };
+        let resume_after = resumed.map(|resumed| resumed.last_returned);
         let page_size = page_size(input.max_results);
-
-        // What the request actually selects on, read once rather than per event: the
-        // filters that name both a key and at least one value.
-        let selections: Vec<Selection<'_>> = filters.iter().filter_map(Selection::read).collect();
 
         let store = state.lock();
         // The events are held ON the app monitor record, so a request naming no stored
@@ -251,15 +265,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
-        // Oldest first, which is the order the data plane appended them in, so a page
-        // boundary cannot drift: paging only ever walks further into the same prefix. The
-        // scan is bounded by the buffer's own ceiling
-        // ([`crate::state::MAX_EVENTS_PER_APP_MONITOR`]), so a query cannot cost more
-        // than the monitor holds however many pages it asks for.
+        // Oldest first, which is the order the data plane appended them in, and resumed on
+        // the RANK of the last event the previous page returned
+        // ([`crate::state::AppMonitorRecord::events_from`]), so a page boundary cannot
+        // drift: a rank names one delivered event, so the events this walk steps over are
+        // exactly the ones the pages before it reported. The scan is bounded by the
+        // buffer's own ceiling ([`crate::state::MAX_EVENTS_PER_APP_MONITOR`]), so a query
+        // cannot cost more than the monitor holds however many pages it asks for.
         let mut matching = monitor
-            .events
-            .iter()
-            .filter(|stored| match parsed_event(&stored.event_json) {
+            .events_from(resume_after)
+            .filter(|(_, stored)| match parsed_event(&stored.event_json) {
                 // The instant is read through the ONE codec the data-plane write stored
                 // it with ([`crate::state::event_instant_seconds`]) rather than
                 // re-derived from anything else, so an event is placed in the window at
@@ -272,24 +287,32 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // An event whose stored document does not parse cannot be placed in the
                 // window, so it matches no query.
                 None => false,
-            })
-            .skip(already_returned);
+            });
 
+        // The rank of the last event this page reports is what the next page resumes
+        // after, so it is read off the walk rather than counted.
+        let mut last_returned = None;
         let events: Vec<String> = matching
             .by_ref()
             .take(page_size)
-            .map(|stored| stored.event_json.clone())
+            .map(|(rank, stored)| {
+                last_returned = Some(rank);
+                stored.event_json.clone()
+            })
             .collect();
 
         // A token is emitted only when something is actually left to return, so the last
         // page carries none.
-        let next_token = matching.next().is_some().then(|| {
-            encode_next_token(
+        let next_token = match last_returned {
+            Some(last) if matching.next().is_some() => Some(encode_next_token(
                 &region,
                 &input.name,
-                already_returned.saturating_add(events.len()),
-            )
-        });
+                last,
+                &window,
+                &selected,
+            )),
+            _ => None,
+        };
 
         Ok(GetAppMonitorDataOutput {
             events: Some(events),
@@ -323,32 +346,127 @@ fn page_size(requested: i32) -> usize {
 /// [`crate::state::encode_pagination_token`].
 const TOKEN_MARKER: &str = "GetAppMonitorData/1/";
 
-/// An opaque continuation token for a query of `app_monitor_name` that has returned
-/// `already_returned` matching events so far.
+/// An opaque continuation token for the page of a query of `app_monitor_name` that ended
+/// on the event ranked `last_returned`.
 ///
 /// The app monitor the query is scoped to — and, through the shared codec, the region the
 /// query ran in — is part of the key, so a token is only honoured by the monitor it was
-/// issued for: events are per-monitor, a monitor is per-region, and two monitors' queries
-/// have counts in common.
-fn encode_next_token(region: &str, app_monitor_name: &str, already_returned: usize) -> String {
+/// issued for: events are per-monitor, a monitor is per-region, and two monitors' buffers
+/// hold the same ranks. The rest of the key is the QUERY: the window it selects over and
+/// the selections it narrows by ([`selections_digest`]), so a token is only honoured by
+/// the query that issued it, since a rank into one query's matching events names a
+/// different position in another's.
+///
+/// The resume point is the [`crate::state::EventRank`] of the last event the page
+/// reported, not how many events it has returned: a rank names ONE delivered event, so the
+/// next page starts exactly where this one stopped however many events have been delivered
+/// or evicted in between.
+fn encode_next_token(
+    region: &str,
+    app_monitor_name: &str,
+    last_returned: crate::state::EventRank,
+    window: &Window,
+    selected: &str,
+) -> String {
     crate::state::encode_pagination_token(
         TOKEN_MARKER,
         region,
-        &[app_monitor_name, &already_returned.to_string()],
+        &[
+            app_monitor_name,
+            &last_returned.to_string(),
+            &window.after.to_string(),
+            &window.before.to_string(),
+            selected,
+        ],
     )
 }
 
-/// How many matching events a token issued by [`encode_next_token`] for the
-/// `app_monitor_name` of `region` resumes after, or `None` for any value this operation
-/// never issued for that monitor.
-fn decode_next_token(region: &str, app_monitor_name: &str, token: &str) -> Option<usize> {
-    let key = crate::state::decode_pagination_token(TOKEN_MARKER, region, token, 2)?;
-    let [issued_for, already_returned] = <[String; 2]>::try_from(key).ok()?;
+/// Where a token issued by [`encode_next_token`] resumes a query, and the window that
+/// query covers.
+struct Resume {
+    /// The [`crate::state::EventRank`] of the last event the page that issued the token
+    /// reported: this page starts strictly after it.
+    last_returned: crate::state::EventRank,
+    /// The window the query was issued for, so every page of it selects over the same
+    /// instants.
+    window: Window,
+}
+
+/// How a token issued by [`encode_next_token`] for the `app_monitor_name` of `region`
+/// resumes, or `None` for any value this operation never issued for that monitor — which
+/// includes a token it issued for another query of it: the request presenting the token
+/// must ask for the same `TimeRange` and carry the same selections (`selected`) as the one
+/// the token was handed to.
+///
+/// A resuming request either leaves `TimeRange$Before` at the modelled default — the one
+/// value that stands for the member being omitted, which the first page resolved to the
+/// instant it ran at — or names the very instant the query is already being answered
+/// against.
+fn decode_next_token(
+    region: &str,
+    app_monitor_name: &str,
+    requested: &TimeRange,
+    selected: &str,
+    token: &str,
+) -> Option<Resume> {
+    let key = crate::state::decode_pagination_token(TOKEN_MARKER, region, token, 5)?;
+    let [issued_for, last_returned, after, before, issued_selections] =
+        <[String; 5]>::try_from(key).ok()?;
     (issued_for == app_monitor_name).then_some(())?;
-    already_returned.parse().ok()
+    (issued_selections == selected).then_some(())?;
+    let window = Window {
+        after: after.parse().ok()?,
+        before: before.parse().ok()?,
+    };
+    (window.after == requested.after).then_some(())?;
+    (requested.before == OMITTED_BEFORE || requested.before == window.before).then_some(())?;
+    Some(Resume {
+        last_returned: last_returned.parse().ok()?,
+        window,
+    })
+}
+
+/// What a request narrows by, as the one value a token carries it as: a digest of the
+/// selections the query actually applies.
+///
+/// The selections are canonicalised before they are digested — each one's values sorted
+/// and de-duplicated, then the selections themselves — because both levels are a
+/// disjunction (`QueryFilter`: "The only performance events that are returned are those
+/// that have values matching the ones that you specify in one of your QueryFilter
+/// structures"), so two requests differing only in the ORDER or the repetition of their
+/// filters narrow by exactly the same thing and one's token resumes the other. Each
+/// component is digested with its own length ahead of it, so no two different sets of
+/// selections can be written as the same bytes. A query that narrows by nothing digests
+/// the empty canonical form, which is what a request carrying no filters — and one whose
+/// filters select nothing out — both have.
+fn selections_digest(selections: &[Selection<'_>]) -> String {
+    use ::sha2::{Digest as _, Sha256};
+
+    let mut canonical: Vec<(&str, Vec<&str>)> = selections
+        .iter()
+        .map(|selection| {
+            let mut values: Vec<&str> = selection.values.iter().map(String::as_str).collect();
+            values.sort_unstable();
+            values.dedup();
+            (selection.key, values)
+        })
+        .collect();
+    canonical.sort_unstable();
+    canonical.dedup();
+
+    let mut digest = Sha256::new();
+    for (key, values) in canonical {
+        for text in ::std::iter::once(key).chain(values) {
+            digest.update(text.len().to_le_bytes());
+            digest.update(text.as_bytes());
+        }
+        digest.update(usize::MAX.to_le_bytes());
+    }
+    hex::encode(digest.finalize())
 }
 
 /// The time window a query selects events from.
+#[derive(Clone, Copy)]
 struct Window {
     /// `TimeRange$After`: the first instant the window covers.
     after: i64,
@@ -373,6 +491,11 @@ impl Window {
     /// an instant before the epoch is as much an instant as one after it. Both bounds are
     /// read in the unit this protocol carries a `RumEvent$timestamp` in — seconds since
     /// the epoch — because they bound that same instant.
+    ///
+    /// This resolution is made by the call that STARTS a query — the one carrying no
+    /// continuation token — and the window it produces is then carried by that query's
+    /// tokens ([`encode_next_token`]), so the pages of one query are all answered against
+    /// the instants it began at rather than each against a clock that has moved on.
     fn from(time_range: &TimeRange) -> Self {
         Self {
             after: time_range.after,

@@ -501,6 +501,17 @@ pub struct StoredRumEvent {
     pub event_json: String,
 }
 
+/// The position one event was appended at inside its app monitor's buffer, counted per
+/// monitor over the monitor's whole life.
+///
+/// It is the key that buffer is ordered by, and so the key a page of `GetAppMonitorData`
+/// resumes after rather than a count of the events a page has returned: a rank names ONE
+/// delivered event whatever happens to the buffer afterwards, so a page boundary cannot
+/// drift from the sequence it indexes when the buffer evicts its oldest entries
+/// ([`AppMonitorRecord::record_events`]) or when the query a later page is evaluated
+/// against selects a different set of events.
+pub type EventRank = u64;
+
 /// The member a stored event document carries `RumEvent$timestamp` under, spelled as the
 /// model spells it — one spelling for the data-plane write, the query that selects on it
 /// and the copy stored in CloudWatch Logs.
@@ -957,8 +968,16 @@ pub struct AppMonitorRecord {
     /// iterates in one stable key order.
     pub tags: BTreeMap<String, String>,
     /// Events delivered by `PutRumEvents`, oldest first. Bounded by
-    /// [`MAX_EVENTS_PER_APP_MONITOR`]; append through [`Self::record_events`].
+    /// [`MAX_EVENTS_PER_APP_MONITOR`]; append through [`Self::record_events`] and read
+    /// through [`Self::events_from`], which pairs each event with its [`EventRank`].
     pub events: VecDeque<StoredRumEvent>,
+    /// How many events this monitor has ever accepted: the source of the next
+    /// [`EventRank`] ([`Self::record_events`]).
+    ///
+    /// It counts DELIVERIES, not the events the buffer currently holds, so the eviction
+    /// that bounds the buffer does not lower it — a rank a reader resumed after must never
+    /// come to name a later event than it did when it was issued.
+    pub accepted_events: EventRank,
     /// The extended-metrics destinations `PutRumMetricsDestination` created or updated
     /// for this monitor, keyed by [`MetricDestinationKey`]. A `BTreeMap` so
     /// `ListRumMetricsDestinations` pages in a stable, resumable order. They live ON the
@@ -1318,13 +1337,63 @@ impl AppMonitorRecord {
 
     /// Append events to this monitor's buffer, dropping the oldest once the buffer is at
     /// [`MAX_EVENTS_PER_APP_MONITOR`].
+    ///
+    /// Each appended event takes the next [`EventRank`], so the ranks the buffer holds are
+    /// the order the data plane delivered its events in and a rank is never reused — not
+    /// even for the slot an eviction just freed.
     pub fn record_events(&mut self, events: impl IntoIterator<Item = StoredRumEvent>) {
         for event in events {
             while self.events.len() >= MAX_EVENTS_PER_APP_MONITOR {
                 self.events.pop_front();
             }
             self.events.push_back(event);
+            self.accepted_events = self.accepted_events.saturating_add(1);
         }
+    }
+
+    /// The [`EventRank`] of the oldest event this monitor's buffer still holds, which is
+    /// also how many of its events have been evicted: the buffer keeps the LAST
+    /// [`MAX_EVENTS_PER_APP_MONITOR`] events accepted, so every rank below this one names
+    /// an event the monitor no longer holds.
+    fn oldest_event_rank(&self) -> EventRank {
+        self.accepted_events.saturating_sub(self.buffered_events())
+    }
+
+    /// How many events the buffer currently holds, as an [`EventRank`] can count them.
+    fn buffered_events(&self) -> EventRank {
+        EventRank::try_from(self.events.len()).unwrap_or(EventRank::MAX)
+    }
+
+    /// This monitor's buffered events with their ranks, oldest first, starting at the
+    /// oldest held event that ranks strictly AFTER `resume_after` — or at the oldest held
+    /// event when there is nothing to resume after.
+    ///
+    /// The one way a reader walks the buffer, so paging it is a RANGE over the ranks rather
+    /// than a count of the entries earlier pages returned: every event is walked under the
+    /// rank it was delivered at, so a resume point names the same place in the sequence
+    /// however many events have been appended or evicted since it was handed out, and an
+    /// event is walked at most once across the pages of one query.
+    pub fn events_from(
+        &self,
+        resume_after: Option<EventRank>,
+    ) -> impl Iterator<Item = (EventRank, &StoredRumEvent)> + '_ {
+        let oldest = self.oldest_event_rank();
+        // Every rank up to and including the one the resume point names has already been
+        // walked or evicted, so the walk starts at the first entry held above it; a resume
+        // point below what the buffer still holds leaves nothing of it to skip.
+        let skipped = match resume_after {
+            Some(after) => usize::try_from(after.saturating_add(1).saturating_sub(oldest))
+                .unwrap_or(usize::MAX)
+                .min(self.events.len()),
+            None => 0,
+        };
+        let first = oldest.saturating_add(EventRank::try_from(skipped).unwrap_or(EventRank::MAX));
+        self.events.range(skipped..).enumerate().map(move |(step, event)| {
+            (
+                first.saturating_add(EventRank::try_from(step).unwrap_or(EventRank::MAX)),
+                event,
+            )
+        })
     }
 }
 

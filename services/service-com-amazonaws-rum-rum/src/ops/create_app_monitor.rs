@@ -473,8 +473,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .deobfuscation_configuration
                 .unwrap_or_else(crate::state::default_deobfuscation_configuration),
             tags,
-            // No telemetry has arrived for a monitor this call just created.
+            // No telemetry has arrived for a monitor this call just created, so it has
+            // accepted no event and the first one it does accept takes the first rank.
             events: ::std::collections::VecDeque::new(),
+            accepted_events: 0,
             // A monitor sends extended metrics nowhere until a
             // `PutRumMetricsDestination` call names a destination.
             metric_destinations: ::std::collections::BTreeMap::new(),

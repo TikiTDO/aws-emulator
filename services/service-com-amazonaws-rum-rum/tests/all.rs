@@ -17,6 +17,8 @@ mod advertised_pattern_expressions;
 mod announced_media_type;
 #[path = "all/app_monitor_data.rs"]
 mod app_monitor_data;
+#[path = "all/app_monitor_data_paging.rs"]
+mod app_monitor_data_paging;
 #[path = "all/app_monitor_lifecycle.rs"]
 mod app_monitor_lifecycle;
 #[path = "all/authorization.rs"]
