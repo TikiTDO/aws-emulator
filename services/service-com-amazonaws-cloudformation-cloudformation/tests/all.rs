@@ -145,6 +145,8 @@ mod error_envelope;
 mod estimate_template_cost;
 #[path = "all/executed_change_set_create_outcomes.rs"]
 mod executed_change_set_create_outcomes;
+#[path = "all/export_pin_release.rs"]
+mod export_pin_release;
 #[path = "all/extension_registrations.rs"]
 mod extension_registrations;
 #[path = "all/extension_registry.rs"]
