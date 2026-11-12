@@ -1147,11 +1147,10 @@ async fn what_the_invoke_endpoint_answers_before_any_route_is_reached() {
 
 #[tokio::test]
 async fn an_api_this_service_does_not_serve_on_that_host_is_not_claimed() {
-    // The claim is narrowed to an api this service HOLDS whose default endpoint still
-    // serves, plus the one address no api of this emulator has at all. Everything else is
-    // left to the front door — which, with only this service registered, answers its own
-    // `UnknownService`. What is pinned is that this service did not answer, not the front
-    // door's wording.
+    // The claim is narrowed to an api this service HOLDS, plus the one address no api of
+    // this emulator has at all. Everything else is left to the front door — which, with
+    // only this service registered, answers its own `UnknownService`. What is pinned is that
+    // this service did not answer, not the front door's wording.
     let emulator = emulator();
     let deployment = deploy(
         &emulator,
@@ -1197,10 +1196,6 @@ async fn an_api_this_service_does_not_serve_on_that_host_is_not_claimed() {
 
     let unclaimed: Vec<(&str, Answer)> = vec![
         (
-            "an api that turned its own default endpoint off",
-            send(&emulator, &disabled_host, "GET", "/hello", &[]).await,
-        ),
-        (
             "the @connections path space, which ApiGatewayManagementApi models",
             invoke(
                 &emulator,
@@ -1224,6 +1219,17 @@ async fn an_api_this_service_does_not_serve_on_that_host_is_not_claimed() {
             answer.summary()
         );
     }
+
+    // An api that turned its OWN default endpoint off is still the api that endpoint
+    // addresses, so the request is claimed and REFUSED there: the endpoint serves nothing of
+    // the api while the member is set. (The rule over a table of apis, stages and both
+    // protocols is `disabled_execute_api_endpoint.rs`.)
+    answered(
+        "an api that turned its own default endpoint off",
+        &send(&emulator, &disabled_host, "GET", "/hello", &[]).await,
+        FORBIDDEN,
+        FORBIDDEN_MESSAGE,
+    );
 
     // The one `execute-api` address this data plane DOES answer without holding the api:
     // an endpoint whose api id resolves to no api of this emulator — the address a client

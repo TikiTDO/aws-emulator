@@ -40,8 +40,11 @@
 //!
 //! 1. the request names an `Api` this service holds whose `ProtocolType` is `HTTP` — by the
 //!    host's first label, by the first path segment, or, on a host that names no service,
-//!    by the stage segment of its path ([`resolve`]) — whose `DisableExecuteApiEndpoint`
-//!    must not have turned this endpoint off;
+//!    by the stage segment of its path ([`resolve`]);
+//! 1b. that api's `DisableExecuteApiEndpoint` has not turned this endpoint off. While it
+//!    has, the endpoint serves nothing of the api and every request to it is refused `403`
+//!    `{"message":"Forbidden"}` before a stage is even looked for, and it serves again as
+//!    soon as the member is cleared ([`super::data_plane::serves_default_endpoint`]);
 //! 2. the path within that api names a `Stage` of it: its first segment, or the
 //!    [`crate::state::DEFAULT_STAGE_NAME`] stage, which is "the stage that serves an api's
 //!    root" and so is reached with no stage segment in the path at all — that is the
@@ -431,7 +434,7 @@ fn resolve<'s, 'r>(
     let mut holding = store
         .apis
         .values()
-        .filter(|api| is_http(api) && !api.disable_execute_api_endpoint)
+        .filter(|api| is_http(api))
         .filter(|api| api.stages.contains_key(first));
     let api = holding.next()?;
     holding.next().is_none().then_some(Resolved {
@@ -440,18 +443,16 @@ fn resolve<'s, 'r>(
     })
 }
 
-/// `api` when it is an HTTP api whose default endpoint still serves.
+/// `api` when it is an api of THIS plane's protocol — the one narrowing every addressing
+/// above shares.
 ///
-/// "Specifies whether clients can invoke your API by using the default execute-api
-/// endpoint. By default, clients can invoke your API with the default
-/// https://{api_id}.execute-api.{region}.amazonaws.com endpoint. To require that clients
-/// use a custom domain name to invoke your API, disable the default endpoint"
-/// (`Api$DisableExecuteApiEndpoint`): an api whose default endpoint is disabled serves
-/// nothing on it, so this data plane resolves none of its addressings and the request is
-/// left unclaimed rather than refused — the host it names is one this api no longer
-/// answers on.
+/// Whether that api's default endpoint still SERVES is not read here: an api whose
+/// `DisableExecuteApiEndpoint` turned the endpoint off is still the api its own endpoint
+/// addresses, so the request is resolved and then REFUSED by this plane
+/// ([`resolved`], [`super::data_plane::serves_default_endpoint`]) rather than left unclaimed
+/// for the front door to call unknown.
 fn servable(api: Option<&Api>) -> Option<&Api> {
-    api.filter(|api| is_http(api) && !api.disable_execute_api_endpoint)
+    api.filter(|api| is_http(api))
 }
 
 /// The api id and invoke path of a request that names the api's endpoint INSIDE ITS PATH,
@@ -546,8 +547,8 @@ pub fn claims_request<Eng: Send + Sync + 'static>(engine: &Eng, req: &RtRequest)
 /// so the address a client was handed answers the same way whichever of the two it is.
 ///
 /// What this does NOT claim, so nothing an api of this service holds changes hands: an
-/// address whose api id this service HOLDS (an api whose default endpoint is disabled, or one
-/// of the other protocol — resolving those is [`resolve`]'s and [`super::websocket`]'s), the
+/// address whose api id this service HOLDS (an api that turned its default endpoint off is
+/// refused by [`resolved`], and one of the other protocol is [`super::websocket`]'s), the
 /// addressings that name NO endpoint (a bare stage path, which names no api id at all), and
 /// the `@connections` path space, which belongs to ApiGatewayManagementApi on this same host.
 fn claims_an_unresolved_endpoint<Eng: Send + Sync + 'static>(
@@ -906,6 +907,18 @@ fn resolved<Eng: Send + Sync + 'static>(
             None,
         )));
     };
+    // The DEFAULT endpoint this request was addressed at serves nothing while the api turned
+    // it off ([`super::data_plane::serves_default_endpoint`]), so the refusal is answered
+    // before any stage, deployment, route or authorization of the api is read — and with none
+    // of the api's CORS decoration, since an endpoint that serves nothing answers for no part
+    // of its configuration.
+    if !super::data_plane::serves_default_endpoint(resolved.api) {
+        tracing::debug!(
+            api_id = %resolved.api.api_id,
+            "this api's default execute-api endpoint is disabled, so it serves nothing"
+        );
+        return Err(Box::new(forbidden()));
+    }
     // The api's own CORS configuration decides the decoration of WHATEVER is answered
     // below, so it is computed once, from the api and the request alone, before the stage
     // and the route are resolved; see [`cors_decoration`].

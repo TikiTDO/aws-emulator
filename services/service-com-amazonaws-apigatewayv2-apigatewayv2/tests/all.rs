@@ -75,6 +75,8 @@ mod deployment_lifecycle;
 mod deployment_pagination;
 #[path = "all/deployment_stage_release.rs"]
 mod deployment_stage_release;
+#[path = "all/disabled_execute_api_endpoint.rs"]
+mod disabled_execute_api_endpoint;
 #[path = "all/domain_name_deletion.rs"]
 mod domain_name_deletion;
 #[path = "all/domain_name_deletion_identity.rs"]

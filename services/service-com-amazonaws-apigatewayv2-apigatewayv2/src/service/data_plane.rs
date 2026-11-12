@@ -113,6 +113,25 @@ pub fn forbidden() -> RtResponse {
     json_response(FORBIDDEN_STATUS, FORBIDDEN_MESSAGE, None)
 }
 
+/// Whether this api's DEFAULT `execute-api` endpoint serves anything at all.
+///
+/// "Specifies whether clients can invoke your API by using the default execute-api endpoint.
+/// By default, clients can invoke your API with the default
+/// https://{api_id}.execute-api.{region}.amazonaws.com endpoint. To require that clients use
+/// a custom domain name to invoke your API, disable the default endpoint"
+/// (`Api$DisableExecuteApiEndpoint`): while the member is set, that endpoint serves NOTHING
+/// of the api — whatever stage, deployment, route or authorization the request would have
+/// resolved — and it serves again as soon as the member is cleared, because the member is a
+/// property of the ENDPOINT and not of the deployment a stage froze.
+///
+/// Both api data planes read the member HERE, so neither can disagree with the other about an
+/// endpoint being off: an addressing that resolves an api is still this service's to answer
+/// ([`forbidden`]), since the host or path the client used is one this very service announced
+/// for the api.
+pub fn serves_default_endpoint(api: &crate::state::Api) -> bool {
+    !api.disable_execute_api_endpoint
+}
+
 /// The reference form a stage variable is interpolated into an integration's configuration
 /// under: `${stageVariables.<name>}`.
 ///

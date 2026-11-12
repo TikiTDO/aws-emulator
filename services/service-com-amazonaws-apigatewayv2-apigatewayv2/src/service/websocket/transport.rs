@@ -521,16 +521,20 @@ impl Refusal {
 ///    read ([`browser_refusal`]) — the check the core applies to every request on one of its
 ///    own HTTP listeners, applied here because an RFC 6455 handshake is a request a page can
 ///    make to a loopback port without a CORS preflight;
-/// 1. the path names a stage THIS api holds, and that stage has a deployment released to it;
+/// 1. the api's `DisableExecuteApiEndpoint` has not turned this endpoint off — this socket is
+///    the DEFAULT endpoint the api announces, so while the member is set every handshake on it
+///    is refused `403` `{"message":"Forbidden"}` and it accepts again as soon as the member is
+///    cleared;
+/// 2. the path names a stage THIS api holds, and that stage has a deployment released to it;
 ///    a step that resolves nothing is `403` `{"message":"Forbidden"}`, which is what the
 ///    `execute-api` endpoint answers for a stage it does not serve;
-/// 2. the AUTHORIZATION the `$connect` route carries is applied before anything that route
+/// 3. the AUTHORIZATION the `$connect` route carries is applied before anything that route
 ///    fronts ([`super::connect_authorization`]): a handshake missing an identity source is
 ///    `401` `{"message":"Unauthorized"}` with the authorizer never invoked, and past that
 ///    precondition the authorizer's own function decides — a DENY is `403`
 ///    ([`super::connect_authorizer`]), and what it ALLOWS travels with the connection into
 ///    every later call's event;
-/// 3. the CONNECTION REQUEST is served by the `$connect` route's integration, PERFORMED
+/// 4. the CONNECTION REQUEST is served by the `$connect` route's integration, PERFORMED
 ///    ([`super::integration`]), and the handshake completes only on a `2xx` reply. A reply
 ///    OUTSIDE `2xx` refuses the handshake with the status that integration answered and the
 ///    body it answered, because `$connect` is where a backend admits or refuses a client; a
@@ -632,6 +636,24 @@ fn offered(
     let mut store = state.lock();
     // One id per connection, minted from the transport's own counter and never reused.
     let connection_id = store.websocket_transport.mint_connection_id();
+    // This socket IS the api's DEFAULT `execute-api` endpoint — its address is the one the
+    // api's `ApiEndpoint` announces — so it upgrades nothing while the api turned that
+    // endpoint off: the handshake is refused `403` `{"message":"Forbidden"}` HERE, under this
+    // one lock and before the stage, the authorizer or the `$connect` integration is read, so
+    // a client learns at once that the endpoint is off rather than waiting on a backend
+    // nothing should have called ([`super::super::data_plane::serves_default_endpoint`]).
+    if store
+        .apis
+        .get(api_id)
+        .is_some_and(|api| !super::super::data_plane::serves_default_endpoint(api))
+    {
+        tracing::debug!(
+            %api_id,
+            stage = %stage_name,
+            "a handshake reached an api whose default execute-api endpoint is disabled"
+        );
+        return Err(forbidden());
+    }
     let Some((api, stage, deployed)) = integration::deployed(&store, api_id, stage_name) else {
         // The api was deleted between the handshake arriving and now (its socket is
         // closing), or the path named no stage of it, or that stage has no deployment

@@ -36,6 +36,10 @@
 //!    HTTP data plane reads too), or, for a handshake whose host names no api (the
 //!    emulator's own endpoint, or a custom domain fronting the api), by the stage segment of
 //!    its path;
+//! 2b. that api's `DisableExecuteApiEndpoint` has not turned this endpoint off. While it
+//!    has, the endpoint upgrades nothing and every handshake made at it is refused `403`
+//!    `{"message":"Forbidden"}` before a stage of the api is looked for
+//!    ([`default_endpoint_refusal`]);
 //! 3. that api holds a stage the path names, and that stage has a deployment released to
 //!    it; a step that resolves nothing is `403` `{"message":"Forbidden"}`, which is what
 //!    API Gateway answers for an api id it does not serve and for a stage that has no
@@ -338,6 +342,25 @@ fn is_websocket(api: &Api) -> bool {
     api.protocol_type == crate::state::WEBSOCKET_PROTOCOL_TYPE
 }
 
+/// The refusal a handshake made at an api's DEFAULT endpoint owes when that endpoint is off,
+/// or `None` for an api that still serves on it
+/// ([`super::data_plane::serves_default_endpoint`]).
+///
+/// `403` `{"message":"Forbidden"}`, the same answer the endpoint gives for an api or a stage
+/// it does not serve: an upgrade the endpoint does not accept is REFUSED rather than upgraded,
+/// and is refused before the stage, the authorizer or the connection request's own backend is
+/// read, so nothing of the api is reached through an endpoint that serves none of it.
+fn default_endpoint_refusal(api: &Api) -> Option<RtResponse> {
+    if super::data_plane::serves_default_endpoint(api) {
+        return None;
+    }
+    tracing::debug!(
+        api_id = %api.api_id,
+        "this api's default execute-api endpoint is disabled, so it upgrades nothing"
+    );
+    Some(forbidden())
+}
+
 /// Whether THIS service serves the request these parts came from as a WebSocket opening
 /// handshake — the data-plane half of `Service::can_handle`.
 ///
@@ -386,6 +409,11 @@ pub fn serve<Eng: Send + Sync + 'static>(engine: &Eng, req: &RtRequest) -> RtRes
     let Some(resolved) = resolve(&store, &handshake) else {
         return forbidden();
     };
+    // The DEFAULT endpoint the handshake was made at serves nothing while the api turned it
+    // off, so the upgrade is refused before a stage of it is even looked for.
+    if let Some(refusal) = default_endpoint_refusal(resolved.api) {
+        return refusal;
+    }
     // A stage the api does not hold, and a stage with no deployment released to it, are
     // both an endpoint that serves nothing: `403` `{"message":"Forbidden"}`.
     let Some(stage) = resolved.stage else {
@@ -495,6 +523,10 @@ pub async fn serve_with_transport<Eng: Send + Sync + 'static>(
         let Some(resolved) = resolve(&store, &handshake) else {
             return forbidden();
         };
+        // As in [`serve`]: an api that turned its default endpoint off upgrades nothing on it.
+        if let Some(refusal) = default_endpoint_refusal(resolved.api) {
+            return refusal;
+        }
         let Some(stage) = resolved.stage else {
             tracing::debug!(
                 api_id = %resolved.api.api_id,
