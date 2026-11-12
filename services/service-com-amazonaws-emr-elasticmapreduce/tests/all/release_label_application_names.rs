@@ -21,13 +21,15 @@ use crate::job_flow_lifecycle::{at, Emr};
 /// the Amazon EMR Release Guide's "Application versions" tables (the same source
 /// `state::APPLICATION_CATALOG` records).
 ///
-/// Four of these capitalize INSIDE the word (`HBase`, `JupyterEnterpriseGateway`,
-/// `JupyterHub`, `ZooKeeper`), so no one case transform of a lower-cased name produces
-/// this list: the spelling has to be stored per application.
+/// Several of these capitalize INSIDE the word (`HBase`, `HCatalog`, `MXNet`,
+/// `JupyterEnterpriseGateway`, `JupyterHub`, `TensorFlow`, `ZooKeeper`), so no one case
+/// transform of a lower-cased name produces this list: the spelling has to be stored per
+/// application.
 const PUBLISHED_APPLICATION_NAMES: &[&str] = &[
     "Flink",
     "Ganglia",
     "HBase",
+    "HCatalog",
     "Hadoop",
     "Hive",
     "Hudi",
@@ -36,11 +38,14 @@ const PUBLISHED_APPLICATION_NAMES: &[&str] = &[
     "JupyterEnterpriseGateway",
     "JupyterHub",
     "Livy",
+    "MXNet",
     "Oozie",
     "Phoenix",
     "Pig",
     "Presto",
     "Spark",
+    "Sqoop",
+    "TensorFlow",
     "Tez",
     "Trino",
     "Zeppelin",

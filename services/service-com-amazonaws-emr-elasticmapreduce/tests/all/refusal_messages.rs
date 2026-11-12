@@ -323,7 +323,10 @@ fn studio_id_requests(studio_id: &str) -> Vec<(&'static str, Value)> {
 
 /// The request id a wrapped Studio refusal reports, asserted to be the 8-4-4-4-12
 /// lowercase-hex form an AWS request id carries.
-fn wrapped_request_id(case: &str, said: &str) -> String {
+///
+/// `pub(crate)` so a sibling suite reads the wrapped form through one helper rather than
+/// its own copy.
+pub(crate) fn wrapped_request_id(case: &str, said: &str) -> String {
     let after = said
         .split_once("Request ID: ")
         .unwrap_or_else(|| panic!("case {case:?}: the wrapped form names a request id, got {said:?}"))

@@ -82,15 +82,29 @@ fn canonical(configuration: &Value) -> Value {
     canonical
 }
 
-/// `BlockPublicAccessConfigurationMetadata` names an IAM principal and an instant no
-/// later than `at_most`.
-fn assert_metadata(case: &str, metadata: &Value, at_least: f64, at_most: f64) {
+/// `BlockPublicAccessConfigurationMetadata` names the principal `created_by` — an IAM
+/// ARN, or the empty string for a configuration no principal has written — and an instant
+/// no later than `at_most`.
+fn assert_metadata(
+    case: &str,
+    metadata: &Value,
+    created_by: CreatedBy,
+    at_least: f64,
+    at_most: f64,
+) {
     let arn = at(metadata, &["CreatedByArn"]).as_str().unwrap_or_default();
-    assert!(
-        arn.starts_with("arn:aws:iam::") && arn.len() >= 20,
-        "case {case:?}: CreatedByArn must be an IAM ARN of at least the modelled 20 \
-         characters, got {arn:?} in {metadata}"
-    );
+    match created_by {
+        CreatedBy::APrincipal => assert!(
+            arn.starts_with("arn:aws:iam::") && arn.len() >= 20,
+            "case {case:?}: CreatedByArn must be an IAM ARN of at least the modelled 20 \
+             characters, got {arn:?} in {metadata}"
+        ),
+        CreatedBy::Nobody => assert_eq!(
+            arn, "",
+            "case {case:?}: CreatedByArn must be empty while no principal has written the \
+             configuration, got {arn:?} in {metadata}"
+        ),
+    }
     let created = at(metadata, &["CreationDateTime"])
         .as_f64()
         .unwrap_or_else(|| panic!("case {case:?}: CreationDateTime must be a timestamp, got {metadata}"));
@@ -99,6 +113,16 @@ fn assert_metadata(case: &str, metadata: &Value, at_least: f64, at_most: f64) {
         "case {case:?}: CreationDateTime {created} must fall in {at_least}..={at_most} \
          ({metadata})"
     );
+}
+
+/// Who the metadata under assertion must attribute the configuration to.
+#[derive(Debug, Clone, Copy)]
+enum CreatedBy {
+    /// A `PutBlockPublicAccessConfiguration` wrote it, so the metadata names its caller.
+    APrincipal,
+    /// Nothing has written it: the configuration is still the account default, which no
+    /// principal created or last modified.
+    Nobody,
 }
 
 /// The class this suite is about: a configuration a caller may put. The rows differ
@@ -225,7 +249,7 @@ async fn a_put_configuration_is_what_a_later_get_reports() {
             "case {case:?}: the reported configuration must be the one that was put, \
              got {reported}"
         );
-        assert_metadata(case, metadata, before, after);
+        assert_metadata(case, metadata, CreatedBy::APrincipal, before, after);
     }
 }
 
@@ -353,7 +377,8 @@ async fn an_omitted_exception_list_reads_back_as_the_empty_list() {
 }
 
 /// THE RULE: an account that has never put a configuration still has one — block public
-/// access enabled, with Port 22 permitted — and reading it changes nothing.
+/// access enabled, with Port 22 permitted — reading it changes nothing, and its metadata
+/// attributes it to NO principal, because none created or last modified it.
 #[tokio::test]
 async fn an_account_that_never_put_a_configuration_reports_the_documented_default() {
     let emr = Emr::new();
@@ -374,7 +399,7 @@ async fn an_account_that_never_put_a_configuration_reports_the_documented_defaul
     );
     // 0.0 as the floor: the default was established before this call, at an instant this
     // test cannot name, so only its upper bound is assertable.
-    assert_metadata(case, metadata, 0.0, now);
+    assert_metadata(case, metadata, CreatedBy::Nobody, 0.0, now);
 
     // A read is a read: the second call reports exactly what the first did, metadata
     // included.
@@ -402,7 +427,7 @@ async fn the_metadata_follows_the_put_that_wrote_the_configuration() {
         let after = epoch_secs(SystemTime::now()) + 1.0;
 
         let metadata = parts(&get(&emr, case).await).1.clone();
-        assert_metadata(case, &metadata, before, after);
+        assert_metadata(case, &metadata, CreatedBy::APrincipal, before, after);
         assert_ne!(
             at(&metadata, &["CreatedByArn"]),
             at(&default_metadata, &["CreatedByArn"]),

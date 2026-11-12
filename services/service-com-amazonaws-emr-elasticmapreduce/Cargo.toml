@@ -36,6 +36,11 @@ aws-sdk-iam = { version = "1", default-features = false }
 aws-sdk-ec2 = { version = "1", default-features = false }
 # The tree's one ARN parse, for reading a `JobFlowRole` given as an ARN.
 service-common = { path = "../common" }
+# The IAM Identity Center identity store a Studio session mapping's user or group lives
+# in, read through the same shared engine: a mapping names "the user or group" by its GUID
+# or by its name, and the member the request did not carry is resolved against the
+# identities `CreateUser`/`CreateGroup` wrote rather than derived here.
+service-com-amazonaws-identitystore-awsidentitystore = { workspace = true }
 # A cluster configured with the AWS Glue Data Catalog as its Hive metastore resolves the
 # tables a step's work names in that catalog, so the step runner reads the ONE Glue Data
 # Catalog store this emulator holds rather than keeping a second copy of it here.

@@ -206,6 +206,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         };
 
+        // ONE identity, named by its GUID or by its name: the member the request did not
+        // carry is resolved in the identity store that owns the user or group, so the
+        // mapping holds both and a later read reports both
+        // (`crate::state::studio_identities`).
+        let mapped = crate::state::resolve_identity(
+            &*self.engine,
+            &input.identity_type,
+            &crate::state::MappedIdentity {
+                identity_id,
+                identity_name,
+            },
+        );
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(
                 CreateStudioSessionMappingErrorModeled::InternalServerError(
@@ -222,9 +235,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(not_found(crate::state::unknown_studio_message()));
         }
 
-        let key =
-            crate::state::session_mapping_key(&input.studio_id, &input.identity_type, &identity);
-        if store.studio_session_mappings.contains_key(&key) {
+        // Already mapped is already mapped however the identity is addressed: a mapping
+        // the identity's OTHER member finds is the same mapping.
+        if store
+            .session_mapping_key_of(&input.studio_id, &input.identity_type, &identity)
+            .is_some()
+        {
             return Err(refuse(format!(
                 "Studio '{}' is already mapped to {} '{identity}'. Use \
                  UpdateStudioSessionMapping to change its session policy.",
@@ -246,12 +262,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let created = crate::state::timestamp(now);
+        let key =
+            crate::state::session_mapping_key(&input.studio_id, &input.identity_type, &identity);
         store.studio_session_mappings.insert(
             key,
             SessionMappingDetail {
                 studio_id: Some(input.studio_id),
-                identity_id,
-                identity_name,
+                identity_id: mapped.identity_id,
+                identity_name: mapped.identity_name,
                 identity_type: Some(input.identity_type),
                 session_policy_arn: Some(input.session_policy_arn),
                 creation_time: Some(created),

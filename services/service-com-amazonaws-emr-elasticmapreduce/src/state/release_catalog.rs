@@ -144,6 +144,20 @@ pub const APPLICATION_CATALOG: &[CatalogApplication] = &[
         removed_from: None,
     },
     CatalogApplication {
+        name: "HCatalog",
+        // HCatalog is Hive's table and storage-management layer and ships WITH Hive, so
+        // the version a release carries is its Hive version (Release Guide "Application
+        // versions" tables, the source of every row here).
+        versions: &[
+            ((5, 30), "2.3.6"),
+            ((5, 33), "2.3.7"),
+            ((5, 36), "2.3.9"),
+            ((6, 0), "3.1.2"),
+            ((6, 9), "3.1.3"),
+        ],
+        removed_from: None,
+    },
+    CatalogApplication {
         name: "Hive",
         versions: &[
             ((5, 30), "2.3.6"),
@@ -199,12 +213,30 @@ pub const APPLICATION_CATALOG: &[CatalogApplication] = &[
     },
     CatalogApplication {
         name: "JupyterHub",
-        versions: &[((5, 30), "1.1.0"), ((5, 36), "1.4.1"), ((6, 0), "1.1.0"), ((6, 6), "1.4.1")],
+        versions: &[
+            ((5, 30), "1.1.0"),
+            ((5, 36), "1.4.1"),
+            ((6, 0), "1.1.0"),
+            ((6, 6), "1.4.1"),
+            ((6, 15), "1.5.0"),
+        ],
         removed_from: None,
     },
     CatalogApplication {
         name: "Livy",
         versions: &[((5, 30), "0.7.0"), ((5, 36), "0.7.1"), ((6, 0), "0.7.0"), ((6, 6), "0.7.1")],
+        removed_from: None,
+    },
+    CatalogApplication {
+        name: "MXNet",
+        versions: &[
+            ((5, 30), "1.6.0"),
+            ((5, 36), "1.8.0"),
+            ((6, 0), "1.5.1"),
+            ((6, 1), "1.6.0"),
+            ((6, 4), "1.8.0"),
+            ((6, 9), "1.9.1"),
+        ],
         removed_from: None,
     },
     CatalogApplication {
@@ -224,7 +256,7 @@ pub const APPLICATION_CATALOG: &[CatalogApplication] = &[
             ((5, 30), "4.14.3"),
             ((6, 0), "5.0.0"),
             ((6, 2), "5.1.2"),
-            ((7, 0), "5.1.3"),
+            ((6, 15), "5.1.3"),
         ],
         removed_from: None,
     },
@@ -266,6 +298,24 @@ pub const APPLICATION_CATALOG: &[CatalogApplication] = &[
             // since, as for every row above.
             ((7, 6), "3.5.4"),
             ((7, 9), "3.5.5"),
+        ],
+        removed_from: None,
+    },
+    CatalogApplication {
+        name: "Sqoop",
+        // One version across the lines that bundle it at all.
+        versions: &[((5, 30), "1.4.7"), ((6, 0), "1.4.7")],
+        removed_from: None,
+    },
+    CatalogApplication {
+        name: "TensorFlow",
+        versions: &[
+            ((5, 30), "1.14.0"),
+            ((5, 36), "2.4.1"),
+            ((6, 0), "1.14.0"),
+            ((6, 2), "2.4.1"),
+            ((6, 9), "2.10.0"),
+            ((6, 12), "2.11.0"),
         ],
         removed_from: None,
     },
@@ -322,9 +372,16 @@ pub fn release_application_version(release_label: &str, name: &str) -> Option<&'
 }
 
 /// The Amazon Linux 2 releases offered for an Amazon EMR release built on it (Amazon
-/// EMR 5.30.0 through 6.x). `OSRelease$Label` documents the format: "as shown in Amazon
-/// Linux 2 Release Notes. For example, 2.0.20220218.1."
-pub(super) const AMAZON_LINUX_2_OS_RELEASES: &[&str] = &["2.0.20230808.0", "2.0.20231116.0"];
+/// EMR 5.30.0 through 6.x), oldest first. `OSRelease$Label` documents the format: "as
+/// shown in Amazon Linux 2 Release Notes. For example, 2.0.20220218.1." — the first
+/// entry here is the release that doc names, and the others are later Amazon Linux 2
+/// release-note labels.
+///
+/// This is a SNAPSHOT of a catalog Amazon Linux keeps publishing to, so what the list
+/// pins is the rule — the releases of the generation the Amazon EMR release is built on,
+/// in a stable order, each in the documented dotted form — and not a count.
+pub(super) const AMAZON_LINUX_2_OS_RELEASES: &[&str] =
+    &["2.0.20220218.1", "2.0.20230808.0", "2.0.20231116.0"];
 
 /// The Amazon Linux 2023 releases offered for an Amazon EMR release built on it (Amazon
 /// EMR 7.x), in the same dotted release-note form.

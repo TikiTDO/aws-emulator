@@ -64,6 +64,11 @@ pub use master_node::*;
 mod studio_network;
 pub use studio_network::*;
 
+/// The IAM Identity Center users and groups an EMR Studio session mapping maps, resolved
+/// in the service that owns them; split out and re-exported the same way.
+mod studio_identities;
+pub use studio_identities::*;
+
 /// The notebook-execution lifecycle, split out of this root as its own concern for the
 /// same reason, and re-exported the same way.
 mod notebook_executions;
@@ -314,7 +319,19 @@ pub mod persistent_app_ui_status {
 /// (`smithy_query(query="shape", shape="AuthMode")`: SSO, IAM).
 pub mod auth_mode {
     pub const IAM: &str = "IAM";
+
+    /// The Studio authenticates its users through IAM Identity Center.
+    pub const SSO: &str = "SSO";
 }
+
+/// How a Studio create that authenticates through IAM Identity Center and names no
+/// `UserRole` is refused.
+///
+/// Recorded behavior for the text, which is entirely FIXED: Amazon EMR names the member
+/// the request has to carry and the authentication mode that requires it, and
+/// interpolates nothing, so every instance of the class is refused with the one sentence.
+pub const USER_ROLE_REQUIRED_FOR_SSO_MESSAGE: &str =
+    "UserRole is required to create a studio with SSO auth-mode.";
 
 /// `com.amazonaws.emr#ClusterStateChangeReasonCode`, for the codes this emulator sets.
 pub mod cluster_state_change_reason_code {
@@ -558,6 +575,22 @@ pub fn malformed_marker(marker: &str) -> InvalidRequestException {
     }
 }
 
+/// How a cluster launch that names BOTH an `AmiVersion` and a `ReleaseLabel` is refused.
+///
+/// A cluster runs one of the two, never both: `AmiVersion` "applies only to Amazon EMR AMI
+/// versions 3.x and 2.x. For Amazon EMR releases 4.0 and later, `ReleaseLabel` is used"
+/// (`RunJobFlow$AmiVersion` doc), so the two members name two different ways of choosing
+/// what the cluster runs and a launch carrying both names no single one.
+///
+/// Recorded behavior for the text: Amazon EMR states the rule and then echoes both values
+/// the request carried, which are what a caller has to choose between.
+pub fn ami_version_and_release_label_message(ami_version: &str, release_label: &str) -> String {
+    format!(
+        "Only one AMI version and release label may be specified. Provided AMI: \
+         {ami_version}, release label: {release_label}."
+    )
+}
+
 /// How an operation that answers a fact ABOUT a release refuses a `ReleaseLabel` that
 /// names none of the catalog's releases.
 ///
@@ -706,18 +739,43 @@ pub fn runtime_roles_not_enabled_message() -> String {
         .to_string()
 }
 
-/// How a Studio operation refuses a `StudioId` the service holds no Studio for.
+/// How the backend behind EMR Studio and EMR Notebooks words EVERY refusal it raises:
+/// the sentence, then its own service name and the wire fields of the error it raised.
 ///
-/// The EMR Studio backend answers its own name and the wire fields of the error it
-/// raised beside the sentence, and names no Studio id: the id the caller sent is not
-/// part of it, and the request id is this response's own
-/// ([`::service_common::query_error_envelope::new_request_id`]).
-pub fn unknown_studio_message() -> String {
+/// Recorded behavior for the text, and it is one template rather than one per operation:
+/// the Studio and notebook-execution surfaces are served by the same backend, so each of
+/// their refusals carries the same parenthesised service detail — the backend's name
+/// ([`STUDIO_BACKEND_SERVICE`]), the status and error code of the refusal, and this
+/// response's own request id
+/// ([`::service_common::query_error_envelope::new_request_id`]). Nothing of the request
+/// is interpolated: a caller matching the sentence sees the same text for every instance
+/// of the class, and an operator reads from the detail which backend refused.
+pub fn editors_refusal_message(sentence: &str) -> String {
     format!(
-        "Studio does not exist. (Service: {STUDIO_BACKEND_SERVICE}; Status Code: 400; \
-         Error Code: InvalidRequestException; Request ID: {}; Proxy: null)",
+        "{sentence} (Service: {STUDIO_BACKEND_SERVICE}; Status Code: 400; Error Code: \
+         InvalidRequestException; Request ID: {}; Proxy: null)",
         ::service_common::query_error_envelope::new_request_id()
     )
+}
+
+/// How a Studio operation refuses a `StudioId` the service holds no Studio for.
+///
+/// The sentence states that the Studio does not exist and names no Studio id — the id the
+/// caller sent is not part of it — inside the backend's own wrapper
+/// ([`editors_refusal_message`]).
+pub fn unknown_studio_message() -> String {
+    editors_refusal_message("Studio does not exist.")
+}
+
+/// How a notebook-execution operation refuses a `NotebookExecutionId` the service holds
+/// no execution for.
+///
+/// Recorded behavior for the text: the same backend wrapper
+/// ([`editors_refusal_message`]) in front of the statement that the execution does not
+/// exist. The execution id the caller sent is NOT echoed, so every notebook-execution
+/// operation refuses an unknown id with the one sentence.
+pub fn unknown_notebook_execution_message() -> String {
+    editors_refusal_message("Execution does not exist")
 }
 
 /// The service name the EMR Studio backend reports in the refusals it wraps.
@@ -1785,6 +1843,40 @@ impl ComAmazonawsEmrElasticmapreduceState {
             .count()
     }
 
+    /// The key the session mapping `identity` addresses on the studio `studio_id` is held
+    /// under, or `None` when that studio holds no mapping for it.
+    ///
+    /// ONE identity, two members: "specify `IdentityId` or `IdentityName`"
+    /// (`GetStudioSessionMapping$IdentityId` doc) addresses the SAME mapping either way,
+    /// so a mapping created from a GUID is found by the identity's name and the other way
+    /// round — the mapping carries both members once the identity resolved
+    /// ([`resolve_identity`]). The key the identity itself produces is tried first, so a
+    /// studio holding many mappings costs one lookup for the member the create was given.
+    pub fn session_mapping_key_of(
+        &self,
+        studio_id: &str,
+        identity_type: &str,
+        identity: &str,
+    ) -> Option<String> {
+        let key = session_mapping_key(studio_id, identity_type, identity);
+        if self.studio_session_mappings.contains_key(&key) {
+            return Some(key);
+        }
+        let prefix = session_mapping_key_prefix(studio_id);
+        self.studio_session_mappings
+            .iter()
+            .find(|(key, mapping)| {
+                key.starts_with(&prefix)
+                    && mapping.identity_type.as_deref() == Some(identity_type)
+                    && identity_addresses(
+                        mapping.identity_id.as_deref(),
+                        mapping.identity_name.as_deref(),
+                        identity,
+                    )
+            })
+            .map(|(key, _)| key.clone())
+    }
+
     /// The cluster `id`, with every transition the clock already made due applied.
     pub fn cluster_mut(&mut self, id: &str, now: SystemTime) -> Option<&mut ClusterRecord> {
         let record = self.clusters.get_mut(id)?;
@@ -2162,8 +2254,13 @@ impl BlockPublicAccessRecord {
     /// with Port 22 permitted. See [`DEFAULT_BLOCK_PUBLIC_SECURITY_GROUP_RULES`] and
     /// [`DEFAULT_PERMITTED_PUBLIC_PORT`].
     ///
-    /// No caller created it, so the principal it names is the account itself rather
-    /// than an invented user.
+    /// `CreatedByArn` is "the Amazon Resource Name that created or last modified the
+    /// configuration" (`BlockPublicAccessConfigurationMetadata$CreatedByArn` doc), and NO
+    /// principal has created or last modified this one: the member is modelled required,
+    /// so it is reported — EMPTY — rather than filled with an ARN naming a principal that
+    /// never acted. A caller reading it therefore learns whether the configuration has
+    /// ever been written: empty while it is still the service default, the writing
+    /// principal once a `Put` has written it ([`Self::put`]).
     pub fn account_default(at: SystemTime) -> Self {
         Self {
             configuration: BlockPublicAccessConfiguration {
@@ -2177,7 +2274,7 @@ impl BlockPublicAccessRecord {
                 properties: None,
             },
             creation_date_time: at,
-            created_by_arn: ::engine::emulator_arn("iam", "", "root"),
+            created_by_arn: String::new(),
         }
     }
 
@@ -3605,6 +3702,68 @@ pub fn implied_instance_group_configs(instances: &JobFlowInstancesConfig) -> Vec
         }
     }
     configs
+}
+
+/// How a cluster launch that provisions no PRIMARY node is refused.
+///
+/// A cluster has exactly one primary instance group: "valid values are MASTER, CORE or
+/// TASK" (`InstanceGroupConfig$InstanceRole` doc), and the MASTER group is the one the
+/// cluster's coordinators run on, so a launch stating its capacity as instance groups and
+/// naming no MASTER group among them describes a cluster that cannot come up.
+///
+/// Recorded behavior for the text, which is entirely FIXED: Amazon EMR states how many
+/// primary groups it was given and how many it needs, and interpolates nothing of the
+/// request.
+pub const NO_PRIMARY_INSTANCE_GROUP_MESSAGE: &str =
+    "Zero master instance groups supplied, you must specify exactly one master instance \
+     group.";
+
+/// How a launch naming MORE than one primary instance group is refused: the other half of
+/// the same "exactly one" requirement, in the same sentence with the count it was given.
+///
+/// One primary group is the most a cluster has — a highly available cluster states its
+/// several primary nodes as that one group's `InstanceCount`
+/// ([`primary_node_count`]) — so two primary groups describe no cluster Amazon EMR
+/// provisions either.
+pub const MULTIPLE_PRIMARY_INSTANCE_GROUPS_MESSAGE: &str =
+    "Multiple master instance groups supplied, you must specify exactly one master \
+     instance group.";
+
+/// The refusal a launch stating its capacity as instance GROUPS earns for the primary
+/// group it names, or `None` when it names exactly one.
+///
+/// The groups a launch provisions are the ones it named, or — for a launch stating its
+/// instances the uniform way — the ones that form implies
+/// ([`implied_instance_group_configs`]), so a request naming a master instance type names
+/// a primary even though it names no group at all. `requested` is the group list the
+/// launch carried, which the handler has already taken off the request.
+///
+/// A launch stating its capacity as instance FLEETS states its primary in that other
+/// vocabulary ([`primary_node_count`]), so this reading is asked only of the groups form.
+pub fn primary_instance_group_refusal(
+    instances: &JobFlowInstancesConfig,
+    requested: &[InstanceGroupConfig],
+) -> Option<&'static str> {
+    // The implied groups are derived only where they are the ones the launch provisions.
+    let implied = if requested.is_empty() {
+        implied_instance_group_configs(instances)
+    } else {
+        Vec::new()
+    };
+    let groups = if requested.is_empty() {
+        implied.as_slice()
+    } else {
+        requested
+    };
+    match groups
+        .iter()
+        .filter(|group| group.instance_role == instance_group_type::MASTER)
+        .count()
+    {
+        1 => None,
+        0 => Some(NO_PRIMARY_INSTANCE_GROUP_MESSAGE),
+        _ => Some(MULTIPLE_PRIMARY_INSTANCE_GROUPS_MESSAGE),
+    }
 }
 
 /// Refuse an `InstanceGroupConfig` this emulator cannot hold as submitted.

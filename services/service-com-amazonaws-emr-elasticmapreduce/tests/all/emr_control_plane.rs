@@ -114,7 +114,8 @@ fn fleet_request(name: &str) -> Value {
 
 /// The members `CreateStudio` requires, with every network id in the form Amazon EC2
 /// gives that resource ("Resource IDs", Amazon EC2 User Guide: the type prefix plus 8
-/// or 17 lowercase hex characters).
+/// or 17 lowercase hex characters) — and, because it authenticates through IAM Identity
+/// Center, the `UserRole` such a Studio cannot be created without.
 ///
 /// `pub(crate)` so another suite in this test target drives `CreateStudio` through the
 /// same request rather than growing a second copy of it.
@@ -125,6 +126,7 @@ pub(crate) fn studio_request(name: &str) -> Value {
         "VpcId": "vpc-0a1b2c3d",
         "SubnetIds": ["subnet-0a1b2c3d"],
         "ServiceRole": "EMR_Studio_ServiceRole",
+        "UserRole": "EMR_Studio_UserRole",
         "WorkspaceSecurityGroupId": "sg-0a1b2c3d",
         "EngineSecurityGroupId": "sg-1a2b3c4d",
         "DefaultS3Location": "s3://emr-studio/backup/",
@@ -965,13 +967,15 @@ async fn studios_are_created_read_back_updated_and_deleted() {
             }),
         ),
         (
-            "IAM Identity Center auth with no user role",
+            // An Identity Center Studio carries the user role its identities assume.
+            "IAM Identity Center auth with a user role",
             json!({
-                "Name": "sso studio, no user role",
+                "Name": "sso studio",
                 "AuthMode": "SSO",
                 "VpcId": "vpc-00000000000000003",
                 "SubnetIds": ["subnet-00000000000000003"],
                 "ServiceRole": "EMR_Studio_ServiceRole",
+                "UserRole": "arn:aws:iam::000000000000:role/EMRStudio_User",
                 "WorkspaceSecurityGroupId": "sg-00000000000000003",
                 "EngineSecurityGroupId": "sg-00000000000000004",
                 "DefaultS3Location": "s3://emr-studio/sso/",
@@ -1005,6 +1009,7 @@ async fn studios_are_created_read_back_updated_and_deleted() {
                     "subnet-00000004", "subnet-00000005",
                 ],
                 "ServiceRole": "EMR_Studio_ServiceRole",
+                "UserRole": "EMR_Studio_UserRole",
                 "WorkspaceSecurityGroupId": "sg-0a1b2c3d",
                 "EngineSecurityGroupId": "sg-1a2b3c4d",
                 "DefaultS3Location": "s3://emr-studio/five/",

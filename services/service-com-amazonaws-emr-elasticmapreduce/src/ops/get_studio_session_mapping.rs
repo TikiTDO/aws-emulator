@@ -190,9 +190,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(not_found(crate::state::unknown_studio_message()));
         }
 
-        let key =
-            crate::state::session_mapping_key(&input.studio_id, &input.identity_type, &identity);
-        let Some(mapping) = store.studio_session_mappings.get(&key) else {
+        let Some(mapping) = store
+            .session_mapping_key_of(&input.studio_id, &input.identity_type, &identity)
+            .and_then(|key| store.studio_session_mappings.get(&key))
+        else {
             return Err(not_found(format!(
                 "Studio '{}' has no session mapping for {} '{identity}'.",
                 input.studio_id, input.identity_type

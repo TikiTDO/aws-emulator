@@ -7,15 +7,18 @@
 //! `CreateStudio` resolves each of those in the service that owns it (Amazon EC2 for the
 //! network objects, IAM for the role) BEFORE allocating a Studio, and refuses the request
 //! with the modelled HTTP 400 `InvalidRequestException` when the owning service reports none
-//! of it, persisting nothing: no Studio id is handed back and `ListStudios` never reports the
+//! of it — or, for a subnet, reports it under another VPC than the one the Studio names —
+//! persisting nothing: no Studio id is handed back and `ListStudios` never reports the
 //! name. The role is resolved first, so a request that gets both wrong is answered about the
-//! role — in the wrapped form the EMR Studio backend states every refusal it raises in,
-//! carrying its own service name, the wire fields of that refusal and this response's own
-//! request id.
+//! role. Every refusal is stated in the wrapped form the EMR Studio backend states every
+//! refusal it raises in, carrying its own service name, the wire fields of that refusal and
+//! this response's own request id; the refusals about a network member name the input MEMBER
+//! and echo no identifier.
 //!
 //! The rows span what the rule generalises over: which member names something that does not
 //! resolve (the VPC, one subnet of a list, either security group, the service role), where in
-//! a list the unresolvable entry sits, whether the role is one IAM holds nothing under or one
+//! a list the unresolvable entry sits, a subnet Amazon EC2 holds under ANOTHER VPC, whether
+//! the role is one IAM holds nothing under or one
 //! whose trust policy admits another principal, and a request that gets the role and the
 //! network both wrong. Every id a row expects to be ACCEPTED was minted by Amazon EC2 itself,
 //! and every role by IAM, so nothing here asserts against a value the test made up. The rule
@@ -204,6 +207,8 @@ struct Network {
     subnets: Vec<String>,
     workspace_group: String,
     engine_group: String,
+    /// A subnet of ANOTHER VPC the account holds, which the Studio's VPC does not contain.
+    foreign_subnet: String,
 }
 
 /// An id of the same FORM Amazon EC2 mints, which this account holds no such resource
@@ -251,6 +256,26 @@ fn seed(router: &MultiServiceRouter, runtime: &tokio::runtime::Runtime) -> Netwo
     let workspace_group = group("emr-studio-workspace", "the Studio Workspace group");
     let engine_group = group("emr-studio-engine", "the Studio Engine group");
 
+    // A second VPC with a subnet of its own: a subnet the account HOLDS that the Studio's
+    // VPC does not contain, which is what the membership half of the rule is about.
+    let other_vpc = element(
+        &ec2_ok(router, runtime, "CreateVpc", &[("CidrBlock", "10.80.0.0/16")]),
+        "vpcId",
+    );
+    let foreign_subnet = element(
+        &ec2_ok(
+            router,
+            runtime,
+            "CreateSubnet",
+            &[
+                ("VpcId", other_vpc.as_str()),
+                ("CidrBlock", "10.80.1.0/24"),
+                ("AvailabilityZone", "us-west-2a"),
+            ],
+        ),
+        "subnetId",
+    );
+
     for (role, principal) in [
         (STUDIO_ROLE, "elasticmapreduce.amazonaws.com"),
         (FOREIGN_TRUST_ROLE, "lambda.amazonaws.com"),
@@ -271,17 +296,25 @@ fn seed(router: &MultiServiceRouter, runtime: &tokio::runtime::Runtime) -> Netwo
         subnets,
         workspace_group,
         engine_group,
+        foreign_subnet,
     }
 }
 
-/// What a row expects: the Studio is created, or the create is refused with this sentence.
+/// The wrapped form the EMR Studio backend states `sentence` in, with `request_id` as the
+/// request id that response reported.
+fn wrapped(sentence: &str, request_id: &str) -> String {
+    format!(
+        "{sentence} (Service: AWSEditors; Status Code: 400; Error Code: \
+         InvalidRequestException; Request ID: {request_id}; Proxy: null)"
+    )
+}
+
+/// What a row expects: the Studio is created, or the create is refused with this sentence
+/// inside the backend's wrapped form, whose request id the assertion reads out of the answer
+/// because it is that response's own.
 enum Expected {
     Created,
     Refused(String),
-    /// The create is refused with the EMR Studio backend's WRAPPED form for a role it may
-    /// not assume: the sentence names the role, and the suffix carries this response's own
-    /// request id, which the assertion reads out of the answer.
-    RefusedRole(String),
 }
 
 /// The request id a wrapped Studio refusal reports, asserted to be the 8-4-4-4-12
@@ -382,53 +415,63 @@ fn a_studio_is_created_only_for_a_network_and_role_the_account_holds() {
                 (
                     "a VPC id the account holds no VPC under",
                     serde_json::json!({ "VpcId": absent_vpc.clone() }),
-                    Expected::Refused(format!(
-                        "VpcId '{absent_vpc}' does not name a VPC in this account"
-                    )),
+                    Expected::Refused("VpcId is not valid.".to_string()),
                 ),
                 (
                     "the only subnet named holds nothing",
                     serde_json::json!({ "SubnetIds": [absent_subnet.clone()] }),
-                    Expected::Refused(format!(
-                        "SubnetIds entry '{absent_subnet}' does not name a subnet in this \
-                         account"
-                    )),
+                    Expected::Refused("SubnetIds is not valid.".to_string()),
                 ),
                 (
                     "one subnet EC2 holds and one it does not",
                     serde_json::json!({
                         "SubnetIds": [network.subnets[0].clone(), absent_subnet.clone()],
                     }),
-                    Expected::Refused(format!(
-                        "SubnetIds entry '{absent_subnet}' does not name a subnet in this \
-                         account"
-                    )),
+                    Expected::Refused("SubnetIds is not valid.".to_string()),
+                ),
+                (
+                    // "The subnets must belong to the VPC specified by VpcId"
+                    // (`CreateStudio$SubnetIds` doc): a subnet the account holds, in
+                    // another VPC, is no subnet this Studio may run in.
+                    "a subnet the account holds, in another VPC",
+                    serde_json::json!({ "SubnetIds": [network.foreign_subnet.clone()] }),
+                    Expected::Refused("SubnetIds is not valid.".to_string()),
+                ),
+                (
+                    "one subnet of this VPC and one of another",
+                    serde_json::json!({
+                        "SubnetIds": [
+                            network.subnets[0].clone(),
+                            network.foreign_subnet.clone(),
+                        ],
+                    }),
+                    Expected::Refused("SubnetIds is not valid.".to_string()),
                 ),
                 (
                     "a Workspace security group the account does not hold",
                     serde_json::json!({ "WorkspaceSecurityGroupId": absent_group.clone() }),
-                    Expected::Refused(format!(
-                        "WorkspaceSecurityGroupId '{absent_group}' does not name a security \
-                         group in this account"
-                    )),
+                    Expected::Refused("WorkspaceSecurityGroupId is not valid.".to_string()),
                 ),
                 (
                     "an Engine security group the account does not hold",
                     serde_json::json!({ "EngineSecurityGroupId": absent_group.clone() }),
-                    Expected::Refused(format!(
-                        "EngineSecurityGroupId '{absent_group}' does not name a security \
-                         group in this account"
-                    )),
+                    Expected::Refused("EngineSecurityGroupId is not valid.".to_string()),
                 ),
                 (
                     "a service role IAM holds nothing under",
                     serde_json::json!({ "ServiceRole": role_arn(ABSENT_ROLE) }),
-                    Expected::RefusedRole(role_arn(ABSENT_ROLE)),
+                    Expected::Refused(format!(
+                        "This entity does not have permissions to assume role '{}'",
+                        role_arn(ABSENT_ROLE)
+                    )),
                 ),
                 (
                     "a service role whose trust policy admits another principal",
                     serde_json::json!({ "ServiceRole": role_arn(FOREIGN_TRUST_ROLE) }),
-                    Expected::RefusedRole(role_arn(FOREIGN_TRUST_ROLE)),
+                    Expected::Refused(format!(
+                        "This entity does not have permissions to assume role '{}'",
+                        role_arn(FOREIGN_TRUST_ROLE)
+                    )),
                 ),
                 (
                     // The role is resolved FIRST, so a request that gets both wrong is
@@ -438,7 +481,10 @@ fn a_studio_is_created_only_for_a_network_and_role_the_account_holds() {
                         "ServiceRole": role_arn(ABSENT_ROLE),
                         "VpcId": absent_vpc.clone(),
                     }),
-                    Expected::RefusedRole(role_arn(ABSENT_ROLE)),
+                    Expected::Refused(format!(
+                        "This entity does not have permissions to assume role '{}'",
+                        role_arn(ABSENT_ROLE)
+                    )),
                 ),
             ];
 
@@ -470,39 +516,13 @@ fn a_studio_is_created_only_for_a_network_and_role_the_account_holds() {
                             "case {case:?}: an unresolvable member must be refused 400 \
                              InvalidRequestException, got {status} {payload}"
                         );
-                        assert_eq!(
-                            error_message(&payload),
-                            *sentence,
-                            "case {case:?}: expected {sentence:?}, got {payload}"
-                        );
-                        assert!(
-                            payload.get("StudioId").is_none(),
-                            "case {case:?}: a refused create hands back no StudioId, got \
-                             {payload}"
-                        );
-                        assert!(
-                            !listed.contains(&name),
-                            "case {case:?}: a refused create leaves no Studio, got {listed:?}"
-                        );
-                    }
-                    Expected::RefusedRole(role) => {
-                        assert_eq!(
-                            (status, error_code(&payload).as_str()),
-                            (400, "InvalidRequestException"),
-                            "case {case:?}: a role the Studio may not assume must be refused \
-                             400 InvalidRequestException, got {status} {payload}"
-                        );
                         let said = error_message(&payload);
                         let request_id = wrapped_request_id(case, &said);
                         assert_eq!(
                             said,
-                            format!(
-                                "This entity does not have permissions to assume role \
-                                 '{role}' (Service: AWSEditors; Status Code: 400; Error \
-                                 Code: InvalidRequestException; Request ID: {request_id}; \
-                                 Proxy: null)"
-                            ),
-                            "case {case:?}: unexpected message {said:?}"
+                            wrapped(sentence, &request_id),
+                            "case {case:?}: expected {:?}, got {payload}",
+                            wrapped(sentence, "<this response's request id>")
                         );
                         assert!(
                             payload.get("StudioId").is_none(),
@@ -549,8 +569,12 @@ fn a_studio_is_created_only_for_a_network_and_role_the_account_holds() {
             );
             assert_eq!(
                 error_message(&payload),
-                format!(
-                    "SubnetIds entry '{absent_subnet}' does not name a subnet in this account"
+                wrapped(
+                    "SubnetIds is not valid.",
+                    &wrapped_request_id(
+                        "UpdateStudio with a subnet EC2 does not hold",
+                        &error_message(&payload)
+                    )
                 ),
                 "case \"UpdateStudio with a subnet EC2 does not hold\": got {payload}"
             );

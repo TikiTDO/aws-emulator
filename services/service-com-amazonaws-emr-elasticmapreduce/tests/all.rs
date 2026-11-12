@@ -103,6 +103,10 @@ mod security_configurations;
 mod spark_step_application;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/studio_notebook_and_catalog_contract.rs"]
+mod studio_notebook_and_catalog_contract;
+#[path = "all/studio_session_mapping_identity.rs"]
+mod studio_session_mapping_identity;
 #[path = "all/studio_session_mapping_listing.rs"]
 mod studio_session_mapping_listing;
 #[path = "all/supported_instance_types.rs"]

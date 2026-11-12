@@ -9,13 +9,15 @@
 //! and refuses the request with `InvalidRequestException` — creating no studio — when
 //! one of them cannot name an existing resource: a `VpcId`, `SubnetIds` entry or
 //! security group id outside the form Amazon EC2 gives those resources
-//! ([`crate::state::is_ec2_resource_id`]), more subnets than a Studio may have, a
+//! ([`crate::state::is_ec2_resource_id`]) or naming nothing the account holds, a subnet
+//! outside the VPC the Studio is in, more subnets than a Studio may have, a
 //! `DefaultS3Location` that is not an Amazon S3 URI, or an empty `ServiceRole`.
 //!
-//! Every OTHER member the model leaves optional is optional here too — a `UserRole`
-//! above all, which "only specify … when you use IAM Identity Center authentication"
-//! (`CreateStudio$UserRole` doc) makes meaningful for one authentication mode and
-//! required by none.
+//! A `UserRole` is required of one authentication mode and no other: the identities an
+//! IAM Identity Center Studio logs in assume it, so a create that authenticates that way
+//! and names none is refused as an invalid request
+//! ([`crate::state::USER_ROLE_REQUIRED_FOR_SSO_MESSAGE`]), while every OTHER member the
+//! model leaves optional is optional here too.
 //!
 //! ## Shape of an operation
 //!
@@ -212,7 +214,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        use crate::state::{is_ec2_resource_id, is_s3_location, MAX_STUDIOS, MAX_STUDIO_SUBNETS};
+        use crate::state::{
+            auth_mode, is_ec2_resource_id, is_s3_location, MAX_STUDIOS, MAX_STUDIO_SUBNETS,
+            SUBNET_IDS_MEMBER, VPC_ID_MEMBER,
+        };
 
         let now = ::std::time::SystemTime::now();
         let region = crate::state::request_region(ctx.parts());
@@ -227,6 +232,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into()
         };
 
+        // "The IAM user role that users and groups assume when logged in to an Amazon EMR
+        // Studio" (`CreateStudio$UserRole` doc): the identities an IAM Identity Center
+        // Studio logs in have nothing to assume without one, so a Studio authenticating
+        // through Identity Center cannot be created without a `UserRole`. The model leaves
+        // the member OPTIONAL — it cannot express a requirement conditional on another
+        // member — so the conditional is enforced here, as a REQUEST-SHAPE rule: it is
+        // decided before anything the request names is resolved, and answered under the
+        // request-validation envelope (HTTP 400 `ValidationException`) rather than as the
+        // backend's own refusal, because nothing was looked up to refuse it.
+        if input.auth_mode == auth_mode::SSO
+            && input
+                .user_role
+                .as_deref()
+                .is_none_or(|role| role.trim().is_empty())
+        {
+            return Err(crate::scaffolded::Scaffolded::validation(
+                crate::state::USER_ROLE_REQUIRED_FOR_SSO_MESSAGE,
+            ));
+        }
+
         // "A list of subnet IDs to associate with the Amazon EMR Studio. A Studio can
         // have a maximum of 5 subnets." (`CreateStudio$SubnetIds` doc.)
         if input.subnet_ids.is_empty() || input.subnet_ids.len() > MAX_STUDIO_SUBNETS {
@@ -236,11 +261,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )));
         }
         if !is_ec2_resource_id("vpc", &input.vpc_id) {
-            return Err(refuse(crate::state::absent_vpc_message(&input.vpc_id)));
+            return Err(refuse(crate::state::invalid_network_member_message(
+                VPC_ID_MEMBER,
+            )));
         }
         for subnet_id in &input.subnet_ids {
             if !is_ec2_resource_id("subnet", subnet_id) {
-                return Err(refuse(crate::state::absent_subnet_message(subnet_id)));
+                return Err(refuse(crate::state::invalid_network_member_message(
+                    SUBNET_IDS_MEMBER,
+                )));
             }
         }
         let security_groups = [
@@ -255,9 +284,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ];
         for (member, group_id) in security_groups {
             if !is_ec2_resource_id("sg", group_id) {
-                return Err(refuse(crate::state::absent_security_group_message(
-                    member, group_id,
-                )));
+                return Err(refuse(crate::state::invalid_network_member_message(member)));
             }
         }
 
@@ -294,12 +321,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(refuse(message));
         }
 
-        // Then the network objects the Studio's Workspaces run in and carry.
+        // Then the network objects the Studio's Workspaces run in and carry: the VPC the
+        // Studio is in, and then the subnets inside it — "the subnets must belong to the
+        // VPC specified by VpcId" (`CreateStudio$SubnetIds` doc), so a subnet Amazon EC2
+        // holds under another VPC is refused as the `SubnetIds` member, the same way one
+        // it holds no subnet for is.
         if let Some(message) = crate::state::unresolved_vpc(ctx, &region, &input.vpc_id).await {
             return Err(refuse(message));
         }
-        if let Some(message) =
-            crate::state::unresolved_subnets(ctx, &region, &input.subnet_ids).await
+        if let Some(message) = crate::state::unresolved_subnets(
+            ctx,
+            &region,
+            &input.subnet_ids,
+            Some(input.vpc_id.as_str()),
+        )
+        .await
         {
             return Err(refuse(message));
         }
@@ -310,9 +346,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // "Only specify a UserRole when you use IAM Identity Center authentication."
-        // (`CreateStudio$UserRole` doc, which the model leaves OPTIONAL.) So a
-        // `UserRole` is not a precondition of any authentication mode: a request that
-        // omits it is well formed, and one that carries it is stored as given.
+        // (`CreateStudio$UserRole` doc.) An IAM-authenticated Studio needs none — the
+        // Identity Center conditional above is what requires one — and a request that
+        // carries one is stored as given.
         let user_role = input.user_role.filter(|role| !role.trim().is_empty());
 
         let Some(state) = crate::state::service_state(&*self.engine) else {

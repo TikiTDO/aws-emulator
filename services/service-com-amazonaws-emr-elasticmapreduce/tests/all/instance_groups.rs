@@ -804,8 +804,10 @@ async fn list_instance_groups_refuses_an_unknown_cluster() {
             label,
             json!({
                 "KeepJobFlowAliveWhenNoSteps": true,
+                // The primary group every launch states its capacity on, carrying the
+                // volume configuration this row is about.
                 "InstanceGroups": [{
-                    "InstanceRole": "CORE",
+                    "InstanceRole": "MASTER",
                     "InstanceType": "m5.xlarge",
                     "InstanceCount": 1,
                     "EbsConfiguration": { "EbsBlockDeviceConfigs": configs },

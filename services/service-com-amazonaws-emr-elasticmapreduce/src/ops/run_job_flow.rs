@@ -402,6 +402,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
+        // A cluster runs ONE Amazon EMR release, chosen EITHER by the release label or by
+        // the AMI version of the 3.x/2.x generations — "applies only to Amazon EMR AMI
+        // versions 3.x and 2.x. For Amazon EMR releases 4.0 and later, `ReleaseLabel` is
+        // used" (`RunJobFlow$AmiVersion` doc) — so a launch carrying both names no single
+        // release and is refused before any cluster state is written.
+        if let (Some(ami_version), Some(release_label)) = (
+            input
+                .ami_version
+                .as_deref()
+                .filter(|version| !version.is_empty()),
+            input
+                .release_label
+                .as_deref()
+                .filter(|label| !label.is_empty()),
+        ) {
+            return Err(refuse(
+                crate::state::ami_version_and_release_label_message(ami_version, release_label),
+            ));
+        }
+
         // "The Amazon EMR release label, which determines the version of open-source
         // application packages installed on the cluster." (`RunJobFlow$ReleaseLabel` doc.)
         // A cluster runs ONE release of Amazon EMR, so the label a launch names is
@@ -445,6 +465,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 return Err(refuse(crate::state::unsupported_instance_type_message(
                     &instance_type,
                 )));
+            }
+        }
+
+        // WHICH RELEASE the cluster runs is settled above; WHAT IT RUNS ON is settled
+        // here. A cluster comes up on its PRIMARY node, so a launch stating its capacity
+        // as instance groups has to name exactly one MASTER group — among the groups it
+        // carried, or the ones its uniform `MasterInstanceType` form implies
+        // (`crate::state::primary_instance_group_refusal`). A launch naming none, or
+        // naming several, describes a cluster that can never come up and is refused
+        // before any cluster state is written. A launch stating its capacity as instance
+        // FLEETS states its primary in that vocabulary instead, so the reading is asked
+        // of the groups form.
+        if !has_fleets {
+            if let Some(message) = crate::state::primary_instance_group_refusal(
+                &input.instances,
+                &requested_group_configs,
+            ) {
+                return Err(refuse(message.to_string()));
             }
         }
 
@@ -550,8 +588,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // The account holds a bounded number of clusters: a cluster record is kept after
         // it terminates (`ListClusters` still reports it), so past the ceiling the launch
-        // is refused and nothing is stored, the way a quota is.
+        // is refused and nothing is stored, the way a quota is. The guard is released
+        // BEFORE the refusal is built, because building it emits this call's audit record
+        // and no emission belongs inside the store's critical section — the same ordering
+        // the success path keeps at the end of this handler.
         if store.clusters.len() >= MAX_CLUSTERS {
+            drop(store);
             return Err(refuse(format!(
                 "This account already holds {MAX_CLUSTERS} clusters, which is the maximum"
             )));

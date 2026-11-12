@@ -59,38 +59,40 @@ const INVALID_GROUP: &str = "InvalidGroup.";
 /// trust policy on the role has to admit the Amazon EMR service principal.
 const STUDIO_SERVICE_PRINCIPAL: &str = "elasticmapreduce.amazonaws.com";
 
-/// What a `VpcId` that names no VPC of this account is refused with.
-pub fn absent_vpc_message(vpc_id: &str) -> String {
-    format!("VpcId '{vpc_id}' does not name a VPC in this account")
-}
+/// The input member a Studio names its VPC under.
+pub const VPC_ID_MEMBER: &str = "VpcId";
 
-/// What a `SubnetIds` entry that names no subnet of this account is refused with.
-pub fn absent_subnet_message(subnet_id: &str) -> String {
-    format!("SubnetIds entry '{subnet_id}' does not name a subnet in this account")
-}
+/// The input member a Studio names the subnets its Workspaces run in under.
+pub const SUBNET_IDS_MEMBER: &str = "SubnetIds";
 
-/// What a security-group member that names no security group of this account is refused
-/// with: the refusal names the MEMBER, because a Studio carries two of them.
-pub fn absent_security_group_message(member: &str, group_id: &str) -> String {
-    format!("{member} '{group_id}' does not name a security group in this account")
+/// What a network member of a Studio that resolves to nothing usable is refused with.
+///
+/// Recorded behavior for the text: the backend names the input MEMBER and states that it
+/// is not valid, and does NOT echo the identifier the request carried, inside the same
+/// service-detail wrapper every refusal it raises carries
+/// ([`super::editors_refusal_message`]). ONE template for every member, so what a caller
+/// reads off the sentence is which member of its request to fix — and that is all that
+/// differs between the members, whether the value is outside the form Amazon EC2 gives
+/// the resource, names nothing the account holds, or (a subnet) names a resource of
+/// another VPC than the Studio's.
+///
+/// `VpcId` is the member a recording states this sentence for; the other three members are
+/// worded by the same template because the template is the backend's, not that member's —
+/// a later recording of one of them can confirm its own instance.
+pub fn invalid_network_member_message(member: &str) -> String {
+    super::editors_refusal_message(&format!("{member} is not valid."))
 }
 
 /// What a `ServiceRole` the Studio could not assume is refused with.
 ///
-/// Recorded behavior for the text: the EMR Studio backend answers the same wrapped form
-/// every refusal it raises carries ([`super::unknown_studio_message`]) — its own service
-/// name and the wire fields of the error it raised, with this response's own request id
-/// ([`service_common::query_error_envelope::new_request_id`]) — in front of which it states
-/// that it has no permission to assume the role. The one value taken from the request is the
-/// role it was handed, which is what a caller has to fix.
+/// Recorded behavior for the text: the backend's own wrapper
+/// ([`super::editors_refusal_message`]) in front of the statement that it has no
+/// permission to assume the role. The one value taken from the request is the role it was
+/// handed, which is what a caller has to fix.
 pub fn unassumable_service_role_message(service_role: &str) -> String {
-    let backend = super::STUDIO_BACKEND_SERVICE;
-    format!(
-        "This entity does not have permissions to assume role '{service_role}' (Service: \
-         {backend}; Status Code: 400; Error Code: InvalidRequestException; Request ID: {}; \
-         Proxy: null)",
-        ::service_common::query_error_envelope::new_request_id()
-    )
+    super::editors_refusal_message(&format!(
+        "This entity does not have permissions to assume role '{service_role}'"
+    ))
 }
 
 /// The refusal the `VpcId` a Studio names earns, or `None` when Amazon EC2 reported that
@@ -108,22 +110,29 @@ pub async fn unresolved_vpc(
     let absent = match &answer {
         // A read that resolved and reports no VPC under the id says the same thing the
         // refusal below does, about the same id.
-        Ok(output) => !output.vpcs().iter().any(|vpc| vpc.vpc_id() == Some(vpc_id)),
-        Err(error) => answered_absent(error.code(), INVALID_VPC_ID, "VPC", vpc_id),
+        Ok(output) => (!output.vpcs().iter().any(|vpc| vpc.vpc_id() == Some(vpc_id)))
+            .then(|| invalid_network_member_message(VPC_ID_MEMBER)),
+        Err(error) => answered_absent(error, INVALID_VPC_ID, "VPC", vpc_id, VPC_ID_MEMBER),
     };
-    absent.then(|| absent_vpc_message(vpc_id))
+    absent
 }
 
-/// The refusal the `SubnetIds` of a Studio earn, by the rule [`unresolved_vpc`] states:
-/// the FIRST entry Amazon EC2 reported no subnet for.
+/// The refusal the `SubnetIds` of a Studio earn, by the rule [`unresolved_vpc`] states.
 ///
-/// Each entry is resolved on its own, so what the refusal names is the entry EC2 answered
-/// about — a read batching every entry is refused as a whole the moment one of them does
-/// not resolve, which says nothing about WHICH.
+/// Each entry is resolved on its own, so the first entry Amazon EC2 answered about decides
+/// the refusal — a read batching every entry is refused as a whole the moment one of them
+/// does not resolve, which says nothing about WHICH.
+///
+/// A subnet also has to be one of the VPC the Studio is in — "The subnets must belong to
+/// the VPC specified by VpcId" (`CreateStudio$SubnetIds` doc) — so when `vpc_id` names the
+/// Studio's VPC, a subnet Amazon EC2 reports under ANOTHER VPC earns the same refusal as
+/// one it reports nothing for: neither names a subnet this Studio could run in. `None`
+/// asks only that the subnets exist, for a caller that has no VPC to hold them to.
 pub async fn unresolved_subnets(
     ctx: &::smithy_server_runtime::OperationContext<'_>,
     region: &str,
     subnet_ids: &[String],
+    vpc_id: Option<&str>,
 ) -> Option<String> {
     let client = ec2_client(ctx, region);
     for subnet_id in subnet_ids {
@@ -133,14 +142,33 @@ pub async fn unresolved_subnets(
             .send()
             .await;
         let absent = match &answer {
-            Ok(output) => !output
-                .subnets()
-                .iter()
-                .any(|subnet| subnet.subnet_id() == Some(subnet_id.as_str())),
-            Err(error) => answered_absent(error.code(), INVALID_SUBNET_ID, "subnet", subnet_id),
+            Ok(output) => {
+                let reported = output
+                    .subnets()
+                    .iter()
+                    .find(|subnet| subnet.subnet_id() == Some(subnet_id.as_str()));
+                let unusable = match (reported, vpc_id) {
+                    (None, _) => true,
+                    // Amazon EC2 ANSWERED which VPC holds the subnet: a subnet of another
+                    // VPC is not one this Studio may use. A subnet EC2 reported without a
+                    // VPC says nothing about membership, so nothing is refused on it.
+                    (Some(subnet), Some(vpc_id)) => {
+                        subnet.vpc_id().is_some_and(|holder| holder != vpc_id)
+                    }
+                    (Some(_), None) => false,
+                };
+                unusable.then(|| invalid_network_member_message(SUBNET_IDS_MEMBER))
+            }
+            Err(error) => answered_absent(
+                error,
+                INVALID_SUBNET_ID,
+                "subnet",
+                subnet_id,
+                SUBNET_IDS_MEMBER,
+            ),
         };
-        if absent {
-            return Some(absent_subnet_message(subnet_id));
+        if let Some(message) = absent {
+            return Some(message);
         }
     }
     None
@@ -162,16 +190,17 @@ pub async fn unresolved_security_groups(
             .send()
             .await;
         let absent = match &answer {
-            Ok(output) => !output
+            Ok(output) => (!output
                 .security_groups()
                 .iter()
-                .any(|group| group.group_id() == Some(*group_id)),
+                .any(|group| group.group_id() == Some(*group_id)))
+            .then(|| invalid_network_member_message(member)),
             Err(error) => {
-                answered_absent(error.code(), INVALID_GROUP, "security group", group_id)
+                answered_absent(error, INVALID_GROUP, "security group", group_id, member)
             }
         };
-        if absent {
-            return Some(absent_security_group_message(member, group_id));
+        if let Some(message) = absent {
+            return Some(message);
         }
     }
     None
@@ -200,13 +229,25 @@ pub async fn unassumable_service_role(
     .then(|| unassumable_service_role_message(service_role))
 }
 
-/// Whether the `code` Amazon EC2 refused a read with is EC2 ANSWERING that the account
-/// holds no such resource — every code under `prefix` says that — rather than this
-/// emulator failing to ask it at all, which refuses nothing and is traced instead.
-fn answered_absent(code: Option<&str>, prefix: &str, kind: &str, requested: &str) -> bool {
-    let code = code.unwrap_or_default();
+/// The refusal a resource a Studio named earns when Amazon EC2 refused the read of it, or
+/// `None` when that error is not EC2 ANSWERING that the account holds no such resource —
+/// every code under `prefix` says that — but this emulator failing to ask it at all, which
+/// refuses nothing and is traced instead.
+///
+/// What EC2 answered decides WHETHER the member is refused; the refusal itself is the
+/// member's own ([`invalid_network_member_message`]), because that is the one sentence the
+/// Studio backend states for a member that resolves to nothing usable, whatever the
+/// service holding the resource said about it.
+fn answered_absent<E: ProvideErrorMetadata>(
+    error: &E,
+    prefix: &str,
+    kind: &str,
+    requested: &str,
+    member: &str,
+) -> Option<String> {
+    let code = error.code().unwrap_or_default();
     if code.starts_with(prefix) {
-        return true;
+        return Some(invalid_network_member_message(member));
     }
     // The caller's own value is rendered in its escaped `Debug` form, so an identifier
     // carrying a newline cannot forge a log line.
@@ -215,5 +256,5 @@ fn answered_absent(code: Option<&str>, prefix: &str, kind: &str, requested: &str
         code = ?code,
         "the {kind} a Studio named could not be resolved against EC2"
     );
-    false
+    None
 }

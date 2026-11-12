@@ -154,10 +154,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 DescribeNotebookExecutionErrorModeled::InvalidRequestException(
                     InvalidRequestException {
                         error_code: None,
-                        message: Some(format!(
-                            "Notebook execution id '{}' is not valid or does not exist.",
-                            input.notebook_execution_id
-                        )),
+                        message: Some(crate::state::unknown_notebook_execution_message()),
                     },
                 )
                 .into(),

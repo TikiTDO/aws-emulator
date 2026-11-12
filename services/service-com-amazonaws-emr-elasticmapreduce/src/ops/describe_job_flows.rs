@@ -6,8 +6,9 @@
 //! removed", and the recorded service answers every call — whatever its arguments —
 //! with a 400 `ValidationException` that states the deprecation rather than serving
 //! job-flow data. Serving data here instead would be strictly more permissive than the
-//! service, so this handler refuses, saying the API is deprecated, and a client is
-//! pointed at the operations the documentation names as the replacements.
+//! service, so this handler refuses with the service's own deprecation sentence
+//! ([`DEPRECATED_MESSAGE`]), which points a client at the API reference page for this
+//! operation.
 //!
 //! ## Shape of an operation
 //!
@@ -130,6 +131,16 @@ impl<Eng> DescribeJobFlows<Eng> {
     }
 }
 
+/// The sentence Amazon EMR refuses every `DescribeJobFlows` call with.
+///
+/// Recorded behavior for the text, which is a CONSTANT: it states that the API is
+/// deprecated and carries the URL of this operation's API reference page, where a caller
+/// reads what to use instead. Nothing of the request is interpolated, so every call is
+/// refused with the same sentence and a caller matching it recognises the refusal.
+pub const DEPRECATED_MESSAGE: &str = "DescribeJobFlows API is deprecated. Please refer to \
+     http://docs.aws.amazon.com/ElasticMapReduce/latest/API/API_DescribeJobFlows.html for \
+     further information.";
+
 impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_runtime::Operation
     for DescribeJobFlows<Eng>
 {
@@ -152,9 +163,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `ValidationException` channel because the operation models no client error.
         let _ = (&input, ctx, &self.engine);
         Err(crate::scaffolded::Scaffolded::validation(
-            "The DescribeJobFlows API is deprecated and no longer serves job flows. Use \
-             ListClusters, DescribeCluster, ListSteps, ListInstanceGroups and \
-             ListBootstrapActions instead.",
+            DEPRECATED_MESSAGE,
         ))
     }
 }

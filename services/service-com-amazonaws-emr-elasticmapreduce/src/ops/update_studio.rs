@@ -202,14 +202,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             for subnet_id in subnet_ids {
                 if !is_ec2_resource_id("subnet", subnet_id) {
-                    return Err(refuse(crate::state::absent_subnet_message(subnet_id)));
+                    return Err(refuse(crate::state::invalid_network_member_message(
+                        crate::state::SUBNET_IDS_MEMBER,
+                    )));
                 }
             }
-            // And an id in that FORM still has to name a subnet the account HOLDS, which
-            // is Amazon EC2's to answer — the same resolution `CreateStudio` makes before
-            // it allocates a Studio, here before anything of this one changes.
-            if let Some(message) =
-                crate::state::unresolved_subnets(ctx, &region, subnet_ids).await
+            // And an id in that FORM still has to name a subnet the account HOLDS, and one
+            // of the VPC the Studio is in ("the subnets must belong to the VPC specified by
+            // VpcId"), which is Amazon EC2's to answer — the same resolution `CreateStudio`
+            // makes before it allocates a Studio, here before anything of this one changes.
+            // The VPC is the one the studio was created with; a Studio this account does not
+            // hold has none to hold them to, and is answered for below.
+            let studio_vpc_id = crate::state::service_state(&*self.engine).and_then(|state| {
+                state
+                    .lock()
+                    .studios
+                    .get(&input.studio_id)
+                    .and_then(|studio| studio.vpc_id.clone())
+            });
+            if let Some(message) = crate::state::unresolved_subnets(
+                ctx,
+                &region,
+                subnet_ids,
+                studio_vpc_id.as_deref(),
+            )
+            .await
             {
                 return Err(refuse(message));
             }
