@@ -36,6 +36,15 @@ pub use practice_runs::{
     PRACTICE_CONFIGURATION_EXISTS_MESSAGE,
 };
 
+/// The zonal autoshift status ARC holds for a resource, and the rule the operation
+/// that writes one applies to it.
+mod zonal_autoshift;
+
+pub use zonal_autoshift::{
+    zonal_autoshift_conflict, PRACTICE_CONFIGURATION_REQUIRED_MESSAGE,
+    ZONAL_AUTOSHIFT_PRACTICE_CONFIGURATION_MISSING_REASON,
+};
+
 /// The Amazon Web Services Region the seeded managed resources live in. The
 /// Availability Zone IDs they are deployed in (`use1-az*`) are this Region's, so
 /// the two are changed together.
@@ -207,6 +216,17 @@ impl ZonalAutoshiftStatus {
             Self::Enabled => "ENABLED",
         }
     }
+
+    /// The status a wire value names, or `None` when it is not one of the two the
+    /// model declares (`ZONAL_AUTOSHIFT_STATUS_VALUES`).
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "DISABLED" => Some(Self::Disabled),
+            "ENABLED" => Some(Self::Enabled),
+            _ => None,
+        }
+    }
 }
 
 /// Whether ARC notifies the account, through Amazon EventBridge, about EVERY
@@ -282,6 +302,17 @@ pub struct ManagedResource {
     /// was seeded with does, and the registry its owner writes holds no ARC
     /// configuration at all.
     pub practice_run_configuration: Option<PracticeRunConfiguration>,
+    /// Whether the account has authorized ARC to shift traffic away from an
+    /// Availability Zone for this resource on its behalf.
+    ///
+    /// Filled, like [`Self::practice_run_configuration`], for the length of one call
+    /// by the accessors that answer about a managed resource from the one place the
+    /// store keeps it
+    /// ([`ComAmazonawsArczonalshiftPercdataplaneState::zonal_autoshift_statuses`]):
+    /// the status is ARC's own record about a resource ARC did not create, so a
+    /// resource another service registered carries the status a caller set for it
+    /// just as one this store was seeded with does. A resource no caller has set one
+    /// for carries the value here, `DISABLED`.
     pub zonal_autoshift_status: ZonalAutoshiftStatus,
 }
 
@@ -343,6 +374,15 @@ pub struct ComAmazonawsArczonalshiftPercdataplaneState {
     /// either is held here, so the shared registry stays the sole authority on what
     /// it published.
     pub practice_run_configurations: BTreeMap<String, PracticeRunConfiguration>,
+    /// The zonal autoshift status ARC holds for a resource, keyed by
+    /// `resourceIdentifier` (its ARN), for the resources a caller has set one for.
+    ///
+    /// Kept BESIDE the resources for the same reason a practice run configuration is
+    /// ([`Self::practice_run_configurations`]): the status is ARC's own record about a
+    /// resource ARC did not create, and a resource reaches ARC either seeded into
+    /// [`Self::managed_resources`] or published by the service that owns it, which
+    /// records no ARC status for it at all.
+    pub zonal_autoshift_statuses: BTreeMap<String, ZonalAutoshiftStatus>,
 }
 
 impl Default for ComAmazonawsArczonalshiftPercdataplaneState {
@@ -358,6 +398,7 @@ impl Default for ComAmazonawsArczonalshiftPercdataplaneState {
             autoshift_observer_notification_status:
                 DEFAULT_AUTOSHIFT_OBSERVER_NOTIFICATION_STATUS,
             practice_run_configurations: BTreeMap::new(),
+            zonal_autoshift_statuses: BTreeMap::new(),
         }
     }
 }

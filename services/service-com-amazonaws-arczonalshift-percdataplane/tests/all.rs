@@ -23,5 +23,7 @@ mod refusal_message_rules;
 mod registered_managed_resources;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/zonal_autoshift_configuration.rs"]
+mod zonal_autoshift_configuration;
 #[path = "all/zonal_shift_lifecycle.rs"]
 mod zonal_shift_lifecycle;

@@ -71,9 +71,9 @@ impl ZonalShiftState {
     /// its own resources; a published one carries the facts its owner recorded and the
     /// defaults ARC reports for a resource nothing has been configured for.
     ///
-    /// The practice run configuration is ARC's own record about a resource, so every
-    /// resource in the answer carries the one this store holds for it, whichever way the
-    /// resource reached ARC.
+    /// The practice run configuration and the zonal autoshift status are ARC's own
+    /// records about a resource, so every resource in the answer carries the ones this
+    /// store holds for it, whichever way the resource reached ARC.
     #[must_use]
     pub fn managed_resource_inventory(
         &self,
@@ -100,6 +100,9 @@ impl ZonalShiftState {
         }
         for (arn, resource) in &mut inventory {
             resource.practice_run_configuration = self.practice_run_configuration(arn);
+            resource.zonal_autoshift_status = self
+                .zonal_autoshift_status(arn)
+                .unwrap_or(resource.zonal_autoshift_status);
         }
         inventory
     }
@@ -110,8 +113,9 @@ impl ZonalShiftState {
     /// The identifier is the ARN of the resource and nothing more
     /// (`ResourceIdentifier`'s documentation: "The identifier is the Amazon Resource Name
     /// (ARN) for the resource"), so a resource is matched by that ARN as the owning
-    /// service recorded it. The resource carries the practice run configuration this
-    /// store holds for it, which is ARC's own record about it.
+    /// service recorded it. The resource carries the practice run configuration and the
+    /// zonal autoshift status this store holds for it, which are ARC's own records about
+    /// it.
     #[must_use]
     pub fn managed_resource(
         &self,
@@ -136,6 +140,9 @@ impl ZonalShiftState {
                     })
             })?;
         resource.practice_run_configuration = self.practice_run_configuration(resource_identifier);
+        resource.zonal_autoshift_status = self
+            .zonal_autoshift_status(resource_identifier)
+            .unwrap_or(resource.zonal_autoshift_status);
         Some(resource)
     }
 }
