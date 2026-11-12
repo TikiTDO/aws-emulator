@@ -12,12 +12,16 @@
 //! client drives it — path-style over the wire (`PUT /<bucket>`, `GET
 //! /<bucket>/<key>`, `GET /<bucket>?list-type=2`) — so every object a suite reads
 //! back is one the object store itself holds.
+//!
+//! A suite that pins what a job's ROLE decides mounts IAM beside them
+//! ([`ObjectStore::with_iam`]), because the role a job runs as exists only if
+//! IAM answers for it.
 
 use std::sync::Arc;
 
 use smithy_server_runtime::MultiServiceRouter;
 
-use crate::access_point_lifecycle::{call_in_region, Reply, ACCOUNT};
+use crate::access_point_lifecycle::{call_in_region, Reply, ACCOUNT, REGION};
 
 /// The XML namespace an Amazon S3 request payload carries.
 const S3_XMLNS: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
@@ -49,6 +53,48 @@ impl ObjectStore {
             engine,
         ));
         Self { router }
+    }
+
+    /// Amazon S3, S3 Control and IAM on one shared engine, plus an IAM SDK
+    /// client over the router's own in-process callback.
+    ///
+    /// A batch job's work is carried out AS the role the create named, so a
+    /// suite that pins what the job's ROLE decides needs the account's IAM
+    /// records to be real: the roles it names are created through IAM's own
+    /// operations, over this client, and the resolution under test then runs
+    /// over the same in-process callback as in production.
+    pub(crate) fn with_iam() -> (Self, ::aws_sdk_iam::Client) {
+        let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+        let mut router = MultiServiceRouter::new();
+        router.set_request_authentication(false);
+        router.register_service(
+            service_com_amazonaws_s3control_awss3controlservicev20180820::EmulatedService::new(
+                Arc::clone(&engine),
+            ),
+        );
+        router.register_service(service_com_amazonaws_s3_amazons3::EmulatedService::new(
+            Arc::clone(&engine),
+        ));
+        router.register_service(
+            service_com_amazonaws_iam_awsidentitymanagementv20100508::EmulatedService::new(engine),
+        );
+        let callback = ::smithy_server_runtime::EmbeddedEmulator::from_router(router.clone());
+        let iam = ::aws_sdk_iam::Client::from_conf(
+            ::aws_sdk_iam::Config::builder()
+                .behavior_version(::aws_sdk_iam::config::BehaviorVersion::latest())
+                .region(::aws_sdk_iam::config::Region::new(REGION.to_string()))
+                .endpoint_url(format!("https://iam.{REGION}.amazonaws.com"))
+                .credentials_provider(callback.aws_credentials_provider())
+                .http_client(callback.http_client())
+                .retry_config(::aws_sdk_iam::config::retry::RetryConfig::disabled())
+                .timeout_config(::aws_sdk_iam::config::timeout::TimeoutConfig::disabled())
+                .identity_cache(::aws_sdk_iam::config::IdentityCache::no_cache())
+                .stalled_stream_protection(
+                    ::aws_sdk_iam::config::StalledStreamProtectionConfig::disabled(),
+                )
+                .build(),
+        );
+        (Self { router }, iam)
     }
 
     /// One S3 Control call, signed for `region` and made for the emulator's own

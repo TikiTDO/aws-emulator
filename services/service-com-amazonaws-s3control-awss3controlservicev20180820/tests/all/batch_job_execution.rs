@@ -76,7 +76,7 @@ impl JobRequest {
 
 /// A `<Manifest>` element naming the manifest object `bucket`/`key`, in the CSV
 /// format a manifest written for a batch job carries.
-fn csv_manifest(bucket: &str, key: &str, e_tag: &str) -> String {
+pub(crate) fn csv_manifest(bucket: &str, key: &str, e_tag: &str) -> String {
     format!(
         "<Manifest><Spec><Format>S3BatchOperations_CSV_20180820</Format>\
          <Fields><member>Bucket</member><member>Key</member></Fields></Spec>\
@@ -114,7 +114,7 @@ async fn submit(store: &ObjectStore, case: &str, token: &str, request: &JobReque
 }
 
 /// `DescribeJob` of one job.
-async fn describe(store: &ObjectStore, job_id: &str) -> Reply {
+pub(crate) async fn describe(store: &ObjectStore, job_id: &str) -> Reply {
     store
         .s3control(REGION, "GET", &format!("/v20180820/jobs/{job_id}"), "")
         .await
@@ -122,7 +122,7 @@ async fn describe(store: &ObjectStore, job_id: &str) -> Reply {
 
 /// Poll `DescribeJob` until the job reports a terminal status, exactly as a
 /// client waits for one, and answer that answer.
-async fn poll_terminal(store: &ObjectStore, case: &str, job_id: &str) -> Reply {
+pub(crate) async fn poll_terminal(store: &ObjectStore, case: &str, job_id: &str) -> Reply {
     let deadline = std::time::Instant::now() + settle_budget();
     let mut last = describe(store, job_id).await;
     loop {

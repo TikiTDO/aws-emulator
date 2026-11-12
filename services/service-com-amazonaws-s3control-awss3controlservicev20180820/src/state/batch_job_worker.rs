@@ -14,6 +14,14 @@
 //! or [`JOB_STATUS_FAILED`] for a job that could not be run at all, with
 //! `FailureReasons` saying why.
 //!
+//! The work is carried out AS the role the create named ("the IAM role that
+//! Batch Operations will use to run this job's operation on every object in the
+//! manifest", `JobDescriptor$RoleArn`), so that role is assumed BEFORE the first
+//! task: a job whose role the account's IAM holds a trust document for that
+//! withholds the assume from this service's principal settles
+//! [`JOB_STATUS_FAILED`] with that reason and leaves every object of its list
+//! untouched.
+//!
 //! Every task is carried out through the OWNING service's own API: the objects a
 //! copy writes, the tags a tagging task sets, the generated manifest and the
 //! completion report are Amazon S3 objects, written by Amazon S3's own
@@ -49,6 +57,10 @@ use super::batch_job_plan::{
     MANIFEST_FORMAT_CSV, TASK_FAILED, TASK_SUCCEEDED, TASK_SUCCEEDED_MESSAGE,
 };
 use super::*;
+
+/// The one reading of whether S3 Batch Operations can assume the role a job's
+/// tasks run as ([`super::batch_job_role`]).
+use super::batch_job_role::engine_assume_refusal;
 
 use crate::ops::types::{
     JobManifestGenerator, S3CopyObjectOperation, S3GeneratedManifestDescriptor,
@@ -97,6 +109,25 @@ const REPORT_RESULTS_NAME: &str = "results/report.csv";
 /// answers with beside the reason that says what stopped the job.
 const JOB_FAILURE_CODE: &str = "JobFailed";
 
+/// The `FailureCode` of a job whose ROLE this service could not assume: the
+/// identity the job's work would have run under refused it, which is what
+/// `AccessDenied` says.
+const ASSUME_ROLE_FAILURE_CODE: &str = "AccessDenied";
+
+/// The longest `FailureCode` one failure can carry. Source: the
+/// `@length(min: 1, max: 64)` of `JobFailureCode` in the Smithy model
+/// (`smithy_query(query="shape", shape="JobFailure")`).
+pub(super) const FAILURE_CODE_LENGTH_MAX: usize = 64;
+
+/// The longest `FailureReason` one failure can carry. Source: the
+/// `@length(min: 1, max: 256)` of `JobFailureReason`, same shape. A reason built
+/// from values a request named (a role ARN is `@length(max: 2048)`) is cut to it
+/// by [`job_failure`], so every failure this run records is a legal value of the
+/// member that carries it — and a reason COMPOSED from such a value is composed
+/// to fit it ([`super::batch_job_role::assume_failure_reason`]), so the cut is
+/// the last resort rather than the usual case.
+pub(super) const FAILURE_REASON_LENGTH_MAX: usize = 256;
+
 /// Run the job the `CreateJob` that returns this accepted.
 ///
 /// Returns at once: the job runs in a task of its own, because the create
@@ -140,6 +171,25 @@ async fn run<Eng: Send + Sync + 'static>(
         // the store no longer holds has no run owed to it.
         return;
     };
+
+    // "The Amazon Resource Name (ARN) for the Identity and Access Management
+    // (IAM) role that Batch Operations will use to run this job's operation on
+    // every object in the manifest" (`JobDescriptor$RoleArn`): the work is
+    // carried out AS that role, so the role is assumed BEFORE any task runs,
+    // and a role whose trust policy withholds the assume from this service's
+    // principal is a job that cannot run at all — it settles failed with that
+    // reason, accounting for the nothing it ran, and no object of its list is
+    // touched.
+    if let Some(reason) = engine_assume_refusal(&**engine, &submitted.role_arn) {
+        return fail_with(
+            &state,
+            account_id,
+            job_id,
+            ASSUME_ROLE_FAILURE_CODE,
+            &reason,
+            Some(0),
+        );
+    }
 
     let client = s3_client(callback, region);
     let action = match action_of(&submitted.operation) {
@@ -219,10 +269,7 @@ async fn run<Eng: Send + Sync + 'static>(
         // so the job did not do all it was created to do.
         Some(reason) => {
             job.status = job_status(JOB_STATUS_FAILED);
-            job.failures.push(JobFailure {
-                failure_code: Some(JOB_FAILURE_CODE.to_string()),
-                failure_reason: Some(reason),
-            });
+            job.failures.push(job_failure(JOB_FAILURE_CODE, &reason));
         }
     }
 }
@@ -255,6 +302,22 @@ fn fail(
     job_id: &str,
     reason: &str,
 ) {
+    fail_with(state, account_id, job_id, JOB_FAILURE_CODE, reason, None);
+}
+
+/// [`fail`] with the `FailureCode` `code` rather than this run's default one and
+/// with `tasks` accounted for in `ProgressSummary`, for a failure of a KIND the
+/// service names: a job whose role could not be assumed is refused by an
+/// identity before its object list is ever read, so its run accounts for the
+/// tasks it carried out — none.
+fn fail_with(
+    state: &::engine::ServiceState<ComAmazonawsS3controlAwss3controlservicev20180820State>,
+    account_id: &str,
+    job_id: &str,
+    code: &str,
+    reason: &str,
+    tasks: Option<i64>,
+) {
     let mut store = state.lock();
     let Some(job) = store.job_mut(account_id, job_id) else {
         return;
@@ -265,10 +328,32 @@ fn fail(
     job.status = job_status(JOB_STATUS_FAILED);
     job.status_due_at = None;
     job.termination_date = Some(::aws_smithy_types::DateTime::from(SystemTime::now()));
-    job.failures.push(JobFailure {
-        failure_code: Some(JOB_FAILURE_CODE.to_string()),
-        failure_reason: Some(reason.to_string()),
-    });
+    if let Some(tasks) = tasks {
+        job.total_tasks = Some(tasks);
+    }
+    job.failures.push(job_failure(code, reason));
+}
+
+/// One `JobFailure` as `FailureReasons` reports it, with both of its members
+/// inside the lengths the model declares for them
+/// ([`FAILURE_CODE_LENGTH_MAX`], [`FAILURE_REASON_LENGTH_MAX`]).
+///
+/// Every failure this run records is built here, so a reason built from values a
+/// request named is a legal value of the member however long those values are,
+/// and no write of that member carries a bound of its own.
+fn job_failure(code: &str, reason: &str) -> JobFailure {
+    JobFailure {
+        failure_code: Some(within(code, FAILURE_CODE_LENGTH_MAX)),
+        failure_reason: Some(within(reason, FAILURE_REASON_LENGTH_MAX)),
+    }
+}
+
+/// `value` cut to at most `characters` characters, on a character boundary.
+pub(super) fn within(value: &str, characters: usize) -> String {
+    match value.char_indices().nth(characters) {
+        None => value.to_string(),
+        Some((cut, _)) => value[..cut].to_string(),
+    }
 }
 
 /// What a submitted job asked for, copied out from under the store's guard so
@@ -277,6 +362,8 @@ fn fail(
 struct Submitted {
     /// The one action the job runs on every object of its list.
     operation: JobOperation,
+    /// The role the job's work is carried out as.
+    role_arn: String,
     /// The manifest the create named, if it named one rather than a generator.
     manifest: Option<JobManifest>,
     /// The generator the create named, if it named one rather than a manifest.
@@ -290,6 +377,7 @@ impl Submitted {
     fn of(job: &JobRecord) -> Self {
         Self {
             operation: job.operation.clone(),
+            role_arn: job.role_arn.clone(),
             manifest: job.manifest.clone(),
             manifest_generator: job.manifest_generator.clone(),
             report: job.report.clone(),

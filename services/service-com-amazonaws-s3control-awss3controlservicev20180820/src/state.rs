@@ -34,6 +34,9 @@ pub mod access_point_routes;
 /// derivations the worker below runs over, held apart from it because they are
 /// pure functions of a manifest, a filter and a set of task outcomes.
 pub mod batch_job_plan;
+/// Whether S3 Batch Operations can assume the role a job's tasks run as, read
+/// from the account's own IAM records.
+pub mod batch_job_role;
 /// Running a submitted S3 Batch Operations job's tasks, off the response path.
 pub mod batch_job_worker;
 /// Where a bucket this service associates actually lives, read from the object
@@ -521,9 +524,10 @@ pub const JOB_STATUS_PAUSED: &str = "Paused";
 /// itself did what it was created to do.
 pub const JOB_STATUS_COMPLETE: &str = "Complete";
 
-/// `JobStatus` of a job that could not be run at all: the manifest could not be
-/// read, or the action is one this emulator does not carry out. What stopped it
-/// is reported in `JobDescriptor$FailureReasons`.
+/// `JobStatus` of a job that could not be run at all: its role could not be
+/// assumed, the manifest could not be read, or the action is one this emulator
+/// does not carry out. What stopped it is reported in
+/// `JobDescriptor$FailureReasons`.
 pub const JOB_STATUS_FAILED: &str = "Failed";
 
 /// The `JobStatus` values a job has ENDED in: nothing moves a job out of one of

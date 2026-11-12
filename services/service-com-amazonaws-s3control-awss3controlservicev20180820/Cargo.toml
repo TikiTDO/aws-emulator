@@ -16,6 +16,12 @@ service-common = { path = "../common" }
 # THAT service's bucket store (`state::change_bucket_tags`) instead of holding a
 # second copy here.
 service-com-amazonaws-s3-amazons3 = { workspace = true }
+# IAM holds the account's roles, and an S3 Batch Operations job's tasks are
+# carried out AS the job's `RoleArn` — so the job's run reads that role's trust
+# document out of IAM's OWN state in the same shared engine
+# (`state::batch_job_role`), the way every service with those records at hand
+# reads them, rather than keeping a second copy of a role here.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }
 aws-smithy-schema-server = { workspace = true }
@@ -52,6 +58,12 @@ percent-encoding = "2"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
+
+[dev-dependencies]
+# IAM is mounted beside Amazon S3 and S3 Control on one engine in the batch-job
+# role suite, and the roles that suite names are created through IAM's own
+# operations, over this client.
+aws-sdk-iam = { version = "1", default-features = false }
 
 [lints]
 workspace = true
