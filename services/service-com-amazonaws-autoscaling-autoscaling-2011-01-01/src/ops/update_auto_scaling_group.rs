@@ -640,6 +640,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // further call from anybody. The store's lock is released first: the pump takes it
         // itself.
         drop(state);
+        // The instances this update launched or scaled in are targets of the target groups
+        // the group is attached to, so the registrations follow its capacity.
+        crate::state::elbv2_targets::settle_group(&*self.engine, &name);
         crate::state::drive_lifecycle_clock(ctx, &self.engine);
         Ok(UpdateAutoScalingGroupOutput)
     }

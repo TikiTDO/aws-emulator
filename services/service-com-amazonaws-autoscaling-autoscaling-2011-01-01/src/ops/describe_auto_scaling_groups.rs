@@ -359,16 +359,25 @@ fn group_view(group: &crate::state::StoredGroup, include_instances: bool) -> Aut
         default_cooldown: group.default_cooldown,
         availability_zones: group.availability_zones.clone(),
         availability_zone_ids: group.availability_zone_ids.clone(),
-        load_balancer_names: group.load_balancer_names.clone(),
-        target_group_ar_ns: group.target_group_arns.clone(),
+        // A collection of the group is reported as a LIST, empty when the group holds
+        // nothing in it: a client reads `TargetGroupARNs` or `LoadBalancerNames` off the
+        // group it describes, and an absent member would make "attached to nothing"
+        // indistinguishable from a group whose attachments this service does not report.
+        load_balancer_names: Some(group.load_balancer_names.clone().unwrap_or_default()),
+        target_group_ar_ns: Some(group.attached_target_groups().to_vec()),
         health_check_type: group.health_check_type.clone(),
         health_check_grace_period: group.health_check_grace_period,
         instances,
         created_time: crate::state::to_date_time(group.created_time),
-        suspended_processes: None,
+        // No process of a group can be suspended and no metric collection enabled in this
+        // emulator (`SuspendProcesses` and `EnableMetricsCollection` are scaffold stubs,
+        // each owned by its own issue), so every group holds NONE of either — which is an
+        // empty list, on the same footing as its attachments above, rather than an absent
+        // member.
+        suspended_processes: Some(Vec::new()),
         placement_group: group.placement_group.clone(),
         vpc_zone_identifier: group.vpc_zone_identifier.clone(),
-        enabled_metrics: None,
+        enabled_metrics: Some(Vec::new()),
         status: group.status.clone(),
         tags: Some(
             group
@@ -393,7 +402,7 @@ fn group_view(group: &crate::state::StoredGroup, include_instances: bool) -> Aut
         context: group.context.clone(),
         desired_capacity_type: group.desired_capacity_type.clone(),
         default_instance_warmup: group.default_instance_warmup,
-        traffic_sources: group.traffic_sources.clone(),
+        traffic_sources: Some(group.traffic_sources.clone().unwrap_or_default()),
         instance_maintenance_policy: group.instance_maintenance_policy.clone(),
         deletion_protection: group.deletion_protection.clone(),
         availability_zone_distribution: group.availability_zone_distribution.clone(),

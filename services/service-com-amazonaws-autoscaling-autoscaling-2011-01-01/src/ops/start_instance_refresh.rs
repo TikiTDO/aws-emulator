@@ -321,6 +321,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // with no further call from anybody. The store's lock is released first: the pump
         // takes it itself.
         drop(state);
+        // A replacement this refresh has already made is an instance of the group like any
+        // other, so the group's target registrations follow it.
+        crate::state::elbv2_targets::settle_group(&*self.engine, &name);
         crate::state::drive_lifecycle_clock(ctx, &self.engine);
         Ok(StartInstanceRefreshOutput {
             instance_refresh_id: Some(instance_refresh_id),

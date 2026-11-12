@@ -33,6 +33,11 @@ uuid = { version = "1", features = ["v4"] }
 # from EC2's own state (`state::ec2_subnets`) rather than asked of the caller. It also
 # holds the account's launch templates, which a group launches its instances from.
 service-com-amazonaws-ec2-amazonec2 = { workspace = true }
+# The Elastic Load Balancing v2 store holds the target groups a group is attached to and the
+# targets registered with them: an instance of an attached group is registered as a target
+# there, through that service's own seam, so `DescribeTargetHealth` reports it
+# (`state::elbv2_targets`).
+service-com-amazonaws-elasticloadbalancingv2-elasticloadbalancing-v10 = { workspace = true }
 # The account's own IAM store holds the identity-based policies and the permissions
 # boundary in force on the principal a request speaks for, which is what the authorization
 # gate decides an account-wide read from (`service::authorization`). A launch template's

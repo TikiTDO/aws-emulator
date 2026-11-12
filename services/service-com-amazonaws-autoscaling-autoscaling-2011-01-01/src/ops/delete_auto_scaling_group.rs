@@ -328,6 +328,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // wake-up. The store's lock is released first: the pump takes it itself.
         drop(state);
         crate::state::scaling_policies::remove_policy_alarms(&*self.engine, &retired_policies);
+        // The group holds no instance any more, so the targets its instances occupied in the
+        // target groups it was attached to are deregistered — the reconcile claims them by
+        // the name the group had, so a group this call removed drains them too.
+        crate::state::elbv2_targets::settle_group(&*self.engine, &name);
         crate::state::drive_lifecycle_clock(ctx, &self.engine);
         Ok(DeleteAutoScalingGroupOutput)
     }

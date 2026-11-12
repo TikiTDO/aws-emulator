@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op AttachLoadBalancerTargetGroups
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `AttachLoadBalancerTargetGroups`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`AttachLoadBalancerTargetGroups::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Attaches target groups to one Auto Scaling group, as a WHOLE: the attachment is
+//! additive — "this operation is additive and does not detach existing target groups or
+//! Classic Load Balancers from the Auto Scaling group" — so the ARNs the request names join
+//! the ones the group already holds, each held once however many times it is named, in the
+//! order the group came to hold them.
+//!
+//! An attachment is what makes the group's instances targets of that target group:
+//! "instances are registered as targets in a target group, and traffic is routed to the
+//! target group". So this call also brings the Elastic Load Balancing v2 registrations the
+//! group owes in line with its new attachments ([`crate::state::elbv2_targets`]), which is
+//! what `DescribeTargetHealth` then reports.
 //!
 //! ## Shape of an operation
 //!
@@ -158,18 +161,74 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `AttachLoadBalancerTargetGroups` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(AttachLoadBalancerTargetGroupsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("AttachLoadBalancerTargetGroups"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(
+                AttachLoadBalancerTargetGroupsErrorModeled::ResourceContentionFault(
+                    ResourceContentionFault {
+                        message: Some(
+                            "the Auto Scaling store is not mounted on this engine".to_string(),
+                        ),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        let name = input.auto_scaling_group_name;
+        let requested = input.target_group_ar_ns;
+        // The member's own documented bound, which the model does not express as a
+        // length, so it is checked here rather than at the boundary — the same bound, and
+        // the same refusal, the detach of a target group is held to.
+        if requested.len() > crate::state::MAX_TARGET_GROUPS_PER_CALL {
+            return Err(crate::scaffolded::Scaffolded::validation_error(
+                crate::state::too_many_target_groups_message(),
+            ));
+        }
+
+        let now = ::std::time::SystemTime::now();
+        {
+            let mut state = state.lock();
+            state.materialize_due(&*self.engine, now);
+
+            let Some(group) = state.groups.get_mut(&name) else {
+                return Err(crate::scaffolded::Scaffolded::validation_error(
+                    crate::state::absent_group_message(&name),
+                ));
+            };
+
+            // Additive, and each target group held ONCE: an ARN the group already holds
+            // keeps the position it has, so attaching one twice leaves the attachments
+            // exactly as one call did.
+            let mut attached: Vec<String> = group.attached_target_groups().to_vec();
+            for arn in requested {
+                if !attached.contains(&arn) {
+                    attached.push(arn);
+                }
+            }
+            // What the group would then HOLD, which is what this process bounds: the
+            // per-call bound above says nothing about a run of calls, and every instance of
+            // the group owes a registration in every attachment. The ceiling is this
+            // service's own, so it is refused the way every refusal this operation models no
+            // error for is — `ValidationError`; `CreateAutoScalingGroup`, which models
+            // `LimitExceededFault`, answers the same message under that error.
+            if crate::state::attachment_count_past_ceiling(&[attached.len()]).is_some() {
+                return Err(crate::scaffolded::Scaffolded::validation_error(
+                    crate::state::too_many_attached_target_groups_message(),
+                ));
+            }
+            group.target_group_arns = Some(attached);
+        }
+
+        crate::state::audit(
+            ctx.parts(),
+            "AttachLoadBalancerTargetGroups",
+            &name,
+            "target groups attached",
+        );
+        // The instances of the group are targets of what it is now attached to, which is
+        // the whole point of the attachment. The store's lock is released above: the
+        // reconcile takes it itself.
+        crate::state::elbv2_targets::settle_group(&*self.engine, &name);
+        Ok(AttachLoadBalancerTargetGroupsOutput {})
     }
 }

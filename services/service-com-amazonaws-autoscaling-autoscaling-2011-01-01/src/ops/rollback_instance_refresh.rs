@@ -204,6 +204,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     &name,
                     "instance refresh rollback started",
                 );
+                crate::state::elbv2_targets::settle_group(&*self.engine, &name);
                 crate::state::drive_lifecycle_clock(ctx, &self.engine);
                 Ok(RollbackInstanceRefreshOutput {
                     instance_refresh_id: Some(instance_refresh_id),

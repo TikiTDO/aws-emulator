@@ -712,6 +712,13 @@ pub fn drive_lifecycle_clock<Eng: Send + Sync + 'static>(
                 .clamp(MIN_CLOCK_WAIT, MAX_CLOCK_WAIT);
             ::tokio::time::sleep(wait).await;
             state.lock().materialize_due(&*engine, SystemTime::now());
+            // The instances this wake-up moved are targets of the target groups their group
+            // is attached to: one brought into service is registered and one the clock
+            // retired has left the group, with no further call from anybody. A wake-up can
+            // have moved an instance of any group, so every group is settled — one group at
+            // a time ([`super::elbv2_targets::settle_every_group`]). The guard above is a
+            // temporary, so none is held here.
+            super::elbv2_targets::settle_every_group(&*engine);
             publish_pending(&callback, &*engine).await;
         }
         if capped {

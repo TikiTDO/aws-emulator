@@ -12,7 +12,10 @@
 //! That reader is still a scaffold stub, owned by its own issue, so this handler drops
 //! the attachment from the group's own `TargetGroupARNs` — the collection
 //! `DescribeAutoScalingGroups` reports — rather than storing a transient state no
-//! implemented operation could report.
+//! implemented operation could report. The instances themselves do deregister: the
+//! group's Elastic Load Balancing v2 registrations are brought in line with what it is
+//! still attached to ([`crate::state::elbv2_targets`]), so a detached target group drains
+//! them exactly as `DeregisterTargets` does.
 //!
 //! ## Shape of an operation
 //!
@@ -211,6 +214,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &name,
             "target groups detached",
         );
+        // A target group the group is no longer attached to deregisters the group's
+        // instances — "when you detach a target group, it enters the Removing state while
+        // deregistering the instances in the group". The store's lock is released first:
+        // the reconcile takes it itself.
+        drop(state);
+        crate::state::elbv2_targets::settle_group(&*self.engine, &name);
         Ok(DetachLoadBalancerTargetGroupsOutput {})
     }
 }

@@ -278,6 +278,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // lifecycle events that report them are published as they fall due, with no further
         // call from anybody. The store's lock is released first: the pump takes it itself.
         drop(state);
+        // Those instances are also targets of the target groups the group is attached to, so
+        // one launched is registered and one scaled in deregisters.
+        crate::state::elbv2_targets::settle_group(&*self.engine, &name);
         crate::state::drive_lifecycle_clock(ctx, &self.engine);
         Ok(SetDesiredCapacityOutput)
     }

@@ -47,6 +47,8 @@ mod launch_template_specifications;
 mod legacy_target_group_detach;
 #[path = "all/lifecycle_hooks.rs"]
 mod lifecycle_hooks;
+#[path = "all/load_balancer_target_registration.rs"]
+mod load_balancer_target_registration;
 #[path = "all/metric_collection_catalog.rs"]
 mod metric_collection_catalog;
 #[path = "all/reference_data_catalogs.rs"]

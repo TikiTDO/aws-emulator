@@ -481,6 +481,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        // The load-balancer attachments the group would hold. Every instance of the group
+        // owes a registration in every one of them ([`crate::state::elbv2_targets`]), so the
+        // count is bounded here — the group's size is bounded just above for the same
+        // reason — and past the ceiling the create answers the modelled `LimitExceededFault`
+        // the service answers a quota with.
+        if crate::state::attachment_count_past_ceiling(&[
+            input.target_group_ar_ns.as_ref().map_or(0, Vec::len),
+            input.traffic_sources.as_ref().map_or(0, Vec::len),
+        ])
+        .is_some()
+        {
+            return Err(CreateAutoScalingGroupErrorModeled::LimitExceededFault(
+                LimitExceededFault {
+                    message: Some(crate::state::too_many_attached_target_groups_message()),
+                },
+            )
+            .into());
+        }
+
         // The lifecycle hooks the request carries. A specification creates ONE hook of
         // this group, through the same upsert `PutLifecycleHook` writes, so a hook a
         // group is created with and a hook put onto it afterwards are taken against the
@@ -705,6 +724,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // that report them are published as they fall due, with no further call from
         // anybody. The store's lock is released first: the pump takes it itself.
         drop(state);
+        // Those instances are targets of the target groups the group was created attached
+        // to: "instances are registered as targets in a target group, and traffic is routed
+        // to the target group".
+        crate::state::elbv2_targets::settle_group(&*self.engine, &name);
         crate::state::drive_lifecycle_clock(ctx, &self.engine);
         Ok(CreateAutoScalingGroupOutput)
     }

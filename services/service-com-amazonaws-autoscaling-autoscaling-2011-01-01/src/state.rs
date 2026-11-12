@@ -56,6 +56,11 @@ pub mod ec2_subnets;
 /// the account, not one of this service's own invention.
 pub mod ec2_instances;
 
+/// The Elastic Load Balancing v2 targets a group's instances occupy in the target groups
+/// it is attached to, in that service's own store: an instance of an attached group is a
+/// target of that target group, not a reference this service keeps to itself.
+pub mod elbv2_targets;
+
 /// The IAM instance profile the launch templates of a group name, resolved against the
 /// account's own IAM store: a reference Amazon EC2 stores verbatim and this service, as
 /// the consumer of the template, is what resolves.
@@ -311,6 +316,21 @@ pub const ACCOUNT_MAX_CALL_RATE_BUCKET_SIZE: i32 = 30;
 /// target groups." The member carries no modelled length, so the bound is the
 /// service's own and is checked by the handler.
 pub const MAX_TARGET_GROUPS_PER_CALL: usize = 10;
+
+/// The most load-balancer attachments this emulator will hold for ONE Auto Scaling group —
+/// its `TargetGroupARNs`, and the traffic sources naming a target group — however many calls
+/// put them there.
+///
+/// A BOUND ON THIS PROCESS, like [`MAX_GROUP_CAPACITY`], rather than a figure AWS documents:
+/// [`MAX_TARGET_GROUPS_PER_CALL`] bounds what ONE attach may name and nothing else, so a run
+/// of attaches would otherwise store caller-supplied ARNs on one group without limit, and
+/// every instance of the group owes a registration in every one of them
+/// ([`elbv2_targets`]) — the product is what has to be bounded, not either factor. Amazon
+/// EC2 Auto Scaling bounds the same growth with an adjustable account quota and answers
+/// `LimitExceededFault` past it; this ceiling plays that role, at a size an in-memory
+/// emulator can hold, and well above the per-call bound so no single documented call is
+/// refused by it.
+pub const MAX_TARGET_GROUPS_PER_GROUP: usize = 50;
 
 /// The most scaling activities this service retains; appending past it drops the
 /// oldest.
@@ -2077,6 +2097,29 @@ pub fn max_below_min_message(max_size: i32, min_size: i32) -> String {
 /// the refusal can name the offending value.
 pub fn size_past_ceiling(sizes: &[i32]) -> Option<i32> {
     sizes.iter().copied().find(|size| *size > MAX_GROUP_CAPACITY)
+}
+
+/// The first of `counts` past [`MAX_TARGET_GROUPS_PER_GROUP`], if any.
+///
+/// Every operation that adds to a group's load-balancer attachments checks the count it
+/// would leave the group holding through this, so neither one request nor a run of them can
+/// store more attachments than this process holds a group to, and the refusal can name the
+/// count that missed the ceiling.
+pub fn attachment_count_past_ceiling(counts: &[usize]) -> Option<usize> {
+    counts
+        .iter()
+        .copied()
+        .find(|count| *count > MAX_TARGET_GROUPS_PER_GROUP)
+}
+
+/// The message a request that would leave one group holding more load-balancer attachments
+/// than [`MAX_TARGET_GROUPS_PER_GROUP`] is refused with, in the same shape this service
+/// states its other per-collection ceilings in: the fixed sentence and the ceiling.
+pub fn too_many_attached_target_groups_message() -> String {
+    format!(
+        "You have already reached the limit of {MAX_TARGET_GROUPS_PER_GROUP} target groups per \
+         Auto Scaling group"
+    )
 }
 
 /// This service's store in the shared engine: call it with a handler's `&*self.engine`.
