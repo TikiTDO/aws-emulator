@@ -213,6 +213,8 @@ mod integration_table_properties;
 mod job_bookmarks;
 #[path = "all/job_capacity_refusal.rs"]
 mod job_capacity_refusal;
+#[path = "all/job_definition_listing.rs"]
+mod job_definition_listing;
 #[path = "all/job_deletion.rs"]
 mod job_deletion;
 #[path = "all/job_glue_version_pattern.rs"]
