@@ -181,13 +181,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if store.data_cells_filters.contains_key(&key) {
             return Err(CreateDataCellsFilterErrorModeled::AlreadyExistsException(
                 AlreadyExistsException {
-                    message: Some(format!(
-                        "Data cells filter {} already exists on table {}.{} in catalog {}",
-                        filter.name,
-                        filter.database_name,
-                        filter.table_name,
-                        filter.table_catalog_id
-                    )),
+                    message: Some(crate::state::FILTER_ALREADY_EXISTS.to_string()),
                 },
             )
             .into());
@@ -211,7 +205,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         }
 
-        store.data_cells_filters.insert(key, filter.clone());
+        store.data_cells_filters.insert(
+            key,
+            // The version is the service's: a create assigns the first one, whatever
+            // `VersionId` the request carried.
+            crate::state::stored_data_cells_filter(
+                filter,
+                crate::state::FIRST_FILTER_VERSION.to_string(),
+            ),
+        );
 
         // The audit record for a state change: who, what, where, outcome. No secret and
         // no credential material — the access key id identifies the caller the way the

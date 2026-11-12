@@ -170,10 +170,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .get(&input.resource_arn)
             .ok_or_else(|| {
                 DescribeResourceErrorModeled::EntityNotFoundException(EntityNotFoundException {
-                    message: Some(format!(
-                        "Resource {} is not registered",
-                        input.resource_arn
-                    )),
+                    message: Some(crate::state::RESOURCE_ENTITY_NOT_FOUND.to_string()),
                 })
             })?;
 

@@ -222,6 +222,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         }
 
+        // Lake Formation grants permissions TO a principal, so a grantee this account's
+        // IAM does not hold is a grant to nobody and is refused with nothing persisted.
+        // Resolved BEFORE this service's own lock is taken: the question travels over the
+        // in-process callback, and holding a store across it is what would make another
+        // handler's lookup wait on this one.
+        if let Some(unresolved) =
+            crate::state::unresolved_grant_principal(ctx, principal).await
+        {
+            return Err(invalid(unresolved));
+        }
+
         crate::state::validate_resource(&input.resource).map_err(invalid)?;
 
         // `PermissionList` carries no length constraint, so the boundary validator admits

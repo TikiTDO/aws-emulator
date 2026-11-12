@@ -758,6 +758,8 @@ mod lambda_execution_role_session_identity;
 // the head of this file or in its appended tail: both of those are where concurrently
 #[path = "all/lakeformation_catalog_resource_resolution.rs"]
 mod lakeformation_catalog_resource_resolution;
+#[path = "all/lakeformation_grant_principal_resolution.rs"]
+mod lakeformation_grant_principal_resolution;
 // tail is where every concurrently landing router suite appends its line, so a
 // declaration placed there conflicts with every one of them. (The build script requires
 // every suite under `tests/all/` to be declared in this file, so it cannot live anywhere

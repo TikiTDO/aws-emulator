@@ -331,6 +331,9 @@ pub struct TransactionDescription {
 #[smithy_macros::smithy(shape = "com.amazonaws.lakeformation#DataLakeSettings")]
 #[derive(Debug, Clone, Default)]
 pub struct DataLakeSettings {
+    pub disallow_grant_on_iam_allowed_principals: Option<bool>,
+    pub set_source_identity: Option<bool>,
+    pub whitelisted_for_external_data_filtering: Option<Vec<DataLakePrincipal>>,
     pub data_lake_admins: Option<Vec<DataLakePrincipal>>,
     pub read_only_admins: Option<Vec<DataLakePrincipal>>,
     pub create_database_default_permissions: Option<Vec<PrincipalPermissions>>,

@@ -112,20 +112,28 @@ async fn create(router: &MultiServiceRouter, catalog: Option<&str>, key: &str, v
 
 #[tokio::test]
 async fn create_then_get_reads_the_stored_values_back() {
-    // Rows differ along what the rule generalises over: the number of values, their
-    // order, repeated values, the character classes `LFTagKey` / `LFTagValue` admit, and
-    // the modelled upper bound of `TagValueList` (len 1..50).
+    // Rows differ along what the rule generalises over: the number of values, the order
+    // they are supplied in, repeated values, the character classes `LFTagKey` /
+    // `LFTagValue` admit, and the modelled upper bound of `TagValueList` (len 1..50).
+    // A tag's values are a SET, reported in the order the tag was created with them.
     let fifty: Vec<String> = (0..50).map(|i| format!("v{i}")).collect();
     let fifty: Vec<&str> = fifty.iter().map(String::as_str).collect();
     let cases: Vec<(&str, Vec<&str>, Vec<&str>)> = vec![
         ("environment", vec!["dev", "prod"], vec!["dev", "prod"]),
         ("single", vec!["only"], vec!["only"]),
-        // Values are a set: a repeated value is stored once, in first-seen order.
+        // Values are a set: a repeated value is stored once, at the position it was
+        // first supplied at.
         ("repeated", vec!["b", "a", "b"], vec!["b", "a"]),
-        // Order is the order given, not a sorted order.
+        // The order is the order given, not a sorted order.
         ("ordered", vec!["z", "m", "a"], vec!["z", "m", "a"]),
         // `LFTagValue` is len 0..256, so the empty string is a legal value.
         ("empty-value", vec![""], vec![""]),
+        ("empty-value-among-others", vec!["b", "", "a"], vec!["b", "", "a"]),
+        (
+            "shared-prefix",
+            vec!["tier-2", "tier-10", "tier-1"],
+            vec!["tier-2", "tier-10", "tier-1"],
+        ),
         // `LFTagKey` admits letters, marks, numbers and `_.:/=+-@%`.
         ("cost.centre:eu/west=1+a-b@c%d", vec!["x"], vec!["x"]),
         // A key outside ASCII: `\p{L}` is any letter.
@@ -166,6 +174,8 @@ async fn create_then_get_reads_the_stored_values_back() {
 async fn create_refuses_a_tag_key_that_already_exists_in_the_catalog() {
     // The key is unique per CATALOG, so the same key in another catalog is a new tag.
     let foreign = "210987654321";
+    // The third element is what the tag is created with and the fourth what the refused
+    // repeat names; the stored set survives in the order it was created with.
     let cases = [
         (None, "environment", vec!["dev"], vec!["prod"]),
         (None, "team", vec!["red", "blue"], vec!["green"]),
@@ -498,6 +508,8 @@ async fn update_merges_additions_and_removals_into_the_stored_set() {
             vec!["dev"],
             vec!["prod", "staging"],
         ),
+        // An addition goes on the end of the set, in the order it was named.
+        ("reordered", vec!["m"], vec!["z", "a"], vec![], vec!["m", "z", "a"]),
         ("add-only", vec!["a"], vec!["b", "c"], vec![], vec!["a", "b", "c"]),
         ("delete-only", vec!["a", "b", "c"], vec![], vec!["b"], vec!["a", "c"]),
         // An addition already stored changes nothing: the values are a set.

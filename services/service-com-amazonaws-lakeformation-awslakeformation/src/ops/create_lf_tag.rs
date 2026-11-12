@@ -169,10 +169,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut store = state.lock();
         if store.holds_lf_tag(&catalog_id, &input.tag_key) {
             return Err(CreateLFTagErrorModeled::InvalidInputException(InvalidInputException {
-                message: Some(format!(
-                    "Tag key {} already exists in catalog {catalog_id}",
-                    input.tag_key
-                )),
+                message: Some(crate::state::TAG_KEY_ALREADY_EXISTS.to_string()),
             })
             .into());
         }

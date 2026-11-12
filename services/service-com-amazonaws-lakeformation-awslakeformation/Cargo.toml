@@ -27,6 +27,9 @@ hex = { workspace = true }
 # and tables, which Glue owns, so their existence is read from Glue's state in the shared
 # engine rather than kept a second time here.
 service-com-amazonaws-glue-awsglue = { workspace = true }
+# `iam_principal`: the tree's one resolution of a caller-supplied IAM principal against
+# this account's IAM, which `GrantPermissions` resolves its grantee through.
+service-common = { path = "../common" }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

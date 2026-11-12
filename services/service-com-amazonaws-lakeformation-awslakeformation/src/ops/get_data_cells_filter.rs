@@ -173,10 +173,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Reporting only: the response is the stored filter, and nothing is written.
         let filter = store.data_cells_filters.get(&key).ok_or_else(|| {
             GetDataCellsFilterErrorModeled::EntityNotFoundException(EntityNotFoundException {
-                message: Some(format!(
-                    "Data cells filter {} not found on table {}.{} in catalog {}",
-                    input.name, input.database_name, input.table_name, input.table_catalog_id
-                )),
+                message: Some(crate::state::FILTER_ENTITY_NOT_FOUND.to_string()),
             })
         })?;
 

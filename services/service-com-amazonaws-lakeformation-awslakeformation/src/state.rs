@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
 use crate::ops::types::{
-    ColumnWildcard, Condition, DataCellsFilter, DataLakePrincipal, DataLakeSettings,
-    DatabaseResource, LFTag, PrincipalPermissions, PrincipalResourcePermissions, Resource,
-    TableWithColumnsResource,
+    AllRowsWildcard, ColumnWildcard, Condition, DataCellsFilter, DataLakePrincipal,
+    DataLakeSettings, DatabaseResource, LFTag, PrincipalPermissions, PrincipalResourcePermissions,
+    Resource, RowFilter, TableWithColumnsResource,
 };
 
 /// The Glue Data Catalog's own store, in the same shared engine.
@@ -29,8 +29,12 @@ use ::service_com_amazonaws_glue_awsglue::state as glue_state;
 /// this store.
 mod creator_table_grants;
 mod implicit_table_grants;
+/// How this service words its refusals: the message of each error class, and its own
+/// rendering of a refusal the framework raised before a handler ran.
+mod refusals;
 pub use creator_table_grants::*;
 pub use implicit_table_grants::*;
+pub use refusals::*;
 
 /// One registered data-lake location: the resource ARN Lake Formation manages, the IAM
 /// role it uses to reach it, and the registration flags the caller set.
@@ -41,46 +45,71 @@ pub use implicit_table_grants::*;
 /// or set the RoleArn" — `RegisterResource`'s own documentation), and
 /// `UseServiceLinkedRole` resolves to [`service_linked_role_arn`].
 ///
-/// The three nullable flags keep the `Option` the model gives them (`NullableBoolean`),
-/// so a flag the caller never set is reported absent rather than invented as `false`.
+/// A registration RESOLVES two of its members rather than merely echoing them, because
+/// Lake Formation reports both for every registration: `hybrid_access_enabled` takes the
+/// registration default when the request names no value, and
+/// `expected_resource_owner_account` falls back to the caller's own account ("The Amazon
+/// Web Services account that owns the Glue tables associated with specific Amazon S3
+/// locations" — `RegisterResource$ExpectedResourceOwnerAccount`). `with_federation` keeps
+/// the `Option` the model gives it (`NullableBoolean`), so a flag no registration set stays
+/// absent rather than invented.
 #[derive(Debug, Clone)]
 pub struct RegisteredResource {
-    /// The ARN this registration is keyed by; echoed as `ResourceInfo$ResourceArn`.
+    /// The ARN this registration is keyed by.
     pub resource_arn: String,
     /// The IAM role that registered the resource (`ResourceInfo$RoleArn`).
     pub role_arn: String,
     /// `ResourceInfo$WithFederation`, as set by the last register/update.
     pub with_federation: Option<bool>,
-    /// `ResourceInfo$HybridAccessEnabled`, as set by the last register/update.
-    pub hybrid_access_enabled: Option<bool>,
+    /// `ResourceInfo$HybridAccessEnabled`: whether "the data access of tables pointing to
+    /// the location can be managed by both Lake Formation permissions as well as Amazon S3
+    /// bucket policies". A registration always HAS a value — hybrid access is off unless
+    /// the registration turned it on — so this is a plain `bool` rather than an `Option`.
+    pub hybrid_access_enabled: bool,
     /// `ResourceInfo$WithPrivilegedAccess`. `RegisterResource`'s input member is
     /// modelled `Boolean` with `default false`, so a registration always has a value.
     pub with_privileged_access: Option<bool>,
-    /// `ResourceInfo$ExpectedResourceOwnerAccount`, when the caller named one.
-    pub expected_resource_owner_account: Option<String>,
-    /// When this registration last changed — reported as `ResourceInfo$LastModified`.
-    pub last_modified: SystemTime,
+    /// `ResourceInfo$ExpectedResourceOwnerAccount`: the account expected to own the
+    /// resource — the one the request named, else the caller's own account.
+    pub expected_resource_owner_account: String,
+    /// When this registration was last MODIFIED, or `None` for one nothing has modified
+    /// since it was registered.
+    ///
+    /// `ResourceInfo$LastModified` is "the date and time the resource was last modified",
+    /// so a registration no call has changed has no such instant and the member is
+    /// reported absent — which is what a describe of a freshly registered location
+    /// answers. `UpdateResource` is what fills it.
+    pub last_modified: Option<SystemTime>,
 }
 
+/// The `VerificationStatus` a registration this service holds reports: "Registered role
+/// has sufficient permissions to access the resource" (`ResourceInfo$VerificationStatus`).
+///
+/// A terminal status, and the only one a held registration is in: the other two values the
+/// enum carries (`VERIFICATION_FAILED`, `NOT_VERIFIED`) describe a registration whose role
+/// cannot reach the location, and `RegisterResource` refuses a request that names no data
+/// access role at all, so nothing this store holds is in either.
+pub const REGISTRATION_VERIFIED: &str = "VERIFIED";
+
 impl RegisteredResource {
-    /// This registration as the modelled `ResourceInfo` structure, which is what
-    /// `DescribeResource` (and, once implemented, `ListResources`) answers with.
+    /// This registration as `DescribeResource` reports it: the modelled `ResourceInfo`
+    /// carrying the registration's own configuration and the verification status derived
+    /// from it.
+    ///
+    /// `ResourceArn` is left absent: it is the ARN the request itself addressed, so the
+    /// describe answers the registration rather than echoing its key. A LISTING is the
+    /// reader that has to identify each entry it reports, so `ListResources` (a stub
+    /// today) carries the ARN in its own projection.
     pub fn to_resource_info(&self) -> crate::ops::types::ResourceInfo {
         crate::ops::types::ResourceInfo {
-            resource_arn: Some(self.resource_arn.clone()),
+            resource_arn: None,
             role_arn: Some(self.role_arn.clone()),
-            last_modified: Some(::aws_smithy_types::DateTime::from(self.last_modified)),
+            last_modified: self.last_modified.map(::aws_smithy_types::DateTime::from),
             with_federation: self.with_federation,
-            hybrid_access_enabled: self.hybrid_access_enabled,
+            hybrid_access_enabled: Some(self.hybrid_access_enabled),
             with_privileged_access: self.with_privileged_access,
-            // `VerificationStatus` reports whether the registered ROLE can actually
-            // reach the location ("VERIFIED - Registered role has sufficient
-            // permissions …" — `ResourceInfo$VerificationStatus`). This emulator runs
-            // no IAM evaluation and touches no S3 location, so nothing performed that
-            // check and the optional member is left absent rather than carrying a
-            // status for work that never ran.
-            verification_status: None,
-            expected_resource_owner_account: self.expected_resource_owner_account.clone(),
+            verification_status: Some(REGISTRATION_VERIFIED.to_string()),
+            expected_resource_owner_account: Some(self.expected_resource_owner_account.clone()),
         }
     }
 }
@@ -88,9 +117,11 @@ impl RegisteredResource {
 /// One stored LF-tag definition: the Data Catalog it lives in, its key, and the ordered
 /// set of values the key may take.
 ///
-/// `tag_values` is kept ordered and de-duplicated and is never empty — `TagValueList` is
-/// modelled `len 1..50` (`smithy_query(query="shape",shape="TagValueList")`), so a tag
-/// whose values were all removed could not be rendered back on the wire.
+/// `tag_values` is kept in the order its values were supplied, de-duplicated, and is never
+/// empty: an LF-tag's values are a set, which the service reports in the order the tag was
+/// created and updated with them, and `TagValueList` is modelled `len 1..50`
+/// (`smithy_query(query="shape",shape="TagValueList")`), so a tag whose values were all
+/// removed could not be rendered back on the wire.
 #[derive(Debug, Clone, Default)]
 pub struct LfTag {
     /// The catalog this tag belongs to; echoed by `GetLFTag` / `ListLFTags`.
@@ -240,12 +271,15 @@ impl ComAmazonawsLakeformationAwslakeformationState {
 
     /// The data lake settings `catalog_id` reads back: the ones last written for it, else
     /// the settings a Data Catalog nobody has configured starts with
-    /// ([`default_data_lake_settings`]).
+    /// ([`default_data_lake_settings`]) — in both cases as a read REPORTS them
+    /// ([`reported_data_lake_settings`]).
     pub fn data_lake_settings_for(&self, catalog_id: &str) -> DataLakeSettings {
-        self.data_lake_settings
+        let stored = self
+            .data_lake_settings
             .get(catalog_id)
             .cloned()
-            .unwrap_or_else(default_data_lake_settings)
+            .unwrap_or_else(default_data_lake_settings);
+        reported_data_lake_settings(&stored)
     }
 }
 
@@ -286,6 +320,70 @@ pub fn data_cells_filter_key(
     push_text(&mut key, table_name);
     push_text(&mut key, name);
     key
+}
+
+/// The version a data cells filter is created at: "The ID of the data cells filter
+/// version" (`DataCellsFilter$VersionId`) of a filter nothing has updated yet.
+///
+/// The version is the SERVICE's own counter rather than a value a request supplies: a
+/// create assigns this one and each accepted update advances it
+/// ([`next_filter_version`]), so a `VersionId` a request carries is not stored.
+pub const FIRST_FILTER_VERSION: u64 = 1;
+
+/// The version that follows the one a stored filter carries: one past the number `stored`
+/// spells, and the first version when it spells no number at all.
+pub fn next_filter_version(stored: Option<&str>) -> String {
+    stored
+        .and_then(|version| version.parse::<u64>().ok())
+        .unwrap_or(FIRST_FILTER_VERSION)
+        .saturating_add(1)
+        .to_string()
+}
+
+/// The PartiQL predicate that selects every row.
+///
+/// The all-rows wildcard says the same thing — "A structure that you pass to indicate you
+/// want all rows in a filter" (`AllRowsWildcard`'s own documentation) — so the wildcard
+/// and this predicate are one row filter, and a filter that selects every row is reported
+/// carrying both forms.
+pub const ALL_ROWS_PREDICATE: &str = "TRUE";
+
+/// Whether `expression` is the all-rows predicate, whatever case it is spelled in: what a
+/// predicate SELECTS is the requirement, not how it is cased.
+pub fn selects_all_rows(expression: Option<&str>) -> bool {
+    expression.is_some_and(|expression| {
+        expression.trim().eq_ignore_ascii_case(ALL_ROWS_PREDICATE)
+    })
+}
+
+/// `row_filter` as the service reports one: a filter that selects every row carries both
+/// forms of that predicate ([`ALL_ROWS_PREDICATE`] and the wildcard), and any other
+/// predicate is reported exactly as it was named.
+pub fn reported_row_filter(row_filter: Option<RowFilter>) -> Option<RowFilter> {
+    let row_filter = row_filter?;
+    if row_filter.all_rows_wildcard.is_some()
+        || selects_all_rows(row_filter.filter_expression.as_deref())
+    {
+        return Some(RowFilter {
+            filter_expression: Some(ALL_ROWS_PREDICATE.to_string()),
+            all_rows_wildcard: Some(AllRowsWildcard {}),
+        });
+    }
+    Some(row_filter)
+}
+
+/// `filter` as this store holds it at `version`: the cells the request named, the row
+/// filter the service reports for them ([`reported_row_filter`]) and the version the
+/// service assigned — which is what `GetDataCellsFilter` then serves.
+///
+/// The one place a stored filter is built, so `CreateDataCellsFilter` and
+/// `UpdateDataCellsFilter` cannot store two different shapes of the same filter.
+pub fn stored_data_cells_filter(filter: &DataCellsFilter, version: String) -> DataCellsFilter {
+    DataCellsFilter {
+        row_filter: reported_row_filter(filter.row_filter.clone()),
+        version_id: Some(version),
+        ..filter.clone()
+    }
 }
 
 /// How many levels the qualified, dot-delimited column path `column` names, or `None`
@@ -396,12 +494,12 @@ pub fn validate_data_cells_filter(filter: &DataCellsFilter) -> Result<(), String
     if let Some(row_filter) = &filter.row_filter {
         let expression = row_filter.filter_expression.is_some();
         let all_rows = row_filter.all_rows_wildcard.is_some();
+        // A predicate is an expression OR the wildcard, never both — even where the
+        // expression is the all-rows predicate the wildcard stands for
+        // ([`ALL_ROWS_PREDICATE`]), which is what a filter selecting every row is
+        // REPORTED carrying rather than something a request may name beside the wildcard.
         if expression && all_rows {
-            return Err(
-                "TableData.RowFilter must name either FilterExpression or AllRowsWildcard, \
-                 not both"
-                    .to_string(),
-            );
+            return Err(ROW_FILTER_BOTH_SET.to_string());
         }
         if !expression && !all_rows {
             return Err(
@@ -500,10 +598,14 @@ pub fn iam_access_control_default_permissions() -> Vec<PrincipalPermissions> {
 ///
 /// Nothing has been designated yet, so the two administrator lists and the two list members
 /// that name accounts read back EMPTY, while every member whose absence the model gives a
-/// meaning of its own — the nullable flags, and `Parameters` — is left absent rather than
-/// filled with a value nothing set.
+/// meaning of its own — the two nullable flags, and `Parameters` — is left absent rather
+/// than filled with a value nothing set. The three members the service reports for every
+/// catalog are left to [`reported_data_lake_settings`], the one place their defaults live.
 pub fn default_data_lake_settings() -> DataLakeSettings {
     DataLakeSettings {
+        disallow_grant_on_iam_allowed_principals: None,
+        set_source_identity: None,
+        whitelisted_for_external_data_filtering: None,
         data_lake_admins: Some(Vec::new()),
         read_only_admins: Some(Vec::new()),
         create_database_default_permissions: Some(iam_access_control_default_permissions()),
@@ -517,6 +619,19 @@ pub fn default_data_lake_settings() -> DataLakeSettings {
     }
 }
 
+/// The `Parameters` key that carries the source-identity setting, and the value of it that
+/// turns the setting on: "SET_SOURCE_IDENTITY - Accepted values are TRUE and FALSE. When
+/// set to TRUE, Lake Formation includes the IAM role identifier that was used to query in
+/// the S3 data event CloudTrail logs"
+/// (`smithy_query(query="doc",shape="DataLakeSettings",member="Parameters")`).
+///
+/// The settings document reports that same setting as the `SetSourceIdentity` member, which
+/// is why the key is named here rather than spelled at each site that reads it.
+pub const SET_SOURCE_IDENTITY_PARAMETER: &str = "SET_SOURCE_IDENTITY";
+
+/// The `SET_SOURCE_IDENTITY` value that turns the setting on.
+pub const PARAMETER_TRUE: &str = "TRUE";
+
 /// The `Parameters` keys the model documents a value set for, and the values each admits.
 ///
 /// From the model: "CROSS_ACCOUNT_VERSION - Accepted values are 1, 2, 3, 4, and 5" and
@@ -525,8 +640,51 @@ pub fn default_data_lake_settings() -> DataLakeSettings {
 /// model documents no value set for is stored as written.
 pub const DOCUMENTED_SETTINGS_PARAMETERS: [(&str, &[&str]); 2] = [
     ("CROSS_ACCOUNT_VERSION", &["1", "2", "3", "4", "5"]),
-    ("SET_SOURCE_IDENTITY", &["TRUE", "FALSE"]),
+    (SET_SOURCE_IDENTITY_PARAMETER, &[PARAMETER_TRUE, "FALSE"]),
 ];
+
+/// `settings` as a read of a Data Catalog's data lake settings REPORTS them: the stored
+/// document, plus the three members the service reports for every catalog whether or not
+/// the write that configured it named them.
+///
+/// Those three are what a client needs to round-trip the document — the only supported way
+/// to change one field is to fetch the settings, change it and write the whole structure
+/// back — so a read that left them absent would lose them on the next write. The two
+/// nullable flags of the modelled structure are NOT among them: absence carries a meaning
+/// of its own there, so a flag nothing set stays absent.
+///
+/// `SetSourceIdentity` is the settings document's reading of the `SET_SOURCE_IDENTITY`
+/// parameter ([`SET_SOURCE_IDENTITY_PARAMETER`]) — one setting under two names, so a
+/// document that carries the parameter reports the member that agrees with it.
+///
+/// Reporting only: it derives a response and writes nothing.
+pub fn reported_data_lake_settings(settings: &DataLakeSettings) -> DataLakeSettings {
+    let from_parameters = settings
+        .parameters
+        .as_ref()
+        .and_then(|parameters| parameters.get(SET_SOURCE_IDENTITY_PARAMETER))
+        .map(|value| value.eq_ignore_ascii_case(PARAMETER_TRUE));
+    DataLakeSettings {
+        disallow_grant_on_iam_allowed_principals: Some(
+            settings
+                .disallow_grant_on_iam_allowed_principals
+                .unwrap_or(false),
+        ),
+        set_source_identity: Some(
+            settings
+                .set_source_identity
+                .or(from_parameters)
+                .unwrap_or(false),
+        ),
+        whitelisted_for_external_data_filtering: Some(
+            settings
+                .whitelisted_for_external_data_filtering
+                .clone()
+                .unwrap_or_default(),
+        ),
+        ..settings.clone()
+    }
+}
 
 /// Whether `entry` is the one create-default entry that selects "Use only IAM access
 /// control": [`DEFAULT_IAM_ACCESS_CONTROL_PERMISSION`] and nothing else, to
@@ -548,12 +706,17 @@ fn is_iam_access_control_default(entry: &PrincipalPermissions) -> bool {
 /// not — the message of the modelled `InvalidInputException` `PutDataLakeSettings` answers
 /// with.
 ///
-/// Three rules the model states but cannot express as constraints:
+/// Four rules the model states but cannot express as constraints:
 ///
 /// * every designated administrator is an IAM user or an IAM role — "A list of Lake
 ///   Formation principals. Supported principals are IAM users or IAM roles."
 ///   (`DataLakeSettings$DataLakeAdmins`, and the same sentence on `ReadOnlyAdmins`), which
 ///   [`is_iam_principal`] is;
+/// * no principal is designated in BOTH administrator lists: the two members are separate
+///   roles — a data lake administrator may "make changes" where a read-only one has "only
+///   view access to the resources, without the ability to make changes"
+///   (`DataLakeSettings$ReadOnlyAdmins`) — so one identity cannot hold both, and the
+///   refusal is [`BOTH_ADMIN_ROLES`];
 /// * each create-default member is the empty list or the single entry that selects "Use
 ///   only IAM access control" — "The only permitted values are an empty array or an array
 ///   that contains a single JSON object that grants ALL to IAM_ALLOWED_PRINCIPALS";
@@ -577,6 +740,22 @@ pub fn validate_data_lake_settings(settings: &DataLakeSettings) -> Result<(), St
                 ));
             }
         }
+    }
+
+    let administrators: BTreeSet<&str> = settings
+        .data_lake_admins
+        .iter()
+        .flatten()
+        .filter_map(|admin| admin.data_lake_principal_identifier.as_deref())
+        .collect();
+    if settings
+        .read_only_admins
+        .iter()
+        .flatten()
+        .filter_map(|admin| admin.data_lake_principal_identifier.as_deref())
+        .any(|identifier| administrators.contains(identifier))
+    {
+        return Err(BOTH_ADMIN_ROLES.to_string());
     }
 
     for (member, entries) in [
@@ -616,6 +795,14 @@ pub fn validate_data_lake_settings(settings: &DataLakeSettings) -> Result<(), St
 
     Ok(())
 }
+
+/// The refusal for a write that designates one principal as both a read-only administrator
+/// and a data lake administrator.
+///
+/// Wholly fixed text, as the service words it: the refusal names the contradiction and not
+/// the principal that caused it, so a request naming several of them is answered the same
+/// way.
+pub const BOTH_ADMIN_ROLES: &str = "Principal cannot be both readOnly and LF admin.";
 
 /// The permissions `settings`' `CreateDatabaseDefaultPermissions` grants `principal` on a
 /// database created under them, in first-named order with duplicates dropped.
@@ -946,7 +1133,8 @@ pub fn service_linked_role_arn() -> String {
     )
 }
 
-/// `Ok(())` when `arn` has the shape of an Amazon Resource Name, else why it does not.
+/// `Ok(())` when `arn` has the shape of an Amazon Resource Name, else the refusal the
+/// service answers a value that is not one with ([`UNSUPPORTED_RESOURCE_ARN`]).
 ///
 /// `ResourceArnString` carries no pattern in the model, so the boundary validator admits
 /// any string and the handler is what must refuse a value that is not an ARN at all. The
@@ -962,10 +1150,7 @@ pub fn validate_resource_arn(arn: &str) -> Result<(), String> {
         || fields[2].is_empty()
         || fields[5].is_empty();
     if malformed {
-        return Err(format!(
-            "ResourceArn {arn:?} is not a valid Amazon Resource Name: expected \
-             arn:<partition>:<service>:<region>:<account-id>:<resource>"
-        ));
+        return Err(UNSUPPORTED_RESOURCE_ARN.to_string());
     }
     Ok(())
 }
@@ -1758,6 +1943,51 @@ pub const DATABASE_NOT_FOUND: &str = "Database not found.";
 /// not hold in a database it DOES hold. The per-kind counterpart of
 /// [`DATABASE_NOT_FOUND`].
 pub const TABLE_NOT_FOUND: &str = "Table not found.";
+
+/// The refusal for a grant whose `Principal` names an identity this account's IAM does not
+/// hold — `None` when nothing shows the principal is absent.
+///
+/// Lake Formation grants permissions TO a principal, so a grant to an identity that does
+/// not exist is a grant to nobody: the grantee is resolved against this account's IAM
+/// before anything is written, and the refusal names the identifier the request carried
+/// ([`invalid_principal`]).
+///
+/// The resolution is [`::service_common::iam_principal::identity_is_absent`], the tree's
+/// one reading of a principal against IAM, so a refusal is grounded in what IAM ANSWERED.
+/// Everything else refuses nothing, because nothing about it is known: a value that names
+/// no IAM role or user of this account (the [`IAM_ALLOWED_PRINCIPALS`] group, an account id,
+/// an identity of ANOTHER account whose IAM this emulator is not the one to ask, a
+/// principal of another identity system), an answer that is not "the entity is absent", and
+/// an emulator with no IAM mounted at all.
+///
+/// Called BEFORE this service's own lock is taken: the question travels over the operation
+/// callback's in-process transport, so no store is held while it is outstanding.
+pub async fn unresolved_grant_principal(
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+    principal: &str,
+) -> Option<String> {
+    let region = request_region(ctx.parts());
+    ::service_common::iam_principal::identity_is_absent(ctx, &region, principal)
+        .await
+        .then(|| invalid_principal(principal))
+}
+
+/// The refusal text for a principal IAM does not hold: fixed text, and the one variable
+/// part is the `DataLakePrincipalIdentifier` the request named.
+pub fn invalid_principal(identifier: &str) -> String {
+    format!("Invalid principal, arn: {identifier}")
+}
+
+/// The region this request was signed for, which the IAM lookup above is addressed to.
+pub fn request_region(parts: &::http::request::Parts) -> String {
+    ::emulator_server::sigv4_credential_scope(&parts.headers)
+        .map(|scope| scope.region)
+        .unwrap_or_else(|| DEFAULT_REGION.to_string())
+}
+
+/// The region a request carrying no SigV4 credential scope is read as: the AWS default
+/// region, which is where an unsigned in-process call is addressed.
+pub const DEFAULT_REGION: &str = "us-east-1";
 
 /// This service's store in the shared engine: call it with a handler's `&*self.engine`.
 ///

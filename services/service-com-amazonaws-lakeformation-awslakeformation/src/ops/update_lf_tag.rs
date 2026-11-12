@@ -185,10 +185,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         else {
             return Err(UpdateLFTagErrorModeled::EntityNotFoundException(
                 EntityNotFoundException {
-                    message: Some(format!(
-                        "Tag key {} not found in catalog {catalog_id}",
-                        input.tag_key
-                    )),
+                    message: Some(crate::state::TAG_KEY_DOES_NOT_EXIST.to_string()),
                 },
             )
             .into());

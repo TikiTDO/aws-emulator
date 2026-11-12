@@ -12,6 +12,12 @@
 //! resource form, and the malformed shapes `ResourceArnString` admits (the model gives it
 //! no pattern). The corpus' own request — an Amazon S3 location registered with a role —
 //! is one row among them.
+//!
+//! What the describe REPORTS is the registration itself: the role, the registration flags
+//! with the value each takes when the request named none, the account expected to own the
+//! resource and the registered role's verification status. It does not echo the ARN the
+//! request addressed, and it reports no last-modified instant for a registration nothing
+//! has modified.
 
 use std::sync::Arc;
 
@@ -88,50 +94,22 @@ async fn describe(router: &MultiServiceRouter, arn: &str) -> (u16, Value) {
     call(router, "DescribeResource", &json!({ "ResourceArn": arn })).await
 }
 
-/// The `ResourceInfo` of a `DescribeResource` payload with `LastModified` split off, so a
-/// test can compare the request-derived members exactly and the clock-derived one
-/// separately.
-fn split_info(payload: &Value, case: &str) -> (Map<String, Value>, Value) {
-    let mut info = payload
+/// The `ResourceInfo` of a `DescribeResource` payload.
+fn resource_info(payload: &Value, case: &str) -> Map<String, Value> {
+    payload
         .get("ResourceInfo")
         .and_then(Value::as_object)
         .cloned()
-        .unwrap_or_else(|| panic!("case {case:?}: expected a ResourceInfo, got {payload:?}"));
-    let last_modified = info.remove("LastModified").unwrap_or(Value::Null);
-    (info, last_modified)
+        .unwrap_or_else(|| panic!("case {case:?}: expected a ResourceInfo, got {payload:?}"))
 }
 
-/// Seconds since the Unix epoch a `LastModifiedTimestamp` carries on the wire.
-///
-/// `restJson1` renders a timestamp with no `@timestampFormat` as epoch seconds; a string
-/// rendering is parsed too so the assertion tests the VALUE, not the encoding.
-fn epoch_seconds(value: &Value, case: &str) -> f64 {
-    match value {
-        Value::Number(seconds) => seconds
-            .as_f64()
-            .unwrap_or_else(|| panic!("case {case:?}: LastModified {seconds} is not a number")),
-        Value::String(text) => aws_smithy_types::DateTime::from_str(
-            text,
-            aws_smithy_types::date_time::Format::DateTime,
-        )
-        .unwrap_or_else(|error| {
-            panic!("case {case:?}: LastModified {text:?} is not a timestamp: {error}")
-        })
-        .as_secs_f64(),
-        other => panic!("case {case:?}: expected a LastModified timestamp, got {other:?}"),
-    }
+/// The account every emulated ARN carries, which is also the account a registration is
+/// expected to be owned by when the request names no other.
+fn account() -> String {
+    engine::emulator_account_id().to_string()
 }
 
-/// Now, in seconds since the Unix epoch.
-fn now_seconds() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("the clock is after the Unix epoch")
-        .as_secs_f64()
-}
-
-/// One register-then-describe row: the request, and the `ResourceInfo` it must read back
-/// (every member but `LastModified`).
+/// One register-then-describe row: the request, and the `ResourceInfo` it must read back.
 struct Row {
     case: &'static str,
     request: Value,
@@ -141,11 +119,18 @@ struct Row {
 #[tokio::test]
 async fn register_then_describe_reads_the_registration_back() {
     let slr = service_linked_role();
+    let account = account();
     // Rows differ along what the rule generalises over: which member names the data
     // access role (`RoleArn`, or `UseServiceLinkedRole` with none), which optional flags
     // the request carries, the ARN's service and resource form (bucket root, one prefix,
     // a nested prefix, a non-Amazon-S3 resource), and whether
     // `ExpectedResourceOwnerAccount` is named.
+    //
+    // Every row reads back the same three members whatever it registered: the hybrid-access
+    // flag (off unless the registration turned it on), the account expected to own the
+    // resource (the caller's unless the request named another) and the registered role's
+    // verification status. None reads back the ARN it addressed or a last-modified instant:
+    // the describe answers the registration, and nothing has modified these.
     let rows = vec![
         Row {
             case: "bucket root registered with a role",
@@ -154,9 +139,11 @@ async fn register_then_describe_reads_the_registration_back() {
                 "RoleArn": "arn:aws:iam::123456789012:role/my-data-access-role",
             }),
             expected_info: json!({
-                "ResourceArn": "arn:aws:s3:::lf-bucket",
                 "RoleArn": "arn:aws:iam::123456789012:role/my-data-access-role",
                 "WithPrivilegedAccess": false,
+                "HybridAccessEnabled": false,
+                "ExpectedResourceOwnerAccount": account,
+                "VerificationStatus": "VERIFIED",
             }),
         },
         Row {
@@ -166,9 +153,11 @@ async fn register_then_describe_reads_the_registration_back() {
                 "UseServiceLinkedRole": true,
             }),
             expected_info: json!({
-                "ResourceArn": "arn:aws:s3:::lf-bucket/warehouse/",
                 "RoleArn": slr,
                 "WithPrivilegedAccess": false,
+                "HybridAccessEnabled": false,
+                "ExpectedResourceOwnerAccount": account,
+                "VerificationStatus": "VERIFIED",
             }),
         },
         Row {
@@ -182,12 +171,12 @@ async fn register_then_describe_reads_the_registration_back() {
                 "ExpectedResourceOwnerAccount": "210987654321",
             }),
             expected_info: json!({
-                "ResourceArn": "arn:aws:s3:::lf-bucket/warehouse/sales/",
                 "RoleArn": "arn:aws:iam::210987654321:role/service-role/lf-role",
                 "WithFederation": true,
                 "HybridAccessEnabled": true,
                 "WithPrivilegedAccess": true,
                 "ExpectedResourceOwnerAccount": "210987654321",
+                "VerificationStatus": "VERIFIED",
             }),
         },
         Row {
@@ -200,11 +189,12 @@ async fn register_then_describe_reads_the_registration_back() {
                 "UseServiceLinkedRole": false,
             }),
             expected_info: json!({
-                "ResourceArn": "arn:aws:s3:::other-bucket/raw/",
                 "RoleArn": "arn:aws:iam::123456789012:role/my-data-access-role",
                 "WithFederation": false,
                 "HybridAccessEnabled": false,
                 "WithPrivilegedAccess": false,
+                "ExpectedResourceOwnerAccount": account,
+                "VerificationStatus": "VERIFIED",
             }),
         },
         Row {
@@ -217,15 +207,16 @@ async fn register_then_describe_reads_the_registration_back() {
                 "WithPrivilegedAccess": true,
             }),
             expected_info: json!({
-                "ResourceArn": "arn:aws:glue:us-east-1:123456789012:database/sales",
                 "RoleArn": "arn:aws:iam::123456789012:role/my-data-access-role",
                 "WithPrivilegedAccess": true,
+                "HybridAccessEnabled": false,
+                "ExpectedResourceOwnerAccount": account,
+                "VerificationStatus": "VERIFIED",
             }),
         },
     ];
 
     let router = emulator();
-    let before = now_seconds();
     for row in &rows {
         let (status, payload) = call(&router, "RegisterResource", &row.request).await;
         assert_eq!(
@@ -243,7 +234,7 @@ async fn register_then_describe_reads_the_registration_back() {
             "case {:?}: expected DescribeResource 200, got {status} {payload:?}",
             row.case
         );
-        let (info, last_modified) = split_info(&payload, row.case);
+        let info = resource_info(&payload, row.case);
         assert_eq!(
             Value::Object(info.clone()),
             row.expected_info,
@@ -251,15 +242,6 @@ async fn register_then_describe_reads_the_registration_back() {
             row.case,
             row.expected_info,
             Value::Object(info)
-        );
-        // The registration was created by these calls, so its LastModified lies between
-        // the instant before the registers and now; `VerificationStatus` is absent
-        // because no access verification ran.
-        let seconds = epoch_seconds(&last_modified, row.case);
-        assert!(
-            seconds >= before - 1.0 && seconds <= now_seconds() + 1.0,
-            "case {:?}: expected LastModified within [{before}, now], got {seconds}",
-            row.case
         );
     }
 }
@@ -319,7 +301,7 @@ async fn re_registering_a_resource_is_refused_and_leaves_the_registration_unchan
             status, 200,
             "case {case:?}: expected DescribeResource 200, got {status} {payload:?}"
         );
-        let (info, _) = split_info(&payload, case);
+        let info = resource_info(&payload, case);
         assert_eq!(
             info.get("RoleArn").and_then(Value::as_str),
             Some("arn:aws:iam::123456789012:role/first-role"),

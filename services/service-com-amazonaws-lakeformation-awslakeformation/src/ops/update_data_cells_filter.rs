@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateDataCellsFilter
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateDataCellsFilter`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateDataCellsFilter::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Replaces one stored data cells filter with the `TableData` the request carries, in
+//! [`crate::state::ComAmazonawsLakeformationAwslakeformationState`]'s `data_cells_filters`
+//! — the same (table catalog, database, table, filter name) identity
+//! `CreateDataCellsFilter` stored it under, which is what this operation addresses rather
+//! than changes. The update is WHOLESALE: the cells and the row filter the request names
+//! are what the filter holds afterwards, so a member the request leaves out is gone from
+//! the stored filter, and the service's version counter advances by one
+//! ([`crate::state::next_filter_version`]). A tuple no filter was created for is the
+//! modelled `EntityNotFoundException`.
 //!
 //! ## Shape of an operation
 //!
@@ -142,18 +142,66 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateDataCellsFilter` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateDataCellsFilterErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateDataCellsFilter"))
+        // The caller the audit record below attributes this state change to.
+        let akid = ::engine::extract_akid(&ctx.parts().headers);
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            UpdateDataCellsFilterErrorModeled::InternalServiceException(InternalServiceException {
+                message: Some("LakeFormation state is unavailable".to_string()),
+            })
+        })?;
+
+        // The same rules a create is held to: `TableData` is the whole filter, so what a
+        // create may not name an update may not name either.
+        crate::state::validate_data_cells_filter(&input.table_data).map_err(|message| {
+            UpdateDataCellsFilterErrorModeled::InvalidInputException(InvalidInputException {
+                message: Some(message),
+            })
+        })?;
+
+        let filter = &input.table_data;
+        let key = crate::state::data_cells_filter_key(
+            &filter.table_catalog_id,
+            &filter.database_name,
+            &filter.table_name,
+            &filter.name,
+        );
+
+        let mut store = state.lock();
+        let Some(held) = store.data_cells_filters.get(&key) else {
+            return Err(UpdateDataCellsFilterErrorModeled::EntityNotFoundException(
+                EntityNotFoundException {
+                    message: Some(crate::state::FILTER_ENTITY_NOT_FOUND.to_string()),
+                },
+            )
+            .into());
+        };
+
+        // A REPLACEMENT, not a merge: the request carries the whole `DataCellsFilter`, so
+        // what it does not name is not part of the filter afterwards. The version is the
+        // service's counter and advances with the change, whatever `VersionId` the request
+        // carried.
+        let version = crate::state::next_filter_version(held.version_id.as_deref());
+        let updated = crate::state::stored_data_cells_filter(filter, version.clone());
+        store.data_cells_filters.insert(key, updated);
+        drop(store);
+
+        // The audit record for a state change: who, what, where, outcome. No secret and
+        // no credential material — the access key id identifies the caller the way the
+        // real service's trail does.
+        tracing::info!(
+            operation = "UpdateDataCellsFilter",
+            akid = %akid,
+            table_catalog_id = %filter.table_catalog_id,
+            database_name = %filter.database_name,
+            table_name = %filter.table_name,
+            name = %filter.name,
+            version_id = %version,
+            outcome = "updated",
+            "Data cells filter updated"
+        );
+
+        // `UpdateDataCellsFilterResponse` models no members: the proof of the replacement
+        // is what `GetDataCellsFilter` reads back out of state.
+        Ok(UpdateDataCellsFilterOutput {})
     }
 }

@@ -48,6 +48,11 @@ const OTHER_DATABASE: &str = "warehouse";
 /// The role the reader of these rows assumes.
 const READER_ROLE: &str = "reader";
 
+/// A role of this account nothing in these tests signs as, so a row can hold a grant for a
+/// principal other than the reader. It is CREATED in IAM like the reader's, because Lake
+/// Formation resolves a grant's principal against this account's IAM.
+const ANOTHER_ROLE: &str = "someone-else";
+
 /// That role's ARN, the identity a Lake Formation grant to the reader names.
 fn reader_arn() -> String {
     format!("arn:aws:iam::{ACCOUNT_ID}:role/{READER_ROLE}")
@@ -56,7 +61,7 @@ fn reader_arn() -> String {
 /// A principal other than the reader: a role of this account nothing in these tests signs
 /// as.
 fn another_principal() -> String {
-    format!("arn:aws:iam::{ACCOUNT_ID}:role/someone-else")
+    format!("arn:aws:iam::{ACCOUNT_ID}:role/{ANOTHER_ROLE}")
 }
 
 /// An emulator with Glue, Lake Formation, IAM and STS over ONE shared engine, with request
@@ -277,17 +282,22 @@ async fn governed_catalog() -> Governed {
          \"Principal\":{{\"AWS\":\"arn:aws:iam::{ACCOUNT_ID}:root\"}},\
          \"Action\":\"sts:AssumeRole\"}}]}}"
     );
-    query(
-        &router,
-        "iam",
-        "2010-05-08",
-        "CreateRole",
-        &[
-            ("RoleName", READER_ROLE.to_string()),
-            ("AssumeRolePolicyDocument", trust),
-        ],
-    )
-    .await;
+    // Both roles a row may name are created, because a Lake Formation grant is resolved
+    // against this account's IAM: the reader every row reads as, and the OTHER principal
+    // one row holds a grant for.
+    for role_name in [READER_ROLE, ANOTHER_ROLE] {
+        query(
+            &router,
+            "iam",
+            "2010-05-08",
+            "CreateRole",
+            &[
+                ("RoleName", role_name.to_string()),
+                ("AssumeRolePolicyDocument", trust.clone()),
+            ],
+        )
+        .await;
+    }
     let assumed = query(
         &router,
         "sts",

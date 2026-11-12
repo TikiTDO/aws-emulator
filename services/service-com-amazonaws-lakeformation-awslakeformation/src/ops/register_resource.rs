@@ -225,10 +225,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if store.registered_resources.contains_key(&input.resource_arn) {
             return Err(
                 RegisterResourceErrorModeled::AlreadyExistsException(AlreadyExistsException {
-                    message: Some(format!(
-                        "Resource {} is already registered",
-                        input.resource_arn
-                    )),
+                    message: Some(crate::state::RESOURCE_ALREADY_REGISTERED.to_string()),
                 })
                 .into(),
             );
@@ -258,12 +255,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 resource_arn: input.resource_arn.clone(),
                 role_arn: role_arn.clone(),
                 with_federation: input.with_federation,
-                hybrid_access_enabled: input.hybrid_access_enabled,
+                // Hybrid access is a flag the registration always carries: off unless
+                // this request turned it on.
+                hybrid_access_enabled: input.hybrid_access_enabled.unwrap_or(false),
                 // Modelled `Boolean` with `default false`, so the registration always
                 // carries a value even when the request omitted the member.
                 with_privileged_access: Some(input.with_privileged_access),
-                expected_resource_owner_account: input.expected_resource_owner_account.clone(),
-                last_modified: ::std::time::SystemTime::now(),
+                // "The Amazon Web Services account that owns the Glue tables associated
+                // with specific Amazon S3 locations": the account the request named, else
+                // the caller's own, which is the account this emulator serves.
+                expected_resource_owner_account: input
+                    .expected_resource_owner_account
+                    .clone()
+                    .unwrap_or_else(|| ::engine::emulator_account_id().to_string()),
+                // Nothing has modified this registration yet, so it has no
+                // last-modified instant to report (see `RegisteredResource`).
+                last_modified: None,
             },
         );
 
