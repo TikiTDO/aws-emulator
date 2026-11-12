@@ -187,7 +187,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     for CreateMultipartReadSetUpload<Eng>
 {
     type Input = CreateMultipartReadSetUploadInput;
-    type Output = CreateMultipartReadSetUploadOutput;
+    type Output = CreateMultipartReadSetUploadResponse;
     type Error = CreateMultipartReadSetUploadError;
 
     const NAME: &'static str = "CreateMultipartReadSetUpload";
@@ -341,17 +341,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 ///
 /// `referenceArn` is required on the response while the request's own member is
 /// optional, and HealthOmics needs a reference genome only for the aligned source
-/// formats: an upload that named no reference has none to report, so the member carries
-/// the empty value rather than an ARN this emulator resolved from nothing.
-fn reported(upload: &crate::state::MultipartReadSetUpload) -> CreateMultipartReadSetUploadOutput {
-    CreateMultipartReadSetUploadOutput {
+/// formats: an upload that named no reference has none to report, and the modelled
+/// `ReferenceArn` admits no value standing for "none" (`@length(1..127)`,
+/// `@pattern("^arn:.+$")`), so the member is left OUT of the body rather than reported as
+/// a constraint-violating empty string.
+fn reported(
+    upload: &crate::state::MultipartReadSetUpload,
+) -> CreateMultipartReadSetUploadResponse {
+    CreateMultipartReadSetUploadResponse {
         sequence_store_id: upload.sequence_store_id.clone(),
         upload_id: upload.upload_id.clone(),
         source_file_type: upload.source_file_type.clone(),
         subject_id: upload.subject_id.clone(),
         sample_id: upload.sample_id.clone(),
         generated_from: upload.generated_from.clone(),
-        reference_arn: upload.reference_arn.clone().unwrap_or_default(),
+        reference_arn: upload.reference_arn.clone(),
         name: Some(upload.name.clone()),
         description: upload.description.clone(),
         tags: upload.tags_output(),

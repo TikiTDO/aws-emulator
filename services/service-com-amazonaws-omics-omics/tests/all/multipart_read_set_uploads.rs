@@ -38,7 +38,7 @@ use crate::private_workflow_runs::{
 /// Every value the modelled `FileType` enum admits.
 /// Source: the `sourceFileType` member of `CreateMultipartReadSetUploadRequest` ("one of:
 /// BAM | CRAM | FASTQ | UBAM").
-const FILE_TYPES: &[&str] = &["BAM", "CRAM", "FASTQ", "UBAM"];
+pub(crate) const FILE_TYPES: &[&str] = &["BAM", "CRAM", "FASTQ", "UBAM"];
 
 /// The source formats HealthOmics aligns against a reference genome.
 /// Source: `CreateSequenceStore`'s own documentation ("For aligned formats (BAM and
@@ -47,7 +47,7 @@ const FILE_TYPES: &[&str] = &["BAM", "CRAM", "FASTQ", "UBAM"];
 const ALIGNED_FILE_TYPES: &[&str] = &["BAM", "CRAM"];
 
 /// A reference ARN satisfying the modelled `ReferenceArn` (len 1..127, `^arn:.+$`).
-const REFERENCE_ARN: &str =
+pub(crate) const REFERENCE_ARN: &str =
     "arn:aws:omics:us-west-2:000000000000:referenceStore/1000000000/reference/1000000001";
 
 /// The published bounds of the modelled `UploadId` length (10..36).
@@ -73,7 +73,7 @@ const READ_SET_DESCRIPTION_MAX: usize = 255;
 /// also asserts that an initiated upload is really IN the service's state afterwards —
 /// the record `UploadReadSetPart` and the upload listings read — so it needs the one
 /// engine the service was mounted on.
-fn emulator_holding_its_engine() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
+pub(crate) fn emulator_holding_its_engine() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
@@ -84,7 +84,7 @@ fn emulator_holding_its_engine() -> (MultiServiceRouter, Arc<engine::InMemoryEng
 }
 
 /// `POST /sequencestore` — the store every upload below is initiated against.
-async fn create_store(router: &MultiServiceRouter, name: &str) -> String {
+pub(crate) async fn create_store(router: &MultiServiceRouter, name: &str) -> String {
     let (status, body) = call(router, "POST", "/sequencestore", Some(&json!({ "name": name }))).await;
     assert_eq!(
         status, 200,
@@ -97,7 +97,7 @@ async fn create_store(router: &MultiServiceRouter, name: &str) -> String {
 }
 
 /// `POST /sequencestore/{id}/upload`.
-async fn create_upload(
+pub(crate) async fn create_upload(
     router: &MultiServiceRouter,
     sequence_store_id: &str,
     body: &Value,
@@ -112,7 +112,7 @@ async fn create_upload(
 }
 
 /// The `uploadId` of a 200 create response, after asserting the status and its shape.
-fn created_upload_id(case: &str, status: u16, body: &Value) -> String {
+pub(crate) fn created_upload_id(case: &str, status: u16, body: &Value) -> String {
     assert_eq!(status, 200, "case {case:?}: expected 200, got {body:?}");
     let id = body
         .get("uploadId")
@@ -136,7 +136,7 @@ fn created_upload_id(case: &str, status: u16, body: &Value) -> String {
 }
 
 /// The record the service holds for `upload_id` inside `sequence_store_id`.
-fn stored_upload(
+pub(crate) fn stored_upload(
     engine: &Arc<engine::InMemoryEngine>,
     sequence_store_id: &str,
     upload_id: &str,
@@ -181,9 +181,6 @@ fn upload_cases() -> Vec<UploadCase> {
                 "subjectId": "subject-a",
                 "sampleId": "sample-a",
                 "sourceFileType": "FASTQ",
-                // Required on the response while optional on the request: an unaligned
-                // upload that named no reference has none to report.
-                "referenceArn": "",
             }),
             absent: vec!["description", "generatedFrom", "tags"],
         },
@@ -338,7 +335,6 @@ fn upload_cases() -> Vec<UploadCase> {
                 "subjectId": format!("subject-{file_type}"),
                 "sampleId": format!("sample-{file_type}"),
                 "sourceFileType": file_type,
-                "referenceArn": if aligned { REFERENCE_ARN } else { "" },
             }),
             absent: vec!["description", "generatedFrom", "tags"],
         });
@@ -419,6 +415,21 @@ fn assert_stored(case: &UploadCase, request: &Value, upload: &MultipartReadSetUp
     );
 }
 
+/// Assert the response reports `referenceArn` exactly when the request named one.
+///
+/// The modelled `ReferenceArn` is `@length(1..127)` `@pattern("^arn:.+$")`, so there is no
+/// value standing for "this upload has no reference": an upload initiated without one
+/// leaves the member out of the body rather than reporting the empty string.
+fn assert_reference_arn(case: &str, request: &Value, body: &Value) {
+    let named = request.get("referenceArn");
+    assert_eq!(
+        body.get("referenceArn"),
+        named,
+        "case {case:?}: expected referenceArn {named:?}, got {:?} in {body:?}",
+        body.get("referenceArn")
+    );
+}
+
 #[tokio::test]
 async fn an_initiated_multipart_read_set_upload_is_reported_from_its_stored_record() {
     let (router, engine) = emulator_holding_its_engine();
@@ -446,6 +457,7 @@ async fn an_initiated_multipart_read_set_upload_is_reported_from_its_stored_reco
             &body,
         );
         assert_absent(upload.case, &upload.absent, &body);
+        assert_reference_arn(upload.case, &request, &body);
         assert_timestamp(upload.case, "creationTime", &body);
         assert!(
             ids.insert(upload_id.clone()),

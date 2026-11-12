@@ -39,6 +39,10 @@
 //! table, and the default error renderers — lives in the generated `ServiceDefinition`
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
+//!
+//! A sixth seam, `override_protocol`, is the one this service DOES take: every timestamp
+//! member of this model declares `@timestampFormat("date-time")`, so each instant it
+//! reports is an RFC 3339 string rather than the protocol's default epoch-seconds number.
 
 use smithy_server_runtime::{
     http, ErasedOperation, Refusal, Refused, Service,
@@ -52,6 +56,9 @@ use std::sync::Arc;
 /// router builds one shared engine and hands it to `new`.
 pub struct EmulatedService<Eng: Send + Sync + 'static> {
     entry: crate::ServiceDefinition<Eng>,
+    /// This service's wire protocol, built ONCE here because
+    /// [`Service::override_protocol`] hands back a borrow of it.
+    protocol: service_common::date_time_json::DateTimeRestJson,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -61,6 +68,7 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
             entry: crate::ServiceDefinition::new(engine),
+            protocol: service_common::date_time_json::DateTimeRestJson::new(),
         }
     }
 }
@@ -135,5 +143,18 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // consume it on `None`.
         let _ = error;
         None
+    }
+
+    fn override_protocol(&self) -> Option<&dyn smithy_server_runtime::ServerHttpProtocol> {
+        // Every timestamp member of this model declares
+        // `@timestampFormat("date-time")` — a sequence store's `creationTime` and
+        // `updateTime`, an upload's `creationTime`, a run's `startTime` and `stopTime`,
+        // a job's `completionTime` — so every instant this service reports is an RFC
+        // 3339 string rather than the protocol's default epoch-seconds number, and a
+        // date-time string a request carries for one of them is read back the same way.
+        // `tests/all/response_member_wire_form.rs` reads that claim off the shipped model, so a
+        // member that later declared another format would fail there rather than go out
+        // in the wrong form. The codec is otherwise the model's own `restJson1`.
+        Some(&self.protocol)
     }
 }

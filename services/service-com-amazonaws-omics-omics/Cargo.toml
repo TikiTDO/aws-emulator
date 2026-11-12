@@ -21,6 +21,9 @@ bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# `date_time_json`: the restJson1 codec that carries a `@timestampFormat("date-time")`
+# timestamp as an RFC 3339 string, which every timestamp member of this model declares.
+service-common = { path = "../common" }
 # SHA-256 over a workflow definition, and the entropy behind each resource's UUID.
 sha2 = { workspace = true }
 # Hex for the `WorkflowDigest`, the UUID groups and the opaque page tokens.

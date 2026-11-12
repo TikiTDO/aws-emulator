@@ -246,19 +246,32 @@ pub(crate) fn expected_digest(bytes: &[u8]) -> String {
     hex::encode(sha2::Sha256::digest(bytes))
 }
 
-/// Assert `member` is present and is an epoch timestamp, and answer it.
+/// Assert `member` is present and is a date-time timestamp, and answer the instant it
+/// names in epoch seconds.
 ///
-/// The modelled `WorkflowTimestamp`/`RunTimestamp` are timestamps; the framework renders
-/// them on the wire as epoch seconds, so what is asserted here is that the value is a
-/// real instant, not its textual shape.
+/// Every timestamp member of this model declares `@timestampFormat("date-time")`, so the
+/// wire form is an RFC 3339 STRING and not the epoch NUMBER the restJson1 protocol
+/// defaults to; `tests/all/response_member_wire_form.rs` asserts that rule over the model and over every path
+/// that reports an instant, and this helper holds every other suite to it.
 pub(crate) fn assert_timestamp(case: &str, member: &str, body: &Value) -> f64 {
-    let value = body
+    let text = body
         .get(member)
-        .and_then(Value::as_f64)
-        .unwrap_or_else(|| panic!("case {case:?}: expected a {member} timestamp, got {body:?}"));
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            panic!("case {case:?}: expected a {member} date-time string, got {body:?}")
+        })
+        .to_string();
+    let instant = aws_smithy_types::DateTime::from_str(
+        &text,
+        aws_smithy_types::date_time::Format::DateTime,
+    )
+    .unwrap_or_else(|error| {
+        panic!("case {case:?}: {member} {text:?} is not an RFC 3339 date-time: {error}")
+    });
+    let value = instant.as_secs_f64();
     assert!(
         value > 0.0,
-        "case {case:?}: expected a {member} after the epoch, got {value}"
+        "case {case:?}: expected a {member} after the epoch, got {text:?}"
     );
     value
 }

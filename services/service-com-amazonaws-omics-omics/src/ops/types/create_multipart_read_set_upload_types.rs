@@ -26,6 +26,12 @@ pub struct CreateMultipartReadSetUploadInput {
     pub tags: Option<std::collections::HashMap<String, String>>,
 }
 
+/// `CreateMultipartReadSetUpload`'s response, exactly as the model declares it: the shape
+/// the generated `CREATE_MULTIPART_READ_SET_UPLOAD_OUTPUT_SCHEMA` describes, which is what
+/// names every response member and carries its traits.
+///
+/// The handler answers with [`CreateMultipartReadSetUploadResponse`] rather than this, for
+/// the reason stated there.
 #[smithy_macros::smithy(shape = "com.amazonaws.omics#CreateMultipartReadSetUploadResponse")]
 #[derive(Debug, Clone)]
 pub struct CreateMultipartReadSetUploadOutput {
@@ -40,5 +46,101 @@ pub struct CreateMultipartReadSetUploadOutput {
     pub description: Option<String>,
     pub tags: Option<std::collections::HashMap<String, String>>,
     pub creation_time: ::aws_smithy_types::DateTime,
+}
+
+/// How `CreateMultipartReadSetUpload` ANSWERS: [`CreateMultipartReadSetUploadOutput`]'s
+/// members, with `referenceArn` carried as "present" or "absent".
+///
+/// `referenceArn` is the one member this exists for. The model marks it `@required` while
+/// the request's own `referenceArn` is optional, and the derive refuses an `Option` field
+/// for a `@required` member (`vendor/smithy-macros`'s `validate_field_type`), so the
+/// derived shape above can only report the type default for an upload that named no
+/// reference. `ReferenceArn` is `@length(1..127)` `@pattern("^arn:.+$")`
+/// (`smithy_query(query="shape",shape="ReferenceArn")`), which the empty string satisfies
+/// neither of — so a reference nobody named has no emittable value and the member is left
+/// OUT of the body instead of standing for "none" with a constraint-violating value.
+///
+/// That is the ONLY difference: every member is written against the member schema of
+/// `CREATE_MULTIPART_READ_SET_UPLOAD_OUTPUT_SCHEMA`, found by its Smithy member name, so
+/// each wire name, each `@jsonName` and the member order stay single-homed in the
+/// model-derived schema rather than copied here.
+#[derive(Debug, Clone)]
+pub struct CreateMultipartReadSetUploadResponse {
+    pub sequence_store_id: String,
+    pub upload_id: String,
+    pub source_file_type: String,
+    pub subject_id: String,
+    pub sample_id: String,
+    pub generated_from: Option<String>,
+    /// The reference the upload was initiated against, when it was initiated against
+    /// one; `None` is reported by leaving the member out of the body.
+    pub reference_arn: Option<String>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub tags: Option<std::collections::HashMap<String, String>>,
+    pub creation_time: ::aws_smithy_types::DateTime,
+}
+
+impl CreateMultipartReadSetUploadResponse {
+    /// The member of the model-derived response schema named `name`.
+    ///
+    /// Read from the schema rather than kept as a second copy of it, so a member's wire
+    /// name and its traits stay single-homed in the generated schema.
+    fn member(
+        name: &str,
+    ) -> ::std::result::Result<
+        &'static ::aws_smithy_schema::Schema,
+        ::aws_smithy_schema::serde::SerdeError,
+    > {
+        CREATE_MULTIPART_READ_SET_UPLOAD_OUTPUT_SCHEMA
+            .members()
+            .iter()
+            .copied()
+            .find(|member| member.member_name() == Some(name))
+            .ok_or_else(|| {
+                ::aws_smithy_schema::serde::SerdeError::custom(format!(
+                    "CreateMultipartReadSetUploadResponse declares no member '{name}'"
+                ))
+            })
+    }
+}
+
+impl ::aws_smithy_schema::serde::SerializableStruct for CreateMultipartReadSetUploadResponse {
+    fn serialize_members(
+        &self,
+        s: &mut dyn ::aws_smithy_schema::serde::ShapeSerializer,
+    ) -> ::std::result::Result<(), ::aws_smithy_schema::serde::SerdeError> {
+        // The model's member order, and the derive's own `is_option` split: a member the
+        // record holds nothing for is left out rather than written as its type default.
+        s.write_string(Self::member("sequenceStoreId")?, self.sequence_store_id.as_str())?;
+        s.write_string(Self::member("uploadId")?, self.upload_id.as_str())?;
+        s.write_string(Self::member("sourceFileType")?, self.source_file_type.as_str())?;
+        s.write_string(Self::member("subjectId")?, self.subject_id.as_str())?;
+        s.write_string(Self::member("sampleId")?, self.sample_id.as_str())?;
+        if let Some(generated_from) = &self.generated_from {
+            s.write_string(Self::member("generatedFrom")?, generated_from.as_str())?;
+        }
+        if let Some(reference_arn) = &self.reference_arn {
+            s.write_string(Self::member("referenceArn")?, reference_arn.as_str())?;
+        }
+        if let Some(name) = &self.name {
+            s.write_string(Self::member("name")?, name.as_str())?;
+        }
+        if let Some(description) = &self.description {
+            s.write_string(Self::member("description")?, description.as_str())?;
+        }
+        if let Some(tags) = &self.tags {
+            let member = Self::member("tags")?;
+            s.write_map(member, &|entries| {
+                for (key, value) in tags {
+                    entries.write_string(member, key.as_str())?;
+                    entries.write_string(member, value.as_str())?;
+                }
+                Ok(())
+            })?;
+        }
+        s.write_timestamp(Self::member("creationTime")?, &self.creation_time)?;
+        Ok(())
+    }
 }
 
