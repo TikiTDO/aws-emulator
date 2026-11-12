@@ -221,6 +221,8 @@ mod task_provisioning;
 mod task_set_creation;
 #[path = "all/task_set_deletion.rs"]
 mod task_set_deletion;
+#[path = "all/task_set_failure_arns.rs"]
+mod task_set_failure_arns;
 #[path = "all/task_set_reports.rs"]
 mod task_set_reports;
 #[path = "all/task_sets.rs"]
