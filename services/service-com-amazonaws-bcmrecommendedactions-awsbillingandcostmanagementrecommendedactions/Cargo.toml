@@ -26,6 +26,9 @@ tracing = { workspace = true }
 sha2 = { workspace = true }
 # Renders that fingerprint (and the resume offset) as the token's hex text.
 hex = { workspace = true }
+# Decodes a supplied `nextToken`'s base64 payload, whose leading bytes name the
+# wrapping schema a refusal of an unusable token reports.
+base64 = "0.22"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

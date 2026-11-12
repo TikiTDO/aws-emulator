@@ -188,6 +188,27 @@ wire_enum! {
     }
 }
 
+impl FilterName {
+    /// The order this service LISTS this enum's members in when a refusal states
+    /// the value set a rejected value failed ([`member_strings`]).
+    ///
+    /// Carried per enum because the listing order is a property of the service's
+    /// message and not of the model: it is neither the declaration order the model
+    /// publishes ([`FilterName::ALL`]) nor any sorting of it — this enum and
+    /// [`MatchOption`] are listed in orders that no single rule over the model
+    /// produces. Every member [`FilterName::ALL`] declares appears here exactly
+    /// once, which is what makes a listing a re-ordering of the published set and
+    /// not a different set (`tests/all/validation_message_wording.rs` pins it).
+    pub const VALUE_SET_ORDER: &'static [Self] = &[Self::Feature, Self::Type, Self::Severity];
+}
+
+impl MatchOption {
+    /// The order this service lists this enum's members in when a refusal states
+    /// its value set; see [`FilterName::VALUE_SET_ORDER`] for why each enum carries
+    /// its own.
+    pub const VALUE_SET_ORDER: &'static [Self] = &[Self::NotEquals, Self::Equals];
+}
+
 /// The wire members of an enum, as the value set a refusal states them — the one
 /// mapping behind every value set this service names in a `ValidationException`.
 ///

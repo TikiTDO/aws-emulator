@@ -49,7 +49,13 @@
 //!   the service could not READ carries the other reason: it is stated by
 //!   [`cannot_parse_input`] as `cannotParse`, naming each member whose value could
 //!   not be read. Which of the two reasons a refusal states never depends on WHERE
-//!   the offending value was found, only on whether the service read it.
+//!   the offending value was found, only on whether the service read it. The
+//!   wording of a member-level refusal is split between its two statements: the
+//!   summary envelope names the member and the requirement it failed, the member's
+//!   own `fieldList` entry adds the value the request sent, and a requirement over
+//!   an enumerated value set lists that enum's members in the order this service
+//!   states that set in (`crate::state::FilterName::VALUE_SET_ORDER`), which is not
+//!   the model's declaration order.
 //! * **Pagination.** Records are reported in store (insertion) order, so a page
 //!   boundary is stable. `nextToken` is opaque: a 128-bit fingerprint of the
 //!   SELECTION the token was issued over (the filter) followed by the offset to
@@ -69,7 +75,12 @@
 //!   different modelled `reason`s: a token this service did not mint could not be
 //!   read at all, so it is `cannotParse`; a token that WAS read and names another
 //!   selection is a value `nextToken` does not accept for this request, so it is
-//!   `fieldValidationFailed`, like every other member-level refusal here.
+//!   `fieldValidationFailed`, like every other member-level refusal here. The two
+//!   also WORD their refusals differently: a token that could not be decoded is
+//!   refused as a pagination-token exception naming this operation and the wrapping
+//!   schema the supplied token's own payload names
+//!   ([`pagination_token_exception`]), while a token that decoded and names another
+//!   selection is refused as the member-level value it is.
 //!
 //! ## Shape of an operation
 //!
@@ -140,8 +151,10 @@
 use super::types::*;
 use crate::state::{member_strings, FilterName, MatchOption, StoredAction};
 use aws_smithy_schema_server::constraints;
+use base64::Engine as _;
 use sha2::Digest;
 use smithy_server_runtime::{Violation, ViolationKind};
+use std::collections::BTreeSet;
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -217,6 +230,13 @@ const TOKEN_LEN: usize = TOKEN_FINGERPRINT_LEN + TOKEN_OFFSET_LEN;
 /// entry per violation — `name` the dotted member path, `message` that violation's
 /// own clause. Both of those members are modelled (`reason` is REQUIRED), so a
 /// client can branch on the reason and report which member was rejected and why.
+///
+/// Each violation is stated TWICE and the two statements carry different halves of
+/// it: the envelope's clause names the member path and the requirement it failed
+/// and does NOT echo the value the request sent, while the member's own `fieldList`
+/// entry — whose `name` already carries that path — is where the rejected value is
+/// reported. So a caller reading the summary is told what the service requires of
+/// each member, and a caller reading a member's entry is told what it sent.
 pub fn field_validation_failed(violations: &[Violation]) -> ListRecommendedActionsErrorModeled {
     // BOUNDED, like the boundary validator's own walk: every violation is rendered
     // TWICE into the body (a clause in the message and a `fieldList` entry) and each
@@ -224,13 +244,23 @@ pub fn field_validation_failed(violations: &[Violation]) -> ListRecommendedActio
     // count turns a small request into an arbitrarily large refusal. The cap is the
     // framework's (`MAX_VIOLATIONS`), and like the framework the envelope keeps
     // counting what was RECORDED, so the two refusal paths read alike.
-    let violations = &violations[..violations.len().min(MAX_VIOLATIONS)];
+    // Each violation as this service STATES it: the value set listed in this
+    // service's order ([`as_stated`]).
+    let stated: Vec<Violation> = violations
+        .iter()
+        .take(MAX_VIOLATIONS)
+        .map(as_stated)
+        .collect();
+    // The SUMMARY clause names the member and the requirement it failed, and
+    // withholds the value the request sent ([`without_echoed_value`]); the member's
+    // own entry below states that value, which is the half a caller reads there.
+    let summarised: Vec<Violation> = stated.iter().map(without_echoed_value).collect();
     ListRecommendedActionsErrorModeled::ValidationException(ValidationException {
-        message: constraints::envelope(violations)
+        message: constraints::envelope(&summarised)
             .unwrap_or_else(|| "The input fails to satisfy the service's constraints.".to_string()),
         reason: REASON_FIELD_VALIDATION_FAILED.to_string(),
         field_list: Some(
-            violations
+            stated
                 .iter()
                 .map(|violation| ValidationExceptionField {
                     name: violation.path.clone(),
@@ -239,6 +269,58 @@ pub fn field_validation_failed(violations: &[Violation]) -> ListRecommendedActio
                 .collect(),
         ),
     })
+}
+
+/// A violation as this service STATES it: the same violation, with an enumerated
+/// value set re-listed in the order this service lists that set in
+/// ([`FilterName::VALUE_SET_ORDER`]).
+///
+/// Needed because a violation found at the constraint boundary reads its value set
+/// off the SCHEMA, so it arrives listed in the model's declaration order, while
+/// the order a refusal states is the service's own. Violations are matched by the
+/// value SET they name, so the re-listing reaches every enum member of every
+/// request shape at any depth and from either refusal path — the boundary's walk
+/// and this handler's own checks alike — and a value set this service publishes no
+/// order for is stated exactly as it was found.
+fn as_stated(violation: &Violation) -> Violation {
+    let ViolationKind::EnumValue(allowed) = &violation.kind else {
+        return violation.clone();
+    };
+    match stated_value_set(allowed) {
+        Some(stated) => Violation {
+            kind: ViolationKind::EnumValue(stated),
+            ..violation.clone()
+        },
+        None => violation.clone(),
+    }
+}
+
+/// The order this service lists `allowed` in, when `allowed` is a value set one of
+/// its enums closes; `None` for any other set.
+fn stated_value_set(allowed: &[String]) -> Option<Vec<String>> {
+    let allowed: BTreeSet<&str> = allowed.iter().map(String::as_str).collect();
+    [
+        member_strings(FilterName::VALUE_SET_ORDER),
+        member_strings(MatchOption::VALUE_SET_ORDER),
+    ]
+    .into_iter()
+    .find(|stated| {
+        stated.iter().map(String::as_str).collect::<BTreeSet<&str>>() == allowed
+    })
+}
+
+/// The same violation with the rejected value WITHHELD, so the clause it renders
+/// names the member and the requirement alone — the form the SUMMARY states.
+///
+/// The framework already renders a clause both ways and chooses by whether the
+/// violation carries a value to show, so withholding the value here keeps the
+/// summary's wording the framework's rather than respelling it in this crate.
+fn without_echoed_value(violation: &Violation) -> Violation {
+    Violation {
+        value: None,
+        sensitive: true,
+        ..violation.clone()
+    }
 }
 
 /// A 400 `ValidationException` for a request this service could not READ —
@@ -495,7 +577,7 @@ fn compile_filters(
             violations.push(enum_violation(
                 filter_member_path(index, "key"),
                 &action_filter.key,
-                member_strings(FilterName::ALL),
+                member_strings(FilterName::VALUE_SET_ORDER),
             ));
         }
         let match_option = MatchOption::from_wire(&action_filter.match_option);
@@ -503,7 +585,7 @@ fn compile_filters(
             violations.push(enum_violation(
                 filter_member_path(index, "matchOption"),
                 &action_filter.match_option,
-                member_strings(MatchOption::ALL),
+                member_strings(MatchOption::VALUE_SET_ORDER),
             ));
         }
         // An empty `values` list is refused rather than evaluated: `any()` over no
@@ -568,18 +650,94 @@ fn mint_token(fingerprint: &str, offset: usize) -> String {
     format!("{fingerprint}{offset:0width$x}", width = TOKEN_OFFSET_LEN)
 }
 
+/// How a `nextToken` whose payload this service cannot use is refused: the
+/// pagination-token exception, naming the operation the token was presented to and
+/// the wrapping schema the token's own payload names.
+///
+/// A pagination token is an OPAQUE payload the service wraps a resume position in,
+/// so a token it cannot use is a payload whose wrapping it does not recognise —
+/// which is what this refusal says, rather than merely that the member's value was
+/// rejected: a caller is told the token failed to DECODE, and which schema its
+/// payload claimed, and so cannot mistake it for a token that decoded and named
+/// something else (that refusal is [`member_value_refused`], the member-level class
+/// every other read-and-refused value of this input carries).
+///
+/// The schema number is read from the SUPPLIED token ([`payload_wrapping_schema`]),
+/// never from anything this service holds, so two different tokens are refused with
+/// what each of them actually carries.
+fn pagination_token_exception(operation: &str, token: &str) -> ListRecommendedActionsError {
+    cannot_parse(
+        format!(
+            "Pagination token exception in operation '{operation}': invalid payload wrapping \
+             schema {}",
+            payload_wrapping_schema(token)
+        ),
+        (
+            "nextToken".to_string(),
+            "not a pagination token issued by this service".to_string(),
+        ),
+    )
+}
+
+/// The wrapping schema a supplied token's decoded payload names: the first 16 bits
+/// of that payload, read big-endian and SIGNED, the way a wrapped payload leads
+/// with the schema it was wrapped under.
+///
+/// A token is base64 text, so the payload is its decoding, and only the LEADING
+/// quantum is decoded — the schema is read out of the payload's first bytes, so a
+/// token that is too short or too damaged to decode any further still names the
+/// schema its first characters spell, and no caller-chosen length is decoded.
+/// Characters base64 does not spell are skipped and the URL-safe alphabet's two
+/// substitutions are read as the standard characters they stand for, so a token in
+/// either alphabet names the same schema; a quantum the token runs out of reads as
+/// zero bits, the same value an all-zero payload names.
+fn payload_wrapping_schema(token: &str) -> i16 {
+    let mut quantum: String = token
+        .chars()
+        .filter_map(standard_base64_char)
+        .take(BASE64_QUANTUM)
+        .collect();
+    while quantum.len() < BASE64_QUANTUM {
+        quantum.push(BASE64_ZERO_BITS);
+    }
+    // A full quantum of alphabet characters always decodes, so the payload below is
+    // the three bytes those characters spell; `unwrap_or_default` only keeps the
+    // reading total, and reads an undecodable quantum as an empty payload.
+    let payload = base64::engine::general_purpose::STANDARD
+        .decode(&quantum)
+        .unwrap_or_default();
+    let leading = |index: usize| payload.get(index).copied().unwrap_or(0);
+    i16::from_be_bytes([leading(0), leading(1)])
+}
+
+/// `c` as the STANDARD base64 alphabet spells it: the URL-safe alphabet's two
+/// substitutions read as the standard characters they stand for, and anything the
+/// alphabet does not spell at all (padding, separators, whitespace) skipped.
+fn standard_base64_char(c: char) -> Option<char> {
+    match c {
+        'A'..='Z' | 'a'..='z' | '0'..='9' | '+' | '/' => Some(c),
+        '-' => Some('+'),
+        '_' => Some('/'),
+        _ => None,
+    }
+}
+
+/// Base64 characters per encoded quantum, and the character spelling six zero bits:
+/// the quantum a token shorter than one is padded out with.
+const BASE64_QUANTUM: usize = 4;
+const BASE64_ZERO_BITS: char = 'A';
+
 /// The offset `token` resumes at, or a `ValidationException` when it is not a token
 /// this service minted over this selection.
-fn parse_token(token: &str, fingerprint: &str) -> Result<usize, ListRecommendedActionsError> {
-    let malformed = || {
-        cannot_parse(
-            "The nextToken is not valid. Pass back the nextToken returned by the previous call, unchanged.",
-            (
-                "nextToken".to_string(),
-                "not a pagination token issued by this service".to_string(),
-            ),
-        )
-    };
+///
+/// `operation` is the operation the token was presented to, named in the refusal of
+/// a token whose payload could not be used (see [`pagination_token_exception`]).
+fn parse_token(
+    token: &str,
+    fingerprint: &str,
+    operation: &str,
+) -> Result<usize, ListRecommendedActionsError> {
+    let malformed = || pagination_token_exception(operation, token);
     // A minted token is lower-case hex throughout, so anything else — including an
     // upper-cased copy of a real token — is a token this service did not mint, and is
     // reported as unreadable rather than as a token for another query.
@@ -699,7 +857,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let resume_at = match input.next_token.as_deref() {
-            Some(token) => parse_token(token, &fingerprint)?,
+            Some(token) => parse_token(token, &fingerprint, Self::NAME)?,
             None => 0,
         };
 

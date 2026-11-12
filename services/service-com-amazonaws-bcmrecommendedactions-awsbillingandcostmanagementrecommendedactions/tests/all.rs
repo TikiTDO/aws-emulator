@@ -25,3 +25,5 @@ mod state_roundtrip;
 mod unreadable_input;
 #[path = "all/unrouted_operation.rs"]
 mod unrouted_operation;
+#[path = "all/validation_message_wording.rs"]
+mod validation_message_wording;
