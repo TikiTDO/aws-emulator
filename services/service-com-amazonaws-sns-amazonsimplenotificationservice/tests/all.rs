@@ -160,6 +160,9 @@ mod sms_sandbox_verification;
 #[path = "all/sqs_delivery_authorization.rs"]
 mod sqs_delivery_authorization;
 
+#[path = "all/sqs_delivery_queue_encryption.rs"]
+mod sqs_delivery_queue_encryption;
+
 #[path = "all/sqs_subscription_delivery.rs"]
 mod sqs_subscription_delivery;
 

@@ -562,7 +562,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             (successful, failed, deliveries)
         };
-        deliver_to_endpoints(ctx, &deliveries).await;
+        deliver_to_endpoints(ctx, &*self.engine, &deliveries).await;
 
         Ok(PublishBatchOutput {
             successful: Some(successful),

@@ -163,6 +163,13 @@ use crate::state::{self, MessageRequest, PublishedMessage};
 #[path = "publish/function_delivery.rs"]
 mod function_delivery;
 
+/// Whether the KMS key a subscribed queue encrypts its messages with lets this service seal
+/// the notification it hands over: one concern of its own, for the reason
+/// [`function_delivery`] is — it is answered by another service, against a document of its
+/// own — and declared with a `#[path]` for the same reason.
+#[path = "publish/queue_encryption.rs"]
+mod queue_encryption;
+
 /// Refuse the request with `InvalidParameterException`, the error SNS uses for a
 /// parameter that "does not comply with the associated constraints".
 fn invalid_parameter(message: String) -> PublishError {
@@ -389,7 +396,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             let mut store = store.lock();
             publish_into_store(&mut store, input, &destination)?
         };
-        deliver_to_endpoints(ctx, &deliveries).await;
+        deliver_to_endpoints(ctx, &*self.engine, &deliveries).await;
         Ok(output)
     }
 }
@@ -1061,14 +1068,20 @@ impl QueueTarget {
 /// protocol has one delivery-status record written for it
 /// ([`crate::state::delivery_status`]): the record reports a delivery that has already been
 /// attempted, so it is written after the attempt and never instead of it.
-pub(crate) async fn deliver_to_endpoints(
+///
+/// `engine` is the shared engine this service is mounted on, which is where the KMS store
+/// holding an encrypted queue's key lives ([`queue_encryption`]): a subscribed queue
+/// encrypted with a customer managed key takes a notification only where that key admits
+/// this service's principal.
+pub(crate) async fn deliver_to_endpoints<Eng: Send + Sync + 'static>(
     ctx: &smithy_server_runtime::OperationContext<'_>,
+    engine: &Eng,
     deliveries: &Deliveries,
 ) {
     // ONE waiting budget for the whole request, for the reason [`RetryBudget`] gives: the
     // per-delivery schedule is bounded, their PRODUCT with the fan-out is not.
     let mut waiting = RetryBudget::new();
-    let mut queues = Queues::new(ctx);
+    let mut queues = Queues::new(ctx, queue_encryption::kms_state(engine));
     for delivery in &deliveries.queues {
         let attempted = queues
             .hand_over(&delivery.target, delivery, &mut waiting)
@@ -1240,23 +1253,32 @@ impl Attempted {
 /// The SQS queues ONE publishing request hands its messages to.
 ///
 /// It remembers what each queue of the fan-out answered — the client its Region is reached
-/// through and the `Policy` the queue itself reports — so a request that owes several
-/// messages to one queue reads that queue once. Both tables are bounded by the same
-/// [`MAX_DELIVERIES_PER_REQUEST`] the deliveries are.
+/// through, the facts the queue itself reports (its `Policy` and the KMS key it encrypts its
+/// messages with) and what that key's own policy says about this delivery — so a request that
+/// owes several messages to one queue reads that queue, and its key, once. Every table is
+/// bounded by the same [`MAX_DELIVERIES_PER_REQUEST`] the deliveries are.
 pub(super) struct Queues<'ctx, 'op> {
     ctx: &'ctx smithy_server_runtime::OperationContext<'op>,
+    /// The KMS store the key an encrypted queue names is resolved in, and `None` for an
+    /// engine carrying none ([`queue_encryption::kms_state`]).
+    kms: Option<::engine::ServiceState<queue_encryption::KmsState>>,
     /// One client per Region: every queue of one Region is reached through the same endpoint,
     /// and a publish rarely fans out across Regions.
     clients: Vec<(String, ::aws_sdk_sqs::Client)>,
-    /// The `Policy` each queue answered with, keyed by its url.
-    policies: Vec<(String, QueuePolicy)>,
+    /// What each queue answered about itself, keyed by its url.
+    facts: Vec<(String, QueueFacts)>,
 }
 
-/// What a queue answered when the `Policy` it carries was read.
+/// What a queue answered when the facts a delivery to it is decided from were read.
 #[derive(Debug, Clone)]
-enum QueuePolicy {
-    /// The queue answered: the policy document it carries, or `None` when it carries none.
-    Stated(Option<String>),
+enum QueueFacts {
+    /// The queue answered: the `Policy` document it carries, or `None` when it carries none,
+    /// and the customer master key it encrypts its messages with, or `None` for a queue on a
+    /// key its own service owns.
+    Stated {
+        policy: Option<String>,
+        master_key_id: Option<String>,
+    },
     /// The queue did not answer at all — one that was deleted, or that never existed — so
     /// nothing can be handed to it, and what its service answered instead is carried along
     /// for the delivery-status record of the attempt.
@@ -1264,11 +1286,15 @@ enum QueuePolicy {
 }
 
 impl<'ctx, 'op> Queues<'ctx, 'op> {
-    pub(super) fn new(ctx: &'ctx smithy_server_runtime::OperationContext<'op>) -> Self {
+    pub(super) fn new(
+        ctx: &'ctx smithy_server_runtime::OperationContext<'op>,
+        kms: Option<::engine::ServiceState<queue_encryption::KmsState>>,
+    ) -> Self {
         Self {
             ctx,
+            kms,
             clients: Vec::new(),
-            policies: Vec::new(),
+            facts: Vec::new(),
         }
     }
 
@@ -1285,14 +1311,24 @@ impl<'ctx, 'op> Queues<'ctx, 'op> {
         fresh
     }
 
-    /// The `Policy` the queue at `queue_url` reports, read at most once per request.
-    async fn policy(&mut self, client: &::aws_sdk_sqs::Client, queue_url: &str) -> QueuePolicy {
-        if let Some((_, policy)) = self.policies.iter().find(|(held, _)| held == queue_url) {
-            return policy.clone();
+    /// What the queue at `queue_url` reports about itself, read at most once per request.
+    async fn facts(&mut self, client: &::aws_sdk_sqs::Client, queue_url: &str) -> QueueFacts {
+        if let Some((_, facts)) = self.facts.iter().find(|(held, _)| held == queue_url) {
+            return facts.clone();
         }
-        let read = queue_policy(client, queue_url).await;
-        self.policies.push((queue_url.to_string(), read.clone()));
+        let read = queue_facts(client, queue_url).await;
+        self.facts.push((queue_url.to_string(), read.clone()));
         read
+    }
+
+    /// Why the key the queue at `queue` encrypts its messages with withholds a delivery to
+    /// it, and `None` when it lets this service seal the notification.
+    fn key_withheld(
+        &self,
+        queue: &QueueLocation,
+        master_key_id: &str,
+    ) -> Option<queue_encryption::KeyWithheld> {
+        queue_encryption::withheld_by_queue_key(self.kms.as_ref(), queue, master_key_id)
     }
 
     /// Hand `delivery`'s message to `queue`, and report whether the queue took it — together
@@ -1331,7 +1367,8 @@ impl<'ctx, 'op> Queues<'ctx, 'op> {
     }
 
     /// ONE attempt at handing `delivery`'s message to `queue`: a queue that does not answer,
-    /// a queue whose own policy does not grant this service the send, and a send the queue
+    /// a queue whose own policy does not grant this service the send, a queue whose
+    /// encryption key does not let this service seal the message, and a send the queue
     /// refused are each a way the message did not reach it.
     async fn attempt_hand_over(
         &mut self,
@@ -1339,9 +1376,12 @@ impl<'ctx, 'op> Queues<'ctx, 'op> {
         delivery: &QueueDelivery,
     ) -> Attempted {
         let client = self.client(&queue.region);
-        let policy = match self.policy(&client, &queue.queue_url).await {
-            QueuePolicy::Stated(policy) => policy,
-            QueuePolicy::Unreachable(answered) => {
+        let (policy, master_key_id) = match self.facts(&client, &queue.queue_url).await {
+            QueueFacts::Stated {
+                policy,
+                master_key_id,
+            } => (policy, master_key_id),
+            QueueFacts::Unreachable(answered) => {
                 ::tracing::warn!(
                     subscription = %delivery.subscription_arn,
                     queue = %queue.queue_url,
@@ -1359,6 +1399,20 @@ impl<'ctx, 'op> Queues<'ctx, 'op> {
                  message, so the notification is withheld"
             );
             return Attempted::new(HandOver::Refused, send_was_denied(&queue.queue_arn));
+        }
+        // A queue encrypted with a customer managed key takes no message this service may not
+        // have that key used for: the data key the message is sealed under is generated on
+        // the producer's behalf, and the producer here is the service principal.
+        if let Some(key) = master_key_id.as_deref() {
+            if let Some(withheld) = self.key_withheld(queue, key) {
+                ::tracing::warn!(
+                    subscription = %delivery.subscription_arn,
+                    queue = %queue.queue_url,
+                    "the subscribed queue's encryption key does not allow this service to \
+                     seal a message for it, so the notification is withheld"
+                );
+                return Attempted::new(HandOver::Refused, withheld.answered());
+            }
         }
         let mut request = client
             .send_message()
@@ -1500,36 +1554,47 @@ fn delivery_is_authorized(policy: Option<&str>, queue_arn: &str, topic_arn: &str
     resource_policy_allows(policy, SEND_MESSAGE_ACTION, queue_arn, topic_arn)
 }
 
-/// What the queue at `queue_url` answered when its `Policy` was read: the document it
-/// carries, none, or nothing at all.
+/// What the queue at `queue_url` answered when the facts a delivery to it is decided from
+/// were read: the `Policy` document it carries (or none) and the customer master key it
+/// encrypts its messages with (or none), or nothing at all.
 ///
 /// A queue that does not answer the read is one no message can be handed to either — it was
 /// deleted, or never existed — which is told apart from a queue that answered and carries no
 /// policy, because the first is an undeliverable endpoint and the second is a queue that has
 /// granted nothing.
-async fn queue_policy(client: &::aws_sdk_sqs::Client, queue_url: &str) -> QueuePolicy {
+///
+/// ONE read for both facts: they are attributes of the same queue, and `GetQueueAttributes`
+/// answers with every name the request asks for.
+async fn queue_facts(client: &::aws_sdk_sqs::Client, queue_url: &str) -> QueueFacts {
     let answered = client
         .get_queue_attributes()
         .queue_url(queue_url)
         .attribute_names(::aws_sdk_sqs::types::QueueAttributeName::Policy)
+        .attribute_names(::aws_sdk_sqs::types::QueueAttributeName::KmsMasterKeyId)
         .send()
         .await;
     match answered {
-        Ok(answer) => QueuePolicy::Stated(
-            answer
-                .attributes()
-                .and_then(|attributes| {
-                    attributes.get(&::aws_sdk_sqs::types::QueueAttributeName::Policy)
-                })
-                .cloned(),
-        ),
+        Ok(answer) => {
+            let attribute = |name: &::aws_sdk_sqs::types::QueueAttributeName| {
+                answer
+                    .attributes()
+                    .and_then(|attributes| attributes.get(name))
+                    .cloned()
+            };
+            QueueFacts::Stated {
+                policy: attribute(&::aws_sdk_sqs::types::QueueAttributeName::Policy),
+                master_key_id: attribute(
+                    &::aws_sdk_sqs::types::QueueAttributeName::KmsMasterKeyId,
+                ),
+            }
+        }
         Err(error) => {
             ::tracing::warn!(
                 queue = %queue_url,
                 error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
-                "a subscribed queue's policy could not be read"
+                "a subscribed queue's attributes could not be read"
             );
-            QueuePolicy::Unreachable(answered_refusal(&error))
+            QueueFacts::Unreachable(answered_refusal(&error))
         }
     }
 }

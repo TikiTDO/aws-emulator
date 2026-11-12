@@ -173,7 +173,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // an in-process call into another service, which must not run under this store's
         // lock.
         let replay = self.write_attribute(input, &state::request_region(ctx.parts()))?;
-        super::publish::deliver_to_endpoints(ctx, &replay).await;
+        super::publish::deliver_to_endpoints(ctx, &*self.engine, &replay).await;
         Ok(SetSubscriptionAttributesOutput)
     }
 }

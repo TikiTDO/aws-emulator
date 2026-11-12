@@ -35,8 +35,10 @@ use crate::topics_subscriptions_publish::percent_encode;
 /// The Region every call below is signed for.
 const REGION: &str = "us-east-1";
 
-/// SNS and SQS on ONE engine: a subscription's endpoint is a queue, and the delivery is
-/// asserted on the queue.
+/// SNS, SQS and KMS on ONE engine: a subscription's endpoint is a queue, the delivery is
+/// asserted on the queue, and the key a queue is encrypted with is a resource of KMS — whose
+/// own key policy decides a delivery into such a queue
+/// (`sqs_delivery_queue_encryption.rs`).
 pub(crate) struct Emulator {
     router: MultiServiceRouter,
 }
@@ -53,6 +55,9 @@ pub(crate) fn emulator() -> Emulator {
     router.register_service(service_com_amazonaws_sqs_amazonsqs::EmulatedService::new(
         Arc::clone(&engine),
     ));
+    router.register_service(
+        service_com_amazonaws_kms_trentservice::EmulatedService::new(Arc::clone(&engine)),
+    );
     Emulator { router }
 }
 
@@ -142,6 +147,43 @@ pub(crate) async fn sqs_call(
         serde_json::from_slice(&payload).unwrap_or(Value::Null)
     };
     (status, parsed)
+}
+
+/// One `awsJson1_1` call against KMS that must SUCCEED: `POST /` with
+/// `X-Amz-Target: TrentService.<Operation>`, through the same router.
+///
+/// The key a subscribed queue is encrypted with is a KMS resource, and the document that
+/// decides a delivery into such a queue is that key's own policy, so a suite asserting the
+/// delivery writes the key and its policy here.
+pub(crate) async fn kms(emulator: &Emulator, operation: &str, body: &Value) -> Value {
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/")
+        .header("host", format!("kms.{REGION}.amazonaws.com"))
+        .header("content-type", "application/x-amz-json-1.1")
+        .header("x-amz-target", format!("TrentService.{operation}"))
+        .header(
+            "authorization",
+            format!(
+                "AWS4-HMAC-SHA256 Credential=AKIDTESTTESTTEST/20260101/{REGION}/kms/aws4_request, \
+                 SignedHeaders=host, Signature=0000"
+            ),
+        )
+        .body(bytes::Bytes::from(body.to_string()))
+        .expect("the test request is well formed");
+    let response = emulator.router.dispatch(request).await;
+    let status = response.status().as_u16();
+    let payload = response.into_body();
+    let parsed: Value = if payload.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&payload).unwrap_or(Value::Null)
+    };
+    assert_eq!(
+        status, 200,
+        "{operation}: expected HTTP 200, got {status} with {parsed}"
+    );
+    parsed
 }
 
 /// The text of the first `<tag>…</tag>` element of an awsQuery response.
