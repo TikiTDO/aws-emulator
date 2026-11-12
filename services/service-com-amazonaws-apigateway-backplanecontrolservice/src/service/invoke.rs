@@ -696,7 +696,7 @@ const EXPIRED_IDENTITY_TOKEN: GatewayRefusal = GatewayRefusal {
 const API_CONFIGURATION_ERROR: GatewayRefusal = GatewayRefusal {
     response_type: "API_CONFIGURATION_ERROR",
     message: Cow::Borrowed("Internal server error"),
-    error_type: None,
+    error_type: Some(INTERNAL_SERVER_ERROR_EXCEPTION),
     validation_detail: Cow::Borrowed(""),
     message_member: MESSAGE_MEMBER,
 };
@@ -726,7 +726,7 @@ const INTEGRATION_TIMEOUT: GatewayRefusal = GatewayRefusal {
 const AUTHORIZER_CONFIGURATION_ERROR: GatewayRefusal = GatewayRefusal {
     response_type: "AUTHORIZER_CONFIGURATION_ERROR",
     message: Cow::Borrowed("Internal server error"),
-    error_type: None,
+    error_type: Some(INTERNAL_SERVER_ERROR_EXCEPTION),
     validation_detail: Cow::Borrowed(""),
     message_member: MESSAGE_MEMBER,
 };
@@ -740,7 +740,7 @@ const AUTHORIZER_CONFIGURATION_ERROR: GatewayRefusal = GatewayRefusal {
 const AUTHORIZER_FAILURE: GatewayRefusal = GatewayRefusal {
     response_type: "AUTHORIZER_FAILURE",
     message: Cow::Borrowed("Internal server error"),
-    error_type: None,
+    error_type: Some(INTERNAL_SERVER_ERROR_EXCEPTION),
     validation_detail: Cow::Borrowed(""),
     message_member: MESSAGE_MEMBER,
 };
@@ -883,6 +883,15 @@ const ERROR_TYPE_HEADER: &str = "x-amzn-errortype";
 /// that reads the class reads the same one for all three, as the recorded keyless invoke of
 /// a key-required method shows.
 const FORBIDDEN_EXCEPTION: &str = "ForbiddenException";
+
+/// The exception class the endpoint reports every refusal whose body is the
+/// `Internal server error` envelope is the wire form of: an integration the stage cannot
+/// perform ([`API_CONFIGURATION_ERROR`]), an authorizer it cannot invoke at all
+/// ([`AUTHORIZER_CONFIGURATION_ERROR`]) and an authorizer whose run produced no decision
+/// ([`AUTHORIZER_FAILURE`]). One envelope, one status, one class: a client's retry and
+/// alarm handling keys off this header, so a 5xx left without it is an untyped failure a
+/// caller can read only as prose.
+const INTERNAL_SERVER_ERROR_EXCEPTION: &str = "InternalServerErrorException";
 
 /// What an invoke addresses, as the wire carries it: the request's host — absent on a
 /// request that carries neither a `Host` header nor an absolute URI — its path, and the api

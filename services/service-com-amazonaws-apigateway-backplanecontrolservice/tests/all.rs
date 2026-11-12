@@ -507,4 +507,8 @@ mod stage_cognito_token_refusal_class;
 // reports — the decision its execution produced, and the status a client would have received.
 #[path = "all/test_invoke_authorizer.rs"]
 mod test_invoke_authorizer;
+// Appended for the reason the note above gives: the exception CLASS a deployed stage names on
+// the `500` it answers when it cannot serve the call at all.
+#[path = "all/stage_internal_error_class.rs"]
+mod stage_internal_error_class;
 
