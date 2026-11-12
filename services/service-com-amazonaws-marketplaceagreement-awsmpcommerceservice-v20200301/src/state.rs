@@ -2411,13 +2411,24 @@ impl Agreement {
     /// passed, whatever later call asks. The answer says whether this call is
     /// what moved it, so a caller that owes an audit record emits one only for
     /// the transition it actually made.
+    ///
+    /// `updated_at` is "when the agreement was last updated"
+    /// (`AgreementViewSummary$lastUpdateTime`), so it reports the LATEST change
+    /// the record carries and never moves backwards: a transition stamped at the
+    /// instant it was DUE — which is what the clock-driven ones are
+    /// ([`Agreement::expire`], [`Agreement::renew`]) — leaves a change already
+    /// recorded later in place rather than re-dating the record before it. That
+    /// is what keeps repeated reads reporting one instant while the key
+    /// `SearchAgreements` sorts by, and the value its `BeforeLastUpdateTime` and
+    /// `AfterLastUpdateTime` filters select on, stay the newest change each
+    /// agreement has.
     #[must_use]
     fn leave_active(&mut self, status: &str, now: SystemTime) -> bool {
         if self.status != STATUS_ACTIVE {
             return false;
         }
         self.status = status.to_string();
-        self.updated_at = now;
+        self.updated_at = self.updated_at.max(now);
         true
     }
 
@@ -2487,7 +2498,9 @@ impl Agreement {
     /// reported without the other.
     ///
     /// `updated_at` becomes the instant the change was DUE, never the instant it
-    /// was observed, so repeated reads report the same `lastUpdateTime`. Guarded
+    /// was observed, so repeated reads report the same `lastUpdateTime` — and
+    /// never an instant earlier than a change the record already carries, which
+    /// [`Agreement::leave_active`] is where that floor is applied. Guarded
     /// by [`Agreement::leave_active`] exactly as [`Agreement::cancel`] is, so an
     /// agreement the acceptor cancelled or a replacement superseded before its
     /// end date keeps the status it reached.

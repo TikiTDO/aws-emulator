@@ -67,6 +67,8 @@ mod intent_enum_values;
 mod invoice_adjustments;
 #[path = "all/invoice_line_item_listing.rs"]
 mod invoice_line_item_listing;
+#[path = "all/last_update_time_monotonicity.rs"]
+mod last_update_time_monotonicity;
 #[path = "all/license_arn_region.rs"]
 mod license_arn_region;
 #[path = "all/listing_resolution_order.rs"]
