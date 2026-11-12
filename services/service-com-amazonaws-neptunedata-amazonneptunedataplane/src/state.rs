@@ -2,7 +2,7 @@
 
 //! Engine state for the com-amazonaws-neptunedata-amazonneptunedataplane service.
 //!
-//! Three kinds of record live here, and every implemented operation computes its answer
+//! Four kinds of record live here, and every implemented operation computes its answer
 //! from them:
 //!
 //! * [`FastResetRecord`] — the fast-reset token the engine is willing to accept, and what
@@ -15,6 +15,8 @@
 //! * [`GremlinQueryRecord`] — one per Gremlin query the engine has accepted, keyed by
 //!   query id. `ListGremlinQueries` and `GetGremlinQueryStatus` report on these and
 //!   `CancelGremlinQuery` mutates them.
+//! * [`LoaderJobRecord`] — one per bulk-load job the engine has admitted, keyed by load
+//!   id. `ListLoaderJobs` reports the load ids of the active ones.
 //!
 //! Nothing in this crate admits a query record yet: the Gremlin execution endpoints
 //! (`ExecuteGremlinQuery`, `ExecuteGremlinExplainQuery`, `ExecuteGremlinProfileQuery`)
@@ -23,6 +25,12 @@
 //! for a traversal nothing ran would be a fabrication. The registry is therefore
 //! honestly empty until a real Gremlin engine is wired in, and the status family above
 //! reports exactly what it holds.
+//!
+//! The loader registry is in the same position: `StartLoaderJob` still answers HTTP 501,
+//! because a bulk load reads data files and writes them into a graph, and this emulator
+//! has no graph store to write them into — so a load id for a load nothing performed
+//! would be a fabrication too. `ListLoaderJobs` therefore reports exactly the jobs the
+//! registry holds, which is nothing until a loader that really loads is wired in.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -76,6 +84,20 @@ pub const CLUSTER_QUERY_TIMEOUT_SETTING: &str = "clusterQueryTimeoutInMs";
 /// `CancelGremlinQueryOutput$status` for a cancellation the engine accepted. It reports
 /// the status of the cancellation request itself, not of the query.
 pub const CANCELLATION_ACCEPTED: &str = "200 OK";
+
+/// `ListLoaderJobsOutput$status` for a job-list request the loader endpoint served — the
+/// member "returns the status of the job list request", and the loader endpoint states
+/// that as the HTTP status line of the answer.
+pub const LOADER_JOB_LIST_SERVED: &str = "200 OK";
+
+/// The maximum of `ListLoaderJobsInput$limit`, which is also its default — the member's
+/// own documentation states both: "Must be a positive integer greater than zero and not
+/// more than 100 (which is the default)".
+pub const LOADER_JOB_LIST_MAX_LIMIT: i32 = 100;
+
+/// The minimum of `ListLoaderJobsInput$limit`: the member must be "a positive integer
+/// greater than zero", which the model declares as the range's lower bound.
+pub const LOADER_JOB_LIST_MIN_LIMIT: i32 = 1;
 
 /// `ExecuteFastResetOutput$status` for a fast-reset command the engine accepted — the
 /// member reports "whether or not the fast reset rquest is accepted", and the system
@@ -294,6 +316,65 @@ impl GremlinQueryRecord {
     }
 }
 
+/// How far a bulk-load job this engine has admitted has got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoaderJobState {
+    /// Admitted as a queued load request, waiting behind the jobs ahead of it.
+    Queued,
+    /// Loading its source data now.
+    Loading,
+    /// Finished loading everything the source held.
+    Completed,
+    /// Stopped on an error it could not skip.
+    Failed,
+    /// Stopped by `CancelLoaderJob`.
+    Cancelled,
+}
+
+impl LoaderJobState {
+    /// Whether the job is still a queued load request, which is what
+    /// `ListLoaderJobsInput$includeQueuedLoads` chooses to see or to exclude.
+    pub fn is_queued(self) -> bool {
+        matches!(self, Self::Queued)
+    }
+
+    /// Whether this is one of the "active loader jobs" `ListLoaderJobs` reports the load
+    /// ids of: a job the loader still owes an outcome, queued or loading. A job that has
+    /// finished — completed, failed or cancelled — is not active, so its load id is not
+    /// one the job list reports.
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Queued | Self::Loading)
+    }
+}
+
+/// One bulk-load job this engine has admitted, as this emulator persists it.
+#[derive(Debug, Clone)]
+pub struct LoaderJobRecord {
+    /// The id the job is reached by — `GetLoaderJobStatus`'s and `CancelLoaderJob`'s
+    /// `loadId` label, the value `ListLoaderJobs` lists, and the key this record is
+    /// stored under.
+    pub load_id: String,
+    /// When the loader admitted the job. The job list orders by this instant, so a job
+    /// the loader took on later is reported ahead of an older one.
+    pub admitted_at: SystemTime,
+    pub state: LoaderJobState,
+}
+
+impl LoaderJobRecord {
+    /// A record for the job `load_id`, admitted at `admitted_at` in `state`.
+    pub fn admitted(
+        load_id: impl Into<String>,
+        admitted_at: SystemTime,
+        state: LoaderJobState,
+    ) -> Self {
+        Self {
+            load_id: load_id.into(),
+            admitted_at,
+            state,
+        }
+    }
+}
+
 /// The fast-reset state of the database this engine serves.
 ///
 /// Fast reset is a two-step command: `initiateDatabaseReset` mints the token, and only a
@@ -352,6 +433,9 @@ pub struct ComAmazonawsNeptunedataAmazonneptunedataplaneState {
     pub gremlin_queries: BTreeMap<String, GremlinQueryRecord>,
     /// The fast-reset token and reset history `ExecuteFastReset` reads and writes.
     pub fast_reset: FastResetRecord,
+    /// Every bulk-load job the engine has admitted, keyed by load id. `ListLoaderJobs`
+    /// reports the load ids of the active ones.
+    pub loader_jobs: BTreeMap<String, LoaderJobRecord>,
 }
 
 impl ComAmazonawsNeptunedataAmazonneptunedataplaneState {
@@ -384,6 +468,32 @@ impl ComAmazonawsNeptunedataAmazonneptunedataplaneState {
                 query.state.is_running() || (include_waiting && query.state == QueryState::Waiting)
             })
             .map(|query| query.status(now))
+            .collect()
+    }
+
+    /// The load ids of the active loader jobs — the jobs the loader still owes an
+    /// outcome — newest admission first, at most `limit` of them.
+    ///
+    /// `include_queued` keeps the queued load requests among them, which is what
+    /// `includeQueuedLoads` chooses; a job that has finished is not active, so its id is
+    /// never listed. Jobs admitted in the same instant are ordered by load id, so the
+    /// order is total and `limit` takes the same prefix on every read.
+    pub fn active_loader_job_ids(&self, include_queued: bool, limit: usize) -> Vec<String> {
+        let mut active: Vec<&LoaderJobRecord> = self
+            .loader_jobs
+            .values()
+            .filter(|job| job.state.is_active() && (include_queued || !job.state.is_queued()))
+            .collect();
+        active.sort_by(|left, right| {
+            right
+                .admitted_at
+                .cmp(&left.admitted_at)
+                .then_with(|| left.load_id.cmp(&right.load_id))
+        });
+        active
+            .into_iter()
+            .take(limit)
+            .map(|job| job.load_id.clone())
             .collect()
     }
 
@@ -475,6 +585,28 @@ fn echoed(value: &str) -> String {
 pub fn invalid_query_id(query_id: &str) -> InvalidParameterException {
     InvalidParameterException {
         detailed_message: format!("Supplied queryId {} is invalid", echoed(query_id)),
+        request_id: new_request_id(),
+        code: "400".to_string(),
+    }
+}
+
+/// The `InvalidParameterException` payload for a request member carrying a number
+/// outside the range the model publishes for it — a value the request cannot be served
+/// with, so it is refused rather than quietly adjusted.
+///
+/// `member` is the modelled member's wire name and the bounds are the ones the model
+/// declares, so the caller can fix the request from the message alone.
+pub fn invalid_parameter_range(
+    member: &str,
+    value: i32,
+    minimum: i32,
+    maximum: i32,
+) -> InvalidParameterException {
+    InvalidParameterException {
+        detailed_message: format!(
+            "Supplied {member} {value} is invalid. {member} must be an integer \
+             not less than {minimum} and not more than {maximum}"
+        ),
         request_id: new_request_id(),
         code: "400".to_string(),
     }

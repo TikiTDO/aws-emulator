@@ -13,6 +13,8 @@
 // points it into `tests/all/`.
 #[path = "all/fast_reset.rs"]
 mod fast_reset;
+#[path = "all/loader_jobs.rs"]
+mod loader_jobs;
 #[path = "all/neptune_data_plane.rs"]
 mod neptune_data_plane;
 #[path = "all/state_roundtrip.rs"]
