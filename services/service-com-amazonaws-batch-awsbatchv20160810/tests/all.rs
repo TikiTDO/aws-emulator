@@ -35,6 +35,8 @@ mod consumable_resource_updates;
 mod consumable_resources;
 #[path = "all/enum_membership_refusals.rs"]
 mod enum_membership_refusals;
+#[path = "all/job_attempt_records.rs"]
+mod job_attempt_records;
 #[path = "all/job_definition_deregistration.rs"]
 mod job_definition_deregistration;
 #[path = "all/job_definition_registry.rs"]

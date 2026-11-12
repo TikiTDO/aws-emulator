@@ -25,7 +25,9 @@
 //! environment. A job whose queue offers none of that waits in `RUNNABLE`; a job whose queue
 //! does is placed, and because this emulator has no container runtime the placement ends in
 //! the modelled failure state with `state::NO_CONTAINER_RUNTIME_REASON` — never with an
-//! invented `startedAt`, `stoppedAt`, attempt or `exitCode`.
+//! invented `startedAt`, `stoppedAt` or `exitCode`. What the PLACEMENT itself records — the
+//! one job attempt, the task it was placed as and the log stream that task writes to — is
+//! pinned in `job_attempt_records.rs`.
 
 use std::time::Duration;
 
@@ -53,7 +55,11 @@ fn fargate_compute_resources() -> Value {
 
 /// A `MANAGED` Fargate compute environment called `name` in `ce_state`, polled until it
 /// reports `VALID`; answers its ARN.
-async fn managed_compute_environment(batch: &Batch, name: &str, ce_state: &str) -> String {
+pub(crate) async fn managed_compute_environment(
+    batch: &Batch,
+    name: &str,
+    ce_state: &str,
+) -> String {
     let body = batch
         .ok(
             "/v1/createcomputeenvironment",
@@ -159,8 +165,10 @@ async fn submit_ok(fixture: &Fixture, name: &str, extra: Value) -> String {
         .to_string()
 }
 
-/// Assert that `detail` reports a job nothing ran: no `startedAt`, no `stoppedAt`, no
-/// attempt and no exit code, whatever status it is in.
+/// Assert that `detail` reports a job whose container nothing RAN: no `startedAt`, no
+/// `stoppedAt` and no exit code — neither on the job nor on any attempt a placement
+/// recorded for it. The attempt record itself belongs to the PLACEMENT, not to a run, and
+/// what a placed job's attempt carries is pinned in `job_attempt_records.rs`.
 fn assert_nothing_ran(case: &str, detail: &Value) {
     for member in ["startedAt", "stoppedAt"] {
         assert_eq!(
@@ -170,13 +178,21 @@ fn assert_nothing_ran(case: &str, detail: &Value) {
         );
     }
     assert!(
-        detail["attempts"].is_null(),
-        "case {case}: no attempt is invented for a job nothing ran, got {detail}"
-    );
-    assert!(
         detail["container"]["exitCode"].is_null(),
         "case {case}: no exit code is invented, got {detail}"
     );
+    for attempt in detail["attempts"].as_array().into_iter().flatten() {
+        for member in ["startedAt", "stoppedAt"] {
+            assert!(
+                attempt[member].is_null(),
+                "case {case}: an attempt nothing ran reports no {member}, got {attempt}"
+            );
+        }
+        assert!(
+            attempt["container"]["exitCode"].is_null(),
+            "case {case}: no attempt exit code is invented, got {attempt}"
+        );
+    }
 }
 
 /// The `jobSummaryList` of `ListJobs` for `request`.

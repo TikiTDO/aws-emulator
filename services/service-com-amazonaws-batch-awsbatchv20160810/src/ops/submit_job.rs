@@ -412,6 +412,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     definition.container_properties.as_ref(),
                     input.container_overrides.as_ref(),
                 ),
+                // No placement has started an attempt for this job yet: the scheduler
+                // records one when it places the job (`state::place_job`).
+                attempts: Vec::new(),
                 node_properties: definition.node_properties.clone(),
                 retry_strategy: input.retry_strategy.or(definition.retry_strategy),
                 timeout: input.timeout.or(definition.timeout),

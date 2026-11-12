@@ -35,10 +35,12 @@
 //! `UNMANAGED`, `DISABLED` or not created yet — leaves the job RESTING in `RUNNABLE`,
 //! where only a caller ends it (`CancelJob`, `TerminateJob`, or the deletion of its
 //! queue), while a queue whose MANAGED environment can hold it PLACES it one span later
-//! and the placement ends in the modelled failure state with
-//! [`NO_CONTAINER_RUNTIME_REASON`]. Either way no `startedAt`, `stoppedAt`, attempt or
-//! `exitCode` is invented, and no job is ever advanced to `STARTING` or `RUNNING`.
-//! Everything around it — accepting, resolving, scheduling, listing, cancelling,
+//! and the placement RECORDS the job attempt it starts — one [`JobAttempt`] carrying the
+//! ARN of the task the job was placed as — and then ends in the modelled failure state with
+//! [`NO_CONTAINER_RUNTIME_REASON`], which is what that attempt ends with too. Either way no
+//! `startedAt`, `stoppedAt` or `exitCode` is invented for a container nothing
+//! ran, and no job is ever advanced to `STARTING` or `RUNNING`.
+//! Everything around it — accepting, resolving, scheduling, placing, listing, cancelling,
 //! terminating — is real.
 //!
 //! An ARRAY job's parent runs no container of its own, so it is never placed: its status
@@ -78,7 +80,8 @@ pub use array_jobs::*;
 pub use placement::*;
 
 use crate::ops::types::{
-    CapacityLimit, ClientException, ComputeEnvironmentOrder, ComputeResource,
+    AttemptContainerDetail, AttemptDetail, CapacityLimit, ClientException, ComputeEnvironmentOrder,
+    ComputeResource,
     ConsumableResourceProperties, ContainerDetail, ContainerOverrides, ContainerProperties,
     EcsProperties, EcsSettings, EksConfiguration, FairsharePolicy, JobDefinition, JobDependency,
     JobStateTimeLimitAction, JobTimeout, KeyValuePair, NodeProperties,
@@ -914,10 +917,10 @@ pub struct JobStateChange {
 /// "The `detail` section of the event contains the job's details, in the same
 /// form as the `DescribeJobs` API returns them" ("AWS Batch events"), so every
 /// member below is read from the stored record — the SAME record `DescribeJobs`
-/// projects — and nothing that is not stored is invented: `attempts` is empty
-/// because no container ran (see this module's header), and `startedAt`,
-/// `stoppedAt`, `statusReason` and the optional members appear only once the
-/// record carries them.
+/// projects — and nothing that is not stored is invented: `attempts` reports the
+/// attempts the record holds (empty for a job nothing has placed, as the sample
+/// event shows it), and `startedAt`, `stoppedAt`, `statusReason` and the optional
+/// members appear only once the record carries them.
 pub fn job_state_change_detail(job: &Job) -> ::serde_json::Value {
     use ::serde_json::{json, Map, Value};
 
@@ -938,9 +941,13 @@ pub fn job_state_change_detail(job: &Job) -> ::serde_json::Value {
     if let Some(at) = job.stopped_at {
         detail.insert("stoppedAt".to_string(), json!(at));
     }
-    // Nothing ran, so there is no attempt to report — the member is present and
-    // empty, exactly as `DescribeJobs` reports it for a job with no attempts.
-    detail.insert("attempts".to_string(), json!([]));
+    // One entry per attempt the record holds, present and empty for a job no placement
+    // has started an attempt for (the "AWS Batch events" sample event shows
+    // `"attempts": []`).
+    detail.insert(
+        "attempts".to_string(),
+        Value::Array(job.attempts.iter().map(attempt_event_detail).collect()),
+    );
     detail.insert(
         "dependsOn".to_string(),
         Value::Array(
@@ -1562,6 +1569,15 @@ pub struct Job {
     pub cancel_requested: Option<String>,
     pub parameters: Option<HashMap<String, String>>,
     pub container: Option<ContainerDetail>,
+    /// The job attempts this job has had, oldest first — one per time the scheduler
+    /// PLACED its container on compute capacity ([`Self::attempts`] is what
+    /// `JobDetail$attempts`, "a list of job attempts that are associated with this job",
+    /// is projected from).
+    ///
+    /// Empty for a job nothing has placed yet, which is why the projection reports no
+    /// attempt for it. Bounded by the placements a job can have, which the lifecycle
+    /// decides and no request can repeat.
+    pub attempts: Vec<JobAttempt>,
     pub node_properties: Option<NodeProperties>,
     pub retry_strategy: Option<RetryStrategy>,
     pub timeout: Option<JobTimeout>,
@@ -3175,10 +3191,12 @@ impl ComAmazonawsBatchAwsbatchv20160810State {
                     // A job resting in `RUNNABLE` owes nothing unless its queue's compute
                     // capacity placed it, which is what this due instant says happened.
                     JOB_RUNNABLE => {
-                        if self.job_is_placeable(id) {
-                            // Placed — and nothing here can RUN the container the attempt
-                            // would start, so the placed job ends in the modelled failure
-                            // state saying exactly that (see [`NO_CONTAINER_RUNTIME_REASON`]).
+                        if self.place_job(id) {
+                            // Placed, so the attempt that placement started is recorded
+                            // with the task it was placed as — and nothing here can RUN
+                            // that task's container, so the placed job ends in the modelled
+                            // failure state saying exactly that, which is what the attempt
+                            // ends with too (see [`NO_CONTAINER_RUNTIME_REASON`]).
                             self.finish_job(id, JOB_FAILED, Some(NO_CONTAINER_RUNTIME_REASON), due);
                             Some(Advanced::Terminal)
                         } else {
@@ -3665,6 +3683,10 @@ impl ComAmazonawsBatchAwsbatchv20160810State {
             if let Some(container) = job.container.as_mut() {
                 container.reason = reason.map(str::to_string);
             }
+            // An attempt still open when the job ends ends WITH it, carrying the same
+            // reason: whatever took the job terminal ended the attempt it was running
+            // ([`end_open_attempt`]).
+            end_open_attempt(job, reason, ended_at);
         }
         self.record_job_state_change(id, ended_at);
         let waiting = self.dependents.get(id).cloned().unwrap_or_default();

@@ -3,7 +3,8 @@
 //! @op DescribeJobs
 //! Reports one `JobDetail` per KNOWN job id, built from the persisted record: the job's
 //! name, its queue's ARN, the ARN of the job definition revision it resolved to, its
-//! status and `statusReason`, `createdAt`/`stoppedAt` in epoch milliseconds, its
+//! status and `statusReason`, `createdAt`/`stoppedAt` in epoch milliseconds, the job
+//! `attempts` the scheduler recorded, its
 //! parameters, tags and the effective container the definition and the submit overrides
 //! added up to. An id nothing stored is omitted silently, as AWS Batch does, rather than
 //! failing the whole call. A request naming more ids than the member's documented
@@ -18,10 +19,15 @@
 //! (`state::publish_job_state_changes`); nothing is published for a job that did not
 //! move.
 //!
-//! No attempt, `startedAt` or `exitCode` is reported: this emulator has no container
-//! runtime, nothing ran, and the engine contract forbids inventing a result for work
-//! that did not happen. The run ends in the modelled `FAILED` status whose
-//! `statusReason` says exactly that.
+//! `attempts` is "a list of job attempts that are associated with this job": one
+//! `AttemptDetail` per time the scheduler PLACED this job's container, read off the
+//! record the placement wrote ([`crate::state::JobAttempt`]), so the attempt reports the
+//! ARN of the task the job was placed as, the log stream that task's container writes to
+//! and the reason that attempt ended. The member is absent for a job no placement has
+//! started an attempt for. No `startedAt` or `exitCode` is reported for any of them: this
+//! emulator has no container runtime, nothing ran, and the engine contract forbids
+//! inventing a result for work that did not happen. The run ends in the modelled `FAILED`
+//! status whose `statusReason` says exactly that.
 //!
 //! `JobDetail$startedAt` is a KNOWN DEPARTURE forced by the model: it is `@required`
 //! (`smithy_query(query="shape",shape="JobDetail")`), so a value is always serialized,
@@ -198,8 +204,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     status: job.status.clone(),
                     share_identifier: job.share_identifier.clone(),
                     scheduling_priority: job.scheduling_priority,
-                    // Nothing ran, so there is no attempt to report.
-                    attempts: None,
+                    // "A list of job attempts that are associated with this job"
+                    // (`JobDetail$attempts`): one entry per placement this job has had,
+                    // and the member absent for a job that has had none.
+                    attempts: (!job.attempts.is_empty()).then(|| {
+                        job.attempts.iter().map(batch::JobAttempt::detail).collect()
+                    }),
                     status_reason: job.status_reason.clone(),
                     created_at: Some(job.created_at),
                     retry_strategy: job.retry_strategy.clone(),
