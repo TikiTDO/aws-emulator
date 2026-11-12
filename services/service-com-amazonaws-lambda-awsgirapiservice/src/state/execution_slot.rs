@@ -26,7 +26,10 @@
 //! * WHAT IS IN FLIGHT IS WHAT IS COUNTED. The counts live on the function record
 //!   ([`super::FunctionRecord::concurrent_executions`] and its per-qualifier breakdown), so
 //!   the account's concurrency metering publishes the executions that are really running
-//!   rather than a quantity nothing is using (see [`super::concurrency_metering`]).
+//!   rather than a quantity nothing is using (see [`super::concurrency_metering`]). An
+//!   admission is also the instant the function's concurrency RISES, so what it took the
+//!   count to is reported back to the caller ([`Admitted::concurrent_executions`]) as the
+//!   reading of that gauge to publish.
 //! * A PROVISIONED ENVIRONMENT IS REPORTED AS ONE. Provisioned concurrency "initializes a
 //!   requested number of execution environments so that they are prepared to respond
 //!   immediately to your function's invocations", allocated per alias or version
@@ -149,6 +152,15 @@ pub struct Admitted {
     /// qualifier's initialised environments serves, [`INITIALIZATION_TYPE_ON_DEMAND`]
     /// otherwise.
     pub initialization_type: &'static str,
+    /// How many executions the function is processing now that this invocation has joined
+    /// them — the reading of the function's concurrency gauge AT this admission, which is
+    /// what the caller publishes as one observation of it
+    /// ([`super::concurrency_metering::publish_function_concurrency`]).
+    ///
+    /// Zero for an invocation that claimed nothing, which is one whose function was deleted
+    /// between resolving it and admitting the invocation: it joined no pool, so it is no
+    /// reading of one.
+    pub concurrent_executions: i32,
 }
 
 /// Admit one invocation of `function_name` addressed at `qualifier` to the function, or
@@ -175,6 +187,7 @@ pub fn admit_invocation(
                 claimed: false,
             },
             initialization_type: INITIALIZATION_TYPE_ON_DEMAND,
+            concurrent_executions: 0,
         });
     };
     // "The number of simultaneous executions to reserve for the function": the invocation is
@@ -222,6 +235,7 @@ pub fn admit_invocation(
             claimed: true,
         },
         initialization_type,
+        concurrent_executions: record.concurrent_executions,
     })
 }
 

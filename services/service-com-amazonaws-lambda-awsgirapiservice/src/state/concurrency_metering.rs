@@ -30,7 +30,10 @@
 //!   ([`super::metrics::STANDARD_STORAGE_RESOLUTION_SECONDS`]) — a reader laying one-minute
 //!   periods over the series reads `Maximum` as the highest the quantity was seen to reach
 //!   in that minute, which is what makes a burst shorter than a minute observable at all.
-//!   [`SAMPLE_INTERVAL`] is how often a sample is taken.
+//!   [`SAMPLE_INTERVAL`] is how often a sample is taken, and the per-function gauge is
+//!   observed at the instants it RISES besides ([`publish_function_concurrency`]), so the
+//!   peak of a window is the peak the function really reached in it rather than the highest
+//!   the cadence happened to catch.
 //! * NOTHING IS METERED FOR WORK NOTHING DID. An account-level series is published every
 //!   sample because the quantity it measures is defined at every instant (an account whose
 //!   functions are idle is claiming exactly its allocations), while
@@ -164,6 +167,46 @@ pub fn publish_account_concurrency<Eng: Send + Sync + 'static>(engine: &Eng, now
             at_secs,
         );
     }
+}
+
+/// Publish ONE reading of the per-function concurrency gauge
+/// ([`CONCURRENT_EXECUTIONS_METRIC`]): `running` is how many executions the function
+/// `function_name` names is processing at `now`.
+///
+/// This is what makes a gauge a client reads `Maximum` off report the function's real peak.
+/// The quantity it measures HAS a value at every instant, so a reader laying periods over the
+/// series reads the highest the quantity was SEEN to reach in each period — a burst nobody
+/// sampled is a burst nobody can observe, and [`SAMPLE_INTERVAL`] alone would miss every
+/// execution shorter than it. So the gauge is observed at the instants it RISES as well,
+/// which are the admissions of the invocations that raise it
+/// ([`super::execution_slot::admit_invocation`]): the greatest reading of a window is then the
+/// greatest concurrency the function held in it, however short the executions were.
+///
+/// Nothing is published for a reading of no executions: the per-function series is published
+/// for a function that IS processing executions and for no other, so a function nobody invoked
+/// has no datapoint in the window rather than a zero.
+///
+/// It goes into the CloudWatch store of the SAME engine ([`super::metrics`]). Call it with no
+/// Lambda store lock held: it takes the CloudWatch store's own.
+pub fn publish_function_concurrency<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    function_name: &str,
+    running: i32,
+    now: SystemTime,
+) {
+    if running <= 0 {
+        return;
+    }
+    let Some(store) = cloudwatch_state(engine) else {
+        return;
+    };
+    publish(
+        &store,
+        CONCURRENT_EXECUTIONS_METRIC,
+        Some(function_name),
+        running,
+        epoch_seconds(now),
+    );
 }
 
 /// Publish one observation of `metric`: of the series of the function `function_name` names,

@@ -815,6 +815,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 return Err(throttled(refused));
             }
         };
+        // Admitting the invocation RAISED the function's concurrency, and that quantity is a
+        // gauge a client reads the peak of: the reading it was taken to is published here, so
+        // the peak of a window is the concurrency the function really reached in it however
+        // short the executions were (`crate::state::concurrency_metering`).
+        crate::state::publish_function_concurrency(
+            &*self.engine,
+            &function_name,
+            admitted.concurrent_executions,
+            now,
+        );
         let invocation = crate::state::Invocation {
             function_name: function_name.clone(),
             executed_version: executed_version.clone(),

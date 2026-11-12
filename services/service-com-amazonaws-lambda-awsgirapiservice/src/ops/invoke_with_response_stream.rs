@@ -516,6 +516,15 @@ impl<Eng: Send + Sync + 'static> InvokeWithResponseStream<Eng> {
         };
         invocation.initialization_type = admitted.initialization_type;
         let _slot = admitted.slot;
+        // Admitting the invocation raised the function's concurrency, which is published as
+        // one reading of that gauge exactly as on `Invoke`
+        // (`crate::state::concurrency_metering`).
+        crate::state::publish_function_concurrency(
+            &*self.engine,
+            &function_name,
+            admitted.concurrent_executions,
+            now,
+        );
         // The invocation this call runs is the one its answer names, exactly as on `Invoke`.
         crate::service::request_id_header::serving_invocation(&invocation.request_id);
         // The invocation is admitted to the function at this point, so it is metered as one

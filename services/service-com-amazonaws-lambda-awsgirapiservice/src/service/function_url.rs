@@ -325,6 +325,15 @@ impl<Eng: Send + Sync + 'static> FunctionUrlPlane<Eng> {
         }) {
             Some(Ok(admitted)) => {
                 prepared.invocation.initialization_type = admitted.initialization_type;
+                // Admitting the invocation raised the function's concurrency, which is
+                // published as one reading of that gauge exactly as on `Invoke`
+                // (`crate::state::concurrency_metering`).
+                crate::state::publish_function_concurrency(
+                    &*self.engine,
+                    &prepared.invocation.function_name,
+                    admitted.concurrent_executions,
+                    ::std::time::SystemTime::now(),
+                );
                 Some(admitted.slot)
             }
             Some(Err(throttled)) => {

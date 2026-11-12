@@ -277,6 +277,8 @@ mod inline_archive_request_quota;
 mod invocation_concurrency;
 #[path = "all/invocation_count_series.rs"]
 mod invocation_count_series;
+#[path = "all/invocation_duration_report_agreement.rs"]
+mod invocation_duration_report_agreement;
 #[path = "all/invocation_init_phase.rs"]
 mod invocation_init_phase;
 #[path = "all/invocation_log_delivery.rs"]

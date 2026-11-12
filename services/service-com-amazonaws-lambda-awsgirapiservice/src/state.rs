@@ -317,7 +317,8 @@ pub use event_invoke_config::{
 /// that holds them, stay in this module.
 pub mod concurrency_metering;
 pub use concurrency_metering::{
-    drive_concurrency_metering, publish_account_concurrency, AccountConcurrency,
+    drive_concurrency_metering, publish_account_concurrency, publish_function_concurrency,
+    AccountConcurrency,
 };
 
 /// What Lambda's RECURSIVE-LOOP guardrail counts, when it stops an invocation and what it
