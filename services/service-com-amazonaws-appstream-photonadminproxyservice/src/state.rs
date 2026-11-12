@@ -46,8 +46,11 @@
 //! the sessions of one stack's fleet back, a page at a time.
 //!
 //! The user pool lives here as well: `CreateUser` writes a [`UserRecord`] under the
-//! `(AuthenticationType, UserName)` identity it allocates, and `DescribeUsers` renders
-//! the stored records of one authentication type back, a page at a time.
+//! `(AuthenticationType, UserName)` identity it allocates, `DisableUser` and `EnableUser`
+//! move that record's sign-in flag
+//! ([`ComAmazonawsAppstreamPhotonadminproxyserviceState::set_user_enabled`]), and
+//! `DescribeUsers` renders the stored records of one authentication type back, a page at
+//! a time.
 //!
 //! Which users may reach which stacks lives here too: `BatchAssociateUserStack` writes
 //! one edge per association it applies, `BatchDisassociateUserStack` removes the edges it
@@ -1645,6 +1648,33 @@ impl ComAmazonawsAppstreamPhotonadminproxyserviceState {
                 .map(|record| encode_cursor(&record.user_name)),
             users,
         })
+    }
+
+    /// Move the sign-in flag of the user the given `(AuthenticationType, UserName)`
+    /// identity names, reporting whether the pool holds that user at all.
+    ///
+    /// `Enabled` is the only thing `DisableUser` and `EnableUser` move: neither touches
+    /// the user's other attributes, so a disabled user is still in the pool with the ARN,
+    /// the names and the creation instant it was created with. Writing the value the
+    /// record already carries leaves it exactly as it was, which is why a repeat of
+    /// either call is answered like the first.
+    pub fn set_user_enabled(
+        &mut self,
+        authentication_type: &str,
+        user_name: &str,
+        enabled: bool,
+    ) -> bool {
+        // Email addresses are case-sensitive, so the lookup uses the name exactly as the
+        // request spells it, under the authentication type it names: an identity no
+        // record is stored under is simply not in the pool.
+        let identity = (authentication_type.to_string(), user_name.to_string());
+        match self.users.get_mut(&identity) {
+            Some(record) => {
+                record.enabled = enabled;
+                true
+            }
+            None => false,
+        }
     }
 
     /// The fleets associated with the named stack, in the stable order a page of

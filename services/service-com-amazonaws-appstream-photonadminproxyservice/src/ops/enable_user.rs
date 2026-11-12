@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op EnableUser
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `EnableUser`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: gives the sign-in flag back to the user the
+//! `(AuthenticationType, UserName)` identity names, by writing `Enabled = true` on the
+//! stored [`crate::state::UserRecord`], so a later `DescribeUsers` reports that same user
+//! as enabled with every other attribute — the ARN, the names, the status and the
+//! creation instant — exactly as it was. The mirror image of `DisableUser`: both move
+//! that one flag on the stored record and nothing else, so either call undoes the other.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`EnableUser::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! The write is IDEMPOTENT: enabling a user who is already enabled asks for the state the
+//! record is already in, so it answers the same empty success and changes nothing. An
+//! identity the pool holds no record for — including one named under an authentication
+//! type whose users this pool does not manage — is refused with
+//! `ResourceNotFoundException` (HTTP 404). `InvalidAccountStatusException` reports an AWS
+//! account that is suspended, which this emulator's single account never is, so nothing
+//! here returns it.
 //!
 //! ## Shape of an operation
 //!
@@ -138,20 +143,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `EnableUser` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(EnableUserErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("EnableUser"))
+        // See `create_stack.rs` for why an engine without this service's store answers
+        // "not written for that engine" rather than a fabricated success.
+        let state = crate::state::service_state(&*self.engine)
+            .ok_or_else(|| crate::scaffolded::Scaffolded::not_implemented("EnableUser"))?;
+        let mut state = state.lock();
+
+        // The lookup and the write happen under one lock, so the flag is never given
+        // back to a record another caller removed in between. An identity the pool holds
+        // no record for is the modelled not-found refusal — which is also where a request
+        // naming an authentication type other than the user pool's lands, because no user
+        // of this pool is stored under one.
+        if !state.set_user_enabled(&input.authentication_type, &input.user_name, true) {
+            return Err(EnableUserErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: Some(crate::state::USER_NOT_FOUND_MESSAGE.to_string()),
+                },
+            )
+            .into());
+        }
+
+        // The modelled result carries no members: that the user may sign in again is read
+        // back through `DescribeUsers`.
+        Ok(EnableUserOutput {})
     }
 }
