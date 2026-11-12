@@ -52,9 +52,9 @@ pub(crate) fn emulator() -> MultiServiceRouter {
     emulator_with_engine().0
 }
 
-/// The same emulator, with the engine it was built on, for a case that has to read the
-/// store directly.
-fn emulator_with_engine() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
+/// The same emulator, with the engine it was built on, for a case that has to read or
+/// arrange the store directly.
+pub(crate) fn emulator_with_engine() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
@@ -161,6 +161,31 @@ pub(crate) fn at(value: &Value, pointer: &str) -> Value {
 
 pub(crate) fn text(value: &Value, pointer: &str) -> String {
     at(value, pointer).as_str().unwrap_or_default().to_string()
+}
+
+/// Assert that `answer` is the modelled 409 carrying exactly `message`.
+///
+/// Part of the shared harness so every suite that asserts a `ResourceConflictException`'s
+/// wording checks the status, the error code and the whole sentence the same way.
+pub(crate) fn assert_conflict(case: &str, answer: &Answer, message: &str) {
+    assert_eq!(
+        answer.status, 409,
+        "case {case:?}: expected HTTP 409, got {} with {:?}",
+        answer.status, answer.body
+    );
+    let code = text(&answer.body, "/__type");
+    assert!(
+        code.ends_with("ResourceConflictException"),
+        "case {case:?}: expected ResourceConflictException, got {code:?} with {:?}",
+        answer.body
+    );
+    assert_eq!(
+        // `ResourceConflictException`'s message member is modelled `message`.
+        text(&answer.body, "/message"),
+        message,
+        "case {case:?}: expected the refusal to state {message:?}, got {:?}",
+        at(&answer.body, "/message")
+    );
 }
 
 /// The names `ListNetworkConnectors` reported, in the order it reported them.

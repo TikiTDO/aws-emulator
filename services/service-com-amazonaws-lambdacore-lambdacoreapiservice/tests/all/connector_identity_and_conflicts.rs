@@ -20,8 +20,8 @@
 use serde_json::{json, Value};
 
 use crate::network_connector_lifecycle::{
-    at, create, delete, emulator, expected_arn, get, list, list_versions, minimal_create, text,
-    update, vpc_egress, wait_for_the_clock,
+    assert_conflict, at, create, delete, emulator, expected_arn, get, list, list_versions,
+    minimal_create, text, update, vpc_egress, wait_for_the_clock,
 };
 
 /// What every ARN of a connector carries before the identifier of the resource.
@@ -261,30 +261,4 @@ async fn a_state_conflict_names_the_connector_by_its_id() {
             ),
         );
     }
-}
-
-/// Assert that `answer` is the modelled 409 carrying exactly `message`.
-fn assert_conflict(
-    case: &str,
-    answer: &crate::network_connector_lifecycle::Answer,
-    message: &str,
-) {
-    assert_eq!(
-        answer.status, 409,
-        "case {case:?}: expected HTTP 409, got {} with {:?}",
-        answer.status, answer.body
-    );
-    let code = text(&answer.body, "/__type");
-    assert!(
-        code.ends_with("ResourceConflictException"),
-        "case {case:?}: expected ResourceConflictException, got {code:?} with {:?}",
-        answer.body
-    );
-    assert_eq!(
-        // `ResourceConflictException`'s message member is modelled `message`.
-        text(&answer.body, "/message"),
-        message,
-        "case {case:?}: expected the refusal to state {message:?}, got {:?}",
-        at(&answer.body, "/message")
-    );
 }
