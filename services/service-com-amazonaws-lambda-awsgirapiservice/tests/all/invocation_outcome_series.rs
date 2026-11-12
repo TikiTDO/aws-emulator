@@ -33,12 +33,25 @@
 //! Lambda-side harness (`send`, `Answer`, the activation window) is `function_lifecycle.rs`'s,
 //! the deployment archive is `synchronous_invoke_run.rs`'s, and the CloudWatch call is
 //! `kinesis_event_source_delivery.rs`'s.
+//!
+//! Every wait here is for a CONDITION, looked at again until it holds or a generous ceiling
+//! passes — the series holding the measurement an accepted delivery owes — and every limit no
+//! case is about (the `Timeout` a handler is given outside the one row that ends a run at it,
+//! the ceiling on the wait itself) is set from what the emulator allows that work rather than
+//! picked tight. So how fast the host runs decides nothing asserted here: a slow or loaded
+//! host is waited for, and only a measurement that never appears fails a case.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use serde_json::{json, Value};
+use service_com_amazonaws_lambda_awsgirapiservice::state::execution::{
+    HOST_WAIT_CEILING, INIT_PHASE_LIMIT, PERMIT_WAIT,
+};
+use service_com_amazonaws_lambda_awsgirapiservice::state::{
+    ASYNC_DELIVERY_DELAY, ASYNC_RETRY_DELAY, MAX_ASYNC_DELIVERY_ATTEMPTS,
+};
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::function_lifecycle::{make_activation_due, send, Answer, ROLE};
@@ -96,13 +109,40 @@ const RESERVED_REASON: &str = "ReservedFunctionConcurrentInvocationLimitExceeded
 /// The `x-amzn-errortype` a throttled invocation carries.
 const THROTTLE_ERROR: &str = "TooManyRequestsException";
 
-/// How long an asynchronous delivery is waited for before the test gives up on it: the
-/// delivery happens off the response path, so the datapoint about it appears shortly after
-/// the accepting call rather than during it.
-const DELIVERY_BUDGET: Duration = Duration::from_secs(10);
+/// How long an asynchronous delivery is waited for: the delivery happens off the response
+/// path, so the datapoint about it appears once that delivery has happened rather than during
+/// the accepting call.
+///
+/// A ceiling on PATIENCE, never a span anything here counts on, and taken from what the
+/// EMULATOR itself allows that work rather than picked here: the event waits its queueing
+/// delay ([`ASYNC_DELIVERY_DELAY`]), then an attempt waits for a share of this process's run
+/// capacity ([`PERMIT_WAIT`]), initializes an execution environment ([`INIT_PHASE_LIMIT`]) and
+/// runs the handler ([`HOST_WAIT_CEILING`]) — with room for every attempt the retry policy has
+/// for one event ([`MAX_ASYNC_DELIVERY_ATTEMPTS`], separated by [`ASYNC_RETRY_DELAY`]). Each
+/// of those spans is shared with every other suite of a whole-workspace run, so only a
+/// delivery that never arrives at all fails the wait below; how fast the host runs decides
+/// nothing this file asserts.
+const DELIVERY_BUDGET: Duration = ASYNC_DELIVERY_DELAY
+    .saturating_add(ASYNC_RETRY_DELAY.saturating_mul(MAX_ASYNC_DELIVERY_ATTEMPTS))
+    .saturating_add(
+        PERMIT_WAIT
+            .saturating_add(INIT_PHASE_LIMIT)
+            .saturating_add(HOST_WAIT_CEILING)
+            .saturating_mul(MAX_ASYNC_DELIVERY_ATTEMPTS),
+    );
 
-/// How long each poll of that wait sleeps.
+/// How long each poll of that wait sleeps before it looks at the series again.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// The `Timeout` every function created here is given, except where a row is ABOUT the
+/// timeout.
+///
+/// Generous on purpose, because no assertion outside that one row is about it: a handler
+/// stopped at this deadline is reported as a run that ERRORED, so a tight value would turn a
+/// slow or loaded host into a `FunctionError` the handler never raised. Minutes for handlers
+/// that return in milliseconds, and well inside the range the model allows the member
+/// (`smithy_query(query="shape", shape="Timeout")`: 1 to 5400).
+const GENEROUS_TIMEOUT_SECS: u32 = 300;
 
 /// The handler every row runs: it sleeps for as long as the event asks, then fails the way
 /// the event asks or returns a value.
@@ -382,7 +422,7 @@ struct Row {
 const ROWS: &[Row] = &[
     Row {
         case: "one invocation that returns a value",
-        timeout_secs: 10,
+        timeout_secs: GENEROUS_TIMEOUT_SECS,
         runs: &[Run {
             surface: Surface::Invoke,
             sleep_ms: 0,
@@ -394,7 +434,7 @@ const ROWS: &[Row] = &[
     },
     Row {
         case: "one invocation whose handler raises",
-        timeout_secs: 10,
+        timeout_secs: GENEROUS_TIMEOUT_SECS,
         runs: &[Run {
             surface: Surface::Invoke,
             sleep_ms: 0,
@@ -406,7 +446,7 @@ const ROWS: &[Row] = &[
     },
     Row {
         case: "a run that takes a measurable span",
-        timeout_secs: 10,
+        timeout_secs: GENEROUS_TIMEOUT_SECS,
         runs: &[Run {
             surface: Surface::Invoke,
             sleep_ms: 300,
@@ -418,7 +458,7 @@ const ROWS: &[Row] = &[
     },
     Row {
         case: "three invocations, two of them failing",
-        timeout_secs: 10,
+        timeout_secs: GENEROUS_TIMEOUT_SECS,
         runs: &[
             Run {
                 surface: Surface::Invoke,
@@ -442,7 +482,7 @@ const ROWS: &[Row] = &[
     },
     Row {
         case: "five invocations, none of them failing",
-        timeout_secs: 10,
+        timeout_secs: GENEROUS_TIMEOUT_SECS,
         runs: &[
             Run {
                 surface: Surface::Invoke,
@@ -476,7 +516,7 @@ const ROWS: &[Row] = &[
     },
     Row {
         case: "a response-streaming invocation, which is an invocation of the function too",
-        timeout_secs: 10,
+        timeout_secs: GENEROUS_TIMEOUT_SECS,
         runs: &[Run {
             surface: Surface::ResponseStream,
             sleep_ms: 0,
@@ -645,7 +685,7 @@ async fn every_throttled_request_is_counted_in_the_throttles_series() {
         let engine = Arc::new(engine::InMemoryEngine::new());
         let router = emulator(&engine);
         let case = row.case;
-        create_function(&router, &engine, case, 10).await;
+        create_function(&router, &engine, case, GENEROUS_TIMEOUT_SECS).await;
         // "A reservation of zero admits nothing at all": every request below is refused.
         reserve_concurrency(&router, case, 0).await;
 
@@ -762,7 +802,7 @@ async fn an_asynchronous_invocation_publishes_its_run_once_it_has_been_delivered
     let case = "an asynchronous invocation delivered off the response path";
     let engine = Arc::new(engine::InMemoryEngine::new());
     let router = emulator(&engine);
-    create_function(&router, &engine, case, 10).await;
+    create_function(&router, &engine, case, GENEROUS_TIMEOUT_SECS).await;
 
     let accepted = invoke(
         &router,
@@ -779,9 +819,11 @@ async fn an_asynchronous_invocation_publishes_its_run_once_it_has_been_delivered
     );
 
     // Polled rather than slept on: the delivery is the runtime's own work, and the datapoint
-    // appears when the run it measures has happened.
+    // appears when the run it measures has happened. The wait is for that CONDITION — the
+    // series holding a measurement — looked at again until it holds or [`DELIVERY_BUDGET`]
+    // passes, so a host that takes longer over the delivery is waited for rather than failed.
     let deadline = Instant::now() + DELIVERY_BUDGET;
-    let measurements = loop {
+    let durations = loop {
         let durations = datapoints(
             &router,
             case,
@@ -790,17 +832,21 @@ async fn an_asynchronous_invocation_publishes_its_run_once_it_has_been_delivered
             &function_dimensions(),
         )
         .await;
-        let samples = total(&durations, "SampleCount");
-        if samples > 0.0 || Instant::now() >= deadline {
-            break (samples, durations);
+        if total(&durations, "SampleCount") > 0.0 {
+            break durations;
         }
+        assert!(
+            Instant::now() < deadline,
+            "case {case:?}: the delivered invocation must publish a {DURATION_SERIES} \
+             measurement, and none arrived inside {DELIVERY_BUDGET:?}, leaving {durations:?}"
+        );
         tokio::time::sleep(POLL_INTERVAL).await;
     };
+    let samples = total(&durations, "SampleCount");
     assert_eq!(
-        measurements.0, 1.0,
+        samples, 1.0,
         "case {case:?}: the delivered invocation must publish exactly one {DURATION_SERIES} \
-         measurement within {DELIVERY_BUDGET:?}, got {:?}",
-        measurements.1
+         measurement, got {samples} over {durations:?}"
     );
     let errors = datapoints(
         &router,
