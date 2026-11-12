@@ -318,24 +318,28 @@ pub const SCHEDULING_POLICY_ARN_NOT_VALID: &str =
     "Scheduling policy arn should match a valid Scheduling policy arn pattern";
 
 /// That refusal as a scheduling-policy operation answers it: the rule above, then the
-/// identifier the request submitted, verbatim.
+/// identifier the request submitted, verbatim, inside Batch's input-validation envelope.
 ///
 /// The offending value is what makes the refusal actionable — `DescribeSchedulingPolicies`
 /// takes a LIST of identifiers, so a refusal that states the rule alone leaves the caller
-/// unable to tell which entry broke it — and it is the sentence's only variable part.
+/// unable to tell which entry broke it — and it is the inner sentence's only variable part.
 ///
-/// Answered BARE: Batch's frontend envelope ([`client_exception_enveloped`]) belongs to the
-/// refusal classes AWS is recorded to wrap, and this identifier-shape class is not one of
-/// them, so the message carries the sentence alone and no request id of its own (the
-/// response still reports one in the header AWS carries it in,
-/// `crate::service::request_id_header`).
+/// Answered ENVELOPED ([`client_exception_enveloped`]): this is a refusal Batch's frontend
+/// raises by checking a value the REQUEST carries against a pattern, before any lookup, and
+/// every such input-validation refusal of this service is worded inside
+/// `Error executing request, Exception : <detail>, RequestId: <this call's id>` — the same
+/// envelope the sibling validators of these operations answer in (the `arns` bound of
+/// `DescribeSchedulingPolicies`, [`SCHEDULING_POLICY_ARNS_REQUIRED`], the quota-share
+/// identifier rule [`QUOTA_SHARE_ARN_NOT_VALID`], the name patterns of the creates). A
+/// refusal derived from STATE instead — not found ([`does_not_exist_sentence`]), already
+/// exists, still in use — stays bare.
 ///
-/// The two EVIDENCED parts are the rule text and that the value refused comes from the
-/// request; the `": "` joining them is this crate's choice, because the recorded refusal of
-/// this class is asserted by shape rather than by value. A later recording that pins the
-/// exact form changes this one expression and nothing else.
+/// The EVIDENCED parts are the envelope and that the value refused comes from the request;
+/// the `": "` joining the rule to the value is this crate's choice, because the recorded
+/// refusal of this class asserts the inner sentence by shape rather than by value. A later
+/// recording that pins the exact inner form changes this one expression and nothing else.
 pub fn scheduling_policy_arn_not_valid(reference: &str) -> ClientException {
-    client_exception(format!("{SCHEDULING_POLICY_ARN_NOT_VALID}: {reference}"))
+    client_exception_enveloped(format!("{SCHEDULING_POLICY_ARN_NOT_VALID}: {reference}"))
 }
 
 /// What `DescribeSchedulingPolicies` answers for a request whose `arns` names nothing.
@@ -348,6 +352,27 @@ pub fn scheduling_policy_arn_not_valid(reference: &str) -> ClientException {
 /// refused instead of answered with an empty result.
 pub const SCHEDULING_POLICY_ARNS_REQUIRED: &str =
     "arns must name at least one scheduling policy";
+
+/// How many scheduling-policy ARNs ONE `DescribeSchedulingPolicies` names at fewest: the
+/// member is REQUIRED and carries the identity of what to describe
+/// ([`SCHEDULING_POLICY_ARNS_REQUIRED`]), so an empty list is outside the range.
+pub const MIN_SCHEDULING_POLICY_ARNS: usize = 1;
+
+/// What `DescribeSchedulingPolicies` answers for an `arns` list that names more entries
+/// than it accepts: the recorded detail, which states the RANGE the member admits rather
+/// than the number of entries the request carried, inside this service's input-validation
+/// envelope.
+///
+/// The bounds are interpolated from the ones this operation enforces
+/// ([`MIN_SCHEDULING_POLICY_ARNS`] and [`MAX_DESCRIBE_FILTER_ENTRIES`], the latter "a list
+/// of up to 100 … entries" from the member's own doc), so the sentence and the check it
+/// reports cannot drift apart.
+pub fn scheduling_policy_arns_bound_message() -> String {
+    format!(
+        "Number of scheduling policies should be between {MIN_SCHEDULING_POLICY_ARNS} and \
+         {MAX_DESCRIBE_FILTER_ENTRIES}."
+    )
+}
 
 /// What `DeleteSchedulingPolicy` answers for a policy a job queue still names:
 /// `DeleteSchedulingPolicy`'s own doc — "You can't delete a scheduling policy that's used

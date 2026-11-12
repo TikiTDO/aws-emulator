@@ -81,6 +81,8 @@ mod response_request_id;
 mod scheduling_policies;
 #[path = "all/scheduling_policy_arn_shape_refusals.rs"]
 mod scheduling_policy_arn_shape_refusals;
+#[path = "all/scheduling_policy_input_validation_envelope.rs"]
+mod scheduling_policy_input_validation_envelope;
 #[path = "all/scheduling_policy_listing.rs"]
 mod scheduling_policy_listing;
 #[path = "all/scheduling_policy_refusal_messages.rs"]

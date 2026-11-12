@@ -6,11 +6,11 @@
 //! The rules under test, each asserted over a SET of identifiers rather than one request:
 //!
 //! * an identifier whose SHAPE names no scheduling policy of this endpoint is refused with
-//!   the modelled `ClientException` (HTTP 400) whose message is the pattern rule followed by
-//!   the identifier the request submitted, verbatim — the sentence alone, carrying no
-//!   frontend envelope and no request id inside the body;
-//! * the response still names the call it answers, in the header AWS reports a request id
-//!   in, so a bare refusal is correlatable without a second id in its message;
+//!   the modelled `ClientException` (HTTP 400) inside Batch's input-validation envelope —
+//!   `Error executing request, Exception : <detail>, RequestId: <this call's id>` — whose
+//!   detail is the pattern rule followed by the identifier the request submitted, verbatim;
+//! * the response names the call it answers in the header AWS reports a request id in, and
+//!   reports the very id its own message states, so one call is correlatable by one id;
 //! * where the identifier arrives as one entry of a LIST (`DescribeSchedulingPolicies$arns`),
 //!   the refusal names the offending ENTRY — the first one that breaks the rule — and not
 //!   whichever entry came first;
@@ -21,16 +21,10 @@ use serde_json::{json, Value};
 use service_com_amazonaws_batch_awsbatchv20160810::state;
 
 use crate::job_lifecycle::{arn, error_code, error_message, Batch, REGION};
+use crate::refusal_contract::enveloped;
 
 /// The header AWS reports a response's own request id in.
 const REQUEST_ID_HEADER: &str = "x-amzn-requestid";
-
-/// The segment Batch's frontend envelope names a refused call's request id in: what a BARE
-/// refusal must not carry anywhere in its message.
-const ENVELOPE_REQUEST_ID: &str = "RequestId";
-
-/// The prefix of Batch's frontend envelope, which this refusal class does not carry.
-const ENVELOPE_PREFIX: &str = "Error executing request, Exception : ";
 
 /// One operation that takes a scheduling-policy identifier: its URI and the request body
 /// that carries `identifier` to it.
@@ -112,20 +106,20 @@ fn malformed_identifiers() -> Vec<(String, String)> {
     ]
 }
 
-/// The refusal this class answers with: the pattern rule, then the identifier the request
-/// submitted.
+/// The detail this class's envelope carries: the pattern rule, then the identifier the
+/// request submitted.
 ///
 /// The rule sentence is spelled out here rather than read from the crate's constant, so a
 /// reworded message is a failing test and not a silently updated expectation.
-fn expected_message(identifier: &str) -> String {
+fn expected_detail(identifier: &str) -> String {
     format!(
         "Scheduling policy arn should match a valid Scheduling policy arn pattern: {identifier}"
     )
 }
 
-/// Assert the answer to `uri` with `body` is the bare, identifier-naming refusal of
-/// `identifier`, and that the response reports a request id in the header instead of in the
-/// message.
+/// Assert the answer to `uri` with `body` is the enveloped, identifier-naming refusal of
+/// `identifier`, and that the id the response reports in the header is the one its own
+/// message states.
 async fn assert_refused(batch: &Batch, case: &str, uri: &str, body: Value, identifier: &str) {
     let (status, headers, refused) = batch.send_reported("POST", uri, Some(body)).await;
     assert_eq!(
@@ -138,19 +132,11 @@ async fn assert_refused(batch: &Batch, case: &str, uri: &str, body: Value, ident
         "case {case:?}: expected the modelled ClientException, got {refused}"
     );
     let message = error_message(&refused);
+    let (detail, request_id) = enveloped(case, &message);
     assert_eq!(
-        message,
-        expected_message(identifier),
+        detail,
+        expected_detail(identifier),
         "case {case:?}: expected the pattern sentence naming the submitted identifier, got \
-         {message:?}"
-    );
-    assert!(
-        !message.starts_with(ENVELOPE_PREFIX),
-        "case {case:?}: this refusal class carries no frontend envelope, got {message:?}"
-    );
-    assert!(
-        !message.contains(ENVELOPE_REQUEST_ID),
-        "case {case:?}: a request id belongs in the header and not in the message, got \
          {message:?}"
     );
     let reported = headers
@@ -158,16 +144,16 @@ async fn assert_refused(batch: &Batch, case: &str, uri: &str, body: Value, ident
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    assert!(
-        !reported.is_empty(),
-        "case {case:?}: expected the response to report its request id in \
-         {REQUEST_ID_HEADER}, got {reported:?}"
+    assert_eq!(
+        reported, request_id,
+        "case {case:?}: expected {REQUEST_ID_HEADER} to report the id the message states \
+         ({request_id:?}), got {reported:?}"
     );
 }
 
 /// RULE: an identifier whose shape names no scheduling policy of this endpoint is refused
-/// 400 / `ClientException` with the pattern sentence followed by the identifier the request
-/// submitted — bare, with no frontend envelope and no request id in the message.
+/// 400 / `ClientException` inside Batch's input-validation envelope, whose detail is the
+/// pattern sentence followed by the identifier the request submitted.
 #[tokio::test]
 async fn a_malformed_scheduling_policy_identifier_is_refused_naming_it() {
     let batch = Batch::new();

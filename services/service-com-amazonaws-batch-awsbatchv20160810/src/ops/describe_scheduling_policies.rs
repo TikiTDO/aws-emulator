@@ -14,8 +14,16 @@
 //! modelled `ClientException` naming that entry
 //! ([`crate::state::scheduling_policy_arn_not_valid`]), and so is an
 //! `arns` list that names nothing at all
-//! ([`crate::state::SCHEDULING_POLICY_ARNS_REQUIRED`]), which is REQUIRED. An ARN of the
-//! right shape that names no stored policy is reported as absent instead.
+//! ([`crate::state::SCHEDULING_POLICY_ARNS_REQUIRED`]), which is REQUIRED, or one naming
+//! more entries than the range the member admits
+//! ([`crate::state::scheduling_policy_arns_bound_message`]). An ARN of the right shape that
+//! names no stored policy is reported as absent instead.
+//!
+//! All three refusals are things the frontend decides from the REQUEST's own values, so all
+//! three are worded inside Batch's input-validation envelope
+//! ([`crate::state::client_exception_enveloped`]) — `Error executing request, Exception :
+//! <detail>, RequestId: <this call's id>` — and a client can classify any of them with one
+//! matcher.
 //!
 //! The detail carries the members AWS always materialises: the tag map of a policy created
 //! without tags is present and empty, and a fair-share policy is present with all three of
@@ -167,14 +175,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "A list of up to 100 scheduling policy Amazon Resource Name (ARN) entries"
         // (`arns`). The model types the list without a length constraint, so the bound is
-        // applied here.
+        // applied here — and, like every refusal this frontend raises by checking the
+        // request's own values, inside the envelope
+        // ([`batch::client_exception_enveloped`]).
         if input.arns.len() > batch::MAX_DESCRIBE_FILTER_ENTRIES {
             return Err(DescribeSchedulingPoliciesErrorModeled::ClientException(
-                batch::client_exception(format!(
-                    "arns accepts at most {} entries, not {}",
-                    batch::MAX_DESCRIBE_FILTER_ENTRIES,
-                    input.arns.len()
-                )),
+                batch::client_exception_enveloped(batch::scheduling_policy_arns_bound_message()),
             )
             .into());
         }
@@ -192,7 +198,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // region, account, partition or resource kind, names no scheduling policy here, so
         // it is refused rather than reported as absent. The refusal names the entry it
         // refused — the first one that breaks the rule — so a caller that submitted several
-        // can tell which one to repair.
+        // can tell which one to repair, and it is worded in the frontend envelope every
+        // refusal this operation decides from the request's own values carries.
         if let Some(refused) = input
             .arns
             .iter()
