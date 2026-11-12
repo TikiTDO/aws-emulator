@@ -193,11 +193,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // invalid-token text, which does not say which of the two it was. Judged ahead of
         // the store lookup, as `ListReportVersions` judges its own: a malformed request
         // parameter is refused whatever the state holds.
-        let resume_at = crate::state::resume_position(input.next_token.as_deref(), |token| {
-            crate::state::parse_inquiry_queries_token(token, &input.compliance_inquiry_id)
-        })
-        .map_err(ListComplianceInquiryQueriesErrorModeled::ValidationException)?;
-
         let page_size = crate::state::page_size(input.max_results);
         let now = ::std::time::SystemTime::now();
         // The endpoint this caller reached the emulator on, which the links of the cited
@@ -206,6 +201,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let host = crate::state::document_url_host(ctx.parts());
 
         let mut store = state.lock();
+        // The cursor is sealed under the secret THIS store drew, so the key comes off the
+        // store before the inquiry is looked up and the refusal still precedes it.
+        let page_tokens = store.page_token_key();
+        let resume_at = crate::state::resume_position(input.next_token.as_deref(), |token| {
+            crate::state::parse_inquiry_queries_token(
+                &page_tokens,
+                token,
+                &input.compliance_inquiry_id,
+            )
+        })
+        .map_err(ListComplianceInquiryQueriesErrorModeled::ValidationException)?;
+
         // The one rule every inquiry-targeting operation of this service resolves its
         // target by, decided in `crate::state`: a well-formed id this account holds no
         // inquiry for is the front door's refusal — the same answer
@@ -226,7 +233,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             resume_at,
             page_size,
             |position| {
-                crate::state::inquiry_queries_token(&input.compliance_inquiry_id, position)
+                crate::state::inquiry_queries_token(
+                    &page_tokens,
+                    &input.compliance_inquiry_id,
+                    position,
+                )
             },
             |query| query.to_summary(&host),
         );

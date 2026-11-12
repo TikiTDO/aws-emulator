@@ -246,13 +246,18 @@ pub const CATALOG: &[Expected] = &[
     },
 ];
 
-/// One emulator: a router carrying only this service, over one shared engine.
-pub fn emulator() -> MultiServiceRouter {
-    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+/// One emulator over `engine`, so a suite can reach the same store the handler reads —
+/// the secret its pagination cursors are sealed under, for instance.
+pub fn emulator_on(engine: Arc<engine::InMemoryEngine>) -> MultiServiceRouter {
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
     router.register_service(EmulatedService::new(engine));
     router
+}
+
+/// One emulator: a router carrying only this service, over one shared engine.
+pub fn emulator() -> MultiServiceRouter {
+    emulator_on(Arc::new(engine::InMemoryEngine::new()))
 }
 
 /// What the emulator answered: the HTTP status, the `x-amzn-errortype` header a restJson1

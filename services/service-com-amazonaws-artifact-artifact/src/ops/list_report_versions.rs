@@ -175,15 +175,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // issued for another report — and anything that does not decode to one of this
         // operation's own cursors — is refused rather than honoured as an offset, with
         // the service's one fixed invalid-token text, which does not say which it was.
-        let resume_at = crate::state::resume_position(input.next_token.as_deref(), |token| {
-            crate::state::parse_report_versions_token(token, &input.report_id)
-        })
-        .map_err(ListReportVersionsErrorModeled::ValidationException)?;
-
         let region = crate::state::request_region(ctx.parts());
         let page_size = crate::state::page_size(input.max_results);
 
         let store = state.lock();
+        // The cursor is sealed under the secret THIS store drew, so the key comes off the
+        // store before the catalog is consulted and the refusal still precedes it.
+        let page_tokens = store.page_token_key();
+        let resume_at = crate::state::resume_position(input.next_token.as_deref(), |token| {
+            crate::state::parse_report_versions_token(&page_tokens, token, &input.report_id)
+        })
+        .map_err(ListReportVersionsErrorModeled::ValidationException)?;
+
         // Stage one of the service's one report-resolution rule, decided in
         // `crate::state`: this operation reports a report's VERSIONS, so it resolves no
         // single version and the catalog refusal is the only one it can get.
@@ -198,7 +201,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             report.versions.values(),
             resume_at,
             page_size,
-            |position| crate::state::report_versions_token(&report.id, position),
+            |position| crate::state::report_versions_token(&page_tokens, &report.id, position),
             |record| report.to_summary(record, &region),
         );
 

@@ -10,9 +10,11 @@ build = "build.rs"
 engine = { workspace = true }
 # `service-common` carries the workspace's ONE free-text search over a stored document's
 # text, which is what retrieves the sources a compliance-inquiry query is answered from,
-# and the ARN form a caller-supplied `resourceArn` is read against, shared with every other
+# the ARN form a caller-supplied `resourceArn` is read against, shared with every other
 # service that binds one, so the tagging surface's syntax refusal cannot disagree with
-# theirs.
+# theirs, and `page_tokens`: the one secret a paginated read authenticates its continuation
+# tokens under, which is what lets `src/state.rs` tell a cursor this service cut from a
+# value a caller assembled.
 service-common = { path = "../common" }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }

@@ -26,7 +26,8 @@ use std::time::{Duration, SystemTime};
 use bytes::Bytes;
 use serde_json::Value;
 use service_com_amazonaws_artifact_artifact::state::{
-    customer_agreements_page_token, ComAmazonawsArtifactArtifactState, CustomerAgreement,
+    customer_agreements_page_token, service_state, ComAmazonawsArtifactArtifactState,
+    CustomerAgreement, PageTokenKey,
 };
 use service_com_amazonaws_artifact_artifact::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
@@ -144,6 +145,16 @@ fn emulator_on(engine: Arc<engine::InMemoryEngine>) -> MultiServiceRouter {
 /// One emulator: a router carrying only this service, over one shared engine.
 fn emulator() -> MultiServiceRouter {
     emulator_on(Arc::new(engine::InMemoryEngine::new()))
+}
+
+/// The secret this emulator's store seals its own pagination cursors under: what a case
+/// needing an AUTHENTIC cursor mints one with, through the very codec the handler mints
+/// from. A caller holds no such secret, which is why a cursor it assembles is refused.
+fn page_token_key(engine: &engine::InMemoryEngine) -> PageTokenKey {
+    service_state(engine)
+        .expect("the in-memory engine carries this service's store")
+        .lock()
+        .page_token_key()
 }
 
 /// What the emulator answered: the HTTP status and the JSON body.
@@ -624,7 +635,9 @@ async fn max_results_outside_the_modelled_range_is_refused() {
 
 #[tokio::test]
 async fn a_next_token_this_service_did_not_issue_is_refused() {
-    let router = emulator();
+    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+    let router = emulator_on(engine.clone());
+    let key = page_token_key(&engine);
     // A `nextToken` is an OPAQUE cursor this operation cut, so every row here is a value
     // that is not one: a made-up string, a token of another operation, an id whose suffix
     // is the wrong length or carries characters the pattern excludes, and — the case this
@@ -705,7 +718,7 @@ async fn a_next_token_this_service_did_not_issue_is_refused() {
             .skip(position)
             .map(|row| row.id.to_string())
             .collect();
-        let token = customer_agreements_page_token(position);
+        let token = customer_agreements_page_token(&key, position);
         let answer = list(&router, &format!("?nextToken={token}")).await;
         assert_eq!(
             answer.status, 200,

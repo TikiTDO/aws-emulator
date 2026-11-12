@@ -67,6 +67,8 @@ mod inquiry_terminal_status_rule;
 mod inquiry_write_audit;
 #[path = "all/minted_store_ids.rs"]
 mod minted_store_ids;
+#[path = "all/pagination_cursor_seal.rs"]
+mod pagination_cursor_seal;
 #[path = "all/pagination_page_walk.rs"]
 mod pagination_page_walk;
 #[path = "all/pagination_token_opacity.rs"]

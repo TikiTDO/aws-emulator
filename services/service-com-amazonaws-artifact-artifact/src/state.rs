@@ -93,6 +93,8 @@ use std::time::{Duration, SystemTime};
 use sha2::{Digest, Sha256};
 use smithy_server_runtime::Violation;
 
+pub use ::service_common::page_tokens::PageTokenKey;
+
 use crate::ops::types::{
     AccountSettings, ConflictException, CustomerAgreementSummary, InquiryDetail, InquirySummary,
     QuerySummary, ReportDetail, ReportSummary, ResourceNotFoundException, ValidationException,
@@ -1630,6 +1632,13 @@ pub struct ComAmazonawsArtifactArtifactState {
     pub inquiry_exports: BTreeMap<String, InquiryExport>,
     /// The counter export ids are minted from, so two exports never share an id.
     pub inquiry_export_seq: u64,
+    /// The secret this store's pagination cursors are authenticated under, drawn from the
+    /// system's randomness when the store is created ([`PageTokenKey`]) and never
+    /// reported: it is what lets a paginated read tell a cursor this service CUT from a
+    /// value a caller assembled. Private, and reached through
+    /// [`page_token_key`](Self::page_token_key), so nothing can overwrite it with a value
+    /// a request carried.
+    page_token_key: PageTokenKey,
 }
 
 impl Default for ComAmazonawsArtifactArtifactState {
@@ -1648,11 +1657,22 @@ impl Default for ComAmazonawsArtifactArtifactState {
             customer_agreements: seed_customer_agreements(),
             inquiry_exports: BTreeMap::new(),
             inquiry_export_seq: 0,
+            // One key per store, from the system's randomness: see `PageTokenKey`.
+            page_token_key: PageTokenKey::new(),
         }
     }
 }
 
 impl ComAmazonawsArtifactArtifactState {
+    /// The secret this store's pagination cursors are sealed under, for the paginated
+    /// operation about to mint or spend one.
+    ///
+    /// Handed out by value — [`PageTokenKey`] is `Copy` — so a read can take the key off
+    /// the store and go on to borrow the records it is about to report in the same call.
+    pub fn page_token_key(&self) -> PageTokenKey {
+        self.page_token_key
+    }
+
     /// Whether the inquiry store is below [`INQUIRY_CAPACITY`].
     pub fn accepts_another_inquiry(&self) -> bool {
         self.inquiries.len() < INQUIRY_CAPACITY
@@ -2407,11 +2427,21 @@ fn is_id_shaped(value: &str, prefix: &str) -> bool {
 //   * WHERE the page resumes is carried as the POSITION in the operation's own reported
 //     order (an index), never as the key of a record the same response published;
 //   * WHICH resource a scoped page belongs to is carried as the DIGEST of that resource's
-//     id, so the cursor still binds to exactly one resource — a token cut for one report
-//     is refused on another — without putting the id on the wire;
-//   * the whole payload is SEALED with a digest over it, so a value a client assembled
-//     decodes to no cursor at all and is refused with the modelled `ValidationException`,
-//     rather than being honoured as a resume point this service never cut.
+//     id, so the cursor names exactly one resource without putting the id on the wire;
+//   * the whole payload is SEALED with an AUTHENTICATOR over it, computed under the secret
+//     this store drew from the system's randomness and never reveals
+//     ([`PageTokenKey`]), so a value a client assembled — including one whose fields are
+//     spelled exactly as this codec spells them — decodes to no cursor at all and is
+//     refused with the modelled `ValidationException`, rather than being honoured as a
+//     resume point this service never cut. The seal covers the scope field too, which is
+//     what makes the binding above hold: a cursor cut for one report cannot be re-pointed
+//     at another, because a caller cannot seal the payload it would have to write to do
+//     so. A seal taken over nothing but public values would authenticate nothing, since
+//     every input to it is one the caller holds.
+//   * and a cursor is honoured only in the SPELLING this codec writes: the position it
+//     carries is decimal with no sign and no leading zero, the one rendering
+//     [`encode_cursor`]'s callers give it, so no other spelling of a number is a cursor of
+//     this service even though `str::parse` would read it.
 //
 // This holds for EVERY paginated operation of the service, not only the report listings:
 // `ListReports`, `ListReportVersions`, `ListCustomerAgreements`, `ListComplianceInquiries`
@@ -2454,24 +2484,31 @@ const CURSOR_UNSCOPED: &str = "-";
 
 /// Encode a cursor: the service and operation that cut the page, the resource the page was
 /// cut for (as a digest, or [`CURSOR_UNSCOPED`]) and the position it resumes at, sealed
-/// with the digest that lets [`decode_cursor`] tell a cursor this service minted from a
-/// value a client assembled.
-fn encode_cursor(kind: &str, scope: Option<&str>, resume_at: &str) -> String {
+/// under `key` — the secret the issuing store drew from the system's randomness — which is
+/// what lets [`decode_cursor`] tell a cursor this service minted from a value a client
+/// assembled.
+fn encode_cursor(
+    key: &PageTokenKey,
+    kind: &str,
+    scope: Option<&str>,
+    resume_at: &str,
+) -> String {
     let scope = scope.map_or_else(|| CURSOR_UNSCOPED.to_string(), cursor_digest);
     let payload = format!(
         "{CURSOR_SERVICE}{CURSOR_SEPARATOR}{kind}{CURSOR_SEPARATOR}{scope}\
          {CURSOR_SEPARATOR}{resume_at}"
     );
-    let digest = cursor_digest(&payload);
-    ::hex::encode(format!("{payload}{CURSOR_SEPARATOR}{digest}"))
+    ::hex::encode(key.mint(&payload))
 }
 
-/// The digest a cursor's payload is sealed with.
-fn cursor_digest(payload: &str) -> String {
+/// The digest the scope field of a SCOPED cursor names a resource by: it is the resource
+/// the cursor binds to, spelled so the id itself never reaches the wire. What makes that
+/// binding unforgeable is the seal the whole payload travels under, not this digest.
+fn cursor_digest(resource_id: &str) -> String {
     use ::sha2::Digest;
     let mut hasher = ::sha2::Sha256::new();
     hasher.update(CURSOR_DIGEST_DOMAIN.as_bytes());
-    hasher.update(payload.as_bytes());
+    hasher.update(resource_id.as_bytes());
     ::hex::encode(hasher.finalize())
 }
 
@@ -2479,16 +2516,20 @@ fn cursor_digest(payload: &str) -> String {
 /// never collide with one this service computes for anything else.
 const CURSOR_DIGEST_DOMAIN: &str = "com.amazonaws.artifact#pagination-cursor\n";
 
-/// The position a token resumes at, when it decodes to a cursor of `kind` cut for `scope`.
-/// `None` for anything else — a value this service never minted, a cursor another of its
-/// paginated operations cut, or one cut for another resource.
-fn decode_cursor(kind: &str, scope: Option<&str>, token: &str) -> Option<String> {
+/// The position a token resumes at, when it decodes to a cursor of `kind` cut for `scope`
+/// under `key`. `None` for anything else — a value this service never minted, one a client
+/// assembled, one another store minted, a cursor another of this service's paginated
+/// operations cut, or one cut for another resource.
+fn decode_cursor(
+    key: &PageTokenKey,
+    kind: &str,
+    scope: Option<&str>,
+    token: &str,
+) -> Option<String> {
     let decoded = ::hex::decode(token).ok()?;
-    let cursor = String::from_utf8(decoded).ok()?;
-    let (payload, digest) = cursor.rsplit_once(CURSOR_SEPARATOR)?;
-    if digest != cursor_digest(payload) {
-        return None;
-    }
+    // The seal first: a payload this store did not authenticate names no cursor, so no
+    // field of it is read at all.
+    let payload = key.cursor_of(&decoded)?;
     let mut fields = payload.split(CURSOR_SEPARATOR);
     let service = fields.next()?;
     let found_kind = fields.next()?;
@@ -2503,21 +2544,34 @@ fn decode_cursor(kind: &str, scope: Option<&str>, token: &str) -> Option<String>
 }
 
 /// The position a cursor of `kind` cut for `scope` resumes its collection at, when
-/// `token` is one this service minted for it.
-fn decode_position(kind: &str, scope: Option<&str>, token: &str) -> Option<usize> {
-    decode_cursor(kind, scope, token)?.parse().ok()
+/// `token` is one this store minted for it.
+///
+/// The position has to be spelled the way this codec writes it — `usize::to_string`, so
+/// decimal with no sign and no leading zero — because a cursor is honoured only as the
+/// value it was cut as. `str::parse` reads `+0005` as five, so the round-trip check is
+/// what rejects every spelling the minting side never writes.
+fn decode_position(
+    key: &PageTokenKey,
+    kind: &str,
+    scope: Option<&str>,
+    token: &str,
+) -> Option<usize> {
+    let resume_at = decode_cursor(key, kind, scope, token)?;
+    let position: usize = resume_at.parse().ok()?;
+    (position.to_string() == resume_at).then_some(position)
 }
 
 /// The `ListReports` pagination token that resumes the catalog at `position` — the number
-/// of catalog entries this operation has already reported.
-pub fn reports_page_token(position: usize) -> String {
-    encode_cursor(REPORTS_CURSOR, None, &position.to_string())
+/// of catalog entries this operation has already reported — sealed under the issuing
+/// store's `key` ([`ComAmazonawsArtifactArtifactState::page_token_key`]).
+pub fn reports_page_token(key: &PageTokenKey, position: usize) -> String {
+    encode_cursor(key, REPORTS_CURSOR, None, &position.to_string())
 }
 
 /// The catalog position a `ListReports` token resumes at, when it is a token THIS operation
-/// issued. `None` for anything else.
-pub fn parse_reports_page_token(token: &str) -> Option<usize> {
-    decode_position(REPORTS_CURSOR, None, token)
+/// issued from THIS store's key. `None` for anything else.
+pub fn parse_reports_page_token(key: &PageTokenKey, token: &str) -> Option<usize> {
+    decode_position(key, REPORTS_CURSOR, None, token)
 }
 
 /// The `ListReportVersions` pagination token that resumes `report_id`'s versions at
@@ -2526,8 +2580,9 @@ pub fn parse_reports_page_token(token: &str) -> Option<usize> {
 /// SCOPED to the report it was cut for: the payload carries the digest of the report id, so
 /// a token cut for one report is refused on another, while the id itself never reaches the
 /// wire.
-pub fn report_versions_token(report_id: &str, position: usize) -> String {
+pub fn report_versions_token(key: &PageTokenKey, report_id: &str, position: usize) -> String {
     encode_cursor(
+        key,
         REPORT_VERSIONS_CURSOR,
         Some(report_id),
         &position.to_string(),
@@ -2535,9 +2590,14 @@ pub fn report_versions_token(report_id: &str, position: usize) -> String {
 }
 
 /// The position in `report_id`'s versions a `ListReportVersions` token resumes at, when it
-/// is a token THIS operation issued for that report. `None` for anything else.
-pub fn parse_report_versions_token(token: &str, report_id: &str) -> Option<usize> {
-    decode_position(REPORT_VERSIONS_CURSOR, Some(report_id), token)
+/// is a token THIS operation issued for that report from THIS store's key. `None` for
+/// anything else.
+pub fn parse_report_versions_token(
+    key: &PageTokenKey,
+    token: &str,
+    report_id: &str,
+) -> Option<usize> {
+    decode_position(key, REPORT_VERSIONS_CURSOR, Some(report_id), token)
 }
 
 /// The `ListComplianceInquiryQueries` pagination token that resumes `inquiry_id`'s queries
@@ -2546,8 +2606,9 @@ pub fn parse_report_versions_token(token: &str, report_id: &str) -> Option<usize
 /// Scoped to the inquiry it was cut for, for the same reason as
 /// [`report_versions_token`]: a token issued for one inquiry must not be spendable as a
 /// resume point on another.
-pub fn inquiry_queries_token(inquiry_id: &str, position: usize) -> String {
+pub fn inquiry_queries_token(key: &PageTokenKey, inquiry_id: &str, position: usize) -> String {
     encode_cursor(
+        key,
         INQUIRY_QUERIES_CURSOR,
         Some(inquiry_id),
         &position.to_string(),
@@ -2555,9 +2616,14 @@ pub fn inquiry_queries_token(inquiry_id: &str, position: usize) -> String {
 }
 
 /// The position in `inquiry_id`'s queries a `ListComplianceInquiryQueries` token resumes
-/// at, when it is a token THIS operation issued for that inquiry. `None` for anything else.
-pub fn parse_inquiry_queries_token(token: &str, inquiry_id: &str) -> Option<usize> {
-    decode_position(INQUIRY_QUERIES_CURSOR, Some(inquiry_id), token)
+/// at, when it is a token THIS operation issued for that inquiry from THIS store's key.
+/// `None` for anything else.
+pub fn parse_inquiry_queries_token(
+    key: &PageTokenKey,
+    token: &str,
+    inquiry_id: &str,
+) -> Option<usize> {
+    decode_position(key, INQUIRY_QUERIES_CURSOR, Some(inquiry_id), token)
 }
 
 /// The `ListCustomerAgreements` pagination token that resumes the account's agreements at
@@ -2566,27 +2632,27 @@ pub fn parse_inquiry_queries_token(token: &str, inquiry_id: &str) -> Option<usiz
 /// A position rather than an agreement id, for the same reason as [`reports_page_token`]:
 /// a `nextToken` is a continuation value, not a resource identifier, so no id this
 /// operation reports reaches the wire inside its token.
-pub fn customer_agreements_page_token(position: usize) -> String {
-    encode_cursor(CUSTOMER_AGREEMENTS_CURSOR, None, &position.to_string())
+pub fn customer_agreements_page_token(key: &PageTokenKey, position: usize) -> String {
+    encode_cursor(key, CUSTOMER_AGREEMENTS_CURSOR, None, &position.to_string())
 }
 
 /// The position a `ListCustomerAgreements` token resumes at, when it is a token THIS
-/// operation issued. `None` for anything else.
-pub fn parse_customer_agreements_page_token(token: &str) -> Option<usize> {
-    decode_position(CUSTOMER_AGREEMENTS_CURSOR, None, token)
+/// operation issued from THIS store's key. `None` for anything else.
+pub fn parse_customer_agreements_page_token(key: &PageTokenKey, token: &str) -> Option<usize> {
+    decode_position(key, CUSTOMER_AGREEMENTS_CURSOR, None, token)
 }
 
 /// The `ListComplianceInquiries` pagination token that resumes the account's inquiries at
 /// `position`. A position rather than an inquiry id, for the same reason as
 /// [`reports_page_token`].
-pub fn inquiries_page_token(position: usize) -> String {
-    encode_cursor(INQUIRIES_CURSOR, None, &position.to_string())
+pub fn inquiries_page_token(key: &PageTokenKey, position: usize) -> String {
+    encode_cursor(key, INQUIRIES_CURSOR, None, &position.to_string())
 }
 
 /// The position a `ListComplianceInquiries` token resumes at, when it is a token THIS
-/// operation issued. `None` for anything else.
-pub fn parse_inquiries_page_token(token: &str) -> Option<usize> {
-    decode_position(INQUIRIES_CURSOR, None, token)
+/// operation issued from THIS store's key. `None` for anything else.
+pub fn parse_inquiries_page_token(key: &PageTokenKey, token: &str) -> Option<usize> {
+    decode_position(key, INQUIRIES_CURSOR, None, token)
 }
 
 /// The `ResourceNotFoundException` payload for a version the named report never had.

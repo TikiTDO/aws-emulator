@@ -168,16 +168,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // own cursors. Anything that does not decode to one was never issued here, and is
         // refused with the service's one fixed invalid-token text, the same as every other
         // token member — the shared judgement, lifted into this operation's own error.
-        let resume_at = crate::state::resume_position(
-            input.next_token.as_deref(),
-            crate::state::parse_reports_page_token,
-        )
-        .map_err(ListReportsErrorModeled::ValidationException)?;
-
+        //
+        // The cursor is sealed under the secret THIS store drew, so the key comes off the
+        // store before anything is read: a value a caller assembled authenticates under no
+        // key and names no position here.
         let region = crate::state::request_region(ctx.parts());
         let page_size = crate::state::page_size(input.max_results);
 
         let store = state.lock();
+        let page_tokens = store.page_token_key();
+        let resume_at = crate::state::resume_position(input.next_token.as_deref(), |token| {
+            crate::state::parse_reports_page_token(&page_tokens, token)
+        })
+        .map_err(ListReportsErrorModeled::ValidationException)?;
+
         // The catalog entries this operation reports, each with the version it reports:
         // a report exists because AWS published a version of it, so one holding none has
         // nothing to summarise and is passed over rather than reported empty. Resolved
@@ -194,7 +198,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             published,
             resume_at,
             page_size,
-            crate::state::reports_page_token,
+            |position| crate::state::reports_page_token(&page_tokens, position),
             |(report, latest)| report.to_summary(latest, &region),
         );
 

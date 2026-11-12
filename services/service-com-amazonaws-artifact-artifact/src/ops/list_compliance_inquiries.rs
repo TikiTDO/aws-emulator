@@ -178,16 +178,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // own cursors. Anything that does not decode to one was never issued here — a bare
         // `InquiryId` included — and is refused with the service's one fixed invalid-token
         // text, the same as every other token member.
-        let resume_at = crate::state::resume_position(
-            input.next_token.as_deref(),
-            crate::state::parse_inquiries_page_token,
-        )
-        .map_err(ListComplianceInquiriesErrorModeled::ValidationException)?;
-
+        //
+        // The cursor is sealed under the secret THIS store drew, so the key comes off the
+        // store before anything is read.
         let page_size = crate::state::page_size(input.max_results);
         let now = ::std::time::SystemTime::now();
 
         let mut store = state.lock();
+        let page_tokens = store.page_token_key();
+        let resume_at = crate::state::resume_position(input.next_token.as_deref(), |token| {
+            crate::state::parse_inquiries_page_token(&page_tokens, token)
+        })
+        .map_err(ListComplianceInquiriesErrorModeled::ValidationException)?;
         // The service's one page-walk rule: resume at the cursor's position in this
         // operation's own reported order — so a page is still served when the inquiry it
         // was cut after left the store — and cut the page at `maxResults`.
@@ -195,7 +197,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             store.inquiries.values_mut(),
             resume_at,
             page_size,
-            crate::state::inquiries_page_token,
+            |position| crate::state::inquiries_page_token(&page_tokens, position),
             |inquiry| {
                 // The only write a read may make: the transition the clock had already
                 // made due. Applied here so this listing and a

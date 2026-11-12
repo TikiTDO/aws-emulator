@@ -170,16 +170,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // own cursors. Anything that does not decode to one was never issued here — a bare
         // customer-agreement id included — and is refused with the service's one fixed
         // invalid-token text, the same as every other token member.
-        let resume_at = crate::state::resume_position(
-            input.next_token.as_deref(),
-            crate::state::parse_customer_agreements_page_token,
-        )
-        .map_err(ListCustomerAgreementsErrorModeled::ValidationException)?;
-
+        //
+        // The cursor is sealed under the secret THIS store drew, so the key comes off the
+        // store before anything is read.
         let region = crate::state::request_region(ctx.parts());
         let page_size = crate::state::page_size(input.max_results);
 
         let store = state.lock();
+        let page_tokens = store.page_token_key();
+        let resume_at = crate::state::resume_position(input.next_token.as_deref(), |token| {
+            crate::state::parse_customer_agreements_page_token(&page_tokens, token)
+        })
+        .map_err(ListCustomerAgreementsErrorModeled::ValidationException)?;
+
         // "List active customer-agreements applicable to calling identity": a terminated
         // agreement is persisted but not reported. Filtered BEFORE the walk is what keeps
         // a `nextToken` pointing at an agreement the next page will actually report.
@@ -194,7 +197,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             reported,
             resume_at,
             page_size,
-            crate::state::customer_agreements_page_token,
+            |position| crate::state::customer_agreements_page_token(&page_tokens, position),
             |agreement| agreement.to_summary(&region),
         );
 

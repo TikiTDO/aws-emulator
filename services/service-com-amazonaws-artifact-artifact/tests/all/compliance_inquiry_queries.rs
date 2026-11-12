@@ -34,7 +34,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use serde_json::{json, Value};
-use service_com_amazonaws_artifact_artifact::state::inquiry_queries_token;
+use service_com_amazonaws_artifact_artifact::state::{
+    inquiry_queries_token, service_state, PageTokenKey,
+};
 use service_com_amazonaws_artifact_artifact::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -97,13 +99,27 @@ const SIGNED: &str = "AWS4-HMAC-SHA256 \
 /// Base64 of an uploaded document's bytes, as restJson1 carries a blob.
 const FILE_CONTENT: &str = "cXVlc3Rpb25uYWlyZQ==";
 
-/// One emulator: a router carrying only this service, over one shared engine.
-fn emulator() -> MultiServiceRouter {
-    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+/// One emulator over `engine`, so a test can reach the same store the handler reads.
+fn emulator_on(engine: Arc<engine::InMemoryEngine>) -> MultiServiceRouter {
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
     router.register_service(EmulatedService::new(engine));
     router
+}
+
+/// One emulator: a router carrying only this service, over one shared engine.
+fn emulator() -> MultiServiceRouter {
+    emulator_on(Arc::new(engine::InMemoryEngine::new()))
+}
+
+/// The secret this emulator's store seals its own pagination cursors under: what a case
+/// needing an AUTHENTIC cursor mints one with, through the very codec the handler mints
+/// from. A caller holds no such secret, which is why a cursor it assembles is refused.
+fn page_token_key(engine: &engine::InMemoryEngine) -> PageTokenKey {
+    service_state(engine)
+        .expect("the in-memory engine carries this service's store")
+        .lock()
+        .page_token_key()
 }
 
 /// What the emulator answered: the HTTP status and the JSON body.
@@ -528,7 +544,9 @@ async fn a_querys_status_moves_with_the_clock_and_a_listing_changes_nothing() {
 
 #[tokio::test]
 async fn a_page_is_bounded_by_max_results_and_resumed_by_a_token_this_service_issued() {
-    let router = emulator();
+    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+    let router = emulator_on(engine.clone());
+    let key = page_token_key(&engine);
     let query = "Which controls cover key rotation?";
     let id = create(&router, &text_body("Key rotation", query, None)).await;
 
@@ -581,7 +599,7 @@ async fn a_page_is_bounded_by_max_results_and_resumed_by_a_token_this_service_is
     // first position serves the query again, and one naming a position past the last
     // serves an empty page rather than failing. The token is the OPAQUE cursor this
     // operation cuts, so it is built through the same codec the handler issues it from.
-    let first_cursor = inquiry_queries_token(&id, 0);
+    let first_cursor = inquiry_queries_token(&key, &id, 0);
     let resumed = list_queries(&router, &id, &format!("&nextToken={first_cursor}")).await;
     assert_eq!(
         resumed.queries().len(),
@@ -596,7 +614,7 @@ async fn a_page_is_bounded_by_max_results_and_resumed_by_a_token_this_service_is
         "case \"a token resuming at the first query\": expected {query:?}, got {:?}",
         resumed.body
     );
-    let past_cursor = inquiry_queries_token(&id, 1);
+    let past_cursor = inquiry_queries_token(&key, &id, 1);
     let exhausted = list_queries(&router, &id, &format!("&nextToken={past_cursor}")).await;
     assert_eq!(
         exhausted.status, 200,
@@ -618,7 +636,9 @@ async fn a_page_is_bounded_by_max_results_and_resumed_by_a_token_this_service_is
 
 #[tokio::test]
 async fn a_token_this_operation_never_issued_is_refused_with_the_fixed_text() {
-    let router = emulator();
+    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+    let router = emulator_on(engine.clone());
+    let key = page_token_key(&engine);
     let mine = create(&router, &text_body("Mine", "Who audits the auditors?", None)).await;
     let other = create(&router, &text_body("Other", "Where are the backups?", None)).await;
 
@@ -633,7 +653,7 @@ async fn a_token_this_operation_never_issued_is_refused_with_the_fixed_text() {
         ("a bare number", "1".to_string()),
         (
             "a cursor cut for another inquiry",
-            inquiry_queries_token(&other, 1),
+            inquiry_queries_token(&key, &other, 1),
         ),
         ("an unencoded resume point", format!("{mine}:1")),
         ("another inquiry's unencoded resume point", format!("{other}:1")),
