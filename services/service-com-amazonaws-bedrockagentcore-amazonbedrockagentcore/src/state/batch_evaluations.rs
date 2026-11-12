@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
 use crate::ops::types::{
-    DataSourceConfig, EvaluationMetadata, Evaluator, Insight, OutputConfig,
+    BatchEvaluationSummary, DataSourceConfig, EvaluationMetadata, Evaluator, Insight, OutputConfig,
 };
 
 use super::{
@@ -157,6 +157,39 @@ impl BatchEvaluationRecord {
         }
     }
 
+    /// This job as the modelled `BatchEvaluationSummary`, as of `now`.
+    ///
+    /// The summary carries the same identity, configuration and clock-derived lifecycle a
+    /// full report of the job does, so a listing and a read of one job cannot disagree;
+    /// `evaluationResults` and `errorDetails` are left out for the same reason the full
+    /// report leaves them out — no judge model runs here, so nothing has scored the job
+    /// and nothing has failed.
+    pub fn summary(&self, now: SystemTime) -> BatchEvaluationSummary {
+        BatchEvaluationSummary {
+            batch_evaluation_id: self.batch_evaluation_id.clone(),
+            batch_evaluation_arn: self.batch_evaluation_arn.clone(),
+            batch_evaluation_name: self.name.clone(),
+            status: self.status_as_of(now).to_string(),
+            created_at: ::aws_smithy_types::DateTime::from(self.created_at),
+            description: self.description.clone(),
+            evaluators: self.evaluators.clone(),
+            insights: self.insights.clone(),
+            evaluation_results: None,
+            error_details: None,
+            kms_key_arn: self.kms_key_arn.clone(),
+            updated_at: Some(::aws_smithy_types::DateTime::from(
+                self.updated_at_as_of(now),
+            )),
+        }
+    }
+
+    /// The total order batch evaluation jobs are reported in: newest first, with the
+    /// start sequence breaking a tie between two jobs started in the same millisecond, so
+    /// one state always paginates the same way.
+    pub fn order_key(&self) -> (SystemTime, u64) {
+        (self.created_at, self.seq)
+    }
+
     /// When this job last changed at `now`: the instant of the most recent lifecycle
     /// transition the clock has made due, which is its start instant while it is still
     /// `PENDING`.
@@ -256,6 +289,15 @@ impl ComAmazonawsBedrockagentcoreAmazonbedrockagentcoreState {
             };
             self.batch_evaluation_idempotency.remove(&oldest);
         }
+    }
+
+    /// Every batch evaluation job this store holds, newest first
+    /// ([`BatchEvaluationRecord::order_key`]) — the one order every page of a listing is
+    /// cut from, so following a token reports each held job exactly once.
+    pub fn batch_evaluations_newest_first(&self) -> Vec<&BatchEvaluationRecord> {
+        let mut jobs: Vec<&BatchEvaluationRecord> = self.batch_evaluations.values().collect();
+        jobs.sort_by_key(|job| std::cmp::Reverse(job.order_key()));
+        jobs
     }
 
     /// The batch evaluation job a read addressed, or the sentence naming it as the

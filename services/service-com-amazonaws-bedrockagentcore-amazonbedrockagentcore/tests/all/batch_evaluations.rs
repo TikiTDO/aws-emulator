@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! End-to-end tests for the AgentCore batch-evaluation surface —
-//! `StartBatchEvaluation` and `GetBatchEvaluation`.
+//! `StartBatchEvaluation`, `GetBatchEvaluation` and `ListBatchEvaluations`.
 //!
 //! The rules under test:
 //!
@@ -20,7 +20,14 @@
 //!   already started, while two starts carrying different tokens are two jobs even under
 //!   one `batchEvaluationName`;
 //! * a `batchEvaluationId` no job is held for is refused 404 `ResourceNotFoundException`
-//!   with the sentence this service words every missed lookup with.
+//!   with the sentence this service words every missed lookup with;
+//! * `ListBatchEvaluations` reports exactly the jobs this emulator holds, cut from ONE
+//!   total order (newest first), one `maxResults`-sized page at a time with an opaque
+//!   `nextToken` resuming after it: whatever page size a caller asks for, following the
+//!   token to the end yields every held job exactly once in the same order, each summary
+//!   agreeing with a read of the same job, while a `maxResults` outside its published
+//!   range or a `nextToken` this listing never issued is refused 400
+//!   `ValidationException`.
 //!
 //! Every case drives real HTTP through the same `MultiServiceRouter` the emulator serves
 //! with, so the routes, status codes, `restJson1` bodies and modelled error codes are
@@ -634,5 +641,349 @@ async fn a_batch_evaluation_id_no_job_is_held_for_is_refused() {
     assert_eq!(
         status, 200,
         "expected the held job to still read back, got {status} with {read:?}"
+    );
+}
+
+/// `ListBatchEvaluations`: `GET /evaluations/batch-evaluate`, with `maxResults` and
+/// `nextToken` carried as `@httpQuery` members.
+async fn list_batch_evaluations(router: &MultiServiceRouter, query: &str) -> (u16, Value) {
+    let path = if query.is_empty() {
+        "/evaluations/batch-evaluate".to_string()
+    } else {
+        format!("/evaluations/batch-evaluate?{query}")
+    };
+    send(router, "GET", &path, None).await
+}
+
+/// The summaries one `ListBatchEvaluations` page carries.
+fn page(body: &Value) -> &Vec<Value> {
+    member(body, "batchEvaluations")
+        .as_array()
+        .unwrap_or_else(|| panic!("expected batchEvaluations to be a list, got {body:?}"))
+}
+
+/// Every batch evaluation the emulator lists, following `nextToken` until the last page,
+/// with `max_results` asked for on each request.
+async fn list_every_batch_evaluation(
+    router: &MultiServiceRouter,
+    max_results: i64,
+) -> Vec<Value> {
+    let mut summaries: Vec<Value> = Vec::new();
+    let mut token: Option<String> = None;
+    // One more request than there can be pages, so a token that never clears is caught
+    // here instead of hanging the suite.
+    for _ in 0..64 {
+        let query = match token.as_deref() {
+            None => format!("maxResults={max_results}"),
+            Some(next) => format!("maxResults={max_results}&nextToken={next}"),
+        };
+        let (status, body) = list_batch_evaluations(router, &query).await;
+        assert_eq!(
+            status, 200,
+            "paging with maxResults={max_results}: expected HTTP 200, got {status} with {body:?}"
+        );
+        let returned = page(&body);
+        assert!(
+            returned.len() as i64 <= max_results,
+            "paging with maxResults={max_results}: expected at most {max_results} summaries on a page, got {}",
+            returned.len()
+        );
+        summaries.extend(returned.iter().cloned());
+        match member(&body, "nextToken").as_str() {
+            Some(next) => token = Some(next.to_string()),
+            None => return summaries,
+        }
+    }
+    panic!("paging with maxResults={max_results} never reached a last page");
+}
+
+/// `ListBatchEvaluations` cuts every page from one total order: whatever `maxResults` a
+/// caller asks for, following `nextToken` to the end yields every held job exactly once in
+/// the same order, and the last page carries no token.
+#[tokio::test]
+async fn list_batch_evaluations_pages_the_whole_list_in_one_stable_order() {
+    let (router, _engine) = emulator();
+
+    // Seven jobs, so a page size that divides the list and one that does not are both
+    // exercised.
+    let mut started_order: Vec<String> = Vec::new();
+    for index in 0..7 {
+        let (status, started) =
+            start_batch_evaluation(&router, minimal_request(&format!("paged_job_{index}"))).await;
+        assert_eq!(
+            status, 202,
+            "starting paged_job_{index}: expected HTTP 202, got {status} with {started:?}"
+        );
+        started_order.push(text(&started, "batchEvaluationId").to_string());
+    }
+    let mut newest_first = started_order.clone();
+    newest_first.reverse();
+
+    // `maxResults` is range 1..100 (source: smithy_query query="operation"
+    // operation="ListBatchEvaluations"): both published bounds, a size that divides the
+    // list, one that does not, and one larger than it.
+    for max_results in [1_i64, 2, 3, 7, 8, 100] {
+        let summaries = list_every_batch_evaluation(&router, max_results).await;
+        let order: Vec<String> = summaries
+            .iter()
+            .map(|summary| text(summary, "batchEvaluationId").to_string())
+            .collect();
+        assert_eq!(
+            order, newest_first,
+            "case maxResults={max_results}: expected every held job exactly once, newest first, got {order:?}"
+        );
+    }
+
+    // A request that names no `maxResults` is served as much of the list as one page can
+    // carry, and that page closes the listing.
+    let (status, body) = list_batch_evaluations(&router, "").await;
+    assert_eq!(
+        status, 200,
+        "expected HTTP 200 with no maxResults, got {status} with {body:?}"
+    );
+    let order: Vec<String> = page(&body)
+        .iter()
+        .map(|summary| text(summary, "batchEvaluationId").to_string())
+        .collect();
+    assert_eq!(
+        order, newest_first,
+        "expected the default page to carry the whole list, newest first, got {order:?}"
+    );
+    assert_eq!(
+        member(&body, "nextToken"),
+        &Value::Null,
+        "expected no nextToken on a page that carries the whole list, got {body:?}"
+    );
+}
+
+/// Every summary a listing reports is the job that was started, and it agrees with a
+/// `GetBatchEvaluation` of the same job — for every shape of request the model admits.
+#[tokio::test]
+async fn a_listed_batch_evaluation_summary_agrees_with_the_read() {
+    let (router, _engine) = emulator();
+
+    let cases = round_trip_cases();
+    let mut expected_ids: Vec<String> = Vec::new();
+    for (case, request) in &cases {
+        let (status, started) = start_batch_evaluation(&router, request.clone()).await;
+        assert_eq!(
+            status, 202,
+            "case {case:?}: expected HTTP 202 from StartBatchEvaluation, got {status} with {started:?}"
+        );
+        expected_ids.push(text(&started, "batchEvaluationId").to_string());
+    }
+
+    let summaries = list_every_batch_evaluation(&router, 100).await;
+    assert_eq!(
+        summaries.len(),
+        cases.len(),
+        "expected one summary per started job, got {summaries:?}"
+    );
+
+    for ((case, request), id) in cases.iter().zip(&expected_ids) {
+        let summary = summaries
+            .iter()
+            .find(|summary| text(summary, "batchEvaluationId") == id.as_str())
+            .unwrap_or_else(|| panic!("case {case:?}: expected {id:?} to be listed, got {summaries:?}"));
+        let (status, read) = get_batch_evaluation(&router, id).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: expected HTTP 200 reading {id:?}, got {status} with {read:?}"
+        );
+        // The members `BatchEvaluationSummary` shares with the full report are the same
+        // values (source: smithy_query query="shape" shape="BatchEvaluationSummary").
+        for name in [
+            "batchEvaluationId",
+            "batchEvaluationArn",
+            "batchEvaluationName",
+            "status",
+            "createdAt",
+            "updatedAt",
+            "description",
+            "evaluators",
+            "insights",
+            "kmsKeyArn",
+        ] {
+            assert_eq!(
+                member(summary, name),
+                member(&read, name),
+                "case {case:?}: expected the listed {name} to agree with the read of {id:?}, got {summary:?}"
+            );
+        }
+        // What the request asked for is what the summary carries.
+        for name in ["description", "evaluators", "insights", "kmsKeyArn"] {
+            assert_eq!(
+                member(summary, name),
+                request.get(name).unwrap_or(&Value::Null),
+                "case {case:?}: expected the listed {name} to be the one the start asked for, got {summary:?}"
+            );
+        }
+        assert_eq!(
+            text(summary, "batchEvaluationName"),
+            request
+                .get("batchEvaluationName")
+                .and_then(Value::as_str)
+                .expect("every case names its job"),
+            "case {case:?}: expected the name the start asked for, got {summary:?}"
+        );
+        // No judge model runs here, so no summary carries a rating or a failure.
+        for name in ["evaluationResults", "errorDetails"] {
+            assert_eq!(
+                member(summary, name),
+                &Value::Null,
+                "case {case:?}: expected no {name} for a job nothing scored, got {summary:?}"
+            );
+        }
+    }
+}
+
+/// A listing is a READ: an emulator holding no job lists none rather than failing, two
+/// listings report the same page, and nothing of the listing is stored.
+#[tokio::test]
+async fn listing_batch_evaluations_changes_nothing_a_later_caller_sees() {
+    let (router, engine) = emulator();
+
+    let (status, empty) = list_batch_evaluations(&router, "maxResults=100").await;
+    assert_eq!(
+        status, 200,
+        "expected HTTP 200 from a listing with nothing to list, got {status} with {empty:?}"
+    );
+    assert!(
+        page(&empty).is_empty(),
+        "expected no summaries before anything was started, got {empty:?}"
+    );
+    assert_eq!(
+        member(&empty, "nextToken"),
+        &Value::Null,
+        "expected no nextToken on an empty listing, got {empty:?}"
+    );
+
+    let (_, started) = start_batch_evaluation(&router, minimal_request("read_only_check")).await;
+    let id = text(&started, "batchEvaluationId").to_string();
+    let (_, first) = list_batch_evaluations(&router, "maxResults=100").await;
+    let (_, again) = list_batch_evaluations(&router, "maxResults=100").await;
+    assert_eq!(
+        first, again,
+        "expected a second listing to report the same page, got {again:?}"
+    );
+    assert_eq!(
+        batch_evaluation_count(&engine),
+        1,
+        "expected listing to store nothing of its own"
+    );
+    assert_eq!(
+        text(&first["batchEvaluations"][0], "batchEvaluationId"),
+        id,
+        "expected the started job to be the one listed, got {first:?}"
+    );
+}
+
+/// A listed `BatchEvaluationStatus` is the one the clock implies, and the listing writes
+/// nothing to make the transition: a row per point of the lifecycle.
+#[tokio::test]
+async fn a_listed_batch_evaluation_status_follows_the_clock() {
+    let span = agentcore::state::BATCH_EVALUATION_TRANSITION_SPAN;
+    // How far past the start instant each row lists the job, and what the lifecycle says
+    // it is then: both sides of each span boundary, and one point well past the last.
+    let cases: [(&str, Duration, &str); 5] = [
+        ("just started", Duration::ZERO, "PENDING"),
+        ("one second short of running", span - Duration::from_secs(1), "PENDING"),
+        ("at the first span", span, "IN_PROGRESS"),
+        ("at the second span", span * 2, "COMPLETED"),
+        ("long past the run", span * 200, "COMPLETED"),
+    ];
+
+    for (case, aged_by, expected_status) in cases {
+        let (router, engine) = emulator();
+        let (status, started) =
+            start_batch_evaluation(&router, minimal_request("clock_listing")).await;
+        assert_eq!(
+            status, 202,
+            "case {case:?}: expected HTTP 202 from StartBatchEvaluation, got {status} with {started:?}"
+        );
+        let id = text(&started, "batchEvaluationId").to_string();
+        age_batch_evaluation(&engine, &id, aged_by);
+
+        // Two listings in a row: the status is read off the clock, so neither advances
+        // the job.
+        for listing_number in 1..=2 {
+            let (status, body) = list_batch_evaluations(&router, "maxResults=100").await;
+            assert_eq!(
+                status, 200,
+                "case {case:?}: expected HTTP 200 from listing {listing_number}, got {status} with {body:?}"
+            );
+            assert_eq!(
+                text(&body["batchEvaluations"][0], "status"),
+                expected_status,
+                "case {case:?}: expected status {expected_status} on listing {listing_number}, got {body:?}"
+            );
+        }
+        // And the read of the same job says the same thing.
+        let (_, read) = get_batch_evaluation(&router, &id).await;
+        assert_eq!(
+            text(&read, "status"),
+            expected_status,
+            "case {case:?}: expected the read to agree with the listing, got {read:?}"
+        );
+    }
+}
+
+/// A `maxResults` outside the range the model publishes, and a `nextToken` this listing
+/// never issued, are refused 400 `ValidationException`; the published bounds themselves
+/// are served.
+#[tokio::test]
+async fn a_batch_evaluation_listing_outside_its_modelled_input_is_refused_with_400() {
+    let (router, engine) = emulator();
+    let (status, started) = start_batch_evaluation(&router, minimal_request("bounds")).await;
+    assert_eq!(
+        status, 202,
+        "expected the job under the bounds cases to be started, got {status} with {started:?}"
+    );
+
+    // `maxResults` is range 1..100 (source: smithy_query query="operation"
+    // operation="ListBatchEvaluations"): one case on each side of it, and a negative one.
+    let refused: [(&str, &str); 5] = [
+        ("max-results-below-the-range", "maxResults=0"),
+        ("max-results-above-the-range", "maxResults=101"),
+        ("negative-max-results", "maxResults=-1"),
+        ("next-token-this-listing-never-issued", "nextToken=not-a-token"),
+        // A token another paginated listing of this service minted does not resume this
+        // one: `nextToken` carries the list it belongs to.
+        ("next-token-of-another-listing", "nextToken=YWItdGVzdHM6MA=="),
+    ];
+    for (case, query) in refused {
+        let (status, body) = list_batch_evaluations(&router, query).await;
+        assert_eq!(
+            status, 400,
+            "case {case:?}: expected HTTP 400, got {status} with {body:?}"
+        );
+        assert_eq!(
+            error_code(&body),
+            "ValidationException",
+            "case {case:?}: expected ValidationException, got {body:?}"
+        );
+    }
+
+    for (case, query) in [
+        ("lowest-max-results", "maxResults=1"),
+        ("highest-max-results", "maxResults=100"),
+    ] {
+        let (status, body) = list_batch_evaluations(&router, query).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: expected a published bound to be served, got {status} with {body:?}"
+        );
+        assert_eq!(
+            page(&body).len(),
+            1,
+            "case {case:?}: expected the one started job on the page, got {body:?}"
+        );
+    }
+
+    // A refused listing stored nothing and removed nothing.
+    assert_eq!(
+        batch_evaluation_count(&engine),
+        1,
+        "expected the refusals above to have changed nothing"
     );
 }

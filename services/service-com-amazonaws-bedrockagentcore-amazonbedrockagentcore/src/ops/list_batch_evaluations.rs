@@ -1,15 +1,21 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListBatchEvaluations
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListBatchEvaluations`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Reports the batch evaluation jobs this service holds, from [`crate::state`] — the jobs
+//! `StartBatchEvaluation` started. Reporting only (`@readonly`): it writes nothing.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListBatchEvaluations::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Each summary carries the identity the start minted, the configuration it was started
+//! with and the `BatchEvaluationStatus` the clock implies for it
+//! ([`crate::state::BatchEvaluationRecord::status_as_of`]), so a listing and a
+//! `GetBatchEvaluation` of the same job never disagree. The list is cut from ONE total
+//! order — newest first, with the start sequence breaking a tie between two jobs started
+//! in the same millisecond ([`crate::state::BatchEvaluationRecord::order_key`]) — and
+//! served one `maxResults`-sized page at a time, with an opaque `nextToken` resuming
+//! after it, so following the token reports each held job exactly once.
+//!
+//! No judge model runs in this emulator — `GetBatchEvaluation` says the same of itself —
+//! so a summary carries no rating: `evaluationResults` and `errorDetails` are left out
+//! rather than filled with numbers nothing computed.
 //!
 //! ## Shape of an operation
 //!
@@ -92,6 +98,18 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+/// The list this operation's `nextToken` belongs to, so a token minted by another
+/// paginated operation does not silently resume this one.
+const PAGE_KIND: &str = "batch-evaluations";
+
+/// The page size a request that names no `maxResults` takes.
+///
+/// The model publishes no default for it, only the range it admits (`maxResults` range
+/// 1..100, source: smithy_query query="operation" operation="ListBatchEvaluations"), so a
+/// caller that asks for no particular page size is served as much of the list as one page
+/// can carry.
+const DEFAULT_MAX_RESULTS: i32 = 100;
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -164,18 +182,47 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListBatchEvaluations` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListBatchEvaluationsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListBatchEvaluations"))
+        // Request metadata is not read by this operation: every member it needs is
+        // bound into `input` by the centralized request walk.
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            ListBatchEvaluationsErrorModeled::InternalServerException(InternalServerException {
+                message: Some("the shared engine does not carry this service's state".to_string()),
+            })
+        })?;
+
+        let offset = match input.next_token.as_deref() {
+            None => 0,
+            Some(token) => crate::state::decode_next_token(PAGE_KIND, token).ok_or_else(|| {
+                ListBatchEvaluationsErrorModeled::ValidationException(ValidationException {
+                    message: "nextToken is not a token this operation issued".to_string(),
+                    reason: "CannotParse".to_string(),
+                    field_list: None,
+                })
+            })?,
+        };
+        // `@range(1..100)` is refused at the boundary; the clamp keeps this arithmetic
+        // total rather than restating that refusal.
+        let max_results = input
+            .max_results
+            .unwrap_or(DEFAULT_MAX_RESULTS)
+            .clamp(1, 100) as usize;
+        // One reading of the clock for the whole page, so two summaries cannot report
+        // two readings of the same transition.
+        let now = ::std::time::SystemTime::now();
+
+        let store = state.lock();
+        let jobs = store.batch_evaluations_newest_first();
+        // Rendered page-first: only the summaries of this page are built, however many
+        // jobs the store holds.
+        let (batch_evaluations, next_token) =
+            crate::state::paginate_with(&jobs, PAGE_KIND, offset, max_results, |job| {
+                job.summary(now)
+            });
+
+        Ok(ListBatchEvaluationsOutput {
+            batch_evaluations,
+            next_token,
+        })
     }
 }
