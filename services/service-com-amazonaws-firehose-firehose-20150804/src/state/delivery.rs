@@ -56,6 +56,13 @@
 //! [`deliver_due`]): the endpoints this emulator can deliver to are the ones it serves
 //! itself, so a delivery opens no socket and reaches nothing outside this process.
 //!
+//! ## A Splunk destination
+//!
+//! A destination in Splunk is delivered to the same way: the buffer is POSTed to the HTTP
+//! Event Collector `HECEndpoint` names, and the events the collector did not take are parked
+//! in the Amazon S3 location its `S3Configuration` names once `RetryOptions` is spent —
+//! [`splunk`].
+//!
 //! ## The clock
 //!
 //! A flush is a clock-owed change like any other in this crate: [`take_due`] applies only
@@ -98,6 +105,8 @@ pub mod destination_logging;
 /// Converting a buffer's records to the format a `DataFormatConversionConfiguration` asks
 /// for, against the column information of the Glue table it binds.
 pub mod format_conversion;
+/// The delivery of a buffer to a destination in Splunk.
+pub mod splunk;
 /// The zone a destination's time fields are rendered in.
 pub mod time_zone;
 
@@ -187,7 +196,9 @@ const DEFAULT_BUFFER_INTERVAL: Duration = Duration::from_secs(300);
 /// put had not yet returned from.
 pub const FULL_BUFFER_DELIVERY_SPAN: Duration = Duration::from_millis(250);
 
-/// `HttpEndpointRetryOptions$DurationInSeconds` when the configuration names none.
+/// `HttpEndpointRetryOptions$DurationInSeconds` when the configuration names none, and the
+/// same span for every other destination whose buffer is attempted against an endpoint and
+/// whose own `RetryOptions` member declares no default either ([`splunk`]).
 ///
 /// A CHOSEN span: the member states what the duration MEANS ("the total amount of time
 /// that Firehose spends on retries. This duration starts after the initial attempt to send
@@ -729,6 +740,8 @@ pub struct PendingDelivery {
     /// Every Amazon OpenSearch Service index this buffer's records are indexed into as
     /// documents.
     pub searches: Vec<SearchTarget>,
+    /// Every Splunk HTTP Event Collector this buffer is POSTed to.
+    pub splunks: Vec<splunk::SplunkTarget>,
 }
 
 /// One object a delivery writes.
@@ -1274,6 +1287,15 @@ fn stream_searches(stream: &DeliveryStream) -> Vec<SearchTarget> {
         .collect()
 }
 
+/// Every Splunk collector this stream's destinations deliver to right now.
+fn stream_splunks(stream: &DeliveryStream) -> Vec<splunk::SplunkTarget> {
+    stream
+        .destinations
+        .iter()
+        .flat_map(|destination| splunk::splunk_targets(&destination.config))
+        .collect()
+}
+
 /// When this stream's buffer comes due for delivery, or `None` when nothing is owed — an
 /// empty buffer, or a destination with no location, no endpoint and no index to deliver
 /// to.
@@ -1298,6 +1320,11 @@ pub fn due_at(stream: &DeliveryStream) -> Option<SystemTime> {
             stream_searches(stream)
                 .iter()
                 .map(|search| delivery_window(search.hints.as_ref(), buffered)),
+        )
+        .chain(
+            stream_splunks(stream)
+                .iter()
+                .map(|splunk| delivery_window(splunk.hints.as_ref(), buffered)),
         )
         .min()?;
     let due = opened_at + window;
@@ -1357,7 +1384,9 @@ pub fn take_due(
         let targets = stream_targets(stream);
         let endpoints = stream_endpoints(stream);
         let searches = stream_searches(stream);
-        if targets.is_empty() && endpoints.is_empty() && searches.is_empty() {
+        let splunks = stream_splunks(stream);
+        if targets.is_empty() && endpoints.is_empty() && searches.is_empty() && splunks.is_empty()
+        {
             continue;
         }
         if extractions == Extractions::LeaveToThePump
@@ -1377,6 +1406,7 @@ pub fn take_due(
             targets,
             endpoints,
             searches,
+            splunks,
         });
     }
     due
@@ -1450,9 +1480,10 @@ pub async fn deliver_due<Eng: Send + Sync + 'static>(
         take_due(&mut store, now, extractions)
     };
     for delivery in pending {
-        // The HTTP endpoints first, because a buffer one of them has not taken and still
-        // has retries for is owed again AS A WHOLE: deciding that before anything is
-        // written keeps the retry from writing the Amazon S3 half of the same buffer twice.
+        // The HTTP endpoints and the Splunk collectors first, because a buffer one of them
+        // has not taken and still has retries for is owed again AS A WHOLE: deciding that
+        // before anything is written keeps the retry from writing the Amazon S3 half of the
+        // same buffer twice.
         let mut parked = Vec::new();
         let mut owed = false;
         for endpoint in &delivery.endpoints {
@@ -1468,7 +1499,40 @@ pub async fn deliver_due<Eng: Send + Sync + 'static>(
             // backup. One this emulator cannot work out — an `S3Configuration` naming no
             // bucket, a prefix that does not resolve — leaves the records owed instead of
             // dropping them.
-            match backup_object(&delivery, endpoint, failure, now) {
+            match endpoint
+                .backup
+                .as_ref()
+                .and_then(|target| backup_object(&delivery, target, failure, now))
+            {
+                Some(object) => parked.push(object),
+                None => owed = true,
+            }
+        }
+        // Then the Splunk destinations, which are attempted the same way and whose events
+        // the collector did not take are parked in the destination's Amazon S3 backup once
+        // its retry window is spent: "Firehose writes any data that could not be indexed to
+        // the configured Amazon S3 destination" (`SplunkS3BackupMode`), which holds under
+        // both of that member's values.
+        for collector in &delivery.splunks {
+            let Err(failure) =
+                splunk::post_to_collector(hop.transport(), &delivery, collector).await
+            else {
+                continue;
+            };
+            if !retries_spent(
+                &delivery,
+                collector.hints.as_ref(),
+                collector.retry_duration,
+                now,
+            ) {
+                owed = true;
+                continue;
+            }
+            match collector
+                .backup
+                .as_ref()
+                .and_then(|target| backup_object(&delivery, target, failure, now))
+            {
                 Some(object) => parked.push(object),
                 None => owed = true,
             }
@@ -1803,9 +1867,10 @@ fn retries_spent(
     now >= first_attempt + retry_duration
 }
 
-/// The object that parks the records this endpoint never took in the destination's Amazon
-/// S3 backup: "only the documents that Firehose could not deliver to the specified HTTP
-/// endpoint destination (`FailedDataOnly`)" (`S3BackupMode`).
+/// The object that parks the records a destination never took in its Amazon S3 backup:
+/// "only the documents that Firehose could not deliver to the specified HTTP endpoint
+/// destination (`FailedDataOnly`)" (`S3BackupMode`), and the same for every other
+/// destination whose backup takes the records its primary destination rejected.
 ///
 /// Written under the backup's `ErrorOutputPrefix` as the error-output document of each
 /// record ([`error_envelope`]), so a consumer of that prefix learns how the delivery failed
@@ -1813,11 +1878,10 @@ fn retries_spent(
 /// all, in which case the records stay owed rather than being dropped.
 fn backup_object(
     delivery: &PendingDelivery,
-    endpoint: &HttpEndpointTarget,
+    target: &S3Target,
     failure: DeliveryFailure,
     now: SystemTime,
 ) -> Option<DeliveredObject> {
-    let target = endpoint.backup.as_ref()?;
     let prefix = error_output_prefix(target, failure, now).ok()?;
     let records: Vec<&StoredRecord> = delivery.records.iter().collect();
     let encoded = compressed(

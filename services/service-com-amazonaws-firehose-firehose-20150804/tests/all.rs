@@ -33,6 +33,8 @@ mod delivered_object_content_encoding;
 mod delivered_object_encryption;
 #[path = "all/delivered_object_name.rs"]
 mod delivered_object_name;
+#[path = "all/delivery_role_refusal.rs"]
+mod delivery_role_refusal;
 #[path = "all/delivery_stream_encryption.rs"]
 mod delivery_stream_encryption;
 #[path = "all/delivery_stream_lifecycle.rs"]
@@ -87,6 +89,8 @@ mod opensearch_fgac_destination_delivery;
 mod processor_parameters;
 #[path = "all/refusal_messages.rs"]
 mod refusal_messages;
+#[path = "all/splunk_destination_delivery.rs"]
+mod splunk_destination_delivery;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/stream_encryption.rs"]

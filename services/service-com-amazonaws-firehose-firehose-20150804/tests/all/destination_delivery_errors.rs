@@ -314,7 +314,10 @@ impl Aws {
 /// A SigV4 `Authorization` header whose credential scope names `service` — the routing key
 /// the router claims a request by. Neither the key id nor the signature is a credential:
 /// this harness turns request authentication off, so nothing here is verified.
-fn authorization(service: &str) -> String {
+///
+/// `pub(crate)` so a sibling suite signing for the same four services reuses it instead of
+/// writing a second copy.
+pub(crate) fn authorization(service: &str) -> String {
     format!(
         "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/{REGION}/{service}/aws4_request, \
          SignedHeaders=host, Signature=not-verified"
@@ -324,7 +327,10 @@ fn authorization(service: &str) -> String {
 /// Percent-encode one `application/x-www-form-urlencoded` component, leaving only RFC 3986's
 /// unreserved characters literal — so a policy document's braces and quotes survive the round
 /// trip.
-fn form_encode(value: &str) -> String {
+///
+/// `pub(crate)` so a sibling suite driving IAM's own `awsQuery` wire reuses it instead of
+/// writing a second copy.
+pub(crate) fn form_encode(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
@@ -337,7 +343,10 @@ fn form_encode(value: &str) -> String {
 }
 
 /// An identity-based policy document allowing `action` on `resource`.
-fn allow(action: &str, resource: &str) -> Value {
+///
+/// `pub(crate)` so a sibling suite granting the same delivery permissions reuses it instead
+/// of writing a second copy.
+pub(crate) fn allow(action: &str, resource: &str) -> Value {
     json!({
         "Version": "2012-10-17",
         "Statement": [{"Effect": "Allow", "Action": action, "Resource": resource}],
