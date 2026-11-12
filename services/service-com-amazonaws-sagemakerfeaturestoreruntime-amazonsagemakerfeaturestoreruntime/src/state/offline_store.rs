@@ -6,7 +6,11 @@
 //! OnlineStore and OfflineStore. Otherwise, the record is a historic record and it is
 //! written only to the OfflineStore" (`PutRecord`): so every whole-record write of this data
 //! plane into a feature group the control plane gave an `OfflineStoreConfig` replicates that
-//! record into the group's offline location, whether or not the online store took it.
+//! record into the group's offline location, whether or not the online store took it. A
+//! DELETION appends to the same location rather than ingesting — "In both cases, Feature
+//! Store appends the deleted record marker to the OfflineStore" (`DeleteRecord`) — so the row
+//! one write lands as is either an ingested record or a delete marker
+//! ([`OfflineRecord::delete_marker`]), and the store is append-only either way.
 //!
 //! WHERE it goes, UNDER WHICH role and WHEN that destination is blocked are the facts the
 //! two planes of the Feature Store share, so they are read from
@@ -49,8 +53,8 @@ const API_INVOCATION_TIME_COLUMN: &str = "api_invocation_time";
 /// The column carrying whether the row is a delete marker; see [`WRITE_TIME_COLUMN`].
 const IS_DELETED_COLUMN: &str = "is_deleted";
 
-/// One ingested record as the offline store holds it: the feature values the request
-/// carried, as text, and the event time they belong to.
+/// One row the offline store holds: the feature values the write carried, as text, the
+/// event time they belong to, and whether the row is a DELETE MARKER.
 #[derive(Debug, Clone)]
 pub struct OfflineRecord {
     /// The record's feature values in the order the request wrote them, each as the text
@@ -59,6 +63,10 @@ pub struct OfflineRecord {
     /// The instant the record's event-time feature named, and `None` when the record
     /// carries no value for it — the one case the partition has no event time to take.
     event_time: Option<SystemTime>,
+    /// `is_deleted`: whether this row marks the record as DELETED rather than ingested —
+    /// "The deleted record marker is a record with the same RecordIdentifer as the original,
+    /// but with is_deleted value set to True" (`DeleteRecord`).
+    is_deleted: bool,
 }
 
 impl OfflineRecord {
@@ -96,6 +104,44 @@ impl OfflineRecord {
         Self {
             features,
             event_time,
+            is_deleted: false,
+        }
+    }
+
+    /// The DELETED RECORD MARKER one deletion appends to the offline store: "a record with
+    /// the same RecordIdentifer as the original, but with is_deleted value set to True,
+    /// EventTime set to the delete input EventTime, and other feature values set to null"
+    /// (`DeleteRecord`).
+    ///
+    /// The two columns the marker carries are therefore the group's OWN
+    /// `RecordIdentifierFeatureName` and `EventTimeFeatureName` — read from the group's
+    /// definition, as every other read of a record of this data plane is — and the other
+    /// features of the record carry no value at all, which is what `null` is in the row.
+    /// The marker is partitioned by the deletion's own event time, so it lands beside the
+    /// record it deletes when that is the hour the deletion names.
+    #[must_use]
+    pub fn delete_marker(
+        definition: &::service_common::feature_store_groups::FeatureGroupRecord,
+        record_identifier: &str,
+        event_time: &str,
+    ) -> Self {
+        let mut features = vec![(
+            definition.record_identifier_feature_name.clone(),
+            record_identifier.to_owned(),
+        )];
+        // A group whose identifier feature IS its event-time feature would otherwise be
+        // written with one column twice; the two values are then the one column's.
+        if definition.event_time_feature_name != definition.record_identifier_feature_name {
+            features.push((
+                definition.event_time_feature_name.clone(),
+                event_time.to_owned(),
+            ));
+        }
+        Self {
+            features,
+            event_time: crate::state::parse_event_time_secs(event_time)
+                .and_then(seconds_since_epoch),
+            is_deleted: true,
         }
     }
 }
@@ -134,7 +180,7 @@ pub enum Replicated {
     Failed(String),
 }
 
-/// Replicate one ingested record into the feature group's offline store.
+/// Append one row of an ingestion or a deletion into the feature group's offline store.
 ///
 /// The write is made UNDER the group's own role, so it is authorized against that role's
 /// permissions first ([`::service_common::feature_store_offline_store::write_is_withheld`])
@@ -277,11 +323,11 @@ pub fn record_parquet_bytes(
                 .map_err(|error| error.to_string())?;
             column.close().map_err(|error| error.to_string())?;
         }
-        // `is_deleted`: an INGESTED record is not a delete marker.
+        // `is_deleted`: true only of a DELETE MARKER; an ingested record is not one.
         let mut column = next_column(&mut row_group, group_name)?;
         column
             .typed::<BoolType>()
-            .write_batch(&[false], Some(&present), None)
+            .write_batch(&[record.is_deleted], Some(&present), None)
             .map_err(|error| error.to_string())?;
         column.close().map_err(|error| error.to_string())?;
         row_group.close().map_err(|error| error.to_string())?;
@@ -428,6 +474,65 @@ mod tests {
                 rendered.contains(expected),
                 "case one ingested record: expected {expected:?} in the row, got {rendered}"
             );
+        }
+    }
+
+    /// RULE: a deletion's row is the delete marker — the group's own record identifier and
+    /// the deletion's event time, `is_deleted` true — while an ingestion's row is not
+    /// marked deleted.
+    #[test]
+    fn a_deletions_row_is_the_delete_marker_of_the_identified_record() {
+        // (case, the row, whether it must be marked deleted, the values it must carry)
+        let rows: [(&str, OfflineRecord, bool, Vec<&str>); 3] = [
+            (
+                "an ingested record",
+                OfflineRecord::of(
+                    &definition(),
+                    &[
+                        feature("customer_id", "C1"),
+                        feature("event_time", "2026-06-01T00:00:00Z"),
+                    ],
+                ),
+                false,
+                vec!["C1", "2026-06-01T00:00:00Z"],
+            ),
+            (
+                "a deletion of that record",
+                OfflineRecord::delete_marker(&definition(), "C1", "2026-06-02T00:00:00Z"),
+                true,
+                vec!["C1", "2026-06-02T00:00:00Z"],
+            ),
+            (
+                "a deletion of a record that was never ingested",
+                OfflineRecord::delete_marker(&definition(), "C9", "1780272000"),
+                true,
+                vec!["C9", "1780272000"],
+            ),
+        ];
+        for (case, row, marked, expected_values) in rows {
+            let bytes = record_parquet_bytes("customers", &row, SystemTime::UNIX_EPOCH)
+                .expect("the row lays out as a Parquet file");
+            let reader =
+                ::parquet::file::reader::SerializedFileReader::new(::bytes::Bytes::from(bytes))
+                    .expect("the written object is a Parquet file");
+            let rendered = reader
+                .get_row_iter(None)
+                .expect("the file's rows are readable")
+                .next()
+                .expect("the file holds a row")
+                .expect("the row is readable")
+                .to_string();
+            let expected_marker = format!("{IS_DELETED_COLUMN}: {marked}");
+            assert!(
+                rendered.contains(&expected_marker),
+                "case {case:?}: expected {expected_marker:?} in the row, got {rendered}"
+            );
+            for expected in expected_values {
+                assert!(
+                    rendered.contains(expected),
+                    "case {case:?}: expected {expected:?} in the row, got {rendered}"
+                );
+            }
         }
     }
 

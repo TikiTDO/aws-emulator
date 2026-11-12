@@ -11,11 +11,15 @@
 //! strictly older one does not delete — `SoftDelete` leaves the record standing,
 //! `HardDelete` answers 400 ([`DELETE_EVENT_TIME_OUT_OF_ORDER`]).
 //!
-//! Authorization is not emulated, so the modelled `AccessForbidden` is unreachable. The
-//! deleted-record marker the model says Feature Store appends to the OfflineStore is a
-//! DELETE's own rule — `HardDelete` and `SoftDelete` leave different marks there — and is
-//! left to the issue that owns this operation, so only the OnlineStore side is served here;
-//! an INGESTION's replication is [`crate::state::offline_store`].
+//! The deletion is also APPENDED to the offline store of a group the control plane gave an
+//! `OfflineStoreConfig`, under that group's own `RoleArn`, as the deleted-record marker
+//! ([`crate::state::offline_store::OfflineRecord::delete_marker`]): "In both cases, Feature
+//! Store appends the deleted record marker to the OfflineStore", and a `SoftDelete` whose
+//! `EventTime` is out of order appends it too, while the `HardDelete` the same `EventTime`
+//! refuses appends nothing.
+//!
+//! Authorization of the CALLER is not emulated, so the modelled `AccessForbidden` is
+//! unreachable.
 //!
 //! ## Shape of an operation
 //!
@@ -252,24 +256,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         };
 
-        // "A list of stores from which you're deleting the record. By default, Feature
-        // Store deletes the record from all of the stores that you're using for the
-        // FeatureGroup." Only the OnlineStore is served here, so a delete naming only
-        // the OfflineStore — or one aimed at a feature group that HAS no OnlineStore —
-        // leaves the online store alone.
-        if !crate::state::targets_online_store(input.target_stores.as_ref())
-            || !definition.online_store_enabled
-        {
-            return Ok(DeleteRecordOutput);
-        }
-
         // "For SoftDelete (default), feature columns are set to null and the record is
         // no longer retrievable by GetRecord or BatchGetRecord. For HardDelete, the
         // complete Record is removed from the OnlineStore."
         let hard_delete = input.deletion_mode.as_deref() == Some("HardDelete");
 
-        // The deletion is ordered against the stored record's event time, so the
-        // request's own `EventTime` must be a timestamp.
+        // The deletion is ordered against the stored record's event time and the marker
+        // appended to the offline store carries the deletion's own `EventTime`, so the
+        // request's `EventTime` must be a timestamp whichever stores the caller named: a
+        // value this operation cannot read is a request defect, not something an
+        // OfflineStore-only deletion excuses.
         let Some(requested_secs) = crate::state::parse_event_time_secs(&input.event_time) else {
             return Err(validation(format!(
                 "EventTime: expected an ISO-8601 timestamp or seconds since the epoch, \
@@ -278,46 +274,91 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )));
         };
 
-        let mut store = state.lock();
-        // A feature group that resolves but has taken no record yet has no online store
-        // here, so there is nothing to remove online.
-        let Some(group) = store.group_mut(&input.feature_group_name) else {
-            return Ok(DeleteRecordOutput);
-        };
-
         let identifier = input.record_identifier_value_as_string.clone();
-        let Some(stored) = group.record(&identifier) else {
-            return Ok(DeleteRecordOutput);
+
+        // The ONLINE side of the deletion, in its own block: the store guard is taken for it
+        // and released with the block, before the offline append below is awaited, so no
+        // guard is held across an await.
+        //
+        // "A list of stores from which you're deleting the record. By default, Feature Store
+        // deletes the record from all of the stores that you're using for the FeatureGroup."
+        // The two stores are decided independently, as an ingestion decides them: the
+        // OnlineStore takes the deletion only when the group HAS one and the request names
+        // it, and the OfflineStore below takes the marker only when the group was created
+        // with an `OfflineStoreConfig` and the request names it.
+        let refused_out_of_order = {
+            let mut refused = false;
+            if crate::state::targets_online_store(input.target_stores.as_ref())
+                && definition.online_store_enabled
+            {
+                let mut store = state.lock();
+                // A feature group that resolves but has taken no record yet has no online
+                // store here, and a record that was never ingested has nothing to remove
+                // online; the offline store still takes the marker, since it is appended
+                // from the REQUEST and holds the history of the record either way.
+                if let Some(group) = store.group_mut(&input.feature_group_name) {
+                    if let Some(stored_secs) =
+                        group.record(&identifier).map(|stored| stored.event_time_secs())
+                    {
+                        // "Note that the EventTime specified in DeleteRecord should be set
+                        // later than the EventTime of the existing record in the OnlineStore
+                        // for that RecordIdentifer. If it is not, the deletion does not
+                        // occur": SoftDelete leaves the existing record in the OnlineStore,
+                        // HardDelete answers 400. The boundary the service enforces is
+                        // SAME-or-after — a deletion submitted at exactly the record's own
+                        // EventTime, which is the value a client reads back from `GetRecord`,
+                        // deletes it — so only a STRICTLY older EventTime is out of order. A
+                        // stored record with no event time at all orders against nothing, so
+                        // the deletion proceeds.
+                        let out_of_order =
+                            stored_secs.is_some_and(|existing| requested_secs < existing);
+                        if out_of_order {
+                            refused = hard_delete;
+                        } else if hard_delete {
+                            group.remove_record(&identifier);
+                        } else {
+                            group.soft_delete_record(
+                                &identifier,
+                                &input.event_time,
+                                &definition.record_identifier_feature_name,
+                                &definition.event_time_feature_name,
+                            );
+                        }
+                    }
+                }
+            }
+            refused
         };
 
-        // "Note that the EventTime specified in DeleteRecord should be set later than
-        // the EventTime of the existing record in the OnlineStore for that
-        // RecordIdentifer. If it is not, the deletion does not occur": SoftDelete
-        // leaves the existing record in the OnlineStore, HardDelete answers 400. The
-        // boundary the service enforces is SAME-or-after — a deletion submitted at
-        // exactly the record's own EventTime, which is the value a client reads back
-        // from `GetRecord`, deletes it — so only a STRICTLY older EventTime is out of
-        // order. A stored record with no event time at all orders against nothing, so
-        // the deletion proceeds.
-        let out_of_order = stored
-            .event_time_secs()
-            .is_some_and(|existing| requested_secs < existing);
-        if out_of_order {
-            if hard_delete {
-                return Err(validation(DELETE_EVENT_TIME_OUT_OF_ORDER));
-            }
-            return Ok(DeleteRecordOutput);
+        // "HardDelete returns EventTime: 400 ValidationException to indicate that the delete
+        // operation failed. No delete record marker is written to the OfflineStore."
+        if refused_out_of_order {
+            return Err(validation(DELETE_EVENT_TIME_OUT_OF_ORDER));
         }
 
-        if hard_delete {
-            group.remove_record(&identifier);
-        } else {
-            group.soft_delete_record(
-                &identifier,
-                &input.event_time,
-                &definition.record_identifier_feature_name,
-                &definition.event_time_feature_name,
-            );
+        // "In both cases, Feature Store appends the deleted record marker to the
+        // OfflineStore" — and "For SoftDelete, the existing (not deleted) record remains in
+        // the OnlineStore, though the delete record marker is still written to the
+        // OfflineStore", so the marker is appended for every deletion this operation accepts.
+        // A group created without an `OfflineStoreConfig` has nowhere to append to, and the
+        // append is the service's own asynchronous work, so neither a withheld permission nor
+        // a failed write changes the answer this call gives its client.
+        if crate::state::targets_offline_store(input.target_stores.as_ref()) {
+            if let Some(delivery) = definition.offline_store.as_ref() {
+                crate::state::offline_store::replicate(
+                    ctx.callback(),
+                    &crate::state::request_region(ctx),
+                    &definition.name,
+                    delivery,
+                    &crate::state::offline_store::OfflineRecord::delete_marker(
+                        &definition,
+                        &identifier,
+                        &input.event_time,
+                    ),
+                    ::std::time::SystemTime::now(),
+                )
+                .await;
+            }
         }
 
         Ok(DeleteRecordOutput)
