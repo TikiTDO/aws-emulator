@@ -210,6 +210,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let group_name = crate::state::effective_group_name(input.group_name.as_deref());
 
+        // An update carries a `Target.RoleArn` of its own, so it HANDS this service a
+        // role exactly as the create does and is charged the caller's `iam:PassRole` for
+        // it the same way (`crate::state::pass_role`) — before the schedule is looked up
+        // and before anything is written, so a refused caller changes nothing.
+        if let Some(message) =
+            crate::state::pass_role::pass_role_denial(&*self.engine, ctx, &input.target.role_arn)
+        {
+            return Err(crate::scaffolded::Scaffolded::access_denied(message));
+        }
+
         // The schedule's own definition, held to the same rules `CreateSchedule`
         // holds it to: both operations carry the same members, so an update
         // cannot move a schedule onto an expression, zone or window a create

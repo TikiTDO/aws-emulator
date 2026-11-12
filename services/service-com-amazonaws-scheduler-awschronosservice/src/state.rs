@@ -18,12 +18,17 @@
 //! [`invocation`], which the operations that write a schedule arm. What becomes of
 //! an invocation that did not reach its target — the attempts its retry policy
 //! admits, and the dead-letter route the last of them takes — is [`dead_letter`].
+//!
+//! Whether the CALLER may hand this service the execution role its request names at
+//! all — the `iam:PassRole` every operation that carries a `Target.RoleArn` charges
+//! against the calling principal's own policies — is [`pass_role`].
 
 mod dead_letter;
 mod occurrence;
 mod schedule_definition;
 
 pub mod invocation;
+pub mod pass_role;
 
 pub use invocation::{drive_invocation_clock, Invocations};
 pub use occurrence::Occurrences;
@@ -538,6 +543,27 @@ pub fn to_wire_timestamp(at: SystemTime) -> ::aws_smithy_types::DateTime {
 /// execution role as (`Target$RoleArn`: "the IAM role that EventBridge
 /// Scheduler will use for this target when the schedule is invoked").
 pub const SCHEDULER_SERVICE_PRINCIPAL: &str = "scheduler.amazonaws.com";
+
+/// The IAM store the calling principal's own policies are read from.
+///
+/// It is the IAM service's OWN state struct, reached through the SAME shared engine
+/// this service's store lives in, so this service reads the very records
+/// `CreateUser`, `CreateRole`, `PutRolePolicy` and `AttachRolePolicy` wrote rather
+/// than a second copy of them. What a schedule's own execution ROLE is resolved
+/// against is a different question, asked of IAM over the in-process callback
+/// ([`execution_role_violation`]), because a target's role is resolved exactly as any
+/// client would resolve it.
+pub type IamState =
+    ::service_com_amazonaws_iam_awsidentitymanagementv20100508::ComAmazonawsIamAwsidentitymanagementv20100508State;
+
+/// The IAM store in the SAME shared engine, which is where the account's identities
+/// and their policies live. `None` means the engine carries no such store — a
+/// deployment with no IAM to ask, which is evidence of nothing.
+pub fn iam_state<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+) -> Option<::engine::ServiceState<IamState>> {
+    ::service_com_amazonaws_iam_awsidentitymanagementv20100508::state::service_state(engine)
+}
 
 /// What AWS answers when a schedule's execution role cannot be assumed — the
 /// role does not exist, or its trust policy does not admit Scheduler.

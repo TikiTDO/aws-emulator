@@ -224,6 +224,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx.parts());
         let group_name = crate::state::effective_group_name(input.group_name.as_deref());
 
+        // Naming `Target.RoleArn` HANDS this service a role it will act as, which is a
+        // permission of the CALLER's: the request goes ahead only where the policies in
+        // force on the calling principal allow it `iam:PassRole` for that role
+        // (`crate::state::pass_role`). It is charged BEFORE the role is resolved against
+        // IAM below and before anything is persisted, so a refused caller writes nothing
+        // and learns nothing about whether the role it named exists.
+        if let Some(message) =
+            crate::state::pass_role::pass_role_denial(&*self.engine, ctx, &input.target.role_arn)
+        {
+            return Err(crate::scaffolded::Scaffolded::access_denied(message));
+        }
+
         // EventBridge Scheduler resolves the execution role when the schedule is
         // CREATED, so a role this account does not hold — or one that does not
         // let Scheduler assume it — is refused here, before anything is

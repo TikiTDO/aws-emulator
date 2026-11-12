@@ -35,8 +35,14 @@ hex = { workspace = true }
 aws-sdk-iam = { version = "1", default-features = false }
 # `iam_trust_policy`: the one reading of an IAM trust policy — including the decode of
 # the URL-encoded form IAM reports a document in — shared with every other service that
-# resolves a caller-supplied execution role.
+# resolves a caller-supplied execution role; `iam_authorization`: the one evaluation of
+# policy documents behind the `iam:PassRole` a request naming a `Target.RoleArn` charges
+# (`state::pass_role`).
 service-common = { path = "../common" }
+# The IAM service's OWN state, read through the shared engine: the identity a request's
+# access key id speaks for, and the identity-based policies in force on it, which is what
+# the `iam:PassRole` gate decides a pass of a target's role against (`state::pass_role`).
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 # The `cron(...)` and `at(...)` halves of a `ScheduleExpression` are read by
 # maintained parsers rather than by a hand-written grammar; `chrono` is what the
 # cron parser is written in, and `chrono-tz` carries the IANA database a
@@ -65,7 +71,10 @@ sha2 = { workspace = true }
 # client sees it: on the queue the schedule's target names, and against the
 # execution role IAM holds.
 service-com-amazonaws-sqs-amazonsqs = { workspace = true }
-service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+# The token service, mounted beside this one so a suite can present the credential of an
+# assumed ROLE session — the identity a least-privilege policy is attached to — rather
+# than only a long-term key.
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
 
 [lints]
 workspace = true
