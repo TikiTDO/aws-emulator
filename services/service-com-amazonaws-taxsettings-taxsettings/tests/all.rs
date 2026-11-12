@@ -53,6 +53,8 @@ mod exemption_access_record;
 mod exemption_authority_support;
 #[path = "all/exemption_identity_padding.rs"]
 mod exemption_identity_padding;
+#[path = "all/exemption_support_case.rs"]
+mod exemption_support_case;
 #[path = "all/exemption_type_admission.rs"]
 mod exemption_type_admission;
 #[path = "all/fidelity_rules.rs"]

@@ -7,6 +7,14 @@
 //! applied submission opens one support case and answers its `caseId`, because
 //! it submits one certificate.
 //!
+//! That case is a real AWS Support case, opened in the Support store on the
+//! shared engine with the submitted certificate attached to it
+//! ([`crate::state::support_case`]): `caseId` is "The customer support case ID",
+//! the handle the caller hands to `support:DescribeCases` to follow the review of
+//! the document — which is also why this operation models a failed upload of that
+//! document to a Support case and the Support case-creation limit. Neither the id
+//! nor the document is this service's to invent or to drop.
+//!
 //! The exemption's identity is its type and its jurisdiction — the request
 //! carries no exemption id — so submitting the same exemption for an account
 //! again REPLACES that account's record, which is what makes this a `Put`. The
@@ -220,17 +228,47 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         crate::state::check_exemption_authority(&input.exemption_type, &input.authority)
             .map_err(PutTaxExemptionErrorModeled::ValidationException)?;
 
-        let mut store = state.lock();
         // Every account id the request names is written for: the boundary already
         // refused anything that is not 1..=550 twelve-digit ids, and nothing here
         // can tell a family member from any other well-formed id (this service
         // models no organization and no operation enrolls an account in one), so
         // there is no observable condition to refuse a named account on.
-        // The records are written first and the case id minted only once they
-        // are: a submission refused for want of room opens no support case, so
-        // the ids this service hands out count the submissions it applied. One
+        // The room the records need is decided FIRST, before the case is opened:
+        // a submission refused for want of room opens no support case, so the
+        // cases this service answers for count the submissions it applied. One
         // applied submission opens exactly one case, whatever number of accounts
         // it wrote for, because it submits one certificate.
+        let store = state.lock();
+        store
+            .exemption_room(&input.account_ids, &input.exemption_type, &input.authority)
+            .map_err(PutTaxExemptionErrorModeled::CaseCreationLimitExceededException)?;
+        drop(store);
+
+        // The case the submitted certificate is reviewed on, opened in the AWS
+        // Support store that owns support cases, with the certificate attached —
+        // so the `caseId` this operation answers is a handle the caller resolves
+        // there. Opened with no guard of this service's own store held, as
+        // [`crate::state::support_case`] documents.
+        let case_id = crate::state::support_case::open_exemption_case(
+            &*self.engine,
+            &input.exemption_type,
+            &input.authority,
+            crate::state::distinct_account_ids(&input.account_ids).len(),
+            &input.exemption_certificate,
+        )
+        .map_err(|refusal| match refusal {
+            crate::state::support_case::ExemptionCaseNotOpened::Unavailable(error) => {
+                PutTaxExemptionErrorModeled::InternalServerException(error)
+            }
+            crate::state::support_case::ExemptionCaseNotOpened::CaseLimit(error) => {
+                PutTaxExemptionErrorModeled::CaseCreationLimitExceededException(error)
+            }
+            crate::state::support_case::ExemptionCaseNotOpened::Upload(error) => {
+                PutTaxExemptionErrorModeled::AttachmentUploadException(error)
+            }
+        })?;
+
+        let mut store = state.lock();
         let accounts = store
             .store_exemptions(
                 &input.account_ids,
@@ -239,7 +277,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 ::std::time::SystemTime::now(),
             )
             .map_err(PutTaxExemptionErrorModeled::CaseCreationLimitExceededException)?;
-        let case_id = store.mint_exemption_case_id();
+        store.count_opened_exemption_case();
         drop(store);
 
         // The access record for a state-changing call: which operation ran, what

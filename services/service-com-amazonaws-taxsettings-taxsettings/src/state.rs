@@ -21,6 +21,7 @@ use ::aws_smithy_types::base64;
 
 pub mod organization;
 pub mod registration_number;
+pub mod support_case;
 
 use crate::ops::types::{
     AccountMetaData, AdditionalInfoRequest, AdditionalInfoResponse, Address, Authority,
@@ -702,8 +703,11 @@ pub struct ComAmazonawsTaxsettingsTaxsettingsState {
     /// exemption certificate for review) and writes it through
     /// [`Self::store_exemptions`].
     pub exemptions: BTreeMap<String, Vec<StoredTaxExemption>>,
-    /// How many support cases `PutTaxExemption` has opened. The next `caseId` is
-    /// derived from it, so every submission gets its own.
+    /// How many support cases `PutTaxExemption` has opened. The cases
+    /// themselves live in the AWS Support store, which owns them and mints their
+    /// ids ([`support_case::open_exemption_case`]); this is this service's tally
+    /// of the submissions it applied, written by
+    /// [`Self::count_opened_exemption_case`].
     pub minted_exemption_cases: u64,
     /// The highest registration revision this service has already minted
     /// document access tokens under for a registration it no longer holds.
@@ -1217,21 +1221,55 @@ impl ComAmazonawsTaxsettingsTaxsettingsState {
         Ok(())
     }
 
-    /// Mint the id of the support case a `PutTaxExemption` submission opens.
+    /// Count one support case opened for an applied submission.
     ///
-    /// `caseId` is SERVER-generated (no request member carries one) and the model
-    /// constrains it only as a `GenericString` of 1..=200 characters, so AWS
-    /// publishes no format for it: this mints a short opaque id from the service's
-    /// own counter, unique per submission, which is every invariant the member
-    /// has.
-    pub fn mint_exemption_case_id(&mut self) -> String {
+    /// The case itself is opened in the AWS Support store, which owns support
+    /// cases and mints their ids ([`support_case::open_exemption_case`]); this
+    /// is only this service's tally of the submissions it applied, so one
+    /// applied submission answers for exactly one case and a refused one for
+    /// none.
+    pub fn count_opened_exemption_case(&mut self) {
         self.minted_exemption_cases = self.minted_exemption_cases.saturating_add(1);
-        format!("tax-exemption-case-{:08}", self.minted_exemption_cases)
     }
 
     /// How many exemption records the store holds, across every account.
     pub fn stored_exemption_count(&self) -> usize {
         self.exemptions.values().map(Vec::len).sum()
+    }
+
+    /// Whether the store has room for the submission `account_ids`,
+    /// `exemption_type` and `authority` describe, or the refusal it is refused
+    /// with.
+    ///
+    /// Asked BEFORE the submission's support case is opened, so a submission the
+    /// store has no room for opens no case: the room a write needs is decided
+    /// from the same records [`Self::store_exemptions`] then writes, which asks
+    /// this first itself — a submission is applied whole or not at all.
+    pub fn exemption_room(
+        &self,
+        account_ids: &[String],
+        exemption_type: &str,
+        authority: &Authority,
+    ) -> Result<(), CaseCreationLimitExceededException> {
+        let recorded_type = submitted_exemption_type(exemption_type, authority);
+        let description = recorded_type.description.clone().unwrap_or_default();
+        // Only the accounts that do not already hold this exemption ADD a
+        // record; replacing one an account holds is always allowed, because it
+        // adds nothing.
+        let additional = distinct_account_ids(account_ids)
+            .iter()
+            .filter(|account_id| {
+                self.exemptions.get(**account_id).is_none_or(|held| {
+                    !held
+                        .iter()
+                        .any(|stored| is_same_exemption(stored, &description, authority))
+                })
+            })
+            .count();
+        if self.stored_exemption_count() + additional > MAX_STORED_EXEMPTIONS {
+            return Err(exemption_store_full());
+        }
+        Ok(())
     }
 
     /// Record the exemption `exemption_type` and `authority` identify for every
@@ -1286,20 +1324,11 @@ impl ComAmazonawsTaxsettingsTaxsettingsState {
         // identity.
         let recorded_type = submitted_exemption_type(exemption_type, authority);
         let description = recorded_type.description.clone().unwrap_or_default();
+        // The bound comes first, from the same records this then writes, so a
+        // submission past it is refused having written nothing
+        // ([`Self::exemption_room`]).
+        self.exemption_room(account_ids, exemption_type, authority)?;
         let distinct = distinct_account_ids(account_ids);
-        let additional = distinct
-            .iter()
-            .filter(|account_id| {
-                self.exemptions.get(**account_id).is_none_or(|held| {
-                    !held
-                        .iter()
-                        .any(|stored| is_same_exemption(stored, &description, authority))
-                })
-            })
-            .count();
-        if self.stored_exemption_count() + additional > MAX_STORED_EXEMPTIONS {
-            return Err(exemption_store_full());
-        }
 
         let submitted = StoredTaxExemption {
             authority: normalized_authority(authority),

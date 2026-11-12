@@ -257,55 +257,61 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 message: Some("the case creation time could not be rendered".to_string()),
             })
         })?;
-        let submitted_by = crate::state::submitted_by();
 
         let mut store = state.lock();
-        // The store holds at most `MAX_STORED_CASES` cases, so a client cannot
-        // grow it without limit; past that, this operation's own modelled
-        // creation-limit error is the answer.
-        if store.is_full() {
-            return Err(CreateCaseErrorModeled::CaseCreationLimitExceeded(
-                CaseCreationLimitExceeded {
-                    message: Some(
-                        "The case creation limit for the account has been exceeded.".to_string(),
-                    ),
+        // The one writer: it applies the store's bounds — among them
+        // `MAX_STORED_CASES`, past which this operation's own modelled creation
+        // limit is the answer — before it allocates or inserts anything, so a
+        // refused create leaves the store exactly as it was.
+        let case_id = store
+            .open_case(
+                crate::state::CaseSubmission {
+                    subject: input.subject,
+                    communication_body: input.communication_body,
+                    service_code: input.service_code,
+                    category_code: input.category_code,
+                    severity_code: input.severity_code,
+                    issue_type: input.issue_type,
+                    language: input.language,
+                    cc_email_addresses: input.cc_email_addresses.unwrap_or_default(),
+                    // This request carries no content: an attachment reaches a
+                    // case only through the attachment-set and upload
+                    // operations, both refused above.
+                    attachments: Vec::new(),
                 },
+                time_created,
+                time_created_instant,
             )
-            .into());
-        }
-
-        let display_id = store.allocate_display_id();
-        let case_id = crate::state::new_case_id(display_id, &time_created);
-
-        let mut case = crate::state::Case::new(
-            case_id.clone(),
-            display_id,
-            input.subject,
-            input.service_code,
-            input.category_code,
-            input.severity_code,
-            input.issue_type,
-            input.language,
-            submitted_by.clone(),
-            time_created.clone(),
-            time_created_instant,
-        );
-        if let Err(total) =
-            case.merge_cc_email_addresses(input.cc_email_addresses.as_deref().unwrap_or_default())
-        {
-            return Err(crate::scaffolded::Scaffolded::validation(format!(
-                "ccEmailAddresses has {total} addresses, more than the {} a case may carry",
-                crate::state::MAX_CC_EMAIL_ADDRESSES
-            )));
-        }
-        // The body that describes the issue is the case's first communication.
-        case.record_communication(
-            input.communication_body,
-            submitted_by,
-            time_created,
-            time_created_instant,
-        );
-        store.cases.insert(case_id.clone(), case);
+            .map_err(|refusal| -> CreateCaseError {
+                match refusal {
+                    crate::state::CaseNotOpened::StoreFull => {
+                        CreateCaseErrorModeled::CaseCreationLimitExceeded(
+                            CaseCreationLimitExceeded {
+                                message: Some(
+                                    "The case creation limit for the account has been exceeded."
+                                        .to_string(),
+                                ),
+                            },
+                        )
+                        .into()
+                    }
+                    crate::state::CaseNotOpened::TooManyCcEmailAddresses(total) => {
+                        crate::scaffolded::Scaffolded::validation(format!(
+                            "ccEmailAddresses has {total} addresses, more than the {} a case may \
+                             carry",
+                            crate::state::MAX_CC_EMAIL_ADDRESSES
+                        ))
+                    }
+                    // Unreachable from here: this request attaches nothing, so
+                    // it submits no content for the store to refuse.
+                    crate::state::CaseNotOpened::AttachmentStoreFull { .. } => {
+                        CreateCaseErrorModeled::InternalServerError(InternalServerError {
+                            message: Some("the case could not be opened".to_string()),
+                        })
+                        .into()
+                    }
+                }
+            })?;
 
         Ok(CreateCaseOutput {
             case_id: Some(case_id),

@@ -14,14 +14,21 @@
 //! [`ComAmazonawsSupportAwssupport20130415State::support_api_allowed`] answers and
 //! `crate::service` enforces once, ahead of dispatch.
 //!
-//! Both growth sites are BOUNDED, because every write here is driven by a request:
+//! Every growth site is BOUNDED, because every write here is driven by a request:
 //! [`MAX_STORED_CASES`] caps how many cases the store holds (a further create is
-//! refused with the operation's own modelled `CaseCreationLimitExceeded`) and
+//! refused with the operation's own modelled `CaseCreationLimitExceeded`),
 //! [`MAX_COMMUNICATIONS_PER_CASE`] caps one case's log, evicting oldest-first
-//! inside the single writer [`Case::record_communication`]. A case's cc list is
-//! capped the same way, at [`MAX_CC_EMAIL_ADDRESSES`] inside
+//! inside the single writer [`Case::record_communication_with_attachments`], and
+//! [`MAX_ATTACHMENT_BYTES`] caps the file content every case retains together. A
+//! case's cc list is capped the same way, at [`MAX_CC_EMAIL_ADDRESSES`] inside
 //! [`Case::merge_cc_email_addresses`], which refuses a request from its length
 //! before doing any work proportional to it.
+//!
+//! A case is added to the store in ONE place, [`ComAmazonawsSupportAwssupport20130415State::open_case`]:
+//! `CreateCase` serves the account opening its own case, and a service opening one
+//! on the account's behalf while serving a submission of its own goes through the
+//! same writer, so every client reads back one case id form, one `displayId`
+//! sequence and one correspondence log.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::SystemTime;
@@ -73,6 +80,16 @@ pub const MAX_STORED_CASES: usize = 128;
 /// this. With [`MAX_STORED_CASES`] that bounds the whole store at roughly
 /// 128 * 32 * 8000 bytes.
 pub const MAX_COMMUNICATIONS_PER_CASE: usize = 32;
+
+/// How many bytes of attachment content this store retains, across every case.
+///
+/// Emulator-chosen for the same reason as the bounds above: an attachment is
+/// caller-supplied content and nothing in this API removes a case, so without
+/// this bound a client could grow the process without limit. A submission whose
+/// files would take the store past it is refused whole
+/// ([`CaseNotOpened::AttachmentStoreFull`]) rather than stored truncated, because
+/// a truncated document is not the document that was submitted.
+pub const MAX_ATTACHMENT_BYTES: usize = 64 * 1024 * 1024;
 
 /// The Amazon Web Services Support plans an account may call this API with.
 ///
@@ -196,6 +213,148 @@ impl ComAmazonawsSupportAwssupport20130415State {
         self.next_display_id += 1;
         self.next_display_id
     }
+
+    /// How many bytes of attachment content the store retains, across every
+    /// case: what [`MAX_ATTACHMENT_BYTES`] bounds.
+    pub fn retained_attachment_bytes(&self) -> usize {
+        self.cases
+            .values()
+            .flat_map(|case| case.communications.iter())
+            .flat_map(|communication| communication.attachments.iter())
+            .map(|attachment| attachment.data.len())
+            .sum()
+    }
+
+    /// Open the case `submission` describes, as created at `time_created`, and
+    /// answer its `caseId`.
+    ///
+    /// The ONE place a case is added to the store, whether the account opened it
+    /// itself through `CreateCase` or a service opened it on the account's behalf
+    /// while serving a submission of its own: both reach a case through here, so
+    /// one case id form, one `displayId` sequence and one correspondence log are
+    /// what every client reads back.
+    ///
+    /// Every bound is applied BEFORE anything is allocated or inserted, so a
+    /// refused submission leaves the store exactly as it was — it mints no case
+    /// id, consumes no `displayId` and retains none of its content. The caller
+    /// renders the refusal with its own modelled error.
+    pub fn open_case(
+        &mut self,
+        submission: CaseSubmission,
+        time_created: String,
+        time_created_instant: i128,
+    ) -> Result<String, CaseNotOpened> {
+        if self.is_full() {
+            return Err(CaseNotOpened::StoreFull);
+        }
+        if submission.cc_email_addresses.len() > MAX_CC_EMAIL_ADDRESSES {
+            return Err(CaseNotOpened::TooManyCcEmailAddresses(
+                submission.cc_email_addresses.len(),
+            ));
+        }
+        let submitted: usize = submission
+            .attachments
+            .iter()
+            .map(|attachment| attachment.data.len())
+            .sum();
+        let retained = self.retained_attachment_bytes();
+        if retained + submitted > MAX_ATTACHMENT_BYTES {
+            return Err(CaseNotOpened::AttachmentStoreFull {
+                submitted,
+                retained,
+            });
+        }
+
+        let display_id = self.allocate_display_id();
+        let case_id = new_case_id(display_id, &time_created);
+        let submitted_by = submitted_by();
+        let mut case = Case::new(
+            case_id.clone(),
+            display_id,
+            submission.subject,
+            submission.service_code,
+            submission.category_code,
+            submission.severity_code,
+            submission.issue_type,
+            submission.language,
+            submitted_by.clone(),
+            time_created.clone(),
+            time_created_instant,
+        );
+        case.merge_cc_email_addresses(&submission.cc_email_addresses)
+            .map_err(CaseNotOpened::TooManyCcEmailAddresses)?;
+        // The files the submission carries are attached to the body that
+        // describes the issue — the case's first communication — under the ids a
+        // client hands to `DescribeAttachment`.
+        let attachments = submission
+            .attachments
+            .into_iter()
+            .enumerate()
+            .map(|(index, file)| StoredAttachment {
+                attachment_id: new_attachment_id(&case_id, index, &file.file_name),
+                file_name: file.file_name,
+                data: file.data,
+            })
+            .collect();
+        case.record_communication_with_attachments(
+            submission.communication_body,
+            submitted_by,
+            time_created,
+            time_created_instant,
+            attachments,
+        );
+        self.cases.insert(case_id.clone(), case);
+        Ok(case_id)
+    }
+}
+
+/// A case to open: what the submission opening it says about the issue, plus the
+/// files it submits with it.
+///
+/// `CreateCase` fills this from its own request; a service opening a case on the
+/// account's behalf fills it from the submission it is serving.
+#[derive(Debug, Clone, Default)]
+pub struct CaseSubmission {
+    /// `CaseDetails$subject`: the title of the case.
+    pub subject: String,
+    /// The body that describes the issue, which becomes the case's first
+    /// communication.
+    pub communication_body: String,
+    pub service_code: Option<String>,
+    pub category_code: Option<String>,
+    pub severity_code: Option<String>,
+    /// `customer-service` or `technical`; [`DEFAULT_ISSUE_TYPE`] when none is
+    /// named.
+    pub issue_type: Option<String>,
+    pub language: Option<String>,
+    pub cc_email_addresses: Vec<String>,
+    /// The files to attach to that first communication. Each carries its name
+    /// and content; the store mints the `attachmentId`.
+    pub attachments: Vec<SubmittedFile>,
+}
+
+/// One file submitted with a case: its name and its content, before the store
+/// has minted the id a client retrieves it by.
+#[derive(Debug, Clone)]
+pub struct SubmittedFile {
+    pub file_name: String,
+    pub data: Vec<u8>,
+}
+
+/// Why a case was NOT opened. Each caller renders it with the modelled error its
+/// own operation declares, so the decision lives in one place and the wording
+/// stays each operation's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseNotOpened {
+    /// The store already holds [`MAX_STORED_CASES`] cases.
+    StoreFull,
+    /// The cc list carries more addresses than a case may hold
+    /// ([`MAX_CC_EMAIL_ADDRESSES`]); the total it named.
+    TooManyCcEmailAddresses(usize),
+    /// The files submitted with the case would take the store past
+    /// [`MAX_ATTACHMENT_BYTES`]: how many bytes they carry, and how many the
+    /// store already retains.
+    AttachmentStoreFull { submitted: usize, retained: usize },
 }
 
 /// One support case, as `CreateCase` persisted it and `DescribeCases` reports it.
@@ -294,6 +453,27 @@ impl Case {
         time_created: String,
         time_created_instant: i128,
     ) {
+        self.record_communication_with_attachments(
+            body,
+            submitted_by,
+            time_created,
+            time_created_instant,
+            Vec::new(),
+        );
+    }
+
+    /// Append a communication carrying `attachments`, the files submitted with
+    /// it: [`Self::record_communication`] with content, and the writer it
+    /// delegates to, so the log's bound and its sequence numbering are applied
+    /// once however a communication reaches a case.
+    pub fn record_communication_with_attachments(
+        &mut self,
+        body: String,
+        submitted_by: String,
+        time_created: String,
+        time_created_instant: i128,
+        attachments: Vec<StoredAttachment>,
+    ) {
         let sequence = self.next_communication_sequence;
         self.next_communication_sequence += 1;
         self.communications.push_back(CommunicationRecord {
@@ -303,7 +483,7 @@ impl Case {
             submitted_by,
             time_created,
             time_created_instant,
-            attachment_set: Vec::new(),
+            attachments,
         });
         while self.communications.len() > MAX_COMMUNICATIONS_PER_CASE {
             self.communications.pop_front();
@@ -356,23 +536,53 @@ pub struct CommunicationRecord {
     /// The same instant in whole nanoseconds: what the
     /// `afterTime`/`beforeTime` window compares.
     pub time_created_instant: i128,
-    /// Empty in this slice: the attachment operations are still scaffolded, so
-    /// no attachment can be on a case.
-    pub attachment_set: Vec<AttachmentDetails>,
+    /// The files attached to this communication, as the submission that opened
+    /// or added it carried them. Empty for a communication submitted without
+    /// any — which is every one `AddCommunicationToCase` records, since the
+    /// attachment-set operations are still scaffolded.
+    pub attachments: Vec<StoredAttachment>,
 }
 
 impl CommunicationRecord {
     /// The modelled `Communication` for this record. `attachments` (every
     /// attachment) and `attachmentSet` (those 5 MB or smaller) report the same
-    /// stored set, which is empty while the attachment operations are scaffolded.
+    /// stored files, because every file this store retains is smaller than that:
+    /// the one submission that attaches content carries a document the model
+    /// bounds at 4 MiB.
     pub fn to_modeled(&self) -> Communication {
+        let details: Vec<AttachmentDetails> = self
+            .attachments
+            .iter()
+            .map(StoredAttachment::to_details)
+            .collect();
         Communication {
             case_id: Some(self.case_id.clone()),
             body: Some(self.body.clone()),
             submitted_by: Some(self.submitted_by.clone()),
             time_created: Some(self.time_created.clone()),
-            attachments: Some(self.attachment_set.clone()),
-            attachment_set: Some(self.attachment_set.clone()),
+            attachments: Some(details.clone()),
+            attachment_set: Some(details),
+        }
+    }
+}
+
+/// One file attached to a case communication: the content as it was submitted,
+/// under the id a client hands to `DescribeAttachment` and the file's own name.
+#[derive(Debug, Clone)]
+pub struct StoredAttachment {
+    pub attachment_id: String,
+    pub file_name: String,
+    pub data: Vec<u8>,
+}
+
+impl StoredAttachment {
+    /// The modelled `AttachmentDetails` for this file — "the file name and ID of
+    /// an attachment to a case communication" — which is what the case readers
+    /// report; the content itself is served by `DescribeAttachment`.
+    pub fn to_details(&self) -> AttachmentDetails {
+        AttachmentDetails {
+            attachment_id: Some(self.attachment_id.clone()),
+            file_name: Some(self.file_name.clone()),
         }
     }
 }
@@ -444,6 +654,18 @@ pub fn new_case_id(display_id: u64, time_created: &str) -> String {
     let digest = Sha256::digest(format!("{account}:{display_id}:{time_created}").as_bytes());
     let suffix = hex::encode(&digest[..8]);
     format!("case-{account}-{CASE_ID_REALM}-{year}-{suffix}")
+}
+
+/// The id of one attachment on a case communication.
+///
+/// The model constrains `AttachmentId` not at all and AWS publishes no format
+/// for it — a client only round-trips it into `DescribeAttachment` — so this
+/// mints an opaque id the same way a case id's segment is minted: a digest over
+/// the case the file is attached to, its position in that attachment set and its
+/// file name, which makes every input distinct and so every id unique.
+pub fn new_attachment_id(case_id: &str, index: usize, file_name: &str) -> String {
+    let digest = Sha256::digest(format!("{case_id}:{index}:{file_name}").as_bytes());
+    format!("attachment-{}", hex::encode(&digest[..8]))
 }
 
 /// The identity recorded as `submittedBy` on a case and on every communication:

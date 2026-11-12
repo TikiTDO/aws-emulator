@@ -25,6 +25,10 @@ tracing = { workspace = true }
 # Organizations, so the organization-level write this service reserves to that
 # account reads the standing from that control plane's store on the shared engine.
 service-com-amazonaws-organizations-awsorganizationsv20161128 = { workspace = true }
+# A tax-exemption submission opens an AWS Support case for the certificate it
+# submits and answers that case's id, so the case is written to the store of the
+# control plane that owns support cases, on the shared engine.
+service-com-amazonaws-support-awssupport-20130415 = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

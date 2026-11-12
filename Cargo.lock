@@ -19267,6 +19267,7 @@ dependencies = [
  "http",
  "serde_json",
  "service-com-amazonaws-organizations-awsorganizationsv20161128",
+ "service-com-amazonaws-support-awssupport-20130415",
  "sha2 0.10.9",
  "tokio",
  "tracing",
