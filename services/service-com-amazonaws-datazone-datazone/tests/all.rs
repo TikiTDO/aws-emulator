@@ -35,6 +35,8 @@ mod delete_asset_denied_scope;
 mod domain_name_conflict_and_not_found;
 #[path = "all/domain_project_lifecycle.rs"]
 mod domain_project_lifecycle;
+#[path = "all/domain_scope_error_class.rs"]
+mod domain_scope_error_class;
 #[path = "all/domain_scoped_read_authorization.rs"]
 mod domain_scoped_read_authorization;
 #[path = "all/domain_scoped_write_authorization.rs"]
