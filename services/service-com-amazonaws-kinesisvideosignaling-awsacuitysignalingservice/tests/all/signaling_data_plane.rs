@@ -18,10 +18,11 @@ use std::time::{Duration, SystemTime};
 use bytes::Bytes;
 use engine::InMemoryEngine;
 use service_com_amazonaws_kinesisvideosignaling_awsacuitysignalingservice as signaling;
+use signaling::state::session::PeerConnection;
 use signaling::state::{
     ComAmazonawsKinesisvideosignalingAwsacuitysignalingserviceState as SignalingState,
-    IceServerRecord, SignalingChannel, MAX_ICE_CREDENTIAL_TTL_SECS,
-    MAX_ICE_ISSUANCES_PER_CHANNEL, MAX_OFFERS_PER_CHANNEL, MIN_ICE_CREDENTIAL_TTL_SECS,
+    SignalingChannel, MAX_ICE_CREDENTIAL_TTL_SECS, MAX_OFFERS_PER_CHANNEL,
+    MIN_ICE_CREDENTIAL_TTL_SECS, MIN_MESSAGE_TTL_SECS,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -92,8 +93,9 @@ fn error_code(body: &serde_json::Value) -> String {
         .unwrap_or_else(|| format!("no __type in {body}"))
 }
 
-/// Put a channel in the registry, the way `CreateSignalingChannel` will once the control
-/// plane is implemented, and let `prepare` set what that channel holds.
+/// Put a channel in the registry, the way the Kinesis Video control plane's
+/// `CreateSignalingChannel` does through `register_channel_of`, and let `prepare` set what
+/// that channel holds.
 fn seed_channel(
     engine: &InMemoryEngine,
     arn: &str,
@@ -118,9 +120,70 @@ fn b64(text: &str) -> String {
     aws_smithy_types::base64::encode(text)
 }
 
-/// The modelled `IceServer$Username` / `IceServer$Password` constraints, checked by hand
-/// because this test target has no regex crate: `@pattern ^[a-zA-Z0-9_.-]+$` with
-/// `@length 1..256` (`smithy_query(query="shape", shape="IceServer")`).
+/// Attach a MASTER peer to `arn` and answer every offer delivered to it with `answer`.
+///
+/// This is the device at the other end of the channel's WebSocket data plane, driven
+/// through the SAME session a real master's socket task drives: the peer's bounded queue is
+/// read, the sender of each delivered offer is taken out of the frame, and the answer is
+/// handed back through the channel's session. Nothing of the handler is stubbed — the
+/// `Answer` a call returns is one this master supplied.
+///
+/// The returned handle ends when the test drops it, which detaches nothing: the channel's
+/// record goes with the store.
+fn attach_scripted_master(
+    engine: &InMemoryEngine,
+    arn: &str,
+    answer: &str,
+) -> tokio::task::JoinHandle<()> {
+    attach_master_answering(engine, arn, None, answer)
+}
+
+/// [`attach_scripted_master`], with the recipient the master addresses its answer to:
+/// `None` answers whoever sent the offer, and `Some(client_id)` answers that client
+/// whatever the offer's sender was — which is a master that is listening but answers
+/// somebody else.
+fn attach_master_answering(
+    engine: &InMemoryEngine,
+    arn: &str,
+    recipient: Option<&str>,
+    answer: &str,
+) -> tokio::task::JoinHandle<()> {
+    let (peer, mut queued) = PeerConnection::new();
+    let state = engine.state::<SignalingState>();
+    {
+        let mut store = state.lock();
+        let channel = store
+            .resolve_channel_mut(arn)
+            .unwrap_or_else(|error| panic!("case {arn:?}: {error:?}"));
+        assert!(
+            channel.session.attach_master(peer).is_some(),
+            "case {arn:?}: the channel must take a master"
+        );
+    }
+    let answer = answer.to_string();
+    let arn = arn.to_string();
+    let recipient = recipient.map(str::to_string);
+    tokio::spawn(async move {
+        while let Some(frame) = queued.recv().await {
+            let parsed: serde_json::Value = serde_json::from_str(&frame)
+                .unwrap_or_else(|error| panic!("a delivered frame must be JSON ({error}): {frame}"));
+            let sender = parsed
+                .get("senderClientId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let addressed = recipient.clone().unwrap_or(sender);
+            let mut store = state.lock();
+            if let Ok(channel) = store.resolve_channel_mut(&arn) {
+                channel.session.deliver_answer(&addressed, &answer);
+            }
+        }
+    })
+}
+
+/// The modelled `IceServer$Password` constraints, checked by hand because this test target
+/// has no regex crate: `@pattern ^[a-zA-Z0-9_.-]+$` with `@length 1..256`
+/// (`smithy_query(query="shape", shape="IceServer")`).
 fn is_modelled_ice_token(value: &str) -> bool {
     // `@length` counts CHARACTERS, so the bound is checked on `chars().count()` rather
     // than on the byte length, which would reject a long multi-byte value for the wrong
@@ -130,6 +193,33 @@ fn is_modelled_ice_token(value: &str) -> bool {
         && value
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// The RECORDED form of an issued `IceServer$Username`: `<unix-expiry>:<opaque token>`.
+///
+/// The `:` is what the recorded response carries and what a TURN REST username joins those
+/// two with; the modelled `@pattern` (which does not admit it) holds for each side. Answers
+/// the expiry instant, so a case can check it against the issued `Ttl`.
+fn parsed_ice_username(case: &str, username: &str) -> u64 {
+    let (expiry, token) = username.split_once(':').unwrap_or_else(|| {
+        panic!("case {case:?}: expected '<expiry>:<token>', got {username:?}")
+    });
+    assert!(
+        !expiry.is_empty() && expiry.chars().all(|c| c.is_ascii_digit()),
+        "case {case:?}: expected a Unix expiry before the separator, got {username:?}"
+    );
+    assert!(
+        is_modelled_ice_token(token),
+        "case {case:?}: the username's token must keep the modelled character class, got \
+         {username:?}"
+    );
+    assert!(
+        (1..=256).contains(&username.chars().count()),
+        "case {case:?}: Username {username:?} is outside the modelled 1..256 length"
+    );
+    expiry
+        .parse()
+        .unwrap_or_else(|_| panic!("case {case:?}: {expiry:?} is not an expiry instant"))
 }
 
 /// One `GetIceServerConfig` row: a channel, how it is configured, and who asks.
@@ -144,8 +234,6 @@ struct IceCase {
     service: Option<&'static str>,
     /// The `Ttl` the answer must carry.
     expected_ttl: i32,
-    /// What the issued username must identify the credentials to.
-    expected_label: &'static str,
 }
 
 fn ice_request_body(case: &IceCase) -> String {
@@ -165,8 +253,9 @@ fn ice_request_body(case: &IceCase) -> String {
 
 /// The rule: a channel in the registry is answered with one TURN credential set, whose
 /// relay URIs are in the channel's own region, whose `Ttl` is the channel's lifetime held
-/// inside the modelled 30..86400 range, and which is RECORDED — so the same client asking
-/// again inside that lifetime is answered with the very same credentials.
+/// inside the modelled 30..86400 range, whose `Username` is `<unix-expiry>:<opaque token>`
+/// carrying nothing of the request, and which is RECORDED ON THE CHANNEL — so asking again
+/// inside that lifetime is answered with the very same credentials.
 #[tokio::test]
 async fn get_ice_server_config_issues_recorded_turn_credentials_per_channel_and_client() {
     // The rows differ along what the rule generalises over: region, account, channel name
@@ -183,7 +272,6 @@ async fn get_ice_server_config_issues_recorded_turn_credentials_per_channel_and_
             username: None,
             service: Some("TURN"),
             expected_ttl: 300,
-            expected_label: "viewer-1",
         },
         IceCase {
             case: "another region and account, naming an optional Username",
@@ -194,7 +282,6 @@ async fn get_ice_server_config_issues_recorded_turn_credentials_per_channel_and_
             username: Some("operator.one"),
             service: None,
             expected_ttl: MIN_ICE_CREDENTIAL_TTL_SECS,
-            expected_label: "operator.one",
         },
         IceCase {
             case: "no ClientId: the credentials are the channel's own",
@@ -205,7 +292,6 @@ async fn get_ice_server_config_issues_recorded_turn_credentials_per_channel_and_
             username: None,
             service: None,
             expected_ttl: MAX_ICE_CREDENTIAL_TTL_SECS,
-            expected_label: "ch-3",
         },
         IceCase {
             case: "a lifetime one second under the modelled minimum is held at it",
@@ -216,7 +302,6 @@ async fn get_ice_server_config_issues_recorded_turn_credentials_per_channel_and_
             username: None,
             service: Some("TURN"),
             expected_ttl: MIN_ICE_CREDENTIAL_TTL_SECS,
-            expected_label: "viewer-3",
         },
         IceCase {
             case: "a lifetime one second over the modelled maximum is held at it",
@@ -227,7 +312,16 @@ async fn get_ice_server_config_issues_recorded_turn_credentials_per_channel_and_
             username: None,
             service: Some("TURN"),
             expected_ttl: MAX_ICE_CREDENTIAL_TTL_SECS,
-            expected_label: "viewer-4",
+        },
+        IceCase {
+            case: "a ClientId the modelled pattern does not admit, which AWS still serves",
+            arn: "arn:aws:kinesisvideo:us-east-2:123456789012:channel/loose-client/1700000003",
+            region: "us-east-2",
+            channel_ttl_secs: None,
+            client_id: Some("not a valid client id!"),
+            username: None,
+            service: None,
+            expected_ttl: 300,
         },
     ];
 
@@ -340,36 +434,53 @@ async fn get_ice_server_config_issues_recorded_turn_credentials_per_channel_and_
             .and_then(serde_json::Value::as_str)
             .unwrap_or_else(|| panic!("case {:?}: no Password in {server}", case.case));
         assert!(
-            is_modelled_ice_token(username),
-            "case {:?}: Username {username:?} breaks the modelled IceServer$Username constraints",
-            case.case
-        );
-        assert!(
             is_modelled_ice_token(password),
             "case {:?}: Password breaks the modelled IceServer$Password constraints \
              (length {})",
             case.case,
             password.len()
         );
-        assert!(
-            username.ends_with(case.expected_label),
-            "case {:?}: Username {username:?} must identify {:?}",
-            case.case,
-            case.expected_label
-        );
-        let (expiry, _) = username
-            .split_once('.')
-            .unwrap_or_else(|| panic!("case {:?}: Username {username:?} has no expiry", case.case));
-        let expiry: u64 = expiry
-            .parse()
-            .unwrap_or_else(|_| panic!("case {:?}: {expiry:?} is not an expiry instant", case.case));
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("the clock is after the epoch")
-            .as_secs();
-        assert!(
-            expiry > now && expiry <= now + u64::from(case.expected_ttl.unsigned_abs()),
-            "case {:?}: Username expiry {expiry} must be within the issued Ttl of {now}",
+        // The username is `<unix-expiry>:<opaque token>` and carries NOTHING of the
+        // request: the credentials are the channel's, so no caller-chosen value can be
+        // read out of them.
+        let expiry = parsed_ice_username(case.case, username);
+        let channel_name = case.arn.split('/').nth(1).expect("the ARN names a channel");
+        for (member, value) in [
+            ("ClientId", case.client_id),
+            ("Username", case.username),
+            ("the channel name", Some(channel_name)),
+        ] {
+            if let Some(value) = value {
+                assert!(
+                    !username.contains(value),
+                    "case {:?}: the Username must carry nothing of {member} ({value:?}), got \
+                     {username:?}",
+                    case.case
+                );
+            }
+        }
+        // The expiry the username states is the issuance's OWN expiry, read back out of
+        // the record the call stored: the instant the registry stops honouring those
+        // credentials. Anchored on that record rather than on the wall clock, so the
+        // assertion does not depend on how long the dispatch took.
+        let expected_expiry = {
+            let state = engine.state::<SignalingState>();
+            let store = state.lock();
+            let channel = store
+                .resolve_channel(case.arn)
+                .unwrap_or_else(|error| panic!("case {:?}: {error:?}", case.case));
+            let held = channel
+                .ice_credential
+                .as_ref()
+                .unwrap_or_else(|| panic!("case {:?}: the call recorded no issuance", case.case));
+            held.expires_at()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("an issuance expires after the epoch")
+                .as_secs()
+        };
+        assert_eq!(
+            expiry, expected_expiry,
+            "case {:?}: the Username must state the issuance's own expiry",
             case.case
         );
 
@@ -436,21 +547,12 @@ async fn get_ice_server_config_issues_recorded_turn_credentials_per_channel_and_
         let channel = store
             .resolve_channel(case.arn)
             .unwrap_or_else(|error| panic!("case {:?}: {error:?}", case.case));
-        let records: Vec<&IceServerRecord> = channel
-            .ice_servers
-            .iter()
-            .filter(|record| record.client_id.as_deref() == case.client_id)
-            .collect();
+        let record = channel
+            .ice_credential
+            .as_ref()
+            .unwrap_or_else(|| panic!("case {:?}: the channel must hold its issuance", case.case));
         assert_eq!(
-            records.len(),
-            1,
-            "case {:?}: expected one recorded issuance for {:?}, got {}",
-            case.case,
-            case.client_id,
-            records.len()
-        );
-        assert_eq!(
-            (records[0].username.as_str(), records[0].password.as_str()),
+            (record.username.as_str(), record.password.as_str()),
             (served_username, served_password),
             "case {:?}: the answer must be read from the recorded issuance",
             case.case
@@ -468,19 +570,38 @@ async fn get_ice_server_config_issues_recorded_turn_credentials_per_channel_and_
     );
 }
 
-/// Two viewers of one channel hold two different credential sets, and each is answered
-/// with its own.
+/// RULE: the credential set is the CHANNEL's, so every viewer of one channel is answered
+/// with the SAME credentials while the issuance lasts — which is what recorded behaviour
+/// shows for clients asking concurrently — while two different channels never share one.
 #[tokio::test]
-async fn get_ice_server_config_issues_one_credential_set_per_client() {
+async fn get_ice_server_config_shares_one_credential_set_between_a_channels_clients() {
     const ARN: &str = "arn:aws:kinesisvideo:us-east-1:123456789012:channel/shared/1700000000";
+    const OTHER: &str = "arn:aws:kinesisvideo:us-east-1:123456789012:channel/other/1700000001";
     let (engine, router) = emulator();
     seed_channel(&engine, ARN, |_| {});
+    seed_channel(&engine, OTHER, |_| {});
 
+    // The rows span the viewers one channel is asked for credentials by: named clients, a
+    // client id the modelled pattern does not admit, and a call naming no client at all.
+    let clients: [Option<&str>; 5] = [
+        Some("viewer-a"),
+        Some("viewer.b_2"),
+        Some("not a valid client id!"),
+        Some("a"),
+        None,
+    ];
     let mut issued: Vec<(String, String)> = Vec::new();
-    for client in ["viewer-a", "viewer-b", "viewer-c"] {
-        let body = format!(r#"{{"ChannelARN":"{ARN}","ClientId":"{client}","Service":"TURN"}}"#);
+    for client in clients {
+        let body = match client {
+            Some(client) => serde_json::json!({ "ChannelARN": ARN, "ClientId": client }),
+            None => serde_json::json!({ "ChannelARN": ARN }),
+        }
+        .to_string();
         let (status, answer) = call(&router, GET_ICE_SERVER_CONFIG, &body).await;
-        assert_eq!(status, 200, "case {client:?}: expected 200, got {answer}");
+        assert_eq!(
+            status, 200,
+            "case {client:?}: expected 200, got {status} with {answer}"
+        );
         let server = &answer["IceServerList"][0];
         issued.push((
             server["Username"].as_str().unwrap_or_default().to_string(),
@@ -488,79 +609,118 @@ async fn get_ice_server_config_issues_one_credential_set_per_client() {
         ));
     }
 
-    for (left, right) in [(0, 1), (0, 2), (1, 2)] {
-        assert_ne!(
-            issued[left], issued[right],
-            "two viewers must not share one credential set: {:?} vs {:?}",
-            issued[left], issued[right]
+    for (index, client) in clients.iter().enumerate() {
+        assert_eq!(
+            issued[index], issued[0],
+            "case {client:?}: every viewer of one channel must be answered with the channel's \
+             one credential set, got {:?} beside {:?}",
+            issued[index], issued[0]
         );
     }
 
+    // Another channel is another credential set.
+    let (status, elsewhere) = call(
+        &router,
+        GET_ICE_SERVER_CONFIG,
+        &format!(r#"{{"ChannelARN":"{OTHER}","ClientId":"viewer-a"}}"#),
+    )
+    .await;
+    assert_eq!(status, 200, "the other channel must be served, got {elsewhere}");
+    assert_ne!(
+        elsewhere["IceServerList"][0]["Password"].as_str(),
+        Some(issued[0].1.as_str()),
+        "two channels must not share one credential set, got {elsewhere}"
+    );
+
     let state = engine.state::<SignalingState>();
     let store = state.lock();
-    let channel = store.resolve_channel(ARN).expect("the channel is registered");
-    assert_eq!(
-        channel.ice_servers.len(),
-        3,
-        "expected one recorded issuance per viewer, got {:?}",
-        channel.ice_servers
-    );
+    for arn in [ARN, OTHER] {
+        let channel = store.resolve_channel(arn).expect("the channel is registered");
+        assert!(
+            channel.ice_credential.is_some(),
+            "case {arn:?}: the channel must hold exactly one issuance, got {:?}",
+            channel.ice_credential
+        );
+    }
 }
 
 /// An issuance the clock has expired is reissued rather than returned: the record is
 /// replaced, and the caller gets credentials that are valid now.
+///
+/// The clock is advanced by moving the STORED issuance's own `issued_at` back, which is the
+/// same thing from the handler's side: the anchor is the instant the first call recorded,
+/// so nothing here reads the wall clock or waits for it.
 #[tokio::test]
 async fn get_ice_server_config_reissues_an_expired_credential_set() {
     const ARN: &str = "arn:aws:kinesisvideo:us-east-1:123456789012:channel/expiring/1700000000";
     let (engine, router) = emulator();
-    let stale = IceServerRecord {
-        uris: vec!["turn:stale.invalid:443?transport=udp".to_string()],
-        username: "1.stale".to_string(),
-        password: "stalepassword".to_string(),
-        ttl_secs: 300,
-        issued_at: SystemTime::now() - Duration::from_secs(3_600),
-        client_id: Some("viewer-1".to_string()),
-    };
-    seed_channel(&engine, ARN, |channel| {
-        channel.ice_servers.push(stale.clone());
-    });
+    seed_channel(&engine, ARN, |_| {});
 
     let body = format!(r#"{{"ChannelARN":"{ARN}","ClientId":"viewer-1"}}"#);
+    let (status, first) = call(&router, GET_ICE_SERVER_CONFIG, &body).await;
+    assert_eq!(status, 200, "expected 200, got {status} with {first}");
+    let stale_password = first["IceServerList"][0]["Password"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no Password in {first}"))
+        .to_string();
+
+    // Age the issuance the first call recorded well past its own lifetime.
+    let state = engine.state::<SignalingState>();
+    let aged_at = {
+        let mut store = state.lock();
+        let channel = store
+            .resolve_channel_mut(ARN)
+            .expect("the channel is registered");
+        let held = channel
+            .ice_credential
+            .as_mut()
+            .expect("the first call must have recorded an issuance");
+        held.issued_at -= Duration::from_secs(3_600);
+        held.issued_at
+    };
+
     let (status, answer) = call(&router, GET_ICE_SERVER_CONFIG, &body).await;
     assert_eq!(status, 200, "expected 200, got {status} with {answer}");
     let server = &answer["IceServerList"][0];
     assert_ne!(
         server["Password"].as_str(),
-        Some(stale.password.as_str()),
+        Some(stale_password.as_str()),
         "an expired issuance must be replaced, got {server}"
     );
 
-    let state = engine.state::<SignalingState>();
     let store = state.lock();
     let channel = store.resolve_channel(ARN).expect("the channel is registered");
-    assert_eq!(
-        channel.ice_servers.len(),
-        1,
-        "the expired issuance must be replaced, not kept beside the new one: {:?}",
-        channel.ice_servers
+    let held = channel
+        .ice_credential
+        .as_ref()
+        .expect("the channel must hold the reissued credential set");
+    assert_ne!(
+        held.password, stale_password,
+        "the expired issuance must be replaced, not kept: {held:?}"
     );
     assert!(
-        channel.ice_servers[0].is_valid_at(SystemTime::now()),
-        "the reissued credential set must be valid now: {:?}",
-        channel.ice_servers[0]
+        held.issued_at > aged_at,
+        "the reissued credential set must be the newer one: {held:?}"
+    );
+    assert!(
+        held.is_valid_at(held.issued_at),
+        "the reissued credential set must be valid from the instant it was issued: {held:?}"
     );
 }
 
-/// A credential set already in the registry is reported with the lifetime it is actually
-/// honoured for: `Ttl` is the lifetime the record has LEFT, held inside the modelled
-/// `IceServer$Ttl` range (30..86400), so a record seeded outside that range can neither
-/// put an out-of-range `Ttl` on the wire nor report a lifetime that differs from the one
-/// the registry enforces.
+/// A credential set the registry already holds is reported with the lifetime it is
+/// actually honoured for: `Ttl` is the lifetime the record has LEFT, held inside the
+/// modelled `IceServer$Ttl` range (30..86400), so a record whose own lifetime is outside
+/// that range can neither put an out-of-range `Ttl` on the wire nor report a lifetime that
+/// differs from the one the registry enforces.
+///
+/// The record under test is the one the FIRST call recorded, with its own `ttl_secs`
+/// retuned in place: the anchor is the instant that call stored, so nothing here reads the
+/// wall clock or waits for it.
 #[tokio::test]
 async fn get_ice_server_config_reports_a_seeded_record_inside_the_modelled_ttl_range() {
-    // The rows span a record seeded under the modelled minimum, over the maximum, and at
-    // each published bound; the record is put straight into the registry (as the control
-    // plane seeding a channel would), not minted through the request path.
+    // The rows span a record whose lifetime is under the modelled minimum, over the
+    // maximum, at each published bound, and negative.
     let cases = [
         ("under the modelled minimum", 1_i32, MIN_ICE_CREDENTIAL_TTL_SECS),
         (
@@ -581,25 +741,34 @@ async fn get_ice_server_config_reports_a_seeded_record_inside_the_modelled_ttl_r
         ("negative, which is no lifetime at all", -7, MIN_ICE_CREDENTIAL_TTL_SECS),
     ];
 
-    for (case, seeded_ttl_secs, expected_ttl) in cases {
+    for (case, held_ttl_secs, expected_ttl) in cases {
         let arn = format!(
             "arn:aws:kinesisvideo:us-east-1:123456789012:channel/seeded-{}/1700000000",
-            seeded_ttl_secs.unsigned_abs()
+            held_ttl_secs.unsigned_abs()
         );
         let (engine, router) = emulator();
-        let seeded = IceServerRecord {
-            uris: vec!["turn:seeded.invalid:443?transport=udp".to_string()],
-            username: "1700000000.seeded".to_string(),
-            password: "seededpassword".to_string(),
-            ttl_secs: seeded_ttl_secs,
-            issued_at: SystemTime::now(),
-            client_id: Some("viewer-1".to_string()),
-        };
-        seed_channel(&engine, &arn, |channel| {
-            channel.ice_servers.push(seeded.clone());
-        });
+        seed_channel(&engine, &arn, |_| {});
 
         let body = format!(r#"{{"ChannelARN":"{arn}","ClientId":"viewer-1"}}"#);
+        let (status, first) = call(&router, GET_ICE_SERVER_CONFIG, &body).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: the first call must be served, got {status} with {first}"
+        );
+        let state = engine.state::<SignalingState>();
+        let recorded = {
+            let mut store = state.lock();
+            let channel = store
+                .resolve_channel_mut(&arn)
+                .unwrap_or_else(|error| panic!("case {case:?}: {error:?}"));
+            let held = channel
+                .ice_credential
+                .as_mut()
+                .unwrap_or_else(|| panic!("case {case:?}: the first call recorded no issuance"));
+            held.ttl_secs = held_ttl_secs;
+            held.clone()
+        };
+
         let (status, answer) = call(&router, GET_ICE_SERVER_CONFIG, &body).await;
         assert_eq!(
             status, 200,
@@ -616,17 +785,17 @@ async fn get_ice_server_config_reports_a_seeded_record_inside_the_modelled_ttl_r
             "case {case:?}: expected Ttl {expected_ttl}, got {ttl}"
         );
 
-        // It is still the seeded issuance that was reported, not a fresh mint: the record
-        // is valid under the lifetime the registry enforces, so it is returned as held.
+        // It is still the held issuance that was reported, not a fresh mint: the record is
+        // valid under the lifetime the registry enforces, so it is returned as held.
         assert_eq!(
             server["Password"].as_str(),
-            Some(seeded.password.as_str()),
-            "case {case:?}: the seeded issuance must be the one reported, got {server}"
+            Some(recorded.password.as_str()),
+            "case {case:?}: the held issuance must be the one reported, got {server}"
         );
         assert_eq!(
             server["Username"].as_str(),
-            Some(seeded.username.as_str()),
-            "case {case:?}: the seeded issuance must be the one reported, got {server}"
+            Some(recorded.username.as_str()),
+            "case {case:?}: the held issuance must be the one reported, got {server}"
         );
     }
 }
@@ -637,12 +806,13 @@ async fn get_ice_server_config_reports_a_seeded_record_inside_the_modelled_ttl_r
 /// reissued rather than re-served (reporting under 30 would break `IceServer$Ttl`'s
 /// range).
 ///
-/// The clock is advanced by seeding `issued_at` in the past, which is the same thing from
-/// the handler's side and needs no sleep.
+/// The clock is advanced by moving the STORED issuance's own `issued_at` back, which is the
+/// same thing from the handler's side: the anchor is the instant the first call recorded,
+/// so nothing here reads the wall clock or waits for it.
 #[tokio::test]
 async fn get_ice_server_config_reports_the_lifetime_an_issuance_has_left() {
     // (case, the issuance's lifetime, how long ago it was issued, the Ttl owed, whether
-    // the seeded credentials must still be the ones answered)
+    // the held credentials must still be the ones answered)
     let cases: [(&str, i32, u64, i64, bool); 5] = [
         ("issued just now, so the whole lifetime is left", 300, 0, 300, true),
         ("a third of the way through", 300, 100, 200, true),
@@ -674,20 +844,30 @@ async fn get_ice_server_config_reports_the_lifetime_an_issuance_has_left() {
             "arn:aws:kinesisvideo:us-east-1:123456789012:channel/remaining-{issued_secs_ago}/1700000000"
         );
         let (engine, router) = emulator();
-        let seeded = IceServerRecord {
-            uris: vec!["turn:seeded.invalid:443?transport=udp".to_string()],
-            username: "1700000000.seeded".to_string(),
-            password: "seededpassword".to_string(),
-            ttl_secs,
-            issued_at: SystemTime::now() - Duration::from_secs(issued_secs_ago),
-            client_id: Some("viewer-1".to_string()),
-        };
         seed_channel(&engine, &arn, |channel| {
             channel.ice_credential_ttl_secs = ttl_secs;
-            channel.ice_servers.push(seeded.clone());
         });
 
         let body = format!(r#"{{"ChannelARN":"{arn}","ClientId":"viewer-1"}}"#);
+        let (status, first) = call(&router, GET_ICE_SERVER_CONFIG, &body).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: the first call must be served, got {status} with {first}"
+        );
+        let state = engine.state::<SignalingState>();
+        let recorded = {
+            let mut store = state.lock();
+            let channel = store
+                .resolve_channel_mut(&arn)
+                .unwrap_or_else(|error| panic!("case {case:?}: {error:?}"));
+            let held = channel
+                .ice_credential
+                .as_mut()
+                .unwrap_or_else(|| panic!("case {case:?}: the first call recorded no issuance"));
+            held.issued_at -= Duration::from_secs(issued_secs_ago);
+            held.clone()
+        };
+
         let (status, answer) = call(&router, GET_ICE_SERVER_CONFIG, &body).await;
         assert_eq!(
             status, 200,
@@ -707,11 +887,11 @@ async fn get_ice_server_config_reports_the_lifetime_an_issuance_has_left() {
                 .contains(&ttl),
             "case {case:?}: Ttl {ttl} is outside the modelled 30..86400 range"
         );
-        let answered_seeded_credentials =
-            server["Password"].as_str() == Some(seeded.password.as_str());
+        let answered_held_credentials =
+            server["Password"].as_str() == Some(recorded.password.as_str());
         assert_eq!(
-            answered_seeded_credentials, served_from_state,
-            "case {case:?}: expected the seeded credentials to be re-served = \
+            answered_held_credentials, served_from_state,
+            "case {case:?}: expected the held credentials to be re-served = \
              {served_from_state}, got {server}"
         );
     }
@@ -793,12 +973,6 @@ async fn get_ice_server_config_refuses_what_the_registry_cannot_serve() {
         RefusalCase {
             case: "a Service the enum does not admit",
             body: r#"{"ChannelARN":"arn:aws:kinesisvideo:us-east-1:123456789012:channel/demo-channel/1700000000","ClientId":"viewer-1","Service":"STUN"}"#,
-            status: 400,
-            code: "InvalidArgumentException",
-        },
-        RefusalCase {
-            case: "a ClientId outside the modelled pattern",
-            body: r#"{"ChannelARN":"arn:aws:kinesisvideo:us-east-1:123456789012:channel/demo-channel/1700000000","ClientId":"viewer one!"}"#,
             status: 400,
             code: "InvalidArgumentException",
         },
@@ -912,10 +1086,10 @@ async fn send_alexa_offer_to_master_answers_from_the_channel_state() {
     ];
 
     let (engine, router) = emulator();
+    let mut masters = Vec::new();
     for case in &cases {
-        seed_channel(&engine, case.arn, |channel| {
-            channel.master_answer = Some(case.master_answer.clone());
-        });
+        seed_channel(&engine, case.arn, |_| {});
+        masters.push(attach_scripted_master(&engine, case.arn, &case.master_answer));
     }
 
     for case in &cases {
@@ -1013,13 +1187,13 @@ async fn send_alexa_offer_to_master_answers_from_the_channel_state() {
 }
 
 /// The rule, on the failing side: the channel must resolve, and `MessagePayload` must be
-/// base64-encoded content. A channel with no master connected has no answer to deliver.
+/// base64-encoded content. A channel that does not resolve is the ONLY not-found here —
+/// "no master connected" is an accepted call, pinned by
+/// [`send_alexa_offer_to_master_accepts_an_offer_no_master_answers`].
 #[tokio::test]
 async fn send_alexa_offer_to_master_refuses_what_it_cannot_deliver() {
     const WITH_MASTER: &str =
         "arn:aws:kinesisvideo:us-east-1:123456789012:channel/demo-channel/1700000000";
-    const WITHOUT_MASTER: &str =
-        "arn:aws:kinesisvideo:us-east-1:123456789012:channel/masterless/1700000001";
 
     let cases = [
         RefusalCase {
@@ -1085,19 +1259,11 @@ async fn send_alexa_offer_to_master_refuses_what_it_cannot_deliver() {
             status: 400,
             code: "InvalidArgumentException",
         },
-        RefusalCase {
-            case: "a channel with no master connected",
-            body: r#"{"ChannelARN":"arn:aws:kinesisvideo:us-east-1:123456789012:channel/masterless/1700000001","SenderClientId":"alexa-1","MessagePayload":"eA=="}"#,
-            status: 404,
-            code: "ResourceNotFoundException",
-        },
     ];
 
     let (engine, router) = emulator();
-    seed_channel(&engine, WITH_MASTER, |channel| {
-        channel.master_answer = Some(b64("v=0\r\na=recvonly\r\n"));
-    });
-    seed_channel(&engine, WITHOUT_MASTER, |_| {});
+    seed_channel(&engine, WITH_MASTER, |_| {});
+    let _master = attach_scripted_master(&engine, WITH_MASTER, &b64("v=0\r\na=recvonly\r\n"));
 
     for case in &cases {
         let (status, body) = call(&router, SEND_ALEXA_OFFER_TO_MASTER, case.body).await;
@@ -1117,16 +1283,6 @@ async fn send_alexa_offer_to_master_refuses_what_it_cannot_deliver() {
 
     let state = engine.state::<SignalingState>();
     let store = state.lock();
-    // An offer to a channel with no master cannot be delivered, so it is refused and
-    // nothing is written: a request the service could not serve leaves no record.
-    let masterless = store
-        .resolve_channel(WITHOUT_MASTER)
-        .expect("the channel is registered");
-    assert!(
-        masterless.offers.is_empty(),
-        "an offer that could not be delivered must not be logged, got {:?}",
-        masterless.offers
-    );
     // A refused request writes nothing to the channel it named.
     let served = store
         .resolve_channel(WITH_MASTER)
@@ -1136,6 +1292,230 @@ async fn send_alexa_offer_to_master_refuses_what_it_cannot_deliver() {
         "a refused offer must not be logged, got {:?}",
         served.offers
     );
+}
+
+/// The rule for an offer NO master answers: the call is ACCEPTED — "the offer is delivered
+/// as soon as the master is connected to the specified signaling channel… If the master is
+/// not connected to the signaling channel, redelivery requests are made until the message
+/// expires" — so the channel retains it for its own `MessageTtlSeconds` window and then
+/// answers HTTP 200 with NO `Answer` member. Not-found is for a channel that does not
+/// exist, never for a channel nobody is listening on.
+///
+/// The rows differ along what is listening: nothing at all, and a master that takes the
+/// offer but answers somebody else.
+#[tokio::test]
+async fn send_alexa_offer_to_master_accepts_an_offer_no_master_answers() {
+    const SILENT: &str =
+        "arn:aws:kinesisvideo:us-east-1:123456789012:channel/masterless/1700000001";
+    const ANSWERS_ANOTHER: &str =
+        "arn:aws:kinesisvideo:us-east-1:123456789012:channel/wrong-recipient/1700000002";
+
+    let (engine, router) = emulator();
+    // Both channels retain an undelivered message for the shortest window the modelled
+    // `MessageTtlSeconds` admits, which is how long such a call is accepted for.
+    for arn in [SILENT, ANSWERS_ANOTHER] {
+        seed_channel(&engine, arn, |channel| {
+            channel.message_ttl_secs = MIN_MESSAGE_TTL_SECS;
+        });
+    }
+    // This master answers a client id that is not the sender's, so the sender's offer
+    // expires unanswered even though a master was listening.
+    let _master = attach_master_answering(
+        &engine,
+        ANSWERS_ANOTHER,
+        Some("another-client"),
+        &b64("v=0\r\na=inactive\r\n"),
+    );
+
+    for (case, arn) in [
+        ("no master connected at all", SILENT),
+        ("a master that answers another client", ANSWERS_ANOTHER),
+    ] {
+        let body = serde_json::json!({
+            "ChannelARN": arn,
+            "SenderClientId": "alexa-unanswered",
+            "MessagePayload": b64("v=0\r\na=sendrecv\r\n"),
+        })
+        .to_string();
+        let (status, answer) = call(&router, SEND_ALEXA_OFFER_TO_MASTER, &body).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: expected HTTP 200, got {status} with {answer}"
+        );
+        assert_eq!(
+            answer.get("Answer"),
+            None,
+            "case {case:?}: expected no Answer member, got {answer}"
+        );
+
+        let state = engine.state::<SignalingState>();
+        let store = state.lock();
+        let channel = store
+            .resolve_channel(arn)
+            .unwrap_or_else(|error| panic!("case {case:?}: {error:?}"));
+        let logged: Vec<_> = channel.offers_from("alexa-unanswered").collect();
+        assert_eq!(
+            logged.len(),
+            1,
+            "case {case:?}: the accepted offer must be logged once, got {:?}",
+            channel.offers
+        );
+        assert_eq!(
+            logged
+                .first()
+                .and_then(|offer| offer.answer.as_deref()),
+            None,
+            "case {case:?}: an offer nobody answered must record no answer, got {:?}",
+            channel.offers
+        );
+    }
+}
+
+/// How this data plane WORDS a `ChannelARN` it cannot serve, on both routes.
+///
+/// The rule: a well-formed ARN for a channel that does not exist is 404
+/// `ResourceNotFoundException` `"<channelName> channel does not exist !"` — the channel
+/// NAME out of the request's ARN and nothing else of it — and a value that is not a
+/// signaling-channel ARN is 400 `InvalidArgumentException` `"Invalid Channel ARN !"`, fixed
+/// text with no request value in it, whether the request boundary refuses it against the
+/// modelled `@pattern` or the handler refuses it after parsing.
+///
+/// The rows span both operations, several channel names, a channel that was deleted, both
+/// refusal paths for a malformed value, and ARN forms whose region, account, partition and
+/// resource type differ.
+#[tokio::test]
+async fn channel_resolution_refusals_are_worded_as_the_service_words_them() {
+    const DELETED: &str =
+        "arn:aws:kinesisvideo:eu-west-2:210987654321:channel/was-here/1700000003";
+    let (engine, router) = emulator();
+    seed_channel(&engine, DELETED, |_| {});
+    assert!(
+        engine
+            .state::<SignalingState>()
+            .lock()
+            .forget_channel(DELETED),
+        "the deleted channel must have been registered first"
+    );
+
+    // Every row: the ChannelARN to send, the expected status, code and message.
+    let rows: Vec<(&str, String, u16, &str, String)> = vec![
+        (
+            "a channel nobody created",
+            "arn:aws:kinesisvideo:us-east-1:123456789012:channel/never-created/1700000009"
+                .to_string(),
+            404,
+            "ResourceNotFoundException",
+            "never-created channel does not exist !".to_string(),
+        ),
+        (
+            "a channel name carrying every character the name pattern admits",
+            "arn:aws:kinesisvideo:ap-southeast-2:000000000001:channel/a.b_c-D9/7".to_string(),
+            404,
+            "ResourceNotFoundException",
+            "a.b_c-D9 channel does not exist !".to_string(),
+        ),
+        (
+            "a one-character channel name",
+            "arn:aws:kinesisvideo:us-west-2:999999999999:channel/a/1".to_string(),
+            404,
+            "ResourceNotFoundException",
+            "a channel does not exist !".to_string(),
+        ),
+        (
+            "a channel that was deleted",
+            DELETED.to_string(),
+            404,
+            "ResourceNotFoundException",
+            "was-here channel does not exist !".to_string(),
+        ),
+        (
+            // Inside the modelled `@pattern`, so the boundary admits it and the handler
+            // refuses it: a Kinesis Video ARN that is not a signaling channel's.
+            "an ARN of another Kinesis Video resource type",
+            "arn:aws:kinesisvideo:us-east-1:123456789012:stream/demo-stream/1700000000"
+                .to_string(),
+            400,
+            "InvalidArgumentException",
+            "Invalid Channel ARN !".to_string(),
+        ),
+        (
+            // Outside the modelled `@pattern` (a trailing non-digit), so the REQUEST
+            // BOUNDARY refuses it before the handler runs — and words it the same way.
+            "a channel ARN with one character appended",
+            "arn:aws:kinesisvideo:us-east-1:123456789012:channel/demo-channel/1700000000x"
+                .to_string(),
+            400,
+            "InvalidArgumentException",
+            "Invalid Channel ARN !".to_string(),
+        ),
+        (
+            "not an ARN at all",
+            "not-an-arn".to_string(),
+            400,
+            "InvalidArgumentException",
+            "Invalid Channel ARN !".to_string(),
+        ),
+        (
+            "a channel ARN in another partition",
+            "arn:aws-us-gov:kinesisvideo:us-gov-west-1:123456789012:channel/demo/1700000000"
+                .to_string(),
+            400,
+            "InvalidArgumentException",
+            "Invalid Channel ARN !".to_string(),
+        ),
+        (
+            "an ARN of another AWS service",
+            "arn:aws:kinesis:us-east-1:123456789012:stream/demo/1".to_string(),
+            400,
+            "InvalidArgumentException",
+            "Invalid Channel ARN !".to_string(),
+        ),
+    ];
+
+    for (case, channel_arn, status_expected, code_expected, message_expected) in &rows {
+        for (route, body) in [
+            (
+                GET_ICE_SERVER_CONFIG,
+                serde_json::json!({ "ChannelARN": channel_arn, "ClientId": "viewer-1" })
+                    .to_string(),
+            ),
+            (
+                SEND_ALEXA_OFFER_TO_MASTER,
+                serde_json::json!({
+                    "ChannelARN": channel_arn,
+                    "SenderClientId": "alexa-1",
+                    "MessagePayload": "eA==",
+                })
+                .to_string(),
+            ),
+        ] {
+            let (status, answered) = call(&router, route, &body).await;
+            assert_eq!(
+                status, *status_expected,
+                "case {case:?} on {route}: expected HTTP {status_expected}, got {status} with \
+                 {answered}"
+            );
+            assert_eq!(
+                error_code(&answered),
+                *code_expected,
+                "case {case:?} on {route}: expected {code_expected}, got {answered}"
+            );
+            let message = answered
+                .get("Message")
+                .or_else(|| answered.get("message"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("case {case:?} on {route}: no message in {answered}"));
+            assert_eq!(
+                message, message_expected,
+                "case {case:?} on {route}: expected {message_expected:?}, got {message:?}"
+            );
+            assert!(
+                !message.contains("arn:") && !message.contains("satisfy"),
+                "case {case:?} on {route}: the message must carry neither the ARN sent nor \
+                 the model's constraint report, got {message:?}"
+            );
+        }
+    }
 }
 
 /// A request whose header values are not valid UTF-8 is still routed and served.
@@ -1179,9 +1559,8 @@ async fn send_alexa_offer_to_master_bounds_the_channel_offer_log() {
     const ARN: &str = "arn:aws:kinesisvideo:us-east-1:123456789012:channel/busy/1700000000";
     let (engine, router) = emulator();
     let master = b64("v=0\r\no=- 9 9 IN IP4 198.51.100.11\r\na=recvonly\r\n");
-    seed_channel(&engine, ARN, |channel| {
-        channel.master_answer = Some(master.clone());
-    });
+    seed_channel(&engine, ARN, |_| {});
+    let _master_peer = attach_scripted_master(&engine, ARN, &master);
 
     // Past the cap, so the oldest offers must have been dropped to make room.
     let deliveries = MAX_OFFERS_PER_CHANNEL + 5;
@@ -1230,17 +1609,16 @@ async fn send_alexa_offer_to_master_bounds_the_channel_offer_log() {
     );
 }
 
-/// A channel's credential records are BOUNDED too: one issuance is held per `ClientId`,
-/// which is the caller's free-form string, so the record count is capped at
-/// `MAX_ICE_ISSUANCES_PER_CHANNEL` however many viewers ask — while every call is still
-/// answered from the record it just stored.
+/// A channel's credential record is BOUNDED by construction: the credentials are the
+/// channel's, so however many viewers ask, the channel holds exactly ONE issuance — and
+/// every call is answered from it.
 #[tokio::test]
 async fn get_ice_server_config_bounds_recorded_issuances_per_channel() {
     const ARN: &str = "arn:aws:kinesisvideo:us-east-1:123456789012:channel/crowded/1700000000";
     let (engine, router) = emulator();
     seed_channel(&engine, ARN, |_| {});
 
-    let viewers = MAX_ICE_ISSUANCES_PER_CHANNEL + 10;
+    let viewers = 74;
     let mut last_password = String::new();
     for index in 0..viewers {
         let body =
@@ -1259,26 +1637,12 @@ async fn get_ice_server_config_bounds_recorded_issuances_per_channel() {
     let state = engine.state::<SignalingState>();
     let store = state.lock();
     let channel = store.resolve_channel(ARN).expect("the channel is registered");
+    let held = channel
+        .ice_credential
+        .as_ref()
+        .expect("the channel must hold its one issuance");
     assert_eq!(
-        channel.ice_servers.len(),
-        MAX_ICE_ISSUANCES_PER_CHANNEL,
-        "the channel must hold at most {MAX_ICE_ISSUANCES_PER_CHANNEL} issuances after \
-         {viewers} viewers, got {}",
-        channel.ice_servers.len()
-    );
-    let newest = channel
-        .ice_servers
-        .last()
-        .expect("the issuance just recorded is present");
-    let newest_viewer = format!("viewer-{}", viewers - 1);
-    assert_eq!(
-        newest.client_id.as_deref(),
-        Some(newest_viewer.as_str()),
-        "the newest issuance must be the one just recorded, got {:?}",
-        newest.client_id
-    );
-    assert_eq!(
-        newest.password, last_password,
-        "the last answer must be read from the issuance just recorded"
+        held.password, last_password,
+        "every answer must be read from the channel's one issuance, after {viewers} viewers"
     );
 }

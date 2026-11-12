@@ -846,13 +846,41 @@ async fn an_endpoint_is_reported_for_every_protocol_the_request_names() {
                 "case {case:?}: endpoint {index} must name {protocol}, got {:?}",
                 listed[index]
             );
-            assert_eq!(
-                listed[index]["ResourceEndpoint"],
-                serde_json::json!(format!("{scheme}://{ENDPOINT_HOST}")),
-                "case {case:?}: endpoint {index} must address this emulator over {scheme}, \
-                 got {:?}",
-                listed[index]
-            );
+            let reported = listed[index]["ResourceEndpoint"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            if *protocol == "WSS" {
+                // "If you specify WSS as the protocol, this API produces a secure
+                // websocket endpoint": a peer completes an opening handshake against it,
+                // which this emulator serves on a socket of its own rather than at its
+                // front door, so the announced value is the address that socket landed on
+                // — loopback, because that is where the core binds a resource listener.
+                let authority = reported
+                    .strip_prefix("wss://")
+                    .unwrap_or_else(|| panic!("case {case:?}: expected a wss:// URL, got {reported:?}"));
+                let (host, port) = authority.rsplit_once(':').unwrap_or_else(|| {
+                    panic!("case {case:?}: expected a host:port, got {authority:?}")
+                });
+                assert_eq!(
+                    host, "127.0.0.1",
+                    "case {case:?}: the websocket endpoint must be one this emulator serves, \
+                     got {reported:?}"
+                );
+                assert!(
+                    port.parse::<u16>().is_ok_and(|port| port > 0),
+                    "case {case:?}: the websocket endpoint must name the port it is served \
+                     on, got {reported:?}"
+                );
+            } else {
+                assert_eq!(
+                    reported,
+                    format!("{scheme}://{ENDPOINT_HOST}"),
+                    "case {case:?}: endpoint {index} must address this emulator over \
+                     {scheme}, got {:?}",
+                    listed[index]
+                );
+            }
         }
     }
 

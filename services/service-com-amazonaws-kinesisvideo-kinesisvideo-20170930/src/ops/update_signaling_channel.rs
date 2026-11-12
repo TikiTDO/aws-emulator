@@ -233,6 +233,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         channel.status = crate::state::STATUS_UPDATING.to_string();
         channel.activates_at =
             Some(::std::time::Instant::now() + crate::state::CHANNEL_ACTIVATION_SPAN);
+        let retention = channel.message_ttl_seconds;
+
+        // The retention window is what the channel's DATA plane redelivers an undelivered
+        // signaling message over, so an update to it is restated there: one registry, so
+        // the window a caller set and the window the data plane waits cannot drift.
+        //
+        // LOCK ORDER: this store's guard is dropped FIRST and the signaling store taken
+        // second, as in `CreateSignalingChannel`.
+        drop(store);
+        // The update restates the retention of a channel the registry already holds, so
+        // the only outcome it acts on is the restatement itself; a registry that could not
+        // take it leaves the control-plane record as the authority, which the next create
+        // of that channel is answered from.
+        let _restated = ::service_com_amazonaws_kinesisvideosignaling_awsacuitysignalingservice::state::register_channel_of(
+            &*self.engine,
+            &input.channel_arn,
+            retention,
+        );
 
         Ok(UpdateSignalingChannelOutput {})
     }

@@ -181,22 +181,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx.parts());
         let authority = crate::state::request_authority(ctx.parts(), &region);
 
-        let mut store = state.lock();
-        store.settle_clock();
+        // The store is read under one guard in this block and the guard is dropped with it:
+        // an address below is resolved by opening a listener, which is awaited, and a
+        // guard may not be held across an await.
+        let ingestion_enabled = {
+            let mut store = state.lock();
+            store.settle_clock();
 
-        let channel = store
-            .resolve_channel(None, Some(input.channel_arn.as_str()))
-            .map_err(|_| {
-                GetSignalingChannelEndpointError::from(
-                    GetSignalingChannelEndpointErrorModeled::ResourceNotFoundException(
-                        ResourceNotFoundException {
-                            message: Some(crate::state::CHANNEL_NOT_FOUND_MESSAGE.to_string()),
-                        },
-                    ),
-                )
-            })?;
-        let ingestion_enabled =
-            channel.media_storage_status == crate::state::MEDIA_STORAGE_ENABLED;
+            let channel = store
+                .resolve_channel(None, Some(input.channel_arn.as_str()))
+                .map_err(|_| {
+                    GetSignalingChannelEndpointError::from(
+                        GetSignalingChannelEndpointErrorModeled::ResourceNotFoundException(
+                            ResourceNotFoundException {
+                                message: Some(
+                                    crate::state::CHANNEL_NOT_FOUND_MESSAGE.to_string(),
+                                ),
+                            },
+                        ),
+                    )
+                })?;
+            channel.media_storage_status == crate::state::MEDIA_STORAGE_ENABLED
+        };
 
         // "This API uses the SingleMasterChannelEndpointConfiguration input parameter,
         // which consists of the Protocols and Role properties. Protocols is used to
@@ -228,9 +234,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // The endpoint list is one entry per protocol the caller asked for, in the order
-        // asked.
-        let mut endpoints = Vec::with_capacity(protocols.len());
-        for protocol in protocols {
+        // asked. The protocols are checked first and the store's guard is dropped before
+        // any address is resolved, because the `WSS` one opens a listener.
+        let requested: Vec<String> = protocols;
+        for protocol in &requested {
             // `ChannelProtocol` is a modeled enum, so the boundary already refuses a
             // value outside its set; this re-states the same rule from the one list the
             // model publishes.
@@ -266,8 +273,42 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .into(),
                 );
             }
+        }
+
+        let mut endpoints = Vec::with_capacity(requested.len());
+        for protocol in requested {
+            // "If you specify WSS as the protocol, this API produces a secure websocket
+            // endpoint": a WebSocket upgrade is what a peer makes to it, which the
+            // emulator's own front door does not serve, so the announced address is the
+            // channels' WebSocket data plane — a socket of its own, served by the
+            // signaling service's crate. A plane that could not be opened announces
+            // nothing: the caller is told to retry rather than handed an address nothing
+            // answers.
+            let resource_endpoint = if protocol == PROTOCOL_WSS {
+                let Some(announced) = ::service_com_amazonaws_kinesisvideosignaling_awsacuitysignalingservice::state::ensure_wss_endpoint(
+                    &*self.engine,
+                )
+                .await
+                else {
+                    return Err(
+                        GetSignalingChannelEndpointErrorModeled::ClientLimitExceededException(
+                            ClientLimitExceededException {
+                                message: Some(
+                                    "The signaling channel endpoint could not be resolved. \
+                                     Try again later."
+                                        .to_string(),
+                                ),
+                            },
+                        )
+                        .into(),
+                    );
+                };
+                announced
+            } else {
+                format!("{}://{authority}", scheme_of(&protocol))
+            };
             endpoints.push(ResourceEndpointListItem {
-                resource_endpoint: Some(format!("{}://{authority}", scheme_of(&protocol))),
+                resource_endpoint: Some(resource_endpoint),
                 protocol: Some(protocol),
             });
         }
@@ -282,6 +323,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 /// channel configured for ingestion. From
 /// [`crate::ops::types::CHANNEL_PROTOCOL_VALUES`].
 const PROTOCOL_WEBRTC: &str = "WEBRTC";
+
+/// The `ChannelProtocol` value whose endpoint is the channel's WebSocket data plane — the
+/// one a master and a viewer complete an opening handshake against. From
+/// [`crate::ops::types::CHANNEL_PROTOCOL_VALUES`].
+const PROTOCOL_WSS: &str = "WSS";
 
 /// The URI scheme a `ChannelProtocol` is addressed over.
 ///

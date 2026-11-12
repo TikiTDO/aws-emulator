@@ -207,6 +207,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let channel_name = channel.channel_name.clone();
         store.signaling_channels.remove(&channel_name);
         store.channel_arn_index.remove(&input.channel_arn);
+        // The channel's DATA plane keeps the registry its two routes resolve a
+        // `ChannelARN` against, so a deleted channel has to go from there too — otherwise
+        // `GetIceServerConfig` goes on serving a channel the control plane says is gone.
+        // Every peer attached to its WebSocket data plane goes with the record.
+        //
+        // LOCK ORDER: this store's guard is dropped FIRST and the signaling store taken
+        // second, as in `CreateSignalingChannel`.
+        drop(store);
+        ::service_com_amazonaws_kinesisvideosignaling_awsacuitysignalingservice::state::forget_channel_of(
+            &*self.engine,
+            &input.channel_arn,
+        );
 
         Ok(DeleteSignalingChannelOutput {})
     }

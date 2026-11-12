@@ -220,6 +220,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let channel_arn =
             crate::state::channel_arn(&region, &input.channel_name, creation_time_millis);
         let version = store.mint_version();
+        // "The default configuration for the channel message's time to live is 60
+        // seconds (1 minute)." Read before the record is built, because the signaling data
+        // plane is told the same window below.
+        let message_ttl_seconds = input
+            .single_master_configuration
+            .and_then(|configuration| configuration.message_ttl_seconds)
+            .unwrap_or(crate::state::DEFAULT_MESSAGE_TTL_SECONDS);
         let channel = crate::state::SignalingChannel {
             channel_name: input.channel_name.clone(),
             channel_arn: channel_arn.clone(),
@@ -230,12 +237,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .unwrap_or_else(|| crate::state::CHANNEL_TYPE_SINGLE_MASTER.to_string()),
             status: crate::state::STATUS_CREATING.to_string(),
             creation_time_millis,
-            // "The default configuration for the channel message's time to live is 60
-            // seconds (1 minute)."
-            message_ttl_seconds: input
-                .single_master_configuration
-                .and_then(|configuration| configuration.message_ttl_seconds)
-                .unwrap_or(crate::state::DEFAULT_MESSAGE_TTL_SECONDS),
+            message_ttl_seconds,
             version,
             // A later tag under a key already present replaces that key's value, which is
             // what collecting the modeled LIST into a map gives.
@@ -257,7 +259,55 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         store
             .channel_arn_index
             .insert(channel_arn.clone(), input.channel_name.clone());
-        store.signaling_channels.insert(input.channel_name, channel);
+        store.signaling_channels.insert(input.channel_name.clone(), channel);
+        // The channel's own DATA plane is served by the signaling service's crate, which
+        // keeps the registry both its routes resolve a `ChannelARN` against, so a channel
+        // this call creates has to be put there too — otherwise the control plane reports
+        // a channel `GetIceServerConfig` and the WebSocket endpoint answer "does not
+        // exist" for. The retention window travels with it, because it is what an
+        // undelivered signaling message is redelivered over.
+        //
+        // LOCK ORDER: this store's guard is dropped FIRST, and the signaling store is
+        // taken second; no reader of that store takes this one, so the order cannot
+        // invert.
+        drop(store);
+        use ::service_com_amazonaws_kinesisvideosignaling_awsacuitysignalingservice::state as signaling;
+        let registered = signaling::register_channel_of(
+            &*self.engine,
+            &channel_arn,
+            message_ttl_seconds,
+        );
+        if registered != signaling::ChannelRegistration::Registered {
+            // The data plane could not take the channel, so the create is UNDONE rather
+            // than answered as a success the signaling routes would refuse.
+            let mut store = state.lock();
+            store.channel_arn_index.remove(&channel_arn);
+            store.signaling_channels.remove(&input.channel_name);
+            return Err(match registered {
+                // The data plane's registry is at its ceiling: a limit on how many
+                // channels this emulator holds, which is the case the model declares
+                // `AccountChannelLimitExceededException` for — the same answer, and the
+                // same sentence, as this service's own ceiling above.
+                signaling::ChannelRegistration::AtCapacity => {
+                    CreateSignalingChannelErrorModeled::AccountChannelLimitExceededException(
+                        AccountChannelLimitExceededException {
+                            message: Some(format!(
+                                "You have reached the maximum limit of active signaling \
+                                 channels for this Amazon Web Services account in this \
+                                 region. This account and region already holds {} channels; \
+                                 delete a channel before creating another.",
+                                signaling::MAX_CHANNELS
+                            )),
+                        },
+                    )
+                    .into()
+                }
+                // No signaling store on this engine at all: the channel's data plane is
+                // not something this emulator can serve here, which is the scaffold's
+                // answer rather than a modelled client error.
+                _ => CreateSignalingChannelError::not_implemented(Self::NAME),
+            });
+        }
 
         Ok(CreateSignalingChannelOutput {
             channel_arn: Some(channel_arn),

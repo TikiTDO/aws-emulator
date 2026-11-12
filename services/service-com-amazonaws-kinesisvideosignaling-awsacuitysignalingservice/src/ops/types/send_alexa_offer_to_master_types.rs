@@ -11,7 +11,14 @@ use super::*;
 
 smithy_macros::smithy_model!("smithy-model/com-amazonaws-kinesisvideosignaling-awsacuitysignalingservice.json");
 
-#[smithy_macros::smithy(shape = "com.amazonaws.kinesisvideosignaling#SendAlexaOfferToMasterRequest")]
+// `skip_validation = ["SenderClientId"]`: the same member class, and the same reason, as
+// `GetIceServerConfigRequest$ClientId` — a caller-chosen client id whose `@pattern` AWS
+// does not enforce. It names the peer an answer is routed back to and nothing here parses
+// it, and its modelled `@length` still holds.
+#[smithy_macros::smithy(
+    shape = "com.amazonaws.kinesisvideosignaling#SendAlexaOfferToMasterRequest",
+    skip_validation = ["SenderClientId"]
+)]
 #[derive(Debug, Clone, Default)]
 pub struct SendAlexaOfferToMasterInput {
     pub channel_arn: String,

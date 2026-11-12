@@ -37,6 +37,12 @@ tracing = { workspace = true }
 # addresses one of the emulator's own listeners by — which is what a published data
 # endpoint carries (`src/state/data_endpoint.rs`).
 service-common = { path = "../common" }
+# The signaling channels' own DATA plane, which that service's crate owns: a channel this
+# control plane creates has to exist in the registry `GetIceServerConfig` and
+# `SendAlexaOfferToMaster` resolve a `ChannelARN` against, and the `WSS` endpoint this
+# control plane announces is the socket that crate serves a channel's peers on. Only its
+# `state` seams are used.
+service-com-amazonaws-kinesisvideosignaling-awsacuitysignalingservice = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

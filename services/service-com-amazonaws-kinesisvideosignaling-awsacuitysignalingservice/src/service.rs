@@ -45,6 +45,15 @@ use smithy_server_runtime::{
 };
 use std::sync::Arc;
 
+/// How this data plane words a `ChannelARN` it cannot serve — the one wording both
+/// routes and this file's boundary refusal state.
+pub mod channel_refusal;
+/// The socket a signaling channel's peers meet on: the channel's own WebSocket data
+/// plane, which no buffered request-and-response seam can carry.
+pub mod wss;
+
+use channel_refusal::{blames_the_channel_arn, INVALID_ARGUMENT, INVALID_CHANNEL_ARN};
+
 /// Whether this service serves the request these `parts` came from.
 ///
 /// `emulator_server::can_handle_based_on_route_key_and_path` is the agent-immutable
@@ -143,12 +152,21 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // is not a signaling-channel ARN). Both the code and the message are replaced,
         // so a client branching on the code sees one code for one logical failure.
         //
+        // A value that breaks the modelled `ChannelARN` constraints is worded by this
+        // service's OWN sentence for that one member ([`INVALID_CHANNEL_ARN`]) rather than
+        // by the framework's constraint report, which would echo the caller's value and
+        // the model's regular expression back; see [`blames_the_channel_arn`].
+        //
         // An authentication refusal keeps the framework's wording: it is refused before
         // this service is reached, and the modelled `NotAuthorizedException` is the
         // authorization answer, not the authentication one.
         match refusal {
+            Refusal::Invalid(violations) if blames_the_channel_arn(violations) => Some(Refused {
+                code: INVALID_ARGUMENT.to_string(),
+                message: INVALID_CHANNEL_ARN.to_string(),
+            }),
             Refusal::Invalid(violations) => Some(Refused {
-                code: "InvalidArgumentException".to_string(),
+                code: INVALID_ARGUMENT.to_string(),
                 message: aws_smithy_schema_server::envelope(violations)
                     .unwrap_or_else(|| "The value for this input parameter is invalid".to_string()),
             }),

@@ -11,7 +11,18 @@ use super::*;
 
 smithy_macros::smithy_model!("smithy-model/com-amazonaws-kinesisvideosignaling-awsacuitysignalingservice.json");
 
-#[smithy_macros::smithy(shape = "com.amazonaws.kinesisvideosignaling#GetIceServerConfigRequest")]
+// `skip_validation = ["ClientId"]`: AWS does not enforce `ClientId`'s `@pattern` at the
+// boundary for this member. The member is documented as a "unique identifier for the
+// viewer" that the caller chooses, and recorded behaviour shows the service issuing
+// credentials for a value the modelled pattern `^[a-zA-Z0-9_.-]+$` does not admit — a
+// client id is an opaque name of the peer, not a value this operation parses. Its modelled
+// `@length` still holds, and the issued credentials carry nothing of it
+// (`crate::ops::get_ice_server_config::ice_username`), so a value outside that class
+// cannot reach a response member.
+#[smithy_macros::smithy(
+    shape = "com.amazonaws.kinesisvideosignaling#GetIceServerConfigRequest",
+    skip_validation = ["ClientId"]
+)]
 #[derive(Debug, Clone, Default)]
 pub struct GetIceServerConfigInput {
     pub channel_arn: String,

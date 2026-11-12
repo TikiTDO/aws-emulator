@@ -6,10 +6,10 @@
 //! signaling channel. The channel is resolved out of
 //! [`crate::state`]'s registry: the credential set is minted on this call (the operation
 //! AWS documents as "gets the ICE server configuration information ... including
-//! authenticating with the TURN relay server"), recorded against the (channel, client)
-//! pair, and returned from that record — so a repeat call inside the issuance's `Ttl`
-//! answers with the same credentials, and a channel nobody created answers
-//! `ResourceNotFoundException`.
+//! authenticating with the TURN relay server"), recorded ON THE CHANNEL, and returned from
+//! that record — so every viewer asking inside the issuance's `Ttl` is answered with the
+//! same credentials, which is what recorded behaviour shows for clients asking
+//! concurrently, and a channel nobody created answers `ResourceNotFoundException`.
 //!
 //! The relay the issued `Uris` name is UNREACHABLE BY CONSTRUCTION: this emulator serves
 //! no TURN listener, so the address is an AWS-form name (the form a client parses, logs
@@ -164,67 +164,74 @@ const USERNAME_MAX_LEN: usize = 256;
 /// 1..256 admits it.
 const PASSWORD_LEN: usize = 32;
 
-/// How many credential-store mints one password may draw its characters from.
+/// How many characters the opaque token in a minted username keeps.
+///
+/// A chosen length, for the same reason as [`PASSWORD_LEN`]: it identifies one issuance to
+/// the relay and is not a secret the client proves anything with, so it is shorter, and the
+/// whole username stays well inside its modelled `@length` of 1..256.
+const USERNAME_TOKEN_LEN: usize = 16;
+
+/// How many credential-store mints one token may draw its characters from.
 ///
 /// A chosen bound: the store's secret is long enough that one draw almost always leaves
-/// [`PASSWORD_LEN`] admissible characters, and four bounded draws make a refusal for an
-/// unlucky secret vanishingly unlikely while still keeping the work per request finite.
+/// enough admissible characters, and four bounded draws make a refusal for an unlucky
+/// secret vanishingly unlikely while still keeping the work per request finite.
 const PASSWORD_MINT_ATTEMPTS: usize = 4;
 
-/// A fresh TURN password.
+/// A fresh opaque value of `length` characters, for a TURN password or for the token a
+/// username carries.
 ///
 /// The secret is minted by the emulator's CREDENTIAL STORE — the one component that
 /// generates secrets (`aws_lc_rs::rand`, the OS CSPRNG) — and then removed from that store
-/// again: this password authenticates a client to a TURN relay, NOT a SigV4 request to
-/// this emulator, so the emulator must not go on accepting it as one and nothing
-/// accumulates per issuance. It is the same seam ECR Public's `GetAuthorizationToken`
-/// mints its registry password through, so this crate adds no randomness source of its
-/// own.
+/// again: these values authenticate a client to a TURN relay, NOT a SigV4 request to this
+/// emulator, so the emulator must not go on accepting them as one and nothing accumulates
+/// per issuance. It is the same seam ECR Public's `GetAuthorizationToken` mints its
+/// registry password through, so this crate adds no randomness source of its own.
 ///
-/// Nothing of the request or the clock enters it, so a password is never a function of
-/// client input and never predictable from another issuance. It is the STORED issuance,
-/// not a recomputation, that makes a repeat call inside the `Ttl` answer with the same
-/// one. Only the characters the modelled `IceServer$Password` pattern admits are kept
-/// (the minted secret's alphabet also carries `+` and `/`), which is a filter over a
-/// uniformly drawn secret, not a derivation from anything.
+/// Nothing of the request or the clock enters it, so a minted value is never a function of
+/// client input and never predictable from another issuance. It is the STORED issuance, not
+/// a recomputation, that makes a later call inside the `Ttl` answer with the same one. Only
+/// the characters the modelled `IceServer$Password` / `IceServer$Username` pattern admits
+/// are kept (the minted secret's alphabet also carries `+` and `/`), which is a filter over
+/// a uniformly drawn secret, not a derivation from anything.
 ///
 /// A mint whose secret happens to carry many inadmissible characters leaves fewer than
-/// [`PASSWORD_LEN`] of them, so the store is drawn from again (up to
-/// [`PASSWORD_MINT_ATTEMPTS`] times) rather than refusing a request that is perfectly
-/// valid: each draw is an independent uniform secret, so taking the admissible characters
-/// of several is still a uniform draw and never a derivation.
+/// `length` of them, so the store is drawn from again (up to [`PASSWORD_MINT_ATTEMPTS`]
+/// times) rather than refusing a request that is perfectly valid: each draw is an
+/// independent uniform secret, so taking the admissible characters of several is still a
+/// uniform draw and never a derivation.
 ///
 /// `None` when the store minted no secret, when it could not be removed again, or when
-/// [`PASSWORD_MINT_ATTEMPTS`] draws together held fewer than [`PASSWORD_LEN`] admissible
+/// [`PASSWORD_MINT_ATTEMPTS`] draws together held fewer than `length` admissible
 /// characters: a credential is then not issued at all rather than issued from something
 /// weaker than the store gives.
-fn mint_password(store: &::emulator_server::CredentialStore) -> Option<String> {
-    let mut password = String::with_capacity(PASSWORD_LEN);
+fn mint_opaque(store: &::emulator_server::CredentialStore, length: usize) -> Option<String> {
+    let mut minted_value = String::with_capacity(length);
     for _ in 0..PASSWORD_MINT_ATTEMPTS {
         let minted = store.create(&::emulator_server::aws_credentials::AWS_SESSION);
         let secret = minted
             .secret(::emulator_server::aws_credentials::SESSION_TOKEN)
             .map(str::to_string);
-        // The password is not a credential of this emulator; see above.
+        // The value is not a credential of this emulator; see above.
         if let Err(error) = store.delete(&minted.id) {
             ::tracing::warn!(
                 operation = "GetIceServerConfig",
                 access_key_id = %minted.id,
                 error = ?error,
-                "a credential minted for a TURN password could not be deleted"
+                "a credential minted for a TURN credential set could not be deleted"
             );
             return None;
         }
         // Every admissible character is ASCII, so `len` counts them.
-        let wanted = PASSWORD_LEN - password.len();
-        password.extend(
+        let wanted = length - minted_value.len();
+        minted_value.extend(
             secret?
                 .chars()
                 .filter(|c| is_modelled_token_char(*c))
                 .take(wanted),
         );
-        if password.len() == PASSWORD_LEN {
-            return Some(password);
+        if minted_value.len() == length {
+            return Some(minted_value);
         }
     }
     None
@@ -299,32 +306,29 @@ fn is_modelled_token_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')
 }
 
-/// The username a credential set logs in with: when it expires, then who it was issued
-/// to, kept inside the modelled `@length` of 1..256.
+/// The username a credential set logs in with: WHEN it expires, then an opaque token for
+/// the issuance, joined by `:` — the form recorded behaviour shows
+/// (`<unix-expiry>:<opaque token>`), kept inside the modelled `@length` of 1..256.
 ///
-/// A TURN REST username conventionally joins the two with `:`; the modelled
-/// `IceServer$Username` pattern `^[a-zA-Z0-9_.-]+$` does not admit that character, so
-/// `.` joins them here.
+/// The separator is the `:` a TURN REST username conventionally joins those two with, and
+/// is what the recorded response carries. The modelled `IceServer$Username` `@pattern`
+/// `^[a-zA-Z0-9_.-]+$` does not admit that character, so the model and the recorded
+/// response disagree here; the recording is what a client parses, so it is what is served,
+/// and the `@pattern` holds for the token on either side of the separator.
 ///
-/// The label is the request's own `Username` (or its `ClientId`, or the channel name).
-/// Every source of it is already constrained to that same character class — the input
-/// `Username` and `ClientId` members carry the modelled pattern `^[a-zA-Z0-9_.-]+$`, which
-/// the request boundary refuses a value against (400 `InvalidArgumentException`), and a
-/// channel name comes out of a parsed `ResourceARN`. The filter below is therefore
-/// defence in depth: whatever the label's source, a character the OUTPUT member does not
-/// admit is dropped rather than spliced into a value that would break the modelled
-/// `IceServer$Username` pattern. The expiry prefix is always non-empty, so the result
-/// still meets that member's `@length` minimum of 1 even for a label with nothing
-/// admissible in it.
-fn ice_username(expires_at: SystemTime, label: &str) -> String {
+/// Nothing of the request enters it. The credentials are the CHANNEL's — every viewer
+/// asking inside one issuance's lifetime is answered with that issuance — so a username
+/// cannot name the caller that happened to mint it, and the request's optional `Username`
+/// labels nothing.
+fn ice_username(expires_at: SystemTime, token: &str) -> String {
     let expiry = expires_at
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let prefix = format!("{expiry}.");
+    let prefix = format!("{expiry}:");
     let room = USERNAME_MAX_LEN.saturating_sub(prefix.len());
     prefix
-        + &label
+        + &token
             .chars()
             .filter(|c| is_modelled_token_char(*c))
             .take(room)
@@ -352,14 +356,22 @@ fn retry_later(message: String) -> GetIceServerConfigError {
 
 /// How a channel ARN that did not resolve is answered: a malformed ARN is the caller's
 /// mistake (400), an ARN for a channel that does not exist is a missing resource (404).
-fn unresolved_channel(arn: &str, error: ChannelLookupError) -> GetIceServerConfigError {
+///
+/// Both sentences are the service's own, stated once for every route that takes a
+/// `ChannelARN` ([`crate::service::channel_refusal`]), so this route, the other one and
+/// the request boundary cannot word one failure three ways. Neither carries the ARN the
+/// caller sent: the malformed case is fixed text, and the missing-channel case names the
+/// channel by the NAME its ARN carries.
+fn unresolved_channel(error: ChannelLookupError) -> GetIceServerConfigError {
     match error {
-        ChannelLookupError::MalformedArn => invalid_argument(format!(
-            "ChannelARN is not a Kinesis Video signaling channel ARN: {arn}"
-        )),
-        ChannelLookupError::NotFound => {
+        ChannelLookupError::MalformedArn => {
+            invalid_argument(crate::service::channel_refusal::INVALID_CHANNEL_ARN.to_string())
+        }
+        ChannelLookupError::NotFound { channel_name } => {
             GetIceServerConfigErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
-                message: Some(format!("No signaling channel exists with ARN {arn}")),
+                message: Some(crate::service::channel_refusal::channel_does_not_exist(
+                    &channel_name,
+                )),
             })
             .into()
         }
@@ -412,6 +424,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let state = crate::state::service_state(&*self.engine)
             .ok_or_else(|| GetIceServerConfigError::not_implemented(Self::NAME))?;
 
+        // IAM decides first, on this operation's own action and the channel the request
+        // addresses: a caller whose policies do not allow it is refused with the code and
+        // status AWS refuses an unauthorized call with — `AccessDeniedException` (403),
+        // which this service's model declares no shape for (see `crate::scaffolded`) — and
+        // nothing is read or minted. Resolved before this service's store is locked, so
+        // only one store is ever held at a time.
+        if let Some(refusal) = crate::state::authorization_refusal(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &input.channel_arn,
+        ) {
+            return Err(GetIceServerConfigError::access_denied(refusal));
+        }
+
         // `Service` names the relay family the viewer wants. The model admits exactly one
         // value, so the boundary refuses every other one; absent means that value.
         let requested_service = input.service.as_deref().unwrap_or(DEFAULT_SERVICE);
@@ -425,7 +452,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut store = state.lock();
         let channel = store
             .resolve_channel_mut(&input.channel_arn)
-            .map_err(|error| unresolved_channel(&input.channel_arn, error))?;
+            .map_err(unresolved_channel)?;
 
         // A channel that restricts its viewers issues credentials only to one of them.
         let known_viewer = input
@@ -444,32 +471,33 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        // The credential set is minted by this call and recorded against the (channel,
-        // client) pair, so the answer is read out of state: an issuance still inside its
-        // `Ttl` is returned again rather than replaced, and one the clock has expired is
-        // reissued.
-        let record = match channel.valid_credential(input.client_id.as_deref(), now) {
+        // The credential set is the CHANNEL's: it is minted on this call if the channel is
+        // not already serving one, recorded on the channel, and read back out of that
+        // record — so every viewer asking inside the issuance's lifetime is answered with
+        // the same credentials (what recorded behaviour shows for clients asking
+        // concurrently), and one the clock has run down is reissued.
+        let record = match channel.valid_credential(now) {
             Some(held) => held.clone(),
             None => {
                 let ttl_secs = channel.ttl_secs();
                 let expires_at = now + Duration::from_secs(u64::from(ttl_secs.unsigned_abs()));
-                let label = input
-                    .username
-                    .as_deref()
-                    .or(input.client_id.as_deref())
-                    .unwrap_or(channel.name.as_str());
-                let password = mint_password(ctx.credential_store()).ok_or_else(|| {
+                let store_handle = ctx.credential_store();
+                let token = mint_opaque(store_handle, USERNAME_TOKEN_LEN).ok_or_else(|| {
+                    retry_later(
+                        "A TURN credential set could not be minted; retry the call".to_string(),
+                    )
+                })?;
+                let password = mint_opaque(store_handle, PASSWORD_LEN).ok_or_else(|| {
                     retry_later(
                         "A TURN credential set could not be minted; retry the call".to_string(),
                     )
                 })?;
                 let issued = IceServerRecord {
                     uris: turn_uris(channel),
-                    username: ice_username(expires_at, label),
+                    username: ice_username(expires_at, &token),
                     password,
                     ttl_secs,
                     issued_at: now,
-                    client_id: input.client_id.clone(),
                 };
                 channel.record_credential(issued).clone()
             }

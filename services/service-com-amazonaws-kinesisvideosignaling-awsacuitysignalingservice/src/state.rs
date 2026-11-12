@@ -3,19 +3,36 @@
 //! Engine state for the com-amazonaws-kinesisvideosignaling-awsacuitysignalingservice service.
 //!
 //! The service is the signaling *data* plane: a channel is created by the Kinesis Video
-//! control plane (`CreateSignalingChannel`), and both operations here only ever read a
-//! channel that already exists. So the state this crate owns is a **signaling-channel
-//! registry** keyed by channel ARN, plus the two per-channel logs the operations write:
-//! the TURN credentials `GetIceServerConfig` issues, and the Alexa SDP offers
-//! `SendAlexaOfferToMaster` delivers.
+//! control plane (`CreateSignalingChannel`), and neither operation here creates one. So the
+//! state this crate owns is a **signaling-channel registry** keyed by channel ARN, plus
+//! what each channel's data plane holds: the TURN credential set `GetIceServerConfig`
+//! issues, the Alexa SDP offers `SendAlexaOfferToMaster` delivers, and the peers attached
+//! to the channel's own WebSocket.
 //!
-//! A channel record is seeded by whoever creates the channel (a test, or the control
-//! plane once `CreateSignalingChannel` is implemented) through
-//! [`ComAmazonawsKinesisvideosignalingAwsacuitysignalingserviceState::register_channel`].
-//! An ARN that is not in the registry is a `ResourceNotFoundException`, never a success.
+//! A channel record is seeded by whoever creates the channel: the Kinesis Video control
+//! plane's `CreateSignalingChannel` calls [`register_channel_of`] (and its
+//! `DeleteSignalingChannel` calls [`forget_channel_of`]) on this store, which is the one
+//! registry both planes read, so a channel the control plane reports as existing is a
+//! channel this data plane serves. An ARN that is not in the registry is a
+//! `ResourceNotFoundException`, never a success.
+//!
+//! Beside the registry the store holds the channels' live WebSocket data plane: the socket
+//! every channel is reached at ([`wss_endpoint`]) and, per channel, the peers attached to
+//! it ([`session`]).
 
 use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, SystemTime};
+
+/// Whether IAM lets a request to this data plane perform the action it asks for.
+pub mod authorization;
+/// The peers attached to one channel, and the frames routed between them.
+pub mod session;
+/// The address every channel's WebSocket data plane is reached at.
+pub mod wss_endpoint;
+
+pub use authorization::authorization_refusal;
+pub use session::{Attachment, ChannelSession, PeerConnection};
+pub use wss_endpoint::{ensure_wss_endpoint, SignalingEndpoint, WSS_SCHEME};
 
 /// Lower bound of the modelled `@range` on `IceServer$Ttl`
 /// (`smithy_query(query="shape", shape="IceServer")`: range 30..86400).
@@ -40,21 +57,12 @@ pub const DEFAULT_ICE_CREDENTIAL_TTL_SECS: i32 = 300;
 /// cap the OLDEST offer is dropped: the log is a recent-delivery history, not an archive.
 pub const MAX_OFFERS_PER_CHANNEL: usize = 128;
 
-/// How many live TURN credential issuances one channel keeps.
-///
-/// Not an AWS quota — a chosen bound. One record is held per distinct `ClientId`, which
-/// is the caller's free-form string (modelled len 1..256), so the record count would
-/// otherwise be chosen by the caller. Expired issuances are purged first; at the cap the
-/// oldest live one is dropped, which only costs its holder a reissue.
-pub const MAX_ICE_ISSUANCES_PER_CHANNEL: usize = 64;
-
 /// How many signaling channels the registry holds.
 ///
-/// Not an AWS quota — a chosen bound. Nothing on this service's two routes creates a
-/// channel today (the control plane's `CreateSignalingChannel` does, and is still a
-/// stub), but the registry is bounded here so it stays bounded once creation becomes
-/// request-reachable: past the cap a new channel is refused rather than evicting a
-/// channel someone is using.
+/// Not an AWS quota — a chosen bound. Channels are put here by the Kinesis Video control
+/// plane's `CreateSignalingChannel`, which carries a ceiling of its own, and the registry
+/// is bounded here too so one store cannot grow without end: past the cap a new channel is
+/// refused rather than evicting a channel someone is using.
 pub const MAX_CHANNELS: usize = 10_000;
 
 /// Upper bound of the modelled `@length` on `ResourceARN`
@@ -65,11 +73,30 @@ pub const MAX_CHANNEL_ARN_LEN: usize = 1024;
 /// The first field of every ARN.
 const ARN_FIRST_FIELD: &str = "arn";
 
+/// Lower bound of the modelled `@range` on the control plane's
+/// `SingleMasterConfiguration$MessageTtlSeconds` (`smithy_query(query="shape",
+/// shape="SingleMasterConfiguration")` on the Kinesis Video model: range 5..120), the
+/// member that states "the period of time (in seconds) a signaling channel retains
+/// undelivered messages before they are discarded".
+pub const MIN_MESSAGE_TTL_SECS: i32 = 5;
+
+/// Upper bound of that same `@range`; see [`MIN_MESSAGE_TTL_SECS`].
+pub const MAX_MESSAGE_TTL_SECS: i32 = 120;
+
+/// The retention a channel record that states none keeps: "The default configuration for
+/// the channel message's time to live is 60 seconds (1 minute)"
+/// (`CreateSignalingChannel$SingleMasterConfiguration` docs).
+pub const DEFAULT_MESSAGE_TTL_SECS: i32 = 60;
+
 /// Per-service state for com-amazonaws-kinesisvideosignaling-awsacuitysignalingservice. A handler reaches it through [`service_state`].
 #[derive(Debug, Default)]
 pub struct ComAmazonawsKinesisvideosignalingAwsacuitysignalingserviceState {
     /// Every signaling channel this emulator knows, keyed by its ARN.
     pub channels: HashMap<String, SignalingChannel>,
+    /// The socket every channel's WebSocket data plane is served on, opened on the first
+    /// `WSS` endpoint resolution ([`ensure_wss_endpoint`]) and held for the life of the
+    /// store, so an announced address never moves under a client.
+    pub wss_endpoint: Option<SignalingEndpoint>,
 }
 
 /// Why a channel ARN in a request did not resolve to a channel record.
@@ -77,13 +104,18 @@ pub struct ComAmazonawsKinesisvideosignalingAwsacuitysignalingserviceState {
 /// The two cases are distinct answers on the wire — a malformed ARN is the caller's
 /// mistake (`InvalidArgumentException`, 400) while a well-formed ARN for a channel that
 /// does not exist is `ResourceNotFoundException` (404) — so the registry reports which
-/// one it was and lets each operation name its own modelled error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// one it was and lets each operation name its own modelled error. The not-found case
+/// carries the channel NAME it parsed out of the ARN, which is the only part of the
+/// request that refusal states.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelLookupError {
     /// The ARN is not a Kinesis Video *signaling channel* ARN at all.
     MalformedArn,
     /// A well-formed channel ARN that no registered channel carries.
-    NotFound,
+    NotFound {
+        /// The channel-name segment of the ARN that did not resolve.
+        channel_name: String,
+    },
 }
 
 impl ComAmazonawsKinesisvideosignalingAwsacuitysignalingserviceState {
@@ -104,8 +136,12 @@ impl ComAmazonawsKinesisvideosignalingAwsacuitysignalingserviceState {
 
     /// The channel `arn` names, for a reporting read.
     pub fn resolve_channel(&self, arn: &str) -> Result<&SignalingChannel, ChannelLookupError> {
-        ChannelArn::parse_channel(arn).ok_or(ChannelLookupError::MalformedArn)?;
-        self.channels.get(arn).ok_or(ChannelLookupError::NotFound)
+        let parsed = ChannelArn::parse_channel(arn).ok_or(ChannelLookupError::MalformedArn)?;
+        self.channels
+            .get(arn)
+            .ok_or(ChannelLookupError::NotFound {
+                channel_name: parsed.name,
+            })
     }
 
     /// The channel `arn` names, for an operation that records what it did on the channel.
@@ -113,13 +149,92 @@ impl ComAmazonawsKinesisvideosignalingAwsacuitysignalingserviceState {
         &mut self,
         arn: &str,
     ) -> Result<&mut SignalingChannel, ChannelLookupError> {
-        ChannelArn::parse_channel(arn).ok_or(ChannelLookupError::MalformedArn)?;
-        self.channels.get_mut(arn).ok_or(ChannelLookupError::NotFound)
+        let parsed = ChannelArn::parse_channel(arn).ok_or(ChannelLookupError::MalformedArn)?;
+        self.channels
+            .get_mut(arn)
+            .ok_or(ChannelLookupError::NotFound {
+                channel_name: parsed.name,
+            })
+    }
+
+    /// Drop the channel `arn` names, which is what the control plane deleting it does.
+    ///
+    /// Every peer attached to it goes with the record, so a viewer or master that was
+    /// signaling over a deleted channel is forgotten and its socket task ends on its next
+    /// frame.
+    pub fn forget_channel(&mut self, arn: &str) -> bool {
+        self.channels.remove(arn).is_some()
     }
 }
 
+/// What came of putting a channel in this emulator's signaling registry.
+///
+/// The two failures are different answers for the control plane to give: a registry at its
+/// ceiling is a LIMIT, which the create's model declares an error for, while a missing
+/// store is a capability this emulator does not have on that engine at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelRegistration {
+    /// The channel is in the registry, and the data plane serves it.
+    Registered,
+    /// The registry already holds [`MAX_CHANNELS`] other channels, so nothing was stored:
+    /// a registration is refused rather than evicting a channel callers are signaling over.
+    AtCapacity,
+    /// This emulator carries no store for the signaling service (it was mounted on an
+    /// engine that has none), or the ARN is not a signaling-channel ARN — in neither case
+    /// is there a registry entry to make.
+    Unservable,
+}
+
+/// Put the channel `arn` names in THIS emulator's signaling registry, with the message
+/// retention its control-plane record states — the seam the Kinesis Video control plane's
+/// `CreateSignalingChannel` calls, so a created channel is one this data plane serves.
+///
+/// `message_ttl_secs` is held inside the modelled `MessageTtlSeconds` range, which is the
+/// server-side bound on the redelivery window a caller's channel configuration chooses.
+///
+/// A channel already registered under that ARN keeps the peers attached to it: only its
+/// retention is restated. Anything but [`ChannelRegistration::Registered`] leaves the
+/// control plane to report the create it could not make servable rather than reporting a
+/// channel the data plane cannot see.
+pub fn register_channel_of<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    arn: &str,
+    message_ttl_secs: i32,
+) -> ChannelRegistration {
+    let Some(state) = service_state(engine) else {
+        return ChannelRegistration::Unservable;
+    };
+    let retention = message_ttl_secs.clamp(MIN_MESSAGE_TTL_SECS, MAX_MESSAGE_TTL_SECS);
+    let mut store = state.lock();
+    if let Some(held) = store.channels.get_mut(arn) {
+        held.message_ttl_secs = retention;
+        return ChannelRegistration::Registered;
+    }
+    let Some(mut channel) = SignalingChannel::from_arn(arn) else {
+        return ChannelRegistration::Unservable;
+    };
+    channel.message_ttl_secs = retention;
+    match store.register_channel(channel) {
+        true => ChannelRegistration::Registered,
+        false => ChannelRegistration::AtCapacity,
+    }
+}
+
+/// Drop the channel `arn` names from this emulator's signaling registry — the seam the
+/// control plane's `DeleteSignalingChannel` calls, so a deleted channel stops resolving on
+/// the data plane.
+///
+/// `false` when there is no store to read or the registry held no such channel.
+pub fn forget_channel_of<Eng: Send + Sync + 'static>(engine: &Eng, arn: &str) -> bool {
+    let Some(state) = service_state(engine) else {
+        return false;
+    };
+    let mut store = state.lock();
+    store.forget_channel(arn)
+}
+
 /// One signaling channel, as this data plane sees it.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SignalingChannel {
     /// The channel's ARN — the registry key, and what both operations take as input.
     pub arn: String,
@@ -138,13 +253,23 @@ pub struct SignalingChannel {
     pub viewer_client_ids: BTreeSet<String>,
     /// How long an issued TURN credential set stays valid, in seconds.
     pub ice_credential_ttl_secs: i32,
-    /// One record per (channel, client) TURN credential issuance.
-    pub ice_servers: Vec<IceServerRecord>,
+    /// The TURN credential set this channel is currently serving, if one has been issued
+    /// and is still re-servable.
+    ///
+    /// ONE per channel, not one per viewer: the credentials belong to the channel, so
+    /// every viewer asking inside an issuance's lifetime is answered with that same
+    /// issuance — which is what a relay honours and what recorded behaviour shows (clients
+    /// asking concurrently share one credential).
+    pub ice_credential: Option<IceServerRecord>,
     /// Every Alexa SDP offer delivered to this channel, oldest first.
     pub offers: Vec<AlexaOffer>,
-    /// The SDP answer the master peer connected to this channel supplies. `None` when no
-    /// master is connected, so there is no answer to return for an offer.
-    pub master_answer: Option<String>,
+    /// How long this channel retains a message it has not delivered, in seconds: its
+    /// control-plane `SingleMasterConfiguration.MessageTtlSeconds`, which is the window an
+    /// undelivered offer is redelivered over.
+    pub message_ttl_secs: i32,
+    /// The peers attached to this channel's WebSocket data plane right now, and the
+    /// answers they owe.
+    pub session: ChannelSession,
 }
 
 impl SignalingChannel {
@@ -160,10 +285,22 @@ impl SignalingChannel {
             creation_id: parsed.creation_id,
             viewer_client_ids: BTreeSet::new(),
             ice_credential_ttl_secs: DEFAULT_ICE_CREDENTIAL_TTL_SECS,
-            ice_servers: Vec::new(),
+            ice_credential: None,
             offers: Vec::new(),
-            master_answer: None,
+            message_ttl_secs: DEFAULT_MESSAGE_TTL_SECS,
+            session: ChannelSession::default(),
         })
+    }
+
+    /// The window an undelivered message of this channel is redelivered over: its
+    /// `MessageTtlSeconds`, held inside the modelled range whatever the record says, so
+    /// the wait a caller's configuration chooses is bounded server-side.
+    #[must_use]
+    pub fn message_ttl(&self) -> Duration {
+        let seconds = self
+            .message_ttl_secs
+            .clamp(MIN_MESSAGE_TTL_SECS, MAX_MESSAGE_TTL_SECS);
+        Duration::from_secs(seconds.unsigned_abs().into())
     }
 
     /// The credential lifetime this channel issues, held inside the modelled
@@ -173,48 +310,35 @@ impl SignalingChannel {
             .clamp(MIN_ICE_CREDENTIAL_TTL_SECS, MAX_ICE_CREDENTIAL_TTL_SECS)
     }
 
-    /// The credential set issued to `client_id` that is still REUSABLE at `now`, if any.
+    /// The credential set this channel is serving that is still REUSABLE at `now`, if any.
     ///
-    /// The issuance is keyed on `ClientId` alone, which is what identifies the viewer the
-    /// credentials were issued to. So a repeat call inside the lifetime is answered with
-    /// the recorded issuance even when it names a different optional `Username`: what the
-    /// relay honours is what was issued, and the request's `Username` only labels the
-    /// issuance that is minted.
+    /// Keyed on nothing but the channel: a TURN credential set is the channel's, so a
+    /// viewer asking inside the issuance's lifetime is answered with the issuance already
+    /// made rather than with one of its own. That is what recorded behaviour shows —
+    /// clients asking concurrently are answered with ONE shared credential — and it is
+    /// what a relay enforces, since the credential it honours is the one that was issued.
     ///
     /// Reusable is narrower than unexpired: what goes on the wire is the lifetime the
     /// issuance has LEFT ([`IceServerRecord::reportable_ttl_secs`]), and the modelled
     /// `IceServer$Ttl` range starts at [`MIN_ICE_CREDENTIAL_TTL_SECS`], so an issuance
     /// with less than that left cannot be reported truthfully and is reissued instead of
     /// re-served. See [`IceServerRecord::is_reusable_at`].
-    pub fn valid_credential(
-        &self,
-        client_id: Option<&str>,
-        now: SystemTime,
-    ) -> Option<&IceServerRecord> {
-        self.ice_servers
-            .iter()
-            .find(|record| record.client_id.as_deref() == client_id && record.is_reusable_at(now))
+    pub fn valid_credential(&self, now: SystemTime) -> Option<&IceServerRecord> {
+        self.ice_credential
+            .as_ref()
+            .filter(|record| record.is_reusable_at(now))
     }
 
-    /// Record `record` as this channel's credential set for its client, replacing the
-    /// one that client held, and hand back the stored record.
+    /// Record `record` as this channel's credential set, replacing the one it was serving,
+    /// and hand back the stored record.
     ///
-    /// Bounded: the issuance this client held and every issuance the clock has already
-    /// expired are dropped first — a credential nobody can still use is not kept — and at
-    /// [`MAX_ICE_ISSUANCES_PER_CHANNEL`] the oldest live issuance goes too, so the record
-    /// count is this channel's, not the callers' `ClientId` cardinality.
+    /// Bounded by construction: one issuance per channel, so a caller cannot make the
+    /// record count its own.
     pub fn record_credential(&mut self, record: IceServerRecord) -> &IceServerRecord {
-        let issued_at = record.issued_at;
-        self.ice_servers
-            .retain(|held| held.client_id != record.client_id && held.is_valid_at(issued_at));
-        // One pass: the oldest issuances above the cap go together, rather than shifting
-        // the whole log once per dropped record.
-        let over_cap = (self.ice_servers.len() + 1).saturating_sub(MAX_ICE_ISSUANCES_PER_CHANNEL);
-        self.ice_servers.drain(..over_cap);
-        self.ice_servers.push(record);
-        self.ice_servers
-            .last()
-            .expect("the record just pushed is present")
+        self.ice_credential = Some(record);
+        self.ice_credential
+            .as_ref()
+            .expect("the record just stored is present")
     }
 
     /// Append `offer` to this channel's offer log and hand back the stored record.
@@ -260,8 +384,6 @@ pub struct IceServerRecord {
     pub ttl_secs: i32,
     /// When it was issued.
     pub issued_at: SystemTime,
-    /// The viewer the credentials were issued to, when the request named one.
-    pub client_id: Option<String>,
 }
 
 impl std::fmt::Debug for IceServerRecord {
@@ -272,7 +394,6 @@ impl std::fmt::Debug for IceServerRecord {
             .field("password", &"<redacted>")
             .field("ttl_secs", &self.ttl_secs)
             .field("issued_at", &self.issued_at)
-            .field("client_id", &self.client_id)
             .finish()
     }
 }

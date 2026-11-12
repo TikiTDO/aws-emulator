@@ -19,6 +19,8 @@ mod data_plane_addresses;
 mod data_plane_front_door;
 #[path = "all/route_claims.rs"]
 mod route_claims;
+#[path = "all/signaling_channel_data_plane.rs"]
+mod signaling_channel_data_plane;
 #[path = "all/signaling_channel_lifecycle.rs"]
 mod signaling_channel_lifecycle;
 #[path = "all/state_roundtrip.rs"]

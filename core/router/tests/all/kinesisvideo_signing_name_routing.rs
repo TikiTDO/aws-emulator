@@ -153,7 +153,7 @@ const CASES: &[Case] = &[
         body: r#"{"ChannelARN":"arn:aws:kinesisvideo:us-east-1:000000000000:channel/probe/1"}"#,
         expect: Expect::Answered {
             status: 404,
-            contains: "No signaling channel exists with ARN",
+            contains: "probe channel does not exist !",
         },
     },
     Case {

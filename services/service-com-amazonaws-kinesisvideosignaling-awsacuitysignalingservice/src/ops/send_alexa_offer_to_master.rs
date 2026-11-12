@@ -3,20 +3,24 @@
 //! @op SendAlexaOfferToMaster
 //!
 //! Delivers an Alexa SDP offer to the master peer of a signaling channel and answers with
-//! the master's SDP answer. The channel is resolved out of [`crate::state`]'s registry,
-//! the offer is appended to that channel's (bounded) offer log, and the answer is read
-//! from the stored offer — never synthesised and never the offer echoed back. An offer no
-//! master can answer is refused and nothing is written.
+//! the master's SDP answer. The channel is resolved out of [`crate::state`]'s registry and
+//! the offer is handed to the master peer attached to that channel's WebSocket data plane
+//! ([`crate::service::wss`]) — the only source of an answer here; nothing is ever
+//! synthesised and the offer is never echoed back.
 //!
-//! WHO CONNECTS A MASTER: nothing in this emulator does yet. A master peer reaches a
-//! signaling channel over the WebSocket endpoint the control plane hands out
-//! (`GetSignalingChannelEndpoint` + the `WSS` role `MASTER`), which no implemented route
-//! serves, so today the only writer of
-//! [`SignalingChannel::master_answer`](crate::state::SignalingChannel::master_answer) is
-//! in-process seeding and every request on this route takes the
-//! `ResourceNotFoundException` branch. That is the honest answer for a channel with no
-//! master, not a stand-in: when the master connection is emulated it sets that field and
-//! this handler needs no change.
+//! WHEN NO MASTER IS LISTENING the call is still ACCEPTED, as the operation's own docs
+//! state: "The offer is delivered as soon as the master is connected to the specified
+//! signaling channel… If the master is not connected to the signaling channel, redelivery
+//! requests are made until the message expires." So the offer is redelivered over the
+//! window [`DELIVERY_WAIT`] — a span this emulator chooses, held under the channel's own
+//! retention: its control-plane `SingleMasterConfiguration` `MessageTtlSeconds`, "the
+//! period of time (in seconds) a signaling channel retains undelivered messages before
+//! they are discarded", inside that member's modelled 5..120 range — and a window that
+//! passes with no answer is answered 200 with no `Answer` member.
+//! `ResourceNotFoundException` is reserved for a channel that does not exist.
+//!
+//! Either way the offer joins the channel's (bounded) log, carrying the answer it was
+//! served or none, and the response is read back out of that record.
 //!
 //! ## Shape of an operation
 //!
@@ -89,8 +93,35 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+use crate::state::session::SDP_OFFER;
 use crate::state::{AlexaOffer, ChannelLookupError};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+
+/// How long this route waits for the master's answer before answering without one.
+///
+/// AWS does not publish how long the call blocks — "the offer is delivered as soon as the
+/// master is connected… redelivery requests are made until the message expires" bounds the
+/// wait by the channel's retention window without stating it — so this span is CHOSEN, and
+/// it is the span this emulator gives any transition the clock owes. It is then held under
+/// the channel's own `MessageTtlSeconds`, so a channel that retains an undelivered message
+/// for less than this waits only that long: the window the data plane waits can never
+/// exceed the window the channel retains.
+const DELIVERY_WAIT: Duration = Duration::from_secs(3);
+
+/// How often an undelivered offer is offered to the channel's master again, inside the
+/// window above.
+///
+/// Not a documented AWS interval — a chosen one: AWS states that "redelivery requests are
+/// made until the message expires" without saying how often, so this is the granularity at
+/// which a master that connects during the window is noticed. Short enough that a client
+/// does not wait for it, and long enough that one waiting call costs a handful of state
+/// reads per second.
+const REDELIVERY_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Upper bound of the modelled `@length` on the output member `Answer`
+/// (`smithy_query(query="shape", shape="Answer")`: len 1..10000), so what a master supplied
+/// is reported only when the member can carry it.
+const MAX_ANSWER_LEN: usize = 10_000;
 
 /// How many characters one base64 quantum encodes to.
 const BASE64_QUANTUM: usize = 4;
@@ -170,14 +201,20 @@ fn not_found(message: String) -> SendAlexaOfferToMasterError {
 
 /// How a channel ARN that did not resolve is answered: a malformed ARN is the caller's
 /// mistake (400), an ARN for a channel that does not exist is a missing resource (404).
-fn unresolved_channel(arn: &str, error: ChannelLookupError) -> SendAlexaOfferToMasterError {
+///
+/// Both sentences are the service's own, stated once for every route that takes a
+/// `ChannelARN` ([`crate::service::channel_refusal`]), so this route, the other one and the
+/// request boundary cannot word one failure three ways. Neither carries the ARN the caller
+/// sent: the malformed case is fixed text, and the missing-channel case names the channel
+/// by the NAME its ARN carries.
+fn unresolved_channel(error: ChannelLookupError) -> SendAlexaOfferToMasterError {
     match error {
-        ChannelLookupError::MalformedArn => invalid_argument(format!(
-            "ChannelARN is not a Kinesis Video signaling channel ARN: {arn}"
-        )),
-        ChannelLookupError::NotFound => {
-            not_found(format!("No signaling channel exists with ARN {arn}"))
+        ChannelLookupError::MalformedArn => {
+            invalid_argument(crate::service::channel_refusal::INVALID_CHANNEL_ARN.to_string())
         }
+        ChannelLookupError::NotFound { channel_name } => not_found(
+            crate::service::channel_refusal::channel_does_not_exist(&channel_name),
+        ),
     }
 }
 
@@ -217,14 +254,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // Request metadata is not part of this operation's answer: the whole response is
-        // a function of the channel registry and the request body.
-        let _ = ctx;
+        // Request metadata is read for the caller's identity alone: the whole answer is a
+        // function of the channel registry, the channel's live peers and the request body.
         // The channel registry lives in the shared in-memory engine. If this service was
         // mounted on some other engine there is no registry to read, so the operation
         // cannot be served at all: that is the scaffold's 501, not a modelled client error.
         let state = crate::state::service_state(&*self.engine)
             .ok_or_else(|| SendAlexaOfferToMasterError::not_implemented(Self::NAME))?;
+
+        // IAM decides first, on this operation's own action and the channel the request
+        // addresses: a caller whose policies do not allow it is refused with the code and
+        // status AWS refuses an unauthorized call with — `AccessDeniedException` (403),
+        // which this service's model declares no shape for (see `crate::scaffolded`) — and
+        // nothing is delivered. Resolved before this service's store is locked, so only one
+        // store is ever held at a time.
+        if let Some(refusal) = crate::state::authorization_refusal(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &input.channel_arn,
+        ) {
+            return Err(SendAlexaOfferToMasterError::access_denied(refusal));
+        }
 
         // `MessagePayload` is documented as "the base64-encoded SDP offer content". The
         // modelled pattern admits only base64's alphabet, but not every string over that
@@ -239,35 +290,109 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let now = SystemTime::now();
+        // One lock, nothing awaited under it: the channel is resolved, the window it
+        // retains an undelivered message for is read, the wait for the master's answer is
+        // registered, and the offer is handed to the master's own bounded queue if one is
+        // attached. The guard is dropped before the window below is waited out.
+        let offered = {
+            let mut store = state.lock();
+            let channel = store
+                .resolve_channel_mut(&input.channel_arn)
+                .map_err(unresolved_channel)?;
+            let frame = crate::service::wss::delivered_frame(
+                SDP_OFFER,
+                Some(&input.sender_client_id),
+                &input.message_payload,
+                None,
+            );
+            // `None` when the channel is already waiting on as many offers as it holds
+            // waiters for: the call is still accepted, and answered without an `Answer`.
+            let waiter = channel.session.wait_for_answer(&input.sender_client_id);
+            let delivered = channel
+                .session
+                .master()
+                .is_some_and(|master| master.deliver(frame.clone()));
+            (channel.message_ttl().min(DELIVERY_WAIT), frame, waiter, delivered)
+        };
+        let (window, frame, waiter, delivered) = offered;
+
+        // "The offer is delivered as soon as the master is connected… If the master is not
+        // connected to the signaling channel, redelivery requests are made until the
+        // message expires": the offer is re-offered to whatever master is attached until
+        // the channel's retention window passes, and the answer is whatever that master
+        // sent back for this sender.
+        let answer = match waiter {
+            None => None,
+            Some(waiter) => {
+                awaited_answer(&state, &input.channel_arn, &frame, waiter, window, delivered).await
+            }
+        };
+        // A master that answered with content the modelled `Answer` cannot carry is
+        // reported as no answer rather than as a value outside the member's `@length`.
+        let answer = answer.filter(|answer| (1..=MAX_ANSWER_LEN).contains(&answer.len()));
+
+        // Delivered or expired, the offer joins this channel's (bounded) log carrying the
+        // answer it was served, and the response is read back out of that stored record.
         let mut store = state.lock();
         let channel = store
             .resolve_channel_mut(&input.channel_arn)
-            .map_err(|error| unresolved_channel(&input.channel_arn, error))?;
-
-        // The answer belongs to the master peer: it is whatever the master connected to
-        // this channel has supplied. No master connected means there is no answer to
-        // deliver, so the offer is refused — rather than answered with something this
-        // emulator made up — and nothing is written: a request that could not be served
-        // leaves no record behind, so a caller cannot fill the channel's log with offers
-        // the service never delivered.
-        let Some(answer) = channel.master_answer.clone() else {
-            return Err(not_found(format!(
-                "No master is connected to signaling channel {}, so the offer from {} cannot be delivered",
-                input.channel_arn, input.sender_client_id
-            )));
-        };
-
-        // Delivered: the offer joins this channel's (bounded) log carrying the answer the
-        // sender was served, and the response is read back out of that stored record.
-        let delivered = channel.record_offer(AlexaOffer {
+            .map_err(unresolved_channel)?;
+        let recorded = channel.record_offer(AlexaOffer {
             sender_client_id: input.sender_client_id.clone(),
             message_payload: input.message_payload.clone(),
             received_at: now,
-            answer: Some(answer),
+            answer,
         });
 
         Ok(SendAlexaOfferToMasterOutput {
-            answer: delivered.answer.clone(),
+            answer: recorded.answer.clone(),
         })
+    }
+}
+
+/// Wait out one channel's retention window for the master's answer to this offer,
+/// re-offering it to whatever master is attached while the window lasts.
+///
+/// `None` when the window passed with no answer, which is the 200 the operation answers
+/// with no `Answer` member. Nothing here holds the store lock across an await: each
+/// redelivery attempt takes it, hands the frame to the master's bounded queue and drops it
+/// again.
+async fn awaited_answer(
+    state: &::engine::ServiceState<
+        crate::state::ComAmazonawsKinesisvideosignalingAwsacuitysignalingserviceState,
+    >,
+    channel_arn: &str,
+    frame: &str,
+    mut waiter: ::tokio::sync::oneshot::Receiver<String>,
+    window: std::time::Duration,
+    delivered_already: bool,
+) -> Option<String> {
+    let expires_at = ::tokio::time::Instant::now() + window;
+    let mut delivered = delivered_already;
+    loop {
+        ::tokio::select! {
+            answered = &mut waiter => return answered.ok(),
+            () = ::tokio::time::sleep_until(expires_at) => return None,
+            () = ::tokio::time::sleep(REDELIVERY_INTERVAL) => {
+                let mut store = state.lock();
+                // A channel deleted while the offer was waiting retains nothing further:
+                // there is no master to redeliver to and no answer to come.
+                let Ok(channel) = store.resolve_channel_mut(channel_arn) else {
+                    return None;
+                };
+                if channel.session.has_master() {
+                    if !delivered {
+                        delivered = channel
+                            .session
+                            .master()
+                            .is_some_and(|master| master.deliver(frame.to_string()));
+                    }
+                } else {
+                    // The master this offer was handed to has gone, so the next one to
+                    // connect inside the window is offered it again.
+                    delivered = false;
+                }
+            }
+        }
     }
 }

@@ -16,11 +16,38 @@ emulator-server = { workspace = true }
 emulator-telemetry = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }
 aws-smithy-types = { workspace = true }
-tokio = { workspace = true }
+# `io-util`, `sync` and `time` beside the workspace features: a channel's WebSocket data
+# plane reads its socket, hands each peer its frames over a bounded queue, and waits out a
+# channel's message-retention window (`src/service/wss.rs`,
+# `src/ops/send_alexa_offer_to_master.rs`).
+tokio = { workspace = true, features = ["io-util", "sync", "time"] }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# The RFC 6455 WebSocket protocol, server side: a signaling channel's data plane completes
+# the opening handshake and frames every signaling message with this maintained
+# implementation over the core-owned socket (`src/service/wss.rs`) rather than with
+# anything hand-written. `handshake` only — this crate serves the SERVER half and opens no
+# connection of its own, and the core owns TLS.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+# The `Stream`/`Sink` halves of that socket, so a frame arriving and a frame pushed to the
+# connection are awaited together.
+futures-util = { version = "0.3", default-features = false }
+# `service-common` carries the ONE reading of a data-plane connection whose encryption is
+# negotiated in band (`in_band_tls`, which is how one announced address serves both the
+# `wss://` a client of AWS dials and the `ws://` a client that does not verify a
+# self-signed certificate dials) and the ONE reading of the `host:port` a core listener is
+# addressed by (`data_plane_addressing::listener_authority`), which is what the announced
+# signaling endpoint carries.
+service-common = { path = "../common" }
+# The two stores the authorization gate reads (`src/state/authorization.rs`): both
+# operations model `NotAuthorizedException`, so they decide whether IAM lets the caller
+# perform the action \u2014 the SESSION a credential speaks for lives in STS's store while the
+# POLICIES in force on that principal live in IAM's. Only their `state` accessors are used;
+# the DECISION itself is `service-common`'s one shared evaluation.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -28,6 +55,19 @@ emulator-core-build-support = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
+# IAM and the token service, mounted beside this one in the test harness: the policies a
+# signaling call is authorized against are IAM's, and the identity a credential speaks for
+# is STS's, so the gate is driven end to end against the services that own them. They are
+# also normal dependencies of this crate (the gate reads their stores); this entry only
+# states that the harness mounts them.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+# The client half of the WebSocket tests: a case dials the announced signaling socket over
+# TCP (`tokio/net`) in this process, as a peer handed that address does, and waits a
+# bounded time for a frame (`tokio/time`).
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", default-features = false }
 
 [lints]
 workspace = true
