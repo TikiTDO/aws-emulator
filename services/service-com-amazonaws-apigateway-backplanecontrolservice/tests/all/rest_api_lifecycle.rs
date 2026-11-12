@@ -141,6 +141,22 @@ pub(crate) fn gateway_with_iam() -> Gateway {
     gateway
 }
 
+/// One emulator with this service, AWS IAM and Amazon CloudWatch Logs mounted on ONE shared
+/// engine.
+///
+/// The account's CloudWatch role is resolved against IAM inside the `UpdateAccount` request,
+/// and what a stage of that account then LOGS lands in CloudWatch Logs' own store, so a suite
+/// that drives both halves needs all three services on one router. Built on
+/// [`gateway_with_iam`], so there is still one place this service and IAM are mounted.
+pub(crate) fn gateway_with_iam_and_logs() -> Gateway {
+    let mut gateway = gateway_with_iam();
+    let engine = Arc::clone(&gateway.engine);
+    gateway.router.register_service(
+        service_com_amazonaws_cloudwatchlogs_logs_20140328::EmulatedService::new(engine),
+    );
+    gateway
+}
+
 /// One emulator with this service AND Amazon EC2 mounted on ONE shared engine.
 ///
 /// A domain name access association's `accessAssociationSource` is resolved against the VPC

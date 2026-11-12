@@ -98,20 +98,20 @@ const REQUEST_ID_HEADER: &str = "x-amzn-requestid";
 
 /// One answered request: its status, its body verbatim and the request id it was reported
 /// under.
-struct Answered {
-    status: u16,
+pub(crate) struct Answered {
+    pub(crate) status: u16,
     body: Bytes,
-    request_id: Option<String>,
+    pub(crate) request_id: Option<String>,
 }
 
 impl Answered {
     /// The body as text.
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         String::from_utf8_lossy(&self.body).to_string()
     }
 
     /// The body as JSON, `Null` when it is not JSON at all.
-    fn json(&self) -> Value {
+    pub(crate) fn json(&self) -> Value {
         serde_json::from_slice(&self.body).unwrap_or(Value::Null)
     }
 }
@@ -256,7 +256,7 @@ async fn logs(router: &MultiServiceRouter, operation: &str, body: Value) -> (u16
 /// `{rest-api-id}.execute-api.{region}.amazonaws.com`, which is the endpoint
 /// `RestApi$disableExecuteApiEndpoint` documents — carrying no credential at all, as a client
 /// of a public method sends none.
-async fn invoke(
+pub(crate) async fn invoke(
     router: &MultiServiceRouter,
     api: &str,
     stage: &str,
@@ -285,7 +285,7 @@ fn group_arn(name: &str) -> String {
 /// The messages `FilterLogEvents` reports for `group`, or `None` when the account holds no
 /// such group at all — which is what "nothing was delivered and nothing was created" looks
 /// like to a client.
-async fn delivered(router: &MultiServiceRouter, group: &str) -> Option<Vec<String>> {
+pub(crate) async fn delivered(router: &MultiServiceRouter, group: &str) -> Option<Vec<String>> {
     let (status, body) = logs(router, "FilterLogEvents", json!({ "logGroupName": group })).await;
     if status != 200 {
         return None;

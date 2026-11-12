@@ -59,6 +59,11 @@ mod account_settings;
 // `UpdateAccount` patch stores, and which one names a role API Gateway could never assume.
 #[path = "all/account_logging_role.rs"]
 mod account_logging_role;
+// That the same question ANSWERS: the account-role patch reaches a terminal status line on the
+// first call, leaves a refused account exactly as it was, and the role it accepts is the one the
+// stage's execution log is then delivered under.
+#[path = "all/account_role_answered_within_the_request.rs"]
+mod account_role_answered_within_the_request;
 #[path = "all/api_key_collection.rs"]
 mod api_key_collection;
 #[path = "all/api_key_collection_members.rs"]

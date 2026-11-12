@@ -29,13 +29,13 @@ use crate::rest_api_lifecycle::{assert_failure, gateway_with_iam, string_member,
 
 /// The account id every emulator ARN carries, which is the account whose roles this emulator
 /// answers for.
-const ACCOUNT: &str = "000000000000";
+pub(crate) const ACCOUNT: &str = "000000000000";
 
 /// The pointer an `UpdateAccount` patch names the CloudWatch role by.
-const ROLE_POINTER: &str = "/cloudwatchRoleArn";
+pub(crate) const ROLE_POINTER: &str = "/cloudwatchRoleArn";
 
 /// The sentence API Gateway refuses a role it cannot assume with.
-const UNUSABLE_ROLE: &str = "The role ARN does not have required permissions configured. \
+pub(crate) const UNUSABLE_ROLE: &str = "The role ARN does not have required permissions configured. \
                              Please grant trust permission for API Gateway and add the \
                              required role policy.";
 
@@ -43,11 +43,11 @@ const UNUSABLE_ROLE: &str = "The role ARN does not have required permissions con
 const INVALID_ARN: &str = "Invalid ARN specified in the request";
 
 /// The error shape a refused `UpdateAccount` carries.
-const BAD_REQUEST: &str = "BadRequestException";
+pub(crate) const BAD_REQUEST: &str = "BadRequestException";
 
 /// A trust policy admitting `principal` to assume the role, as a service-principal trust
 /// document is written.
-fn trusting(principal: &str) -> String {
+pub(crate) fn trusting(principal: &str) -> String {
     json!({
         "Version": "2012-10-17",
         "Statement": [{
@@ -61,7 +61,7 @@ fn trusting(principal: &str) -> String {
 
 /// `iam:CreateRole` for `name` under `path`, carrying `trust` as its
 /// `AssumeRolePolicyDocument`.
-async fn create_role(gateway: &Gateway, name: &str, path: &str, trust: &str) {
+pub(crate) async fn create_role(gateway: &Gateway, name: &str, path: &str, trust: &str) {
     let encoded = |value: &str| {
         ::percent_encoding::utf8_percent_encode(value, ::percent_encoding::NON_ALPHANUMERIC)
             .to_string()
@@ -97,7 +97,10 @@ async fn create_role(gateway: &Gateway, name: &str, path: &str, trust: &str) {
 }
 
 /// `UpdateAccount` replacing the CloudWatch role with `value`.
-async fn replace_role(gateway: &Gateway, value: &str) -> crate::rest_api_lifecycle::Answer {
+pub(crate) async fn replace_role(
+    gateway: &Gateway,
+    value: &str,
+) -> crate::rest_api_lifecycle::Answer {
     gateway
         .call(
             "PATCH",
@@ -112,7 +115,7 @@ async fn replace_role(gateway: &Gateway, value: &str) -> crate::rest_api_lifecyc
 }
 
 /// The `cloudwatchRoleArn` `GetAccount` reports, or `None` when it reports none.
-async fn reported_role(gateway: &Gateway) -> Option<String> {
+pub(crate) async fn reported_role(gateway: &Gateway) -> Option<String> {
     let answer = gateway.call("GET", "/account", None).await;
     assert_eq!(
         answer.status, 200,
@@ -127,7 +130,7 @@ async fn reported_role(gateway: &Gateway) -> Option<String> {
 }
 
 /// The ARN of a role of THIS account, under `path`.
-fn role_arn(path: &str, name: &str) -> String {
+pub(crate) fn role_arn(path: &str, name: &str) -> String {
     format!("arn:aws:iam::{ACCOUNT}:role{path}{name}")
 }
 

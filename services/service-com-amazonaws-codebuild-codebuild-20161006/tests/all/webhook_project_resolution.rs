@@ -290,8 +290,12 @@ async fn a_webhook_operation_on_an_unresolvable_project_reports_the_project() {
 /// DOES resolve, so the two separately actionable conditions stay distinguishable.
 ///
 /// The table spans the same request variations as above against a held project carrying no
-/// webhook: `CreateWebhook` connects it, while the two mutators report the WEBHOOK as the
-/// absent resource (or refuse on the request itself) and never the project.
+/// webhook: `CreateWebhook` connects it, while the mutators that have to RESOLVE an
+/// existing webhook in order to act on it report the WEBHOOK as the absent resource (or
+/// refuse on the request itself) and never the project. `DeleteWebhook` is the one request
+/// that resolves no webhook to act on it: a webhook that is not there is already the state
+/// that call asks for, so recorded behaviour is the empty 200 and the project is left as it
+/// was (the sentence's own doc states that exception).
 #[tokio::test]
 async fn a_held_project_with_no_webhook_reports_the_webhook() {
     for (nth, (operation, variation, extra)) in requests().iter().enumerate() {
@@ -310,6 +314,40 @@ async fn a_held_project_with_no_webhook_reports_the_webhook() {
             assert!(
                 body["webhook"]["payloadUrl"].is_string(),
                 "case {case:?}: the created webhook is reported, got {body}"
+            );
+            continue;
+        }
+
+        if operation == &"DeleteWebhook" {
+            // The one request that resolves no webhook in order to act on it: a project
+            // that carries none is already in the state a delete asks for, so the call is
+            // an idempotent no-op — HTTP 200 with the output's no members, the project
+            // still held and still carrying no webhook.
+            assert_eq!(
+                status, 200,
+                "case {case:?}: a delete of a webhook that is not there is a no-op, got \
+                 {status} with {body}"
+            );
+            assert_eq!(
+                body,
+                json!({}),
+                "case {case:?}: the output models no members, got {body}"
+            );
+            let (read_status, read) =
+                call(&router, "BatchGetProjects", json!({"names": [&project]})).await;
+            assert_eq!(
+                read_status, 200,
+                "case {case:?}: BatchGetProjects: expected 200, got {read}"
+            );
+            assert!(
+                read["projectsNotFound"]
+                    .as_array()
+                    .is_some_and(|missing| missing.is_empty()),
+                "case {case:?}: the no-op must leave the project held, got {read}"
+            );
+            assert!(
+                read["projects"][0]["webhook"].is_null(),
+                "case {case:?}: the project still carries no webhook, got {read}"
             );
             continue;
         }
