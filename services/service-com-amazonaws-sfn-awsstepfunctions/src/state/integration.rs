@@ -238,20 +238,23 @@ pub const MAX_CALL_CHAIN_DEPTH: u8 = 3;
 /// The longest the walk waits for ONE integration call to answer.
 ///
 /// Emulator bound: the call is served in THIS process, so a call that only reads or
-/// writes another service's store answers in microseconds, and the work one
-/// interpretation may do cannot bound the time spent inside a call because the walk is
-/// blocked there rather than interpreting. A call that has not answered inside this
+/// writes another service's store answers in microseconds, while one that RUNS work —
+/// a job script, a function's own code — takes as long as that work takes on whatever
+/// the host has left to give it. A call that has not answered inside this
 /// fails the task with ASL's own timeout error instead of holding the blocking thread
 /// the walk runs on, which also clamps a target that holds its answer on purpose:
 /// `GetActivityTask` is a long poll, and this is what stops one from pinning a thread
-/// for its hold.
+/// for its hold. So the figure is chosen to bound a HELD THREAD and not to impose a
+/// latency expectation on the work a call performs: it is wide enough that a call whose
+/// target is running caller-supplied work is not pre-empted by it, and it stays well
+/// inside the per-run ceiling below.
 ///
 /// It bounds ONE call and nothing about the interpretation around it, because a call is
 /// not interpretation: a `lambda:invoke` task's call RUNS the caller's own function,
 /// which Lambda bounds by that function's `Timeout` and not by anything of this
 /// service's. What bounds the thread a run holds across every call it makes is
 /// [`super::asl::MAX_CALL_WAIT_DURATION`], which this stays well inside.
-pub const MAX_CALL_DURATION: Duration = Duration::from_secs(10);
+pub const MAX_CALL_DURATION: Duration = Duration::from_secs(60);
 
 /// The ARN namespace every service-integration `Resource` is written under: the
 /// `Resource` names Step Functions' own integration, not the target resource.
