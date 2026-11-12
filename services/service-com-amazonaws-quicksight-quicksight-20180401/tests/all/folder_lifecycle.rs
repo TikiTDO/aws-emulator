@@ -331,8 +331,11 @@ async fn create_folder_persists_it_and_describe_reports_it() {
         );
         assert_eq!(
             body["Message"],
-            json!(format!("The folder with ID {folder_id} already exists.")),
-            "case {case:?}: the refusal must name the folder: {body}"
+            json!(format!(
+                "Folder {} already exists",
+                folder_arn(row.account, folder_id)
+            )),
+            "case {case:?}: the refusal must name the folder by its ARN: {body}"
         );
         let (status, body) = describe_folder(&harness, row.account, folder_id).await;
         assert_eq!(
@@ -400,8 +403,12 @@ async fn folder_identity_is_the_account_and_the_id() {
         );
         assert_eq!(
             body["Message"],
-            json!(format!("Folder {folder_id} not found in account {account}.")),
-            "case {case:?}: the refusal must name the folder that was not found: {body}"
+            json!(format!(
+                "Folder {} is not found",
+                folder_arn(account, folder_id)
+            )),
+            "case {case:?}: the refusal must name the folder that was not found by its \
+             ARN: {body}"
         );
     }
 }

@@ -6,6 +6,13 @@
 //! handler needs — ARN construction, request-id minting, the `NextToken` codec and
 //! the model's enum catalogs — so the per-operation files in `src/ops/` share one
 //! implementation instead of each growing its own.
+//!
+//! The wording of the conflict and not-found refusals those handlers raise is one
+//! concern of its own, so it lives in [`refusals`] and is re-exported from here.
+
+mod refusals;
+
+pub use refusals::*;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};

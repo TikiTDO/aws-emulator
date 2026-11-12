@@ -327,9 +327,11 @@ async fn create_group_persists_it_and_describe_reports_it() {
         assert_eq!(
             body["Message"],
             json!(format!(
-                "The group {group_name} already exists in namespace {namespace}."
+                "Group {group_name} already exists. AWS account id: {}, groupName: \
+                 {group_name}. ",
+                row.account
             )),
-            "case {case:?}: the refusal must name the group and its namespace: {body}"
+            "case {case:?}: the refusal must name the group and its account: {body}"
         );
         assert_eq!(
             body["ResourceType"],

@@ -222,9 +222,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if store.groups.contains_key(&key) {
             return Err(CreateGroupErrorModeled::ResourceExistsException(
                 ResourceExistsException {
-                    message: Some(format!(
-                        "The group {} already exists in namespace {}.",
-                        input.group_name, input.namespace
+                    message: Some(crate::state::group_exists_message(
+                        &input.group_name,
+                        &input.aws_account_id,
                     )),
                     resource_type: Some(crate::state::EXCEPTION_RESOURCE_TYPE_GROUP.to_string()),
                     request_id: Some(request_id),

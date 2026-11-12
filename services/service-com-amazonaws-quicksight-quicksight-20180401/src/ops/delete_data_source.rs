@@ -146,7 +146,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
+        // `ctx` carries the region a refusal's ARN is scoped to.
+        let region = crate::state::request_region(ctx.parts());
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(DeleteDataSourceErrorModeled::InternalFailureException(
                 InternalFailureException {
@@ -163,8 +164,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(removed) = store.data_sources.remove(&key) else {
             return Err(DeleteDataSourceErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
-                    message: Some(format!("Data source with ID {} not found.", key.1)),
-                    resource_type: Some("DATA_SOURCE".to_string()),
+                    message: Some(crate::state::data_source_not_found_message(
+                        &region, &key.0, &key.1,
+                    )),
+                    // The data-source miss reports no `ResourceType`: QuickSight sends
+                    // the discriminator on the identity paths, not this one.
+                    resource_type: None,
                     request_id: Some(request_id),
                 },
             )

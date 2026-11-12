@@ -154,7 +154,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
+        // A report on stored state: nothing here writes to the store. `ctx` carries
+        // the region a refusal's ARN is scoped to.
+        let region = crate::state::request_region(ctx.parts());
         let request_id = crate::state::next_request_id();
 
         let Some(state) = crate::state::service_state(&*self.engine) else {
@@ -171,9 +173,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(folder) = store.folder(&input.aws_account_id, &input.folder_id) else {
             return Err(DescribeFolderErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
-                    message: Some(format!(
-                        "Folder {} not found in account {}.",
-                        input.folder_id, input.aws_account_id
+                    message: Some(crate::state::folder_not_found_message(
+                        &region,
+                        &input.aws_account_id,
+                        &input.folder_id,
                     )),
                     // `ExceptionResourceType` declares no member for a folder, so this
                     // refusal reports none rather than an unmodelled value.

@@ -199,9 +199,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if store.folders.contains_key(&key) {
             return Err(CreateFolderErrorModeled::ResourceExistsException(
                 ResourceExistsException {
-                    message: Some(format!(
-                        "The folder with ID {} already exists.",
-                        input.folder_id
+                    message: Some(crate::state::folder_exists_message(
+                        &region,
+                        &input.aws_account_id,
+                        &input.folder_id,
                     )),
                     // `ExceptionResourceType` declares no member for a folder, so this
                     // refusal reports none rather than an unmodelled value.
