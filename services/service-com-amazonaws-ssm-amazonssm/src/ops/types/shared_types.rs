@@ -318,6 +318,7 @@ pub struct AttachmentsSource {
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#DocumentDescription")]
 #[derive(Debug, Clone, Default)]
 pub struct DocumentDescription {
+    pub document_id: Option<String>,
     pub sha1: Option<String>,
     pub hash: Option<String>,
     pub hash_type: Option<String>,

@@ -296,10 +296,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if store.resolve_document(&region, &input.name).is_some() {
             return Err(CreateDocumentErrorModeled::DocumentAlreadyExists(
                 DocumentAlreadyExists {
-                    message: Some(format!(
-                        "Document {} already exists in {region}",
-                        input.name
-                    )),
+                    message: Some(crate::state::document_already_exists_message(&input.name)),
                 },
             )
             .into());
@@ -335,6 +332,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let record = crate::state::DocumentRecord {
+            // "The identifier Systems Manager assigned the SSM document when it was
+            // created": minted here, once, and persisted with the document, so every read
+            // of it reports the id this create assigned.
+            document_id: crate::state::new_document_id(),
             name: input.name.clone(),
             region,
             document_type,

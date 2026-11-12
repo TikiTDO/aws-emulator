@@ -165,7 +165,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let missing = || {
             DescribeDocumentErrorModeled::InvalidDocument(InvalidDocument {
-                message: Some(format!("Document {} doesn't exist", input.name)),
+                message: Some(crate::state::document_not_found_message(&input.name)),
             })
         };
 
@@ -218,7 +218,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         Ok(DescribeDocumentOutput {
-            document: Some(record.description_of(version)),
+            document: Some(record.described_version(version)),
         })
     }
 }

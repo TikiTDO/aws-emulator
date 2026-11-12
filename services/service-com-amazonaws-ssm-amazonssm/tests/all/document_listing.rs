@@ -47,10 +47,10 @@ const AMAZON: &str = "Amazon";
 /// A second Region, so a rule that holds per Region is seen to.
 const OTHER_REGION: &str = "eu-central-1";
 
-/// The `PlatformType` values the model's enum declares
+/// The `PlatformType` values the model's enum declares, in the order it declares them
 /// (`smithy_query(query="shape", shape="PlatformType")`), which is what a document whose
 /// body restricts it to no platform is compatible with.
-const PLATFORM_TYPES: &[&str] = &["Linux", "MacOS", "Windows"];
+const PLATFORM_TYPES: &[&str] = &["Windows", "Linux", "MacOS"];
 
 /// The published `Automation` runbooks, in name order. Checked below to partition the
 /// catalogue with [`PUBLISHED_COMMANDS`], so a new entry has to be given its place here.

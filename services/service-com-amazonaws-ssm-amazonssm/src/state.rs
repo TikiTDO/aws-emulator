@@ -146,6 +146,9 @@ pub mod cloud_connectors;
 /// Rendering a persisted document's content in the `DocumentFormat` a read asks for.
 pub mod document_format;
 
+/// Which operating-system platforms a document's own content leaves it compatible with.
+pub mod document_platforms;
+
 /// Which documents a listing of this account's SSM documents walks, the filters that
 /// narrow it, and the identity each one is reported by.
 pub mod document_listing;
@@ -226,7 +229,7 @@ use crate::ops::types::{
     DocumentRequires, InstanceInformation, InstanceProperty, Parameter, ParameterHistory,
     ParameterInlinePolicy, ParameterMetadata, Tag, DESCRIBE_ACTIVATIONS_FILTER_KEYS_VALUES,
     INSTANCE_INFORMATION_FILTER_KEY_VALUES, INSTANCE_PROPERTY_FILTER_KEY_VALUES,
-    PARAMETER_TIER_VALUES, PARAMETER_TYPE_VALUES, PLATFORM_TYPE_VALUES,
+    PARAMETER_TIER_VALUES, PARAMETER_TYPE_VALUES,
 };
 
 /// The signing name, endpoint prefix and ARN namespace of this service, all three
@@ -1129,6 +1132,15 @@ pub const DOCUMENT_STATUS_UPDATING: &str = "Updating";
 /// clock makes it due rather than by any call.
 pub const DOCUMENT_TRANSITION_DELAY: Duration = Duration::from_secs(3);
 
+/// The `PlatformType` values, in the order the modelled enum
+/// (`smithy_query(query="shape",shape="PlatformType")`) lists them — which is the order a
+/// document's `PlatformTypes` are reported in, so a caller reading `PlatformTypes[0]`
+/// reads the platform the service names first. The generated
+/// `crate::ops::types::PLATFORM_TYPE_VALUES` carries the same values sorted; the test in
+/// [`document_platforms`] holds the two to the same SET, so a model revision cannot leave
+/// this listing behind.
+pub const DOCUMENT_PLATFORM_TYPES: &[&str] = &["Windows", "Linux", "MacOS"];
+
 /// The version a newly created document carries: "The document version" counts from 1,
 /// and each `UpdateDocument` mints the next number after the latest one
 /// ([`DocumentRecord::next_version`]).
@@ -1273,6 +1285,28 @@ pub fn document_name_rejection(name: &str) -> Option<String> {
     ))
 }
 
+/// How this service states that the document a call named is not one it holds.
+///
+/// `InvalidDocument` is "the specified SSM document doesn't exist" (its own
+/// documentation), and the sentence Systems Manager answers a document read with is fixed
+/// text around the NAME the request asked for: `Document with name <name> does not
+/// exist.`. One function, so every read that resolves a document by name reports a miss
+/// in the same words — the name comes from the request and nothing else of it is
+/// interpolated.
+pub fn document_not_found_message(name: &str) -> String {
+    format!("Document with name {name} does not exist.")
+}
+
+/// How this service states that the name a `CreateDocument` asked for is already held.
+///
+/// `DocumentAlreadyExists` is "the specified document already exists" (its own
+/// documentation), and the sentence is fixed text around the name the create asked for:
+/// `Document with same name <name> already exists`. A document name is unique within a
+/// Region, but the sentence states no Region — what the caller has to change is the name.
+pub fn document_already_exists_message(name: &str) -> String {
+    format!("Document with same name {name} already exists")
+}
+
 /// What a `DocumentARN` value names: which document, and — when the value is a full
 /// ARN — in which Region and account.
 pub type DocumentQuery<'a> = ResourceQuery<'a>;
@@ -1344,8 +1378,9 @@ pub struct ParsedDocumentContent {
     pub description: Option<String>,
     /// One entry per `parameters` entry, in the content's own order.
     pub parameters: Vec<DocumentParameter>,
-    /// The platforms the content's step preconditions restrict the document to, or
-    /// every modelled platform when it restricts it to none.
+    /// The platforms the content's steps leave the document compatible with, or every
+    /// modelled platform when they restrict it to none
+    /// ([`document_platforms::declared_platform_types`]).
     pub platform_types: Vec<String>,
     /// The names of the steps the content declares, in the content's own order: the
     /// steps a command's invocation runs, which `GetCommandInvocation`'s `PluginName`
@@ -2109,49 +2144,6 @@ fn declared_parameters(
     Ok(parameters)
 }
 
-/// The platforms the content restricts the document to.
-///
-/// "The list of operating system (OS) platforms compatible with this SSM document"
-/// (`DocumentDescription$PlatformTypes`). A document declares a platform through a step
-/// precondition on `platformType` (`precondition: {StringEquals: [platformType,
-/// Linux]}`), so the compatible platforms are the ones its steps name; content that
-/// names none restricts nothing and so is compatible with every platform the model
-/// lists. Reported in the modelled enum's order, so two reads of one document agree.
-fn declared_platform_types(map: &::yaml_rust2::yaml::Hash) -> Vec<String> {
-    let mut declared: Vec<&str> = Vec::new();
-    if let Some(steps) = mapping_get(map, "mainSteps").and_then(::yaml_rust2::Yaml::as_vec) {
-        for step in steps {
-            let Some(precondition) = step
-                .as_hash()
-                .and_then(|step| mapping_get(step, "precondition"))
-                .and_then(::yaml_rust2::Yaml::as_hash)
-            else {
-                continue;
-            };
-            let Some(equals) =
-                mapping_get(precondition, "StringEquals").and_then(::yaml_rust2::Yaml::as_vec)
-            else {
-                continue;
-            };
-            if equals.first().and_then(::yaml_rust2::Yaml::as_str) != Some("platformType") {
-                continue;
-            }
-            for value in equals.iter().skip(1) {
-                if let Some(platform) = value.as_str() {
-                    if PLATFORM_TYPE_VALUES.contains(&platform) && !declared.contains(&platform) {
-                        declared.push(platform);
-                    }
-                }
-            }
-        }
-    }
-    PLATFORM_TYPE_VALUES
-        .iter()
-        .filter(|platform| declared.is_empty() || declared.contains(*platform))
-        .map(|platform| (*platform).to_string())
-        .collect()
-}
-
 /// The names of the steps `content` declares, in its own order.
 ///
 /// A schema 2.x document declares its steps as `mainSteps`, each with its own `name`
@@ -2257,7 +2249,7 @@ pub fn parse_document_content(
         schema_version,
         description: mapping_get(map, "description").and_then(scalar_string),
         parameters: declared_parameters(map)?,
-        platform_types: declared_platform_types(map),
+        platform_types: document_platforms::declared_platform_types(map),
         step_names: declared_step_names(map),
     })
 }
@@ -2501,8 +2493,9 @@ const PUBLISH_SNS_NOTIFICATION: &str = r#"{
 
 /// The body of the command document that runs a shell script on a managed node.
 ///
-/// A command document's step precondition is what restricts it to a platform
-/// ([`declared_platform_types`]), so the platforms the published document is reported
+/// A command document's step actions and preconditions are what restrict it to a platform
+/// ([`document_platforms::declared_platform_types`]), so the platforms the published
+/// document is reported
 /// compatible with are declared the same way a created document's are.
 const RUN_SHELL_SCRIPT: &str = r#"{
   "schemaVersion": "2.2",
@@ -2811,6 +2804,13 @@ impl DocumentVersionRecord {
 /// latest without becoming the default.
 #[derive(Debug, Clone)]
 pub struct DocumentRecord {
+    /// The identifier Systems Manager assigned the document when it was created, which is
+    /// what a read reports as `DocumentId`: minted once, per document, so two reads of one
+    /// document report the same id and no two documents share one
+    /// ([`ComAmazonawsSsmAmazonssmState::mint_document_id`]). Nothing of the request is in
+    /// it, and it is not the key the document is reached by — a document is addressed by
+    /// name.
+    pub document_id: String,
     /// The name the create supplied, which is what a read reports and part of the
     /// store key.
     pub name: String,
@@ -2970,6 +2970,9 @@ impl DocumentRecord {
     /// and default version.
     pub fn description_of(&self, version: &DocumentVersionRecord) -> DocumentDescription {
         DocumentDescription {
+            // The id Systems Manager assigned the document, which every read of it
+            // reports.
+            document_id: Some(self.document_id.clone()),
             // "Sha1 hashes have been deprecated", so the system hash is the Sha256 in
             // `Hash` and the deprecated member is left unset.
             sha1: None,
@@ -2996,7 +2999,11 @@ impl DocumentRecord {
             default_version: Some(self.default_version.to_string()),
             document_format: Some(version.document_format.clone()),
             target_type: version.target_type.clone(),
-            tags: (!self.tags.is_empty()).then(|| tagging::to_tag_list(&self.tags)),
+            // "The tags, or metadata, that have been applied to the document"
+            // (`DocumentDescription$Tags`, a `TagList` of length 0..1000): a document
+            // carrying none has an EMPTY tag list rather than no list at all, so a caller
+            // iterating `Tags` never has to tell a missing member from an empty one.
+            tags: Some(tagging::to_tag_list(&self.tags)),
             attachments_information: (!version.attachment_names.is_empty()).then(|| {
                 version
                     .attachment_names
@@ -3030,6 +3037,37 @@ impl DocumentRecord {
     /// this document holds no such version.
     pub fn description_of_version(&self, selector: &str) -> Option<DocumentDescription> {
         Some(self.description_of(self.select(selector)?))
+    }
+
+    /// The same description as a DESCRIBE of this document reports it: the document's
+    /// classification members carried as the empty lists a document nothing classified
+    /// has.
+    ///
+    /// `Category` is "the classification of a document to help you identify and
+    /// categorize its use" and `CategoryEnum` "the value that identifies a document's
+    /// category" (both `CategoryList`/`CategoryEnumList`, `@length` 0..3): Systems Manager
+    /// classifies the documents it publishes, so a document created through this API
+    /// carries NO category — which a describe reports as an empty list rather than as a
+    /// missing member, the way it reports an untagged document's `Tags`. RECORDED
+    /// BEHAVIOUR (corpus `simparity-wire-aws-v1`, fixture `ssm-association-create-and-list`
+    /// step `setup#2`): the create's own response carries neither member while the describe
+    /// carries both as `[]`, so this shape belongs to the describe rather than to every
+    /// read.
+    pub fn described_version(&self, version: &DocumentVersionRecord) -> DocumentDescription {
+        DocumentDescription {
+            category: Some(Vec::new()),
+            category_enum: Some(Vec::new()),
+            ..self.description_of(version)
+        }
+    }
+
+    /// Drop the version `version` numbers from this document, reporting whether it held
+    /// one. A document whose last version is dropped holds none and is removed whole by
+    /// its store ([`ComAmazonawsSsmAmazonssmState::remove_document_version`]).
+    pub fn remove_version(&mut self, version: u64) -> bool {
+        let held = self.version(version).is_some();
+        self.versions.retain(|candidate| candidate.version != version);
+        held
     }
 }
 
@@ -3113,6 +3151,12 @@ pub struct ComAmazonawsSsmAmazonssmState {
     /// a Region, which is what `DocumentAlreadyExists` reports a collision on. A
     /// `BTreeMap` so a listing walks a stable, total order.
     pub documents: BTreeMap<(String, String), DocumentRecord>,
+
+    /// The `DocumentId` of each document Systems Manager publishes ([`PUBLISHED_DOCUMENTS`]),
+    /// keyed by its name: a published document exists for as long as the account does, so
+    /// there is no create to mint its id. Minted ONCE here, so two reads of one published
+    /// document — through any Region's endpoint — report the same id.
+    pub published_document_ids: BTreeMap<String, String>,
 
     /// Every command a caller sent, keyed by `(region, command id)`: a command is sent
     /// to the Systems Manager endpoint of one Region and identified there by the id this
@@ -3283,6 +3327,10 @@ impl Default for ComAmazonawsSsmAmazonssmState {
         Self {
             parameters: BTreeMap::new(),
             documents: BTreeMap::new(),
+            published_document_ids: PUBLISHED_DOCUMENTS
+                .iter()
+                .map(|published| (published.name.to_string(), new_uuid()))
+                .collect(),
             commands: BTreeMap::new(),
             minted_command_ids: 0,
             automation_executions: BTreeMap::new(),
@@ -3462,6 +3510,13 @@ impl ComAmazonawsSsmAmazonssmState {
     pub fn published_document_record(&self, region: &str, name: &str) -> Option<DocumentRecord> {
         let (published, parsed, hash) = published_document_projection(name)?;
         Some(DocumentRecord {
+            // The id this store minted for the catalogue entry when it came into being;
+            // every read of that published document reports it.
+            document_id: self
+                .published_document_ids
+                .get(published.name)
+                .cloned()
+                .unwrap_or_default(),
             name: published.name.to_string(),
             region: region.to_string(),
             document_type: published.document_type.to_string(),
@@ -3538,6 +3593,46 @@ impl ComAmazonawsSsmAmazonssmState {
     pub fn insert_document(&mut self, record: DocumentRecord) {
         let key = (record.region.clone(), record.name.clone());
         self.documents.insert(key, record);
+    }
+
+    /// Remove `region`'s document of that name and every version of it, reporting whether
+    /// that Region held one.
+    ///
+    /// "Deletes the … document and all managed node associations to the document"
+    /// (`DeleteDocument`), so the associations that apply the document go with it: an
+    /// association names the document it applies by name, and the document it named is no
+    /// longer there to apply.
+    pub fn remove_document(&mut self, region: &str, name: &str) -> bool {
+        let removed = self
+            .documents
+            .remove(&(region.to_string(), name.to_string()))
+            .is_some();
+        if removed {
+            self.associations
+                .retain(|(held_region, _), association| {
+                    held_region != region || association.name != name
+                });
+        }
+        removed
+    }
+
+    /// Remove ONE version of `region`'s document of that name, reporting whether that
+    /// version was held.
+    ///
+    /// "The version of the document that you want to delete" (`DeleteDocument`'s
+    /// `DocumentVersion`): a document that holds other versions keeps them, and one whose
+    /// LAST version this was holds nothing and goes whole, associations with it.
+    pub fn remove_document_version(&mut self, region: &str, name: &str, version: u64) -> bool {
+        let Some(document) = self.document_mut(region, name) else {
+            return false;
+        };
+        if !document.remove_version(version) {
+            return false;
+        }
+        if document.versions.is_empty() {
+            self.remove_document(region, name);
+        }
+        true
     }
 
     /// How many documents `region` holds, which is what the documented document quota
@@ -4177,6 +4272,16 @@ pub const ACTIVATION_CODE_BYTES: usize = ACTIVATION_CODE_LEN / 4 * 3;
 /// names ONE random source and every id it mints is drawn the same way.
 pub fn new_uuid() -> String {
     ::emulator_telemetry::BatchId::random().as_str().to_string()
+}
+
+/// A fresh document id: the identifier Systems Manager assigns an SSM document when it is
+/// created, which every read of that document reports as `DocumentId`.
+///
+/// Drawn once per document and PERSISTED with it ([`DocumentRecord::document_id`]), so two
+/// reads of one document report the same id, no two documents share one, and nothing of
+/// the request is in it. The draw is the crate's one identifier source ([`new_uuid`]).
+pub fn new_document_id() -> String {
+    new_uuid()
 }
 
 /// A fresh activation id: "The ID number generated by the system when it processed the

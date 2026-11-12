@@ -368,6 +368,7 @@ mod tests {
     /// A document of `document_type` in `region`, as a create persists one.
     fn document(region: &str, name: &str, document_type: &str) -> DocumentRecord {
         DocumentRecord {
+            document_id: super::super::new_document_id(),
             name: name.to_string(),
             region: region.to_string(),
             document_type: document_type.to_string(),

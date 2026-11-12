@@ -258,7 +258,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 })
             } else {
                 UpdateDocumentErrorModeled::InvalidDocument(InvalidDocument {
-                    message: Some(format!("Document with name {} does not exist.", input.name)),
+                    message: Some(crate::state::document_not_found_message(&input.name)),
                 })
             }
             .into());

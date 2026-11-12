@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteDocument
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteDocument`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Remove an SSM document — the delete half of this service's document slice. This is the
+//! ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteDocument::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! What `CreateDocument` persisted is what this removes, from the one store in
+//! [`crate::state`]: "deletes the … document and all managed node associations to the
+//! document", so the associations that apply it go with it
+//! ([`crate::state::ComAmazonawsSsmAmazonssmState::remove_document`]) and a later
+//! `DescribeDocument` or `GetDocument` of that name reports `InvalidDocument`.
+//!
+//! A call that names a `DocumentVersion` or a `VersionName` removes THAT version and
+//! leaves the rest, and one that names neither removes every version — the document
+//! whole. Three deletes are refused rather than served: one of a document Systems Manager
+//! publishes (it is not the account's), one of a document type whose delete requires the
+//! `Force` flag, and one of the default version of a document that holds others.
 //!
 //! ## Shape of an operation
 //!
@@ -119,6 +124,14 @@ impl From<DeleteDocumentErrorModeled> for DeleteDocumentError {
     }
 }
 
+/// The `DocumentType` values whose delete requires the `Force` flag.
+///
+/// "Some SSM document types require that you specify a Force flag before you can delete
+/// the document. For example, you must specify a Force flag to delete a document of type
+/// ApplicationConfigurationSchema" (`DeleteDocument`'s `Force` doc) — the one type the doc
+/// names, and the only one this service requires the flag for.
+const DOCUMENT_TYPES_REQUIRING_FORCE: &[&str] = &["ApplicationConfigurationSchema"];
+
 /// The `DeleteDocument` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -155,18 +168,108 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteDocument` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteDocumentErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteDocument"))
+        // `Name`'s, `DocumentVersion`'s and `VersionName`'s patterns are MODELLED
+        // constraints, so the centralized walk has already refused anything outside them:
+        // reaching here means `Name` is a bare document name and `DocumentVersion`, when
+        // sent, is `$LATEST`, `$DEFAULT` or a positive integer.
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            DeleteDocumentErrorModeled::InternalServerError(InternalServerError {
+                message: Some("the document store is unavailable".to_string()),
+            })
+        })?;
+
+        let region = crate::state::request_region(ctx.parts());
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+
+        // The document this deletes, resolved the way every document call resolves one —
+        // which also materialises the status move the clock already owed. A name neither
+        // the account's documents nor the published catalogue holds names no document,
+        // which is what `InvalidDocument` reports.
+        let Some(record) = store.resolve_document_for_request(&input.name, &region, now) else {
+            return Err(DeleteDocumentErrorModeled::InvalidDocument(InvalidDocument {
+                message: Some(crate::state::document_not_found_message(&input.name)),
+            })
+            .into());
+        };
+
+        // A document Systems Manager publishes resolves for a read but is not the
+        // account's to remove, which is the operation `InvalidDocumentOperation` refuses.
+        if record.owner == crate::state::PUBLISHED_DOCUMENT_OWNER {
+            return Err(DeleteDocumentErrorModeled::InvalidDocumentOperation(
+                InvalidDocumentOperation {
+                    message: Some(format!(
+                        "Document {} is owned by {} and can't be deleted",
+                        record.name,
+                        crate::state::PUBLISHED_DOCUMENT_OWNER
+                    )),
+                },
+            )
+            .into());
+        }
+
+        // "Some SSM document types require that you specify a Force flag before you can
+        // delete the document. For example, you must specify a Force flag to delete a
+        // document of type ApplicationConfigurationSchema" (`Force`): a delete of such a
+        // document that carries no flag is the operation `InvalidDocumentOperation`
+        // refuses, and nothing is removed.
+        if DOCUMENT_TYPES_REQUIRING_FORCE.contains(&record.document_type.as_str()) && !input.force {
+            return Err(DeleteDocumentErrorModeled::InvalidDocumentOperation(
+                InvalidDocumentOperation {
+                    message: Some(format!(
+                        "You must specify the Force flag to delete a document of type {}",
+                        record.document_type
+                    )),
+                },
+            )
+            .into());
+        }
+
+        // "The version of the document that you want to delete. If not provided, all
+        // versions of the document are deleted" — and the same for `VersionName`, so a
+        // call that names neither removes the document whole.
+        let document_version = input
+            .document_version
+            .as_deref()
+            .filter(|selector| !selector.is_empty());
+        let version_name = input
+            .version_name
+            .as_deref()
+            .filter(|name| !name.is_empty());
+        if document_version.is_none() && version_name.is_none() {
+            store.remove_document(&region, &record.name);
+            return Ok(DeleteDocumentOutput {});
+        }
+
+        // A version selector or a version name the document holds none of names nothing
+        // to delete; `InvalidDocument` is the only miss this operation models.
+        let Ok(selected) = record.select_requested(document_version, version_name) else {
+            return Err(DeleteDocumentErrorModeled::InvalidDocument(InvalidDocument {
+                message: Some(format!(
+                    "Document with name {} and version {} does not exist.",
+                    record.name,
+                    document_version.or(version_name).unwrap_or_default()
+                )),
+            })
+            .into());
+        };
+        // "The default version" is the version every read that names none resolves to, so
+        // a document that holds other versions cannot be left without one: the default
+        // moves (`UpdateDocumentDefaultVersion`) before that version can go. A document
+        // whose ONLY version this is has no default to keep and goes whole.
+        if selected.version == record.default_version && record.versions.len() > 1 {
+            return Err(DeleteDocumentErrorModeled::InvalidDocumentOperation(
+                InvalidDocumentOperation {
+                    message: Some(format!(
+                        "Version {} of document {} is its default version and can't be \
+                         deleted while the document holds other versions",
+                        selected.version, record.name
+                    )),
+                },
+            )
+            .into());
+        }
+        store.remove_document_version(&region, &record.name, selected.version);
+        Ok(DeleteDocumentOutput {})
     }
 }

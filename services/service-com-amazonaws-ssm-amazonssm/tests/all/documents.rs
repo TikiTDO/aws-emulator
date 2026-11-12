@@ -31,9 +31,9 @@ const TRANSITION_DELAY: Duration =
 /// (`smithy_query(query="shape", shape="DocumentFormat")`).
 const DOCUMENT_FORMATS: &[&str] = &["JSON", "TEXT", "YAML"];
 
-/// The `PlatformType` values the model's enum declares
+/// The `PlatformType` values the model's enum declares, in the order it declares them
 /// (`smithy_query(query="shape", shape="PlatformType")`).
-const PLATFORM_TYPES: &[&str] = &["Linux", "MacOS", "Windows"];
+const PLATFORM_TYPES: &[&str] = &["Windows", "Linux", "MacOS"];
 
 /// The document-name prefixes `CreateDocument`'s `Name` doc reserves: "These are
 /// reserved by Amazon Web Services for use as document name prefixes: aws amazon amzn
@@ -166,12 +166,16 @@ fn content_hash(content: &str) -> String {
     hex::encode(sha2::Sha256::digest(content.as_bytes()))
 }
 
-/// A description with its `Status` dropped, so a create's report and a later read's can
-/// be compared without the clock-owed status move making the comparison a race.
-fn without_status(description: &Value) -> Value {
+/// A description with its `Status` and its classification members dropped, so a create's
+/// report and a later read's can be compared: the clock-owed status move would make the
+/// comparison a race, and a DESCRIBE carries `Category` and `CategoryEnum` where the
+/// create's own response carries neither (asserted on their own below).
+fn comparable(description: &Value) -> Value {
     let mut copy = description.clone();
     if let Some(map) = copy.as_object_mut() {
         map.remove("Status");
+        map.remove("Category");
+        map.remove("CategoryEnum");
     }
     copy
 }
@@ -263,7 +267,7 @@ async fn create_then_describe_reports_what_was_persisted() {
             schema_version: Some("2.2"),
             description: Some("Run on Windows and MacOS only"),
             parameters: &[],
-            platforms: &["MacOS", "Windows"],
+            platforms: &["Windows", "MacOS"],
         },
         RoundTrip {
             case: "TEXT content, which carries no document tree",
@@ -389,13 +393,21 @@ async fn create_then_describe_reports_what_was_persisted() {
             created["CreatedDate"].is_number(),
             "case {case}: expected a CreatedDate, got {created}"
         );
-        // None of these rows carries a tag, and an untagged document reports no Tags
-        // member rather than an empty list.
+        // None of these rows carries a tag, and an untagged document reports its tag set
+        // as the EMPTY list the modelled `TagList` admits rather than as no member.
         assert_eq!(
             created["Tags"],
-            Value::Null,
-            "case {case}: an untagged document reports no Tags, got {created}"
+            json!([]),
+            "case {case}: an untagged document reports an empty Tags list, got {created}"
         );
+        // The create's own response carries no classification members at all.
+        for member in ["Category", "CategoryEnum"] {
+            assert_eq!(
+                created[member],
+                Value::Null,
+                "case {case}: a create reports no {member}, got {created}"
+            );
+        }
         // A review is the change-template approval workflow, so no other document type
         // reports one.
         assert_eq!(
@@ -406,10 +418,19 @@ async fn create_then_describe_reports_what_was_persisted() {
 
         let read = describe_ok(&router, case, row.name).await;
         assert_eq!(
-            without_status(&read),
-            without_status(&created),
+            comparable(&read),
+            comparable(&created),
             "case {case}: DescribeDocument must report what CreateDocument persisted, got {read}"
         );
+        // A document nothing classified carries both classification members as empty
+        // lists when it is DESCRIBED (`CategoryList` / `CategoryEnumList`, length 0..3).
+        for member in ["Category", "CategoryEnum"] {
+            assert_eq!(
+                read[member],
+                json!([]),
+                "case {case}: a describe reports an empty {member} list, got {read}"
+            );
+        }
     }
 
     // A change template is the one type whose versions are reviewed.

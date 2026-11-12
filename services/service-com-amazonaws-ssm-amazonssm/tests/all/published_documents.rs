@@ -31,7 +31,7 @@ const CATALOGUE: &[service_com_amazonaws_ssm_amazonssm::state::PublishedDocument
 /// The `PlatformType` values the model's enum declares, in the model's order
 /// (`smithy_query(query="shape", shape="PlatformType")`), which is what a document whose
 /// body restricts it to no platform is compatible with.
-const PLATFORM_TYPES: &[&str] = &["Linux", "MacOS", "Windows"];
+const PLATFORM_TYPES: &[&str] = &["Windows", "Linux", "MacOS"];
 
 /// The `Owner` a published document reports: `Owner` is "the Amazon Web Services user
 /// that created the document" (`DocumentDescription$Owner`), and these were created by

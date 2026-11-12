@@ -29,6 +29,8 @@ mod boundary_refusal_wording;
 mod document_content;
 #[path = "all/document_default_version.rs"]
 mod document_default_version;
+#[path = "all/document_identity_and_deletion.rs"]
+mod document_identity_and_deletion;
 #[path = "all/document_listing.rs"]
 mod document_listing;
 #[path = "all/document_versions.rs"]

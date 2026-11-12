@@ -183,7 +183,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(record) = store.document_mut(&region, &input.name) else {
             return Err(UpdateDocumentDefaultVersionErrorModeled::InvalidDocument(
                 InvalidDocument {
-                    message: Some(format!("Document with name {} does not exist.", input.name)),
+                    message: Some(crate::state::document_not_found_message(&input.name)),
                 },
             )
             .into());
