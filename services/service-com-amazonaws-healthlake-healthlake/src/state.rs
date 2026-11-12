@@ -73,6 +73,12 @@ pub use agent_conversation::*;
 mod import_run;
 pub use import_run::*;
 
+mod sample_data;
+pub use sample_data::*;
+
+mod starter_profiles;
+pub use starter_profiles::*;
+
 use crate::ops::types::{
     AnalyticsConfiguration, BackupConfiguration, DatastoreBackupStatus, DatastoreProperties,
     DataTransformationProfileSummary, DataTransformationProfileVersionSummary, ErrorCause,
@@ -1908,6 +1914,64 @@ impl DataTransformationProfile {
             MAX_PROFILE_RETAINED_BYTES,
         )
     }
+}
+
+/// The characters a mapping file's name is built from: the name it is derived from
+/// lowercased, with every run of anything else collapsed to one of these.
+const CONTENT_NAME_SEPARATOR: char = '-';
+
+/// `name` as the name of a file in a profile's mapping: lowercased, with every run
+/// of anything that is not a letter or a digit collapsed to one
+/// [`CONTENT_NAME_SEPARATOR`] and none left at either end.
+///
+/// The ONE place a mapping file is named after something the service read — a C-CDA
+/// section of a starter profile ([`starter_profiles`]) or a column of a sample data
+/// file ([`sample_data`]) — so both resolvers name their files the same way.
+pub(crate) fn content_file_slug(name: &str) -> String {
+    let mut slug = String::with_capacity(name.len());
+    for character in name.chars() {
+        if character.is_alphanumeric() {
+            slug.extend(character.to_lowercase());
+        } else if !slug.ends_with(CONTENT_NAME_SEPARATOR) {
+            slug.push(CONTENT_NAME_SEPARATOR);
+        }
+    }
+    slug.trim_matches(CONTENT_NAME_SEPARATOR).to_string()
+}
+
+/// `name`'s letters and digits, lowercased: the form two spellings of one name are
+/// compared in.
+///
+/// The ONE place a name a caller or a file supplies is matched against a name this
+/// service publishes — a starter profile of the library, a FHIR R4 element a sample
+/// column carries — so neither resolver decides a match on case or on how the name's
+/// words are separated.
+pub(crate) fn normalized_content_name(name: &str) -> String {
+    name.chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// The file every resolved profile mapping carries beside its per-entry files:
+/// which source the content came from and what it converts between.
+///
+/// Named in one place because both resolvers that BUILD content — the starter
+/// profile library ([`starter_profiles`]) and the sample data inference
+/// ([`sample_data`]) — emit it, so the two cannot name it differently.
+pub(crate) const PROFILE_CONTENT_MANIFEST_FILE: &str = "profile.json";
+
+/// The format a profile's content converts TO, from the modelled `TargetFormat`
+/// enum — which declares exactly one value, the one
+/// `CreateDataTransformationProfile` documents as "Always FHIR_R4".
+///
+/// Read from the model in ONE place, so no resolver writes a target format out by
+/// hand or reads a different member of the enum than another.
+pub(crate) fn profile_target_format() -> &'static str {
+    crate::ops::types::TARGET_FORMAT_VALUES
+        .first()
+        .copied()
+        .unwrap_or_default()
 }
 
 /// Refuse profile content the modelled `ProfileMapping` could not carry, with

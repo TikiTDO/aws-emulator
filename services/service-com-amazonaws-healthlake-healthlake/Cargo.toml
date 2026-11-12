@@ -37,6 +37,10 @@ roxmltree = "0.20"
 # callback into this same emulator: no network client feature is enabled, because
 # the transport is the emulator's own.
 aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# Parses the sample data (CSV) file a `CreateDataTransformationProfile` infers a
+# profile mapping from (`src/state/sample_data.rs`): the columns and the values the
+# mapping is inferred from come from a real CSV reader, not from matching on text.
+csv = "1.4"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

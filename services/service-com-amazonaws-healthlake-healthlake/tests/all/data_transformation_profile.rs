@@ -652,24 +652,34 @@ fn refusal_cases() -> Vec<(&'static str, Value, u16, &'static str)> {
             "ResourceNotFoundException",
         ),
         (
-            "StarterProfile at its documented CCDA format: content this emulator does not hold",
+            // The starter profile library this service holds
+            // (`state::STARTER_PROFILES`) publishes no entry under this name, and a
+            // name it does not hold resolves to no content — see
+            // `tests/all/profile_source_variants.rs` for the names it does hold and
+            // the content each resolves to.
+            "StarterProfile naming an entry the built-in library does not hold",
             json!({
                 "ProfileName": "starter-ccda",
                 "SourceFormat": "CCDA",
                 "Source": { "StarterProfile": { "StarterProfileName": "ccda-ccd" } },
             }),
-            501,
-            "NotImplemented",
+            400,
+            "ValidationException",
         ),
         (
-            "SampleData at its documented CSV format: a mapping this emulator cannot infer",
+            // No Amazon S3 is mounted beside this service in THIS suite's harness,
+            // so nothing answers the read of the sample data file and no mapping can
+            // be inferred from it. The suite that stages a file through Amazon S3's
+            // own `PutObject` and reads the inferred DRAFT back is
+            // `tests/all/profile_source_variants.rs`.
+            "SampleData naming a location no mapping can be read from",
             json!({
                 "ProfileName": "sample-csv",
                 "SourceFormat": "CSV",
                 "Source": { "SampleData": { "S3Uri": "s3://sample-bucket/patients.csv" } },
             }),
-            501,
-            "NotImplemented",
+            400,
+            "ValidationException",
         ),
     ]
 }

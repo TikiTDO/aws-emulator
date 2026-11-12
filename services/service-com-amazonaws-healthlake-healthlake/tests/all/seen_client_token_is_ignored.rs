@@ -353,8 +353,9 @@ fn minting_create() -> Value {
 /// The rows for the create. The `Source` variants come from the modelled
 /// `CreateDataTransformationProfileSource` union
 /// (`smithy_query(query="shape", shape="CreateDataTransformationProfileSource")`),
-/// including the two whose content lives outside this emulator and which a FIRST
-/// call therefore answers 501 for.
+/// including the two whose content lives outside the request — and which a FIRST
+/// call therefore refuses here, because this harness mounts no Amazon S3 to read a
+/// sample file from and the library holds no entry under the name below.
 fn create_variants() -> Vec<Variant> {
     vec![
         Variant::new("the identical request", json!({})),
@@ -386,14 +387,14 @@ fn create_variants() -> Vec<Variant> {
             } } }),
         ),
         Variant::new(
-            "a starter profile this emulator holds no content for",
+            "a starter profile the built-in library does not hold",
             json!({
                 "SourceFormat": "CCDA",
                 "Source": { "StarterProfile": { "StarterProfileName": "CCDA_TO_FHIR_R4" } },
             }),
         ),
         Variant::new(
-            "a sample data file this emulator cannot read",
+            "a sample data file this harness has no Amazon S3 to read",
             json!({ "Source": { "SampleData": { "S3Uri": "s3://sample-bucket/patients.csv" } } }),
         ),
     ]
@@ -464,8 +465,8 @@ async fn a_create_under_a_seen_token_is_ignored_and_answered_with_its_profile() 
 
     // The ignoring is the TOKEN's doing: under a token not yet seen, the bodies
     // above are answered on their own merits — a clone of a version nothing
-    // holds is the modelled 404, and a source whose content lives outside this
-    // emulator is its 501 channel.
+    // holds is the modelled 404, and a source whose content nothing could be read
+    // from is the modelled 400.
     for (case, token, expected_code) in [
         (
             "a clone of a version no profile holds",
@@ -473,14 +474,14 @@ async fn a_create_under_a_seen_token_is_ignored_and_answered_with_its_profile() 
             "ResourceNotFoundException",
         ),
         (
-            "a starter profile this emulator holds no content for",
+            "a starter profile the built-in library does not hold",
             "token-fresh-starter",
-            "NotImplemented",
+            "ValidationException",
         ),
         (
-            "a sample data file this emulator cannot read",
+            "a sample data file this harness has no Amazon S3 to read",
             "token-fresh-sample",
-            "NotImplemented",
+            "ValidationException",
         ),
     ] {
         let fresh = under_a_fresh_token(&create_variants(), case, &minting, token);

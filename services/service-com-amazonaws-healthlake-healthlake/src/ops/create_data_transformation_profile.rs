@@ -6,23 +6,33 @@
 //! in [`crate::state`], so `GetDataTransformationProfile` reads back the content
 //! this call stored.
 //!
-//! Two of the four modelled source variants carry their content with the request or
-//! name content this service already holds, and both are served here:
-//! `ProfileMapping` (raw content) and `ExistingVersionedProfileId` (a clone of a
-//! stored version). The other two name content that lives OUTSIDE this emulator —
-//! `StarterProfile` names an entry in AWS's built-in starter profile library, whose
-//! content AWS does not publish, and `SampleData` asks the service to infer a
-//! mapping from a sample file in Amazon S3 — so neither can be served faithfully
-//! and each answers the 501 `NotImplemented` channel AFTER the source-format rule
-//! the model documents for it is enforced. Nothing is invented and nothing is
-//! persisted for them.
+//! All four modelled source variants resolve that initial content here, each from
+//! where its own content lives:
+//!
+//! * `ProfileMapping` carries it with the request, verbatim;
+//! * `ExistingVersionedProfileId` names a version this service already holds, and
+//!   the new profile starts life with a clone of it;
+//! * `StarterProfile` names an entry of this service's built-in starter profile
+//!   library ([`crate::state::starter_profile_mapping`]), whose content the
+//!   emulator holds — a name the library does not hold resolves to nothing and is
+//!   refused; and
+//! * `SampleData` names a CSV file in Amazon S3, and the mapping is INFERRED from
+//!   that file's own header row and the values its rows carry
+//!   ([`crate::state::infer_sample_data_mapping`]), read out of this emulator's own
+//!   object store through the in-process callback — a location nothing can be read
+//!   from is refused rather than answered with content nothing read.
+//!
+//! Each of the two variants whose content lives outside the request is resolved
+//! only AFTER the source-format rule the model documents for it, and the two that
+//! reach outside the store are resolved with NO lock held, exactly as
+//! `StartFHIRImportJob` reads its input.
 //!
 //! `ClientToken` is this operation's `@idempotencyToken`, and the model documents
 //! what a token the service has already seen does: "If this token matches a
 //! previous request, the service ignores the request but does not return an
 //! error". A call carrying one therefore mints nothing, changes nothing on the
-//! profile that token minted, and answers what the create that minted it
-//! answered — whatever the rest of the request says.
+//! profile that token minted, reads no source at all, and answers what the create
+//! that minted it answered — whatever the rest of the request says.
 //!
 //! The reply carries the new profile's status beside the modelled members — see
 //! [`CreatedProfile`] — so a caller learns it without a second call.
@@ -236,7 +246,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let region = crate::state::request_region(ctx.parts());
-        let mut store = state.lock();
 
         // `ClientToken` is this operation's `@idempotencyToken`, and the model
         // documents what a token already seen does: "the service ignores the
@@ -244,32 +253,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // no second profile, changes nothing on the profile that token minted,
         // and answers what the create that minted it answered — whatever the
         // rest of the request says and whether or not it repeats the first one.
-        if let Some(recorded) = input
-            .client_token
-            .as_deref()
-            .and_then(|token| store.profile_client_tokens.get(token))
-            .cloned()
-        {
-            if let Some(existing) = store.profiles.get(&recorded.profile_id) {
-                return Ok(CreatedProfile {
-                    modelled: CreateDataTransformationProfileOutput {
-                        profile_id: existing.id.clone(),
-                        version: crate::state::DRAFT_PROFILE_VERSION,
-                        source_format: existing.source_format.clone(),
-                        target_format: existing.target_format.clone(),
-                        profile_name: existing.name.clone(),
-                        last_updated_at: existing.created_at,
-                    },
-                    profile_status: existing.status().to_string(),
-                });
-            }
+        // Answered BEFORE any source is resolved, so a repeat reads no starter
+        // profile and no sample data file either. The guard is SCOPED: no other
+        // caller waits on the store while one create reads its source.
+        if let Some(answered) = replayed(&state.lock(), input.client_token.as_deref()) {
+            return Ok(answered);
         }
 
         // The initial DRAFT content, resolved from the one source variant the request
         // carries. Resolved BEFORE the profile is minted, so a source that does not
         // resolve leaves no half-built profile behind.
-        let mapping = initial_mapping(&store, &input)?;
+        let mapping = initial_mapping(ctx, &region, &state, &input).await?;
         crate::state::validate_profile_mapping(&mapping).map_err(validation)?;
+
+        let mut store = state.lock();
+        // The replay again, because the store is only this handler's for the span
+        // of a lock: a repeat under the same token while the source was being read
+        // is answered exactly as it would have been before the read — nothing has
+        // been persisted yet.
+        if let Some(answered) = replayed(&store, input.client_token.as_deref()) {
+            return Ok(answered);
+        }
 
         // The store holds a bounded number of profiles; past the ceiling this
         // operation answers with the quota refusal it models.
@@ -344,12 +348,42 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     }
 }
 
+/// What a create carrying a `ClientToken` this service has already seen answers:
+/// the profile that token minted, read out of its stored record, or `None` when the
+/// token is one no create has used.
+///
+/// Read off the RECORD rather than from the request, so a repeat cannot report
+/// anything the stored profile does not say.
+fn replayed(
+    store: &crate::state::ComAmazonawsHealthlakeHealthlakeState,
+    client_token: Option<&str>,
+) -> Option<CreatedProfile> {
+    let recorded = client_token.and_then(|token| store.profile_client_tokens.get(token))?;
+    let existing = store.profiles.get(&recorded.profile_id)?;
+    Some(CreatedProfile {
+        modelled: CreateDataTransformationProfileOutput {
+            profile_id: existing.id.clone(),
+            version: crate::state::DRAFT_PROFILE_VERSION,
+            source_format: existing.source_format.clone(),
+            target_format: existing.target_format.clone(),
+            profile_name: existing.name.clone(),
+            last_updated_at: existing.created_at,
+        },
+        profile_status: existing.status().to_string(),
+    })
+}
+
 /// The DRAFT content the request's `Source` resolves to.
 ///
 /// One variant carries the content, one names content this service already holds,
-/// and two name content that lives outside this emulator — see the module docs.
-fn initial_mapping(
-    store: &crate::state::ComAmazonawsHealthlakeHealthlakeState,
+/// one names an entry of this service's starter profile library and one names a
+/// sample data file in this emulator's own Amazon S3 — see the module docs. Each
+/// arm takes the store lock only if it needs it, and the arm that reads Amazon S3
+/// holds none.
+async fn initial_mapping(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    state: &::engine::ServiceState<crate::state::ComAmazonawsHealthlakeHealthlakeState>,
     input: &CreateDataTransformationProfileInput,
 ) -> Result<::std::collections::BTreeMap<String, String>, CreateDataTransformationProfileError> {
     match &input.source {
@@ -363,57 +397,75 @@ fn initial_mapping(
         // A clone of a stored version: the new profile starts life with exactly the
         // content that version holds, which is what makes a rollback possible.
         CreateDataTransformationProfileSource::ExistingVersionedProfileId(source) => {
-            if !crate::state::is_profile_id(&source.profile_id) {
-                return Err(validation(
-                    "Source.ExistingVersionedProfileId.ProfileId must be 32 lowercase \
-                     hexadecimal characters",
-                ));
-            }
-            if !(crate::state::DRAFT_PROFILE_VERSION..=crate::state::MAX_PROFILE_VERSION)
-                .contains(&source.version)
-            {
-                return Err(validation(format!(
-                    "Source.ExistingVersionedProfileId.Version must be between {} and {}",
-                    crate::state::DRAFT_PROFILE_VERSION,
-                    crate::state::MAX_PROFILE_VERSION
-                )));
-            }
-            // The two lookups answer with their own sentence, so a clone naming an
-            // id no profile holds is not told its VERSION is missing — the same
-            // distinction `GetDataTransformationProfile` makes.
-            let Some(profile) = store.profiles.get(&source.profile_id) else {
-                return Err(not_found(crate::state::profile_not_found_message(
-                    &source.profile_id,
-                )));
-            };
-            let Some(version) = profile.version(source.version) else {
-                return Err(not_found(crate::state::profile_version_not_found_message(
-                    &source.profile_id,
-                    source.version,
-                )));
-            };
-            Ok(version.mapping.clone())
+            cloned_version(&state.lock(), source)
         }
-        // Documented: "Valid only when the source format is Consolidated Clinical
-        // Document Architecture (C-CDA)".
-        CreateDataTransformationProfileSource::StarterProfile(_) => {
-            require_source_format(&input.source_format, "CCDA", "Source.StarterProfile")?;
-            Err(crate::scaffolded::Scaffolded::not_implemented(
-                "CreateDataTransformationProfile from a StarterProfile source (AWS does not \
-                 publish the content of its built-in starter profiles, so this emulator holds \
-                 none)",
-            ))
+        // Documented: "Creates the profile from a built-in starter profile. Valid
+        // only when the source format is Consolidated Clinical Document
+        // Architecture (C-CDA)" — so the content is the library entry's own, and a
+        // name the library does not hold resolves to nothing.
+        CreateDataTransformationProfileSource::StarterProfile(source) => {
+            require_source_format(
+                &input.source_format,
+                crate::state::STARTER_PROFILE_SOURCE_FORMAT,
+                "Source.StarterProfile",
+            )?;
+            crate::state::starter_profile_mapping(&source.starter_profile_name).ok_or_else(|| {
+                validation(crate::state::starter_profile_not_found_message())
+            })
         }
-        // Documented: "Valid only when the source format is Comma-separated values
-        // (CSV)".
-        CreateDataTransformationProfileSource::SampleData(_) => {
-            require_source_format(&input.source_format, "CSV", "Source.SampleData")?;
-            Err(crate::scaffolded::Scaffolded::not_implemented(
-                "CreateDataTransformationProfile from a SampleData source (inferring a profile \
-                 mapping from a sample data file is not something this emulator can do)",
-            ))
+        // Documented: "Creates the profile from a sample data file stored in Amazon
+        // S3. Valid only when the source format is Comma-separated values (CSV)" —
+        // so the mapping is inferred from that file, read out of this emulator's own
+        // object store with NO lock held.
+        CreateDataTransformationProfileSource::SampleData(source) => {
+            require_source_format(
+                &input.source_format,
+                crate::state::SAMPLE_DATA_SOURCE_FORMAT,
+                "Source.SampleData",
+            )?;
+            crate::state::infer_sample_data_mapping(ctx, region, &source.s3_uri)
+                .await
+                .map_err(validation)
         }
     }
+}
+
+/// The content of the stored version `source` names: the version's own mapping, or
+/// the refusal that names what the clone could not find.
+fn cloned_version(
+    store: &crate::state::ComAmazonawsHealthlakeHealthlakeState,
+    source: &ExistingVersionedProfileSource,
+) -> Result<::std::collections::BTreeMap<String, String>, CreateDataTransformationProfileError> {
+    if !crate::state::is_profile_id(&source.profile_id) {
+        return Err(validation(
+            "Source.ExistingVersionedProfileId.ProfileId must be 32 lowercase \
+             hexadecimal characters",
+        ));
+    }
+    if !(crate::state::DRAFT_PROFILE_VERSION..=crate::state::MAX_PROFILE_VERSION)
+        .contains(&source.version)
+    {
+        return Err(validation(format!(
+            "Source.ExistingVersionedProfileId.Version must be between {} and {}",
+            crate::state::DRAFT_PROFILE_VERSION,
+            crate::state::MAX_PROFILE_VERSION
+        )));
+    }
+    // The two lookups answer with their own sentence, so a clone naming an
+    // id no profile holds is not told its VERSION is missing — the same
+    // distinction `GetDataTransformationProfile` makes.
+    let Some(profile) = store.profiles.get(&source.profile_id) else {
+        return Err(not_found(crate::state::profile_not_found_message(
+            &source.profile_id,
+        )));
+    };
+    let Some(version) = profile.version(source.version) else {
+        return Err(not_found(crate::state::profile_version_not_found_message(
+            &source.profile_id,
+            source.version,
+        )));
+    };
+    Ok(version.mapping.clone())
 }
 
 /// Enforce the source format a source variant is documented to be valid for.

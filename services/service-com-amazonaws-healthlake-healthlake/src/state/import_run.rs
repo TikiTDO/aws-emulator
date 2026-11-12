@@ -697,7 +697,9 @@ async fn input_objects(
 ///
 /// An import location may name one object or a prefix holding many, and a key is
 /// a prefix of itself, so both are read with the one listing the prefix gives.
-fn split_s3_uri(uri: &str) -> Option<(String, String)> {
+/// `pub(crate)` because every Amazon S3 location this service is pointed at — a
+/// sample data file among them ([`super::sample_data`]) — is split the one way.
+pub(crate) fn split_s3_uri(uri: &str) -> Option<(String, String)> {
     let rest = uri.strip_prefix("s3://")?;
     let (bucket, key) = match rest.split_once('/') {
         Some((bucket, key)) => (bucket, key),

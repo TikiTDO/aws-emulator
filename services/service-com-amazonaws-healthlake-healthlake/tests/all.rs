@@ -73,6 +73,8 @@ mod list_tags_for_resource;
 mod profile_client_token_lifetime;
 #[path = "all/profile_retained_byte_ceilings.rs"]
 mod profile_retained_byte_ceilings;
+#[path = "all/profile_source_variants.rs"]
+mod profile_source_variants;
 #[path = "all/publish_data_transformation_profile.rs"]
 mod publish_data_transformation_profile;
 #[path = "all/resource_tagging.rs"]
