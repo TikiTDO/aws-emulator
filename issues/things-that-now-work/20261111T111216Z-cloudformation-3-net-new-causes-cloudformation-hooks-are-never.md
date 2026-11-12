@@ -1,19 +1,41 @@
 Issue-Severity: CRITICAL
 Issue-Corpus: simparity-behavioral-aws-v1
 Issue-Corpus-Kind: behavioral
-Issue-Trace-Ids: cloudformation.deep-cloudformation-1-cfn-enforce-fail-hook-blocks-unencrypted-queue-create cloudformation.deep-cloudformation-1-cfn-enforce-warn-hook-flags-but-allows-unencrypted-queue-create cloudformation.stack-continue-update-rollback-client-request-token-marks-its-events cloudformation.stack-continue-update-rollback-force-rollback-skips-failed-resource cloudformation.stack-continue-update-rollback-lifecycle cloudformation.stack-update-cancel-then-continue-rollback cloudformation.continue-update-rollback-on-stable-stack-fails cloudformation.cdk-s3-auto-delete-objects-empties-past-destroy-manual-bucket-blocks-on-bucketnotempty
+Issue-Trace-Ids: cloudformation.stack-continue-update-rollback-client-request-token-marks-its-events cloudformation.stack-continue-update-rollback-force-rollback-skips-failed-resource cloudformation.stack-continue-update-rollback-lifecycle cloudformation.stack-update-cancel-then-continue-rollback cloudformation.continue-update-rollback-on-stable-stack-fails
 Issue-Shape-Id: com.amazonaws.cloudformation#CloudFormation
-Issue-Key: cloudformation.deep-cloudformation-1-cfn-enforce-fail-hook-blocks-unencrypted-queue-create|run#21|AssertionError|assert bad["StackStatus"] == "ROLLBACK_COMPLETE", (
-Issue-Key: cloudformation.deep-cloudformation-1-cfn-enforce-warn-hook-flags-but-allows-unencrypted-queue-create|run#20|AssertionError|assert len(hook_events) == 1, (
 Issue-Key: cloudformation|ContinueUpdateRollback|ValidationError
 Issue-Key: cloudformation.stack-continue-update-rollback-force-rollback-skips-failed-resource|run#7|AssertionError|assert _status_of(cfn, stack_id, "Custom") == "UPDATE_FAILED", f"Custom after the failed rollback: {_resources(cfn, stack_id)!r}"
 Issue-Key: cloudformation.stack-continue-update-rollback-lifecycle|_next_request#33|Timeout|return json.loads(envelope["Message"])
 Issue-Key: cloudformation.stack-update-cancel-then-continue-rollback|_next_request#31|Timeout|return json.loads(envelope["Message"])
 Issue-Key: cloudformation.continue-update-rollback-on-stable-stack-fails|_next_request#38|Timeout|raise AssertionError(f"no custom-resource request arrived within {timeout_s}s")
-Issue-Key: cloudformation.cdk-s3-auto-delete-objects-empties-past-destroy-manual-bucket-blocks-on-bucketnotempty|_cdk#12|AssertionError|assert result.returncode == expect_rc, (
 Issue-Commit: 9e6dcc54d456fb2455bf69889afaa61e9a9cc966
 
 # 3 net-new causes: CloudFormation hooks are never enforced, UPDATE_ROLLBACK_FAILED is never reached, and a Lambda-backed custom resource never completes
+
+> _RESOLVED SCOPE — read this first._ What this report is filed as resolved for is **Cause 2
+> of 3**: UPDATE_ROLLBACK_FAILED is now reached, the resource a refused rollback leaves behind
+> reports `UPDATE_FAILED`, and `ContinueUpdateRollback` resumes such a rollback (asking the
+> custom resource's provider for the previous configuration again where it skips nothing).
+> Its keys and traces are the ones left in the header above.
+>
+> **Cause 1 (hooks are never enforced) and Cause 3 (a Lambda-backed custom resource never
+> completes) are NOT fixed.** They were re-filed, with their own replay keys and traces, as
+> `issues/things-that-do-not-work/20261112T140000Z-cloudformation-hooks-are-never-enforced-and-a-lambda-backed-custom-resource-never-completes.md`;
+> their descriptions below are kept here only as the context Cause 2 was found in.
+>
+> _Reconciliation of two conflicting recordings, for the next fixer._ The wrong-state refusal
+> of `ContinueUpdateRollback` is recorded in two different forms by two corpora. The
+> behavioral corpus (this issue's `continue-update-rollback-on-stable-stack-fails`, plus the
+> three checks of
+> `20261112T002904Z-cloudformation-2-net-new-causes-continueupdaterollback-s-wrong.md`)
+> records the FIXED sentence `RollbackUpdatedStack cannot be called from current stack status`,
+> which is also the form the sibling `CancelUpdateStack` gate already answers in and is what
+> the emulator now emits (`crate::state::CANNOT_CONTINUE_UPDATE_ROLLBACK`). The older wire
+> issue `20261109T061652Z-cloudformation-continueupdaterollback-s-wrong-state-refusal-names-rollbackupdatedstack-and.md`
+> (in `things-that-now-work`) recorded the opposite, status-interpolating form
+> `ContinueUpdateRollback cannot be called from stack with <StackStatus> status.`; four
+> behavioral checks and the message family outweigh it, so do NOT flip the wording back on a
+> wire replay without reconciling both corpora first.
 
 > _Note: this issue was identified against the code base at commit `9e6dcc54d456fb2455bf69889afaa61e9a9cc966`. If you are an issue fixer working on this, the code base you are currently working in can have drifted, so you might need to trace the issue back to the current code base._
 

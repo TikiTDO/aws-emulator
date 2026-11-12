@@ -178,6 +178,31 @@ pub const UNSTATED_REASON: &str = "The custom resource provider reported FAILED"
 /// this size is one CloudFormation reads; one byte more is not.
 pub const MAX_RESPONSE_BODY_BYTES: usize = 4096;
 
+/// What CloudFormation reports as the failure of a custom resource whose provider ANSWERED
+/// and whose answer says the work was not carried out.
+///
+/// A provider's `Reason` is not CloudFormation's own diagnostic, and CloudFormation does not
+/// report it as one: it reports the response status it RECEIVED from the custom resource,
+/// quotes the message that response carried ([`ProviderResponse::failure_reason`]), and names
+/// the request the answer answered. That is what tells a client reading the event that the
+/// failure came from the resource's provider rather than from CloudFormation or an owning
+/// service, and WHICH of the resource's requests it was about — a resource is sent one
+/// request per stack operation, each answered under its own `RequestId`.
+///
+/// Public so a suite asserting a failed resource's reported reason reads the sentence from
+/// here rather than spelling it again.
+///
+/// Recorded behaviour: the custom-resource response protocol is not in the Smithy model, and
+/// this is the sentence CloudFormation writes — its fixed text verbatim, with the message the
+/// answer stated and the `RequestId` of the request it answered as its only variable parts,
+/// both taken from that answer and from the request this emulator sent.
+pub fn answered_failure_reason(message: &str, request_id: &str) -> String {
+    format!(
+        "Received response status [{FAILED}] from custom resource. Message returned: {message} \
+         (RequestId: {request_id})"
+    )
+}
+
 /// What a resource whose provider answered with a document past that bound fails with.
 /// Entirely fixed text: nothing of the document is interpolated into it, and the document
 /// itself is never read.

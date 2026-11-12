@@ -396,19 +396,25 @@ async fn a_failed_answer_fails_the_action_its_request_was_for() {
              {summary:?}"
         );
 
-        // The resource's OWN event is that action's failure, carrying the provider's reason.
+        // The resource's OWN event is that action's failure, reporting the FAILED response
+        // CloudFormation received from the resource: the message that answer stated, and the
+        // request it answered.
         if let Some(expected) = row.resource_status {
             let reason = recorded_event_reason(&router, row.stack_name, "Thing", expected).await;
+            let expected_reason =
+                custom_resource::answered_failure_reason(STATED_REASON, &awaited);
             assert_eq!(
-                reason, STATED_REASON,
-                "case {case:?}: the resource's {expected} event must carry the provider's reason"
+                reason, expected_reason,
+                "case {case:?}: the resource's {expected} event must report the provider's \
+                 answer as {expected_reason:?}"
             );
         }
     }
 }
 
-/// The `Reason` a `FAILED` answer carries is the resource's failure reason, as the protocol
-/// states it: the provider's own sentence, and the fixed one for an answer that states none.
+/// The `Reason` a `FAILED` answer carries is the MESSAGE the resource's failure quotes, as
+/// the protocol states it: the provider's own sentence, and the fixed one for an answer that
+/// states none.
 ///
 /// The rows differ in what the answer's `Reason` member is.
 #[tokio::test]
@@ -486,9 +492,12 @@ async fn the_reason_a_failed_answer_states_is_the_resources_failure_reason() {
             "case {case:?}: a FAILED answer must fail the create, got {described}"
         );
         let reason = recorded_event_reason(&router, stack_name, "Thing", "CREATE_FAILED").await;
+        let expected_reason =
+            custom_resource::answered_failure_reason(&expected, &request.request_id);
         assert_eq!(
-            reason, expected,
-            "case {case:?}: expected the resource to report the provider's reason, got {reason:?}"
+            reason, expected_reason,
+            "case {case:?}: expected the resource to report the provider's answer as \
+             {expected_reason:?}, got {reason:?}"
         );
     }
 }

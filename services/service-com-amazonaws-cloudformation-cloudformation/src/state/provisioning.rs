@@ -1003,19 +1003,26 @@ pub async fn advance_stabilisations_in(
             let provider_answer = barrier
                 .provider_request
                 .as_ref()
-                .map(|_| barrier.provider_response.as_ref());
+                .map(|request| (request.request_id.as_str(), barrier.provider_response.as_ref()));
             // WHICH of the owning service's answers ends this wait: that the resource it
             // created is ready, or that the resource it deleted is gone. A removal that is
             // still in flight holds the operation exactly as a creation that is still coming
             // up does, so the two answers are read as the one thing they both are — whether
             // the call that service accepted has been carried out.
             let readiness = match provider_answer {
-                Some(Some(response)) if response.succeeded() => Ok(Readiness::Ready),
+                Some((_, Some(response))) if response.succeeded() => Ok(Readiness::Ready),
                 // The provider says it did not carry the request out, so nothing is going to
-                // bring the resource up — or take it away — and the reason it gave is the
-                // resource's own failure.
-                Some(Some(response)) => Ok(Readiness::Failed(response.failure_reason())),
-                Some(None) => Ok(Readiness::Pending(barrier.reported_state.clone())),
+                // bring the resource up — or take it away — and what CloudFormation reports
+                // is the FAILED response it received from the resource, carrying the message
+                // that response stated and the request it answered
+                // ([`custom_resource::answered_failure_reason`]).
+                Some((request_id, Some(response))) => Ok(Readiness::Failed(
+                    custom_resource::answered_failure_reason(
+                        &response.failure_reason(),
+                        request_id,
+                    ),
+                )),
+                Some((_, None)) => Ok(Readiness::Pending(barrier.reported_state.clone())),
                 None => match owner_for(&barrier.resource_type) {
                     Some(provisioner) => match barrier.awaited {
                         // A create's wait and a change's wait ask that service the one
@@ -1067,7 +1074,7 @@ pub async fn advance_stabilisations_in(
                 || !barrier.awaited.awaits_readiness()
             {
                 BTreeMap::new()
-            } else if let Some(Some(response)) = provider_answer {
+            } else if let Some((_, Some(response))) = provider_answer {
                 response.data.clone()
             } else {
                 match owner_for(&barrier.resource_type) {

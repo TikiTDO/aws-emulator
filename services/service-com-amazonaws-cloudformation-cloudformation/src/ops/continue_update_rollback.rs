@@ -212,7 +212,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The store lock is taken for the write and RELEASED at the end of this block: the
         // calls that put the resources back run after it, and each of those reaches another
         // service's own handler.
-        let (stack_id, region, declared, against, outstanding, provenance, role_arn, policies) = {
+        let (stack_id, region, declared, against, provenance, role_arn, policies) = {
             let mut store = state.lock();
             store.settle(now);
 
@@ -228,10 +228,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // roll back all changes after a failed stack update": that is the one state a
             // rollback can be continued from, so a stack in any other one is refused and
             // left exactly where it is. The refusal names the call that cannot be made and
-            // the status the stack is in.
+            // says the current status is not one it can be made from
+            // ([`crate::state::CANNOT_CONTINUE_UPDATE_ROLLBACK`]).
             if previous.status != status::UPDATE_ROLLBACK_FAILED {
                 return Err(crate::scaffolded::Scaffolded::validation_error(
-                    crate::state::cannot_continue_update_rollback(&previous.status),
+                    crate::state::CANNOT_CONTINUE_UPDATE_ROLLBACK,
                 ));
             }
             // "A client request token already exists": the token identifies ONE request, so
@@ -336,7 +337,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 stack.region.clone(),
                 declared,
                 against,
-                outstanding,
                 stack.provenance(),
                 // The role the resumed rollback's own calls are made under: the one in
                 // force on the stack, which this request may have just replaced.
@@ -370,6 +370,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let mut store = state.lock();
         if let Some(stack) = store.resolve_mut(&request_region, &stack_id) {
+            // A resource whose owning service accepted the revert without having carried it
+            // out — or whose PROVIDER has been sent the request and has not answered — holds
+            // this resumption open, exactly as it held the rollback it resumes open: the
+            // resumption is not reported complete while a resource it put back is still
+            // being put back, and an answer that says the revert failed leaves the stack in
+            // `UPDATE_ROLLBACK_FAILED` again
+            // ([`crate::state::provisioning::advance_stabilisations`]).
+            //
+            // Recorded BEFORE the walk's events are scheduled, as every other deployment
+            // does it: a resource still being put back is one the walk's own terminal event
+            // for it is GATED behind, so nothing reports the revert as complete until the
+            // answer that decides it has landed.
+            stack.record_stabilisations(&reverted.stabilising, ::std::time::SystemTime::now());
             stack.schedule_resource_events(&reverted.transitions);
             stack.record_materialised_resources(reverted.resources);
             // What the resumed rollback left each resource in, which is what a client reads
@@ -382,13 +395,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // The rollback could not be carried out even now: the stack stays in
                 // UPDATE_ROLLBACK_FAILED with the owning service's own refusal as the
                 // reason, rather than reporting a rollback that did not happen, and what
-                // the owning services hold is still what the failed update put there.
+                // the owning services hold is still what the failed update put there — the
+                // outstanding plan this resumption read is still on the stack, so a further
+                // resumption asks for the same revert again.
                 stack.fail_transition(
                     ::std::time::SystemTime::now(),
                     status::UPDATE_ROLLBACK_FAILED,
                     failure,
                 );
-                stack.unreverted_rollback = outstanding;
             }
         }
 

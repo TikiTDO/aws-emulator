@@ -76,11 +76,11 @@ fn labelled(name: &str) -> String {
     format!("Stack: {name} does not exist")
 }
 
-/// The sentence `ContinueUpdateRollback` answers for a stack whose status the continuation
-/// cannot be started from: the call that cannot be made, then the status the stack IS in.
-fn cannot_continue(stack_status: &str) -> String {
-    format!("ContinueUpdateRollback cannot be called from stack with {stack_status} status.")
-}
+/// The fixed sentence `ContinueUpdateRollback` answers for a stack whose status the
+/// continuation cannot be started from: the call CloudFormation's control plane makes for it,
+/// and that the current status is not one the call can be made from — which status that is
+/// reaches no part of it.
+const CANNOT_CONTINUE: &str = "RollbackUpdatedStack cannot be called from current stack status";
 
 /// The fixed sentence `RollbackStack` answers for a stack whose status a rollback cannot be
 /// started from: it states the statuses the call CAN be made from and nothing of the stack.
@@ -477,7 +477,7 @@ async fn a_drift_result_nothing_issued_is_refused_naming_the_id_the_request_sent
 }
 
 #[tokio::test]
-async fn a_status_gated_rollback_refusal_names_only_the_status_it_was_refused_from() {
+async fn a_status_gated_rollback_refusal_carries_no_part_of_the_stack_it_refused() {
     let router = router();
     // A stack whose create is still in flight, and the same stack once that create has
     // completed and once an update has: three statuses, none of which either call can be made
@@ -542,9 +542,14 @@ async fn a_status_gated_rollback_refusal_names_only_the_status_it_was_refused_fr
             status, 200,
             "case {case:?}: expected the stack to be readable, got {status} {described}"
         );
+        assert_eq!(
+            xml_text(&described, "StackStatus").as_deref(),
+            Some(reported_status),
+            "case {case:?}: expected the stack to be in {reported_status:?}, got {described}"
+        );
 
         for (action, expected) in [
-            ("ContinueUpdateRollback", cannot_continue(reported_status)),
+            ("ContinueUpdateRollback", CANNOT_CONTINUE.to_string()),
             ("RollbackStack", CANNOT_ROLL_BACK.to_string()),
         ] {
             let members = vec![member("StackName", "wording-status")];
@@ -589,11 +594,11 @@ async fn a_status_gated_rollback_refusal_names_only_the_status_it_was_refused_fr
                  got {leaked:?} in {sentence:?}"
             );
         }
-        if *action == "RollbackStack" {
+        if *action == "RollbackStack" || *action == "ContinueUpdateRollback" {
             assert!(
                 !sentence.contains(reported.as_str()),
-                "case {case:?} on {action}: expected the refusal to name the statuses the call \
-                 can be made from rather than the stack's own, got {reported:?} in {sentence:?}"
+                "case {case:?} on {action}: expected the refusal to carry no part of this run, \
+                 got the stack's own status {reported:?} in {sentence:?}"
             );
         }
     }

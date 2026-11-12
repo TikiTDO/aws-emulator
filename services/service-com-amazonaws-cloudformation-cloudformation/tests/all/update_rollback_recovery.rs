@@ -38,7 +38,7 @@ use service_com_amazonaws_cloudformation_cloudformation::state::wait_conditions:
     DEFAULT_TIMEOUT, MAX_TIMEOUT,
 };
 use service_com_amazonaws_cloudformation_cloudformation::state::{
-    cannot_continue_update_rollback, resource_status, status,
+    resource_status, status, CANNOT_CONTINUE_UPDATE_ROLLBACK,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -294,10 +294,16 @@ async fn continuing_a_rollback_is_refused_unless_the_rollback_failed() {
             http_status, 400,
             "case {case:?}: expected the call to be refused with 400, got {http_status} {body}"
         );
-        let expected = cannot_continue_update_rollback(reported);
+        // The status gate words ONE sentence whatever status it refused from, so the status
+        // the stack is really in (`reported`) reaches no part of it.
+        let expected = CANNOT_CONTINUE_UPDATE_ROLLBACK;
         assert!(
-            body.contains(&expected),
+            body.contains(expected),
             "case {case:?}: expected the refusal to be {expected:?}, got {body}"
+        );
+        assert!(
+            !body.contains(&format!("{reported} status")),
+            "case {case:?}: expected the refusal to carry no part of this run, got {body}"
         );
         wait_for_the_transition().await;
     }

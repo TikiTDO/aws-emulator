@@ -6,13 +6,15 @@
 //! RULE under test: **the operation "continues rolling back a stack from
 //! UPDATE_ROLLBACK_FAILED to UPDATE_ROLLBACK_COMPLETE state", so it is served only for a
 //! stack in `UPDATE_ROLLBACK_FAILED`; from any other `StackStatus` it is refused with HTTP
-//! 400 and a `ValidationError` whose message names the operation the caller INVOKED and the
-//! status the stack is CURRENTLY in — `ContinueUpdateRollback cannot be called from stack
-//! with <StackStatus> status.` — and the stack is left exactly where it was.**
+//! 400 and a `ValidationError` whose message is the status gate's own FIXED sentence —
+//! `RollbackUpdatedStack cannot be called from current stack status`, naming the call
+//! CloudFormation's control plane makes for this operation and saying the stack's current
+//! status is not one it can be made from, with no part of this run in it — and the stack is
+//! left exactly where it was.**
 //!
 //! The sentence is spelled out here rather than imported from the crate, because the sentence
-//! IS the requirement: a reworded message, a message naming some other verb, or one that
-//! replaces the status with a constant phrase must fail this suite.
+//! IS the requirement: a reworded message, one naming some other call, or one that
+//! interpolates the status or the stack it was called against must fail this suite.
 //!
 //! The rows span the class the rule generalises over: every value of the model's `StackStatus`
 //! enum, read with
@@ -38,11 +40,9 @@ const TEMPLATE: &str = r#"{"Resources":{
      "Topic":{"Type":"AWS::SNS::Topic","Properties":{"DisplayName":"continue-gate"}}}}"#;
 
 /// The sentence CloudFormation answers when the continuation arrives at a stack whose status
-/// it cannot be started from: the operation the caller invoked, then the status the stack is
-/// in, then the terminating period.
-fn cannot_continue_from(stack_status: &str) -> String {
-    format!("ContinueUpdateRollback cannot be called from stack with {stack_status} status.")
-}
+/// it cannot be started from: the call its control plane makes, and that the current status
+/// is not one the call can be made from — whichever status that is.
+const CANNOT_CONTINUE: &str = "RollbackUpdatedStack cannot be called from current stack status";
 
 /// Every `StackStatus` the model declares except `UPDATE_ROLLBACK_FAILED` (the one status the
 /// call is served from) and `DELETE_COMPLETE` (a stack that no longer exists).
@@ -101,8 +101,8 @@ async fn the_continuation_is_refused_from_every_other_status_naming_the_call_and
     );
     wait_for_the_transition().await;
 
-    // Every sentence the table collects, so the status really is interpolated rather than
-    // replaced by a constant phrase: one shared sentence cannot satisfy the rows.
+    // Every sentence the table collects: the gate words one refusal whatever status it
+    // refused from, so the set this fills must hold exactly that sentence.
     let mut answered: BTreeSet<String> = BTreeSet::new();
     for seeded in REFUSED_FROM {
         // The status the call arrives at, seeded directly: most of these need an operation
@@ -142,17 +142,16 @@ async fn the_continuation_is_refused_from_every_other_status_naming_the_call_and
             Some("ValidationError"),
             "case {seeded:?}: expected a ValidationError, got {refused}"
         );
-        let expected = cannot_continue_from(seeded);
         let message = xml_text(&refused, "Message");
         assert_eq!(
             message.as_deref(),
-            Some(expected.as_str()),
-            "case {seeded:?}: expected the refusal to read {expected:?}, got {message:?}"
+            Some(CANNOT_CONTINUE),
+            "case {seeded:?}: expected the refusal to read {CANNOT_CONTINUE:?}, got {message:?}"
         );
-        // The sentence carries the operation and the status and nothing else of this run: not
-        // the stack's id, and not the name the request sent.
+        // The sentence carries the call and nothing of this run: not the status the stack is
+        // really in, not the stack's id, and not the name the request sent.
         let sentence = message.unwrap_or_default();
-        for leaked in [stack_id.as_str(), stack_name] {
+        for leaked in [stack_id.as_str(), stack_name, *seeded] {
             assert!(
                 !sentence.contains(leaked),
                 "case {seeded:?}: expected the refusal to name no part of the stack, got \
@@ -176,9 +175,9 @@ async fn the_continuation_is_refused_from_every_other_status_naming_the_call_and
     }
 
     assert_eq!(
-        answered.len(),
-        REFUSED_FROM.len(),
-        "expected one distinct sentence per status, got {answered:?}"
+        answered.into_iter().collect::<Vec<String>>(),
+        vec![CANNOT_CONTINUE.to_string()],
+        "expected the one fixed sentence from every status"
     );
 }
 

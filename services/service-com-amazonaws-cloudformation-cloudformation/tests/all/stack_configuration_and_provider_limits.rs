@@ -327,9 +327,16 @@ async fn a_response_document_past_the_bound_fails_the_resource() {
              with {body}"
         );
         let reason = recorded_reason(&router, stack_name, "Thing", "CREATE_FAILED").await;
+        // The resource reports the FAILED response CloudFormation read for a document it
+        // would not read: the response-too-long message, under the request that document
+        // answered.
+        let expected = custom_resource::answered_failure_reason(
+            custom_resource::RESPONSE_TOO_LONG_REASON,
+            &request.request_id,
+        );
         assert_eq!(
-            reason, custom_resource::RESPONSE_TOO_LONG_REASON,
-            "case {case:?}: expected the response-too-long reason, got {reason:?}"
+            reason, expected,
+            "case {case:?}: expected the response-too-long reason {expected:?}, got {reason:?}"
         );
     }
 }

@@ -396,7 +396,10 @@ async fn a_verification_call_starts_the_check_and_the_record_then_reports_its_ou
 async fn a_verification_call_the_service_cannot_act_on_is_refused_and_starts_no_check() {
     let router = emulator();
     // Several registrations, so the stored id the near-miss rows mutate carries letters
-    // as well as digits.
+    // as well as digits: a minted id is a string of digits and letters, so WHICH of the
+    // registrations below provides it is whichever one first minted an id with a letter in
+    // it — keeping only the last would make the rows below depend on how one run's ids came
+    // out.
     let mut kept = String::new();
     for index in 0..10 {
         let case = format!("stored domain {index}");
@@ -407,7 +410,10 @@ async fn a_verification_call_the_service_cannot_act_on_is_refused_and_starts_no_
             &case,
         )
         .await;
-        kept = member(&created, "targetDomainId").expect("the registration mints an id");
+        let minted = member(&created, "targetDomainId").expect("the registration mints an id");
+        if !kept.chars().any(|c| c.is_ascii_alphabetic()) {
+            kept = minted;
+        }
     }
     assert!(
         kept.chars().any(|c| c.is_ascii_alphabetic()),

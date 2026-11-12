@@ -4154,12 +4154,15 @@ pub fn stack_cannot_be_rolled_back() -> String {
 /// The message CloudFormation answers when `ContinueUpdateRollback` names a stack whose
 /// current status is not one a rollback can be continued from.
 ///
-/// CloudFormation's status gate states the call that cannot be made and the status the stack
-/// IS in: the operation's own name, then the stack's current `StackStatus` read off the
-/// record. The stack's id and name reach no part of the text.
-pub fn cannot_continue_update_rollback(stack_status: &str) -> String {
-    format!("ContinueUpdateRollback cannot be called from stack with {stack_status} status.")
-}
+/// Entirely FIXED text, the way every status gate of this service's control plane words its
+/// refusal (`CANNOT_CANCEL_UPDATE_STACK` of `crate::ops::cancel_update_stack` is the same
+/// sentence for the call that cancels an update): the gate names the CALL it refused —
+/// `RollbackUpdatedStack`, the name of this operation in CloudFormation's own control plane
+/// — and says the stack's current status is not one it can be made from. WHICH status that
+/// is reaches no part of the sentence, and neither does the stack's id or name: the status
+/// is this run's own state, and `DescribeStacks` is what reports it.
+pub const CANNOT_CONTINUE_UPDATE_ROLLBACK: &str =
+    "RollbackUpdatedStack cannot be called from current stack status";
 
 /// `Err(message)` for a request that names a change set by NAME without the stack it
 /// belongs to.
@@ -4863,7 +4866,7 @@ pub async fn settle_due_rollbacks<Eng: Send + Sync + 'static>(
         store.take_due_rollbacks()
     };
     for owed in due {
-        let outstanding = owed.rollback.clone();
+        let outstanding = owed.rollback;
         // The rollback's calls are the STACK's, made under its service role: a role denied
         // the call that would put a resource back cannot make it, which is what leaves the
         // stack in `UPDATE_ROLLBACK_FAILED` below.
@@ -4887,14 +4890,19 @@ pub async fn settle_due_rollbacks<Eng: Send + Sync + 'static>(
         let Some(stack) = store.resolve_mut(&owed.region, &owed.stack_id) else {
             continue;
         };
-        stack.schedule_resource_events(&reverted.transitions);
-        stack.record_materialised_resources(reverted.resources);
         // A resource whose owning service accepted the revert without having carried it out
         // — or whose PROVIDER has been sent the request and has not answered — holds this
         // rollback open, exactly as it holds the operation being rolled back open: the
         // rollback is not reported complete while a resource it put back is still coming up,
         // and a wait that runs out fails it ([`provisioning::advance_stabilisations`]).
+        //
+        // Recorded BEFORE the walk's events are scheduled, as every other deployment does
+        // it: a resource still being put back is one the walk's own terminal event for it is
+        // GATED behind ([`StoredStack::schedule_resource_events`]), so nothing reports the
+        // revert as complete until the answer that decides it has landed.
         stack.record_stabilisations(&reverted.stabilising, SystemTime::now());
+        stack.schedule_resource_events(&reverted.transitions);
+        stack.record_materialised_resources(reverted.resources);
         // What the rollback left each resource in, which is what a client reads back —
         // and what says which resource a resumed rollback may skip.
         stack.record_rollback_resource_statuses(&reverted.transitions, SystemTime::now());
@@ -4905,13 +4913,14 @@ pub async fn settle_due_rollbacks<Eng: Send + Sync + 'static>(
             // `ContinueUpdateRollback` resumes from — with that service's own refusal as
             // the reason, rather than reporting a rollback that did not happen. What those
             // services are still holding is kept, because that is what a resumed rollback
-            // has to put back.
+            // has to put back — the plan the rollback was opened with
+            // ([`StoredStack::begin_owed_update_rollback`] holds it as the outstanding one
+            // for exactly this, so there is nothing to put back on the stack here).
             stack.fail_transition(
                 SystemTime::now(),
                 status::UPDATE_ROLLBACK_FAILED,
                 failure,
             );
-            stack.unreverted_rollback = Some(outstanding);
         }
     }
 }

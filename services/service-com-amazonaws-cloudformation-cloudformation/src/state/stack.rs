@@ -2118,9 +2118,20 @@ impl StoredStack {
         let failed_status = failed_status_of(&self.status);
         let updating = self.status == status::UPDATE_IN_PROGRESS;
         let creating = self.status == status::CREATE_IN_PROGRESS;
-        // WHICH action on the resource did not go through, which is what the stack's summary
-        // reports it failed for.
-        let action = match barrier.awaited {
+        // WHICH action on the resource did not go through: what the stack's summary reports
+        // it failed for, and the `*_FAILED` status that action leaves the RESOURCE itself in.
+        //
+        // The walk that opened this wait had already recorded the outcome it PLANNED for the
+        // resource — it accepted the call and held the resource at the wait, so the record
+        // states the work as carried through — and a wait that ends in a failure is exactly
+        // that work NOT being carried through. `StackResource$ResourceStatus` is the
+        // resource's "Current status", so it reports the failed status with the reason that
+        // ended the wait: nothing reports a completion a provider or an owning service
+        // refused, and this is the set a resumed rollback reads ("you can specify only
+        // resources that are in the UPDATE_FAILED state because a rollback failed"). Both
+        // follow from the same arm, so the event and the status cannot disagree about which
+        // action failed.
+        let (action, failed_resource_status) = match barrier.awaited {
             // The resource was being CREATED, so its own event is the failed CREATE, which
             // the walk had planned as a completion and the gate held back.
             stabilising::Awaited::Ready => {
@@ -2134,7 +2145,7 @@ impl StoredStack {
                 if unanswered_provider_request {
                     self.discard_uncreated_resource(logical_id);
                 }
-                failed_action::CREATE
+                (failed_action::CREATE, resource_status::CREATE_FAILED)
             }
             // The resource's creation had not STARTED: it was waiting for the resources it
             // depends on, and what did not go through is still its own create. There is no
@@ -2154,7 +2165,7 @@ impl StoredStack {
                         .and_then(|pending| pending.operation_id.clone()),
                     self.client_request_token.clone(),
                 );
-                failed_action::CREATE
+                (failed_action::CREATE, resource_status::CREATE_FAILED)
             }
             // The resource ALREADY EXISTED and what was being carried out on it was the
             // change this deployment declared, so what did not go through is its UPDATE:
@@ -2167,13 +2178,21 @@ impl StoredStack {
                     resource_status::UPDATE_FAILED,
                     reason,
                 );
-                failed_action::UPDATE
+                (failed_action::UPDATE, resource_status::UPDATE_FAILED)
             }
             // The resource was being DELETED, and what the owning service answered about
             // that delete was recorded when it answered: what did not happen is the removal,
             // so no event of the resource is rewritten.
-            stabilising::Awaited::Gone => failed_action::DELETE,
+            stabilising::Awaited::Gone => {
+                (failed_action::DELETE, resource_status::DELETE_FAILED)
+            }
         };
+        self.record_resource_status(
+            logical_id,
+            failed_resource_status,
+            Some(reason.to_string()),
+            now,
+        );
         let summary = resource_failure_summary(action, [logical_id]);
         // Whether the stack RESTS in the failed status decides whether an event of its own
         // reports that status: a rollback this failure owes begins at this very instant and
@@ -2357,6 +2376,14 @@ impl StoredStack {
         }
         let plan = self.rollback_plan.take();
         self.begin_update_rollback(now, reason);
+        // The rollback now in flight is this stack's OUTSTANDING one until it finishes: a
+        // resource it is still waiting on can fail it later ([`Self::fail_stabilisation`]),
+        // with no call of its own to work out what is left to put back, and the stack it
+        // leaves in `UPDATE_ROLLBACK_FAILED` is one `ContinueUpdateRollback` resumes — which
+        // asks the owning services, and a custom resource's provider, for the previous
+        // configuration again. A rollback that COMPLETES is one those services carried out,
+        // so [`Self::settle`] clears it there.
+        self.unreverted_rollback = plan.clone();
         self.owed_rollback = plan;
     }
 
@@ -2950,17 +2977,44 @@ impl StoredStack {
             if transition.status.ends_with(IN_PROGRESS_SUFFIX) {
                 continue;
             }
-            let Some(deployed) = self
-                .resources
-                .iter_mut()
-                .find(|deployed| deployed.resource.logical_id == transition.logical_id)
-            else {
-                continue;
-            };
-            deployed.status = transition.status.clone();
-            deployed.status_reason = transition.reason.clone();
-            deployed.status_timestamp = at;
+            self.record_resource_status(
+                &transition.logical_id,
+                &transition.status,
+                transition.reason.clone(),
+                at,
+            );
         }
+    }
+
+    /// Leave ONE resource's record in `status` as of `at`, with the reason that status came
+    /// with — the single write every caller above makes per resource, and the one place a
+    /// resource's current status is set.
+    ///
+    /// Also what a wait that could not be carried through writes
+    /// ([`Self::fail_stabilisation`]): the walk that opened the wait had recorded the outcome
+    /// it PLANNED, so without this the record would go on stating work a provider — or the
+    /// service that owns the resource — then refused. Writing both through one function is
+    /// what keeps the per-resource views and that resource's event stream agreeing.
+    ///
+    /// A logical id this stack holds no record for is left alone: there is no resource to
+    /// report a status for.
+    fn record_resource_status(
+        &mut self,
+        logical_id: &str,
+        status: &str,
+        reason: Option<String>,
+        at: SystemTime,
+    ) {
+        let Some(deployed) = self
+            .resources
+            .iter_mut()
+            .find(|deployed| deployed.resource.logical_id == logical_id)
+        else {
+            return;
+        };
+        deployed.status = status.to_string();
+        deployed.status_reason = reason;
+        deployed.status_timestamp = at;
     }
 
     /// Leave each of the stack's resource records in the status a ROLLBACK left it in.
@@ -3299,9 +3353,11 @@ impl StoredStack {
     /// UPDATE_ROLLBACK_FAILED to UPDATE_ROLLBACK_COMPLETE state", and of the resources the
     /// request names: "CloudFormation sets the status of the specified resources to
     /// UPDATE_COMPLETE and continues to roll back the stack" — so each skipped resource
-    /// keeps the configuration it has and takes that status, with the event that says so,
-    /// while the stack moves to `UPDATE_ROLLBACK_IN_PROGRESS` and reaches
-    /// `UPDATE_ROLLBACK_COMPLETE` one [`STATUS_TRANSITION_DELAY`] later.
+    /// keeps the configuration it has and takes that status, with the event that says so and
+    /// the reason that says WHY it is complete without having been put back
+    /// ([`RESOURCE_SKIPPED_DURING_UPDATE_ROLLBACK`]), while the stack moves to
+    /// `UPDATE_ROLLBACK_IN_PROGRESS` and reaches `UPDATE_ROLLBACK_COMPLETE` one
+    /// [`STATUS_TRANSITION_DELAY`] later.
     pub fn continue_update_rollback(
         &mut self,
         now: SystemTime,
@@ -3315,11 +3371,15 @@ impl StoredStack {
         self.record_operation(operation_type::CONTINUE_ROLLBACK, &operation_id, now);
         self.client_request_token = client_request_token.clone();
         self.status = status::UPDATE_ROLLBACK_IN_PROGRESS.to_string();
-        self.status_reason = None;
+        // A CLIENT asked for this rollback to be resumed, so the event that opens it is
+        // `USER_INITIATED` — the reason every stack operation a client starts opens with
+        // ([`Self::begin_transition`]), as against the rollback this one resumes, whose own
+        // opening event carries the failure that forced it.
+        self.status_reason = Some(USER_INITIATED.to_string());
         self.record_event(
             now,
             status::UPDATE_ROLLBACK_IN_PROGRESS,
-            None,
+            Some(USER_INITIATED.to_string()),
             Some(operation_id.clone()),
             client_request_token.clone(),
         );
@@ -3333,7 +3393,7 @@ impl StoredStack {
             };
             deployed.status = resource_status::UPDATE_COMPLETE.to_string();
             deployed.status_timestamp = now;
-            deployed.status_reason = None;
+            deployed.status_reason = Some(RESOURCE_SKIPPED_DURING_UPDATE_ROLLBACK.to_string());
             let logical_resource_id = deployed.resource.logical_id.clone();
             let physical_resource_id = deployed.resource.physical_resource_id.clone();
             let resource_type = deployed.resource.resource_type.clone();
@@ -3343,7 +3403,7 @@ impl StoredStack {
                 Some(physical_resource_id),
                 &resource_type,
                 resource_status::UPDATE_COMPLETE,
-                None,
+                Some(RESOURCE_SKIPPED_DURING_UPDATE_ROLLBACK.to_string()),
                 None,
                 Some(operation_id.clone()),
                 client_request_token.clone(),
@@ -3527,6 +3587,20 @@ pub(crate) fn failed_status_of(in_progress: &str) -> &'static str {
         _ => status::CREATE_FAILED,
     }
 }
+
+/// The `ResourceStatusReason` CloudFormation reports for a resource a resumed rollback
+/// SKIPPED: the resource reaches `UPDATE_COMPLETE` without having been put back, and this is
+/// the sentence that says why.
+///
+/// "CloudFormation sets the status of the specified resources to UPDATE_COMPLETE and
+/// continues to roll back the stack" (`ContinueUpdateRollbackInput$ResourcesToSkip`) is the
+/// STATUS; the reason beside it is recorded behaviour — CloudFormation writes this sentence,
+/// verbatim and entire, on the skipped resource's `UPDATE_COMPLETE` event, which is what
+/// distinguishes a resource the rollback really put back from one it was told to leave as the
+/// failed update made it. Entirely FIXED text: no part of the stack, the resource or the
+/// request reaches it, and the model documents no event wording at all.
+pub const RESOURCE_SKIPPED_DURING_UPDATE_ROLLBACK: &str =
+    "Resource skipped during UpdateRollback";
 
 /// The `ResourceStatusReason` CloudFormation reports for a resource whose work has been
 /// STARTED and has not finished: it records that the resource's creation — or, for an
