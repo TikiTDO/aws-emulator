@@ -25,6 +25,10 @@ tracing = { workspace = true }
 # created under a membership, so this crate reads that membership from the store
 # the owning service keeps.
 service-com-amazonaws-cleanrooms-awsbastioncontrolplaneservicelambda = { workspace = true }
+# `service-common` carries the workspace's ONE restJson1 codec that renders a timestamp
+# member in the `date-time` form a model declares; every timestamp member of this model
+# declares it, so this service answers through that codec.
+service-common = { path = "../common" }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

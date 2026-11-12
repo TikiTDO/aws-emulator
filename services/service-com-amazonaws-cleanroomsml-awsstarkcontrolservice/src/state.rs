@@ -166,6 +166,43 @@ pub struct TrainingDataset {
     pub update_time: SystemTime,
 }
 
+/// The stored form of a submitted `DatasetList`: the dataset metadata as the service
+/// holds it once the create has resolved what the request left to the service.
+///
+/// Two things are resolved here, so every later read of the record reports them and no
+/// read has to compute anything:
+///
+/// * `GlueDataSource$catalogId` names the Glue Data Catalog the training data is read
+///   from. The member is optional on the wire and the Glue Data Catalog a request leaves
+///   unnamed is the one of the account making the call, so the resolved catalog is that
+///   account and that is what the record carries.
+/// * A dataset's input `schema` is a column set keyed by column name, so it is held in
+///   column-name order rather than in the order one request happened to list it in: two
+///   creates naming the same columns in different orders describe the same dataset and
+///   are reported identically. `sort_by` is stable, so entries that share a name keep
+///   their submitted order relative to each other. The model fixes no relation between
+///   the submitted and the reported order, so this order is taken from the recorded
+///   read-back of a create whose columns were submitted unordered; a recording that
+///   showed an unordered submission reported back unchanged would retire this sort
+///   rather than refine it.
+pub fn stored_training_data(training_data: Vec<Dataset>) -> Vec<Dataset> {
+    training_data
+        .into_iter()
+        .map(|mut dataset| {
+            let input_config = &mut dataset.input_config;
+            input_config
+                .schema
+                .sort_by(|left, right| left.column_name.cmp(&right.column_name));
+            input_config
+                .data_source
+                .glue_data_source
+                .catalog_id
+                .get_or_insert_with(|| ::engine::emulator_account_id().to_string());
+            dataset
+        })
+        .collect()
+}
+
 impl TrainingDataset {
     /// The `TrainingDatasetSummary` projection `ListTrainingDatasets` returns.
     pub fn to_summary(&self) -> TrainingDatasetSummary {
@@ -1366,11 +1403,11 @@ pub const KIND_MEMBERSHIP: &str = "Membership";
 /// `ResourceNotFoundException` models `message` and nothing else, so the message
 /// is where both go: Clean Rooms ML words this refusal as the KIND of resource
 /// that was looked for, then the identifier the request carried for it, then
-/// `not found.` — one wording for the whole class, each refusal naming its own
-/// kind and the value the caller sent.
+/// `does not exist.` — one wording for the whole class, each refusal naming its
+/// own kind and the value the caller sent.
 pub fn resource_not_found(kind: &str, identifier: &str) -> ResourceNotFoundException {
     ResourceNotFoundException {
-        message: format!("{kind}: {identifier} not found."),
+        message: format!("{kind} {identifier} does not exist."),
     }
 }
 

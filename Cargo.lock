@@ -10168,6 +10168,7 @@ dependencies = [
  "http",
  "serde_json",
  "service-com-amazonaws-cleanrooms-awsbastioncontrolplaneservicelambda",
+ "service-common",
  "sha2 0.10.9",
  "tokio",
  "tracing",

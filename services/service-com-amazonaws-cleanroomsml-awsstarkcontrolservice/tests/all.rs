@@ -32,3 +32,5 @@ mod state_roundtrip;
 
 #[path = "all/training_dataset_audience_model_lifecycle.rs"]
 mod training_dataset_audience_model_lifecycle;
+#[path = "all/training_dataset_input_config_projection.rs"]
+mod training_dataset_input_config_projection;

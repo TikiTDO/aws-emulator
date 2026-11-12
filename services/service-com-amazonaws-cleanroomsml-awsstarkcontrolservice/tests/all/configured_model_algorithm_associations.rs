@@ -797,35 +797,35 @@ async fn a_create_naming_a_resource_this_endpoint_does_not_hold_is_refused() {
             REGION,
             unknown_membership.to_string(),
             algorithm.clone(),
-            format!("Membership: {unknown_membership} not found."),
+            format!("Membership {unknown_membership} does not exist."),
         ),
         (
             "a membership created in another region",
             REGION,
             other_region_membership.clone(),
             algorithm.clone(),
-            format!("Membership: {other_region_membership} not found."),
+            format!("Membership {other_region_membership} does not exist."),
         ),
         (
             "an algorithm nothing minted",
             REGION,
             membership.clone(),
             unknown_algorithm.clone(),
-            format!("Configured Model Algorithm: {unknown_algorithm} not found."),
+            format!("Configured Model Algorithm {unknown_algorithm} does not exist."),
         ),
         (
             "an algorithm created in another region",
             REGION,
             membership.clone(),
             other_region_algorithm.clone(),
-            format!("Configured Model Algorithm: {other_region_algorithm} not found."),
+            format!("Configured Model Algorithm {other_region_algorithm} does not exist."),
         ),
         (
             "this region's algorithm, through the other region's endpoint",
             OTHER_REGION,
             other_region_membership.clone(),
             algorithm.clone(),
-            format!("Configured Model Algorithm: {algorithm} not found."),
+            format!("Configured Model Algorithm {algorithm} does not exist."),
         ),
     ];
 
@@ -897,7 +897,7 @@ async fn an_association_is_only_read_through_its_own_scope() {
         .unwrap()
         .to_string();
 
-    let expected_message = format!("Configured Model Algorithm Association: {arn} not found.");
+    let expected_message = format!("Configured Model Algorithm Association {arn} does not exist.");
     // Each row: the case, and the answer a read outside the association's own scope gave.
     let cases: Vec<(&str, Answer)> = vec![
         (

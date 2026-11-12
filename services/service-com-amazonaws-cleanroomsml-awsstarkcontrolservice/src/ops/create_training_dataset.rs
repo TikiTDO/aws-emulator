@@ -228,7 +228,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 region,
                 name: input.name,
                 role_arn: input.role_arn,
-                training_data: input.training_data,
+                // The dataset metadata as this service holds it: the Glue catalog
+                // the request left unnamed resolved to the calling account's own,
+                // and the column schema in the name order a column set is reported
+                // in. See `crate::state::stored_training_data`.
+                training_data: crate::state::stored_training_data(input.training_data),
                 description: input.description,
                 tags: input.tags.unwrap_or_default().into_iter().collect(),
                 // A training dataset is metadata pointing at a Glue table, read only

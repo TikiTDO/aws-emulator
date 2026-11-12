@@ -490,8 +490,17 @@ async fn a_created_training_dataset_is_reported_from_what_was_stored() {
         );
 
         // Every member the create carried lands on the same member of the Get answer.
+        // `trainingData` is the one member the create RESOLVES rather than echoes — the
+        // Glue catalog a request leaves unnamed is the calling account's own, and a
+        // column set is reported in column-name order — so it is compared against that
+        // projection, which `training_dataset_input_config_projection` states and pins.
         for (member, expected) in request.as_object().expect("each case is a JSON object") {
-            assert_member_round_trips(case, member, expected, &got.at(member));
+            let expected = if member == "trainingData" {
+                crate::training_dataset_input_config_projection::reported_training_data(expected)
+            } else {
+                expected.clone()
+            };
+            assert_member_round_trips(case, member, &expected, &got.at(member));
         }
         // A create that named no tags stored none, and that is what is reported.
         if request.get("tags").is_none() {
@@ -1000,11 +1009,10 @@ async fn a_created_audience_model_is_reported_from_what_was_stored() {
         );
         for (member, expected) in request.as_object().expect("each case is a JSON object") {
             let observed = got.at(member);
-            assert_eq!(
-                &observed, expected,
-                "case {case:?}: member {member:?} was stored as {expected:?} but \
-                 GetAudienceModel reports {observed:?}"
-            );
+            // A timestamp member is compared as an INSTANT: a `date-time` member is
+            // reported as an RFC 3339 string whichever of the two forms the request sent
+            // it in. See [`assert_member_round_trips`].
+            assert_member_round_trips(case, member, expected, &observed);
         }
         if request.get("kmsKeyArn").is_none() {
             assert_eq!(
@@ -1121,6 +1129,15 @@ async fn an_arn_naming_no_resource_is_not_found() {
                 "case {operation} {arn:?}: expected ResourceNotFoundException, got {:?}",
                 answer.body
             );
+            // The refusal names the KIND of resource that was looked for and the
+            // identifier the request carried for it: "<Kind> <identifier> does not
+            // exist." is the wording of this class for every resource kind.
+            assert_eq!(
+                answer.at("message"),
+                json!(format!("Training Dataset {arn} does not exist.")),
+                "case {operation} {arn:?}: unexpected refusal wording, got {:?}",
+                answer.at("message")
+            );
         }
     }
     for arn in &model_arns {
@@ -1138,6 +1155,12 @@ async fn an_arn_naming_no_resource_is_not_found() {
                 "ResourceNotFoundException",
                 "case {operation} {arn:?}: expected ResourceNotFoundException, got {:?}",
                 answer.body
+            );
+            assert_eq!(
+                answer.at("message"),
+                json!(format!("Audience Model {arn} does not exist.")),
+                "case {operation} {arn:?}: unexpected refusal wording, got {:?}",
+                answer.at("message")
             );
         }
     }
