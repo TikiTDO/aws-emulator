@@ -528,6 +528,11 @@ mod cloudfront_api_call_events;
 // Declared HERE, in the sorted list beside the other CloudFront suites, rather than
 // appended at the end of this file: the tail is where every suite landing in the same
 // window appends, so a line added there conflicts with all of them.
+#[path = "all/cloudfront_apigateway_origin_edge.rs"]
+mod cloudfront_apigateway_origin_edge;
+// Declared HERE, in the sorted list beside the other CloudFront suites, rather than
+// appended at the end of this file: the tail is where every suite landing in the same
+// window appends, so a line added there conflicts with all of them.
 #[path = "all/cloudfront_edge_cache_refresh.rs"]
 mod cloudfront_edge_cache_refresh;
 #[path = "all/cloudfront_key_value_store_handshake.rs"]
@@ -537,6 +542,11 @@ mod cloudfront_key_value_store_handshake;
 // so a line added there conflicts with all of them.
 #[path = "all/cloudfront_oac_s3_origin_edge.rs"]
 mod cloudfront_oac_s3_origin_edge;
+// Declared HERE, in the sorted list beside the other CloudFront suites, rather than appended
+// at the end of this file: the tail is where every suite landing in the same window appends,
+// so a line added there conflicts with all of them.
+#[path = "all/cloudfront_oai_s3_origin_edge.rs"]
+mod cloudfront_oai_s3_origin_edge;
 // Declared HERE, in the sorted list, rather than appended at the end of this file: the
 // tail is where every suite landing in the same window appends, so it is the contended
 // region, while this span of the list is stable.
@@ -747,6 +757,12 @@ mod keyspaces_signing_name_routing;
 mod keyspaces_streams_routing;
 #[path = "all/lambda_bundled_wire_operations.rs"]
 mod lambda_bundled_wire_operations;
+// Declared in this span of the sorted list, beside the other `lambda…` suites, rather than
+// at the head of this file or in its appended tail: both of those are where concurrently
+// landing suites put their line, so a declaration there loses a squash merge to every one
+// of them, while these neighbouring lines are stable.
+#[path = "all/lambda_handler_invalidates_its_distribution.rs"]
+mod lambda_handler_invalidates_its_distribution;
 #[path = "all/lambda_signing_name_routing.rs"]
 mod lambda_signing_name_routing;
 // Declared in this span of the sorted list, beside the other `lambda…` suites, rather than

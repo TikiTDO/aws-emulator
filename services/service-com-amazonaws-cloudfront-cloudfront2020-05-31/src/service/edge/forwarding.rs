@@ -22,8 +22,15 @@
 //! So the origin receives the UNION of the two, and a part named by neither is withheld from
 //! it. Nothing here touches the viewer's own credential or a hop-by-hop header, which the
 //! caller drops whatever a policy says (`super::HEADERS_NEVER_FORWARDED`).
+//!
+//! A behaviour may carry NEITHER policy: `CacheBehavior$CachePolicyId` documents that "a
+//! `CacheBehavior` must include either a `CachePolicyId` or `ForwardedValues`", so the
+//! legacy `ForwardedValues` member is the other half of this one reading — the same three
+//! parts, named in that member's own older vocabulary, deciding the same two questions
+//! ([`legacy_cache_key_parameters`] and [`legacy_forwarded_parameters`]).
 
 use super::Behavior;
+use crate::ops::types::ForwardedValues;
 use crate::state::ComAmazonawsCloudfrontCloudfront20200531State;
 
 /// A behaviour that names nothing: no header, no cookie, no query string.
@@ -51,6 +58,10 @@ const ALL_VIEWER_EXCEPT_HOST: &str = "allViewerExceptHostHeader";
 
 /// The one header `allViewerExceptHostHeader` leaves out.
 const HOST: &str = "host";
+
+/// The name a legacy `ForwardedValues$Headers` list carries to name EVERY header, from that
+/// member's own documentation ("if you specify `1` for `Quantity` and `*` for `Name`").
+const ALL_NAMES: &str = "*";
 
 /// The names of one part of a viewer request that a policy's behaviour names.
 ///
@@ -172,15 +183,15 @@ pub struct ForwardedParameters {
 
 /// What the behaviour's cache policy keys on.
 ///
-/// A behaviour that names no cache policy, or one whose policy cannot be read, keys on none
-/// of them: what such a behaviour forwards is its own legacy `ForwardedValues` member, not a
-/// cache policy's.
+/// A behaviour that names no cache policy, or one whose policy cannot be read, keys on what
+/// its own legacy `ForwardedValues` member names instead
+/// ([`legacy_cache_key_parameters`]).
 pub(super) fn cache_key_parameters(
     store: &ComAmazonawsCloudfrontCloudfront20200531State,
     behavior: &Behavior,
 ) -> CacheKeyParameters {
     let Some(id) = behavior.cache_policy_id.as_deref() else {
-        return CacheKeyParameters::default();
+        return legacy_cache_key_parameters(behavior);
     };
     // Read the way every other read of a cache policy reads one: a policy this account
     // created, and otherwise the one AWS published under that id.
@@ -220,14 +231,16 @@ pub(super) fn cache_key_parameters(
 
 /// What the behaviour's origin request policy forwards.
 ///
-/// A behaviour that names no origin request policy forwards nothing of its own, which is
-/// CloudFront's default: the origin then sees exactly what the cache key carries.
+/// A behaviour that names no origin request policy forwards what its own legacy
+/// `ForwardedValues` member names ([`legacy_forwarded_parameters`]); one that names neither
+/// forwards nothing of its own, which is CloudFront's default: the origin then sees exactly
+/// what the cache key carries.
 pub(super) fn forwarded_parameters(
     store: &ComAmazonawsCloudfrontCloudfront20200531State,
     behavior: &Behavior,
 ) -> ForwardedParameters {
     let Some(id) = behavior.origin_request_policy_id.as_deref() else {
-        return ForwardedParameters::default();
+        return legacy_forwarded_parameters(behavior);
     };
     let Some(policy) = store.readable_origin_request_policy(id) else {
         return ForwardedParameters::default();
@@ -257,6 +270,115 @@ pub(super) fn forwarded_parameters(
             ),
         ),
     }
+}
+
+/// The LEGACY member a behaviour that names no cache policy states its forwarding with:
+/// "a `CacheBehavior` must include either a `CachePolicyId` or `ForwardedValues`".
+///
+/// A behaviour that names neither forwards nothing, which is what a behaviour with no
+/// policy to read and no legacy member leaves.
+fn legacy(behavior: &Behavior) -> Option<&ForwardedValues> {
+    behavior.forwarded_values.as_ref()
+}
+
+/// What a behaviour's legacy `ForwardedValues` puts in the cache key.
+///
+/// `QueryString`: "if you specify true for `QueryString` and you don't specify any values
+/// for `QueryStringCacheKeys`, CloudFront forwards all query string parameters to the
+/// origin and caches based on all query string parameters"; with one or more
+/// `QueryStringCacheKeys` "it only caches based on the query string parameters that you
+/// specify"; and "if you specify false for `QueryString`, CloudFront doesn't forward any
+/// query string parameters to the origin, and doesn't cache based on query string
+/// parameters". `Headers` is the whitelist of headers CloudFront forwards, and "for the
+/// headers that you specify, CloudFront also caches separate versions of a specified
+/// object that is based on the header values in viewer requests" — the list naming `*`
+/// being every header. `Cookies.Forward` "specifies which cookies to forward to the origin
+/// for this cache behavior: all, none, or the list of cookies specified in the
+/// `WhitelistedNames` complex type", and the cookies forwarded under it are the ones
+/// cached on.
+fn legacy_cache_key_parameters(behavior: &Behavior) -> CacheKeyParameters {
+    let Some(values) = legacy(behavior) else {
+        return CacheKeyParameters::default();
+    };
+    CacheKeyParameters {
+        headers: legacy_headers(values),
+        cookies: legacy_cookies(values),
+        query_strings: legacy_keyed_query_strings(values),
+        // The legacy member states nothing about `Accept-Encoding`, which only a cache
+        // policy's own `EnableAcceptEncoding*` members enable.
+        gzip: false,
+        brotli: false,
+    }
+}
+
+/// What a behaviour's legacy `ForwardedValues` sends the origin beside the cache key's own
+/// parameters.
+///
+/// The one part that differs from the cache key is the query string: `QueryString` true
+/// "forwards all query string parameters to the origin" whatever `QueryStringCacheKeys`
+/// narrows the KEY to, so every parameter travels while only the named ones separate one
+/// cached object from another.
+fn legacy_forwarded_parameters(behavior: &Behavior) -> ForwardedParameters {
+    let Some(values) = legacy(behavior) else {
+        return ForwardedParameters::default();
+    };
+    let headers = legacy_headers(values);
+    ForwardedParameters {
+        // A CloudFront-generated header reaches the origin only where it is NAMED, and the
+        // legacy whitelist is the one place a behaviour with no origin request policy names
+        // one ([`super::generated_headers`]).
+        generated_headers: NameSet::Named(headers.named().to_vec()),
+        headers,
+        cookies: legacy_cookies(values),
+        query_strings: match values.query_string {
+            true => NameSet::Every,
+            false => NameSet::None,
+        },
+    }
+}
+
+/// The headers a legacy `ForwardedValues` names: its `Headers` whitelist, or every header
+/// for the list naming `*` ("if you specify `1` for `Quantity` and `*` for `Name`").
+fn legacy_headers(values: &ForwardedValues) -> NameSet {
+    let names = items(values.headers.as_ref().map(|headers| &headers.items));
+    if names.iter().any(|name| name == ALL_NAMES) {
+        return NameSet::Every;
+    }
+    NameSet::Named(names)
+}
+
+/// The cookies a legacy `ForwardedValues` names, from `Cookies.Forward`: `all`, `none`, or
+/// the `WhitelistedNames` the `whitelist` value lists.
+fn legacy_cookies(values: &ForwardedValues) -> NameSet {
+    NameSet::of(
+        &values.cookies.forward,
+        items(
+            values
+                .cookies
+                .whitelisted_names
+                .as_ref()
+                .map(|names| &names.items),
+        ),
+    )
+}
+
+/// The query-string parameters a legacy `ForwardedValues` KEYS on: the
+/// `QueryStringCacheKeys` it names, every parameter when `QueryString` is true and it names
+/// none, and nothing at all when `QueryString` is false.
+fn legacy_keyed_query_strings(values: &ForwardedValues) -> NameSet {
+    if !values.query_string {
+        return NameSet::None;
+    }
+    let keys = items(
+        values
+            .query_string_cache_keys
+            .as_ref()
+            .map(|keys| &keys.items),
+    );
+    if keys.is_empty() {
+        return NameSet::Every;
+    }
+    NameSet::Named(keys)
 }
 
 /// The names a `(Quantity, Items)` wrapper carries, or none when the behaviour names no list

@@ -97,6 +97,10 @@ pub mod guest_tls;
 /// The Amazon S3 half of that seam, whose own protocol binds a request per operation.
 mod aws_s3;
 
+/// The CloudFront half of it, for the same reason: that service's own `restXml` protocol
+/// binds a request per operation rather than carrying an input document in a JSON body.
+mod aws_cloudfront;
+
 /// Binding one of those calls to HTTP for a service whose protocol is `restJson1`.
 pub mod rest_json;
 

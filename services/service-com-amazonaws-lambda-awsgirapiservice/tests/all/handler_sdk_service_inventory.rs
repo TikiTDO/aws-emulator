@@ -151,6 +151,11 @@ fn rows() -> Vec<Row> {
             reachable: true,
         },
         Row {
+            case: "the content delivery service, whose protocol is the other XML one",
+            token: "cloudfront",
+            reachable: true,
+        },
+        Row {
             case: "a real AWS service this runtime binds no requests for",
             token: "ec2",
             reachable: false,

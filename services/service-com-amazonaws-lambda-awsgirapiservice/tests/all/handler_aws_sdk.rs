@@ -445,8 +445,10 @@ async fn a_service_the_runtimes_sdk_does_not_reach_is_an_unknown_service() {
         case,
         "sdk-unknown",
         &json!({
-            "service": "cloudfront",
-            "method": "list_distributions",
+            // A real AWS service whose own protocol this runtime's SDK seam binds no
+            // request for, so the client cannot be built for it at all.
+            "service": "route53",
+            "method": "list_hosted_zones",
             "parameters": {},
         }),
     )
@@ -457,7 +459,7 @@ async fn a_service_the_runtimes_sdk_does_not_reach_is_an_unknown_service() {
     );
     let reported = payload["unknown_service"].as_str().unwrap_or_default();
     assert!(
-        reported.contains("Unknown service: 'cloudfront'"),
+        reported.contains("Unknown service: 'route53'"),
         "case {case:?}: expected the unknown service to be named, got {payload}"
     );
 }

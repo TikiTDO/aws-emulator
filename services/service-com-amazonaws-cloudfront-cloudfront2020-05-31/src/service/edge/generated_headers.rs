@@ -65,10 +65,10 @@ const EDGE_COUNTRY: &str = "US";
 
 /// The scheme a viewer that reached an address of this emulator dialled, unless its request
 /// states otherwise: every endpoint this emulator publishes is served over TLS.
-const DEFAULT_SCHEME: &str = "https";
+pub const DEFAULT_SCHEME: &str = "https";
 
 /// The scheme a viewer that dialled the plaintext half of an address used.
-const PLAINTEXT_SCHEME: &str = "http";
+pub const PLAINTEXT_SCHEME: &str = "http";
 
 /// Whether `name` is a header name CloudFront generates itself, rather than one a viewer
 /// states.
@@ -121,7 +121,12 @@ pub fn viewer_country(req: &RtRequest) -> String {
 }
 
 /// The scheme a viewer dialled, read off the request's own URI.
-fn viewer_scheme(uri: &str) -> &'static str {
+///
+/// The one reading of it: the header the edge generates for the origin
+/// ([`Generated::of_request`]) and the behaviour's own `ViewerProtocolPolicy` decision
+/// (`super::viewer_protocol_plan`) both ask this, so a request is one scheme's whichever
+/// asks.
+pub fn viewer_scheme(uri: &str) -> &'static str {
     match uri.split_once("://") {
         Some((scheme, _rest)) if scheme.eq_ignore_ascii_case(PLAINTEXT_SCHEME) => PLAINTEXT_SCHEME,
         // An absolute URI naming any other scheme, and an origin-form URI, which the

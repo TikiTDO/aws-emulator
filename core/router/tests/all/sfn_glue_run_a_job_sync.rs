@@ -42,8 +42,11 @@ const ACCOUNT: &str = "000000000000";
 ///
 /// A parked task is resolved by polling the job, so the execution's own outcome
 /// arrives a few poll intervals after the job's does; this is well past that and far
-/// short of the ceiling on a parked job.
-const PATIENCE: Duration = Duration::from_secs(20);
+/// short of the ceiling on a parked job. Generous rather than tight: the chain takes a
+/// few seconds on an idle host, and this deadline is only the point at which the work is
+/// declared never to have happened — a host running the whole suite at once must not be
+/// the thing that trips it.
+const PATIENCE: Duration = Duration::from_secs(120);
 
 /// How often a poll asks again.
 const POLL: Duration = Duration::from_millis(25);

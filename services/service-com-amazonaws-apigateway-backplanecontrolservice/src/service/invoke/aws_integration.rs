@@ -17,7 +17,8 @@
 //! resource decides which of its calls that is:
 //!
 //! * AMAZON S3, whose object actions are the ones the `path` form addresses as a path
-//!   (`path/{bucket}/{key}`);
+//!   (`path/{bucket}/{key}`), and whose BUCKET actions are what the same form addresses
+//!   when its path names a bucket and nothing under it (`path/{bucket}`);
 //! * AMAZON SQS, whose queue actions the `path` form addresses by the queue
 //!   (`path/{account-id}/{queue-name}`) and whose action and parameters the integration
 //!   request then carries as its own query api's wire form does ([`sqs`]).
@@ -247,6 +248,81 @@ impl ObjectCall {
     }
 }
 
+/// One Amazon S3 BUCKET action, which is what the `path` form addresses when its resource
+/// path names a bucket and nothing under it (`path/{bucket}` — Amazon S3's own REST path
+/// for the bucket itself).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BucketAction {
+    /// `ListObjects`, the call Amazon S3's REST API binds to `GET /{Bucket}`: the bucket's
+    /// own listing, answered as the `ListBucketResult` document
+    /// (`smithy_query(query="operation",operation="ListObjects")`).
+    List,
+    /// `HeadBucket`, bound to `HEAD /{Bucket}`: whether the bucket is there and reachable,
+    /// with no body.
+    Head,
+}
+
+impl BucketAction {
+    /// The action the integration's own HTTP method names, as the PATH form carries it:
+    /// Amazon S3 binds the bucket's listing to `GET` and its head to `HEAD`.
+    fn of_verb(verb: &str) -> Option<Self> {
+        match verb.to_ascii_uppercase().as_str() {
+            "GET" => Some(Self::List),
+            "HEAD" => Some(Self::Head),
+            _ => None,
+        }
+    }
+
+    /// The action the ACTION form names, by the Amazon S3 operation's own name.
+    fn of_action_name(name: &str) -> Option<Self> {
+        match name {
+            "ListObjects" => Some(Self::List),
+            "HeadBucket" => Some(Self::Head),
+            _ => None,
+        }
+    }
+
+    /// The HTTP method Amazon S3's REST API binds this action to.
+    fn verb(self) -> &'static str {
+        match self {
+            Self::List => "GET",
+            Self::Head => "HEAD",
+        }
+    }
+
+    /// The IAM action a call of it is authorized by. Both are `s3:ListBucket`:
+    /// `ListObjects` needs "the `s3:ListBucket` permission", and `HeadBucket` documents
+    /// "you must have permissions to perform the `s3:ListBucket` action".
+    fn iam_action(self) -> &'static str {
+        "s3:ListBucket"
+    }
+}
+
+/// What an `AWS` integration addresses when its `uri` names a BUCKET rather than an object:
+/// the bucket, the Region of the service endpoint the call is made at, and the action.
+#[derive(Debug)]
+struct BucketCall {
+    /// The partition the integration ARN names, which the bucket's own ARN carries.
+    partition: String,
+    /// The Region the integration ARN names, or the api's own when it names none.
+    region: String,
+    bucket: String,
+    action: BucketAction,
+}
+
+impl BucketCall {
+    /// The ARN of the bucket this call addresses, which is the resource an identity-based
+    /// policy grants the action on: an Amazon S3 bucket ARN carries neither Region nor
+    /// account, and names no key (`arn:{partition}:s3:::{bucket}`).
+    fn bucket_arn(&self) -> String {
+        format!(
+            "arn:{partition}:s3:::{bucket}",
+            partition = self.partition,
+            bucket = self.bucket
+        )
+    }
+}
+
 /// What the AWS service answered the integration request: the three things a mapped
 /// method response is built from.
 #[derive(Debug)]
@@ -303,11 +379,13 @@ fn addressed_call(
     default_region: &str,
     call: &MethodRequest,
 ) -> Option<Result<ServiceCall, UnservedIntegration>> {
-    if let Some(object) = addressed_object(integration, default_region, &call.inputs) {
+    if let Some(s3) = addressed_s3(integration, default_region, &call.inputs) {
         return Some(
-            object
-                .map(ServiceCall::Object)
-                .map_err(|reason| unanswered(&reason)),
+            s3.map(|call| match call {
+                S3Call::Object(object) => ServiceCall::Object(object),
+                S3Call::Bucket(bucket) => ServiceCall::Bucket(bucket),
+            })
+            .map_err(|reason| unanswered(&reason)),
         );
     }
     if let Some(queue) = sqs::addressed_queue(integration, default_region, call) {
@@ -324,8 +402,17 @@ fn addressed_call(
 enum ServiceCall {
     /// An Amazon S3 object action.
     Object(ObjectCall),
+    /// An Amazon S3 bucket action.
+    Bucket(BucketCall),
     /// An Amazon SQS queue action.
     Queue(sqs::QueueCall),
+}
+
+/// What an Amazon S3 integration `uri` addresses: the bucket itself, or an object in it.
+#[derive(Debug)]
+enum S3Call {
+    Object(ObjectCall),
+    Bucket(BucketCall),
 }
 
 impl ServiceCall {
@@ -333,6 +420,7 @@ impl ServiceCall {
     fn region(&self) -> &str {
         match self {
             Self::Object(object) => &object.region,
+            Self::Bucket(bucket) => &bucket.region,
             Self::Queue(queue) => queue.region(),
         }
     }
@@ -341,6 +429,7 @@ impl ServiceCall {
     fn iam_action(&self) -> &'static str {
         match self {
             Self::Object(object) => object.action.iam_action(),
+            Self::Bucket(bucket) => bucket.action.iam_action(),
             Self::Queue(queue) => queue.iam_action(),
         }
     }
@@ -350,6 +439,7 @@ impl ServiceCall {
     fn resource_arn(&self) -> String {
         match self {
             Self::Object(object) => object.object_arn(),
+            Self::Bucket(bucket) => bucket.bucket_arn(),
             Self::Queue(queue) => queue.queue_arn(),
         }
     }
@@ -367,6 +457,15 @@ impl ServiceCall {
                     &format!("/{}/{}", object.bucket, object.key),
                 ),
             },
+            Self::Bucket(bucket) => Answered {
+                status: ACCESS_DENIED_STATUS,
+                content_type: Some(XML_CONTENT_TYPE.to_string()),
+                body: error_body(
+                    ACCESS_DENIED_CODE,
+                    ACCESS_DENIED_MESSAGE,
+                    &format!("/{}", bucket.bucket),
+                ),
+            },
             Self::Queue(queue) => sqs::access_denied(queue),
         }
     }
@@ -379,6 +478,7 @@ impl ServiceCall {
     ) -> Result<Answered, UnservedIntegration> {
         match self {
             Self::Object(object) => answered_by_s3(ctx, object, call).await,
+            Self::Bucket(bucket) => answered_by_s3_bucket(ctx, bucket).await,
             Self::Queue(queue) => sqs::answered(ctx, queue, call).await,
         }
     }
@@ -617,6 +717,108 @@ async fn answered_by_s3(
             Err(error) => refused(&error, object),
         },
     }
+}
+
+/// Make the call `bucket` addresses against Amazon S3, in process, and report what it
+/// answered.
+///
+/// A bucket call is made as Amazon S3's REST API binds it — the method and the bucket's own
+/// path, signed for `s3` in the call's Region — and what the method response carries is the
+/// service's OWN answer: its status, its media type and its bytes, which for a listing is
+/// the `ListBucketResult` document Amazon S3 renders. The request is dispatched over the
+/// in-process callback transport, so it is served by the Amazon S3 this emulator mounts and
+/// no connection is opened; the signature is the tree's one in-process signer, with the
+/// credential the callback hands this handler, which is never reported or logged.
+///
+/// `Err` only where there is no answer FROM THE SERVICE to report at all — the request could
+/// not be built or signed, it reached no Amazon S3 in this emulator, or the answer is larger
+/// than one method response may carry. Every answer the service DID give, refusals included,
+/// is reported as [`Answered`] and mapped.
+async fn answered_by_s3_bucket(
+    ctx: &OperationContext<'_>,
+    bucket: &BucketCall,
+) -> Result<Answered, UnservedIntegration> {
+    // The endpoint every in-process call to Amazon S3 is made at, with the bucket in the
+    // PATH: this emulator serves one endpoint per service, so a per-bucket host would name
+    // an address its router could not resolve ([`s3_client`] configures the same).
+    let host = format!("s3.{}.amazonaws.com", bucket.region);
+    let built = ::http::Request::builder()
+        .method(bucket.action.verb())
+        .uri(format!("https://{host}/{}", bucket.bucket))
+        .header(::http::header::HOST, &host)
+        .body(Vec::new());
+    let mut request = built.map_err(|error| {
+        ::tracing::warn!(%error, "the integration's Amazon S3 bucket call does not render an \
+                                  HTTP request");
+        unanswered(
+            "the integration's uri does not render a request to Amazon S3, so no call was made",
+        )
+    })?;
+    ::service_common::in_process_sigv4::sign_in_process_request(
+        &mut request,
+        S3_SUBDOMAIN,
+        &bucket.region,
+        ctx,
+    )
+    .await
+    .map_err(|error| {
+        ::tracing::warn!(%error, "the integration's Amazon S3 bucket call could not be signed");
+        unanswered("the integration request to Amazon S3 could not be signed, so no call was made")
+    })?;
+    let (parts, body) = request.into_parts();
+    let request = ::aws_smithy_runtime_api::http::Request::try_from(::http::Request::from_parts(
+        parts,
+        ::aws_smithy_types::body::SdkBody::from(::bytes::Bytes::from(body)),
+    ))
+    .map_err(|error| {
+        ::tracing::warn!(%error, "the integration's Amazon S3 bucket call does not render an \
+                                  HTTP request");
+        unanswered(
+            "the integration's uri does not render a request to Amazon S3, so no call was made",
+        )
+    })?;
+    let answered = ::aws_smithy_runtime_api::client::http::HttpConnector::call(
+        &ctx.callback().http_connector(),
+        request,
+    )
+    .await
+    .map_err(|error| {
+        ::tracing::warn!(
+            error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
+            "the integration request was not answered by Amazon S3"
+        );
+        unanswered(&format!(
+            "the integration request to {S3_SERVICE_NAME} was not answered, so there is no \
+             backend answer to map"
+        ))
+    })?;
+    let status = answered.status().as_u16();
+    let content_type = answered
+        .headers()
+        .get(::http::header::CONTENT_TYPE.as_str())
+        .map(str::to_string);
+    let body = answered
+        .into_body()
+        .bytes()
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default();
+    if ::service_common::in_process_refusal::is_transport_refusal(&body) {
+        ::tracing::warn!(
+            status,
+            "the integration request reached no such service: this emulator mounts none, so \
+             there is no backend answer to map"
+        );
+        return Err(unanswered(&format!(
+            "the integration request reached no {S3_SERVICE_NAME} in this emulator, so there \
+             is no backend answer to map"
+        )));
+    }
+    bounded(body.len())?;
+    Ok(Answered {
+        status,
+        content_type,
+        body,
+    })
 }
 
 /// An integration whose answer this stage could not produce at all, for the reason
@@ -918,98 +1120,158 @@ fn pattern_matches(pattern: &str, value: &str) -> bool {
     }
 }
 
-/// What `integration`'s `uri` addresses, when it names an Amazon S3 OBJECT call:
+/// What `integration`'s `uri` addresses, when it names an Amazon S3 call:
 ///
 /// * `None` when the `uri` names no AWS service call this module makes — another
 ///   service's action, or no ARN at all — which leaves it to the caller's own refusal;
 /// * `Some(Err(reason))` when it DOES name Amazon S3 and this call cannot be placed
 ///   against it, which is a configuration this stage cannot serve;
 /// * `Some(Ok(call))` for the call to make.
-fn addressed_object(
+fn addressed_s3(
     integration: &GetIntegrationOutput,
     default_region: &str,
     inputs: &TemplateInputs,
-) -> Option<Result<ObjectCall, String>> {
+) -> Option<Result<S3Call, String>> {
     let uri = integration.uri.as_deref()?;
     let arn = ::service_common::arn::parse(uri)?;
     if arn.vendor != APIGATEWAY_VENDOR || arn.account != S3_SUBDOMAIN {
         return None;
     }
-    Some(resolved_object(integration, &arn, default_region, inputs))
+    Some(resolved_s3(integration, &arn, default_region, inputs))
 }
 
 /// The call the integration ARN `arn` names, with every `{placeholder}` of its resource
 /// resolved against this request.
-fn resolved_object(
+///
+/// The `path` form's resource is Amazon S3's own REST path, so WHAT it addresses is read
+/// off that path: `path/{bucket}/{key}` addresses the object, and `path/{bucket}` — a path
+/// naming a bucket and nothing under it — addresses the BUCKET itself, each with the
+/// action the integration's `httpMethod` names for that resource. The `action` form names
+/// the operation instead, and the operation says which of the two it is.
+fn resolved_s3(
     integration: &GetIntegrationOutput,
     arn: &::service_common::arn::Arn<'_>,
     default_region: &str,
     inputs: &TemplateInputs,
-) -> Result<ObjectCall, String> {
+) -> Result<S3Call, String> {
     let region = match arn.region.is_empty() {
         true => default_region,
         false => arn.region,
     };
+    let partition = arn.partition.to_string();
     let resource = substituted(arn.resource, integration, inputs)?;
-    let (action, bucket, key) = if let Some(path) = resource.strip_prefix(PATH_FORM_PREFIX) {
-        let verb = integration.http_method.as_deref().unwrap_or_default();
+    let verb = integration.http_method.as_deref().unwrap_or_default();
+    if let Some(path) = resource.strip_prefix(PATH_FORM_PREFIX) {
+        let path = path.trim_start_matches('/');
+        // The bucket is the first segment; what follows it is Amazon S3's own object path.
+        // A path that names only the bucket — with or without the trailing slash Amazon
+        // S3's own bucket path carries — addresses the BUCKET.
+        let (bucket, key) = match path.split_once('/') {
+            Some((bucket, key)) => (bucket, key),
+            None => (path, ""),
+        };
+        if key.is_empty() {
+            let action = BucketAction::of_verb(verb).ok_or_else(|| {
+                format!(
+                    "the integration's httpMethod {verb} names no Amazon S3 bucket action \
+                     this emulator performs"
+                )
+            })?;
+            nonempty_bucket(bucket)?;
+            return Ok(S3Call::Bucket(BucketCall {
+                partition,
+                region: region.to_string(),
+                bucket: bucket.to_string(),
+                action,
+            }));
+        }
         let action = ObjectAction::of_verb(verb).ok_or_else(|| {
             format!(
                 "the integration's httpMethod {verb} names no Amazon S3 object action this \
                  emulator performs"
             )
         })?;
-        let (bucket, key) = path.trim_start_matches('/').split_once('/').ok_or_else(|| {
-            "the integration's uri addresses the Amazon S3 path form but names no \
-             {bucket}/{key} under it"
-                .to_string()
-        })?;
-        (action, bucket.to_string(), key.to_string())
-    } else if let Some(named) = resource.strip_prefix(ACTION_FORM_PREFIX) {
-        let mut parts = named.split('&');
-        let name = parts.next().unwrap_or_default();
-        let action = ObjectAction::of_action_name(name).ok_or_else(|| {
-            format!(
-                "the integration's uri names the Amazon S3 action {name}, which this \
-                 emulator does not perform"
-            )
-        })?;
-        let mut bucket = None;
-        let mut key = None;
-        for pair in parts {
-            match pair.split_once('=') {
-                Some((BUCKET_PARAMETER, value)) => bucket = Some(value.to_string()),
-                Some((KEY_PARAMETER, value)) => key = Some(value.to_string()),
-                _ => {}
-            }
-        }
-        let (Some(bucket), Some(key)) = (bucket, key) else {
-            return Err(format!(
-                "the integration's uri names the Amazon S3 action {name} without both a \
-                 {BUCKET_PARAMETER} and a {KEY_PARAMETER} parameter, so it addresses no object"
-            ));
-        };
-        (action, bucket, key)
-    } else {
+        nonempty_bucket(bucket)?;
+        return Ok(S3Call::Object(ObjectCall {
+            partition,
+            region: region.to_string(),
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            action,
+        }));
+    }
+    let Some(named) = resource.strip_prefix(ACTION_FORM_PREFIX) else {
         return Err(
             "the integration's uri addresses neither the path nor the action form of an \
              Amazon S3 call"
                 .to_string(),
         );
     };
-    if bucket.is_empty() || key.is_empty() {
+    let mut parts = named.split('&');
+    let name = parts.next().unwrap_or_default();
+    let mut bucket = None;
+    let mut key = None;
+    for pair in parts {
+        match pair.split_once('=') {
+            Some((BUCKET_PARAMETER, value)) => bucket = Some(value.to_string()),
+            Some((KEY_PARAMETER, value)) => key = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    if let Some(action) = ObjectAction::of_action_name(name) {
+        let (Some(bucket), Some(key)) = (bucket, key) else {
+            return Err(format!(
+                "the integration's uri names the Amazon S3 action {name} without both a \
+                 {BUCKET_PARAMETER} and a {KEY_PARAMETER} parameter, so it addresses no object"
+            ));
+        };
+        nonempty_bucket(&bucket)?;
+        if key.is_empty() {
+            return Err(
+                "the integration's uri names an empty bucket or key, so it addresses no object"
+                    .to_string(),
+            );
+        }
+        return Ok(S3Call::Object(ObjectCall {
+            partition,
+            region: region.to_string(),
+            bucket,
+            key,
+            action,
+        }));
+    }
+    if let Some(action) = BucketAction::of_action_name(name) {
+        let Some(bucket) = bucket else {
+            return Err(format!(
+                "the integration's uri names the Amazon S3 action {name} without a \
+                 {BUCKET_PARAMETER} parameter, so it addresses no bucket"
+            ));
+        };
+        nonempty_bucket(&bucket)?;
+        return Ok(S3Call::Bucket(BucketCall {
+            partition,
+            region: region.to_string(),
+            bucket,
+            action,
+        }));
+    }
+    Err(format!(
+        "the integration's uri names the Amazon S3 action {name}, which this emulator does \
+         not perform"
+    ))
+}
+
+/// `Ok` while `bucket` names a bucket at all: a `uri` whose bucket resolved to nothing
+/// addresses no resource, so no call is placed for it.
+fn nonempty_bucket(bucket: &str) -> Result<(), String> {
+    if bucket.is_empty() {
         return Err(
-            "the integration's uri names an empty bucket or key, so it addresses no object"
+            "the integration's uri names an empty bucket, so it addresses no Amazon S3 \
+             resource"
                 .to_string(),
         );
     }
-    Ok(ObjectCall {
-        partition: arn.partition.to_string(),
-        region: region.to_string(),
-        bucket,
-        key,
-        action,
-    })
+    Ok(())
 }
 
 /// `resource` with every `{name}` placeholder replaced by the value the integration maps
@@ -1140,19 +1402,38 @@ mod tests {
     }
 
     /// One row of the table below: the case name, the integration whose `uri` is read, and
-    /// the `(bucket, key, action)` it addresses — `None` for a configuration this stage
-    /// cannot serve.
-    type Row = (
-        &'static str,
-        GetIntegrationOutput,
-        Option<(&'static str, &'static str, ObjectAction)>,
-    );
+    /// what it addresses — `None` for a configuration this stage cannot serve.
+    type Row = (&'static str, GetIntegrationOutput, Option<Addressed>);
+
+    /// What a row expects the `uri` to address: an object, or a bucket.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Addressed {
+        Object(&'static str, &'static str, ObjectAction),
+        Bucket(&'static str, BucketAction),
+    }
+
+    /// What `read` addresses, in the row vocabulary above.
+    fn addressed(call: &S3Call) -> Addressed {
+        match call {
+            S3Call::Object(object) => {
+                Addressed::Object(leaked(&object.bucket), leaked(&object.key), object.action)
+            }
+            S3Call::Bucket(bucket) => Addressed::Bucket(leaked(&bucket.bucket), bucket.action),
+        }
+    }
+
+    /// `value` as a `&'static str`, so a read call compares against a row's own literals.
+    /// Test-only, and bounded by the number of rows.
+    fn leaked(value: &str) -> &'static str {
+        Box::leak(value.to_string().into_boxed_str())
+    }
 
     #[test]
     fn the_uri_decides_which_object_call_an_aws_integration_makes() {
         // Rows differ along what the rule generalises over: the FORM the uri names the
         // call in, the verb that names the action in the path form, the action the action
-        // form names, and where a placeholder's value is mapped from.
+        // form names, WHICH RESOURCE the path addresses (an object under a bucket, and a
+        // bucket on its own), and where a placeholder's value is mapped from.
         let cases: Vec<Row> = vec![
             (
                 "the path form, read as a GetObject",
@@ -1161,7 +1442,7 @@ mod tests {
                     "GET",
                     &[],
                 ),
-                Some(("shelf", "plain.txt", ObjectAction::Get)),
+                Some(Addressed::Object("shelf", "plain.txt", ObjectAction::Get)),
             ),
             (
                 "the path form with a PUT, read as a PutObject",
@@ -1170,12 +1451,12 @@ mod tests {
                     "PUT",
                     &[],
                 ),
-                Some(("shelf", "written.txt", ObjectAction::Put)),
+                Some(Addressed::Object("shelf", "written.txt", ObjectAction::Put)),
             ),
             (
                 "the path form with a DELETE, read as a DeleteObject",
                 integration("arn:aws:apigateway:us-east-1:s3:path/shelf/gone.txt", "DELETE", &[]),
-                Some(("shelf", "gone.txt", ObjectAction::Delete)),
+                Some(Addressed::Object("shelf", "gone.txt", ObjectAction::Delete)),
             ),
             (
                 "a placeholder mapped from a path parameter, key segments kept",
@@ -1184,7 +1465,11 @@ mod tests {
                     "GET",
                     &[("integration.request.path.object", "method.request.path.item")],
                 ),
-                Some(("shelf", "notes/today.txt", ObjectAction::Get)),
+                Some(Addressed::Object(
+                    "shelf",
+                    "notes/today.txt",
+                    ObjectAction::Get,
+                )),
             ),
             (
                 "a placeholder mapped from a query parameter",
@@ -1196,7 +1481,7 @@ mod tests {
                         "method.request.querystring.name",
                     )],
                 ),
-                Some(("shelf", "chosen.txt", ObjectAction::Get)),
+                Some(Addressed::Object("shelf", "chosen.txt", ObjectAction::Get)),
             ),
             (
                 "a placeholder mapped from a header, named in another case",
@@ -1208,7 +1493,7 @@ mod tests {
                         "method.request.header.X-Object",
                     )],
                 ),
-                Some(("shelf", "headed.txt", ObjectAction::Head)),
+                Some(Addressed::Object("shelf", "headed.txt", ObjectAction::Head)),
             ),
             (
                 "a placeholder mapped from a static value",
@@ -1217,7 +1502,11 @@ mod tests {
                     "GET",
                     &[("integration.request.path.bucket", "'static-shelf'")],
                 ),
-                Some(("static-shelf", "fixed.txt", ObjectAction::Get)),
+                Some(Addressed::Object(
+                    "static-shelf",
+                    "fixed.txt",
+                    ObjectAction::Get,
+                )),
             ),
             (
                 "the action form, which names the action itself",
@@ -1226,7 +1515,7 @@ mod tests {
                     "GET",
                     &[],
                 ),
-                Some(("shelf", "acted.txt", ObjectAction::Get)),
+                Some(Addressed::Object("shelf", "acted.txt", ObjectAction::Get)),
             ),
             (
                 "the action form naming PutObject against the GET verb: the action wins",
@@ -1235,7 +1524,54 @@ mod tests {
                     "GET",
                     &[],
                 ),
-                Some(("shelf", "acted.txt", ObjectAction::Put)),
+                Some(Addressed::Object("shelf", "acted.txt", ObjectAction::Put)),
+            ),
+            (
+                "the path form naming a bucket alone, read as a ListObjects",
+                integration("arn:aws:apigateway:us-east-1:s3:path/shelf", "GET", &[]),
+                Some(Addressed::Bucket("shelf", BucketAction::List)),
+            ),
+            (
+                "the path form naming a bucket alone with a trailing slash",
+                integration("arn:aws:apigateway:us-east-1:s3:path/shelf/", "GET", &[]),
+                Some(Addressed::Bucket("shelf", BucketAction::List)),
+            ),
+            (
+                "the path form naming a bucket alone with a HEAD, read as a HeadBucket",
+                integration("arn:aws:apigateway:us-east-1:s3:path/shelf", "HEAD", &[]),
+                Some(Addressed::Bucket("shelf", BucketAction::Head)),
+            ),
+            (
+                "a bucket placeholder mapped from a path parameter",
+                integration(
+                    "arn:aws:apigateway:us-east-1:s3:path/{bucket}",
+                    "GET",
+                    &[("integration.request.path.bucket", "'mapped-shelf'")],
+                ),
+                Some(Addressed::Bucket("mapped-shelf", BucketAction::List)),
+            ),
+            (
+                "the action form naming ListObjects",
+                integration(
+                    "arn:aws:apigateway:us-east-1:s3:action/ListObjects&Bucket=shelf",
+                    "GET",
+                    &[],
+                ),
+                Some(Addressed::Bucket("shelf", BucketAction::List)),
+            ),
+            (
+                "a verb that names no bucket action",
+                integration("arn:aws:apigateway:us-east-1:s3:path/shelf", "PUT", &[]),
+                None,
+            ),
+            (
+                "the action form naming ListObjects without a bucket",
+                integration(
+                    "arn:aws:apigateway:us-east-1:s3:action/ListObjects",
+                    "GET",
+                    &[],
+                ),
+                None,
             ),
             (
                 "a verb that names no object action",
@@ -1254,18 +1590,18 @@ mod tests {
             ),
         ];
         for (case, integration, expected) in &cases {
-            let read = addressed_object(integration, "us-east-1", &inputs());
+            let read = addressed_s3(integration, "us-east-1", &inputs());
             let read = read
                 .unwrap_or_else(|| panic!("case {case:?}: the uri names an Amazon S3 call"));
             match expected {
-                Some((bucket, key, action)) => {
+                Some(expected) => {
                     let call = read
                         .as_ref()
                         .unwrap_or_else(|error| panic!("case {case:?}: unplaced: {error}"));
+                    let actual = addressed(call);
                     assert_eq!(
-                        (call.bucket.as_str(), call.key.as_str(), call.action),
-                        (*bucket, *key, *action),
-                        "case {case:?}: expected {bucket}/{key} {action:?}, got {call:?}"
+                        actual, *expected,
+                        "case {case:?}: expected {expected:?}, got {actual:?}"
                     );
                 }
                 None => assert!(
@@ -1293,7 +1629,7 @@ mod tests {
             ("a formed URL rather than an ARN", "https://example.test/x"),
         ];
         for (case, uri) in &cases {
-            let read = addressed_object(&integration(uri, "GET", &[]), "us-east-1", &inputs());
+            let read = addressed_s3(&integration(uri, "GET", &[]), "us-east-1", &inputs());
             assert!(
                 read.is_none(),
                 "case {case:?}: expected the uri to name none of these calls, got {read:?}"

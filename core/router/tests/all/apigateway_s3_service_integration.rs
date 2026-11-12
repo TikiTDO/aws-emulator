@@ -881,3 +881,280 @@ async fn a_deployed_method_integrating_an_aws_service_action_makes_that_call() {
         gone.text()
     );
 }
+
+/// One row of the bucket table: a request to the stage and what the records say it is
+/// answered with.
+struct BucketRow {
+    case: &'static str,
+    verb: &'static str,
+    path: &'static str,
+    expected_status: u16,
+    /// The text every one of these has to appear in the method response's body, which for a
+    /// listing is Amazon S3's own `ListBucketResult` document.
+    expected_contains: &'static [&'static str],
+    /// Text the method response must NOT carry.
+    expected_absent: &'static [&'static str],
+}
+
+/// The bucket this test's own rows address, and a second one the account does not hold.
+const LISTED_BUCKET: &str = "stage-integration-listed";
+const ABSENT_BUCKET: &str = "stage-integration-absent";
+
+/// RULE (the same one, over the other resource an Amazon S3 `path` form can name): the
+/// resource of an `AWS` integration's `uri` IS Amazon S3's own REST path, so a `path` naming
+/// a bucket and nothing under it addresses the BUCKET — `GET` is the bucket's own listing
+/// (`ListObjects`, which Amazon S3 binds to `GET /{Bucket}` and answers as the
+/// `ListBucketResult` document) and `HEAD` is `HeadBucket` — authorized by `s3:ListBucket`
+/// on the bucket's ARN, and the method response carries the service's own answer.
+///
+/// The rows vary what the rule generalises over: the FORM the `uri` names the call in (the
+/// path form and the action form), the ACTION (the listing and the head), the role (one that
+/// may list this bucket, one whose grant names another), and the bucket (one the account
+/// holds and one it does not).
+#[tokio::test]
+async fn a_deployed_method_integrating_an_aws_service_action_can_address_a_bucket() {
+    let router = emulator();
+
+    // The bucket and the two objects its listing reports, written through Amazon S3's own
+    // API so what the stage serves is what that service holds.
+    let created = s3(&router, "PUT", &format!("/{LISTED_BUCKET}"), &[], Bytes::new()).await;
+    assert_eq!(
+        created.status,
+        200,
+        "setup: CreateBucket must succeed, got {} with {:?}",
+        created.status,
+        created.text()
+    );
+    for key in [TEXT_KEY, NESTED_KEY] {
+        let written = s3(
+            &router,
+            "PUT",
+            &format!("/{LISTED_BUCKET}/{key}"),
+            &[("content-type", "text/plain")],
+            Bytes::from("listed".to_string()),
+        )
+        .await;
+        assert_eq!(
+            written.status,
+            200,
+            "setup: PutObject({key}) must succeed, got {} with {:?}",
+            written.status,
+            written.text()
+        );
+    }
+
+    // Two roles this api can assume: one granted the bucket action on THIS bucket, one on
+    // another bucket's ARN.
+    let list_action = r#""s3:ListBucket""#;
+    let allowed = role(
+        &router,
+        "stage-listing-allowed",
+        APIGATEWAY_TRUST,
+        &policy(list_action, &format!("arn:aws:s3:::{LISTED_BUCKET}")),
+    )
+    .await;
+    let other_bucket = role(
+        &router,
+        "stage-listing-other-bucket",
+        APIGATEWAY_TRUST,
+        &policy(list_action, "arn:aws:s3:::another-shelf"),
+    )
+    .await;
+
+    let api_body = apigw_ok(
+        &router,
+        "CreateRestApi",
+        "POST",
+        "/restapis",
+        Some(json!({ "name": "stage-listing" })),
+        201,
+    )
+    .await;
+    let api = member("CreateRestApi", &api_body, "id");
+    let root = member("CreateRestApi", &api_body, "rootResourceId");
+
+    // The PATH form naming the bucket alone, with the listing and the head on it.
+    let bucket_path = format!("arn:aws:apigateway:{REGION}:s3:path/{LISTED_BUCKET}");
+    let listing = resource(&router, &api, &root, "listing").await;
+    for verb in ["GET", "HEAD"] {
+        aws_method(
+            &router,
+            &api,
+            &listing,
+            verb,
+            &bucket_path,
+            Some(&allowed),
+            None,
+            MAPPED_STATUSES,
+        )
+        .await;
+    }
+
+    // The ACTION form of the same listing.
+    let listed = resource(&router, &api, &root, "listed").await;
+    aws_method(
+        &router,
+        &api,
+        &listed,
+        "GET",
+        &format!("arn:aws:apigateway:{REGION}:s3:action/ListObjects&Bucket={LISTED_BUCKET}"),
+        Some(&allowed),
+        None,
+        MAPPED_STATUSES,
+    )
+    .await;
+
+    // The same listing under the role whose grant names another bucket.
+    let denied = resource(&router, &api, &root, "listing-denied").await;
+    aws_method(
+        &router,
+        &api,
+        &denied,
+        "GET",
+        &bucket_path,
+        Some(&other_bucket),
+        None,
+        MAPPED_STATUSES,
+    )
+    .await;
+
+    // A listing of a bucket the account does not hold, under a role granted every bucket.
+    let every_bucket = role(
+        &router,
+        "stage-listing-every-bucket",
+        APIGATEWAY_TRUST,
+        &policy(list_action, "arn:aws:s3:::*"),
+    )
+    .await;
+    let absent = resource(&router, &api, &root, "listing-absent").await;
+    aws_method(
+        &router,
+        &api,
+        &absent,
+        "GET",
+        &format!("arn:aws:apigateway:{REGION}:s3:path/{ABSENT_BUCKET}"),
+        Some(&every_bucket),
+        None,
+        MAPPED_STATUSES,
+    )
+    .await;
+
+    apigw_ok(
+        &router,
+        "CreateDeployment",
+        "POST",
+        &format!("/restapis/{api}/deployments"),
+        Some(json!({ "stageName": STAGE })),
+        201,
+    )
+    .await;
+
+    const LISTING_ELEMENTS: &[&str] = &[
+        "<ListBucketResult",
+        "<Name>stage-integration-listed</Name>",
+        "<Key>report.txt</Key>",
+        "<Key>notes/today.txt</Key>",
+    ];
+    let rows: &[BucketRow] = &[
+        BucketRow {
+            case: "the bucket's own listing, through the path form naming the bucket",
+            verb: "GET",
+            path: "/listing",
+            expected_status: 200,
+            expected_contains: LISTING_ELEMENTS,
+            expected_absent: &["UnknownService"],
+        },
+        BucketRow {
+            case: "the same listing through the action form",
+            verb: "GET",
+            path: "/listed",
+            expected_status: 200,
+            expected_contains: LISTING_ELEMENTS,
+            expected_absent: &["UnknownService"],
+        },
+        BucketRow {
+            case: "a head of the bucket, which carries no body",
+            verb: "HEAD",
+            path: "/listing",
+            expected_status: 200,
+            expected_contains: &[],
+            expected_absent: &["<ListBucketResult", "UnknownService"],
+        },
+        BucketRow {
+            case: "a role whose grant names another bucket",
+            verb: "GET",
+            path: "/listing-denied",
+            expected_status: 403,
+            // The refusal is the SERVICE's own, in its own error envelope.
+            expected_contains: &["AccessDenied"],
+            expected_absent: &["<ListBucketResult", "UnknownService"],
+        },
+        BucketRow {
+            case: "a bucket the account does not hold",
+            verb: "GET",
+            path: "/listing-absent",
+            // Amazon S3 answers `NoSuchBucket` with 404, and the integration response whose
+            // pattern matches that status is what the client sees.
+            expected_status: 404,
+            expected_contains: &["NoSuchBucket"],
+            expected_absent: &["<ListBucketResult", "UnknownService"],
+        },
+    ];
+
+    for row in rows {
+        let answer = invoke(&router, &api, row.verb, row.path, &[], Bytes::new()).await;
+        assert_eq!(
+            answer.status,
+            row.expected_status,
+            "case {:?}: expected HTTP {}, got {} with {:?}",
+            row.case,
+            row.expected_status,
+            answer.status,
+            answer.text()
+        );
+        let body = answer.text();
+        for expected in row.expected_contains {
+            assert!(
+                body.contains(expected),
+                "case {:?}: expected the body to carry {expected:?}, got {body:?}",
+                row.case
+            );
+        }
+        for absent in row.expected_absent {
+            assert!(
+                !body.contains(absent),
+                "case {:?}: expected the body to carry nothing of {absent:?}, got {body:?}",
+                row.case
+            );
+        }
+    }
+
+    // ROUND TRIP: the listing the stage served is the bucket's own, read back through Amazon
+    // S3's own API — the two documents report the same keys.
+    let read_back = s3(
+        &router,
+        "GET",
+        &format!("/{LISTED_BUCKET}"),
+        &[],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(
+        read_back.status,
+        200,
+        "the bucket must be listable through Amazon S3, got {} with {:?}",
+        read_back.status,
+        read_back.text()
+    );
+    let through_the_stage = invoke(&router, &api, "GET", "/listing", &[], Bytes::new()).await;
+    for key in [TEXT_KEY, NESTED_KEY] {
+        let element = format!("<Key>{key}</Key>");
+        assert!(
+            read_back.text().contains(&element) && through_the_stage.text().contains(&element),
+            "the stage's listing and Amazon S3's own must report {key:?} alike, got {:?} and \
+             {:?}",
+            through_the_stage.text(),
+            read_back.text()
+        );
+    }
+}

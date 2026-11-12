@@ -134,6 +134,10 @@ pub enum Protocol {
     /// request is built, signed and parsed by the S3 client this crate holds
     /// ([`super::aws_s3`]) rather than by either path above.
     S3Rest,
+    /// CloudFront's `restXml`: the same, for the service whose operations bind their input
+    /// to a path and an XML document, built by the CloudFront client this crate holds
+    /// ([`super::aws_cloudfront`]).
+    CloudFrontRest,
 }
 
 impl Api {
@@ -148,7 +152,9 @@ impl Api {
             Protocol::AwsJson { json_version, .. } => {
                 format!("application/x-amz-json-{json_version}")
             }
-            Protocol::RestJson(_) | Protocol::S3Rest => "application/json".to_string(),
+            Protocol::RestJson(_) | Protocol::S3Rest | Protocol::CloudFrontRest => {
+                "application/json".to_string()
+            }
         }
     }
 }
@@ -541,6 +547,24 @@ pub const APIS: &[Api] = &[
             json_version: "1.1",
         },
         answer_model: Some(&CODEDEPLOY_ANSWERS),
+    },
+    // `services/service-com-amazonaws-cloudfront-cloudfront2020-05-31/smithy-model/
+    // com-amazonaws-cloudfront-cloudfront2020-05-31.json`: restXml, sigv4Name `cloudfront`,
+    // endpointPrefix `cloudfront`, sdkId `CloudFront`. Its operations bind their input to a
+    // path and an XML document rather than to a JSON body, so the request is built by
+    // [`super::aws_cloudfront`].
+    //
+    // A function that REFRESHES THE EDGE after writing the object behind it is the shape that
+    // reaches this service: the write lands in the origin and the handler invalidates the
+    // paths the distribution is still serving, so a handler that cannot reach CloudFront can
+    // only leave stale content being served.
+    Api {
+        sdk_token: "cloudfront",
+        signing_name: "cloudfront",
+        endpoint_prefix: "cloudfront",
+        model: None,
+        protocol: Protocol::CloudFrontRest,
+        answer_model: None,
     },
 ];
 
@@ -1036,6 +1060,18 @@ impl AwsAccess {
                 )
                 .await
             }
+            // CloudFront is reached at ONE endpoint whatever Region the client the guest
+            // built names, so the Region is not threaded into this call
+            // ([`super::aws_cloudfront::SIGNING_REGION`]).
+            Protocol::CloudFrontRest => {
+                super::aws_cloudfront::call(
+                    &self.callback,
+                    self.identity.as_ref(),
+                    operation,
+                    body,
+                )
+                .await
+            }
         }
     }
 
@@ -1248,10 +1284,10 @@ async fn sent(
             }
             bound.body
         }
-        // Amazon S3's own protocol is bound by the client [`super::aws_s3`] holds, which is
-        // where a call to it is dispatched ([`AwsAccess::dispatched`]): no request to it is
-        // built here.
-        Protocol::S3Rest => {
+        // Amazon S3's own protocol is bound by the client [`super::aws_s3`] holds, and
+        // CloudFront's by the one [`super::aws_cloudfront`] holds, which is where a call to
+        // either is dispatched ([`AwsAccess::dispatched`]): no request to them is built here.
+        Protocol::S3Rest | Protocol::CloudFrontRest => {
             return Err(Sent::NotMade(format!(
                 "{} binds its requests with its own protocol rather than with a JSON one",
                 api.sdk_token
@@ -1586,6 +1622,12 @@ mod tests {
                 super::Protocol::S3Rest => assert_eq!(
                     api.signing_name, "s3",
                     "case {:?}: expected S3's own signing name on the S3 protocol entry",
+                    api.sdk_token
+                ),
+                // CloudFront's, the same way, in `super::super::aws_cloudfront`.
+                super::Protocol::CloudFrontRest => assert_eq!(
+                    api.signing_name, "cloudfront",
+                    "case {:?}: expected CloudFront's own signing name on its protocol entry",
                     api.sdk_token
                 ),
             }

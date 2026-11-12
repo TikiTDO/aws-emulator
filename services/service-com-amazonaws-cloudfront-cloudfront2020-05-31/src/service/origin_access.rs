@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! ORIGIN ACCESS CONTROL on the data plane: how the edge makes an origin request ON BEHALF
-//! OF the distribution that configured it.
+//! ORIGIN ACCESS on the data plane: how the edge makes an origin request ON BEHALF OF the
+//! distribution that configured it.
+//!
+//! An origin is fronted by one of the two mechanisms CloudFront publishes, and both say the
+//! same thing: a PRIVATE origin is reachable through the distribution and through nothing
+//! else, because the origin's own resource-based policy grants the read to CloudFront alone.
 //!
 //! An `Origin` may name an `OriginAccessControlId`, and the control it names says what
 //! CloudFront does to every request it sends that origin: `SigningBehavior` `always` —
@@ -14,10 +18,21 @@
 //! resource-based policy grants the read to the [`SERVICE_PRINCIPAL`] service principal and
 //! scopes that grant, by `aws:SourceArn`, to the one distribution it was written for.
 //!
-//! So one origin fetch under an origin access control is two questions, in this order:
+//! The LEGACY mechanism is the other half, and it is the one an Amazon S3 origin may name
+//! instead: `S3OriginConfig$OriginAccessIdentity` names "the CloudFront origin access
+//! identity to associate with the origin", whose documented value is
+//! `origin-access-identity/cloudfront/ID-of-origin-access-identity`, and an origin access
+//! identity exists so that "viewers can only access objects in an Amazon S3 bucket through
+//! CloudFront". The grant is then written for that IDENTITY rather than for the service
+//! principal, in either spelling AWS publishes for it, and the two questions below are the
+//! same two ([`of_origin_access_identity`] builds it, and [`SignedAs`] says what a granted
+//! fetch of such an origin is signed as).
 //!
-//! 1. the DECISION the ORIGIN's own resource policy states about it — may
-//!    [`SERVICE_PRINCIPAL`], acting for THIS distribution, perform the action the viewer's
+//! So one origin fetch under an origin access mechanism is two questions, in this order:
+//!
+//! 1. the DECISION the ORIGIN's own resource policy states about it — may the principal the
+//!    mechanism names ([`SERVICE_PRINCIPAL`] for a control, the identity's own spellings for
+//!    a legacy identity), acting for THIS distribution, perform the action the viewer's
 //!    method names on the object the viewer asked for? The document is read from the origin's
 //!    own service (for an `s3` origin type, through that bucket's `GetBucketPolicy`), so what
 //!    decides a fetch is the document a client's last write left on the bucket: a policy just
@@ -65,11 +80,24 @@ use ::aws_smithy_types::body::SdkBody;
 use ::smithy_server_runtime::OperationContext;
 
 use crate::ops::types::Origin;
-use crate::state::{ComAmazonawsCloudfrontCloudfront20200531State, StoredDistribution};
+use crate::state::{
+    origin_access_identity_reference, ComAmazonawsCloudfrontCloudfront20200531State,
+    StoredDistribution,
+};
 
 /// The service principal an origin request CloudFront makes is made as, and so the principal
 /// an origin's resource policy grants the read to.
 pub const SERVICE_PRINCIPAL: &str = "cloudfront.amazonaws.com";
+
+/// The account field of the IAM principal a LEGACY origin access identity is named by in a
+/// bucket policy: an origin access identity is an identity of CloudFront's own account, not
+/// of the caller's.
+const ORIGIN_ACCESS_IDENTITY_ACCOUNT: &str = "cloudfront";
+
+/// The resource the same principal names, ahead of the identity's own id
+/// (`arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity <id>` — the spelling the
+/// Amazon S3 User Guide's own OAI bucket policy carries).
+const ORIGIN_ACCESS_IDENTITY_USER_PREFIX: &str = "user/CloudFront Origin Access Identity ";
 
 /// The `SigningBehavior` values under which CloudFront signs EVERY origin request: `always`
 /// ("CloudFront signs all origin requests") and `always-amz-auth` ("CloudFront signs all
@@ -149,8 +177,8 @@ const BUCKET_POLICY_QUERY: &str = "policy";
 /// granted nothing"), not a failure to read one.
 const NO_SUCH_BUCKET_POLICY: &str = "NoSuchBucketPolicy";
 
-/// What one origin request is made under, when the origin it addresses carries an origin
-/// access control that signs it.
+/// What one origin request is made under, when the origin it addresses is fronted by an
+/// access mechanism that signs it.
 ///
 /// Owned, and computed under the store's lock, so the decision and the signing happen after
 /// that lock is released.
@@ -159,6 +187,8 @@ pub struct OriginAccess {
     /// The signing name of the service the origin belongs to, from the control's own
     /// `OriginAccessControlOriginType` ([`ORIGIN_TYPE_SIGNING_NAMES`]).
     signing_name: &'static str,
+    /// WHICH identity a granted fetch is signed as ([`SignedAs`]).
+    signed_as: SignedAs,
     /// The Region the origin's host addresses ([`region_of_host`]).
     region: String,
     /// The host the origin request is addressed to, which is also where its resource policy
@@ -167,10 +197,35 @@ pub struct OriginAccess {
     /// The ARN of the distribution the request is made on behalf of: the value of
     /// [`SOURCE_ARN_CONDITION_KEY`] a grant may be scoped by.
     source_arn: String,
+    /// The principals the ORIGIN's own resource policy has to grant the fetch to, any one of
+    /// which admits it: the service principal for an origin fronted by an ORIGIN ACCESS
+    /// CONTROL, and the two spellings a bucket policy names a LEGACY ORIGIN ACCESS IDENTITY
+    /// by for an origin fronted by one ([`of_origin_access_identity`]).
+    principals: Vec<String>,
     /// The object an `s3` origin's bucket policy is evaluated over, for an origin whose host
     /// names a bucket; `None` for an origin whose resource policy is not one this emulator
     /// reads.
     s3_object: Option<S3Object>,
+}
+
+/// WHICH identity a granted origin fetch is signed as.
+///
+/// An ORIGIN ACCESS CONTROL names the CloudFront SERVICE PRINCIPAL, and a call made as it is
+/// recorded as that principal's so the serving service decides it for that principal
+/// ([`sign_as_the_service_principal`]). A LEGACY ORIGIN ACCESS IDENTITY names an identity of
+/// CloudFront's own account, for which this emulator mints no credential at all: the grant
+/// the identity holds is decided HERE, from the bucket's own policy ([`admits`]), and the
+/// fetch the policy grants is then signed with the emulator's own credential — so the origin
+/// serves it as it serves the account, which is what makes a private bucket reachable through
+/// the distribution and through nothing else. The consequence is that a decision the ORIGIN's
+/// service would make ITSELF about such a fetch is decided for the account rather than for
+/// the identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignedAs {
+    /// The CloudFront service principal, acting for this distribution.
+    ServicePrincipal,
+    /// The account, the identity the grant was decided for having no credential of its own.
+    Account,
 }
 
 /// The Amazon S3 object one origin request addresses, as a bucket policy names it.
@@ -182,11 +237,46 @@ struct S3Object {
     resource: String,
 }
 
-/// What the origin access control of `origin` makes of one fetch, or `None` when no request
-/// to that origin is signed at all: an origin naming no control, a control this account no
-/// longer holds, one whose `SigningBehavior` is `never`, one whose behaviour leaves a viewer
-/// that presented its own credential alone, and one whose origin type names no service.
+/// What the origin access of `origin` makes of one fetch, or `None` when no request to that
+/// origin is signed at all.
+///
+/// The two mechanisms an origin is fronted by are read in the order CloudFront's own
+/// configuration puts them in: the ORIGIN ACCESS CONTROL an `OriginAccessControlId` names
+/// ([`of_origin_access_control`]) and, for an origin that names none, the LEGACY ORIGIN
+/// ACCESS IDENTITY its `S3OriginConfig` names ([`of_origin_access_identity`]). `None` for an
+/// origin fronted by neither — and for a control this account no longer holds, one whose
+/// `SigningBehavior` is `never`, one whose behaviour leaves a viewer that presented its own
+/// credential alone, and one whose origin type names no service.
 pub fn of_fetch(
+    store: &ComAmazonawsCloudfrontCloudfront20200531State,
+    distribution: &StoredDistribution,
+    origin: &Origin,
+    method: &str,
+    object_path: &str,
+    viewer_presented_a_credential: bool,
+) -> Option<OriginAccess> {
+    // An origin that names a control is fronted by that control; an `OriginAccessControlId`
+    // the configuration carries EMPTY names none ("specify an empty `OriginAccessControlId`"
+    // is how an origin states it has no control), which leaves the legacy member below.
+    if origin
+        .origin_access_control_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty())
+    {
+        return of_origin_access_control(
+            store,
+            distribution,
+            origin,
+            method,
+            object_path,
+            viewer_presented_a_credential,
+        );
+    }
+    of_origin_access_identity(store, distribution, origin, method, object_path)
+}
+
+/// What the ORIGIN ACCESS CONTROL of `origin` makes of one fetch.
+fn of_origin_access_control(
     store: &ComAmazonawsCloudfrontCloudfront20200531State,
     distribution: &StoredDistribution,
     origin: &Origin,
@@ -209,11 +299,77 @@ pub fn of_fetch(
         .flatten();
     Some(OriginAccess {
         signing_name,
+        signed_as: SignedAs::ServicePrincipal,
         region: region_of_host(&host, signing_name),
         host,
         source_arn: distribution.arn.clone(),
+        principals: vec![SERVICE_PRINCIPAL.to_string()],
         s3_object,
     })
+}
+
+/// What the LEGACY ORIGIN ACCESS IDENTITY of an Amazon S3 origin makes of one fetch.
+///
+/// `S3OriginConfig$OriginAccessIdentity` is "the CloudFront origin access identity to
+/// associate with the origin", whose documented value is
+/// `origin-access-identity/cloudfront/ID-of-origin-access-identity` — and an origin access
+/// identity exists so that "viewers can only access objects in an Amazon S3 bucket through
+/// CloudFront": the bucket's own policy grants the read to that IDENTITY and to nobody else,
+/// so a fetch the policy grants it is signed and a direct request stays refused. An origin
+/// that "specif(ies) an empty `OriginAccessIdentity` element" names none, which is an origin
+/// fronted by nothing.
+///
+/// The identity is named in a bucket policy in either of the two spellings AWS publishes for
+/// it: the IAM principal of CloudFront's own account
+/// (`arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity <id>`) and the
+/// `S3CanonicalUserId` the identity was minted with, which is the value the console writes as
+/// a `CanonicalUser` principal. Both name the one identity, so a grant to either admits the
+/// fetch.
+fn of_origin_access_identity(
+    store: &ComAmazonawsCloudfrontCloudfront20200531State,
+    distribution: &StoredDistribution,
+    origin: &Origin,
+    method: &str,
+    object_path: &str,
+) -> Option<OriginAccess> {
+    let reference = origin
+        .s3_origin_config
+        .as_ref()
+        .map(|s3| s3.origin_access_identity.trim())
+        .filter(|reference| !reference.is_empty())?;
+    let identity = store
+        .origin_access_identities
+        .values()
+        .find(|identity| origin_access_identity_reference(&identity.id) == reference)?;
+    // Read as a HOSTNAME or not at all, for the reason [`of_origin_access_control`] gives.
+    let host = dns_host(&host_of(&origin.domain_name))?;
+    let s3_object = s3_object(&host, method, object_path)?;
+    Some(OriginAccess {
+        signing_name: S3_ORIGIN_TYPE,
+        signed_as: SignedAs::Account,
+        region: region_of_host(&host, S3_ORIGIN_TYPE),
+        host,
+        source_arn: distribution.arn.clone(),
+        principals: vec![
+            format!(
+                "arn:{partition}:iam::{ORIGIN_ACCESS_IDENTITY_ACCOUNT}:\
+                 {ORIGIN_ACCESS_IDENTITY_USER_PREFIX}{id}",
+                partition = partition_of(&distribution.arn),
+                id = identity.id
+            ),
+            identity.s3_canonical_user_id.clone(),
+        ],
+        s3_object: Some(s3_object),
+    })
+}
+
+/// The partition an ARN of this account names, and `aws` for a value that is not one — which
+/// is the partition every ARN this emulator mints carries.
+fn partition_of(arn: &str) -> String {
+    ::service_common::arn::parse(arn)
+        .map(|arn| arn.partition.to_string())
+        .filter(|partition| !partition.is_empty())
+        .unwrap_or_else(|| "aws".to_string())
 }
 
 /// Whether a control with this `SigningBehavior` signs the request at hand.
@@ -414,16 +570,16 @@ pub async fn grants_origin_request(
     }
 }
 
-/// Whether `document` grants [`SERVICE_PRINCIPAL`], acting for the distribution
+/// Whether `document` grants one of `access.principals`, acting for the distribution
 /// `access.source_arn` names, the action `object.action` on `object.resource`.
 ///
-/// A service principal holds no identity-based policies, so the ORIGIN's document is the only
-/// one in force over this fetch and it alone decides it: in IAM's own order an explicit `Deny`
-/// about the fetch refuses it whatever a grant says, and otherwise the fetch needs an `Allow`
-/// about it — a document whose statements are about something else has granted nothing, which
-/// is IAM's implicit deny.
+/// Neither a service principal nor an origin access identity holds identity-based policies,
+/// so the ORIGIN's document is the only one in force over this fetch and it alone decides it:
+/// in IAM's own order an explicit `Deny` about the fetch refuses it whatever a grant says, and
+/// otherwise the fetch needs an `Allow` about it — a document whose statements are about
+/// something else has granted nothing, which is IAM's implicit deny.
 fn admits(document: &str, access: &OriginAccess, object: &S3Object) -> bool {
-    let principals = [SERVICE_PRINCIPAL.to_string()];
+    let principals = access.principals.clone();
     let account = ::service_common::arn::parse(&access.source_arn)
         .map(|arn| arn.account.to_string())
         .unwrap_or_default();
@@ -622,6 +778,14 @@ pub async fn sign_as_the_service_principal<'e, Eng: Send + Sync + 'static>(
     ctx: &'e OperationContext<'_>,
     read_timeout: Duration,
 ) -> Result<Option<InFlightOriginRequest<'e, Eng>>, String> {
+    // A fetch for an origin fronted by a LEGACY ORIGIN ACCESS IDENTITY is made as no service
+    // principal: that identity's grant was decided here, from the bucket's own policy, and
+    // the fetch is signed with the emulator's own credential ([`SignedAs`] says why), so
+    // there is no per-call credential to mint and no record to write.
+    if access.signed_as == SignedAs::Account {
+        sign(request, access, ctx).await?;
+        return Ok(None);
+    }
     let Some(directory) = in_flight_calls(engine) else {
         // No directory to record the call in, so there is no way for the origin's service to
         // decide it as the CloudFront principal: the request travels UNSIGNED rather than as
@@ -793,9 +957,11 @@ mod tests {
     fn access(host: &str, action: &'static str, key: &str) -> OriginAccess {
         OriginAccess {
             signing_name: "s3",
+            signed_as: SignedAs::ServicePrincipal,
             region: region_of_host(host, "s3"),
             host: host.to_string(),
             source_arn: DISTRIBUTION_ARN.to_string(),
+            principals: vec![SERVICE_PRINCIPAL.to_string()],
             s3_object: Some(S3Object {
                 action,
                 resource: format!(

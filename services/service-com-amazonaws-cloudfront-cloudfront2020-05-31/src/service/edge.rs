@@ -29,15 +29,20 @@
 //!    order the configuration lists them, first match wins, and the
 //!    `DefaultCacheBehavior` when none matches — "If none of the path patterns match,
 //!    CloudFront applies the default cache behavior";
-//! 4. that behaviour's `AllowedMethods` decide whether the viewer's METHOD is served at
+//! 4. that behaviour's `ViewerProtocolPolicy` decides whether the SCHEME the viewer
+//!    dialled is served at all: `redirect-to-https` answers a plaintext viewer `301` with
+//!    the HTTPS URL of the same request, `https-only` answers it `403`, and `allow-all`
+//!    serves it ([`viewer_protocol_plan`]);
+//! 5. that behaviour's `AllowedMethods` decide whether the viewer's METHOD is served at
 //!    all. A method the behaviour does not allow is refused BY CLOUDFRONT with `403` and
 //!    `X-Cache: Error from cloudfront`, and no origin request is made;
-//! 5. that behaviour's `CachedMethods` and cache policy decide whether the answer may
+//! 6. that behaviour's `CachedMethods` and cache policy decide whether the answer may
 //!    come from the edge cache: a cacheable method whose TTL has not run out is answered
 //!    `X-Cache: Hit from cloudfront` without touching the origin, and everything else
 //!    goes to the origin and is answered `X-Cache: Miss from cloudfront`;
-//! 6. only then is the ORIGIN the behaviour's `TargetOriginId` names fetched, in process,
-//!    through the emulator this service is running within — as the distribution's own origin
+//! 7. only then is the ORIGIN the behaviour's `TargetOriginId` names fetched, in process,
+//!    through the emulator this service is running within — over the scheme that origin's
+//!    own `OriginProtocolPolicy` names ([`origin_uri`]) and as the distribution's own origin
 //!    access control says that origin is to be addressed (see below).
 //!
 //! # What the origin fetch is, and what it is not
@@ -51,6 +56,12 @@
 //! serves answers nothing, and that is reported as CloudFront reports an origin it could
 //! not reach: `502` with `X-Cache: Error from cloudfront`. Nothing is invented for an
 //! origin that did not answer, and nothing off this machine is ever addressed.
+//!
+//! The SCHEME of that request is the origin's own, from its `OriginProtocolPolicy`, and an
+//! origin addressed over a scheme it does not serve is the same `502`: every AWS service
+//! endpoint this emulator serves answers over TLS alone, so an origin whose policy
+//! addresses one of them over plaintext is an origin connection that cannot be opened
+//! ([`origin_accepts_scheme`]).
 //!
 //! One origin shape is worth naming because it is the one the Lambda-function-URL
 //! topology uses: a function URL host is served by nothing in this emulator — Lambda has
@@ -125,7 +136,9 @@ use std::time::{Duration, Instant, SystemTime};
 use super::edge_metrics;
 use super::origin_access::{self, OriginAccess};
 use compression::Encoding;
-use crate::ops::types::{AllowedMethods, CacheBehavior, DefaultCacheBehavior, Origin};
+use crate::ops::types::{
+    AllowedMethods, CacheBehavior, DefaultCacheBehavior, ForwardedValues, Origin,
+};
 use crate::state::{
     managed_cache_policy, matches_path_pattern, same_domain, CachedEdgeResponse,
     ComAmazonawsCloudfrontCloudfront20200531State, StoredDistribution, DEFAULT_ALLOWED_METHODS,
@@ -175,6 +188,42 @@ const ORIGIN_USER_AGENT: &str = "Amazon CloudFront";
 
 /// The status a viewer request gets when CloudFront refuses it at the edge.
 const FORBIDDEN: u16 = 403;
+
+/// The status a viewer request gets when the behaviour's `ViewerProtocolPolicy` is
+/// `redirect-to-https` and the viewer dialled the plaintext scheme: "CloudFront returns an
+/// HTTP status code of 301 (Moved Permanently) to the viewer along with the HTTPS URL".
+const MOVED_PERMANENTLY: u16 = 301;
+
+/// The response header that redirect carries the HTTPS URL in.
+const LOCATION: &str = "location";
+
+/// `ViewerProtocolPolicy` `redirect-to-https`: "If a viewer submits an HTTP request,
+/// CloudFront returns an HTTP status code of 301 (Moved Permanently) to the viewer along
+/// with the HTTPS URL. The viewer then resubmits the request using the new URL."
+const REDIRECT_TO_HTTPS: &str = "redirect-to-https";
+
+/// `ViewerProtocolPolicy` `https-only`: "If a viewer sends an HTTP request, CloudFront
+/// returns an HTTP status code of 403 (Forbidden)."
+const HTTPS_ONLY: &str = "https-only";
+
+/// The scheme a viewer that dialled the plaintext half of an edge address used, which is
+/// the only scheme either policy above acts on. The one spelling of it
+/// ([`generated_headers`] reads the viewer's scheme off the request).
+const PLAINTEXT_SCHEME: &str = generated_headers::PLAINTEXT_SCHEME;
+
+/// The scheme a redirected viewer is sent to.
+const SECURE_SCHEME: &str = generated_headers::DEFAULT_SCHEME;
+
+/// `OriginProtocolPolicy` `http-only`: the origin is reached over HTTP alone.
+const ORIGIN_HTTP_ONLY: &str = "http-only";
+
+/// `OriginProtocolPolicy` `match-viewer`: the origin is reached over the scheme the VIEWER
+/// dialled.
+const ORIGIN_MATCH_VIEWER: &str = "match-viewer";
+
+/// The default port of each scheme, which an origin URI leaves out.
+const HTTP_DEFAULT_PORT: i32 = 80;
+const HTTPS_DEFAULT_PORT: i32 = 443;
 
 /// The status a viewer request gets when CloudFront could not get a response from the
 /// origin.
@@ -525,6 +574,10 @@ struct Behavior {
     /// behaviour, which matches by being last.
     path_pattern: Option<String>,
     target_origin_id: String,
+    /// `ViewerProtocolPolicy` — "the protocol that viewers can use to access the files in
+    /// the origin specified by `TargetOriginId`", which is a required member of both
+    /// shapes.
+    viewer_protocol_policy: String,
     allowed_methods: Option<AllowedMethods>,
     cache_policy_id: Option<String>,
     origin_request_policy_id: Option<String>,
@@ -534,6 +587,10 @@ struct Behavior {
     /// The legacy per-behaviour TTL, for a behaviour that names no cache policy.
     default_ttl: Option<i64>,
     max_ttl: Option<i64>,
+    /// `ForwardedValues` — the legacy member that states what a behaviour naming no cache
+    /// policy keys on and forwards: "a `CacheBehavior` must include either a
+    /// `CachePolicyId` or `ForwardedValues`" ([`forwarding`] reads it).
+    forwarded_values: Option<ForwardedValues>,
 }
 
 impl Behavior {
@@ -542,12 +599,14 @@ impl Behavior {
         Self {
             path_pattern: Some(behavior.path_pattern.clone()),
             target_origin_id: behavior.target_origin_id.clone(),
+            viewer_protocol_policy: behavior.viewer_protocol_policy.clone(),
             allowed_methods: behavior.allowed_methods.clone(),
             cache_policy_id: behavior.cache_policy_id.clone(),
             origin_request_policy_id: behavior.origin_request_policy_id.clone(),
             compress: behavior.compress.unwrap_or(DEFAULT_COMPRESS),
             default_ttl: behavior.default_ttl,
             max_ttl: behavior.max_ttl,
+            forwarded_values: behavior.forwarded_values.clone(),
         }
     }
 
@@ -556,12 +615,14 @@ impl Behavior {
         Self {
             path_pattern: None,
             target_origin_id: behavior.target_origin_id.clone(),
+            viewer_protocol_policy: behavior.viewer_protocol_policy.clone(),
             allowed_methods: behavior.allowed_methods.clone(),
             cache_policy_id: behavior.cache_policy_id.clone(),
             origin_request_policy_id: behavior.origin_request_policy_id.clone(),
             compress: behavior.compress.unwrap_or(DEFAULT_COMPRESS),
             default_ttl: behavior.default_ttl,
             max_ttl: behavior.max_ttl,
+            forwarded_values: behavior.forwarded_values.clone(),
         }
     }
 
@@ -620,6 +681,77 @@ fn select_behavior(distribution: &StoredDistribution, viewer_path: &str) -> Beha
     match ordered {
         Some(behavior) => Behavior::of_ordered(behavior),
         None => Behavior::of_default(&distribution.config.default_cache_behavior),
+    }
+}
+
+/// What the matched behaviour's `ViewerProtocolPolicy` does with a viewer that dialled the
+/// PLAINTEXT scheme, or `None` when this viewer's scheme is served as it arrived.
+///
+/// The member is "the protocol that viewers can use to access the files in the origin
+/// specified by `TargetOriginId`", and each value states its own answer: `allow-all` —
+/// "viewers can use HTTP or HTTPS" — serves the request as it arrived; `redirect-to-https`
+/// answers "an HTTP status code of 301 (Moved Permanently) to the viewer along with the
+/// HTTPS URL", which the viewer "then resubmits the request using"; and `https-only`
+/// answers "an HTTP status code of 403 (Forbidden)". A viewer that already dialled `https`
+/// is served by every one of them, so the decision reads the scheme first.
+///
+/// Decided from the configuration and the connection alone: it needs no origin, no cache
+/// and no method, so it is made before any of them.
+fn viewer_protocol_plan(
+    behavior: &Behavior,
+    addressed: &Addressed<'_>,
+    resolved: &Resolved<'_, '_>,
+    req: &RtRequest,
+) -> Option<Plan> {
+    if generated_headers::viewer_scheme(req.uri()) != PLAINTEXT_SCHEME {
+        return None;
+    }
+    match behavior.viewer_protocol_policy.as_str() {
+        REDIRECT_TO_HTTPS => Some(Plan::Redirect {
+            location: secure_url(
+                viewer_host(addressed, resolved),
+                resolved.viewer_path,
+                addressed.query,
+            ),
+        }),
+        HTTPS_ONLY => Some(Plan::Generated {
+            status: FORBIDDEN,
+            detail: BAD_REQUEST_DETAIL,
+        }),
+        // `allow-all`, and a policy value this emulator does not know: the request is
+        // served over the scheme it arrived on.
+        _ => None,
+    }
+}
+
+/// The host a redirected viewer is sent back to: the one it ADDRESSED, when that host is a
+/// domain name this distribution is served on, and otherwise the `DomainName` the
+/// distribution publishes.
+///
+/// A viewer reaches a distribution at a name the distribution itself published — its
+/// `DomainName` or one of its `Aliases` — so a redirect keeps the viewer on the name it
+/// chose. A request that arrived through the reserved data-plane path carries this
+/// service's own host instead of a name of the distribution's, and the name to send such a
+/// viewer to is the one the distribution publishes.
+fn viewer_host<'a>(addressed: &Addressed<'a>, resolved: &'a Resolved<'_, '_>) -> &'a str {
+    addressed
+        .host
+        .filter(|host| serves_host(resolved.distribution, host))
+        .unwrap_or(&resolved.distribution.domain_name)
+}
+
+/// The `https` URL of the same request: the host the viewer addressed, the viewer path and
+/// the viewer query, which is the "HTTPS URL" a `redirect-to-https` answer carries.
+fn secure_url(host: &str, viewer_path: &str, query: &str) -> String {
+    let path = if viewer_path.starts_with('/') {
+        viewer_path.to_string()
+    } else {
+        format!("/{viewer_path}")
+    };
+    if query.is_empty() {
+        format!("{SECURE_SCHEME}://{host}{path}")
+    } else {
+        format!("{SECURE_SCHEME}://{host}{path}?{query}")
     }
 }
 
@@ -717,6 +849,13 @@ enum Plan {
     /// CloudFront answers this itself: a status it generated and the detail line its
     /// error page carries.
     Generated { status: u16, detail: &'static str },
+    /// CloudFront sends this viewer to the HTTPS url of what it asked for, the matched
+    /// behaviour's `ViewerProtocolPolicy` being `redirect-to-https`.
+    Redirect {
+        /// The absolute `https` URL of the same request, which the redirect's `Location`
+        /// carries.
+        location: String,
+    },
     /// The edge cache holds the answer.
     Hit {
         /// The ORIGIN's own answer, as the entry holds it.
@@ -832,6 +971,11 @@ pub async fn serve<Eng: Send + Sync + 'static>(
         None => match plan {
             Plan::Generated { status, detail } => (
                 generated(status, detail, &cf_id),
+                edge_metrics::ServedFrom::CloudFront,
+                None,
+            ),
+            Plan::Redirect { location } => (
+                redirected(&location, &cf_id),
                 edge_metrics::ServedFrom::CloudFront,
                 None,
             ),
@@ -992,6 +1136,12 @@ fn plan_resolved(
         };
     }
     let behavior = select_behavior(resolved.distribution, &viewer_path);
+    // Decided by CloudFront from the matched behaviour's `ViewerProtocolPolicy` alone,
+    // before the cache is read and before any origin request exists: the SCHEME the viewer
+    // dialled is a property of the connection, not of what it asked for.
+    if let Some(plan) = viewer_protocol_plan(&behavior, addressed, resolved, req) {
+        return plan;
+    }
     let method = req.method().to_ascii_uppercase();
     if !behavior.allows(&method) {
         // Enforced HERE, by CloudFront, before any origin request exists: a method the
@@ -1084,7 +1234,27 @@ fn plan_resolved(
     // configuration: what it says about this fetch is decided after the lock is released
     // (see [`origin_access`]), because the origin's own resource policy is read from the
     // origin's own service.
-    let uri = origin_uri(origin, &viewer_path, &origin_query(&keyed, &forwarded, addressed.query));
+    let uri = origin_uri(
+        origin,
+        generated_headers::viewer_scheme(req.uri()),
+        &viewer_path,
+        &origin_query(&keyed, &forwarded, addressed.query),
+    );
+    // An origin request the edge cannot OPEN at all is reported as an origin CloudFront
+    // could not reach, and no request is sent: the configuration decides the scheme
+    // ([`origin_uri`]), and the origin either answers on it or does not exist on it.
+    if !origin_accepts_scheme(&uri) {
+        ::tracing::warn!(
+            distribution = %distribution_id,
+            origin = %origin.domain_name,
+            "this origin's protocol policy addresses it over a scheme it does not serve, so \
+             the origin connection cannot be completed"
+        );
+        return Plan::Generated {
+            status: BAD_GATEWAY,
+            detail: NO_ORIGIN_DETAIL,
+        };
+    }
     let access = origin_access::of_fetch(
         store,
         resolved.distribution,
@@ -1217,6 +1387,62 @@ fn carries_cloudfront_via(req: &RtRequest) -> bool {
         .is_some_and(|via| via.contains(VIA_CLOUDFRONT))
 }
 
+/// Whether the origin an origin request is addressed at SERVES the scheme that request is
+/// addressed over, so the connection can be opened at all.
+///
+/// A plaintext origin request reaches only an origin that answers plaintext, and the AWS
+/// SERVICE ENDPOINTS this emulator serves answer over TLS alone: every one of them is
+/// reached at this emulator's own front door, which is ONE self-signed HTTPS listener and
+/// refuses a plaintext request to that port (`vendor/server/src/lib.rs`, whose production
+/// contract is a single TLS data listener). So an origin whose `OriginProtocolPolicy`
+/// addresses one of them over `http` — an API Gateway stage's `execute-api` endpoint, a
+/// bucket's own endpoint, any other service's — names an endpoint that answers nothing on
+/// that scheme, which is "CloudFront can't connect to the origin" and the `502` an
+/// unreachable origin is reported with. The divergence that follows is named rather than
+/// hidden: AWS's own S3 REST endpoint does serve HTTP, so an `http-only` custom origin over
+/// a bucket endpoint is served there and is this `502` here, because this emulator serves
+/// that endpoint over TLS only.
+///
+/// Two kinds of host are NOT such an endpoint. A per-resource listener this emulator opens
+/// negotiates its encryption in band, so it answers both schemes at one address — a
+/// distribution's own edge domain among them ([`crate::state::edge_endpoint`]). And a host
+/// of nobody's this emulator serves at all is reached over either scheme and answers on
+/// neither, which the fetch itself reports.
+fn origin_accepts_scheme(uri: &str) -> bool {
+    let Some((scheme, _rest)) = uri.split_once("://") else {
+        return true;
+    };
+    if !scheme.eq_ignore_ascii_case(PLAINTEXT_SCHEME) {
+        return true;
+    }
+    let Some(authority) = authority_of(uri) else {
+        return true;
+    };
+    !names_a_service_endpoint(bare_host(authority))
+}
+
+/// Whether `host` is an AWS SERVICE ENDPOINT of this emulator: a host the front door
+/// resolves a service from ([`service_named_by_host`]) in one of the zones AWS serves its
+/// service endpoints in.
+///
+/// The edge zone is not one of them: `cloudfront.net` carries the domain names
+/// DISTRIBUTIONS publish, which are addresses of this emulator's own per-distribution
+/// listeners rather than of the front door, and those serve both schemes.
+fn names_a_service_endpoint(host: &str) -> bool {
+    if service_named_by_host(host).is_none() {
+        return false;
+    }
+    let lowercase = host.to_ascii_lowercase();
+    AWS_ENDPOINT_SUFFIXES
+        .iter()
+        .filter(|suffix| **suffix != EDGE_ZONE_SUFFIX)
+        .any(|suffix| lowercase.ends_with(suffix))
+}
+
+/// The zone a distribution's own published domain name is in, which is the one zone of
+/// [`AWS_ENDPOINT_SUFFIXES`] that names no service endpoint.
+const EDGE_ZONE_SUFFIX: &str = ".cloudfront.net";
+
 /// The absolute URI of the origin request: the origin's own host, its `OriginPath`, the
 /// viewer path and the viewer query.
 ///
@@ -1224,15 +1450,27 @@ fn carries_cloudfront_via(req: &RtRequest) -> bool {
 /// name when CloudFront requests content". The scheme and port come from the origin's own
 /// configuration: an `S3OriginConfig` origin is reached over HTTPS, and a
 /// `CustomOriginConfig` one over the protocol its `OriginProtocolPolicy` names, on the
-/// matching port.
-fn origin_uri(origin: &Origin, viewer_path: &str, query: &str) -> String {
+/// matching port — `http-only` is "CloudFront uses only HTTP to access the origin",
+/// `https-only` only HTTPS, and `match-viewer` is CloudFront "communicating with your
+/// origin using HTTP or HTTPS, depending on the protocol of the viewer request", which is
+/// what `viewer_scheme` carries.
+fn origin_uri(origin: &Origin, viewer_scheme: &str, viewer_path: &str, query: &str) -> String {
     let (scheme, port) = match &origin.custom_origin_config {
-        Some(custom) if custom.origin_protocol_policy == "http-only" => ("http", custom.http_port),
-        Some(custom) => ("https", custom.https_port),
-        None => ("https", 443),
+        Some(custom) => match custom.origin_protocol_policy.as_str() {
+            ORIGIN_HTTP_ONLY => (PLAINTEXT_SCHEME, custom.http_port),
+            ORIGIN_MATCH_VIEWER if viewer_scheme == PLAINTEXT_SCHEME => {
+                (PLAINTEXT_SCHEME, custom.http_port)
+            }
+            // `https-only`, `match-viewer` for a viewer that dialled HTTPS, and a policy
+            // value this emulator does not know: the origin is reached over TLS.
+            _ => (SECURE_SCHEME, custom.https_port),
+        },
+        None => (SECURE_SCHEME, HTTPS_DEFAULT_PORT),
     };
     let authority = match (scheme, port) {
-        ("http", 80) | ("https", 443) => origin.domain_name.clone(),
+        (PLAINTEXT_SCHEME, HTTP_DEFAULT_PORT) | (SECURE_SCHEME, HTTPS_DEFAULT_PORT) => {
+            origin.domain_name.clone()
+        }
         _ => format!("{}:{port}", origin.domain_name),
     };
     let origin_path = origin
@@ -1750,6 +1988,30 @@ fn generated(status: u16, detail: &str, cf_id: &str) -> RtResponse {
     response
 }
 
+/// The redirect CloudFront answers a viewer whose behaviour is `redirect-to-https`: the
+/// status, the HTTPS URL to resubmit the request to, and the page CloudFront serves beside
+/// it.
+fn redirected(location: &str, cf_id: &str) -> RtResponse {
+    let page = "<html>\n<head><title>301 Moved Permanently</title></head>\n<body>\n\
+                <center><h1>301 Moved Permanently</h1></center>\n\
+                <hr><center>CloudFront</center>\n</body>\n</html>\n";
+    let mut response = RtResponse::new(
+        status_code(MOVED_PERMANENTLY),
+        SdkBody::from(page.as_bytes().to_vec()),
+    );
+    let _ = response
+        .headers_mut()
+        .try_insert(LOCATION, location.to_string());
+    let _ = response
+        .headers_mut()
+        .try_insert(CONTENT_TYPE, "text/html".to_string());
+    let _ = response
+        .headers_mut()
+        .try_insert("server", SERVER.to_string());
+    stamp(&mut response, CACHE_ERROR, cf_id);
+    response
+}
+
 /// Put the headers every edge answer carries on `response`: its cache outcome and the
 /// identifier of the request it answers.
 fn stamp(response: &mut RtResponse, x_cache: &str, cf_id: &str) {
@@ -1884,10 +2146,13 @@ mod tests {
             custom_origin_config: config,
             ..Origin::default()
         };
-        let cases: [(&str, Origin, &str, &str, &str); 5] = [
+        // (case, the origin, the scheme the viewer dialled, the viewer path, the query, the
+        // origin URI)
+        let cases: [(&str, Origin, &str, &str, &str, &str); 8] = [
             (
                 "an https-only origin on the default port",
                 origin(Some(custom("https-only", 80, 443)), None),
+                "https",
                 "/index.html",
                 "",
                 "https://origin.example.com/index.html",
@@ -1895,13 +2160,39 @@ mod tests {
             (
                 "an http-only origin on the default port",
                 origin(Some(custom("http-only", 80, 443)), None),
+                "https",
                 "/index.html",
                 "",
                 "http://origin.example.com/index.html",
             ),
             (
+                "a match-viewer origin for a viewer that dialled plaintext",
+                origin(Some(custom("match-viewer", 80, 443)), None),
+                "http",
+                "/index.html",
+                "",
+                "http://origin.example.com/index.html",
+            ),
+            (
+                "a match-viewer origin for a viewer that dialled TLS",
+                origin(Some(custom("match-viewer", 80, 443)), None),
+                "https",
+                "/index.html",
+                "",
+                "https://origin.example.com/index.html",
+            ),
+            (
+                "a match-viewer origin on an http port of its own",
+                origin(Some(custom("match-viewer", 8080, 443)), None),
+                "http",
+                "/index.html",
+                "",
+                "http://origin.example.com:8080/index.html",
+            ),
+            (
                 "an https origin on a port of its own",
                 origin(Some(custom("https-only", 80, 8443)), None),
+                "https",
                 "/index.html",
                 "",
                 "https://origin.example.com:8443/index.html",
@@ -1909,6 +2200,7 @@ mod tests {
             (
                 "an origin path the viewer path is appended to",
                 origin(Some(custom("https-only", 80, 443)), Some("/prefix")),
+                "https",
                 "/index.html",
                 "",
                 "https://origin.example.com/prefix/index.html",
@@ -1916,16 +2208,77 @@ mod tests {
             (
                 "an S3 origin, over https, carrying the viewer query",
                 origin(None, None),
+                "http",
                 "/key",
                 "a=1",
                 "https://origin.example.com/key?a=1",
             ),
         ];
-        for (case, origin, viewer_path, query, expected) in cases {
-            let actual = origin_uri(&origin, viewer_path, query);
+        for (case, origin, viewer_scheme, viewer_path, query, expected) in cases {
+            let actual = origin_uri(&origin, viewer_scheme, viewer_path, query);
             assert_eq!(
                 actual, expected,
                 "case {case:?}: expected the origin URI {expected:?}, got {actual:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_origin_addressed_over_a_scheme_it_does_not_serve_cannot_be_connected_to() {
+        // Rows differ along the scheme the origin request is addressed over and along the
+        // KIND of host it names: an AWS service endpoint this emulator serves (which is
+        // served over TLS alone), a bucket's own virtual-hosted endpoint, a per-resource
+        // listener of this emulator (which negotiates its encryption in band), and a host
+        // nothing here serves.
+        let cases: [(&str, &str, bool); 9] = [
+            (
+                "an api stage over TLS",
+                "https://abcdef1234.execute-api.us-east-1.amazonaws.com/live/echo",
+                true,
+            ),
+            (
+                "an api stage over plaintext",
+                "http://abcdef1234.execute-api.us-east-1.amazonaws.com/live/echo",
+                false,
+            ),
+            (
+                "a bucket endpoint over TLS",
+                "https://shelf.s3.us-east-1.amazonaws.com/key",
+                true,
+            ),
+            (
+                "a bucket endpoint over plaintext",
+                "http://shelf.s3.us-east-1.amazonaws.com/key",
+                false,
+            ),
+            (
+                "a per-resource listener over plaintext",
+                "http://127.0.0.1:38211/index.html",
+                true,
+            ),
+            (
+                "a per-resource listener over TLS",
+                "https://127.0.0.1:38211/index.html",
+                true,
+            ),
+            (
+                "a host nothing here serves, over plaintext",
+                "http://origin.example.com/index.html",
+                true,
+            ),
+            (
+                "a distribution's own edge domain, over plaintext",
+                "http://d111111abcdef8.cloudfront.net/index.html",
+                true,
+            ),
+            ("an origin-form URI", "/index.html", true),
+        ];
+        for (case, uri, expected) in cases {
+            let actual = origin_accepts_scheme(uri);
+            assert_eq!(
+                actual, expected,
+                "case {case:?} ({uri:?}): expected origin_accepts_scheme == {expected}, got \
+                 {actual}"
             );
         }
     }
@@ -1995,12 +2348,14 @@ mod tests {
             let behavior = Behavior {
                 path_pattern: None,
                 target_origin_id: "primary".to_string(),
+                viewer_protocol_policy: "allow-all".to_string(),
                 allowed_methods: None,
                 cache_policy_id: None,
                 origin_request_policy_id: policy.map(str::to_string),
                 compress: false,
                 default_ttl: None,
                 max_ttl: None,
+                forwarded_values: None,
             };
             let mut req = RtRequest::new(SdkBody::empty());
             req.set_uri("/index.html").expect("a valid URI");
@@ -2278,12 +2633,14 @@ mod tests {
         Behavior {
             path_pattern: None,
             target_origin_id: "primary".to_string(),
+            viewer_protocol_policy: "allow-all".to_string(),
             allowed_methods: None,
             cache_policy_id: Some(CACHE_POLICY.to_string()),
             origin_request_policy_id: Some(ORIGIN_REQUEST_POLICY.to_string()),
             compress: true,
             default_ttl: None,
             max_ttl: None,
+            forwarded_values: None,
         }
     }
 
