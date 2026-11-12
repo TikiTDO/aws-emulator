@@ -17,6 +17,8 @@ mod absent_scope_listings;
 mod action_type_value_set_order;
 #[path = "all/advanced_security_configuration.rs"]
 mod advanced_security_configuration;
+#[path = "all/application_capabilities.rs"]
+mod application_capabilities;
 #[path = "all/application_create_refusals.rs"]
 mod application_create_refusals;
 #[path = "all/application_deletion.rs"]

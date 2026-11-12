@@ -1,15 +1,26 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op RegisterCapability
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `RegisterCapability`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`RegisterCapability::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Registers a capability for one OpenSearch UI application: the
+//! [`crate::state::Capability`] record the application holds under the capability's name,
+//! which `GetCapability` reports and `DeregisterCapability` removes — so this call's
+//! answer and a later read of the same capability report one record.
+//!
+//! The name is unique per application, so a register naming a capability the application
+//! already holds re-states THAT capability — it carries the configuration the request
+//! named and answers with the record the application holds — rather than adding a second
+//! registration under one name. A capability already on its way out is registered afresh,
+//! because what the application holds under its name is then a record being removed
+//! rather than a registration a caller can use.
+//!
+//! The capability is not enabled the instant the call returns: it is minted in its
+//! creating status and the clock owes it the status enabling leaves it in one
+//! [`crate::state::PROVISIONING`] span later.
+//!
+//! An `applicationId` naming no application of this account is the modelled not-found
+//! refusal ([`crate::state::application_not_found_named`]); an application already
+//! holding [`crate::state::CAPABILITY_QUOTA`] capabilities is the modelled quota refusal.
 //!
 //! ## Shape of an operation
 //!
@@ -99,6 +110,11 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+use crate::state::{
+    application_not_found_named, capability_quota_exceeded, service_state, state_unavailable,
+    Capability, CAPABILITY_QUOTA,
+};
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -173,18 +189,80 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `RegisterCapability` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(RegisterCapabilityErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("RegisterCapability"))
+        let _ = ctx;
+        let state = service_state(&*self.engine).ok_or_else(state_unavailable)?;
+
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+
+        // Whatever the clock already owed the records this call reads is materialised
+        // first, so the decisions below are made on the state at `now`: a capability whose
+        // enabling has landed is active, and one whose removal has fallen due is gone.
+        store.settle_for_capabilities(now);
+
+        // The capability belongs to the application, so an id naming none has nothing to
+        // register a capability for. A call about a SUB-RESOURCE of an application names
+        // that application among other values, so the refusal names the id back.
+        let application = store
+            .applications
+            .get_mut(&input.application_id)
+            .ok_or_else(|| {
+                RegisterCapabilityErrorModeled::ResourceNotFoundException(
+                    application_not_found_named(&input.application_id),
+                )
+            })?;
+
+        // The name is unique per application, so what the application already holds under
+        // it IS the capability this register is about: the configuration the request names
+        // is re-stated on that record and the record answered with, rather than a second
+        // registration minted under one name. A record on its way out is not such a
+        // registration — the deregistration that asked for its removal still stands — so
+        // it is replaced by a fresh registration below.
+        if let Some(held) = application
+            .capabilities
+            .get_mut(&input.capability_name)
+            .filter(|held| !held.is_being_removed())
+        {
+            held.config = input.capability_config;
+            return Ok(registered(&input.application_id, held));
+        }
+
+        // The set is bounded: past its quota a register is refused rather than adding
+        // another record, so a caller looping with fresh capability names cannot grow one
+        // application's state without end. Replacing the record of a capability the
+        // application is already removing adds none.
+        let replaces_outgoing = application.capabilities.contains_key(&input.capability_name);
+        if application.capabilities.len() >= CAPABILITY_QUOTA && !replaces_outgoing {
+            return Err(
+                RegisterCapabilityErrorModeled::ServiceQuotaExceededException(
+                    capability_quota_exceeded(&input.application_id),
+                )
+                .into(),
+            );
+        }
+
+        let capability =
+            Capability::registered(&input.capability_name, input.capability_config, now);
+        // Answered from the record that is STORED, so this call's answer and a later read
+        // of the same capability report one capability.
+        let answer = registered(&input.application_id, &capability);
+        application
+            .capabilities
+            .insert(input.capability_name, capability);
+        Ok(answer)
+    }
+}
+
+/// The stored capability as this operation answers with it.
+///
+/// Both the register that mints a capability and one that re-states a capability the
+/// application already holds answer through here, so a repeat cannot report the capability
+/// differently from the call that registered it.
+fn registered(application_id: &str, capability: &Capability) -> RegisterCapabilityOutput {
+    RegisterCapabilityOutput {
+        application_id: Some(application_id.to_string()),
+        capability_name: Some(capability.name.clone()),
+        status: Some(capability.status.clone()),
+        capability_config: Some(capability.to_base_response_config()),
     }
 }

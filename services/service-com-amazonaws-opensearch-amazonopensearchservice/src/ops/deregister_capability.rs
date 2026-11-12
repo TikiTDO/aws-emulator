@@ -1,15 +1,23 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeregisterCapability
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeregisterCapability`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeregisterCapability::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Deregisters a capability from one OpenSearch UI application — "this operation removes
+//! the capability and its associated configuration" — by starting the removal of the ONE
+//! [`crate::state::Capability`] record `RegisterCapability` minted.
+//!
+//! The capability is not gone the instant the call returns: it rests in its deleting
+//! status, which is the status this call reports ("returns deleting when the capability is
+//! being removed"), and the clock owes the record's removal one
+//! [`crate::state::PROVISIONING`] span later — after which the application holds no such
+//! capability and `GetCapability` reports the modelled not-found refusal.
+//!
+//! Idempotent: a capability whose removal the clock already owes keeps the instant it was
+//! owed at, so repeating the call reports the same deleting status rather than pushing the
+//! removal back.
+//!
+//! An `applicationId` naming no application of this account, or a `capabilityName` that
+//! application holds no registration under, is the modelled not-found refusal.
 //!
 //! ## Shape of an operation
 //!
@@ -82,6 +90,10 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+
+use crate::state::{
+    application_not_found_named, capability_not_found, service_state, state_unavailable,
+};
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -156,18 +168,45 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeregisterCapability` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeregisterCapabilityErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeregisterCapability"))
+        let _ = ctx;
+        let state = service_state(&*self.engine).ok_or_else(state_unavailable)?;
+
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+
+        // Whatever the clock already owed the records this call reads is materialised
+        // first, so the removal starts from the state at `now`.
+        store.settle_for_capabilities(now);
+
+        // The capability belongs to the application, so an id naming none holds no
+        // capability to remove.
+        let application = store
+            .applications
+            .get_mut(&input.application_id)
+            .ok_or_else(|| {
+                DeregisterCapabilityErrorModeled::ResourceNotFoundException(
+                    application_not_found_named(&input.application_id),
+                )
+            })?;
+        let capability = application
+            .capabilities
+            .get_mut(&input.capability_name)
+            .ok_or_else(|| {
+                DeregisterCapabilityErrorModeled::ResourceNotFoundException(capability_not_found(
+                    &input.application_id,
+                    &input.capability_name,
+                ))
+            })?;
+
+        // The record is left where it stands in its deleting status and the clock owes its
+        // removal, so a caller acting straight after this call still observes the capability
+        // being removed; repeating the call cannot push that removal back.
+        capability.begin_deregistration(now);
+
+        // Answered from the STORED record, so this call's answer and a read of the same
+        // capability before its removal lands report one status.
+        Ok(DeregisterCapabilityOutput {
+            status: Some(capability.status.clone()),
+        })
     }
 }

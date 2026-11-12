@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetCapability
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetCapability`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetCapability::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the ONE [`crate::state::Capability`] the `applicationId` and `capabilityName`
+//! name — the record `RegisterCapability` minted — so the register's answer and this read
+//! report one capability. An id naming no application of this account, or a name that
+//! application holds no registration under, is the modelled not-found refusal.
+//!
+//! Reporting only, with one exception the clock owes: a capability registered in a
+//! transient status is moved to the status enabling left it in once that span has passed
+//! ([`crate::state::PROVISIONING`]), and one whose removal has fallen due is gone — moves
+//! that were due at this instant even if nobody had called.
+//!
+//! `failures` is "a list of failures associated with the capability, if any": this
+//! emulator's registrations do not fail, so a capability carries none and the member is
+//! left out rather than answered as an empty list.
 //!
 //! ## Shape of an operation
 //!
@@ -90,6 +95,10 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+use crate::state::{
+    application_not_found_named, capability_not_found, service_state, state_unavailable,
+};
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -162,18 +171,47 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetCapability` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetCapabilityErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetCapability"))
+        let _ = ctx;
+        let state = service_state(&*self.engine).ok_or_else(state_unavailable)?;
+
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+
+        // Whatever the clock already owed the records this call reads is materialised
+        // first, so the capability is reported as it stands at `now`: one whose enabling
+        // has landed is active, and one whose removal has fallen due is gone.
+        store.settle_for_capabilities(now);
+
+        // The capability belongs to the application, so an id naming none holds no
+        // capability to report.
+        let application = store.applications.get(&input.application_id).ok_or_else(|| {
+            GetCapabilityErrorModeled::ResourceNotFoundException(application_not_found_named(
+                &input.application_id,
+            ))
+        })?;
+        let capability = application
+            .capabilities
+            .get(&input.capability_name)
+            .ok_or_else(|| {
+                GetCapabilityErrorModeled::ResourceNotFoundException(capability_not_found(
+                    &input.application_id,
+                    &input.capability_name,
+                ))
+            })?;
+
+        // Answered from the STORED record, through the same members the register answered
+        // with, so the two cannot disagree about where the capability stands or what it was
+        // configured with.
+        Ok(GetCapabilityOutput {
+            application_id: Some(input.application_id.clone()),
+            capability_name: Some(capability.name.clone()),
+            status: Some(capability.status.clone()),
+            capability_config: Some(capability.to_extended_response_config()),
+            // Nothing has failed for this capability, and the member is "a list of
+            // failures associated with the capability, IF ANY": a member the record has
+            // nothing for is one the service leaves out rather than one it answers with an
+            // empty list.
+            failures: None,
+        })
     }
 }

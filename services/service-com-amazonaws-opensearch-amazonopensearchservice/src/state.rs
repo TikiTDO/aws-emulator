@@ -95,6 +95,9 @@ mod domains;
 /// The store every operation reaches this service's records through, and the ids it mints.
 mod store;
 
+/// The capabilities an OpenSearch UI application has registered, and their lifecycle.
+mod capabilities;
+
 /// A principal's access to one domain through an interface VPC endpoint, and the
 /// service-managed endpoints themselves.
 mod vpc_endpoints;
@@ -128,6 +131,7 @@ mod projections;
 mod refusals;
 
 pub use analyzers::*;
+pub use capabilities::*;
 pub use domains::*;
 pub use indexes::*;
 pub use instance_types::*;
@@ -148,6 +152,7 @@ use crate::ops::types::{
     AutoTuneOptions, AutoTuneOptionsInput, AutoTuneOptionsOutput,
     AutoTuneOptionsStatus, AutoTuneStatus, AutomatedSnapshotPauseOptions,
     AutomatedSnapshotPauseOptionsStatus, AutomatedSnapshotPauseRequestOptions, BaseException,
+    CapabilityBaseRequestConfig, CapabilityBaseResponseConfig, CapabilityExtendedResponseConfig,
     ChangeProgressDetails, ChangeProgressStatusDetails, ClusterConfig, ClusterConfigStatus,
     CognitoOptions, CognitoOptionsStatus, ConflictException, ConnectionProperties,
     DataSource as LinkedDataSource, DataSourceAttachmentSummary, DataSourceDetails, DataSourceType,
@@ -182,7 +187,7 @@ use crate::ops::types::{
     RecurringCharge, ReservedInstance,
     ReservedInstanceOffering, ResourceAlreadyExistsException, ResourceNotFoundException,
     RollbackServiceSoftwareOptions, SAMLOptionsOutput, ScheduledAction,
-    ScheduledAutoTuneDetails, ServiceSoftwareOptions,
+    ScheduledAutoTuneDetails, ServiceQuotaExceededException, ServiceSoftwareOptions,
     SnapshotOptions,
     SnapshotOptionsStatus, SoftwareUpdateOptions, SoftwareUpdateOptionsStatus, StorageType,
     StorageTypeLimit, Tag, UpgradeHistory, UpgradeStepItem, UseCaseStatus,
@@ -1177,6 +1182,12 @@ pub struct Application {
     /// The `AppConfigs` the application was created with, stored as the modelled
     /// shape every read path reports.
     pub app_configs: Vec<AppConfig>,
+    /// The capabilities registered for this application, keyed by the
+    /// `capabilityName` they are addressed by — one record per name, so the name IS
+    /// the key, and the value `GetCapability` and `DeregisterCapability` address a
+    /// record by. Iterating a `BTreeMap` is order-stable, so the same set is reported
+    /// in the same order twice. Bounded by [`CAPABILITY_QUOTA`].
+    pub capabilities: BTreeMap<String, Capability>,
     /// The IAM Identity Center settings the application carries, absent where the
     /// create asked for none ([`stored_iam_identity_center_options`]).
     pub iam_identity_center_options: Option<IamIdentityCenterOptions>,

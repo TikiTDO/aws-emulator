@@ -315,6 +315,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // `AttachDataSource` mints, so a new application holds none.
             attachments: ::std::collections::BTreeMap::new(),
             app_configs: input.app_configs.unwrap_or_default(),
+            // A create registers no capability: a capability is the record
+            // `RegisterCapability` mints, so a new application holds none.
+            capabilities: ::std::collections::BTreeMap::new(),
             iam_identity_center_options: input
                 .iam_identity_center_options
                 .map(stored_iam_identity_center_options),
