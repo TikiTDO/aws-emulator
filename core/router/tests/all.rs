@@ -374,6 +374,10 @@ mod ses_firehose_event_destination_setup;
 // Declared beside its sibling ses suites, at the head, for the reason the entries above
 #[path = "all/ses_v1_receipt_rule_sets_through_the_router.rs"]
 mod ses_v1_receipt_rule_sets_through_the_router;
+// Declared beside the sibling suite whose SES v1 sender it reuses, at the head, for the
+// reason the entries above record.
+#[path = "all/ses_v1_receipt_rule_lambda_invoke_grant.rs"]
+mod ses_v1_receipt_rule_lambda_invoke_grant;
 #[path = "all/ses_identities_shared_across_v1_and_v2.rs"]
 mod ses_identities_shared_across_v1_and_v2;
 #[path = "all/ses_easy_dkim_shared_across_surfaces.rs"]

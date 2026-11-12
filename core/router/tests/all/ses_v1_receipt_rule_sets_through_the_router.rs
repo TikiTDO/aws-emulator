@@ -66,7 +66,11 @@ const XML_METACHARACTERS: [char; 5] = ['<', '>', '&', '"', '\''];
 /// EVERY answer on this surface, whatever the request asked for: it came from exactly one
 /// service (so neither of the router's own pre-dispatch refusals), and it is an XML
 /// document — never a JSON `__type` envelope, which an `awsQuery` client cannot parse.
-fn ses_v1(
+///
+/// Shared with [`crate::ses_v1_receipt_rule_lambda_invoke_grant`], which drives the same
+/// surface through the same router: one account of what every SES v1 answer owes, so no
+/// suite can hold this family to less.
+pub(crate) fn ses_v1(
     router: &smithy_server_runtime::MultiServiceRouter,
     runtime: &tokio::runtime::Runtime,
     case: &str,
