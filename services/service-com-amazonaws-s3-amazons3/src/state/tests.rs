@@ -89,14 +89,28 @@ fn the_published_event_catalog_fits_one_event_mask() {
         EVENT_VALUES.len(),
         EVENT_VALUES_FIT_ONE_MASK
     );
-    // And every value of it is a distinct bit, so two configurations named by two
-    // different events never read as sharing one.
+    // And the set one value reads into is the set DELIVERY would match it against: its
+    // own bit, plus — for the `s3:<Type>:*` form — the bit of every published event of
+    // that type. So two configurations named by two different literal events never read
+    // as sharing one, while a type's wildcard shares a bit with each of its own events.
     for (index, published) in EVENT_VALUES.iter().enumerate() {
-        let target = queue_target(None, &[published]);
+        let mask = event_mask(&queue_target(None, &[published]));
+        let expected = EVENT_VALUES
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| {
+                crate::state::notifications::event_matches(published, candidate)
+            })
+            .fold(0u64, |mask, (bit, _)| mask | (1 << bit));
         assert_eq!(
-            event_mask(&target),
+            mask, expected,
+            "case {published:?}: expected the bits of every published event it matches, \
+             got {mask:#x}"
+        );
+        assert_eq!(
+            mask & (1 << index),
             1 << index,
-            "case {published:?}: expected the bit of its position in the catalog"
+            "case {published:?}: its own bit must be in the set it reads into, got {mask:#x}"
         );
     }
 }
@@ -394,13 +408,33 @@ fn a_notification_configuration_is_validated_against_the_published_sets() {
             None,
         ),
         (
-            // The wildcard form and a literal value of its type are two distinct
-            // rules, so a bucket may route an event class and one event of it to
-            // different destinations.
+            // The wildcard form "stands for every event of that type", so it and a literal
+            // value of its own type are both matched by that event. The two do NOT name the
+            // same value, so what they overlap in is the event type itself.
             "a wildcard event beside a literal one of the same type",
             queue_configuration(vec![
                 prefixed_queue_target("a", "shared/", &["s3:ObjectCreated:*"]),
                 prefixed_queue_target("b", "shared/", &["s3:ObjectCreated:Put"]),
+            ]),
+            Some("cannot share a common event type"),
+        ),
+        (
+            // ...and the key filters are what tell them apart, exactly as they do for two
+            // configurations of one literal value.
+            "a wildcard event beside a literal one of the same type over disjoint prefixes",
+            queue_configuration(vec![
+                prefixed_queue_target("a", "wild/", &["s3:ObjectCreated:*"]),
+                prefixed_queue_target("b", "literal/", &["s3:ObjectCreated:Put"]),
+            ]),
+            None,
+        ),
+        (
+            // The wildcard spans ONE type, so a literal value of another type is a
+            // different event and the two configurations are both kept.
+            "a wildcard event beside a literal one of another type",
+            queue_configuration(vec![
+                prefixed_queue_target("a", "shared/", &["s3:ObjectCreated:*"]),
+                prefixed_queue_target("b", "shared/", &["s3:ObjectRemoved:Delete"]),
             ]),
             None,
         ),

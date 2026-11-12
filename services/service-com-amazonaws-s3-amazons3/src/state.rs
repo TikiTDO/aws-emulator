@@ -2347,10 +2347,22 @@ pub enum NotificationConfigurationRejection {
         /// The kind named twice, as the request vocabulary spells it (`prefix`/`suffix`).
         kind: &'static str,
     },
-    /// Two configurations that would both match the same key for the same event: their
-    /// prefixes overlap AND their suffixes overlap, which leaves the document unable to say
-    /// which rule an object matches.
+    /// Two configurations that would both match the same key for the same event VALUE: the
+    /// two name one event between them, and their prefixes overlap AND their suffixes
+    /// overlap, which leaves the document unable to say which rule an object matches.
     AmbiguousConfiguration,
+    /// Two configurations that SHARE AN EVENT TYPE without naming the same value: one names
+    /// the `s3:<Type>:*` form, which "stands for every event of that type", and the other an
+    /// event of that type, so one object event would be published for both. The conflict is
+    /// in the EVENT, which is the field the refusal names.
+    OverlappingEventTypes {
+        /// The two `Event` values the pair overlaps in, as the request spelled them: the one
+        /// each configuration names that the other is notified of too, in the order the
+        /// document carried the two configurations and separated by `, ` — the value the
+        /// refusal's `<ArgumentValue>` carries
+        /// ([`NotificationConfigurationRejection::argument`]).
+        events: String,
+    },
     /// Two configurations carrying the same `Id`: "An optional UNIQUE identifier for
     /// configurations in a notification configuration" (`NotificationId`).
     DuplicateConfigurationId {
@@ -2392,6 +2404,10 @@ impl std::fmt::Display for NotificationConfigurationRejection {
                 "Configuration is ambiguously defined. Cannot have overlapping suffixes in \
                  two rules if the prefixes are overlapping for the same event type.",
             ),
+            Self::OverlappingEventTypes { .. } => f.write_str(
+                "Configurations overlap. Configurations on the same bucket cannot share a \
+                 common event type.",
+            ),
             Self::DuplicateConfigurationId { id } => {
                 write!(f, "Configuration ID {id} is not unique")
             }
@@ -2411,6 +2427,35 @@ impl std::fmt::Display for NotificationConfigurationRejection {
         }
     }
 }
+
+impl NotificationConfigurationRejection {
+    /// The request field this refusal is ABOUT, as S3 names it in the `<ArgumentName>` of
+    /// its `InvalidArgument` document, beside the value that field carried — or `None` for a
+    /// refusal whose document names no argument.
+    ///
+    /// S3's `InvalidArgument` document carries an `<ArgumentName>` / `<ArgumentValue>` pair
+    /// beside its code and message (Amazon S3 API Reference, *Error responses*), and for a
+    /// document whose configurations share an event type the field it names is the `Event`,
+    /// carrying the two values the pair overlaps in: that class's sentence is the same for
+    /// every document in it, so the pair is the whole of what says which events to change.
+    ///
+    /// Every other rejection answers `None` — the ambiguous-filters class included: the
+    /// message is what states the rule each of them broke, and naming a field S3 is not known
+    /// to name in those documents would invent one.
+    #[must_use]
+    pub fn argument(&self) -> Option<(&'static str, Option<&str>)> {
+        match self {
+            Self::OverlappingEventTypes { events } => {
+                Some((EVENT_ARGUMENT, Some(events.as_str())))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The request field a document whose configurations share an event type is reported about:
+/// the `Event` they overlap in, as the API publishes that member.
+const EVENT_ARGUMENT: &str = "Event";
 
 impl std::error::Error for NotificationConfigurationRejection {}
 
@@ -2632,50 +2677,88 @@ pub fn validate_notification_configuration(
         }
     }
 
-    // And the document as a WHOLE: no two of its configurations may both match the same
-    // key for the same event — "overlapping prefixes and suffixes are not supported"
-    // ([`filters_overlap`] is the key half of the rule) — because S3 could not then say
-    // which rule an object matches. The check is over every pair across all three lists,
-    // since which destination a configuration publishes to does not make two rules
-    // distinguish an object.
+    // And the document as a WHOLE: no two of its configurations may both be matched by one
+    // object event. WHICH field the conflict is in decides what S3 answers:
     //
-    // Each configuration's events are read ONCE, into the bit set [`event_mask`] encodes
-    // them as, so the pair walk below costs one AND per pair: the walk is bounded by the
-    // configuration count alone (at most
+    // * two configurations that name the SAME event value are told apart by their key
+    //   filters alone — "overlapping prefixes and suffixes are not supported"
+    //   ([`filters_overlap`] is that half of the rule) — so a pair whose filters overlap too
+    //   leaves the document ambiguous;
+    // * two that do NOT name the same value and still share an event — one names the
+    //   `s3:<Type>:*` form and the other an event of that type — overlap in the EVENT, and
+    //   that is what S3 reports.
+    //
+    // The check is over every pair across all three lists, since which destination a
+    // configuration publishes to does not make two rules distinguish an object.
+    //
+    // Each configuration's events are read ONCE, into the two bit sets [`named_mask`] and
+    // [`event_mask`] encode them as, so the pair walk below costs two ANDs per pair: the walk
+    // is bounded by the configuration count alone (at most
     // [`MAX_NOTIFICATION_CONFIGURATIONS_PER_BUCKET`], checked above, so at most 4950
     // pairs) and reading the `Events` lists is ONE pass over them, whatever a request
     // carries in them. Comparing the lists pair by pair instead would multiply the pair
     // count by the two lists' lengths, which no published limit bounds.
-    let targets: Vec<(&NotificationTarget, u64)> = configuration
+    let targets: Vec<(&NotificationTarget, u64, u64)> = configuration
         .targets()
-        .map(|(_, target)| (target, event_mask(target)))
+        .map(|(_, target)| (target, named_mask(target), event_mask(target)))
         .collect();
-    for (position, (one, one_events)) in targets.iter().enumerate() {
-        for (other, other_events) in &targets[position + 1..] {
-            if one_events & other_events != 0 && filters_overlap(one, other) {
+    for (position, (one, one_named, one_events)) in targets.iter().enumerate() {
+        for (other, other_named, other_events) in &targets[position + 1..] {
+            if one_events & other_events == 0 || !filters_overlap(one, other) {
+                continue;
+            }
+            if one_named & other_named != 0 {
                 return Err(NotificationConfigurationRejection::AmbiguousConfiguration);
             }
+            return Err(NotificationConfigurationRejection::OverlappingEventTypes {
+                events: overlapping_events((one, *one_events), (other, *other_events)),
+            });
         }
     }
 
     Ok(())
 }
 
-/// The events one configuration names, as one bit per published `Event` value — the set two
-/// configurations are asked to share an element of.
+/// The two `Event` values two configurations overlap in, as the refusal's `<ArgumentValue>`
+/// carries them: the one each configuration names that the other is notified of too, in the
+/// order the document carried the two configurations, separated by `, `.
 ///
-/// The `Event` vocabulary is CLOSED and small ([`EVENT_VALUES`], which
-/// [`EVENT_VALUES_FIT_ONE_MASK`] holds to the width of this mask), and every event of the
-/// container has already been checked to be one of its values by the time this is built, so
-/// the mask loses nothing: a value outside the set has been refused, and a value repeated in
-/// one list is the same bit.
+/// Each value is the one the REQUEST spelled, read through the same per-value set delivery is
+/// matched by ([`value_mask`]), so both really would be reached by one object event: for a
+/// type's wildcard that is the wildcard as written, and for a literal value the value itself.
+fn overlapping_events(
+    one: (&NotificationTarget, u64),
+    other: (&NotificationTarget, u64),
+) -> String {
+    let (one_target, one_events) = one;
+    let (other_target, other_events) = other;
+    format!(
+        "{}, {}",
+        overlapping_event(one_target, other_events),
+        overlapping_event(other_target, one_events)
+    )
+}
+
+/// The first `Event` `target` names that is also one of `events`.
 ///
-/// The event sets are compared AS THE DOCUMENT NAMES THEM: two configurations share an
-/// event when the same `Event` value appears in both, so a configuration naming a value and
-/// another naming the `s3:<Type>:*` form of its type are two distinct rules and are both
-/// kept — the pair a bucket carries to route one event class and one event of it to
-/// different destinations.
-fn event_mask(target: &NotificationTarget) -> u64 {
+/// The caller has already found that the two configurations' expanded sets intersect, so one
+/// such value exists; a slip that left none falls back to the empty string rather than
+/// panicking, because nothing a request carries may take the serving process down.
+fn overlapping_event(target: &NotificationTarget, events: u64) -> String {
+    target
+        .events
+        .iter()
+        .find(|event| value_mask(event) & events != 0)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The events one configuration NAMES, as the same bit set [`event_mask`] uses — the values
+/// as written, with no wildcard expanded.
+///
+/// What two configurations sharing a bit of THIS set means is that both name one event value,
+/// which is the pair whose conflict is in their key filters rather than in their events.
+fn named_mask(target: &NotificationTarget) -> u64 {
     target
         .events
         .iter()
@@ -2685,6 +2768,39 @@ fn event_mask(target: &NotificationTarget) -> u64 {
                 .position(|published| *published == event.as_str())
         })
         .fold(0, |mask, index| mask | (1 << index))
+}
+
+/// The events one configuration is NOTIFIED OF, as one bit per published `Event` value —
+/// the set two configurations are asked to share an element of.
+///
+/// The `Event` vocabulary is CLOSED and small ([`EVENT_VALUES`], which
+/// [`EVENT_VALUES_FIT_ONE_MASK`] holds to the width of this mask), and every event of the
+/// container has already been checked to be one of its values by the time this is built, so
+/// the mask loses nothing: a value outside the set has been refused, and a value repeated in
+/// one list is the same bit.
+///
+/// The set is the one DELIVERY reads, not the literal text of the `Events` list: a value the
+/// configuration names covers the event itself, and the `s3:<Type>:*` form "stands for every
+/// event of that type" ([`notifications::event_matches`], the one reading of that rule in
+/// this crate). So a configuration naming the wildcard of a type and another naming one
+/// event of that type both match that event, and the pair is ambiguous for the same reason
+/// two configurations naming the same value are: an object event would be published to both
+/// and S3 could not say which rule it matched.
+fn event_mask(target: &NotificationTarget) -> u64 {
+    target
+        .events
+        .iter()
+        .fold(0, |mask, event| mask | value_mask(event))
+}
+
+/// The published events ONE `Event` value is notified of, as that same bit set: the value
+/// itself, and for the `s3:<Type>:*` form every published event of that type.
+fn value_mask(event: &str) -> u64 {
+    EVENT_VALUES
+        .iter()
+        .enumerate()
+        .filter(|(_, published)| notifications::event_matches(event, published))
+        .fold(0, |mask, (index, _)| mask | (1 << index))
 }
 
 /// Whether the published `Event` catalog still fits in the one mask [`event_mask`] encodes

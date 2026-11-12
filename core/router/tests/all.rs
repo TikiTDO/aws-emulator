@@ -29,7 +29,6 @@ mod workmailmessageflow_resolves_an_s3_object;
 // follow a published event to the object it lands in.
 #[path = "all/ses_event_publication_reaches_firehose_s3.rs"]
 mod ses_event_publication_reaches_firehose_s3;
-// Declared here, in this same head region, for the reason the entry above records: what a
 // client of a CloudFormation-deployed HTTP api's `$default` Lambda route is served, and the
 // CORS decoration that answer carries, spans CloudFormation, API Gateway v2, AWS Lambda and
 // IAM at once, so no single service's test target can ask it.
@@ -41,7 +40,6 @@ mod cloudformation_http_api_cors_lambda_default_route;
 // both sides of it.
 #[path = "all/bedrock_guardrail_applied_across_planes.rs"]
 mod bedrock_guardrail_applied_across_planes;
-// Declared here, in this same head region, for the reason the entry above records: the
 // StackSet status-change events a stack set's lifecycle publishes onto the default event
 // bus, which span CloudFormation, EventBridge, Amazon SQS and Systems Manager at once.
 #[path = "all/cloudformation_stackset_status_change_events.rs"]
@@ -536,9 +534,6 @@ mod cloudfront_api_call_events;
 // window appends, so a line added there conflicts with all of them.
 #[path = "all/cloudfront_apigateway_origin_edge.rs"]
 mod cloudfront_apigateway_origin_edge;
-// Declared HERE, in the sorted list beside the other CloudFront suites, rather than
-// appended at the end of this file: the tail is where every suite landing in the same
-// window appends, so a line added there conflicts with all of them.
 #[path = "all/cloudfront_edge_cache_refresh.rs"]
 mod cloudfront_edge_cache_refresh;
 #[path = "all/cloudfront_key_value_store_handshake.rs"]
@@ -549,8 +544,6 @@ mod cloudfront_key_value_store_handshake;
 #[path = "all/cloudfront_oac_s3_origin_edge.rs"]
 mod cloudfront_oac_s3_origin_edge;
 // Declared HERE, in the sorted list beside the other CloudFront suites, rather than appended
-// at the end of this file: the tail is where every suite landing in the same window appends,
-// so a line added there conflicts with all of them.
 #[path = "all/cloudfront_oai_s3_origin_edge.rs"]
 mod cloudfront_oai_s3_origin_edge;
 // Declared HERE, in the sorted list, rather than appended at the end of this file: the
@@ -771,10 +764,6 @@ mod lambda_bundled_wire_operations;
 mod lambda_handler_invalidates_its_distribution;
 #[path = "all/lambda_signing_name_routing.rs"]
 mod lambda_signing_name_routing;
-// Declared in this span of the sorted list, beside the other `lambda…` suites, rather than
-// at the head of this file or in its appended tail: both of those are where concurrently
-// landing suites put their line, so a declaration there loses a squash merge to every one
-// of them, while these neighbouring lines are stable.
 #[path = "all/lambda_execution_role_trust.rs"]
 mod lambda_execution_role_trust;
 // Declared in this span of the sorted list, for the reason the line above states.
@@ -1534,10 +1523,14 @@ mod s3_notification_pipeline_lifecycle;
 // CloudFormation at once — no single service crate's test target can see both hops.
 #[path = "all/s3_sns_lambda_chain_invoke_permission.rs"]
 mod s3_sns_lambda_chain_invoke_permission;
-// Declared in the appended tail, which is where every new suite inserts its lines: what a
 // stack-declared secret rotation DOES — the four-step rotation protocol a CloudFormation
 // `AWS::SecretsManager::RotationSchedule` puts in force — spans CloudFormation, AWS Secrets
 // Manager, AWS Lambda, IAM and STS at once, so no single service crate's test target can ask
 // it.
 #[path = "all/cloudformation_rotation_schedule_rotates_its_secret.rs"]
 mod cloudformation_rotation_schedule_rotates_its_secret;
+// ROLLED-BACK stack leaves behind in Amazon S3 — nothing — which spans CloudFormation (the
+// create and its rollback), Amazon S3 (the refusal and the bucket read) and Amazon SQS (the
+// destination that decides the refusal) at once.
+#[path = "all/cloudformation_rollback_deletes_the_buckets_it_created.rs"]
+mod cloudformation_rollback_deletes_the_buckets_it_created;

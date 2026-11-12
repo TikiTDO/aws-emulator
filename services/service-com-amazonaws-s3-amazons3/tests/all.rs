@@ -209,6 +209,8 @@ mod multipart_upload_listing;
 mod not_modified_version_headers;
 #[path = "all/notification_destination_validation.rs"]
 mod notification_destination_validation;
+#[path = "all/notification_wildcard_event_overlap.rs"]
+mod notification_wildcard_event_overlap;
 #[path = "all/object_acl.rs"]
 mod object_acl;
 #[path = "all/object_and_policy.rs"]

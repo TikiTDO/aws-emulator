@@ -24,12 +24,19 @@
 //!
 //! * the queue configuration scoped to that call's sub-type receives a record whose
 //!   `eventName` is that sub-type's, for that key;
-//! * the queue configuration scoped to the type WILDCARD receives the same event, because
-//!   the wildcard spans every sub-type of the type;
+//! * the queue configuration scoped to the type WILDCARD receives the same event for the
+//!   same call made under its own key prefix, because the wildcard spans every sub-type of
+//!   the type;
 //! * the queue the rule on that sub-type's detail-type targets receives an `aws.s3`
 //!   envelope carrying that detail-type, the bucket and the key;
 //! * and the OTHER sub-type's queue configuration and the OTHER detail-type's rule target
 //!   stay empty — which is what makes the differential observable rather than vacuous.
+//!
+//! The three configurations sit on ONE bucket over DISJOINT key prefixes, because the type
+//! wildcard covers each scoped configuration's own event: two configurations that would both
+//! match one key for one event are ambiguous and S3 refuses the whole configuration, so the
+//! `Filter` is what tells them apart and each call is made under the prefix of the
+//! configuration it is about.
 //!
 //! The rows span what the rule generalises over: which sub-type the call produces, the
 //! size of the tag set it writes (one tag, several, none at all), the form of the key
@@ -114,18 +121,31 @@ const SUB_TYPES: &[SubType] = &[SubType::Added, SubType::Deleted];
 
 /// One `QueueConfiguration` of the bucket's notification configuration: the `Id` it is
 /// stored under (which a delivered record reports as its `configurationId`), the queue it
-/// names and the `Events` it is notified of.
+/// names, the `Events` it is notified of and the key-name prefix its `Filter` admits.
 struct Subscription {
     id: &'static str,
     queue: &'static str,
     events: &'static [&'static str],
+    prefix: &'static str,
 }
+
+/// The prefix the two SCOPED configurations filter by, and the one the WILDCARD
+/// configuration filters by.
+///
+/// They are DISJOINT because the type wildcard covers each scoped configuration's own
+/// event: two configurations of one bucket cannot share an event type, and S3 refuses the
+/// whole configuration when they do (`InvalidArgument`, "Configurations overlap"). The
+/// filters are what tell them apart, so one bucket carries all three and each call below is
+/// made under the prefix of the configuration it is about.
+const SCOPED_PREFIX: &str = "scoped/";
+const WILDCARD_PREFIX: &str = "every/";
 
 /// The queue configuration scoped to a tag-set WRITE alone.
 const ADDED_SCOPED: Subscription = Subscription {
     id: "tags-added-only",
     queue: "tag-events-added",
     events: &["s3:ObjectTagging:Put"],
+    prefix: SCOPED_PREFIX,
 };
 
 /// The queue configuration scoped to a tag-set REMOVAL alone.
@@ -133,6 +153,7 @@ const DELETED_SCOPED: Subscription = Subscription {
     id: "tags-deleted-only",
     queue: "tag-events-deleted",
     events: &["s3:ObjectTagging:Delete"],
+    prefix: SCOPED_PREFIX,
 };
 
 /// The queue configuration naming the type wildcard, which stands for every event of the
@@ -141,6 +162,7 @@ const EVERY_TAGGING: Subscription = Subscription {
     id: "every-tagging-event",
     queue: "tag-events-any",
     events: &["s3:ObjectTagging:*"],
+    prefix: WILDCARD_PREFIX,
 };
 
 /// The three queue configurations one bucket carries at once.
@@ -277,6 +299,11 @@ async fn install_notification(emulator: &Emulator, bucket: &str, index: usize) {
         for event in subscription.events {
             body.push_str(&format!("<Event>{event}</Event>"));
         }
+        body.push_str(&format!(
+            "<Filter><S3Key><FilterRule><Name>prefix</Name><Value>{}</Value>\
+             </FilterRule></S3Key></Filter>",
+            subscription.prefix
+        ));
         body.push_str("</QueueConfiguration>");
     }
     body.push_str("<EventBridgeConfiguration></EventBridgeConfiguration>");
@@ -386,34 +413,45 @@ async fn each_tagging_sub_type_reaches_only_the_subscriptions_and_rules_that_nam
             .await;
         }
 
+        // The row's call is made TWICE, once under each configuration's own prefix: the
+        // scoped configurations and the wildcard one cannot both match a single key for one
+        // event, so each is exercised on the key its own filter admits.
+        let scoped_key = format!("{SCOPED_PREFIX}{}", row.key);
+        let wildcard_key = format!("{WILDCARD_PREFIX}{}", row.key);
+
         // Seeded BEFORE the configuration is installed, so the write and the tag set that
-        // put the key into the state this row needs notify nothing, and the row's own call
-        // is the only change the configuration sees.
-        emulator.put_object(&bucket, row.key, OBJECT_BODY).await;
-        emulator
-            .put_object_tagging_of(&bucket, row.key, SEED_TAGS)
-            .await;
+        // put each key into the state this row needs notify nothing, and the row's own
+        // calls are the only changes the configuration sees.
+        for key in [&scoped_key, &wildcard_key] {
+            emulator.put_object(&bucket, key, OBJECT_BODY).await;
+            emulator
+                .put_object_tagging_of(&bucket, key, SEED_TAGS)
+                .await;
+        }
 
         install_notification(&emulator, &bucket, index).await;
         for subscription in SUBSCRIPTIONS {
             take_test_event(&emulator, subscription.id, url_of(&classic, &subscription.id)).await;
         }
 
-        // The call the row is about, and the pair ITS OWN response named the request by.
+        let sub_type = row.call.sub_type();
+        // The call the row is about on the SCOPED prefix, and the pair ITS OWN response
+        // named the request by.
         let answer = match row.call {
             Call::Tag(tags) => {
                 emulator
-                    .put_object_tagging_of(&bucket, row.key, tags)
+                    .put_object_tagging_of(&bucket, &scoped_key, tags)
                     .await
             }
-            Call::Untag => delete_object_tagging(&emulator, &bucket, row.key).await,
+            Call::Untag => delete_object_tagging(&emulator, &bucket, &scoped_key).await,
         };
         let (request_id, extended_request_id) = answer.correlation(case);
-        let sub_type = row.call.sub_type();
 
-        // The configuration scoped to THIS sub-type is notified, and so is the one naming
-        // the type wildcard; both records name the call they came of.
-        for subscription in [sub_type.subscription(), &EVERY_TAGGING] {
+        // The configuration scoped to THIS sub-type is notified of it, and the record names
+        // the call it came of.
+        {
+            let subscription = sub_type.subscription();
+            let published_key = format!("{SCOPED_PREFIX}{}", row.published_key);
             let url = url_of(&classic, &subscription.id);
             let message = emulator.delivered(url).await.unwrap_or_else(|| {
                 panic!(
@@ -459,10 +497,10 @@ async fn each_tagging_sub_type_reaches_only_the_subscriptions_and_rules_that_nam
             );
             assert_eq!(
                 record["s3"]["object"]["key"].as_str(),
-                Some(row.published_key),
-                "case {case:?}: the {:?} subscription expected the key {:?}, got {message}",
-                subscription.id,
-                row.published_key
+                Some(published_key.as_str()),
+                "case {case:?}: the {:?} subscription expected the key {published_key:?}, \
+                 got {message}",
+                subscription.id
             );
             assert_eq!(
                 record["responseElements"]["x-amz-request-id"].as_str(),
@@ -509,14 +547,79 @@ async fn each_tagging_sub_type_reaches_only_the_subscriptions_and_rules_that_nam
         );
         assert_eq!(
             envelope["detail"]["object"]["key"].as_str(),
-            Some(row.key),
-            "case {case:?}: expected detail.object.key {:?}, got {envelope}",
-            row.key
+            Some(scoped_key.as_str()),
+            "case {case:?}: expected detail.object.key {scoped_key:?}, got {envelope}"
         );
         assert_eq!(
             envelope["detail"]["request-id"].as_str(),
             Some(request_id.as_str()),
             "case {case:?}: expected detail.request-id {request_id:?}, got {envelope}"
+        );
+
+        // ...and the SAME call under the wildcard configuration's own prefix reaches it,
+        // because the wildcard "stands for every event of that type": the sub-type the row
+        // produces is one of them.
+        let wildcard_answer = match row.call {
+            Call::Tag(tags) => {
+                emulator
+                    .put_object_tagging_of(&bucket, &wildcard_key, tags)
+                    .await
+            }
+            Call::Untag => delete_object_tagging(&emulator, &bucket, &wildcard_key).await,
+        };
+        let (wildcard_request_id, wildcard_extended_id) = wildcard_answer.correlation(case);
+        let wildcard_published_key = format!("{WILDCARD_PREFIX}{}", row.published_key);
+        let message = emulator
+            .delivered(url_of(&classic, &EVERY_TAGGING.id))
+            .await
+            .unwrap_or_else(|| {
+                panic!(
+                    "case {case:?}: no notification reached the {:?} subscription's queue",
+                    EVERY_TAGGING.id
+                )
+            });
+        let record = &message["Records"][0];
+        assert_eq!(
+            record["eventName"].as_str(),
+            Some(sub_type.record_event_name()),
+            "case {case:?}: the {:?} subscription expected eventName {:?}, got {message}",
+            EVERY_TAGGING.id,
+            sub_type.record_event_name()
+        );
+        assert_eq!(
+            record["s3"]["configurationId"].as_str(),
+            Some(EVERY_TAGGING.id),
+            "case {case:?}: expected the record to name the configuration it was delivered \
+             for ({:?}), got {message}",
+            EVERY_TAGGING.id
+        );
+        assert_eq!(
+            record["s3"]["bucket"]["name"].as_str(),
+            Some(bucket.as_str()),
+            "case {case:?}: the {:?} subscription expected the bucket {bucket:?}, got \
+             {message}",
+            EVERY_TAGGING.id
+        );
+        assert_eq!(
+            record["s3"]["object"]["key"].as_str(),
+            Some(wildcard_published_key.as_str()),
+            "case {case:?}: the {:?} subscription expected the key \
+             {wildcard_published_key:?}, got {message}",
+            EVERY_TAGGING.id
+        );
+        assert_eq!(
+            record["responseElements"]["x-amz-request-id"].as_str(),
+            Some(wildcard_request_id.as_str()),
+            "case {case:?}: the {:?} subscription expected the call's own x-amz-request-id \
+             {wildcard_request_id:?}, got {message}",
+            EVERY_TAGGING.id
+        );
+        assert_eq!(
+            record["responseElements"]["x-amz-id-2"].as_str(),
+            Some(wildcard_extended_id.as_str()),
+            "case {case:?}: the {:?} subscription expected the call's own x-amz-id-2 \
+             {wildcard_extended_id:?}, got {message}",
+            EVERY_TAGGING.id
         );
 
         // THE DIFFERENTIAL: the other sub-type's subscription and the other detail-type's

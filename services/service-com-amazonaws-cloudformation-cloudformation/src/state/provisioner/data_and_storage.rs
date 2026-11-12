@@ -2122,10 +2122,7 @@ pub(super) async fn create_bucket(
     resource: &StoredResource,
     propagated: &[(String, String)],
 ) -> Result<Created, Refusal> {
-    use ::aws_sdk_s3::types::{
-        BucketLocationConstraint, BucketVersioningStatus, CreateBucketConfiguration, Tag, Tagging,
-        VersioningConfiguration,
-    };
+    use ::aws_sdk_s3::types::{BucketLocationConstraint, CreateBucketConfiguration};
 
     let client = s3_client(ctx, region);
     let bucket = &resource.physical_resource_id;
@@ -2149,6 +2146,63 @@ pub(super) async fn create_bucket(
         // refusal, which fails the resource like any other.
         return Err(s3_refusal_of(&error));
     }
+    // The bucket EXISTS from here on, so a follow-up call Amazon S3 refuses must not leave
+    // it behind: the resource the create could not finish is taken away again
+    // ([`discard_created_bucket`]) and the refusal is what the deployment reports, so the
+    // rollback of the failed stack leaves no bucket of its own standing.
+    if let Err(refusal) = configure_bucket(&client, resource, propagated).await {
+        return Err(discard_created_bucket(&client, bucket, refusal).await);
+    }
+    Ok(Created::default())
+}
+
+/// Take away a bucket this create had already made, for a create one of its own follow-up
+/// calls refused.
+///
+/// `CreateBucket` is only the first of the calls an `AWS::S3::Bucket` declaration takes to
+/// install: each sub-resource configuration is a call of its own on the bucket that now
+/// exists, and a refusal of one of those is a resource the provider created and could not
+/// finish. CloudFormation fails such a resource and rolls the stack back, and the rollback
+/// asks each owning service to delete what the create MADE — so a bucket nothing recorded
+/// as created has to be removed here, by the provider that created it, or it outlives the
+/// stack that made it.
+///
+/// The reported refusal is the one Amazon S3 answered; a delete it will not carry out is
+/// said beside it, because the bucket is then really still there and a client reading the
+/// failed stack has to be able to tell.
+async fn discard_created_bucket(
+    client: &::aws_sdk_s3::Client,
+    bucket: &str,
+    refusal: Refusal,
+) -> Refusal {
+    match client.delete_bucket().bucket(bucket).send().await {
+        Ok(_) => refusal,
+        Err(cleanup) => Refusal {
+            code: refusal.code,
+            message: format!(
+                "{}; the bucket it created could not be deleted again: {}",
+                refusal.message,
+                s3_refusal_of(&cleanup)
+            ),
+        },
+    }
+}
+
+/// Apply every sub-resource configuration an `AWS::S3::Bucket` declaration carries to the
+/// bucket [`create_bucket`] has just created, each by the one call Amazon S3 publishes for
+/// it.
+///
+/// Separated from the create itself so that ONE answer covers all of them: whatever Amazon
+/// S3 refuses here leaves a bucket that exists and is not configured as declared, which is
+/// the case [`create_bucket`] undoes.
+async fn configure_bucket(
+    client: &::aws_sdk_s3::Client,
+    resource: &StoredResource,
+    propagated: &[(String, String)],
+) -> Result<(), Refusal> {
+    use ::aws_sdk_s3::types::{BucketVersioningStatus, Tag, Tagging, VersioningConfiguration};
+
+    let bucket = &resource.physical_resource_id;
     // "VersioningConfiguration — enables multiple versions of all objects in this bucket",
     // whose one member is `Status`. The value is the template's: S3's own deserializer is
     // what judges it against `BucketVersioningStatus`.
@@ -2302,7 +2356,7 @@ pub(super) async fn create_bucket(
             .await
             .map_err(|error| s3_refusal_of(&error))?;
     }
-    Ok(Created::default())
+    Ok(())
 }
 
 /// The property an `AWS::S3::Bucket` declares its event notifications under.

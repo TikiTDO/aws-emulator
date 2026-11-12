@@ -378,6 +378,15 @@ async fn a_bucket_a_stack_declares_carries_the_notification_configuration_it_dec
                 "        QueueConfigurations:\n",
                 "          - Event: s3:ObjectCreated:*\n",
                 "            Queue: arn:aws:sqs:us-east-1:000000000000:fan-out-ingest-queue\n",
+                // Filtered on a prefix of its own: the type wildcard covers the Lambda
+                // configuration's own `s3:ObjectCreated:Put`, and two configurations of one
+                // bucket cannot share an event type unless their key filters tell them
+                // apart.
+                "            Filter:\n",
+                "              S3Key:\n",
+                "                Rules:\n",
+                "                  - Name: prefix\n",
+                "                    Value: queued/\n",
                 "        TopicConfigurations:\n",
                 "          - Event: s3:ObjectRemoved:*\n",
                 "            Topic: !Ref Notices\n",
@@ -404,7 +413,7 @@ async fn a_bucket_a_stack_declares_carries_the_notification_configuration_it_dec
                         "arn:aws:sqs:us-east-1:000000000000:fan-out-ingest-queue",
                     ),
                     events: &["s3:ObjectCreated:*"],
-                    rules: &[],
+                    rules: &[("prefix", "queued/")],
                 }],
                 topic: &[Expected {
                     destination: Destination::Topic("fan-out-ingest-notices"),

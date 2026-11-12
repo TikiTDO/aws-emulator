@@ -295,11 +295,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // model declares no shape for, so the refusal goes out through the unmodelled
         // channel with the code and status S3 sends.
         if let Err(rejection) = crate::state::validate_notification_configuration(&configuration) {
-            return Err(crate::scaffolded::Scaffolded::unmodeled(
-                crate::state::INVALID_ARGUMENT_CODE,
-                crate::state::INVALID_ARGUMENT_STATUS,
-                rejection.to_string(),
-            ));
+            let message = rejection.to_string();
+            // S3's `InvalidArgument` document names the request field the refusal is about
+            // where the sentence alone does not say which one it was
+            // ([`crate::state::NotificationConfigurationRejection::argument`]).
+            return Err(match rejection.argument() {
+                Some((argument, value)) => {
+                    crate::scaffolded::Scaffolded::invalid_argument(argument, value, message)
+                }
+                None => crate::scaffolded::Scaffolded::unmodeled(
+                    crate::state::INVALID_ARGUMENT_CODE,
+                    crate::state::INVALID_ARGUMENT_STATUS,
+                    message,
+                ),
+            });
         }
 
         // The pair this call is named by, minted before the test notification is published
