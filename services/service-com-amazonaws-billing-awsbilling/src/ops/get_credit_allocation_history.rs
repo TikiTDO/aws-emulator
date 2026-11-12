@@ -7,9 +7,10 @@
 //!
 //! It is a REPORTING operation: it reads the store and writes nothing, so a
 //! caller cannot change another caller's answer by reading. Entries are
-//! selected by the requested account, the requested billing-month range and the
-//! optional `creditId`, reported newest billing month first, and paged by
-//! `maxResults`/`nextToken`.
+//! selected by the consolidated billing family of the requested account (see
+//! [`crate::state::ComAmazonawsBillingAwsbillingState::history_covers_billed_account`]),
+//! the requested billing-month range and the optional `creditId`, reported
+//! newest billing month first, and paged by `maxResults`/`nextToken`.
 //!
 //! NOTE: nothing in this emulator writes that store yet — an allocation exists
 //! only once a credit has been APPLIED to a bill, and the emulator runs no
@@ -250,21 +251,25 @@ fn is_filtered_credit(stored: &str, filter: i64) -> bool {
     stored.parse::<i128>().ok() == Some(i128::from(filter))
 }
 
-/// Whether `allocation` is one the request selects: the account whose history
-/// was asked for and the credit the `creditId` filter names when it carries
-/// one.
+/// Whether `allocation` is one the request selects: a bill the consolidated
+/// billing family of the account whose history was asked for covers, and the
+/// credit the `creditId` filter names when it carries one.
+///
+/// The family traversal the operation documents lives in
+/// [`crate::state::ComAmazonawsBillingAwsbillingState::history_covers_billed_account`],
+/// so a credit applied to a family MEMBER's bill is reported in the payer
+/// account's history — the cross-account credit application — while an account
+/// that pays for nobody still sees only its own.
 ///
 /// The billing-month range is NOT checked here: the walk below seeks straight
 /// to the keys of the requested months, so every entry this sees is already in
 /// range.
 fn is_selected(
+    state: &crate::state::ComAmazonawsBillingAwsbillingState,
     allocation: &crate::state::CreditAllocation,
     input: &GetCreditAllocationHistoryInput,
 ) -> bool {
-    // This emulator persists no consolidated billing family, so the family of
-    // the requested account is that account: the entries applied to its own
-    // bills. A family model would widen this filter, not replace it.
-    allocation.account_id == input.account_id
+    state.history_covers_billed_account(&input.account_id, &allocation.account_id)
         && input
             .credit_id
             .is_none_or(|credit| is_filtered_credit(&allocation.credit_id, credit))
@@ -377,7 +382,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut page: Vec<(&String, &crate::state::CreditAllocation)> = Vec::new();
         if lower < upper {
             for (key, allocation) in state.credit_allocations.range(lower..upper).rev() {
-                if is_selected(allocation, &input) {
+                if is_selected(&state, allocation, &input) {
                     page.push((key, allocation));
                     if page.len() > limit {
                         break;

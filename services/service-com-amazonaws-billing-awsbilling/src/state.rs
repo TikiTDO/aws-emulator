@@ -789,6 +789,22 @@ impl ComAmazonawsBillingAwsbillingState {
             .map(String::as_str)
     }
 
+    /// Whether a record about the bill of `billed_account` belongs to the
+    /// billing history reported FOR `account_id`.
+    ///
+    /// An account's own bills always; and, when `account_id` is the management
+    /// (payer) account of the consolidated billing family, the bill of every
+    /// MEMBER of that family too — the family traversal that lets a credit
+    /// applied to a member's bill appear in the payer's history. An account
+    /// that pays for nobody (a member account, or an account outside the
+    /// family) has only its own bills: a family's history is the payer's to
+    /// read, not a member's.
+    pub fn history_covers_billed_account(&self, account_id: &str, billed_account: &str) -> bool {
+        billed_account == account_id
+            || (self.is_billing_family_management_account(account_id)
+                && self.family_account_name(billed_account).is_some())
+    }
+
     /// How many of `keys` are not stored under `feature` yet — the number of
     /// entries an update would ADD, which is what [`MAX_BILLING_PREFERENCES`]
     /// bounds.
