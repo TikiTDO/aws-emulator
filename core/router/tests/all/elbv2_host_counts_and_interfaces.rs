@@ -426,15 +426,32 @@ async fn a_load_balancer_publishes_the_host_counts_of_every_target_group_it_rout
     let router = build_router();
     let network = seed_network(&router).await;
 
-    // One interface of the account, in the load balancer's own subnet: its address is an
-    // address something in this VPC answers on, which is what makes a target registered at
-    // it one the load balancer can reach.
+    // One interface of the account, in the load balancer's own subnet and its own security
+    // group: its address is an address something in this VPC answers on, and that group
+    // admits the load balancer's health check on the checked port — which together are what
+    // make a target registered at it one the load balancer can reach.
     let interface = ec2(
         &router,
         "CreateNetworkInterface",
         &[
             ("SubnetId", network.subnets[0].0.as_str()),
+            ("SecurityGroupId.1", network.security_group.as_str()),
             ("Description", "a workload of the account"),
+        ],
+    )
+    .await;
+    ec2(
+        &router,
+        "AuthorizeSecurityGroupIngress",
+        &[
+            ("GroupId", network.security_group.as_str()),
+            ("IpPermissions.1.IpProtocol", "tcp"),
+            ("IpPermissions.1.FromPort", "80"),
+            ("IpPermissions.1.ToPort", "80"),
+            (
+                "IpPermissions.1.Groups.1.GroupId",
+                network.security_group.as_str(),
+            ),
         ],
     )
     .await;

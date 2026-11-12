@@ -37,6 +37,11 @@
 //!   fails every check against a port that is not one of them: a workload that is running
 //!   answers nothing on a port it does not serve, which is what a health check pointed at
 //!   the wrong port finds;
+//! * a registration the security groups governing its address admit no connection to on that
+//!   port from the load balancer doing the checking fails every check too: a check that
+//!   cannot arrive is answered by nothing. Those groups are the ones the scheduler running
+//!   the workload declared ([`super::GuardingGroups`]), else the ones the network interface
+//!   holding the address reports ([`super::health_check_firewall`]);
 //! * otherwise, a registration another emulated service's SCHEDULER made for a workload it
 //!   runs stands for that workload, which is running here, so the check passes;
 //! * an `instance` target passes while EC2 — which owns instances — reports that instance
@@ -91,8 +96,8 @@ use ::service_com_amazonaws_ec2_amazonec2::state as ec2;
 use super::target_health::{HEALTHY_STATE, UNHEALTHY_STATE};
 use super::{
     load_balancer_type_code,
-    ComAmazonawsElasticloadbalancingv2ElasticloadbalancingV10State as ElbState, LoadBalancerRecord,
-    RegisteredTarget, TargetGroupRecord, TargetKey,
+    ComAmazonawsElasticloadbalancingv2ElasticloadbalancingV10State as ElbState, GuardingGroups,
+    LoadBalancerRecord, RegisteredTarget, TargetGroupRecord, TargetKey,
 };
 
 /// "The number of targets that are considered healthy" — the metric an Elastic Load
@@ -264,6 +269,27 @@ struct Checked {
     /// `None` when that is not known: a registration whose workload declares no ports
     /// ([`super::ServedPorts`]), or a health check whose port no number names.
     serves_health_check_port: Option<bool>,
+    /// The port this check CONNECTS to, as a number — the same effective health-check port,
+    /// which is what the target's own inbound rules are read against
+    /// ([`super::health_check_firewall`]). `None` for a health check whose port no number
+    /// names.
+    health_check_port: Option<i32>,
+    /// The `GroupId` of every security group GOVERNING this registration's address, as the
+    /// scheduler that runs the workload behind it declares them
+    /// ([`super::GuardingGroups`]). Empty for a registration nothing declares them for,
+    /// whose groups are read off the network interface holding its address instead.
+    ///
+    /// The scheduler's own SHARED list, never copied: a pass checks up to
+    /// [`MAX_CHECKS_PER_PASS`] registrations, so one allocation per registration would make
+    /// the pass cost the list's length times that cap.
+    guarding_group_ids: GuardingGroups,
+    /// The `GroupId` of every security group the load balancers forwarding to this group are
+    /// associated with: where the check arrives FROM, as an inbound rule of the target can
+    /// name it.
+    source_group_ids: Vec<String>,
+    /// The `NetworkInterfaceId` of every own interface those load balancers hold, which is
+    /// what the addresses their checks come from are read off.
+    source_interface_ids: Vec<String>,
 }
 
 /// What one check observed about a registration: `Some(true)` for one something in this
@@ -510,7 +536,13 @@ fn registrations_to_check(store: &ElbState) -> Vec<Checked> {
             if checked.len() >= MAX_CHECKS_PER_PASS {
                 return checked;
             }
-            checked.push(checked_registration(target_group_arn, group, key, target));
+            checked.push(checked_registration(
+                store,
+                target_group_arn,
+                group,
+                key,
+                target,
+            ));
         }
     }
     checked
@@ -532,19 +564,41 @@ fn named_registrations(store: &ElbState, registrations: &[(String, TargetKey)]) 
                 return None;
             }
             let target = group.targets.get(key)?;
-            Some(checked_registration(target_group_arn, group, key, target))
+            Some(checked_registration(
+                store,
+                target_group_arn,
+                group,
+                key,
+                target,
+            ))
         })
         .collect()
 }
 
 /// What one check of the registration `key` of `group` reads: where it is stored, what it
-/// stands for, and the port the check connects to.
+/// stands for, the port the check connects to, and the load balancer it arrives from.
 fn checked_registration(
+    store: &ElbState,
     target_group_arn: &str,
     group: &TargetGroupRecord,
     key: &TargetKey,
     target: &RegisteredTarget,
 ) -> Checked {
+    let health_check_port = group
+        .health_check_port_of(target)
+        .and_then(|port| port.parse::<i32>().ok());
+    // The load balancers that FORWARD to this group are the ones checking its registrations,
+    // so they are where a check of this target arrives from.
+    let mut source_group_ids: Vec<String> = Vec::new();
+    let mut source_interface_ids: Vec<String> = Vec::new();
+    for load_balancer in group
+        .load_balancer_arns
+        .iter()
+        .filter_map(|arn| store.load_balancers.get(arn))
+    {
+        source_group_ids.extend(load_balancer.security_groups.iter().cloned());
+        source_interface_ids.extend(load_balancer.network_interface_ids.iter().cloned());
+    }
     Checked {
         target_group_arn: target_group_arn.to_string(),
         key: key.clone(),
@@ -554,10 +608,11 @@ fn checked_registration(
         scheduled: target.registered_for.is_some(),
         // The port this group's check connects to for THIS registration, read against the
         // ports the workload behind it serves.
-        serves_health_check_port: group
-            .health_check_port_of(target)
-            .and_then(|port| port.parse::<i32>().ok())
-            .and_then(|port| target.serves(port)),
+        serves_health_check_port: health_check_port.and_then(|port| target.serves(port)),
+        health_check_port,
+        guarding_group_ids: GuardingGroups::clone(&target.guarded_by),
+        source_group_ids,
+        source_interface_ids,
     }
 }
 
@@ -576,18 +631,51 @@ fn observe_all<Eng: Send + Sync + 'static>(
     let inventory = ec2::service_state(engine);
     let held: Option<Inventory> = inventory.as_ref().map(|state| {
         let store = state.lock();
+        let mut interface_groups: HashMap<String, Vec<String>> = HashMap::new();
+        let mut interface_addresses: HashMap<String, Vec<String>> = HashMap::new();
+        for interface in store.network_interfaces.values() {
+            let addresses = interface_addresses_of(interface);
+            let groups = interface_group_ids(interface);
+            if let Some(id) = interface.network_interface_id.clone() {
+                interface_addresses.insert(id, addresses.clone());
+            }
+            for address in addresses {
+                // An address is held by one interface, so the groups of the interface holding
+                // it are the groups governing traffic to it.
+                interface_groups.entry(address).or_insert_with(|| groups.clone());
+            }
+        }
         Inventory {
             vpcs: store.vpcs.keys().cloned().collect(),
             addresses: store
                 .network_interfaces
                 .values()
-                .flat_map(interface_addresses)
+                .flat_map(interface_addresses_of)
                 .collect(),
             running: store
                 .instances
                 .values()
                 .filter(|instance| instance_is_running(instance))
                 .map(|instance| instance.instance_id.clone())
+                .collect(),
+            interface_groups,
+            interface_addresses,
+            ingress: store
+                .security_groups
+                .iter()
+                .map(|(group_id, group)| {
+                    (
+                        group_id.clone(),
+                        group.ip_permissions.clone().unwrap_or_default(),
+                    )
+                })
+                .collect(),
+            group_names: store
+                .security_groups
+                .iter()
+                .filter_map(|(group_id, group)| {
+                    Some((group_id.clone(), group.group_name.clone()?))
+                })
                 .collect(),
         }
     });
@@ -606,7 +694,8 @@ fn observe_all<Eng: Send + Sync + 'static>(
 }
 
 /// What the account's EC2 inventory holds that a health check reads: the VPCs of the
-/// account, the addresses its network interfaces hold, and the instances it reports running.
+/// account, the addresses its network interfaces hold, the instances it reports running, and
+/// the security groups governing what may reach those interfaces.
 #[derive(Debug, Default)]
 struct Inventory {
     /// Every `VpcId` the inventory holds.
@@ -615,6 +704,18 @@ struct Inventory {
     addresses: HashSet<String>,
     /// Every instance the inventory reports running.
     running: HashSet<String>,
+    /// The security groups of the interface holding each address, keyed by that address:
+    /// the rules that decide whether a check of a target at it may arrive.
+    interface_groups: HashMap<String, Vec<String>>,
+    /// The addresses each network interface holds, keyed by `NetworkInterfaceId` — read for
+    /// the load balancer's OWN interfaces, which is where its checks come from.
+    interface_addresses: HashMap<String, Vec<String>>,
+    /// The INBOUND rules of each security group of the account, keyed by `GroupId`. A group
+    /// absent from this is one whose rules are not known.
+    ingress: HashMap<String, Vec<ec2_types::IpPermission>>,
+    /// The `GroupName` of each of those groups, for an inbound rule that names its source
+    /// group by name rather than by id.
+    group_names: HashMap<String, String>,
 }
 
 /// What one check of `target` observed, given what the account's EC2 inventory holds — see
@@ -631,6 +732,14 @@ fn observe(target: &Checked, held: Option<&Inventory>) -> Observation {
         // else stands behind the registration. This is the one condition a check can
         // observe about the PORT, and it is read before what stands behind the target,
         // because a workload that is running answers nothing on a port it does not serve.
+        return Some(false);
+    }
+    if held.is_some_and(|held| health_check_is_blocked(target, held)) {
+        // The check is a connection to the target's own address on that port, and the
+        // security groups governing that address admit no such connection from this load
+        // balancer: nothing answers a check that cannot arrive, whatever stands behind the
+        // registration ([`super::health_check_firewall`]). Read before what stands behind
+        // the target, for the same reason the port is.
         return Some(false);
     }
     if target.scheduled {
@@ -651,8 +760,59 @@ fn observe(target: &Checked, held: Option<&Inventory>) -> Observation {
     }
 }
 
+/// Whether the security groups of the interface holding this target's address are known to
+/// admit NO health check of it from the load balancers that check it.
+///
+/// `false` whenever the question is not decided — a target whose groups are neither declared
+/// nor readable off an interface of the account's inventory, a check whose port no number
+/// names, an interface in no security group, a group whose rules are not held, or a load
+/// balancer whose own groups and addresses are unknown. Nothing is failed on silence
+/// ([`super::health_check_firewall`]).
+fn health_check_is_blocked(target: &Checked, held: &Inventory) -> bool {
+    let Some(port) = target.health_check_port else {
+        return false;
+    };
+    // The groups the scheduler running the workload DECLARED, else the ones the interface
+    // holding this address reports: either way they are the groups governing traffic to it.
+    let groups = if target.guarding_group_ids.is_empty() {
+        let Some(groups) = held.interface_groups.get(&target.id) else {
+            return false;
+        };
+        groups.as_slice()
+    } else {
+        target.guarding_group_ids.as_ref()
+    };
+    let source = super::health_check_firewall::CheckSource {
+        group_ids: target.source_group_ids.clone(),
+        group_names: target
+            .source_group_ids
+            .iter()
+            .filter_map(|group_id| held.group_names.get(group_id).cloned())
+            .collect(),
+        addresses: target
+            .source_interface_ids
+            .iter()
+            .filter_map(|interface_id| held.interface_addresses.get(interface_id))
+            .flatten()
+            .cloned()
+            .collect(),
+    };
+    super::health_check_firewall::interface_admits_check(groups, &held.ingress, port, &source)
+        == Some(false)
+}
+
+/// The `GroupId` of every security group one network interface is associated with.
+fn interface_group_ids(interface: &ec2_types::NetworkInterface) -> Vec<String> {
+    interface
+        .groups
+        .iter()
+        .flatten()
+        .filter_map(|group| group.group_id.clone())
+        .collect()
+}
+
 /// Every private IPv4 and IPv6 address one network interface holds.
-fn interface_addresses(interface: &ec2_types::NetworkInterface) -> Vec<String> {
+fn interface_addresses_of(interface: &ec2_types::NetworkInterface) -> Vec<String> {
     let private = interface
         .private_ip_addresses
         .iter()
@@ -969,6 +1129,7 @@ mod tests {
             vpcs: HashSet::from(["vpc-0123456789abcdef0".to_string()]),
             addresses: HashSet::from(["10.0.1.7".to_string()]),
             running: HashSet::from(["i-0123456789abcdef0".to_string()]),
+            ..Inventory::default()
         };
         for (case, target_type, id, scheduled, serves, expected) in [
             ("an address an interface holds", "ip", "10.0.1.7", false, None, Some(true)),
@@ -1046,6 +1207,10 @@ mod tests {
                 id: id.to_string(),
                 scheduled,
                 serves_health_check_port: serves,
+                health_check_port: Some(443),
+                guarding_group_ids: Vec::new().into(),
+                source_group_ids: Vec::new(),
+                source_interface_ids: Vec::new(),
             };
             let observed = observe(&checked, Some(&held));
             assert_eq!(
@@ -1076,6 +1241,105 @@ mod tests {
                 "case {case:?} in a VPC the inventory does not hold: expected \
                  {expected_unknown:?}, got {foreign:?}"
             );
+        }
+    }
+
+    /// RULE: a check that the target's own security groups do not admit on the checked port
+    /// from the load balancer doing the checking FAILS, however healthy the workload behind
+    /// the registration is — and a check those groups do admit is unaffected.
+    ///
+    /// The rows span a group that admits the check, one that admits the port from somewhere
+    /// else, one that admits the load balancer on another port, one with no inbound rule at
+    /// all, and an interface in no group (nothing known, so nothing failed).
+    #[test]
+    fn a_check_the_targets_security_groups_do_not_admit_fails() {
+        let address = "10.0.1.7".to_string();
+        let target_group = "sg-0000000000000000b".to_string();
+        let load_balancer_group = "sg-0000000000000000a".to_string();
+        let load_balancer_interface = "eni-0123456789abcdef0".to_string();
+        let admits = |protocol: &str, from: i32, to: i32, source: &str| ec2_types::IpPermission {
+            ip_protocol: Some(protocol.to_string()),
+            from_port: Some(from),
+            to_port: Some(to),
+            user_id_group_pairs: Some(vec![ec2_types::UserIdGroupPair {
+                group_id: Some(source.to_string()),
+                ..ec2_types::UserIdGroupPair::default()
+            }]),
+            ..ec2_types::IpPermission::default()
+        };
+        for (case, groups_of_target, rules, expected) in [
+            (
+                "a group admitting the load balancer on the checked port",
+                vec![target_group.clone()],
+                vec![admits("tcp", 443, 443, &load_balancer_group)],
+                Some(true),
+            ),
+            (
+                "a group admitting the checked port from another group",
+                vec![target_group.clone()],
+                vec![admits("tcp", 443, 443, "sg-0000000000000000c")],
+                Some(false),
+            ),
+            (
+                "a group admitting the load balancer on another port",
+                vec![target_group.clone()],
+                vec![admits("tcp", 8080, 8080, &load_balancer_group)],
+                Some(false),
+            ),
+            (
+                "a group with no inbound rule at all",
+                vec![target_group.clone()],
+                Vec::new(),
+                Some(false),
+            ),
+            (
+                "an interface in no security group",
+                Vec::new(),
+                vec![admits("tcp", 443, 443, &load_balancer_group)],
+                Some(true),
+            ),
+        ] {
+            let held = Inventory {
+                vpcs: HashSet::from(["vpc-0123456789abcdef0".to_string()]),
+                addresses: HashSet::from([address.clone()]),
+                interface_groups: HashMap::from([(address.clone(), groups_of_target.clone())]),
+                interface_addresses: HashMap::from([(
+                    load_balancer_interface.clone(),
+                    vec!["10.0.0.5".to_string()],
+                )]),
+                ingress: HashMap::from([(target_group.clone(), rules)]),
+                ..Inventory::default()
+            };
+            // The same groups reach this decision two ways: declared by the scheduler that
+            // runs the workload, and read off the interface holding the address. Both are
+            // the groups governing traffic to it, so both must decide the same.
+            for (provenance, declared) in [
+                ("declared by the scheduler", groups_of_target.clone()),
+                ("read off the interface", Vec::new()),
+            ] {
+                let checked = Checked {
+                    target_group_arn: "tg".to_string(),
+                    key: (address.clone(), Some(443)),
+                    target_type: "ip".to_string(),
+                    vpc_id: Some("vpc-0123456789abcdef0".to_string()),
+                    id: address.clone(),
+                    // A registration an ECS-like scheduler owns, which is the one a running
+                    // workload stands behind: the firewall still decides whether a check of
+                    // it can arrive.
+                    scheduled: true,
+                    serves_health_check_port: Some(true),
+                    health_check_port: Some(443),
+                    guarding_group_ids: declared.into(),
+                    source_group_ids: vec![load_balancer_group.clone()],
+                    source_interface_ids: vec![load_balancer_interface.clone()],
+                };
+                let observed = observe(&checked, Some(&held));
+                assert_eq!(
+                    observed, expected,
+                    "case {case:?} with groups {provenance}: expected {expected:?}, got \
+                     {observed:?}"
+                );
+            }
         }
     }
 }

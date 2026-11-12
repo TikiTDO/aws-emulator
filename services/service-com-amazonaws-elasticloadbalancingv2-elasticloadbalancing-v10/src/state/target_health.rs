@@ -44,8 +44,8 @@ use std::time::{Duration, SystemTime};
 use crate::ops::types::{TargetDescription, TargetHealth, TargetHealthDescription};
 
 use super::{
-    target_group_attribute, targets_per_target_group, RegisteredTarget, TargetGroupRecord,
-    TargetKey, SETTLE_AFTER,
+    target_group_attribute, targets_per_target_group, GuardingGroups, RegisteredTarget,
+    TargetGroupRecord, TargetKey, SETTLE_AFTER,
 };
 
 /// The target group attribute that holds how long a deregistering target drains, from
@@ -242,6 +242,36 @@ fn reported(state: (&str, &str, &str)) -> TargetHealth {
     }
 }
 
+/// What another emulated service's SCHEDULER declares about one registration it makes in a
+/// target group on behalf of a workload it runs ([`TargetGroupRecord::register_for`]).
+///
+/// Every member is the scheduler's own word about the workload, which is what this service
+/// cannot know: where it is reached, and the two facts a health check of it is read against.
+#[derive(Debug, Clone)]
+pub struct SchedulerRegistration {
+    /// The target's id: the address the load balancer reaches the workload at.
+    pub id: String,
+    /// The port it receives traffic on, and `None` for a registration that takes the target
+    /// group's own port.
+    pub port: Option<i32>,
+    /// The Availability Zone the target is in, and `None` for one whose zone is unknown.
+    pub availability_zone: Option<String>,
+    /// The workload this registration stands for, which is what lets the scheduler that
+    /// added it take it out again ([`TargetGroupRecord::scheduler_registrations`]).
+    pub workload: String,
+    /// The ports that workload LISTENS on ([`ServedPorts`]): a check of this registration
+    /// gets an answer only on a port among them, so a health check the target group points
+    /// at any other port is answered by nothing. A scheduler that declares none leaves the
+    /// ports unknown.
+    pub serves_ports: ServedPorts,
+    /// The security groups GOVERNING that address ([`GuardingGroups`]): a check of this
+    /// registration ARRIVES only if an inbound rule of one of them admits it from the load
+    /// balancer performing it ([`super::health_check_firewall`]). A scheduler that declares
+    /// none leaves the groups unknown, and the groups of the interface holding the address
+    /// are read instead.
+    pub guarded_by: GuardingGroups,
+}
+
 impl RegisteredTarget {
     /// Whether the workload behind this registration answers on `port` \u2014 `None` when
     /// nothing declares which ports it serves ([`ServedPorts`]), which is no answer either
@@ -324,20 +354,15 @@ impl TargetGroupRecord {
             .collect()
     }
 
-    /// Register the target `id` (on `port`, else this group's own) for `workload`, on
-    /// behalf of the emulated service whose scheduler owns that workload — the Amazon ECS
-    /// service registering a task its `loadBalancers` bind.
+    /// Register the target `declared` describes, on behalf of the emulated service whose
+    /// scheduler owns the workload it stands for — the Amazon ECS service registering a task
+    /// its `loadBalancers` bind.
     ///
     /// The registration is this group's own in every respect a reader sees: it is keyed and
     /// health-checked exactly as `RegisterTargets` keys and checks one, so it begins
     /// `initial` and is reported whatever its checks then determine
     /// ([`TargetGroupRecord::health_of`]). It carries the workload it stands for, which is
     /// what lets the scheduler that added it take it out again.
-    ///
-    /// `serves_ports` is the ports that workload LISTENS on, as the scheduler that runs it
-    /// declares them ([`ServedPorts`]): a check of this registration gets an answer only on
-    /// a port among them, so a health check the target group points at any other port is
-    /// answered by nothing. A scheduler that declares none leaves the ports unknown.
     ///
     /// Nothing is replaced: a key this group already holds — whether a caller registered it
     /// or the same workload did — is left exactly as it is, so a reconcile does not restart
@@ -346,16 +371,8 @@ impl TargetGroupRecord {
     /// `RegisterTargets` refuses past.
     ///
     /// Answers whether this call added a registration.
-    pub fn register_for(
-        &mut self,
-        id: &str,
-        port: Option<i32>,
-        availability_zone: Option<String>,
-        workload: &str,
-        serves_ports: ServedPorts,
-        now: SystemTime,
-    ) -> bool {
-        let key: TargetKey = (id.to_string(), port.or(self.port));
+    pub fn register_for(&mut self, declared: &SchedulerRegistration, now: SystemTime) -> bool {
+        let key: TargetKey = (declared.id.clone(), declared.port.or(self.port));
         if self.targets.contains_key(&key) {
             return false;
         }
@@ -367,13 +384,14 @@ impl TargetGroupRecord {
             RegisteredTarget {
                 id: key.0,
                 port: key.1,
-                availability_zone,
+                availability_zone: declared.availability_zone.clone(),
                 registered_at: now,
                 healthy_at: now + SETTLE_AFTER,
                 draining_until: None,
                 probe: TargetProbe::default(),
-                registered_for: Some(workload.to_string()),
-                serves_ports,
+                registered_for: Some(declared.workload.clone()),
+                serves_ports: ServedPorts::clone(&declared.serves_ports),
+                guarded_by: GuardingGroups::clone(&declared.guarded_by),
             },
         );
         true

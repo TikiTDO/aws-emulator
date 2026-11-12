@@ -195,11 +195,17 @@ fn register_workload(
         .get_mut(arn)
         .unwrap_or_else(|| panic!("case {:?}: the store holds the target group", row.case));
     let added = group.register_for(
-        ADDRESS,
-        Some(TRAFFIC_PORT),
-        None,
-        &workload(index),
-        serves.iter().map(|(first, last)| *first..=*last).collect(),
+        &elb::SchedulerRegistration {
+            id: ADDRESS.to_string(),
+            port: Some(TRAFFIC_PORT),
+            availability_zone: None,
+            workload: workload(index),
+            serves_ports: serves.iter().map(|(first, last)| *first..=*last).collect(),
+            // This suite's rule is about the PORT, so it declares no security groups: the
+            // account's EC2 inventory holds none for this VPC either, so nothing can be
+            // observed about whether a check of these registrations arrives.
+            guarded_by: Vec::new().into(),
+        },
         SystemTime::now(),
     );
     assert!(

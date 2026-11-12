@@ -68,8 +68,15 @@ pub use rule_actions::{check_redirect_actions, redirects_to_itself, REDIRECT_LOO
 pub mod target_health;
 
 pub use target_health::{
-    deregistration_delay, ServedPorts, TargetProbe, DEREGISTRATION_DELAY_ATTRIBUTE,
+    deregistration_delay, SchedulerRegistration, ServedPorts, TargetProbe,
+    DEREGISTRATION_DELAY_ATTRIBUTE,
 };
+
+/// Whether the security groups of a target's own network interface let a health check of it
+/// arrive at all.
+pub mod health_check_firewall;
+
+pub use health_check_firewall::{interface_admits_check, CheckSource, GuardingGroups};
 
 /// The periodic health check of the registrations a load balancer routes to, and the
 /// host-count series that check is published as.
@@ -3268,6 +3275,18 @@ pub struct RegisteredTarget {
     /// the group's effective health-check port ([`TargetGroupRecord::health_check_port_of`]),
     /// and a port the workload does not listen on is answered by nothing.
     pub serves_ports: ServedPorts,
+    /// The security groups GOVERNING the address this registration names, as the scheduler
+    /// that runs the workload declares them — `AwsVpcConfiguration$securityGroups`, "the IDs
+    /// of the security groups associated with the task or service", for an Amazon ECS task.
+    ///
+    /// Empty for a registration nothing declares them for, which is every `RegisterTargets`
+    /// caller's own: the groups of such a target are read off the network interface holding
+    /// its address instead ([`health_check_firewall`]).
+    ///
+    /// What decides whether a health check of this registration ARRIVES: the groups' own
+    /// inbound rules, which are Amazon EC2's records, are read against the load balancer
+    /// performing the check.
+    pub guarded_by: GuardingGroups,
 }
 
 /// How a registration is keyed in a target group: the target id and the port the target

@@ -255,6 +255,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     // nothing declares which ports it listens on
                     // ([`crate::state::ServedPorts`]).
                     serves_ports: Vec::new().into(),
+                    // Nor which security groups govern it: the groups of such a target are
+                    // the ones the network interface holding its address reports
+                    // ([`crate::state::health_check_firewall`]).
+                    guarded_by: Vec::new().into(),
                 },
             );
         }

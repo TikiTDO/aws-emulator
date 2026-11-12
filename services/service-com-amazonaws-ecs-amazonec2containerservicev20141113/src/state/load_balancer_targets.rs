@@ -19,7 +19,12 @@
 //! ([`revision_container_ports`], bounded by [`MAX_SERVED_PORT_RANGES`]), because that is
 //! what the load balancer's health check of it can get an answer on: the check connects to
 //! the target group's effective health-check port, and a port no container of the task
-//! listens on is one the task answers nothing on.
+//! listens on is one the task answers nothing on. It carries the SECURITY GROUPS the
+//! placement gave the task's interface for the same reason
+//! (`AwsVpcConfiguration$securityGroups`, [`ComAmazonawsEcsAmazonec2containerservicev20141113State::placement_security_groups`]):
+//! a security group admits only the traffic an inbound rule of it names, so those groups are
+//! what decides whether a health check of the task ARRIVES at all (`ELBv2
+//! state::health_check_firewall`).
 //!
 //! # Reconciled, never appended
 //!
@@ -44,7 +49,9 @@
 
 use ::std::ops::RangeInclusive;
 
-use ::service_com_amazonaws_elasticloadbalancingv2_elasticloadbalancing_v10::state::ServedPorts;
+use ::service_com_amazonaws_elasticloadbalancingv2_elasticloadbalancing_v10::state::{
+    GuardingGroups, ServedPorts,
+};
 
 use super::*;
 
@@ -58,6 +65,18 @@ use super::*;
 /// read and no more: the stored list is held to a figure this service fixes rather than to
 /// one a request chose.
 pub const MAX_SERVED_PORT_RANGES: usize = 100 * MAX_CONTAINER_DEFINITIONS;
+
+/// How many DISTINCT security groups the registration of ONE task carries.
+///
+/// The ceiling of the Amazon VPC quota on the resource the groups are associated with:
+/// "security groups per network interface" is 5 by default and adjustable "up to a maximum
+/// of 16" (Amazon VPC User Guide, "Amazon VPC quotas"), and an `awsvpc` task is reached at
+/// one elastic network interface, so no more than this many groups can govern its address
+/// under any quota setting. `AwsVpcConfiguration$securityGroups` carries no length of its
+/// own, so a placement naming more has the first this many DISTINCT ids read and no more:
+/// the stored list is held to a figure this service fixes rather than to one a request chose,
+/// exactly as [`MAX_SERVED_PORT_RANGES`] holds the declared ports.
+pub const MAX_GUARDING_GROUPS: usize = 16;
 
 /// One target an ECS service's task occupies in one ELBv2 target group.
 ///
@@ -97,6 +116,20 @@ pub struct TargetRegistration {
     /// The type is the Elastic Load Balancing v2 service's own alias for the shape, which
     /// is where this value is stored ([`ServedPorts`]).
     pub served_ports: ServedPorts,
+    /// The security groups GOVERNING the address the load balancer reaches the task at, as
+    /// the placement declares them: `AwsVpcConfiguration$securityGroups`, "the IDs of the
+    /// security groups associated with the task or service".
+    ///
+    /// Carried into the registration because it is what decides whether a health check of
+    /// that target ARRIVES at all: a security group admits only the traffic an inbound rule
+    /// of it names, so a task whose groups carry no rule admitting the load balancer on the
+    /// health-check port answers no check of it. The rules themselves are Amazon EC2's
+    /// records and are read there.
+    ///
+    /// SHARED, as [`Self::served_ports`] is, and under the Elastic Load Balancing v2
+    /// service's own alias for the shape, which is where this value is stored
+    /// ([`GuardingGroups`]).
+    pub guarding_groups: GuardingGroups,
 }
 
 impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
@@ -150,6 +183,9 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
                 // The ports this task's containers listen on, read off the revision it runs
                 // once for the task rather than per binding.
                 let served_ports = self.task_container_ports(task);
+                // The security groups governing that address, read off the placement that
+                // placed the task — once for the task, for the same reason.
+                let guarding_groups = self.placement_security_groups(service, task);
                 for binding in self.placement_load_balancers(service, task) {
                     let Some(arn) = binding.target_group_arn.as_deref() else {
                         continue;
@@ -168,6 +204,7 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
                         subnet_id: subnet_id.clone(),
                         task_arn: task.task_arn.clone(),
                         served_ports: served_ports.clone(),
+                        guarding_groups: GuardingGroups::clone(&guarding_groups),
                     });
                 }
             }
@@ -213,6 +250,60 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
                 task_set.load_balancers.as_slice()
             })
     }
+
+    /// The security groups the placement that placed `task` gave its elastic network
+    /// interface: `AwsVpcConfiguration$securityGroups` of the TASK SET's own network
+    /// configuration when a task set placed it, and of the service's otherwise — read the
+    /// same way the bindings are ([`Self::placement_load_balancers`]), because both are the
+    /// configuration the task was placed under.
+    ///
+    /// Empty for a placement that names none, which declares nothing about the groups rather
+    /// than that the task is in none.
+    fn placement_security_groups(
+        &self,
+        service: &ServiceRecord,
+        task: &TaskRecord,
+    ) -> GuardingGroups {
+        let configuration = task
+            .started_by
+            .as_deref()
+            .and_then(|started_by| {
+                self.task_sets.get(&(
+                    service.cluster_name.clone(),
+                    service.name.clone(),
+                    started_by.to_string(),
+                ))
+            })
+            .map_or(service.network_configuration.as_ref(), |task_set| {
+                task_set.network_configuration.as_ref()
+            });
+        guarding_groups(
+            configuration
+                .and_then(|configuration| configuration.awsvpc_configuration.as_ref())
+                .and_then(|awsvpc| awsvpc.security_groups.as_deref())
+                .unwrap_or_default(),
+        )
+    }
+}
+
+/// The groups a registration carries for a placement that `declared` these: each DISTINCT id
+/// in the order it was named, and at most [`MAX_GUARDING_GROUPS`] of them.
+///
+/// A group named twice governs nothing twice and a placement cannot legitimately name more
+/// than the quota, so the stored list is sized by this service rather than by the request —
+/// which is what keeps the work a later health check does on it independent of the length a
+/// caller chose.
+fn guarding_groups(declared: &[String]) -> GuardingGroups {
+    let mut groups: Vec<String> = Vec::new();
+    for group in declared {
+        if groups.len() >= MAX_GUARDING_GROUPS {
+            break;
+        }
+        if !groups.iter().any(|held| held == group) {
+            groups.push(group.clone());
+        }
+    }
+    GuardingGroups::from(groups)
 }
 
 /// Whether a task is one the load balancer sends requests to: Amazon ECS registers a task
@@ -360,11 +451,14 @@ pub fn reconcile_target_group_registrations<Eng: Send + Sync + 'static>(
             // room for.
             let held = group.targets.contains_key(&key);
             let registered = group.register_for(
-                &registration.target_id,
-                registration.port,
-                zones.get(&registration.target_id).cloned(),
-                &registration.task_arn,
-                registration.served_ports.clone(),
+                &::service_com_amazonaws_elasticloadbalancingv2_elasticloadbalancing_v10::state::SchedulerRegistration {
+                    id: registration.target_id.clone(),
+                    port: registration.port,
+                    availability_zone: zones.get(&registration.target_id).cloned(),
+                    workload: registration.task_arn.clone(),
+                    serves_ports: ServedPorts::clone(&registration.served_ports),
+                    guarded_by: GuardingGroups::clone(&registration.guarding_groups),
+                },
                 now,
             );
             // A group already holding its quota of targets takes no further registration, so
@@ -441,4 +535,54 @@ fn target_availability_zones<Eng: Send + Sync + 'static>(
         }
     }
     zones
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RULE: the groups a registration carries are the DISTINCT ids the placement named, in
+    /// the order it named them, and at most as many as may govern one interface — so no
+    /// length a request chose sizes the stored list.
+    ///
+    /// The rows span a placement that names none, one, several, the quota, more than the
+    /// quota, and the same id repeated.
+    #[test]
+    fn a_registration_carries_at_most_the_quota_of_distinct_declared_groups() {
+        let named = |count: usize| -> Vec<String> {
+            (0..count).map(|index| format!("sg-{index:017x}")).collect()
+        };
+        for (case, declared, expected) in [
+            ("a placement naming none", Vec::new(), Vec::new()),
+            ("one group", named(1), named(1)),
+            ("two groups", named(2), named(2)),
+            (
+                "exactly the quota",
+                named(MAX_GUARDING_GROUPS),
+                named(MAX_GUARDING_GROUPS),
+            ),
+            (
+                "one past the quota",
+                named(MAX_GUARDING_GROUPS + 1),
+                named(MAX_GUARDING_GROUPS),
+            ),
+            (
+                "far past the quota",
+                named(MAX_GUARDING_GROUPS * 400),
+                named(MAX_GUARDING_GROUPS),
+            ),
+            (
+                "the same id a thousand times",
+                vec!["sg-00000000000000001".to_string(); 1_000],
+                vec!["sg-00000000000000001".to_string()],
+            ),
+        ] {
+            let carried = guarding_groups(&declared);
+            assert_eq!(
+                carried.as_ref(),
+                expected.as_slice(),
+                "case {case:?}: expected {expected:?}, got {carried:?}"
+            );
+        }
+    }
 }

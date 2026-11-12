@@ -571,6 +571,9 @@ mod ecs_service_target_group_association;
 // file is the region every concurrent landing appends to.
 #[path = "all/ecs_service_target_group_health_check_port.rs"]
 mod ecs_service_target_group_health_check_port;
+// Declared HERE, in the sorted list, for the reason the note above gives.
+#[path = "all/ecs_service_target_group_security_groups.rs"]
+mod ecs_service_target_group_security_groups;
 // Declared HERE, in the sorted list, rather than appended at the end of this file like
 // the most recent suites: the tail is where every landing in the same window appends, so
 // it is the contended region now, while this span of the sorted list is untouched by
