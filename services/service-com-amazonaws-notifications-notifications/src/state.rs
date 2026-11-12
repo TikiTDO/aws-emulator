@@ -648,45 +648,108 @@ struct PublishedManagedNotification {
 /// with each segment `[a-zA-Z0-9\-]{3,64}`, and `ManagedNotificationConfigurationDescription`
 /// bounds a description at 256 characters.
 ///
-/// The set below spans the services AWS publishes managed notifications for,
-/// each with one entry per event-type category of that service: `AWS-Health`
-/// (whose sub-categories are AWS Health's own event type categories),
-/// `AWS-Partner-Central` (whose sub-categories are the AWS Marketplace seller
-/// notification categories — product listings, offers and agreements, payments
-/// and disbursements, and seller account management) and `AWS-MP-Buyer` (whose
-/// sub-categories are the Marketplace BUYER notification categories — the
-/// products and solutions subscribed to, private offers extended to the
-/// account, pricing changes and agreements). Both sides of Marketplace are
-/// published, because a buyer account enumerates the catalog to subscribe to
-/// buyer notifications just as a seller account does to seller ones. A category
-/// is published for every account, since nothing a caller does creates or
-/// removes one — the catalog is the same fixed set for every account, so an
-/// entry's arn, name and description are published values rather than
-/// per-account or per-run ones.
+/// The set below is the published catalog, one entry per event-type
+/// sub-category of every service whose events it covers:
+///
+/// * `AWS-BCM` — the Billing and Cost Management notifications that reach an
+///   account's billing contacts: bills and invoices, financing, fraud
+///   prevention, payments and subscriptions.
+/// * `AWS-Health` — the account-level AWS Health notifications: the issue
+///   events, and the three sub-categories whose events AWS also delivers by
+///   email to the account's root address and its matching alternate contact
+///   (billing, operations and security), which is what each of those three
+///   descriptions states.
+/// * `AWS-Partner-Central` — the AWS Marketplace SELLER notification
+///   categories: product listings, offers and agreements, payments and
+///   disbursements, and seller account management.
+/// * `AWS-MP-Buyer` — the Marketplace BUYER notification categories: the
+///   products and solutions subscribed to, private offers extended to the
+///   account, pricing changes, and agreements and subscriptions.
+///
+/// Both sides of Marketplace are published, because a buyer account enumerates
+/// the catalog to subscribe to buyer notifications just as a seller account
+/// does to seller ones. Every entry is published for every account, since
+/// nothing a caller does creates or removes one — the catalog is the same fixed
+/// set for every account, so an entry's arn, name and description are published
+/// values rather than per-account or per-run ones. An entry is published only
+/// where the service publishes it: a sub-category the service does not publish
+/// must be absent, so a caller that enumerates the catalog is not shown a
+/// category whose events nothing delivers.
 const MANAGED_NOTIFICATION_CATALOG: &[PublishedManagedNotification] = &[
+    // The Billing and Cost Management cluster. Each display name is the words
+    // its sub-category segment spells, and each description states the billing
+    // events the sub-category covers; the entry's own published wording is not
+    // recoverable in this checkout, so the description says what the
+    // sub-category delivers rather than carrying wording nothing attests to.
+    // The arn — what every read path keys an entry on — is the published one.
+    PublishedManagedNotification {
+        category: "AWS-BCM",
+        sub_category: "Billing-and-Invoices",
+        name: "Billing and Invoices",
+        description: "Notifications about your bills and invoices, including invoice availability, charges that differ from your usual spend, and changes to the billing documents for your account.",
+    },
+    PublishedManagedNotification {
+        category: "AWS-BCM",
+        sub_category: "Financing",
+        name: "Financing",
+        description: "Notifications about AWS financing for your account, including financing application outcomes, installment schedules, and upcoming financed payments.",
+    },
+    PublishedManagedNotification {
+        category: "AWS-BCM",
+        sub_category: "Fraud-Prevention",
+        name: "Fraud Prevention",
+        description: "Notifications about suspected fraudulent activity on your account, including unusual usage, credentials that may be compromised, and the action needed to secure the account.",
+    },
+    PublishedManagedNotification {
+        category: "AWS-BCM",
+        sub_category: "Payment",
+        name: "Payment",
+        description: "Notifications about your payments, including upcoming and overdue payments, payment confirmations, failed payment methods, and refunds.",
+    },
+    PublishedManagedNotification {
+        category: "AWS-BCM",
+        sub_category: "Subscriptions",
+        name: "Subscriptions",
+        description: "Notifications about the subscriptions billed to your account, including upcoming renewals, expirations, and cancellations.",
+    },
+    // The AWS Health issue sub-category. Its published display text is not
+    // recoverable in this checkout either, so the name is the word its segment
+    // spells and the description states the events it covers, in the form its
+    // three siblings below publish.
     PublishedManagedNotification {
         category: "AWS-Health",
         sub_category: "Issue",
-        name: "Issues",
-        description: "AWS Health events reporting an issue that affects resources, services or regions you use, including the resources involved and the action to take.",
+        name: "Issue",
+        description: "All account health issue events that are sent through email. By default, these are sent to the root email address.",
+    },
+    // The three AWS Health sub-categories below are the ones whose events are
+    // also delivered by email, so each description states the implication the
+    // sub-category carries and the account contacts that delivery reaches: the
+    // root address plus the alternate contact of the matching kind
+    // (`AccountContactType`'s `ACCOUNT_ALTERNATE_BILLING`,
+    // `ACCOUNT_ALTERNATE_OPERATIONS` and `ACCOUNT_ALTERNATE_SECURITY`, which
+    // are also the `ChannelIdentifier` values a caller associates them with).
+    PublishedManagedNotification {
+        category: "AWS-Health",
+        sub_category: "Billing",
+        name: "Health Billing",
+        description: "Health events with Billing implications that are sent through email. By default, these are sent to the root email address and the billing alternate contact.",
     },
     PublishedManagedNotification {
         category: "AWS-Health",
-        sub_category: "AccountNotification",
-        name: "Account notifications",
-        description: "AWS Health events reporting account and service notifications for this account, including announcements, deprecations and changes that need your attention.",
+        sub_category: "Operations",
+        name: "Health Operations",
+        description: "Health events with Operational implications that are sent through email. By default, these are sent to the root email address and the operations alternate contact.",
     },
     PublishedManagedNotification {
         category: "AWS-Health",
-        sub_category: "ScheduledChange",
-        name: "Scheduled changes",
-        description: "AWS Health events reporting a change scheduled against resources you use, including planned lifecycle events, maintenance windows and certificate rotations.",
-    },
-    PublishedManagedNotification {
-        category: "AWS-Health",
-        sub_category: "Investigation",
-        name: "Investigations",
-        description: "AWS Health events reporting an open investigation into possible impact on resources you use, published while the impact is still being confirmed.",
+        sub_category: "Security",
+        // The published display name of this entry is the one word its
+        // sub-category segment also carries: the two coincide here, which is
+        // not the same as the name being derived from the arn — the sibling
+        // entries publish names their own segments do not spell.
+        name: "Security",
+        description: "Health events with Security implications that are sent through email. By default, these are sent to the root email address, operations alternate contact, and the security alternate contact.",
     },
     PublishedManagedNotification {
         category: "AWS-Partner-Central",

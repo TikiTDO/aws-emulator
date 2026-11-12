@@ -5,15 +5,16 @@
 //! emulator boots in production.
 //!
 //! The ordering, paging and filtering of the listing are covered by
-//! `tests/all/managed_notification_configurations.rs`; this suite is about the
-//! catalog's CONTENTS and the rule they follow: the service publishes one entry
-//! per event-type category of every service whose events it covers, each entry
-//! carrying its OWN display `name` and prose `description` — neither of them a
-//! rendering of the arn's `category`/`sub-category` tokens, so a caller that
-//! renders `name` shows display text and not an arn segment. Because nothing a
-//! caller does creates or removes a managed configuration, that published set
-//! and its text are the SAME for every account and every read: a fixed catalog,
-//! not a per-account or per-run value.
+//! `tests/all/managed_notification_configurations.rs` and the catalog's
+//! membership by `tests/all/managed_catalog_membership.rs`; this suite is about
+//! the catalog's CONTENTS and the rule they follow: the service publishes one
+//! entry per event-type sub-category of every service whose events it covers,
+//! each entry carrying its OWN display `name` and prose `description` — text
+//! the service publishes rather than text computed from the arn's
+//! `category`/`sub-category` tokens, so a caller that renders `name` shows
+//! display text. Because nothing a caller does creates or removes a managed
+//! configuration, that published set and its text are the SAME for every
+//! account and every read: a fixed catalog, not a per-account or per-run value.
 //!
 //! Shape source for the bounds and the arn layout the rows below check:
 //! `smithy_query(query="shape",shape="ManagedNotificationConfigurationStructure,ManagedNotificationConfigurationName,ManagedNotificationConfigurationDescription,ManagedNotificationConfigurationOsArn",model_path="services/service-com-amazonaws-notifications-notifications/smithy-model/com-amazonaws-notifications-notifications.json")`.
@@ -37,31 +38,62 @@ const DESCRIPTION_MAX: usize = 256;
 /// in `src/state.rs` — the model enumerates no entries (only their shape, see
 /// the module header's `smithy_query`), so this table is the published behaviour
 /// and the rows span every category the service covers rather than one of them:
-/// the health side, the Marketplace SELLER side and the Marketplace BUYER side.
+/// the Billing and Cost Management side, the health side, the Marketplace
+/// SELLER side and the Marketplace BUYER side.
 const PUBLISHED: &[(&str, &str, &str, &str)] = &[
+    (
+        "AWS-BCM",
+        "Billing-and-Invoices",
+        "Billing and Invoices",
+        "Notifications about your bills and invoices, including invoice availability, charges that differ from your usual spend, and changes to the billing documents for your account.",
+    ),
+    (
+        "AWS-BCM",
+        "Financing",
+        "Financing",
+        "Notifications about AWS financing for your account, including financing application outcomes, installment schedules, and upcoming financed payments.",
+    ),
+    (
+        "AWS-BCM",
+        "Fraud-Prevention",
+        "Fraud Prevention",
+        "Notifications about suspected fraudulent activity on your account, including unusual usage, credentials that may be compromised, and the action needed to secure the account.",
+    ),
+    (
+        "AWS-BCM",
+        "Payment",
+        "Payment",
+        "Notifications about your payments, including upcoming and overdue payments, payment confirmations, failed payment methods, and refunds.",
+    ),
+    (
+        "AWS-BCM",
+        "Subscriptions",
+        "Subscriptions",
+        "Notifications about the subscriptions billed to your account, including upcoming renewals, expirations, and cancellations.",
+    ),
     (
         "AWS-Health",
         "Issue",
-        "Issues",
-        "AWS Health events reporting an issue that affects resources, services or regions you use, including the resources involved and the action to take.",
+        "Issue",
+        "All account health issue events that are sent through email. By default, these are sent to the root email address.",
     ),
     (
         "AWS-Health",
-        "AccountNotification",
-        "Account notifications",
-        "AWS Health events reporting account and service notifications for this account, including announcements, deprecations and changes that need your attention.",
+        "Billing",
+        "Health Billing",
+        "Health events with Billing implications that are sent through email. By default, these are sent to the root email address and the billing alternate contact.",
     ),
     (
         "AWS-Health",
-        "ScheduledChange",
-        "Scheduled changes",
-        "AWS Health events reporting a change scheduled against resources you use, including planned lifecycle events, maintenance windows and certificate rotations.",
+        "Operations",
+        "Health Operations",
+        "Health events with Operational implications that are sent through email. By default, these are sent to the root email address and the operations alternate contact.",
     ),
     (
         "AWS-Health",
-        "Investigation",
-        "Investigations",
-        "AWS Health events reporting an open investigation into possible impact on resources you use, published while the impact is still being confirmed.",
+        "Security",
+        "Security",
+        "Health events with Security implications that are sent through email. By default, these are sent to the root email address, operations alternate contact, and the security alternate contact.",
     ),
     (
         "AWS-Partner-Central",
@@ -322,9 +354,16 @@ async fn the_default_page_carries_the_whole_published_catalog() {
 }
 
 /// RULE: an entry's `name` and `description` are its own published display
-/// text, independent of the arn — so neither is any rendering of the arn's
-/// `category`/`sub-category` tokens, and both stay inside the bounds the model
+/// text, independent of the arn — not computed from the arn's
+/// `category`/`sub-category` tokens, and both inside the bounds the model
 /// declares for them.
+///
+/// Independent does not mean different: a sub-category named by a single word
+/// publishes that word as its display name too (`AWS-BCM/Payment` is
+/// `Payment`), so the rule is checked over the catalog — a derivation of the
+/// arn's segments could not produce the names of the entries whose display text
+/// their segments do not spell — rather than by demanding every entry's name
+/// differ from its own segments.
 #[tokio::test]
 async fn every_entry_carries_display_text_that_is_not_its_arn_segments() {
     let emulator = Emulator::new();
@@ -351,8 +390,8 @@ async fn every_entry_carries_display_text_that_is_not_its_arn_segments() {
             "case {case}: description must be prose within {DESCRIPTION_MAX} characters, got {description:?}"
         );
 
-        // Every rendering of the arn's own two segments: the name is none of
-        // them, so a caller rendering `name` cannot be shown an arn token.
+        // Every rendering of the arn's own two segments: a description is prose
+        // about the covered events, so it is none of them.
         let renderings = [
             format!("{category}-{sub_category}"),
             format!("{category}/{sub_category}"),
@@ -363,12 +402,17 @@ async fn every_entry_carries_display_text_that_is_not_its_arn_segments() {
         ];
         for rendering in &renderings {
             assert_ne!(
-                name, rendering,
-                "case {case}: name must be published display text, not the arn rendering {rendering:?}"
-            );
-            assert_ne!(
                 description, rendering,
                 "case {case}: description must be published prose, not the arn rendering {rendering:?}"
+            );
+        }
+        // And the name is published text rather than a rendering of the whole
+        // arn path: a two-segment rendering is never a display name, even where
+        // a single-word sub-category and its display name coincide.
+        for rendering in &renderings[..4] {
+            assert_ne!(
+                name, rendering,
+                "case {case}: name must be published display text, not the arn rendering {rendering:?}"
             );
         }
 
@@ -382,6 +426,24 @@ async fn every_entry_carries_display_text_that_is_not_its_arn_segments() {
             "case {case}: description must be a prose sentence, got {description:?}"
         );
     }
+
+    // The catalog as a whole proves the name is not computed from the arn: more
+    // than one entry publishes a display name neither of its own segments
+    // spells, which no derivation of those segments could produce.
+    let not_a_segment = listed
+        .iter()
+        .filter(|(arn, name, _)| {
+            managed_configuration_arn_segments(arn)
+                .is_some_and(|(category, sub_category)| *name != category && *name != sub_category)
+        })
+        .count();
+    assert!(
+        not_a_segment >= 2,
+        "case display text: the published names must be the entries' own text rather than a \
+         rendering of their arn segments, got {} of {} entries whose name is a segment",
+        listed.len() - not_a_segment,
+        listed.len()
+    );
 
     // No two entries share a name or an arn, so the catalog identifies each
     // published category distinctly.
