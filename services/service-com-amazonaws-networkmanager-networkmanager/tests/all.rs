@@ -153,6 +153,8 @@ mod get_direct_connect_gateway_attachment;
 mod get_link_associations_selector_absence;
 #[path = "all/get_links_site_exclusion.rs"]
 mod get_links_site_exclusion;
+#[path = "all/get_network_routes.rs"]
+mod get_network_routes;
 #[path = "all/get_transit_gateway_connect_peer_associations_paging.rs"]
 mod get_transit_gateway_connect_peer_associations_paging;
 #[path = "all/get_transit_gateway_registrations_paging.rs"]

@@ -480,6 +480,30 @@ pub const FIELD_MED_MATCHES: &str = "medMatches";
 pub const FIELD_EXACT_AS_PATH_MATCHES: &str = "exactAsPathMatches";
 /// See [`FIELD_LOCAL_PREFERENCE_MATCHES`].
 pub const FIELD_COMMUNITY_MATCHES: &str = "communityMatches";
+/// See [`FIELD_CORE_NETWORK_ID`]: the member naming the ROUTE TABLE a read of a global
+/// network's routes is addressed at, and the network function group one of its forms names.
+pub const FIELD_ROUTE_TABLE_IDENTIFIER: &str = "routeTableIdentifier";
+/// See [`FIELD_ROUTE_TABLE_IDENTIFIER`].
+pub const FIELD_NETWORK_FUNCTION_GROUP_NAME: &str = "networkFunctionGroupName";
+/// See [`FIELD_ROUTE_TABLE_IDENTIFIER`]: the five lists a read of a route table matches a
+/// route's prefix and prefix list against.
+pub const FIELD_EXACT_CIDR_MATCHES: &str = "exactCidrMatches";
+/// See [`FIELD_EXACT_CIDR_MATCHES`].
+pub const FIELD_LONGEST_PREFIX_MATCHES: &str = "longestPrefixMatches";
+/// See [`FIELD_EXACT_CIDR_MATCHES`].
+pub const FIELD_SUBNET_OF_MATCHES: &str = "subnetOfMatches";
+/// See [`FIELD_EXACT_CIDR_MATCHES`].
+pub const FIELD_SUPERNET_OF_MATCHES: &str = "supernetOfMatches";
+/// See [`FIELD_EXACT_CIDR_MATCHES`].
+pub const FIELD_PREFIX_LIST_IDS: &str = "prefixListIds";
+/// See [`FIELD_EXACT_CIDR_MATCHES`]: the filter map that read narrows itself with by what a
+/// route's destinations carry, and the two enum lists it narrows itself with by what a route
+/// itself carries.
+pub const FIELD_DESTINATION_FILTERS: &str = "destinationFilters";
+/// See [`FIELD_DESTINATION_FILTERS`].
+pub const FIELD_STATES: &str = "states";
+/// See [`FIELD_DESTINATION_FILTERS`].
+pub const FIELD_TYPES: &str = "types";
 
 /// How a resource kind of this service reads in prose: the ARN resource type
 /// ([`GLOBAL_NETWORK_KIND`] and friends) with its hyphens as spaces and a leading
@@ -2545,6 +2569,16 @@ pub fn check_filter_values(member: &str, values: &[String]) -> Result<(), Valida
     check_filter_list(member, values.len(), "carry", "values")
 }
 
+/// Whether the value-match filter `values` holds the value `held`.
+///
+/// The ONE membership test a value-match filter of this service is: a filter selects a
+/// record when the attribute it names carries one of the filter's values, so every handler
+/// that narrows a listing by such a filter asks this rather than spelling the scan again.
+/// The list is bounded by [`check_filter_values`], which is what keeps the scan cheap.
+pub fn filter_holds(values: &[String], held: &str) -> bool {
+    values.iter().any(|value| value == held)
+}
+
 /// The shared body of the two above: ONE statement of the bound and of the refusal a list
 /// past it carries, so an id-list filter and a value-match filter cannot drift apart in
 /// either. `verb` and `things` are how the refusal reads about the list at fault ("name …
@@ -3226,6 +3260,27 @@ pub fn no_such_segment(
     )
 }
 
+/// The modelled `ValidationException` (HTTP 400) a request answers when the core network it
+/// addresses declares no network function group of the name it carries.
+///
+/// The sibling of [`no_such_segment`] for the other kind of group a policy document declares
+/// ([`PolicyTopology::has_network_function_group`]): a network function group of a core
+/// network is one its `network-function-groups` declares, so a request naming any other
+/// group addresses nothing. The `Reason` is [`VALIDATION_REASON_OTHER`] for the same reason:
+/// the member satisfies every modelled constraint, it is the stored policy that declares no
+/// such group.
+pub fn no_such_network_function_group(
+    member: &str,
+    core_network_id: &str,
+    group_name: &str,
+) -> ValidationException {
+    field_rejection(
+        member,
+        VALIDATION_REASON_OTHER,
+        format!("core network {core_network_id} declares no network function group {group_name}"),
+    )
+}
+
 /// Check a tag set a request asks to APPLY (`TagResource`, and the `Tags` of a create).
 ///
 /// Refuses an empty or over-long key, an over-long value, and any key carrying the
@@ -3771,7 +3826,7 @@ pub fn malformed_transit_gateway_connect_peer_arn(member: &str) -> ValidationExc
 }
 
 /// `SystemTime` as a Smithy timestamp (epoch seconds, sub-second part kept).
-fn epoch_seconds(at: SystemTime) -> ::aws_smithy_types::DateTime {
+pub fn epoch_seconds(at: SystemTime) -> ::aws_smithy_types::DateTime {
     let secs = at
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0.0, |since| since.as_secs_f64());

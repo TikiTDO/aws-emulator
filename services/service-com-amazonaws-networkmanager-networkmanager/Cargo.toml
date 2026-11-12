@@ -9,6 +9,9 @@ build = "build.rs"
 [dependencies]
 # Opaque pagination tokens: this service encodes the key offset a `NextToken` names.
 hex = { workspace = true }
+# `ipnet`: the ONE reading of a route's prefix in CIDR notation, and of whether one prefix
+# contains another, which the CIDR matches of a read of a route table select on.
+ipnet = "2"
 engine = { workspace = true }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }

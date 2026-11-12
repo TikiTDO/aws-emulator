@@ -158,11 +158,6 @@ fn next_hop_member<'a>(hop: &'a RoutingInformationNextHop, name: &str) -> Option
     }
 }
 
-/// Whether `values` holds `held`.
-fn holds(values: &[String], held: &str) -> bool {
-    values.iter().any(|value| value == held)
-}
-
 /// Whether `entry` satisfies every match the request carries.
 ///
 /// Each filter NARROWS the listing and they combine: an entry is reported only where every
@@ -183,7 +178,7 @@ fn selected(
                 .next_hop
                 .as_ref()
                 .and_then(|hop| next_hop_member(hop, name));
-            if !held.is_some_and(|held| holds(values, held)) {
+            if !held.is_some_and(|held| crate::state::filter_holds(values, held)) {
                 return false;
             }
         }
@@ -192,19 +187,23 @@ fn selected(
         if !entry
             .local_preference
             .as_deref()
-            .is_some_and(|held| holds(values, held))
+            .is_some_and(|held| crate::state::filter_holds(values, held))
         {
             return false;
         }
     }
     if let Some(values) = input.med_matches.as_ref() {
-        if !entry.med.as_deref().is_some_and(|held| holds(values, held)) {
+        if !entry
+            .med
+            .as_deref()
+            .is_some_and(|held| crate::state::filter_holds(values, held))
+        {
             return false;
         }
     }
     if let Some(values) = input.exact_as_path_matches.as_ref() {
         let held = entry.as_path.as_deref().unwrap_or_default().join(" ");
-        if !holds(values, &held) {
+        if !crate::state::filter_holds(values, &held) {
             return false;
         }
     }
@@ -214,7 +213,7 @@ fn selected(
             .as_deref()
             .unwrap_or_default()
             .iter()
-            .any(|community| holds(values, community))
+            .any(|community| crate::state::filter_holds(values, community))
         {
             return false;
         }

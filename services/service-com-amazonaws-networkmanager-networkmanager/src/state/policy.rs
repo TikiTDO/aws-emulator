@@ -601,6 +601,15 @@ pub struct AttachmentClaim {
     pub require_acceptance: bool,
 }
 
+/// Whether `groups` declares one named `name`.
+///
+/// The membership test both [`PolicyTopology::has_segment`] and
+/// [`PolicyTopology::has_network_function_group`] are, so the two kinds of named group a
+/// document declares are judged the same way.
+fn declares(groups: &[NamedGroup], name: &str) -> bool {
+    groups.iter().any(|group| group.name == name)
+}
+
 /// The value of the tag `key` names, or `None` when the list carries no such tag.
 pub(super) fn tag_value_of<'a>(tags: &'a [Tag], key: &str) -> Option<&'a str> {
     tags.iter()
@@ -723,7 +732,17 @@ impl PolicyTopology {
     /// segment of a core network is one its policy document's `segments` declares, so a
     /// request naming any other segment addresses nothing ([`no_such_segment`]).
     pub fn has_segment(&self, name: &str) -> bool {
-        self.segments.iter().any(|group| group.name == name)
+        declares(&self.segments, name)
+    }
+
+    /// Whether this core network declares a network function group named `name`.
+    ///
+    /// The sibling of [`Self::has_segment`] for the other kind of group a policy document
+    /// declares: a network function group of a core network is one its
+    /// `network-function-groups` declares, so a request naming any other group addresses
+    /// nothing ([`no_such_network_function_group`]).
+    pub fn has_network_function_group(&self, name: &str) -> bool {
+        declares(&self.network_function_groups, name)
     }
 
     /// Whether the segment `name` is present at the edge location `location`: it is
@@ -734,7 +753,21 @@ impl PolicyTopology {
     /// A segment that is not present at an edge has no route table there, so it holds no
     /// routing information at that edge however much the core network holds elsewhere.
     pub fn segment_present_at(&self, name: &str, location: &str) -> bool {
-        self.segments
+        self.group_present_at(&self.segments, name, location)
+    }
+
+    /// Whether the network function group `name` is present at the edge location `location`,
+    /// under the same rule [`Self::segment_present_at`] states for a segment: a group is
+    /// placed at the locations it restricts itself to, or at every edge the core network has
+    /// where it restricts itself to none.
+    pub fn network_function_group_present_at(&self, name: &str, location: &str) -> bool {
+        self.group_present_at(&self.network_function_groups, name, location)
+    }
+
+    /// The shared body of the two above: ONE statement of where a named group of a document
+    /// is placed, so a segment and a network function group cannot drift apart in it.
+    fn group_present_at(&self, groups: &[NamedGroup], name: &str, location: &str) -> bool {
+        groups
             .iter()
             .filter(|group| group.name == name)
             .any(|group| match group.edge_locations.as_deref() {

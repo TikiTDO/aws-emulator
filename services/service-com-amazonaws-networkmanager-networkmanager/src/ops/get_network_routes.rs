@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetNetworkRoutes
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetNetworkRoutes`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetNetworkRoutes::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports ONE route table of a global network: the table the request's single
+//! `RouteTableIdentifier` member addresses — one SEGMENT of a core network at one of its
+//! edge locations, one NETWORK FUNCTION GROUP of a core network at one of its edge
+//! locations, or one route table of a TRANSIT GATEWAY — and the routes that table holds,
+//! narrowed by the CIDR, prefix-list, state, type and destination matches the request
+//! carries. A pure READ: every route is computed from this service's state — the policy in
+//! force on the core network and the attachments and peerings stored against it — and
+//! nothing is written: this is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -93,6 +92,11 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+use ::std::collections::{BTreeMap, BTreeSet};
+use ::std::time::SystemTime;
+
+use ::ipnet::IpNet;
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -127,6 +131,716 @@ impl From<GetNetworkRoutesErrorModeled> for GetNetworkRoutesError {
     fn from(modeled: GetNetworkRoutesErrorModeled) -> Self {
         crate::scaffolded::Scaffolded::Modeled(modeled)
     }
+}
+
+/// The values `RouteTableType` enumerates (`smithy_query shape=RouteTableType`, mirrored in
+/// `ops::types::ROUTE_TABLE_TYPE_VALUES`): which KIND of route table the answer reports, one
+/// per form of the `RouteTableIdentifier` the request addressed it by.
+const ROUTE_TABLE_TYPE_CORE_NETWORK_SEGMENT: &str = "CORE_NETWORK_SEGMENT";
+/// See [`ROUTE_TABLE_TYPE_CORE_NETWORK_SEGMENT`].
+const ROUTE_TABLE_TYPE_NETWORK_FUNCTION_GROUP: &str = "NETWORK_FUNCTION_GROUP";
+/// See [`ROUTE_TABLE_TYPE_CORE_NETWORK_SEGMENT`].
+const ROUTE_TABLE_TYPE_TRANSIT_GATEWAY_ROUTE_TABLE: &str = "TRANSIT_GATEWAY_ROUTE_TABLE";
+
+/// The values `RouteState` enumerates (`smithy_query shape=RouteState`, mirrored in
+/// `ops::types::ROUTE_STATE_VALUES`): a route reached through at least one destination is
+/// [`ROUTE_STATE_ACTIVE`], and one reached through none at all is
+/// [`ROUTE_STATE_BLACKHOLE`] — which is what the policy's `blackhole` destination declares,
+/// and what a route whose every destination has gone becomes.
+const ROUTE_STATE_ACTIVE: &str = "ACTIVE";
+/// See [`ROUTE_STATE_ACTIVE`].
+const ROUTE_STATE_BLACKHOLE: &str = "BLACKHOLE";
+
+/// The values `RouteType` enumerates (`smithy_query shape=RouteType`, mirrored in
+/// `ops::types::ROUTE_TYPE_VALUES`): a route the policy in force DECLARES is
+/// [`ROUTE_TYPE_STATIC`], and one a BGP peering of the table's attachments carries is
+/// [`ROUTE_TYPE_PROPAGATED`].
+const ROUTE_TYPE_STATIC: &str = "STATIC";
+/// See [`ROUTE_TYPE_STATIC`].
+const ROUTE_TYPE_PROPAGATED: &str = "PROPAGATED";
+
+/// The parts of a route's DESTINATION a `DestinationFilters` entry may select on, in the
+/// spelling a filter name is written in.
+///
+/// The catalog is the published one: "Filter by route table destination. Possible Values:
+/// TRANSIT_GATEWAY_ATTACHMENT_ID, RESOURCE_ID, or RESOURCE_TYPE." (`smithy_query
+/// query="doc" shape="GetNetworkRoutesRequest" member="DestinationFilters"`). A name outside
+/// this set selects on no part of a destination at all, which is a field failure on the
+/// member that carried it rather than a route list the filter was silently dropped from.
+const DESTINATION_FILTER_NAMES: [&str; 3] = [
+    "RESOURCE_ID",
+    "RESOURCE_TYPE",
+    "TRANSIT_GATEWAY_ATTACHMENT_ID",
+];
+
+/// The value the destination `destination` carries for the filter `name`, or `None` where it
+/// carries none (or `name` is not one of [`DESTINATION_FILTER_NAMES`], which the handler has
+/// already refused).
+fn destination_member<'a>(
+    destination: &'a NetworkRouteDestination,
+    name: &str,
+) -> Option<&'a str> {
+    match name {
+        "RESOURCE_ID" => destination.resource_id.as_deref(),
+        "RESOURCE_TYPE" => destination.resource_type.as_deref(),
+        "TRANSIT_GATEWAY_ATTACHMENT_ID" => destination.transit_gateway_attachment_id.as_deref(),
+        _ => None,
+    }
+}
+
+/// The prefix `value` names, or `None` where it names none.
+///
+/// A CIDR match is written as a block (`10.0.1.0/30`), and a bare address is the block that
+/// holds only it — the `/32` or `/128` a longest-prefix match of one address is looked up as
+/// — so both spellings name a prefix and are compared as one. Host bits are dropped
+/// ([`IpNet::trunc`]), so one prefix has one reading however the caller spelled it.
+fn prefix(value: &str) -> Option<IpNet> {
+    if let Ok(network) = value.parse::<IpNet>() {
+        return Some(network.trunc());
+    }
+    value
+        .parse::<::std::net::IpAddr>()
+        .ok()
+        .map(|address| IpNet::from(address).trunc())
+}
+
+/// Which route table the request's `RouteTableIdentifier` addresses: one form per member the
+/// shape carries (`smithy_query shape=RouteTableIdentifier`).
+#[derive(Debug)]
+enum Addressed {
+    /// `CoreNetworkSegmentEdge`: one segment of a core network at one of its edge locations.
+    Segment {
+        core_network_id: String,
+        segment_name: String,
+        edge_location: String,
+    },
+    /// `CoreNetworkNetworkFunctionGroup`: one network function group of a core network at
+    /// one of its edge locations.
+    NetworkFunctionGroup {
+        core_network_id: String,
+        group_name: String,
+        edge_location: String,
+    },
+    /// `TransitGatewayRouteTableArn`: one route table of a transit gateway.
+    TransitGatewayRouteTable { arn: String },
+}
+
+/// What a core network route table holds its routes FOR: the segment or the network function
+/// group whose attachments propagate into it, which is the one coordinate the two core
+/// network forms differ in.
+#[derive(Debug, Clone, Copy)]
+enum Membership<'a> {
+    Segment(&'a str),
+    NetworkFunctionGroup(&'a str),
+}
+
+/// The route table the answer reports: how it is identified, when it came into being, and
+/// the routes it holds, keyed by prefix so the answer is in one stable order and a prefix
+/// held several ways is held once.
+#[derive(Debug)]
+struct RouteTable {
+    /// `RouteTableArn`.
+    arn: String,
+    /// `RouteTableType`: one of the three [`ROUTE_TABLE_TYPE_CORE_NETWORK_SEGMENT`] values.
+    kind: &'static str,
+    /// `CoreNetworkSegmentEdge`, which the answer reports for the table the request
+    /// addressed by one.
+    segment_edge: Option<CoreNetworkSegmentEdgeIdentifier>,
+    /// `RouteTableTimestamp`, absent for a table whose creation time nothing stored knows.
+    created_at: Option<SystemTime>,
+    /// The routes the table holds: the type each is held under, and the destinations it is
+    /// reached through.
+    routes: BTreeMap<String, (&'static str, Vec<NetworkRouteDestination>)>,
+}
+
+/// Read the request's `RouteTableIdentifier`.
+///
+/// Exactly ONE of its members names a route table, so a request naming none addresses
+/// nothing and one naming several addresses no single table: both are a field failure on the
+/// member that carried them rather than a guess at which was meant. An ARN member carrying
+/// the EMPTY string names no route table, the one reading this service gives an optional
+/// reference ([`crate::state::optional_reference`]), so it is counted as absent; the two
+/// structure members name a table only through the coordinates they carry, so one missing a
+/// coordinate is refused on that coordinate's own member.
+fn addressed(
+    identifier: &RouteTableIdentifier,
+) -> Result<Addressed, GetNetworkRoutesErrorModeled> {
+    match (
+        crate::state::optional_reference(identifier.transit_gateway_route_table_arn.as_deref()),
+        identifier.core_network_segment_edge.as_ref(),
+        identifier.core_network_network_function_group.as_ref(),
+    ) {
+        (Some(arn), None, None) => Ok(Addressed::TransitGatewayRouteTable {
+            arn: arn.to_string(),
+        }),
+        (None, Some(edge), None) => Ok(Addressed::Segment {
+            core_network_id: coordinate(
+                edge.core_network_id.as_deref(),
+                crate::state::FIELD_CORE_NETWORK_ID,
+            )?,
+            segment_name: coordinate(
+                edge.segment_name.as_deref(),
+                crate::state::FIELD_SEGMENT_NAME,
+            )?,
+            edge_location: coordinate(
+                edge.edge_location.as_deref(),
+                crate::state::FIELD_EDGE_LOCATION,
+            )?,
+        }),
+        (None, None, Some(group)) => Ok(Addressed::NetworkFunctionGroup {
+            core_network_id: coordinate(
+                group.core_network_id.as_deref(),
+                crate::state::FIELD_CORE_NETWORK_ID,
+            )?,
+            group_name: coordinate(
+                group.network_function_group_name.as_deref(),
+                crate::state::FIELD_NETWORK_FUNCTION_GROUP_NAME,
+            )?,
+            edge_location: coordinate(
+                group.edge_location.as_deref(),
+                crate::state::FIELD_EDGE_LOCATION,
+            )?,
+        }),
+        (arn, edge, group) => {
+            let named = usize::from(arn.is_some())
+                + usize::from(edge.is_some())
+                + usize::from(group.is_some());
+            Err(GetNetworkRoutesErrorModeled::ValidationException(
+                crate::state::field_rejection(
+                    crate::state::FIELD_ROUTE_TABLE_IDENTIFIER,
+                    crate::state::REASON_FIELD_VALIDATION_FAILED,
+                    format!(
+                        "exactly one of transitGatewayRouteTableArn, coreNetworkSegmentEdge and \
+                         coreNetworkNetworkFunctionGroup names the route table, but {named} \
+                         were named"
+                    ),
+                ),
+            ))
+        }
+    }
+}
+
+/// One coordinate of a route table the request names by a structure: the value the member
+/// `member` carries, or the field failure naming that member where it carries none. A core
+/// network route table is addressed by all of its coordinates, so a structure missing one
+/// addresses nothing.
+fn coordinate(
+    supplied: Option<&str>,
+    member: &'static str,
+) -> Result<String, GetNetworkRoutesErrorModeled> {
+    supplied.map(str::to_string).ok_or_else(|| {
+        GetNetworkRoutesErrorModeled::ValidationException(crate::state::field_rejection(
+            member,
+            crate::state::REASON_FIELD_VALIDATION_FAILED,
+            "the route table identifier names no such coordinate".to_string(),
+        ))
+    })
+}
+
+/// Whether `attachment` is one of the attachments of the route table of `membership` at
+/// `edge_location`, as of `now`: an attachment of that core network which the policy in
+/// force put in that segment or network function group, which sits at that edge, and which
+/// is AVAILABLE — an attachment still being created, or one awaiting the acceptance the
+/// policy asked for, reaches nothing yet.
+fn attached(
+    attachment: &crate::state::AttachmentRecord,
+    core_network_id: &str,
+    membership: Membership<'_>,
+    edge_location: &str,
+    now: SystemTime,
+) -> bool {
+    let joined = match membership {
+        Membership::Segment(name) => attachment.segment_name.as_deref() == Some(name),
+        Membership::NetworkFunctionGroup(name) => {
+            attachment.network_function_group_name.as_deref() == Some(name)
+        }
+    };
+    joined
+        && attachment.core_network_id == core_network_id
+        && attachment.sits_at(edge_location)
+        && attachment.state_at(now) == crate::state::STATE_AVAILABLE
+}
+
+/// The destination one attachment of the route table is reached through.
+///
+/// The resource the destination reaches is the one the attachment attaches, as that
+/// resource's own ARN names it — the same derivation the routing information of a core
+/// network makes rather than a second copy kept beside the ARN — and the segment and group
+/// it names are the ones the policy in force put the attachment in.
+fn attachment_destination(
+    store: &crate::state::ComAmazonawsNetworkmanagerNetworkmanagerState,
+    attachment: &crate::state::AttachmentRecord,
+    edge_location: &str,
+) -> NetworkRouteDestination {
+    NetworkRouteDestination {
+        core_network_attachment_id: Some(attachment.id.clone()),
+        // A transit gateway route table is reached over the PEERING its attachment was
+        // created on, and the peering leaves an attachment on the gateway side
+        // (`TransitGatewayPeering$TransitGatewayPeeringAttachmentId`), which is the transit
+        // gateway attachment this destination is reached through. Every other kind attaches a
+        // resource that is not an attachment of a transit gateway and names none.
+        transit_gateway_attachment_id: match &attachment.detail {
+            crate::state::AttachmentDetail::TransitGatewayRouteTable { peering_id } => store
+                .peerings
+                .get(peering_id)
+                .map(|peering| peering.transit_gateway_peering_attachment_id.clone()),
+            _ => None,
+        },
+        segment_name: attachment.segment_name.clone(),
+        network_function_group_name: attachment.network_function_group_name.clone(),
+        edge_location: Some(edge_location.to_string()),
+        resource_type: crate::state::arn_resource_kind(&attachment.resource_arn)
+            .map(str::to_string),
+        resource_id: Some(crate::state::arn_resource_id(&attachment.resource_arn).to_string()),
+    }
+}
+
+/// The destination a route learned over a BGP peering is reached through: the Connect
+/// attachment the peering is carried over, and the peering itself as the resource the
+/// destination reaches — a Connect peer is a network resource of this service
+/// ([`crate::state::CONNECT_PEER_KIND`]), so it is named the way the global network's
+/// inventory names it.
+fn peer_destination(
+    peer: &crate::state::ConnectPeerRecord,
+    attachment: &crate::state::AttachmentRecord,
+) -> NetworkRouteDestination {
+    NetworkRouteDestination {
+        core_network_attachment_id: Some(attachment.id.clone()),
+        transit_gateway_attachment_id: None,
+        segment_name: attachment.segment_name.clone(),
+        network_function_group_name: attachment.network_function_group_name.clone(),
+        edge_location: Some(peer.edge_location.clone()),
+        resource_type: Some(crate::state::CONNECT_PEER_KIND.to_string()),
+        resource_id: Some(peer.id.clone()),
+    }
+}
+
+/// Hold the route `prefix`, of type `route_type`, reached through `destinations`.
+///
+/// A route table holds ONE route per prefix, so a prefix declared by two `create-route`
+/// actions is held once, reached through what both of them name. A prefix the policy in
+/// force declares STATICALLY is held as that static route and a prefix of the same block
+/// learned over a peering adds nothing to it: a static route is what the core network's own
+/// policy puts in the table, which is why the statics are held first and a propagated prefix
+/// one of them already holds is dropped here rather than reported as a second route for the
+/// same block.
+fn hold(
+    routes: &mut BTreeMap<String, (&'static str, Vec<NetworkRouteDestination>)>,
+    prefix: &str,
+    route_type: &'static str,
+    destinations: Vec<NetworkRouteDestination>,
+) {
+    let held = routes
+        .entry(prefix.to_string())
+        .or_insert_with(|| (route_type, Vec::new()));
+    if held.0 != route_type {
+        return;
+    }
+    held.1.extend(destinations);
+}
+
+/// The routes the core network route table of `membership` at `edge_location` holds, as of
+/// `now`.
+///
+/// Two things put a route in such a table, and nothing else does:
+///
+/// * the STATIC routes the policy in force declares for a segment — each `create-route`
+///   entry's prefixes, reached through each destination it names. A destination naming an
+///   attachment reaches the prefix only while that attachment is one of this table's
+///   ([`attached`]), and a destination that names no attachment of it at all — the policy's
+///   own `blackhole`, an attachment that has since gone, one of another segment or edge —
+///   reaches nothing, which is what leaves the route BLACKHOLE. A network function group's
+///   route table holds no static route: a `create-route` entry acts on a `segment`
+///   (`crate::state::POLICY_SEGMENT`), so no document declares one for a group.
+/// * the prefixes the table's BGP PEERINGS at this edge carry: a Connect peer peers one edge
+///   of the core network with an appliance over the inside IP addresses its create named, so
+///   each of those prefixes is PROPAGATED into the table of the segment or group the
+///   peering's Connect attachment belongs to. A peering carries routes only once its session
+///   is up, which is the transition the clock owes the peer.
+///
+/// What a VPC, a VPN connection or a transit gateway route table an attachment attaches
+/// would itself advertise is NOT a route of this table: those prefixes belong to the
+/// resource's own service, which this service holds no record of, so none is reported.
+fn core_network_routes(
+    store: &crate::state::ComAmazonawsNetworkmanagerNetworkmanagerState,
+    core_network: &crate::state::CoreNetworkRecord,
+    membership: Membership<'_>,
+    edge_location: &str,
+    now: SystemTime,
+) -> BTreeMap<String, (&'static str, Vec<NetworkRouteDestination>)> {
+    let mut routes: BTreeMap<String, (&'static str, Vec<NetworkRouteDestination>)> =
+        BTreeMap::new();
+    if let Membership::Segment(segment) = membership {
+        for route in core_network.topology().static_routes_of(segment) {
+            let destinations: Vec<NetworkRouteDestination> = route
+                .destinations
+                .iter()
+                .filter_map(|destination| store.attachments.get(destination))
+                .filter(|attachment| {
+                    attached(attachment, &core_network.id, membership, edge_location, now)
+                })
+                .map(|attachment| attachment_destination(store, attachment, edge_location))
+                .collect();
+            for prefix in &route.destination_cidr_blocks {
+                hold(
+                    &mut routes,
+                    prefix,
+                    ROUTE_TYPE_STATIC,
+                    destinations.clone(),
+                );
+            }
+        }
+    }
+
+    for peer in store.connect_peers.values().filter(|peer| {
+        peer.core_network_id == core_network.id
+            && peer.edge_location == edge_location
+            && peer.state_at(now) == crate::state::STATE_AVAILABLE
+    }) {
+        let Some(attachment) = store.attachments.get(&peer.connect_attachment_id) else {
+            continue;
+        };
+        if !attached(attachment, &core_network.id, membership, edge_location, now) {
+            continue;
+        }
+        for block in &peer.inside_cidr_blocks {
+            hold(
+                &mut routes,
+                block,
+                ROUTE_TYPE_PROPAGATED,
+                vec![peer_destination(peer, attachment)],
+            );
+        }
+    }
+    routes
+}
+
+/// The instant a core network's route tables came into being: the instant the policy in
+/// force came into force, since a segment or a network function group — and with it the route
+/// table it holds at each of its edges — exists from the deployment of the document that
+/// declares it. A core network holding no policy in force holds no route table either, so
+/// there is nothing to report.
+fn in_force_at(core_network: &crate::state::CoreNetworkRecord) -> Option<SystemTime> {
+    let live = core_network.live_policy_version?;
+    core_network
+        .policy_versions
+        .get(&live)
+        .and_then(|version| version.executed_at)
+}
+
+/// The core network the route table `core_network_id` names belongs to, which must be one of
+/// the global network `global_network_id` the request is addressed at: a core network of
+/// another global network holds no route table this request can read, so it is not found
+/// here either.
+fn core_network_of<'a>(
+    store: &'a crate::state::ComAmazonawsNetworkmanagerNetworkmanagerState,
+    global_network_id: &str,
+    core_network_id: &str,
+) -> Result<&'a crate::state::CoreNetworkRecord, GetNetworkRoutesErrorModeled> {
+    store
+        .core_networks
+        .get(core_network_id)
+        .filter(|core_network| core_network.global_network_id == global_network_id)
+        .ok_or_else(|| {
+            GetNetworkRoutesErrorModeled::ResourceNotFoundException(
+                crate::state::resource_not_found(crate::state::CORE_NETWORK_KIND, core_network_id),
+            )
+        })
+}
+
+/// Resolve the route table `addressed` names against the store, and compute the routes it
+/// holds as of `now`.
+fn route_table(
+    store: &crate::state::ComAmazonawsNetworkmanagerNetworkmanagerState,
+    global_network_id: &str,
+    addressed: &Addressed,
+    now: SystemTime,
+) -> Result<RouteTable, GetNetworkRoutesErrorModeled> {
+    match addressed {
+        // A segment and an edge location are the two coordinates of a core network route
+        // table, and both are a function of the policy IN FORCE on the core network: a
+        // request naming a segment that policy does not declare, or a Region it configures no
+        // edge in, addresses no route table at all, so it is refused on the member that
+        // carried it — the refusal the listing of a segment's routing information gives for
+        // the same input. A segment that IS declared but is not present at that edge has no
+        // route table there and therefore holds no route, which is an empty table rather than
+        // a refusal.
+        Addressed::Segment {
+            core_network_id,
+            segment_name,
+            edge_location,
+        } => {
+            let core_network = core_network_of(store, global_network_id, core_network_id)?;
+            let topology = core_network.topology();
+            if !topology.has_segment(segment_name) {
+                return Err(GetNetworkRoutesErrorModeled::ValidationException(
+                    crate::state::no_such_segment(
+                        crate::state::FIELD_SEGMENT_NAME,
+                        core_network_id,
+                        segment_name,
+                    ),
+                ));
+            }
+            if !topology.has_edge_location(edge_location) {
+                return Err(GetNetworkRoutesErrorModeled::ValidationException(
+                    crate::state::no_such_edge(
+                        crate::state::FIELD_EDGE_LOCATION,
+                        core_network_id,
+                        edge_location,
+                    ),
+                ));
+            }
+            let routes = if topology.segment_present_at(segment_name, edge_location) {
+                core_network_routes(
+                    store,
+                    core_network,
+                    Membership::Segment(segment_name),
+                    edge_location,
+                    now,
+                )
+            } else {
+                BTreeMap::new()
+            };
+            Ok(RouteTable {
+                // The route table of a segment at an edge is a table OF the core network,
+                // which is the resource an ARN of it names: this service mints no ARN for a
+                // segment, an edge or a route table of one.
+                arn: core_network.arn.clone(),
+                kind: ROUTE_TABLE_TYPE_CORE_NETWORK_SEGMENT,
+                segment_edge: Some(CoreNetworkSegmentEdgeIdentifier {
+                    core_network_id: Some(core_network.id.clone()),
+                    segment_name: Some(segment_name.clone()),
+                    edge_location: Some(edge_location.clone()),
+                }),
+                created_at: in_force_at(core_network),
+                routes,
+            })
+        }
+        // The same two coordinates, for the other kind of group a policy declares.
+        Addressed::NetworkFunctionGroup {
+            core_network_id,
+            group_name,
+            edge_location,
+        } => {
+            let core_network = core_network_of(store, global_network_id, core_network_id)?;
+            let topology = core_network.topology();
+            if !topology.has_network_function_group(group_name) {
+                return Err(GetNetworkRoutesErrorModeled::ValidationException(
+                    crate::state::no_such_network_function_group(
+                        crate::state::FIELD_NETWORK_FUNCTION_GROUP_NAME,
+                        core_network_id,
+                        group_name,
+                    ),
+                ));
+            }
+            if !topology.has_edge_location(edge_location) {
+                return Err(GetNetworkRoutesErrorModeled::ValidationException(
+                    crate::state::no_such_edge(
+                        crate::state::FIELD_EDGE_LOCATION,
+                        core_network_id,
+                        edge_location,
+                    ),
+                ));
+            }
+            let routes = if topology.network_function_group_present_at(group_name, edge_location) {
+                core_network_routes(
+                    store,
+                    core_network,
+                    Membership::NetworkFunctionGroup(group_name),
+                    edge_location,
+                    now,
+                )
+            } else {
+                BTreeMap::new()
+            };
+            Ok(RouteTable {
+                arn: core_network.arn.clone(),
+                kind: ROUTE_TABLE_TYPE_NETWORK_FUNCTION_GROUP,
+                // The answer reports a route table's identity through
+                // `CoreNetworkSegmentEdge`, which names a SEGMENT: a network function group
+                // is not one, and the output models no member that names a group
+                // (`smithy_query shape=GetNetworkRoutesResponse`), so this table is reported
+                // by its ARN and its type alone.
+                segment_edge: None,
+                created_at: in_force_at(core_network),
+                routes,
+            })
+        }
+        // A route table of a transit gateway belongs to Amazon VPC, so this service knows one
+        // only where a TRANSIT GATEWAY ROUTE TABLE ATTACHMENT of a core network of this
+        // global network attaches it; an ARN naming no such route table is not found. It
+        // holds no route HERE: the routes of a transit gateway's route table are that
+        // gateway's own, learned through its registration with the global network, and the
+        // global network's inventory holds none of them — the same position the Route
+        // Analyzer of this service takes about those route tables
+        // (`crate::state::REASON_ROUTE_NOT_FOUND`) — and nothing this service stores
+        // advertises a prefix into one. Its creation time is the gateway's too, so no
+        // timestamp is reported for it.
+        Addressed::TransitGatewayRouteTable { arn } => {
+            if crate::state::ec2_resource_region(
+                arn,
+                crate::state::TRANSIT_GATEWAY_ROUTE_TABLE_TYPE,
+            )
+            .is_none()
+            {
+                return Err(GetNetworkRoutesErrorModeled::ValidationException(
+                    crate::state::field_rejection(
+                        crate::state::FIELD_TRANSIT_GATEWAY_ROUTE_TABLE_ARN,
+                        crate::state::REASON_FIELD_VALIDATION_FAILED,
+                        "must name a transit gateway route table and the Region it is in"
+                            .to_string(),
+                    ),
+                ));
+            }
+            let attached = store.attachments.values().any(|attachment| {
+                attachment.attachment_type
+                    == crate::state::ATTACHMENT_TYPE_TRANSIT_GATEWAY_ROUTE_TABLE
+                    && attachment.resource_arn == *arn
+                    && store
+                        .core_networks
+                        .get(&attachment.core_network_id)
+                        .is_some_and(|core_network| {
+                            core_network.global_network_id == global_network_id
+                        })
+            });
+            if !attached {
+                return Err(GetNetworkRoutesErrorModeled::ResourceNotFoundException(
+                    crate::state::resource_not_found(
+                        crate::state::TRANSIT_GATEWAY_ROUTE_TABLE_TYPE,
+                        arn,
+                    ),
+                ));
+            }
+            Ok(RouteTable {
+                arn: arn.clone(),
+                kind: ROUTE_TABLE_TYPE_TRANSIT_GATEWAY_ROUTE_TABLE,
+                segment_edge: None,
+                created_at: None,
+                routes: BTreeMap::new(),
+            })
+        }
+    }
+}
+
+/// The CIDR matches a request carries, each value read as the prefix it names.
+#[derive(Debug, Default)]
+struct CidrMatches {
+    /// `ExactCidrMatches`: the prefix itself.
+    exact: Vec<IpNet>,
+    /// `LongestPrefixMatches`: the traffic whose most specific matching route is wanted.
+    longest: Vec<IpNet>,
+    /// `SubnetOfMatches`: the prefix a route's own has to be a subnet of.
+    subnet_of: Vec<IpNet>,
+    /// `SupernetOfMatches`: the prefix a route's own has to encompass.
+    supernet_of: Vec<IpNet>,
+}
+
+impl CidrMatches {
+    /// Read every CIDR match of `input`, refusing a value that names no prefix on the member
+    /// that carried it: a match this service cannot read would otherwise narrow the answer by
+    /// nothing, which reads as "no route matches" rather than "that is not a CIDR block".
+    fn read(input: &GetNetworkRoutesInput) -> Result<Self, GetNetworkRoutesErrorModeled> {
+        Ok(Self {
+            exact: prefixes(
+                crate::state::FIELD_EXACT_CIDR_MATCHES,
+                input.exact_cidr_matches.as_deref(),
+            )?,
+            longest: prefixes(
+                crate::state::FIELD_LONGEST_PREFIX_MATCHES,
+                input.longest_prefix_matches.as_deref(),
+            )?,
+            subnet_of: prefixes(
+                crate::state::FIELD_SUBNET_OF_MATCHES,
+                input.subnet_of_matches.as_deref(),
+            )?,
+            supernet_of: prefixes(
+                crate::state::FIELD_SUPERNET_OF_MATCHES,
+                input.supernet_of_matches.as_deref(),
+            )?,
+        })
+    }
+
+    /// Whether `held`, one route's own prefix, satisfies every CIDR match carried.
+    ///
+    /// Each match NARROWS the answer and they combine: a route is reported only where every
+    /// match given selects it, and one match selects it where ANY of its values does. One
+    /// prefix is a SUBNET of another where that other holds every address of it, which is
+    /// also what makes the other its SUPERNET, so one containment test states both
+    /// directions. The longest-prefix match is not a test of one route on its own — it asks
+    /// for the most specific route matching the traffic — so the prefixes that answer it are
+    /// computed over the whole table ([`longest_prefix_matches`]) and passed in as
+    /// `most_specific`.
+    fn select(&self, held: IpNet, most_specific: &BTreeSet<IpNet>) -> bool {
+        if !self.exact.is_empty() && !self.exact.contains(&held) {
+            return false;
+        }
+        if !self.longest.is_empty() && !most_specific.contains(&held) {
+            return false;
+        }
+        if !self.subnet_of.is_empty()
+            && !self.subnet_of.iter().any(|wanted| wanted.contains(&held))
+        {
+            return false;
+        }
+        if !self.supernet_of.is_empty()
+            && !self.supernet_of.iter().any(|wanted| held.contains(wanted))
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Whether any CIDR match is carried at all: a route whose prefix names no block cannot
+    /// be compared against one, so it is selected by no CIDR match and reported only where
+    /// the request carries none.
+    fn any(&self) -> bool {
+        !self.exact.is_empty()
+            || !self.longest.is_empty()
+            || !self.subnet_of.is_empty()
+            || !self.supernet_of.is_empty()
+    }
+}
+
+/// Read one CIDR match list, bounded like every other value-match filter of this service
+/// ([`crate::state::check_filter_values`]).
+fn prefixes(
+    member: &'static str,
+    values: Option<&[String]>,
+) -> Result<Vec<IpNet>, GetNetworkRoutesErrorModeled> {
+    let values = values.unwrap_or_default();
+    crate::state::check_filter_values(member, values)
+        .map_err(GetNetworkRoutesErrorModeled::ValidationException)?;
+    values
+        .iter()
+        .map(|value| {
+            prefix(value).ok_or_else(|| {
+                GetNetworkRoutesErrorModeled::ValidationException(crate::state::field_rejection(
+                    member,
+                    crate::state::REASON_FIELD_VALIDATION_FAILED,
+                    format!("{value} is not a CIDR block"),
+                ))
+            })
+        })
+        .collect()
+}
+
+/// The prefix of the route that is the LONGEST PREFIX MATCH for each of `wanted`, over the
+/// prefixes `held` holds.
+///
+/// A longest-prefix match is the most specific route whose block holds the traffic, so for
+/// each value it is the matching route with the greatest prefix length — and at most one
+/// route answers it, since two blocks of the same length either are the same block or are
+/// disjoint. A value no route's block holds is answered by no route at all.
+fn longest_prefix_matches(held: &[IpNet], wanted: &[IpNet]) -> BTreeSet<IpNet> {
+    wanted
+        .iter()
+        .filter_map(|value| {
+            held.iter()
+                .filter(|candidate| candidate.contains(value))
+                .max_by_key(|candidate| candidate.prefix_len())
+                .copied()
+        })
+        .collect()
 }
 
 /// The `GetNetworkRoutes` operation.
@@ -166,17 +880,159 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetNetworkRoutes` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetNetworkRoutesErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        // request metadata.
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            GetNetworkRoutesErrorModeled::InternalServerException(InternalServerException {
+                message: "the networkmanager store is unavailable".to_string(),
+                retry_after_seconds: None,
+            })
+        })?;
+
+        let now = SystemTime::now();
+        let store = state.lock();
+        // The resource the path addresses is checked first: an unknown global network is not
+        // found whatever route table the rest of the request names.
+        if !store.global_networks.contains_key(&input.global_network_id) {
+            return Err(GetNetworkRoutesErrorModeled::ResourceNotFoundException(
+                crate::state::resource_not_found(
+                    crate::state::GLOBAL_NETWORK_KIND,
+                    &input.global_network_id,
+                ),
+            )
+            .into());
+        }
+
+        let addressed = addressed(&input.route_table_identifier)?;
+        let table = route_table(&store, &input.global_network_id, &addressed, now)?;
+        drop(store);
+
+        // A destination filter name that selects on no part of a destination is refused
+        // rather than dropped: a caller that misspells one must not be answered a route list
+        // selected by fewer filters than it asked for. The LENGTH of every value list is
+        // bounded here too, before anything is selected: selecting compares each route held
+        // against each value a filter carries, so the work is the product of the two, and
+        // this is what caps the caller's factor of it — the same bound every other filter of
+        // this service carries.
+        if let Some(filters) = input.destination_filters.as_ref() {
+            for (name, values) in filters {
+                if !DESTINATION_FILTER_NAMES.contains(&name.as_str()) {
+                    return Err(GetNetworkRoutesErrorModeled::ValidationException(
+                        crate::state::field_rejection(
+                            crate::state::FIELD_DESTINATION_FILTERS,
+                            crate::state::REASON_FIELD_VALIDATION_FAILED,
+                            format!(
+                                "{name} names no part of a route destination; the filters are {}",
+                                DESTINATION_FILTER_NAMES.join(", ")
+                            ),
+                        ),
+                    )
+                    .into());
+                }
+                crate::state::check_filter_values(crate::state::FIELD_DESTINATION_FILTERS, values)
+                    .map_err(GetNetworkRoutesErrorModeled::ValidationException)?;
+            }
+        }
+        let matches = CidrMatches::read(&input)?;
+        let prefix_list_ids = input.prefix_list_ids.unwrap_or_default();
+        crate::state::check_filter_values(crate::state::FIELD_PREFIX_LIST_IDS, &prefix_list_ids)
+            .map_err(GetNetworkRoutesErrorModeled::ValidationException)?;
+
+        // Reporting a route never writes: every route above is a function of the stored
+        // policy, the stored attachments and peerings and the clock, so this read leaves the
+        // store exactly as the next caller would have found it.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetNetworkRoutes"))
+        // The prefixes the table holds, read as blocks, are what the longest-prefix match is
+        // resolved over: it asks for the most specific route matching the traffic, which is a
+        // property of the whole table rather than of one route.
+        let blocks: Vec<IpNet> = table.routes.keys().filter_map(|held| prefix(held)).collect();
+        let most_specific = longest_prefix_matches(&blocks, &matches.longest);
+
+        let states = input.states.unwrap_or_default();
+        crate::state::check_filter_values(crate::state::FIELD_STATES, &states)
+            .map_err(GetNetworkRoutesErrorModeled::ValidationException)?;
+        let types = input.types.unwrap_or_default();
+        crate::state::check_filter_values(crate::state::FIELD_TYPES, &types)
+            .map_err(GetNetworkRoutesErrorModeled::ValidationException)?;
+        let network_routes: Vec<NetworkRoute> = table
+            .routes
+            .into_iter()
+            .map(|(block, (route_type, destinations))| NetworkRoute {
+                destination_cidr_block: Some(block),
+                state: Some(if destinations.is_empty() {
+                    ROUTE_STATE_BLACKHOLE
+                } else {
+                    ROUTE_STATE_ACTIVE
+                }
+                .to_string()),
+                destinations: Some(destinations),
+                // A route carries a prefix list id where the prefix it reaches is a managed
+                // prefix list's rather than a block of its own. Nothing this service stores
+                // puts such a route in a table — a core network's prefix-list association ties
+                // a list of Amazon VPC's to the core network and holds none of its entries,
+                // and a transit gateway's own route tables are that gateway's — so every route
+                // reported here carries a block and no list, and the `PrefixListIds` filter
+                // below selects none of them.
+                prefix_list_id: None,
+                r#type: Some(route_type.to_string()),
+            })
+            // Every filter the request carries narrows the table and an absent one matches
+            // everything; a filter selects a route when what it names carries one of the
+            // filter's values, so one naming something no route carries selects nothing.
+            .filter(|route| {
+                states.is_empty()
+                    || route
+                        .state
+                        .as_deref()
+                        .is_some_and(|held| crate::state::filter_holds(&states, held))
+            })
+            .filter(|route| {
+                types.is_empty()
+                    || route
+                        .r#type
+                        .as_deref()
+                        .is_some_and(|held| crate::state::filter_holds(&types, held))
+            })
+            .filter(|route| {
+                prefix_list_ids.is_empty()
+                    || route
+                        .prefix_list_id
+                        .as_deref()
+                        .is_some_and(|held| crate::state::filter_holds(&prefix_list_ids, held))
+            })
+            // A destination filter selects a route reached through at least one destination
+            // carrying one of its values: the route is what is reported, so one of its
+            // destinations matching is what selects it.
+            .filter(|route| {
+                input.destination_filters.as_ref().is_none_or(|filters| {
+                    filters.iter().all(|(name, values)| {
+                        route
+                            .destinations
+                            .as_deref()
+                            .unwrap_or_default()
+                            .iter()
+                            .any(|destination| {
+                                destination_member(destination, name)
+                                    .is_some_and(|held| crate::state::filter_holds(values, held))
+                            })
+                    })
+                })
+            })
+            .filter(|route| {
+                match route.destination_cidr_block.as_deref().and_then(prefix) {
+                    Some(held) => matches.select(held, &most_specific),
+                    // A prefix that names no block satisfies no comparison with one.
+                    None => !matches.any(),
+                }
+            })
+            .collect();
+
+        Ok(GetNetworkRoutesOutput {
+            route_table_arn: Some(table.arn),
+            core_network_segment_edge: table.segment_edge,
+            route_table_type: Some(table.kind.to_string()),
+            route_table_timestamp: table.created_at.map(crate::state::epoch_seconds),
+            network_routes: Some(network_routes),
+        })
     }
 }
