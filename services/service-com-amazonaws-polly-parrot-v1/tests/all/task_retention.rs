@@ -161,8 +161,8 @@ async fn an_expired_task_drops_out_of_the_report() {
 }
 
 /// RULE: an expired task occupies no page slot and shifts no cursor — paging a store
-/// that holds expired tasks visits exactly the retained ones, once each, in creation
-/// order.
+/// that holds expired tasks visits exactly the retained ones, once each, in the report's
+/// own order (newest first).
 #[tokio::test]
 async fn expired_tasks_take_up_no_page_slot() {
     let polly = Polly::new();
@@ -187,7 +187,10 @@ async fn expired_tasks_take_up_no_page_slot() {
             ),
         );
     }
-    let expected: Vec<String> = (0..retained).map(|index| format!("Keep{index}")).collect();
+    let expected: Vec<String> = (0..retained)
+        .rev()
+        .map(|index| format!("Keep{index}"))
+        .collect();
 
     // Both published bounds of `MaxResults` (1 and 100), sizes in between, and a
     // request that bounds nothing.
@@ -235,7 +238,7 @@ async fn expired_tasks_take_up_no_page_slot() {
         }
         assert_eq!(
             seen, expected,
-            "MaxResults={max_results:?}: the pages together must be the retained tasks once, in creation order"
+            "MaxResults={max_results:?}: the pages together must be the retained tasks once, newest first"
         );
     }
 }

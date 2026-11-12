@@ -39,10 +39,11 @@ fn forged_token(tag: &[u8], created_millis: i64, task_id: &str, status: &str) ->
 }
 
 /// Seed `count` tasks, oldest first, half of them `completed` and half `failed`, and
-/// answer their ids in creation order.
+/// answer their ids in the order the report must use — the reverse, because the report is
+/// newest first.
 fn seed_tasks(polly: &Polly, count: u64) -> Vec<String> {
     let now = SystemTime::now();
-    (0..count)
+    let mut seeded: Vec<String> = (0..count)
         .map(|index| {
             let task_id = fixture_task_id(&format!("page-token-{index}"));
             let mut task = stored_task(&task_id, now - Duration::from_secs(count - index));
@@ -50,7 +51,9 @@ fn seed_tasks(polly: &Polly, count: u64) -> Vec<String> {
             seed_task(polly, &task);
             task_id
         })
-        .collect()
+        .collect();
+    seeded.reverse();
+    seeded
 }
 
 /// Milliseconds since the epoch, as a cursor carries them.

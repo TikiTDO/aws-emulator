@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListSpeechSynthesisTasks
-//! Reports this service's speech synthesis tasks, ordered by creation date and
+//! Reports this service's speech synthesis tasks, MOST RECENTLY CREATED FIRST and
 //! optionally filtered by status. A REPORT, not a mutation: the only state it writes is
 //! what the clock had ALREADY made due on the task store
 //! ([`crate::state::ComAmazonawsPollyParrotV1State::retained_synthesis_tasks`]) — a
-//! status transition that fell due, and the dropping of a task past its documented
+//! status transition that fell due with the output delivery that completes it
+//! ([`crate::state::task_completion`]), and the dropping of a task past its documented
 //! retention window — the same thing `GetSpeechSynthesisTask` does, and nothing a
 //! caller could not have observed by waiting instead of calling. A task the service no
 //! longer holds is not reported and takes up no page slot.
@@ -203,10 +204,13 @@ fn decode_task_cursor(
 
 /// The total order the report pages in.
 ///
-/// "Returns a list of SpeechSynthesisTask objects ordered by their creation date" —
-/// oldest first, with the `TaskId` breaking a tie so the order is TOTAL and a page
-/// token can resume it exactly. The date is taken at millisecond precision, the
-/// precision the cursor carries, so sorting and resuming cannot disagree.
+/// "Returns a list of SpeechSynthesisTask objects ordered by their creation date" — the
+/// MOST RECENTLY created task first, which is the order the service reports and the order a
+/// client reading the first page to find its latest task depends on. This key is the
+/// creation date and the `TaskId`, and the report sorts by it DESCENDING: the date decides,
+/// and the `TaskId` breaks a tie so the order is TOTAL and a page token can resume it
+/// exactly. The date is taken at millisecond precision, the precision the cursor carries, so
+/// sorting and resuming cannot disagree.
 fn order_key(task: &crate::state::StoredSynthesisTask) -> (i64, &str) {
     let created_millis = task
         .creation_time
@@ -251,7 +255,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         // The page bound the CALLER asked for, and the only one there is. `None` means
         // the caller bounded nothing, so the whole matching report is owed in one
@@ -275,6 +279,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // ONE clock reading for the whole call, so the task store this call reads, the
         // status it filters on and the status it reports are the same one.
         let now = ::std::time::SystemTime::now();
+        // What the clock has already made due OUTSIDE this service: the output object a
+        // completed task writes into the caller's bucket, and the notification it publishes.
+        // Owed at `now` whether or not anybody listed, and made BEFORE the statuses below
+        // are read, so no task is listed as completed while its output is not there.
+        crate::state::task_completion::deliver_due_completions(
+            &*self.engine,
+            ctx.callback(),
+            now,
+            // A listing is about no ONE task, so the store's own order decides which due
+            // deliveries this response pays for.
+            None,
+        )
+        .await;
         let mut guard = state.lock();
         // The key this store mints and recognises its own page tokens under. Copied out
         // before the task store is borrowed, so the same call can check the token it was
@@ -320,14 +337,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .as_deref()
                     .is_none_or(|status| task.task_status == status)
             })
-            // Resume strictly after the order key the token carries.
+            // Resume strictly after the order key the token carries, in the order this
+            // report serves: the page ended at that key, so what is left is what sorts
+            // BELOW it.
             .filter(|task| {
                 after
                     .as_ref()
-                    .is_none_or(|(millis, task_id)| order_key(task) > (*millis, task_id.as_str()))
+                    .is_none_or(|(millis, task_id)| order_key(task) < (*millis, task_id.as_str()))
             })
             .collect();
-        matching.sort_by(|left, right| order_key(left).cmp(&order_key(right)));
+        // Descending: the most recently created task is the first one reported, and the
+        // `TaskId` breaks a tie in the same direction so the order stays total.
+        matching.sort_by(|left, right| order_key(right).cmp(&order_key(left)));
 
         // One task past the window is enough to know whether a further page exists. The
         // truncation happens HERE, before the tasks are cloned into the response below,

@@ -155,7 +155,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         // No gate on the identifier's spelling: the boundary has already refused every
         // value the model's `TaskId` pattern does not admit, and whether the service
         // holds a task under the value it does admit is a question for the store.
@@ -168,6 +167,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // ONE clock reading for the whole call, so the task store this read sees and
         // the status it reports are of the same instant.
         let now = ::std::time::SystemTime::now();
+        // What the clock has already made due OUTSIDE this service: the output object a
+        // completed task writes into the caller's bucket, and the notification it publishes.
+        // Owed at `now` whether or not anybody polled, and made BEFORE the status below is
+        // read, so this read never reports a task completed while its output is not there.
+        crate::state::task_completion::deliver_due_completions(
+            &*self.engine,
+            ctx.callback(),
+            now,
+            Some(&input.task_id),
+        )
+        .await;
         let mut guard = state.lock();
         // The task store as of NOW: a task whose retention window has run out is no
         // longer held, and a status transition the clock owed a task it still holds is

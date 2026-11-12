@@ -86,6 +86,10 @@ pub(crate) fn stored_task(task_id: &str, created: SystemTime) -> StoredSynthesis
         task_status: "inProgress".to_string(),
         task_status_reason: None,
         pending_status: None,
+        // A seeded task stands for one whose output delivery is already behind it, so the
+        // clock alone settles what it is owed; `crate::synthesis_task_side_effects` is the
+        // suite that drives the delivery itself.
+        output_delivery: None,
     }
 }
 

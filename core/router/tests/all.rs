@@ -865,6 +865,11 @@ mod payment_cryptography_signing_name_routing;
 // either collides with all of them.
 #[path = "all/pinpoint_sms_voice_signing_name_routing.rs"]
 mod pinpoint_sms_voice_signing_name_routing;
+// Declared HERE, beside the neighbouring entry of this same quiet span, for the reason it
+// records: the appended tail at the end of this file and the HEAD of the sorted list are
+// both regions every concurrently landing router suite puts its line in.
+#[path = "all/polly_synthesis_task_side_effects.rs"]
+mod polly_synthesis_task_side_effects;
 // this file or beside the other `cloudformation_provisions_*` suites in the `c` span: both
 // of those are where every concurrently landing suite puts its line, so a declaration there
 // conflicts with all of them.

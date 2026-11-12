@@ -48,14 +48,14 @@ fn task_name(prefix: &str, index: usize) -> String {
     fixture_task_id(&format!("{prefix}-{index}"))
 }
 
-/// Seed `count` tasks in `status`, oldest first, and return their ids in the creation
-/// order the report must use.
+/// Seed `count` tasks in `status`, oldest first, and return their ids in the order the
+/// report must use — the reverse, because the report is newest first.
 ///
 /// The creation dates are ten milliseconds apart, so every task has a distinct
 /// millisecond order key and the expected order is unambiguous.
 fn seed_tasks(polly: &Polly, prefix: &str, count: usize, status: &str) -> Vec<String> {
     let base = SystemTime::now() - Duration::from_secs(3_600);
-    (0..count)
+    let mut seeded: Vec<String> = (0..count)
         .map(|index| {
             let task_id = task_name(prefix, index);
             let offset_millis = u64::try_from(index).expect("a seeded index fits a u64") * 10;
@@ -64,11 +64,13 @@ fn seed_tasks(polly: &Polly, prefix: &str, count: usize, status: &str) -> Vec<St
             seed_task(polly, &task);
             task_id
         })
-        .collect()
+        .collect();
+    seeded.reverse();
+    seeded
 }
 
 /// RULE: a request that names no `MaxResults` is not paged — it reports every matching
-/// task in one response, in creation order, with no `NextToken`.
+/// task in one response, newest first, with no `NextToken`.
 #[tokio::test]
 async fn an_unbounded_request_reports_every_task_in_one_response() {
     for size in STORE_SIZES {
@@ -88,7 +90,7 @@ async fn an_unbounded_request_reports_every_task_in_one_response() {
         assert_eq!(
             reported,
             expected,
-            "case {case:?}: one response must carry every task in creation order, got {} tasks",
+            "case {case:?}: one response must carry every task, newest first, got {} tasks",
             reported.len()
         );
         assert_eq!(
@@ -193,7 +195,7 @@ async fn a_store_past_the_materialisation_ceiling_pages_rather_than_drops() {
     assert_eq!(
         first,
         expected[..REPORT_MATERIALISATION_CEILING],
-        "case {size} stored tasks: the first response must be the oldest tasks, in order"
+        "case {size} stored tasks: the first response must be the newest tasks, in order"
     );
     let token = body["NextToken"]
         .as_str()

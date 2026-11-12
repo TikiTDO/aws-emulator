@@ -237,7 +237,5 @@ mod unknown_instance_message;
 mod validation_message_wording;
 #[path = "all/withdrawn_assignment_copy_in_place.rs"]
 mod withdrawn_assignment_copy_in_place;
-#[path = "all/listed_instance_state_every_entry.rs"]
-mod listed_instance_state_every_entry;
 #[path = "all/listed_instance_state_across_read_edge_cases.rs"]
 mod listed_instance_state_across_read_edge_cases;

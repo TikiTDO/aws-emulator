@@ -53,7 +53,7 @@ pub(crate) async fn list_ids(polly: &Polly, query: &str) -> Vec<String> {
 }
 
 /// RULE: `ListSpeechSynthesisTasks` reports the stored tasks ordered by their creation
-/// date, oldest first, each one carrying the members the store holds for it.
+/// date, MOST RECENTLY CREATED FIRST, each one carrying the members the store holds for it.
 #[tokio::test]
 async fn tasks_are_reported_in_creation_order_with_their_stored_members() {
     let polly = Polly::new();
@@ -81,8 +81,8 @@ async fn tasks_are_reported_in_creation_order_with_their_stored_members() {
 
     assert_eq!(
         list_ids(&polly, "").await,
-        vec!["first", "second", "tie-a", "tie-b", "third"],
-        "tasks must be ordered by creation date, with the task id breaking a tie"
+        vec!["third", "tie-b", "tie-a", "second", "first"],
+        "tasks must be ordered by creation date, newest first, with the task id breaking a tie"
     );
 
     // Every member of the reported task is the stored one.
@@ -198,7 +198,7 @@ async fn the_status_filter_reports_exactly_the_tasks_in_that_status() {
 
 /// RULE: the report is paged — a page carries at most `MaxResults` tasks, a `NextToken`
 /// appears only while a further task exists, and following the tokens visits every task
-/// exactly once in creation order.
+/// exactly once in creation order, newest first.
 #[tokio::test]
 async fn pagination_visits_every_task_exactly_once() {
     let polly = Polly::new();
@@ -214,7 +214,11 @@ async fn pagination_visits_every_task_exactly_once() {
             ),
         );
     }
-    let expected: Vec<String> = (0..total).map(|index| format!("Task{index:02}")).collect();
+    // Newest first, so the highest-numbered task is the first one reported.
+    let expected: Vec<String> = (0..total)
+        .rev()
+        .map(|index| format!("Task{index:02}"))
+        .collect();
 
     // Both published bounds of `MaxResults` (1 and 100), sizes in between, and a
     // request that names no bound at all (`None`), which is therefore not paged.
@@ -262,7 +266,7 @@ async fn pagination_visits_every_task_exactly_once() {
         }
         assert_eq!(
             seen, expected,
-            "MaxResults={max_results:?}: the pages together must be every task once, in creation order"
+            "MaxResults={max_results:?}: the pages together must be every task once, newest first"
         );
         let unique: BTreeSet<&String> = seen.iter().collect();
         assert_eq!(

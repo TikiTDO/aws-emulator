@@ -488,6 +488,9 @@ pub mod api_call_events;
 /// The ONE construction of the in-process Amazon S3 client a service writing an object
 /// drives, so no two services configure that hop differently.
 pub mod s3_client;
+/// The ONE construction of the in-process Amazon SNS client a service publishing a
+/// notification drives, so no two services configure that hop differently.
+pub mod sns_client;
 /// The ONE read of an Amazon S3 object a service was pointed at, and the ONE reading of
 /// what the object store's answer about it established, over that same hop.
 pub mod s3_object_read;

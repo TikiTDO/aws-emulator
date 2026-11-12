@@ -285,7 +285,17 @@ async fn a_started_task_is_held_and_reported_by_both_reads() {
 /// the reads report the same status, because they read the same record.
 #[tokio::test]
 async fn the_clock_completes_a_started_task() {
-    let polly = Polly::new();
+    // The destination bucket exists, so the completion this test is about is the one that
+    // delivers its output: `crate::synthesis_task_side_effects` is the suite about the
+    // object itself, and about the task whose bucket is not there.
+    let polly = Polly::with_s3();
+    polly
+        .s3("us-east-1")
+        .create_bucket()
+        .bucket(OUTPUT_BUCKET)
+        .send()
+        .await
+        .expect("the destination bucket is created");
     let request = serde_json::json!({
         "Text": "Hello from the emulator.",
         "VoiceId": "Matthew",

@@ -23,7 +23,10 @@
 //!   A task is kept for the documented [`TASK_RETENTION`] window and no longer, so
 //!   every task read reaches the store through
 //!   [`ComAmazonawsPollyParrotV1State::retained_synthesis_tasks`], which materialises
-//!   what the clock already owes it.
+//!   what the clock already owes it. What a task's COMPLETION owes outside this service —
+//!   the output object in the caller's bucket and the notification about the terminal
+//!   status — travels with the task ([`TaskOutputDelivery`]) and is delivered by
+//!   [`task_completion`].
 //!
 //! The state also carries the secret the paginated reads mint their `NextToken`s under
 //! ([`PageTokenKey`]), which is what lets a read tell a continuation token this service
@@ -31,7 +34,12 @@
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
+
+/// What a completed synthesis task does OUTSIDE this service: the output object it writes
+/// into the caller's bucket, and the notification it publishes about the terminal status it
+/// reached.
+pub mod task_completion;
 
 /// The key one stored lexicon sits under: the Region it was put in, then its name.
 ///
@@ -177,6 +185,57 @@ pub struct StoredSynthesisTask {
     /// without any further call, so the due instant is stored and
     /// [`settle_task_status`] materialises it when a read arrives after it.
     pub pending_status: Option<PendingTaskStatus>,
+    /// What this task's completion owes OUTSIDE this service — the output object it
+    /// writes into the bucket the start call named, and the notification it publishes
+    /// to the topic that call named — or `None` for a task with nothing left to
+    /// deliver. See [`task_completion`], which is what delivers it.
+    pub output_delivery: Option<TaskOutputDelivery>,
+}
+
+/// The side effects one task's COMPLETION has outside this service, and how far they
+/// have got.
+///
+/// Amazon Polly's asynchronous API exists to put the rendered output in the caller's
+/// bucket, so a task is not completed by the clock alone: the output object has to be
+/// written (and the optional notification published) before the task is reported
+/// terminal. This record carries what producing that object needs — the text, the
+/// output location and the voice settings the start call resolved — so the delivery is
+/// made from the task's own record rather than from a later request.
+#[derive(Debug, Clone)]
+pub struct TaskOutputDelivery {
+    /// The Region the start call was signed for: the Region of the bucket the output is
+    /// written to and of the topic the notification is published to.
+    pub region: String,
+    /// `OutputS3BucketName` — the bucket the output object is written into.
+    pub bucket: String,
+    /// The key the output object is written at, which is the key
+    /// [`StoredSynthesisTask::output_uri`] reports.
+    pub key: String,
+    /// The `Text` the task synthesises.
+    pub text: String,
+    /// How far the delivery has got.
+    pub state: DeliveryState,
+}
+
+/// How far a task's completion side effects have got.
+///
+/// The three states are what keep the delivery EXACTLY ONCE while two callers poll the
+/// same task: the claim that moves [`DeliveryState::Owed`] to
+/// [`DeliveryState::InFlight`] happens under the state lock, and only the claimant goes
+/// on to write the object and publish the notification. A claim carries the instant it was
+/// made, so a claimant that never reports back — the read it was made on was dropped —
+/// cannot wedge the task: the claim is taken again once it cannot still be running. That
+/// instant is a MONOTONIC one, so how long a claim has been outstanding never depends on
+/// the wall clock the task's own timestamps are measured on — a clock that jumps backwards
+/// cannot make a claim look stale and have the delivery made twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryState {
+    /// Nothing has been delivered yet.
+    Owed,
+    /// One caller claimed the delivery at this instant and is making it.
+    InFlight(Instant),
+    /// The delivery was made (or it failed, and the task carries that failure).
+    Done,
 }
 
 /// A status transition the clock owes a task.
@@ -227,6 +286,17 @@ pub fn task_is_retained(task: &StoredSynthesisTask, now: SystemTime) -> bool {
 /// have observed by waiting, because the transition was owed at `now` whether or not
 /// anybody called. It never moves a status that is not yet due.
 pub fn settle_task_status(task: &mut StoredSynthesisTask, now: SystemTime) {
+    // A task whose completion still owes its output object is NOT completed by the clock
+    // alone: the object the task's own `OutputUri` names has to exist before any read
+    // reports the task terminal, so the transition waits for the delivery
+    // ([`task_completion`]) and that delivery is what applies it.
+    if task
+        .output_delivery
+        .as_ref()
+        .is_some_and(|delivery| delivery.state != DeliveryState::Done)
+    {
+        return;
+    }
     if task.pending_status.as_ref().is_some_and(|p| now >= p.due_at) {
         let pending = task
             .pending_status
@@ -317,6 +387,11 @@ pub struct ComAmazonawsPollyParrotV1State {
     /// caller could read or replace would no longer tell a token this service minted
     /// from one it did not.
     page_token_key: PageTokenKey,
+    /// How many task completions are being delivered right now
+    /// ([`task_completion::deliver_when_due`]). PRIVATE, and taken and given back through
+    /// the two methods below: it is what bounds the work a burst of start calls can leave
+    /// outstanding.
+    deliveries_in_flight: usize,
 }
 
 impl ComAmazonawsPollyParrotV1State {
@@ -412,6 +487,23 @@ impl ComAmazonawsPollyParrotV1State {
         }
         &self.synthesis_tasks
     }
+
+    /// Take one of the [`task_completion::MAX_DELIVERIES_IN_FLIGHT`] delivery slots, or
+    /// answer `false` when they are all taken — which is what keeps the deliveries a burst
+    /// of start calls arms bounded. A caller that takes one gives it back with
+    /// [`ComAmazonawsPollyParrotV1State::finish_delivery`].
+    pub(crate) fn begin_delivery(&mut self) -> bool {
+        if self.deliveries_in_flight >= task_completion::MAX_DELIVERIES_IN_FLIGHT {
+            return false;
+        }
+        self.deliveries_in_flight += 1;
+        true
+    }
+
+    /// Give back a delivery slot, however the delivery ended.
+    pub(crate) fn finish_delivery(&mut self) {
+        self.deliveries_in_flight = self.deliveries_in_flight.saturating_sub(1);
+    }
 }
 
 impl Default for ComAmazonawsPollyParrotV1State {
@@ -426,6 +518,8 @@ impl Default for ComAmazonawsPollyParrotV1State {
             voices: VOICE_CATALOG.to_vec(),
             // One key per store, from the system's randomness: see `PageTokenKey`.
             page_token_key: PageTokenKey::new(),
+            // No delivery is in flight until a task is started.
+            deliveries_in_flight: 0,
         }
     }
 }
@@ -972,6 +1066,9 @@ mod tests {
             task_status: "inProgress".to_string(),
             task_status_reason: None,
             pending_status: None,
+            // A seeded task stands for one whose delivery is already behind it, so the
+            // clock alone settles what it is owed.
+            output_delivery: None,
         }
     }
 
@@ -1013,6 +1110,47 @@ mod tests {
             ("completed", false),
             "a settled task must stay settled"
         );
+    }
+
+    /// A task whose completion still owes its output object does NOT reach its terminal
+    /// status on the clock alone: the status moves with the delivery, so no read can report
+    /// the task completed before the object its own `OutputUri` names is there.
+    #[test]
+    fn a_due_status_waits_for_the_output_delivery() {
+        let now = SystemTime::now();
+        let delivery = |state: DeliveryState| TaskOutputDelivery {
+            region: "us-east-1".to_string(),
+            bucket: "polly-output".to_string(),
+            key: "task.mp3".to_string(),
+            text: "hello".to_string(),
+            state,
+        };
+        // Every state of a delivery, plus the task that owes none at all.
+        for (case, owed, expected) in [
+            ("nothing to deliver", None, "completed"),
+            ("the delivery is owed", Some(DeliveryState::Owed), "inProgress"),
+            (
+                "the delivery is being made",
+                Some(DeliveryState::InFlight(Instant::now())),
+                "inProgress",
+            ),
+            ("the delivery was made", Some(DeliveryState::Done), "completed"),
+        ] {
+            let mut subject = stored_task("task", now);
+            subject.pending_status = Some(PendingTaskStatus {
+                // Due well before now: the clock owes this transition.
+                due_at: now - TASK_COMPLETION_DELAY,
+                status: "completed".to_string(),
+                reason: None,
+            });
+            subject.output_delivery = owed.map(delivery);
+            settle_task_status(&mut subject, now);
+            assert_eq!(
+                subject.task_status, expected,
+                "case {case:?}: wrong status, pending {:?}",
+                subject.pending_status
+            );
+        }
     }
 
     /// A task is held for the documented retention window, measured from its own

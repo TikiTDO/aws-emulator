@@ -20,17 +20,21 @@
 //!
 //! ## What is real, and what the emulator cannot do
 //!
-//! NO OBJECT IS WRITTEN TO THE OUTPUT BUCKET: this operation's contribution is the
-//! TASK — its identifier, its status timeline, the request it records and the output
-//! location it reports — and the object that location names is not uploaded here. The
-//! speech itself is rendered where it is served ([`super::synthesize_speech`]); this
-//! upload is the one recorded behaviour of this operation still outstanding, tracked by
-//! its own issue (`20261022T175007Z-polly-startspeechsynthesistask-stub.md`), so nothing
-//! here pretends the bytes are there. Everything the task record reports is computed from
-//! the request and from state: the billed character count, the resolved output
-//! location, the lexicons resolved in the request's Region, and the voice's engine and
-//! language, all read through the same helpers `SynthesizeSpeech` uses so the
-//! synchronous and the asynchronous path cannot disagree about one request.
+//! THE OUTPUT OBJECT IS WRITTEN: when the task's completion falls due, the rendered output
+//! is put into the bucket this request names, at exactly the key the task's `OutputUri`
+//! reports and carrying the media type of its `OutputFormat`, and the task reaches its
+//! terminal status with that object in place — a task whose output could not be written
+//! reports a failure rather than a completion with nothing behind it. The speech itself is
+//! rendered the same way the synchronous path renders it ([`super::synthesize_speech`]), and
+//! the notification a request's `SnsTopicArn` asks for is published about the terminal
+//! status the task reached. Both are [`crate::state::task_completion`]'s work, made over the
+//! emulator's own in-process transport.
+//!
+//! Everything the task record reports is computed from the request and from state: the
+//! billed character count, the resolved output location, the lexicons resolved in the
+//! request's Region, and the voice's engine and language, all read through the same helpers
+//! `SynthesizeSpeech` uses so the synchronous and the asynchronous path cannot disagree
+//! about one request.
 //!
 //! ## Shape of an operation
 //!
@@ -268,24 +272,26 @@ fn output_suffix(output_format: &str) -> Option<&'static str> {
         .map(|(_, suffix)| *suffix)
 }
 
-/// Where this task's output is written: the object in the requested bucket, named by
-/// the key prefix the request asked for and the task's own identifier.
+/// Where this task's output is written inside the bucket: the key prefix the request asked
+/// for, the task's own identifier and the suffix of the requested format.
 ///
-/// `SynthesisTask$OutputUri` is the "Pathway for the output speech file", and an S3
-/// object's pathway is its URL in the Region the request was made in. The prefix is
-/// taken as the request spelled it — `OutputS3KeyPrefix` is a KEY PREFIX, so the
-/// identifier and the suffix follow it with nothing inserted — and a request that names
+/// The prefix is taken as the request spelled it — `OutputS3KeyPrefix` is a KEY PREFIX, so
+/// the identifier and the suffix follow it with nothing inserted — and a request that names
 /// no prefix gets the object at the root of the bucket.
-fn output_uri(
-    region: &str,
-    bucket: &str,
-    key_prefix: Option<&str>,
-    task_id: &str,
-    output_format: &str,
-) -> String {
+fn output_key(key_prefix: Option<&str>, task_id: &str, output_format: &str) -> String {
     let suffix = output_suffix(output_format).unwrap_or(output_format);
     let prefix = key_prefix.unwrap_or_default();
-    format!("https://s3.{region}.amazonaws.com/{bucket}/{prefix}{task_id}.{suffix}")
+    format!("{prefix}{task_id}.{suffix}")
+}
+
+/// Where this task's output is: the object this request's bucket and [`output_key`] name.
+///
+/// `SynthesisTask$OutputUri` is the "Pathway for the output speech file", and an S3
+/// object's pathway is its URL in the Region the request was made in. It is built from the
+/// key the object is actually written at, so the location the task reports and the object
+/// its completion writes cannot drift apart.
+fn output_uri(region: &str, bucket: &str, key: &str) -> String {
+    format!("https://s3.{region}.amazonaws.com/{bucket}/{key}")
 }
 
 /// The `StartSpeechSynthesisTask` operation.
@@ -455,14 +461,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .checked_add(crate::state::TASK_COMPLETION_DELAY)
             .unwrap_or(now);
         let task_id = crate::state::mint_task_id();
+        let output_key = output_key(
+            input.output_s3_key_prefix.as_deref(),
+            &task_id,
+            output_format,
+        );
         let stored = crate::state::StoredSynthesisTask {
-            output_uri: output_uri(
-                &region,
-                &input.output_s3_bucket_name,
-                input.output_s3_key_prefix.as_deref(),
-                &task_id,
-                output_format,
-            ),
+            output_uri: output_uri(&region, &input.output_s3_bucket_name, &output_key),
             task_id,
             engine: engine.to_string(),
             output_format: output_format.to_string(),
@@ -485,12 +490,35 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 status: TERMINAL_TASK_STATUS.to_string(),
                 reason: None,
             }),
+            // ... and what that completion owes outside this service: the output object,
+            // and the notification this request's `SnsTopicArn` asks for. The task reaches
+            // its terminal status WITH that delivery, never before it.
+            output_delivery: Some(crate::state::TaskOutputDelivery {
+                region: region.clone(),
+                bucket: input.output_s3_bucket_name.clone(),
+                key: output_key,
+                text: input.text.clone(),
+                state: crate::state::DeliveryState::Owed,
+            }),
         };
         let reported = crate::state::synthesis_task(&stored);
+        let started = stored.task_id.clone();
         state
             .lock()
             .synthesis_tasks
             .insert(stored.task_id.clone(), stored);
+
+        // A client that waits on the notification never calls this service again, and a
+        // consumer handed the output location reads the object rather than the task — so the
+        // delivery is armed for the instant the completion falls due rather than left to a
+        // read that may never come. It claims the same delivery a read claims, so whichever
+        // gets there first makes it exactly once.
+        crate::state::task_completion::deliver_when_due(
+            ::std::sync::Arc::clone(&self.engine),
+            ctx.callback().clone(),
+            started,
+            completion_due_at,
+        );
 
         Ok(StartSpeechSynthesisTaskOutput {
             synthesis_task: Some(reported),

@@ -47,6 +47,11 @@ vorbis_rs = { version = "0.5", default-features = false }
 # rather than scanning the text by hand. `v5` is for the deterministic task ids
 # the test fixtures derive from a label.
 uuid = { version = "1", features = ["v4", "v5"] }
+# The in-process Amazon S3 client a completed synthesis task writes its output object
+# through (built once in `service-common::s3_client`): only the types the write itself takes
+# are named here. Only the generated client is needed \u2014 the emulator supplies the transport,
+# so the SDK's own HTTPS stack is left out and this client can reach nothing off this process.
+aws-sdk-s3 = { version = "1", default-features = false }
 # Encodes and decodes one `application/vnd.amazon.eventstream` frame:
 # `StartSpeechSynthesisStream` reads the caller's action events out of the request
 # body and writes each `AudioEvent` frame, whose `@eventPayload` chunk the
@@ -58,6 +63,10 @@ emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
 sha2 = { workspace = true }
+# The object store a completed synthesis task writes its output into: mounted beside this
+# service in the suites about that output, so the fact that the object arrived is answered
+# by the service that OWNS it rather than by this crate.
+service-com-amazonaws-s3-amazons3 = { workspace = true }
 
 [lints]
 workspace = true

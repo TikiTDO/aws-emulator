@@ -70,6 +70,8 @@ mod stated_enum_value_set;
 mod support;
 #[path = "all/synthesis_tasks.rs"]
 mod synthesis_tasks;
+#[path = "all/synthesis_task_side_effects.rs"]
+mod synthesis_task_side_effects;
 #[path = "all/task_page_token_minting.rs"]
 mod task_page_token_minting;
 #[path = "all/task_report_bounds.rs"]
