@@ -15,6 +15,13 @@
 //! are owed to the clock rather than to this call, so a caller reading the experiment
 //! immediately still sees it initiating; see [`crate::state::ExperimentRecord::settle`].
 //!
+//! The experiment's targets are RESOLVED here, once: a target that names its resources
+//! resolves to the ones it named, and one that identifies them by `resourceTags` resolves
+//! to the resources of its `resourceType` the services that OWN them hold in this same
+//! engine carrying those tags, narrowed by the target's `filters` and scoped by its
+//! `selectionMode` — see [`crate::state::target_resolution`]. What that resolution came to
+//! is what `ListExperimentResolvedTargets` reports and what the run's actions act on.
+//!
 //! A request whose `@idempotencyToken` already started an experiment REPORTS that
 //! experiment and starts nothing, so it is a READ of it: every write the clock owes that
 //! experiment is materialised before it is reported — the settle, and the report
@@ -198,6 +205,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> StartExperiment<E
             );
         };
         let breaches = crate::state::stop_conditions::AlarmBreaches::read(&*self.engine);
+        // The resources this start's tag-identified targets resolve against, read out of
+        // the stores of the services that OWN them before this store's guard is taken —
+        // exactly as the alarm states above are read.
+        let resources = crate::state::TargetableResources::read(&*self.engine, region);
         let mut store = state.lock();
 
         // Settle first: an experiment whose run already elapsed is no longer active, so
@@ -205,7 +216,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> StartExperiment<E
         // and not against ones the clock finished before this call.
         store.settle_experiments(now, &breaches);
 
-        let outcome = self.mint_under_guard(&mut store, input, actions_mode, region, now);
+        let outcome =
+            self.mint_under_guard(&mut store, input, actions_mode, region, now, &resources);
 
         // Every record this call made true — the settle above for a run that elapsed, and
         // what a start it accepted parked on the experiment it minted — drained here, on
@@ -220,6 +232,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> StartExperiment<E
     ///
     /// It drains no outbox: [`Self::start_under_guard`] does that once, for whatever this
     /// answers.
+    #[allow(clippy::too_many_arguments)]
     fn mint_under_guard(
         &self,
         store: &mut crate::state::ComAmazonawsFisFaultinjectionsimulatorState,
@@ -227,6 +240,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> StartExperiment<E
         actions_mode: &str,
         region: &str,
         now: ::std::time::SystemTime,
+        resources: &crate::state::TargetableResources,
     ) -> Result<Experiment, StartExperimentError> {
         // The token is `@idempotencyToken`: replaying it with the SAME request reports
         // the experiment the first call started, while reusing it for a different request
@@ -368,7 +382,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> StartExperiment<E
         // every action, so no permission failure is possible at all. A role the account's
         // IAM store shows nothing about leaves the run to go ahead, which is why a run is
         // only failed for a role whose documents were read.
-        let plan = crate::state::plan_run(&template, actions_mode);
+        let plan = crate::state::plan_run(&template, actions_mode, resources);
         let permission_failure = acting_documents.into_iter().find_map(|(role_arn, documents)| {
             documents.and_then(|documents| {
                 crate::state::action_permissions::permission_failure(
@@ -389,6 +403,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> StartExperiment<E
             input.tags.clone(),
             now,
             permission_failure,
+            resources,
         );
         let experiment = record.to_experiment();
         store.experiments.insert(id.clone(), record);

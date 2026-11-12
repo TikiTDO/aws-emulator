@@ -65,8 +65,10 @@ const SETTLE_POLLS: usize = 400;
 ///
 /// A row's destination declares the shortest buffering interval the hint admits
 /// ([`buffering_hints`]), which is the wait its delivery is then held for, so this budget is
-/// about that wait and not about an interval a consumer might configure instead.
-const DELIVERY_DEADLINE: Duration = Duration::from_secs(20);
+/// about that wait and not about an interval a consumer might configure instead. Generous
+/// against that wait: a host running the whole suite at once takes longer to serve it, and
+/// what the row waits for is the CONDITION (the records arriving), re-read in a poll loop.
+const DELIVERY_DEADLINE: Duration = Duration::from_secs(90);
 
 /// How often the destination bucket is polled while waiting for a delivery.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);

@@ -19,7 +19,10 @@
 //! An experiment carries one more derived record: the RESOLVED TARGETS its targets
 //! resolved to when it was started ([`resolve_targets`]), enumerated by
 //! `ListExperimentResolvedTargets`. It is computed once, at start, and held on the
-//! experiment record, so every read of it reports the resolution that start computed.
+//! experiment record, so every read of it reports the resolution that start computed. A
+//! target that identifies its resources by `resourceTags` rather than by naming them is
+//! resolved against the resources the services that OWN them hold in the same shared engine
+//! ([`target_resolution`]), narrowed by the target's `filters`.
 //!
 //! An experiment started from a template that configured an EXPERIMENT REPORT also carries
 //! that report's generation ([`ExperimentReportRecord`]): `pending` while the experiment has
@@ -173,6 +176,10 @@ pub mod stop_conditions;
 mod catalog;
 mod experiment_reports;
 mod template_validation;
+/// What an experiment's targets RESOLVE to, including the resources of other services a
+/// target identified by `resourceTags` describes ([`target_resolution`]).
+pub mod target_resolution;
+pub use target_resolution::*;
 pub use action_execution::*;
 pub use action_progress::*;
 pub use api_fault_injection::*;
@@ -1628,6 +1635,11 @@ impl ExperimentRecord {
     /// resolved by the caller, which is where the IAM store is reachable, over the actions
     /// this run CARRIES OUT ([`plan_run`] is how the caller selects them), and decides the
     /// terminal status the run earns — see [`run_plan`].
+    ///
+    /// `resources` is the snapshot of the other services' stores this run's tag-identified
+    /// targets resolve against ([`TargetableResources::read`]), read by the caller for the
+    /// same reason the IAM store is: those stores are reachable there.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_template(
         id: String,
         arn: String,
@@ -1636,10 +1648,11 @@ impl ExperimentRecord {
         tags: Option<HashMap<String, String>>,
         now: SystemTime,
         failure: Option<ExperimentFailure>,
+        resources: &TargetableResources,
     ) -> Self {
         let targets = experiment_targets(&template.targets);
         // Resolution happens ONCE, here, where the experiment is started.
-        let resolved_targets = resolve_targets(&targets);
+        let resolved_targets = resolve_targets(&targets, resources);
         // What the experiment options make of that resolution and of the template's
         // actions. The same plan the caller decided the role's permissions over, computed
         // from the same template and mode — see [`plan_run`].
@@ -3060,111 +3073,6 @@ pub fn action_page_token_id(token: &str) -> Option<&'static str> {
     action_catalog_entry(id).map(|entry| entry.id)
 }
 
-/// What `targets` RESOLVE to: one `ResolvedTarget` per resource a target identifies,
-/// scoped by that target's `selectionMode`.
-///
-/// The resources a target identifies are the ones it NAMES (`resourceArns`), each named
-/// resource resolving once however often the target lists it. A target that identifies
-/// its resources by `resourceTags` instead describes resources of OTHER services, which
-/// this emulator does not hold and therefore cannot resolve — it identifies nothing here,
-/// and nothing is reported for it rather than a resource being invented for it.
-///
-/// The order is a stable total order — targets by name, and within one target the order
-/// it named its resources — which is what [`resolved_target_page_token`] indexes into.
-///
-/// The work is linear and bounded: de-duplication goes through a set, one target names at
-/// most [`MAX_TARGET_RESOURCE_ARNS`] resources (the model's own ceiling, refused at the
-/// boundary), and the resolution stops at [`MAX_RESOLVED_TARGETS`].
-pub fn resolve_targets(targets: &HashMap<String, ExperimentTarget>) -> Vec<ResolvedTarget> {
-    let mut by_name: Vec<(&String, &ExperimentTarget)> = targets.iter().collect();
-    by_name.sort_by_key(|(name, _)| *name);
-    let mut resolved = Vec::new();
-    for (name, target) in by_name {
-        // [`MAX_RESOLVED_TARGETS`] is the emulator's own ceiling on one experiment's
-        // resolution: the work this function does, and the records it hands to the store,
-        // are bounded by it rather than by how long a list a request carried.
-        if resolved.len() >= MAX_RESOLVED_TARGETS {
-            break;
-        }
-        // One resource per ARN: an ARN a target repeats names the resource it already
-        // identified. Membership goes through a SET, so de-duplicating a target's list
-        // costs time linear in its length rather than quadratic.
-        let mut seen: HashSet<&str> = HashSet::new();
-        let mut identified: Vec<&String> = Vec::new();
-        for arn in target.resource_arns.iter().flatten() {
-            if seen.insert(arn.as_str()) {
-                identified.push(arn);
-            }
-        }
-        let keep = selection_count(target.selection_mode.as_deref(), identified.len())
-            .min(MAX_RESOLVED_TARGETS - resolved.len());
-        for arn in identified.into_iter().take(keep) {
-            resolved.push(ResolvedTarget {
-                resource_type: target.resource_type.clone(),
-                target_name: Some(name.clone()),
-                target_information: Some(HashMap::from([(
-                    TARGET_INFORMATION_ARN_KEY.to_string(),
-                    arn.clone(),
-                )])),
-            });
-        }
-    }
-    resolved
-}
-
-/// How many of the `identified` resources a target's `selectionMode` keeps.
-///
-/// FIS documents three forms: `ALL` ("Run the action on all identified targets. This is
-/// the default"), `COUNT(n)` ("the specified number of targets") and `PERCENT(n)` ("the
-/// specified percentage of targets"). A count or a percentage asking for more than the
-/// target identified keeps what it identified.
-///
-/// One choice this emulator makes, where FIS documents no rule: a percentage that does
-/// not reach a whole resource is taken DOWN (`PERCENT(25)` of two resources keeps none,
-/// of four keeps one). FIS picks the kept resources "at random"; this emulator keeps the
-/// first ones in the order the target named them, which satisfies the documented count and
-/// makes a resolution reproducible.
-///
-/// A target that names NO `selectionMode`, and one whose mode is in none of the three
-/// documented forms, keep every identified resource — the documented default. A stored
-/// target is never in that second case: [`targets_refusal`] refuses a mode outside the
-/// documented forms before a template carrying it is persisted, and it decides that by
-/// asking [`selection_mode_count`], so the rule and the resolution read one definition of
-/// the three forms.
-pub fn selection_count(selection_mode: Option<&str>, identified: usize) -> usize {
-    selection_mode
-        .and_then(|mode| selection_mode_count(mode, identified))
-        .unwrap_or(identified)
-}
-
-/// How many of the `identified` resources the `selectionMode` `mode` keeps, or `None` when
-/// `mode` is in NONE of the three forms FIS documents for it.
-///
-/// The one definition of those forms: `ALL`, `COUNT(n)` and `PERCENT(n)`, matched
-/// case-sensitively because the documented forms are upper-case. Both the rule that admits
-/// a target ([`targets_refusal`]) and the resolution that scopes one
-/// ([`selection_count`]) read it, so a mode a created template carries is one the
-/// resolution understands.
-pub fn selection_mode_count(mode: &str, identified: usize) -> Option<usize> {
-    let mode = mode.trim();
-    if mode == SELECTION_MODE_ALL {
-        return Some(identified);
-    }
-    if let Some(count) = selection_argument(mode, SELECTION_MODE_COUNT_PREFIX) {
-        return Some(identified.min(count));
-    }
-    if let Some(percent) = selection_argument(mode, SELECTION_MODE_PERCENT_PREFIX) {
-        return Some(identified.saturating_mul(percent.min(100)) / 100);
-    }
-    None
-}
-
-/// The `n` of a `selectionMode` of the form `<prefix>n)`, or `None` when `mode` is not of
-/// that form. The documented forms are upper-case, so the match is case-sensitive.
-fn selection_argument(mode: &str, prefix: &str) -> Option<usize> {
-    mode.strip_prefix(prefix)?.strip_suffix(')')?.trim().parse().ok()
-}
-
 /// The ARN of the experiment template `id` names, in `region`.
 pub fn template_arn(region: &str, id: &str) -> String {
     ::engine::emulator_arn(ARN_SERVICE, region, &format!("{TEMPLATE_RESOURCE}/{id}"))
@@ -4124,9 +4032,13 @@ pub fn run_actions(
 /// permissions are decided over, which it has to know BEFORE the record exists. It is the
 /// same plan [`ExperimentRecord::from_template`] then computes for the record, because both
 /// are this pure function of the same template and the same mode.
-pub fn plan_run(template: &ExperimentTemplateRecord, actions_mode: &str) -> RunActions {
+pub fn plan_run(
+    template: &ExperimentTemplateRecord,
+    actions_mode: &str,
+    resources: &TargetableResources,
+) -> RunActions {
     let targets = experiment_targets(&template.targets);
-    let resolved = resolve_targets(&targets);
+    let resolved = resolve_targets(&targets, resources);
     run_actions(
         &template.actions,
         actions_mode,
@@ -4162,8 +4074,9 @@ fn action_empty_target(
 /// Read off the resolution itself rather than recomputed, so what
 /// `ListExperimentResolvedTargets` reports for an experiment and what its run made of an
 /// empty target are the SAME fact: a target no entry of the resolution names resolved to
-/// nothing (a target identified by `resourceTags`, whose resources belong to services this
-/// emulator does not hold, is the case that reaches here — see [`resolve_targets`]).
+/// nothing (a target identified by `resourceTags` that no resource of this emulator carries,
+/// and one whose filters admitted none of the resources it identified, are the cases that
+/// reach here — see [`resolve_targets`]).
 pub fn empty_target_names(
     targets: &HashMap<String, ExperimentTarget>,
     resolved: &[ResolvedTarget],

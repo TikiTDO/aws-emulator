@@ -116,6 +116,10 @@ mod target_account_configurations;
 mod target_account_id_is_an_account_number;
 #[path = "all/target_account_role_ownership.rs"]
 mod target_account_role_ownership;
+// What a target RESOLVES to: the resources it names, and the resources of other services
+// carrying the tags it describes, narrowed by its filters.
+#[path = "all/targets_resolve_against_tagged_resources.rs"]
+mod targets_resolve_against_tagged_resources;
 #[path = "all/template_admissibility_sequence.rs"]
 mod template_admissibility_sequence;
 #[path = "all/template_target_and_action_rules.rs"]

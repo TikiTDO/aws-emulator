@@ -5,7 +5,9 @@
 //!
 //! The resolution itself is a snapshot held on the experiment record
 //! (`crate::state::ExperimentRecord::resolved_targets`, computed by
-//! `crate::state::resolve_targets`), so this operation only reads, filters and paginates
+//! `crate::state::resolve_targets` — which resolves a target that identifies its resources
+//! by `resourceTags` against the resources the owning services hold, narrowed by the
+//! target's `filters`), so this operation only reads, filters and paginates
 //! it: two reads at any instant report the same page.
 //!
 //! ## Shape of an operation

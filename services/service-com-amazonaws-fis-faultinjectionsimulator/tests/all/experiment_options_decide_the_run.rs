@@ -119,8 +119,9 @@ fn named_target() -> Value {
     })
 }
 
-/// A target identified by TAG: the resources it describes belong to services this emulator
-/// does not hold, so it resolves to nothing — the empty resolution
+/// A target identified by TAG: no resource of this emulator carries that tag — the suite
+/// mounts FIS alone, so the stores a tag-identified target is resolved against hold
+/// nothing — so it resolves to nothing, which is the empty resolution
 /// `emptyTargetResolutionMode` decides about.
 fn tagged_target() -> Value {
     json!({

@@ -29,6 +29,7 @@ use service_com_amazonaws_fis_faultinjectionsimulator::ops::types::{
 };
 use service_com_amazonaws_fis_faultinjectionsimulator::state::{
     run_plan, ExperimentFailure, ExperimentOutcome, ExperimentRecord, ExperimentTemplateRecord,
+    TargetableResources,
 };
 use service_com_amazonaws_fis_faultinjectionsimulator::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
@@ -980,6 +981,10 @@ fn an_experiment_runs_for_its_actions_durations_and_then_ends_at_the_status_they
             None,
             started,
             None,
+            // No store of another service is read here: this record's targets name their
+            // resources, so the snapshot a tag-identified target would be resolved against
+            // is the empty one.
+            &TargetableResources::none(),
         );
         let expected_terminal = "completed";
         for (offset, expected) in [
@@ -1036,6 +1041,7 @@ fn an_experiment_runs_for_its_actions_durations_and_then_ends_at_the_status_they
             None,
             started,
             Some(failure.clone()),
+            &TargetableResources::none(),
         );
         denied.settle(
             started + TRANSITION_DELAY + TRANSITION_DELAY,

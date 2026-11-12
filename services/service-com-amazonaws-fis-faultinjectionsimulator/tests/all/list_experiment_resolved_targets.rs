@@ -291,6 +291,10 @@ fn rows() -> Vec<Row> {
             selection_mode: "ALL",
             named: Vec::new(),
             resource_tags: Some(json!({ "Stage": "test", "Team": "chaos" })),
+            // This emulator holds no EC2 instance carrying those tags — the suite mounts
+            // FIS alone, so the store such a target is resolved against is empty — so the
+            // target identifies nothing. The suite that seeds tagged resources beside FIS
+            // is `targets_resolve_against_tagged_resources`.
             expected: 0,
         },
         Row {
