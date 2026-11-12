@@ -15,6 +15,8 @@
 mod bot_addressing;
 #[path = "all/bot_locale_dialog.rs"]
 mod bot_locale_dialog;
+#[path = "all/declared_slot_map.rs"]
+mod declared_slot_map;
 #[path = "all/dialog_turn_reporting.rs"]
 mod dialog_turn_reporting;
 #[path = "all/harness.rs"]
