@@ -2036,9 +2036,9 @@ pub fn remove_association_periods(
 /// resource is associated IN a period is the association record's own question
 /// ([`ResourceAssociationRecord::covers`]) — the same one the listing of the associations
 /// and the charge computation ask of it — so a record the item holds for periods that do
-/// not include the one being read counts for nothing there. Counted here once, for the
-/// live item ([`CustomLineItemRecord::association_size`]) as much as for a frozen
-/// generation of it ([`CustomLineItemVersion::association_size`]), so no two reads of one
+/// not include the one being read counts for nothing there. Counted here once, over the
+/// item's own association records ([`CustomLineItemRecord::association_size`]) whether the
+/// read reports the generation in effect now or a frozen one, so no two reads of one
 /// period can disagree about the number.
 fn associations_in_effect(associations: &[ResourceAssociationRecord], billing_period: &str) -> i64 {
     let in_effect = associations
@@ -2221,6 +2221,12 @@ impl CustomLineItemRecord {
     /// `AssociationSize`: "The number of resources that are associated to the custom
     /// line item" — in `billing_period`, counted the one way every read of that member
     /// counts it ([`associations_in_effect`]).
+    ///
+    /// These records are the item's ONLY membership, so this is the count every read
+    /// reporting the member takes, whichever generation of the item it reports: an
+    /// association record carries the billing periods it is in effect over, so a read of
+    /// a period a superseded generation answers for is already answered by the periods
+    /// those records hold.
     pub fn association_size(&self, billing_period: &str) -> i64 {
         associations_in_effect(&self.associated_resources, billing_period)
     }
@@ -2324,7 +2330,6 @@ impl CustomLineItemRecord {
             billing_group_arn: self.billing_group_arn.clone(),
             account_id: self.account_id.clone(),
             charge_details: self.charge_details(),
-            associated_resources: self.associated_resources.clone(),
             computation_rule: self.computation_rule.clone(),
             presentation_service: self.presentation_service.clone(),
             spans: self.spans.clone(),
@@ -2427,6 +2432,14 @@ impl CustomLineItemRecord {
 /// billing period it took effect in and the instant it did. A superseded generation is
 /// FROZEN: nothing writes to it again, so the history a read reports is what the item
 /// really was, not a recomputation from the item it has since become.
+///
+/// The resource associations are NOT here, for the reason the sibling versioned resources
+/// keep their membership off a generation too ([`PricingPlanVersion`],
+/// [`BillingGroupVersion`]): an association record carries the billing periods it is in
+/// effect over, so `AssociationSize` is derived per period from the item's own records
+/// ([`CustomLineItemRecord::association_size`]) — the records the listing of the
+/// associations and the charge computation read — and a write to them cannot leave one
+/// read of a period counting a membership another read of the same period denies.
 #[derive(Debug, Clone, Default)]
 pub struct CustomLineItemVersion {
     pub name: String,
@@ -2435,11 +2448,6 @@ pub struct CustomLineItemVersion {
     pub account_id: Option<String>,
     /// `ChargeDetails` as this generation reported them.
     pub charge_details: crate::ops::types::ListCustomLineItemChargeDetails,
-    /// The resource associations this generation held, as they stood while it was in
-    /// effect, so the `AssociationSize` a read reports for it ([`Self::association_size`])
-    /// is the membership the item really had then and not a recomputation from the
-    /// associations it has since acquired.
-    pub associated_resources: Vec<ResourceAssociationRecord>,
     pub computation_rule: Option<String>,
     /// `PresentationDetails.Service`.
     pub presentation_service: Option<String>,
@@ -2458,13 +2466,6 @@ pub struct CustomLineItemVersion {
 }
 
 impl CustomLineItemVersion {
-    /// `AssociationSize`: the resources this generation's associations are in effect for
-    /// in `billing_period`, counted the one way every read of that member counts it
-    /// ([`associations_in_effect`]).
-    pub fn association_size(&self, billing_period: &str) -> i64 {
-        associations_in_effect(&self.associated_resources, billing_period)
-    }
-
     /// Does this generation apply in `billing_period`? Each stretch it applies in is
     /// half-open, and a write that named no billing period range leaves the generation
     /// holding the stretches the item already applied in — see

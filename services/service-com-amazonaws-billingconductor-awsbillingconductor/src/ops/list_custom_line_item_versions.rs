@@ -77,7 +77,7 @@
 #[allow(unused_imports)]
 use super::types::*;
 
-use crate::state::CustomLineItemVersion;
+use crate::state::{CustomLineItemRecord, CustomLineItemVersion};
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -192,12 +192,13 @@ fn in_filter(
 ///
 /// `AssociationSize` is the one member that is scoped to a billing period rather than to
 /// the generation as a whole, so it is derived for the period the element itself names:
-/// the `StartBillingPeriod` this generation took effect in. A resource is associated to
-/// the item only in the periods its association record covers, so that count is the one
-/// `ListCustomLineItems` and `ListResourcesAssociatedToCustomLineItem` report for that
-/// same period.
+/// the `StartBillingPeriod` this generation took effect in. It is counted over the item's
+/// own association records, whichever generation is being reported, because a resource is
+/// associated to the item only in the periods its association record covers — so that
+/// count is the one `ListCustomLineItems` and `ListResourcesAssociatedToCustomLineItem`
+/// report for that same period.
 fn element(
-    item_arn: &str,
+    item: &CustomLineItemRecord,
     version: &CustomLineItemVersion,
     end_billing_period: Option<String>,
 ) -> CustomLineItemVersionListElement {
@@ -205,7 +206,7 @@ fn element(
     CustomLineItemVersionListElement {
         name: Some(version.name.clone()),
         charge_details: Some(version.charge_details.clone()),
-        currency_code: Some(crate::state::custom_line_item_currency_code(item_arn).to_string()),
+        currency_code: Some(crate::state::custom_line_item_currency_code(&item.arn).to_string()),
         description: Some(version.description.clone()),
         // Nothing in this service's surface sets a product code — neither
         // `CreateCustomLineItem` nor `UpdateCustomLineItem` models a `ProductCode`
@@ -214,10 +215,10 @@ fn element(
         billing_group_arn: Some(version.billing_group_arn.clone()),
         creation_time: version.creation_time_millis,
         last_modified_time: version.last_modified_time_millis,
-        association_size: version.association_size(&start_billing_period),
+        association_size: item.association_size(&start_billing_period),
         start_billing_period: Some(start_billing_period),
         end_billing_period,
-        arn: Some(item_arn.to_string()),
+        arn: Some(item.arn.clone()),
         start_time: version.start_time_millis,
         account_id: version.account_id.clone(),
         computation_rule: version.computation_rule.clone(),
@@ -337,7 +338,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             // The pagination key is the generation's position in that order, written
             // fixed-width so it orders as a string the way it orders as a number.
-            selected.push((format!("{index:010}"), element(&item_arn, version, end)));
+            selected.push((format!("{index:010}"), element(item, version, end)));
         }
 
         let (custom_line_item_versions, next_token) = crate::state::paginate(

@@ -27,6 +27,8 @@ mod associate_pricing_rules;
 mod association_delete_gate_spans_billing_periods;
 #[path = "all/association_size_is_billing_period_scoped.rs"]
 mod association_size_is_billing_period_scoped;
+#[path = "all/association_writes_reach_superseded_generations.rs"]
+mod association_writes_reach_superseded_generations;
 #[path = "all/auto_associate_billing_group_cap.rs"]
 mod auto_associate_billing_group_cap;
 #[path = "all/aws_managed_pricing_plan_tagging.rs"]

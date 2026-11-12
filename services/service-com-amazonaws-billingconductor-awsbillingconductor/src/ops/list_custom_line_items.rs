@@ -200,10 +200,11 @@ fn non_empty(values: Option<&[String]>) -> Option<&[String]> {
 /// write can change come from the version in effect, and the ones no write can change —
 /// the ARN and the creation time — from the record itself, so there is one copy of them.
 ///
-/// `AssociationSize` is derived FOR `billing_period`: the resources associated to the
+/// `AssociationSize` is derived FOR `billing_period`, from the item's own association
+/// records rather than from the generation being reported: the resources associated to the
 /// item are the ones whose association is in effect in the period this read reports the
 /// item for, which is the question
-/// [`crate::state::CustomLineItemVersion::association_size`] asks of each association
+/// [`crate::state::CustomLineItemRecord::association_size`] asks of each association
 /// record and `ListResourcesAssociatedToCustomLineItem` asks of the same records.
 fn element(
     item: &CustomLineItemRecord,
@@ -223,7 +224,7 @@ fn element(
         billing_group_arn: Some(version.billing_group_arn.clone()),
         creation_time: item.creation_time_millis,
         last_modified_time: version.last_modified_time_millis,
-        association_size: version.association_size(billing_period),
+        association_size: item.association_size(billing_period),
         account_id: version.account_id.clone(),
         computation_rule: version.computation_rule.clone(),
         presentation_details: version

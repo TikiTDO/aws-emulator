@@ -28,7 +28,11 @@ use serde_json::{json, Value};
 /// A `CustomLineItemBillingPeriodRange`, as the model shapes it
 /// (`smithy_query(query="shape",shape="CustomLineItemBillingPeriodRange")`: `@required
 /// InclusiveStartBillingPeriod`, optional `ExclusiveEndBillingPeriod`).
-fn range(inclusive_start: &str, exclusive_end: Option<&str>) -> Value {
+///
+/// `pub(crate)` so the sibling suite about the same count drives these helpers rather
+/// than keeping a second copy of them that could drift (see
+/// `tests/all/association_writes_reach_superseded_generations.rs`).
+pub(crate) fn range(inclusive_start: &str, exclusive_end: Option<&str>) -> Value {
     let mut value = json!({ "InclusiveStartBillingPeriod": inclusive_start });
     if let Some(end) = exclusive_end {
         value["ExclusiveEndBillingPeriod"] = json!(end);
@@ -39,7 +43,12 @@ fn range(inclusive_start: &str, exclusive_end: Option<&str>) -> Value {
 /// A PERCENTAGE custom line item — the only kind resources can be associated to — in
 /// effect from the PREVIOUS billing period on, so that a read of that period reports it
 /// and the count it reports there can be asked about at all.
-async fn target_item(emulator: &Emulator, case: &str, group: &str, name: &str) -> String {
+pub(crate) async fn target_item(
+    emulator: &Emulator,
+    case: &str,
+    group: &str,
+    name: &str,
+) -> String {
     let (status, body) = emulator
         .send(
             "POST",
@@ -64,7 +73,7 @@ async fn target_item(emulator: &Emulator, case: &str, group: &str, name: &str) -
 }
 
 /// The `AssociationSize` `ListCustomLineItems` reports for one item in `billing_period`.
-async fn association_size(
+pub(crate) async fn association_size(
     emulator: &Emulator,
     case: &str,
     target: &str,
@@ -97,7 +106,7 @@ async fn association_size(
 
 /// How many resources `ListResourcesAssociatedToCustomLineItem` reports for one item in
 /// `billing_period`: the membership `AssociationSize` has to agree with.
-async fn associated_count(
+pub(crate) async fn associated_count(
     emulator: &Emulator,
     case: &str,
     target: &str,
@@ -115,7 +124,7 @@ async fn associated_count(
 }
 
 /// `BatchAssociateResourcesToCustomLineItem` over `resources`, asserted to succeed.
-async fn associate_ok(
+pub(crate) async fn associate_ok(
     emulator: &Emulator,
     case: &str,
     target: &str,
@@ -137,7 +146,7 @@ async fn associate_ok(
 }
 
 /// `BatchDisassociateResourcesFromCustomLineItem` over `resources`, asserted to succeed.
-async fn disassociate_ok(
+pub(crate) async fn disassociate_ok(
     emulator: &Emulator,
     case: &str,
     target: &str,
@@ -500,7 +509,12 @@ async fn the_update_answer_and_the_version_history_count_their_own_billing_perio
 }
 
 /// `UpdateCustomLineItem` with whatever members the case carries, asserted to succeed.
-async fn update_ok(emulator: &Emulator, case: &str, target: &str, request: Value) -> Value {
+pub(crate) async fn update_ok(
+    emulator: &Emulator,
+    case: &str,
+    target: &str,
+    request: Value,
+) -> Value {
     let mut body = json!({ "Arn": target });
     for (member, value) in request.as_object().cloned().unwrap_or_default() {
         body[member] = value;
@@ -516,7 +530,7 @@ async fn update_ok(emulator: &Emulator, case: &str, target: &str, request: Value
 }
 
 /// The versions `ListCustomLineItemVersions` reports for one item, oldest first.
-async fn versions_ok(emulator: &Emulator, case: &str, target: &str) -> Vec<Value> {
+pub(crate) async fn versions_ok(emulator: &Emulator, case: &str, target: &str) -> Vec<Value> {
     let (status, body) = emulator
         .send(
             "POST",
