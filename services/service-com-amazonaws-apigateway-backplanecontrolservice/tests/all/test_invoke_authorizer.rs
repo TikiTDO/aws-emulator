@@ -8,17 +8,22 @@
 //! > request to a deployed stage executes it by — the identity source read off the simulated
 //! > request, the Lambda function the authorizer names invoked with the event its own type
 //! > documents, and the policy it returned judged against the ARN of the method the
-//! > simulation addresses (the api's own, under the stage AWS reserves for a test
-//! > invocation) — and reports the decision: `clientStatus` 0 for a call the authorizer
-//! > authorized and otherwise the status of the gateway response the client would have been
-//! > answered through, beside the principal the authorizer named, the policy it returned and
-//! > the values it published. An identifier no record carries is `NotFoundException`.
+//! > simulation addresses (the api's own, under the stage AWS reserves for a simulated
+//! > authorizer execution) — and reports the decision: `clientStatus` 0 for every authorizer
+//! > that PRODUCED a decision, whichever way its policy decided, and otherwise the status of
+//! > the gateway response the client would have been answered through, beside the principal
+//! > the authorizer named, the policy it returned and the values it published. `claims` is a
+//! > user-pool authorizer's own member, so a Lambda-backed authorizer's report carries none
+//! > of it. The execution log reports what the authorizer RETURNED — the principal it named
+//! > and every value it published — and never the identity the request presented. An
+//! > identifier no record carries is `NotFoundException`.
 //!
 //! The rows differ along what the rule generalises over:
 //!
 //! * the DECISION the returned policy takes about the simulated method — an allow naming
 //!   that method, an allow naming every method, an explicit deny, and an allow naming
-//!   another method;
+//!   another method: each of the four is an authorizer that RAN, so each is reported at
+//!   `clientStatus` 0 with the document it returned;
 //! * each way a call earns no decision at all — an identity source the simulated request
 //!   does not carry (the function is not invoked), the `Unauthorized` error API Gateway
 //!   documents a refusal by, a function that fails otherwise, a function that returns no
@@ -67,9 +72,10 @@ const IDENTITY_PARAMETER: &str = "access_token";
 /// that a simulation reusing a held result would be observable.
 const HELD_TTL: u32 = 300;
 
-/// The stage AWS reserves for a test invocation, which the method ARN a simulation addresses
-/// names.
-const TEST_INVOKE_STAGE: &str = "test-invoke-stage";
+/// The stage segment of the method ARN a simulated authorizer execution synthesizes: AWS's
+/// reserved test-invoke stage, as `TestInvokeAuthorizer` spells it in the `methodArn` it hands
+/// the authorizer.
+const TEST_INVOKE_ARN_STAGE: &str = "ESTestInvoke-stage";
 
 /// The one authorizer function every row is decided by: it reads the token out of whichever
 /// event it was handed, chooses what to return from that token, and publishes a value that is
@@ -109,7 +115,7 @@ def lambda_handler(event, context):
                 {"Action": "execute-api:Invoke", "Effect": effect, "Resource": resource}
             ],
         },
-        "context": {"ran": str(time.time_ns()), "kind": kind, "token": token},
+        "context": {"ran": str(time.time_ns()), "kind": kind},
     }
 "#;
 
@@ -514,7 +520,9 @@ struct Row {
     /// method the simulation addresses, `{elsewhere}` for another method of the same api,
     /// and a literal for anything else. `None` where the authorizer returned no policy.
     resource: Option<&'static str>,
-    /// The `clientStatus` the simulation reports.
+    /// The `clientStatus` the simulation reports: `0` for an authorizer that produced a
+    /// decision, and the status of the gateway response the client would have met for a call
+    /// that earned none.
     client_status: i64,
     /// Whether the authorizer RETURNED a policy, which is reported whichever way it decided.
     returned: bool,
@@ -571,7 +579,10 @@ fn rows() -> Vec<Row> {
             identity: "deny-me",
             path: "/orders",
             resource: Some("{method}"),
-            client_status: 403,
+            // The function RAN and returned this document, so the authorizer succeeded: the
+            // deny is the decision's content, and the log is where the gateway response that
+            // call would have met is named.
+            client_status: 0,
             returned: true,
             event: Some("TOKEN"),
             log: Some("does not allow"),
@@ -583,7 +594,7 @@ fn rows() -> Vec<Row> {
             identity: "other-me",
             path: "/orders",
             resource: Some("{elsewhere}"),
-            client_status: 403,
+            client_status: 0,
             returned: true,
             event: Some("TOKEN"),
             log: Some("does not allow"),
@@ -733,7 +744,7 @@ async fn a_simulation_reports_the_decision_the_authorizer_produced() {
             // api's own method ARN under the stage AWS reserves for a test invocation,
             // naming the path the simulation addressed.
             let method_arn = format!(
-                "arn:aws:execute-api:{REGION}:{account}:{api}/{TEST_INVOKE_STAGE}/GET/{path}",
+                "arn:aws:execute-api:{REGION}:{account}:{api}/{TEST_INVOKE_ARN_STAGE}/GET/{path}",
                 account = engine::emulator_account_id(),
                 api = wired.api,
                 path = row
@@ -798,17 +809,56 @@ async fn a_simulation_reports_the_decision_the_authorizer_produced() {
                 "case {case:?}: expected the execution log to carry {phrase:?}, got {log:?}"
             );
         }
+        // What the authorizer RETURNED is reported in the log: the principal it named and
+        // every value it published, each read back out of the report itself — which is what a
+        // developer simulating an execution reads its result from.
+        if row.returned {
+            assert!(
+                log.contains(&principal),
+                "case {case:?}: expected the execution log to name the principal \
+                 {principal:?}, got {log:?}"
+            );
+            let published = authorization
+                .as_object()
+                .unwrap_or_else(|| panic!("case {case:?}: no published values in {reported}"));
+            for (name, values) in published {
+                let value = values
+                    .as_array()
+                    .and_then(|values| values.first())
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                assert!(
+                    log.contains(value),
+                    "case {case:?}: expected the execution log to carry the published \
+                     {name}={value:?}, got {log:?}"
+                );
+            }
+        }
         assert!(
             reported.get("latency").and_then(Value::as_i64).is_some(),
             "case {case:?}: expected a measured latency, got {reported}"
         );
-        // A caller's credential never travels into a log: the header NAMES are reported and
-        // the token the row presented is not.
+        // `claims` is the member a COGNITO_USER_POOLS authorizer's accepted identity token
+        // fills, so every row here — all of them Lambda-backed — carries none of it.
+        assert!(
+            reported.get("claims").is_none(),
+            "case {case:?}: expected no claims member for a Lambda-backed authorizer, got \
+             {reported}"
+        );
+        // A caller's credential never travels into the lines the emulator writes about the
+        // REQUEST: those report the header NAMES and not the value presented under one. (The
+        // lines reporting what the authorizer RETURNED carry the authorizer's own output,
+        // which a function is free to derive from the token it was handed.)
         if let Some(token) = row.header {
+            let about_the_request: String = log
+                .lines()
+                .filter(|line| !line.contains("returned"))
+                .collect::<Vec<&str>>()
+                .join("\n");
             assert!(
-                !log.contains(token),
-                "case {case:?}: expected the presented token to stay out of the execution \
-                 log, got {log:?}"
+                !about_the_request.contains(token),
+                "case {case:?}: expected the presented token to stay out of what the \
+                 execution log says about the request, got {about_the_request:?}"
             );
         }
     }

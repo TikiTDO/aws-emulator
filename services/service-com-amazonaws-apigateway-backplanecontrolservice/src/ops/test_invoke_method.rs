@@ -176,6 +176,11 @@ const ACCEPT: &str = "accept";
 /// `arn:aws:execute-api:{region}:{account}:{api-id}/test-invoke-stage/{verb}/{path}` — which
 /// is why a grant added for `*/{verb}/{path}`, covering every stage, admits a test
 /// invocation as well as a deployed one.
+///
+/// This is also the stage a simulated request's `$context.stage` reports. It is NOT the stage
+/// segment of the method ARN API Gateway synthesizes for a simulated AUTHORIZER execution,
+/// which is a reserved spelling of its own
+/// ([`super::test_invoke_authorizer::TEST_INVOKE_ARN_STAGE`]).
 pub(crate) const TEST_INVOKE_STAGE: &str = "test-invoke-stage";
 
 /// The reported response header the rendered body's media type travels in.

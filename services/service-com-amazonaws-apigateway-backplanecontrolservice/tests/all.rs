@@ -523,3 +523,8 @@ mod test_invoke_method_request_validator;
 // the `500` it answers when it cannot serve the call at all.
 #[path = "all/stage_internal_error_class.rs"]
 mod stage_internal_error_class;
+// Appended for the reason the note above gives: `TestInvokeAuthorizer` against a
+// `COGNITO_USER_POOLS` authorizer — the `claims` member a token it ACCEPTED fills and every
+// other answer omits, beside the status a call that earned no decision reports.
+#[path = "all/test_invoke_authorizer_cognito_claims.rs"]
+mod test_invoke_authorizer_cognito_claims;

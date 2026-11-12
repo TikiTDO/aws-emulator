@@ -34,7 +34,16 @@
 //!
 //! Nothing here is invented: every outcome is the authorizer's own answer about this request
 //! or a refusal of it, each carrying the gateway response a client would have been answered
-//! through, which is what the reported `clientStatus` is rendered from.
+//! through.
+//!
+//! # A decision and a refusal are two different answers
+//!
+//! An authorizer that RAN and returned a well-formed authorizer output has DECIDED, whichever
+//! way its policy decided: the document is the authorizer's result, not a failure of it. So
+//! [`Simulation::decided`] records that a decision exists, separately from the refusal a
+//! request the decision does not admit would have been answered through — the caller reports
+//! the first as the authorizer having succeeded and the second as what a client would have
+//! received.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
@@ -61,6 +70,13 @@ pub(crate) struct Simulation {
     /// The gateway response a client would have been answered through, or `None` when the
     /// authorizer authorized the call.
     pub refusal: Option<GatewayRefusal>,
+    /// Whether the authorizer PRODUCED A DECISION about this request: its function ran and
+    /// returned an authorizer output, or the identity token it evaluates was evaluated and
+    /// accepted. `false` for every call that earned no decision at all — an identity source
+    /// the request did not carry, an authorizer that could not be asked, one that did not
+    /// answer or answered with something that is not an authorizer output, and a presented
+    /// token the authorizer did not accept.
+    pub decided: bool,
     /// The `principalId` the authorizer named, when its function returned one.
     pub principal_id: Option<String>,
     /// The policy document it returned, verbatim.
@@ -68,8 +84,11 @@ pub(crate) struct Simulation {
     /// The `context` map it published, which is what an integration would read as
     /// `$context.authorizer.{key}`.
     pub context: BTreeMap<String, String>,
-    /// The claims of an identity token a `COGNITO_USER_POOLS` authorizer accepted.
-    pub claims: BTreeMap<String, String>,
+    /// The claims of an identity token a `COGNITO_USER_POOLS` authorizer ACCEPTED, or `None`
+    /// for every authorizer that evaluates no such token — a `TOKEN` or `REQUEST` authorizer,
+    /// whose verdict is a function's return value, publishes no claims at all rather than an
+    /// empty set of them.
+    pub claims: Option<BTreeMap<String, String>>,
     /// What the simulation did, one sentence per step, in the order it took them: for the
     /// execution log the caller reports. States the configuration or the authorizer's own
     /// signal, and never a caller credential.
@@ -134,7 +153,8 @@ pub(crate) async fn simulated<Eng: Send + Sync + 'static>(
                     "Authorizer {name} accepted the presented identity token",
                     name = authorizer.name
                 ));
-                report.claims = authorized.claims;
+                report.decided = true;
+                report.claims = Some(authorized.claims);
                 report
             }
             cognito_user_pools::Decision::Refused(refusal, reason) => {
@@ -173,11 +193,11 @@ pub(crate) async fn simulated<Eng: Send + Sync + 'static>(
     ));
     let pending = custom_authorizer::Pending {
         api_id: api.id.clone(),
-        // The stage a test invocation's own ARN names ([`crate::ops::test_invoke_method`]
-        // owns that one spelling). Nothing is held under it: `cache_key` is `None`, so this
-        // names the stage the simulated request belongs to without touching what any stage
-        // of the api holds.
-        stage: crate::ops::test_invoke_method::TEST_INVOKE_STAGE.to_string(),
+        // The stage a simulated authorizer execution's own method ARN names
+        // ([`crate::ops::test_invoke_authorizer`] owns that one spelling). Nothing is held
+        // under it: `cache_key` is `None`, so this names the stage the simulated request
+        // belongs to without touching what any stage of the api holds.
+        stage: crate::ops::test_invoke_authorizer::TEST_INVOKE_ARN_STAGE.to_string(),
         region: api.arn_region().to_string(),
         authorizer_name: authorizer.name.clone(),
         authorizer_uri: authorizer.authorizer_uri.clone().unwrap_or_default(),
@@ -191,6 +211,27 @@ pub(crate) async fn simulated<Eng: Send + Sync + 'static>(
     };
     match custom_authorizer::obtained(ctx, &pending).await {
         Obtained::Returned(held) => {
+            // The function ran and returned an authorizer output, so a decision EXISTS: what
+            // its policy decided about the method is the decision's content, reported beside
+            // it rather than instead of it.
+            report.decided = true;
+            // WHAT it returned, in the log: the principal it named and every value it
+            // PUBLISHED, each under the name it published it by. Those values are the
+            // authorizer's own output about this request — what an integration would read as
+            // `$context.authorizer.{key}` — so the developer who asked for this execution to
+            // be simulated reads them back here. Nothing of the REQUEST's identity travels
+            // into the log; only what the authorizer answered does.
+            report.steps.push(format!(
+                "Authorizer {name} returned principalId {principal}, publishing [{published}]",
+                name = authorizer.name,
+                principal = held.principal_id,
+                published = held
+                    .context
+                    .iter()
+                    .map(|(key, value)| format!("{key}={value}"))
+                    .collect::<Vec<String>>()
+                    .join(", "),
+            ));
             report.principal_id = Some(held.principal_id.clone());
             report.policy = Some(held.policy_document.clone());
             report.context = held.context.clone();

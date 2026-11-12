@@ -22,24 +22,36 @@
 //! answer one stored authorizer differently.
 //!
 //! The reported `clientStatus` is "the HTTP status code that the client would have received.
-//! Value is 0 if the authorizer succeeded", so it is the status of the GATEWAY RESPONSE the
-//! refused request would have been answered through — including a developer's customization
-//! of that response type, read through the one renderer of a refusal
-//! ([`crate::service::invoke::refusal_rendering`]) — and `0` for a call the authorizer
-//! authorized.
+//! Value is 0 if the authorizer succeeded", and an authorizer SUCCEEDED once it produced a
+//! decision: its function ran and returned an authorizer output, or the identity token it
+//! evaluates was accepted. Whether the policy that decision carries admits the method is the
+//! decision's CONTENT, not a failure of the authorizer, so a returned deny is reported at `0`
+//! beside the document that denied it. A non-zero status is for a call that earned no decision
+//! at all — an identity source the request did not carry, an authorizer that could not be
+//! asked, that did not answer, that answered with something that is not an authorizer output,
+//! or a presented token it did not accept — and it is then the status of the GATEWAY RESPONSE
+//! that refused request would have been answered through, including a developer's
+//! customization of that response type, read through the one renderer of a refusal
+//! ([`crate::service::invoke::refusal_rendering`]).
 //!
 //! What the authorizer RETURNED is reported whichever way it decided: a developer testing an
 //! authorizer that denies the call is testing the very document that denied it, so the
-//! principal, the policy and the published values are reported beside the `403`-class status
-//! as well as beside the `0`.
+//! principal, the policy and the published values are reported beside the execution log naming
+//! the gateway response that call would have met.
+//!
+//! `claims` is "the open identity claims … returned from the Cognito Your User Pool configured
+//! for the API", so the member is served only by a `COGNITO_USER_POOLS` authorizer that
+//! accepted an identity token and is ABSENT for a `TOKEN` or a `REQUEST` authorizer, whose
+//! verdict is a function's return value: what such a function published reaches the caller
+//! through `authorization` and the log.
 //!
 //! ## Which method the simulation addresses
 //!
 //! This operation models no `httpMethod` and no `resourceId`: its only request-bound members
 //! are the headers, `pathWithQueryString`, the body, the stage variables and the additional
 //! context. So the ARN the authorizer is handed, and the ARN its returned policy is judged
-//! against, is the api's own method ARN under the stage AWS reserves for a test invocation
-//! ([`super::test_invoke_method::TEST_INVOKE_STAGE`]) — naming the [`SIMULATED_VERB`] of the
+//! against, is the api's own method ARN under the stage AWS reserves for a SIMULATED
+//! AUTHORIZER EXECUTION ([`TEST_INVOKE_ARN_STAGE`]) — naming the [`SIMULATED_VERB`] of the
 //! path the caller described, which is the request `pathWithQueryString` alone can describe.
 //!
 //! ## What it does not change
@@ -153,6 +165,18 @@ use super::test_invoke_method::{ExecutionLog, TEST_INVOKE_STAGE};
 /// READ — the one request `pathWithQueryString` by itself describes, and the verb AWS's own
 /// method ARN for a test invocation of an authorizer carries.
 const SIMULATED_VERB: &str = "GET";
+
+/// The stage segment of the method ARN API Gateway SYNTHESIZES for a simulated authorizer
+/// execution: the reserved test-invoke stage, spelled `ESTestInvoke-stage`.
+///
+/// This operation addresses no method of the api, so the ARN handed to the authorizer as
+/// `methodArn`, which its returned policy names in turn, is
+/// `arn:aws:execute-api:{region}:{account}:{api-id}/ESTestInvoke-stage/{verb}/{path}`. It is a
+/// spelling of its own, distinct from the stage a test invocation's REQUEST belongs to
+/// ([`TEST_INVOKE_STAGE`], which `$context.stage` reports and which the `aws:SourceArn` of a
+/// grant for a simulated METHOD invocation is narrowed by), so a function whose policy is
+/// scoped to the ARN AWS hands it decides a simulation here as it decides one there.
+pub(crate) const TEST_INVOKE_ARN_STAGE: &str = "ESTestInvoke-stage";
 
 /// The path a simulated request that names none addresses: the api's root resource.
 const ROOT_PATH: &str = "/";
@@ -276,7 +300,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let method_arn = crate::service::resource_policy::Call {
             region: api.arn_region(),
             api_id: &input.rest_api_id,
-            stage: TEST_INVOKE_STAGE,
+            stage: TEST_INVOKE_ARN_STAGE,
             verb: SIMULATED_VERB,
             resource_path: request_path,
             request_path,
@@ -355,6 +379,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             stage_variables: simulated_variables,
             context: BTreeMap::from([
                 ("apiId".to_string(), input.rest_api_id.clone()),
+                // The stage a test invocation's REQUEST belongs to, which is what
+                // `$context.stage` stands for — the reserved name of the test-invoke stage
+                // itself, not the stage segment the synthesized method ARN carries
+                // ([`TEST_INVOKE_ARN_STAGE`]).
                 ("stage".to_string(), TEST_INVOKE_STAGE.to_string()),
                 ("httpMethod".to_string(), SIMULATED_VERB.to_string()),
                 ("resourcePath".to_string(), request_path.to_string()),
@@ -399,9 +427,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             log.line(step.clone());
         }
         // "The HTTP status code that the client would have received. Value is 0 if the
-        // authorizer succeeded": the status of the gateway response a refused request would
-        // have been answered through, rendered from THIS api's own records so a developer's
-        // customization of that response type is what the report carries.
+        // authorizer succeeded": an authorizer that produced a DECISION succeeded, whichever
+        // way its policy decided, so the status is `0` for it and the gateway response a
+        // refused request would have met is what the log reports. Only a call that earned no
+        // decision carries that response's own status, rendered from THIS api's own records so
+        // a developer's customization of the response type is what the report carries.
         let client_status = match simulation.refusal {
             None => {
                 log.line("Successfully completed execution".to_string());
@@ -414,7 +444,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     "Answered through this API's {response_type} gateway response: the client \
                      would have received HTTP {status}"
                 ));
-                i32::from(status)
+                if simulation.decided {
+                    0
+                } else {
+                    i32::from(status)
+                }
             }
         };
 
@@ -435,14 +469,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .map(|(key, value)| (key, vec![value]))
                     .collect::<HashMap<String, Vec<String>>>(),
             ),
-            // The claims of an identity token a user-pool authorizer accepted; empty for
-            // every authorizer that evaluates no such token.
-            claims: Some(
-                simulation
-                    .claims
-                    .into_iter()
-                    .collect::<HashMap<String, String>>(),
-            ),
+            // "The open identity claims … returned from the Cognito Your User Pool configured
+            // for the API": the member is a user-pool authorizer's own, so it is served only
+            // where such an authorizer accepted an identity token and is absent for every
+            // authorizer that evaluates none.
+            claims: simulation
+                .claims
+                .map(|claims| claims.into_iter().collect::<HashMap<String, String>>()),
         })
     }
 }
