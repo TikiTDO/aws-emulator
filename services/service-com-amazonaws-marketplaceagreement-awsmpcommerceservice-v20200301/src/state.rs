@@ -1408,6 +1408,14 @@ pub fn page_token(scope: &str, offset: usize) -> String {
 
 /// The offset `token` resumes `scope` at, or `None` when it is not a token this
 /// service minted for that scope.
+///
+/// Reading hexadecimal digits out of the offset half is not enough to accept a
+/// token: `usize::from_str_radix` also reads spellings [`page_token`] never
+/// writes — upper and mixed case digits, a leading `+` — and `NextToken`'s
+/// modelled `^[a-zA-Z0-9+/=_-]+$` admits all of them, so they do reach here. A
+/// token names a page only when it is, character for character, the token this
+/// service mints for the scope and offset it carries; every other spelling names
+/// no page, exactly like a non-hexadecimal one.
 pub fn page_offset(scope: &str, token: &str) -> Option<usize> {
     if !token.is_ascii() || token.len() != PAGE_TOKEN_LEN {
         return None;
@@ -1416,7 +1424,8 @@ pub fn page_offset(scope: &str, token: &str) -> Option<usize> {
     if digest != scope_digest(scope) {
         return None;
     }
-    usize::from_str_radix(offset, 16).ok()
+    let offset = usize::from_str_radix(offset, 16).ok()?;
+    (page_token(scope, offset) == token).then_some(offset)
 }
 
 /// The page of `items` starting at `offset`, and the token that resumes after
