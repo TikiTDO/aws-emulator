@@ -8,13 +8,13 @@
 //!
 //! The rule under test: a QuickSight group is identified by
 //! `(AwsAccountId, Namespace, GroupName)` and belongs to a namespace the account holds;
-//! `CreateGroup` persists it and reports the group it stored — its ARN, its name, the
-//! description it was given and the `PrincipalId` the service minted for it — and
-//! `DescribeGroup` answers from that same record. A name the namespace already holds is
-//! refused as an existing resource, and a namespace the account does not hold is not
-//! found. So the rows below vary what the rule generalises over (the group name's form
-//! and length, whether a description is submitted and how long it is, the namespace, and
-//! the account) rather than re-running one recorded call.
+//! `CreateGroup` persists it, answers HTTP 201 for the group it created and reports that
+//! group — its ARN, its name, the description it was given and the `PrincipalId` the
+//! service minted for it — and `DescribeGroup` answers from that same record. A name the
+//! namespace already holds is refused as an existing resource, and a namespace the
+//! account does not hold is not found. So the rows below vary what the rule generalises
+//! over (the group name's form and length, whether a description is submitted and how
+//! long it is, the namespace, and the account) rather than re-running one recorded call.
 
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use serde_json::{json, Value};
@@ -51,7 +51,11 @@ const GROUP_NAME_LABEL: &AsciiSet = &CONTROLS
     .add(b'#')
     .add(b'+');
 
-fn group_label(group_name: &str) -> String {
+/// The group name as the URI path label carries it.
+///
+/// `pub(crate)` because every suite that addresses a group by name needs it: the label
+/// is percent-encoded over the bytes the pattern admits but a URI does not.
+pub(crate) fn group_label(group_name: &str) -> String {
     utf8_percent_encode(group_name, GROUP_NAME_LABEL).to_string()
 }
 
@@ -227,8 +231,8 @@ async fn create_group_persists_it_and_describe_reports_it() {
 
         let (status, body) = create_group(&harness, row.account, namespace, row.body()).await;
         assert_eq!(
-            status, 200,
-            "case {case:?}: create expected 200, got {status} with body {body}"
+            status, 201,
+            "case {case:?}: create expected 201, got {status} with body {body}"
         );
         let created = &body["Group"];
         assert_eq!(
@@ -377,9 +381,9 @@ async fn group_identity_is_the_account_the_namespace_and_the_name() {
         )
         .await;
         assert_eq!(
-            status, 200,
+            status, 201,
             "case {case:?}: one group of that name per namespace, so this create \
-             expected 200, got {status} with {body}"
+             expected 201, got {status} with {body}"
         );
         assert_eq!(
             body["Group"]["Arn"],

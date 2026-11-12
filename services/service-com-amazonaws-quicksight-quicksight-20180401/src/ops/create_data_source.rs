@@ -174,7 +174,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     const NAME: &'static str = "CreateDataSource";
     const INPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::CREATE_DATA_SOURCE_INPUT_SCHEMA;
     const OUTPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::CREATE_DATA_SOURCE_OUTPUT_SCHEMA;
-    const SUCCESS_STATUS: u16 = 200u16;
+    // Creating a data source is asynchronous: the service accepts the request and
+    // reports the lifecycle status through the response's `@httpResponseCode`-bound
+    // `Status` member, which is what the handler sets below. This constant is only the
+    // fallback the framework uses when no such member carries one.
+    const SUCCESS_STATUS: u16 = 202u16;
 
     async fn handle(
         &self,
@@ -223,7 +227,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let region = crate::state::request_region(ctx.parts());
         let arn = crate::state::data_source_arn(&region, &input.aws_account_id, &input.data_source_id);
-        let created_time = crate::state::now_timestamp(std::time::SystemTime::now());
+        let now = std::time::SystemTime::now();
+        let created_time = crate::state::now_timestamp(now);
 
         let mut store = state.lock();
         let key = (input.aws_account_id.clone(), input.data_source_id.clone());
@@ -281,10 +286,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 data_source_id: input.data_source_id.clone(),
                 name: input.name,
                 r#type: input.r#type,
-                // The response below reports creation as succeeded, so the stored
-                // resource is in that terminal status from this instant: there is no
-                // later transition for the clock to owe.
-                status: crate::state::RESOURCE_STATUS_CREATION_SUCCESSFUL.to_string(),
+                // The call starts the creation rather than completing it, so the
+                // stored resource carries the non-terminal status this response
+                // reports and reaches the terminal one when the clock owes it, which a
+                // later read materialises.
+                status: crate::state::RESOURCE_STATUS_CREATION_IN_PROGRESS.to_string(),
+                settled_status: crate::state::RESOURCE_STATUS_CREATION_SUCCESSFUL.to_string(),
+                status_settles_at: now + crate::state::DATA_SOURCE_LIFECYCLE_SPAN,
                 created_time,
                 last_updated_time: created_time,
                 data_source_parameters: input.data_source_parameters,
@@ -292,7 +300,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 ssl_properties: input.ssl_properties,
                 permissions: input.permissions.unwrap_or_default(),
                 tags: input.tags.unwrap_or_default(),
-                // Creation succeeded, so the data source carries no error.
+                // Nothing has failed, so the data source carries no error.
                 error_info: None,
             },
         );
@@ -302,9 +310,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         Ok(CreateDataSourceOutput {
             arn: Some(arn),
             data_source_id: Some(input.data_source_id),
-            creation_status: Some(crate::state::RESOURCE_STATUS_CREATION_SUCCESSFUL.to_string()),
+            // The creation is accepted, not finished: the caller polls
+            // `DescribeDataSource` for the terminal status.
+            creation_status: Some(crate::state::RESOURCE_STATUS_CREATION_IN_PROGRESS.to_string()),
             request_id: Some(request_id),
-            status: 200,
+            // `Status` is this response's `@httpResponseCode` member, so it IS the
+            // call's HTTP status: an accepted asynchronous creation.
+            status: 202,
         })
     }
 }

@@ -165,7 +165,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     const NAME: &'static str = "UpdateDataSource";
     const INPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::UPDATE_DATA_SOURCE_INPUT_SCHEMA;
     const OUTPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::UPDATE_DATA_SOURCE_OUTPUT_SCHEMA;
-    const SUCCESS_STATUS: u16 = 200u16;
+    // Updating a data source is asynchronous: the service accepts the request and
+    // reports the lifecycle status through the response's `@httpResponseCode`-bound
+    // `Status` member, which is what the handler sets below. This constant is only the
+    // fallback the framework uses when no such member carries one.
+    const SUCCESS_STATUS: u16 = 202u16;
 
     async fn handle(
         &self,
@@ -185,7 +189,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let request_id = crate::state::next_request_id();
-        let updated_time = crate::state::now_timestamp(std::time::SystemTime::now());
+        let now = std::time::SystemTime::now();
+        let updated_time = crate::state::now_timestamp(now);
 
         let key = (input.aws_account_id, input.data_source_id);
         let mut store = state.lock();
@@ -214,10 +219,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         record.vpc_connection_properties = input.vpc_connection_properties;
         record.ssl_properties = input.ssl_properties;
         record.last_updated_time = updated_time;
-        // The update is applied by the time this call answers, so the data source is in
-        // the terminal update status from this instant — there is no later transition for
-        // the clock to owe — and no error describes it any more.
-        record.status = crate::state::RESOURCE_STATUS_UPDATE_SUCCESSFUL.to_string();
+        // The call starts the update rather than completing it, so the data source
+        // carries the non-terminal status this response reports and reaches the
+        // terminal one when the clock owes it, which a later read materialises.
+        record.status = crate::state::RESOURCE_STATUS_UPDATE_IN_PROGRESS.to_string();
+        record.settled_status = crate::state::RESOURCE_STATUS_UPDATE_SUCCESSFUL.to_string();
+        record.status_settles_at = now + crate::state::DATA_SOURCE_LIFECYCLE_SPAN;
         record.error_info = None;
         // `input.credentials` is deliberately not stored, exactly as on create: the
         // member is `@sensitive`, no read returns it, and keeping a secret nothing can
@@ -226,9 +233,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         Ok(UpdateDataSourceOutput {
             arn: Some(record.arn.clone()),
             data_source_id: Some(record.data_source_id.clone()),
-            update_status: Some(crate::state::RESOURCE_STATUS_UPDATE_SUCCESSFUL.to_string()),
+            // The update is accepted, not finished: the caller polls
+            // `DescribeDataSource` for the terminal status.
+            update_status: Some(crate::state::RESOURCE_STATUS_UPDATE_IN_PROGRESS.to_string()),
             request_id: Some(request_id),
-            status: 200,
+            // `Status` is this response's `@httpResponseCode` member, so it IS the
+            // call's HTTP status: an accepted asynchronous update.
+            status: 202,
         })
     }
 }

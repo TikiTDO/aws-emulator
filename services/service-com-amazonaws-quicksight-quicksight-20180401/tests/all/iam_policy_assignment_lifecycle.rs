@@ -235,8 +235,16 @@ async fn create_persists_the_assignment_and_describe_reports_it() {
         let (status, body) =
             create_assignment(&harness, row.account, row.namespace, row.body()).await;
         assert_eq!(
-            status, 200,
-            "case {case:?}: create expected 200, got {status} with body {body}"
+            status, 201,
+            "case {case:?}: create expected 201, got {status} with body {body}"
+        );
+        assert_eq!(
+            body["Arn"],
+            json!(format!(
+                "arn:aws:quicksight::{}:assignment/{}",
+                row.account, row.assignment_name
+            )),
+            "case {case:?}: create must report the assignment's own ARN: {body}"
         );
         assert_eq!(
             body["AssignmentName"],
@@ -376,7 +384,7 @@ async fn an_assignment_name_is_unique_per_account_whatever_namespace_claims_it()
             ACCOUNT,
             DEFAULT_NAMESPACE,
             READ_ONLY_POLICY,
-            200u16,
+            201u16,
         ),
         (
             "same-account-same-namespace-again",
@@ -397,7 +405,7 @@ async fn an_assignment_name_is_unique_per_account_whatever_namespace_claims_it()
             OTHER_ACCOUNT,
             DEFAULT_NAMESPACE,
             other_account_policy,
-            200,
+            201,
         ),
         (
             "another-account-another-namespace-again",
@@ -543,8 +551,8 @@ async fn update_applies_only_the_members_the_request_carries() {
     )
     .await;
     assert_eq!(
-        status, 200,
-        "the fixture create expected 200, got {status} with {body}"
+        status, 201,
+        "the fixture create expected 201, got {status} with {body}"
     );
     let assignment_id = body["AssignmentId"].clone();
 
@@ -680,8 +688,8 @@ async fn an_assignment_moves_between_every_pair_of_modelled_statuses() {
             )
             .await;
             assert_eq!(
-                status, 200,
-                "case {case:?}: create expected 200, got {status} with {body}"
+                status, 201,
+                "case {case:?}: create expected 201, got {status} with {body}"
             );
             assert_eq!(
                 body["AssignmentStatus"],
@@ -736,8 +744,8 @@ async fn delete_removes_the_assignment_and_leaves_its_siblings() {
         )
         .await;
         assert_eq!(
-            status, 200,
-            "case {name:?}: the fixture create expected 200, got {status} with {body}"
+            status, 201,
+            "case {name:?}: the fixture create expected 201, got {status} with {body}"
         );
     }
     // An assignment in another namespace of the same account, under its own name: the
@@ -751,8 +759,8 @@ async fn delete_removes_the_assignment_and_leaves_its_siblings() {
     )
     .await;
     assert_eq!(
-        status, 200,
-        "the namespace fixture create expected 200, got {status} with {body}"
+        status, 201,
+        "the namespace fixture create expected 201, got {status} with {body}"
     );
 
     let (status, body) = delete_assignment(&harness, ACCOUNT, DEFAULT_NAMESPACE, deleted).await;
@@ -820,8 +828,8 @@ async fn delete_removes_the_assignment_and_leaves_its_siblings() {
     )
     .await;
     assert_eq!(
-        status, 200,
-        "re-creating a deleted assignment expected 200, got {status} with {body}"
+        status, 201,
+        "re-creating a deleted assignment expected 201, got {status} with {body}"
     );
     assert_eq!(
         body["AssignmentStatus"],
@@ -872,8 +880,8 @@ async fn racing_creates_of_distinct_names_all_commit_and_read_back() {
         for racer in racers {
             let (name, status, body) = racer.await.expect("a racing create panicked");
             assert_eq!(
-                status, 200,
-                "case {case:?}: the racer that named {name:?} expected 200, got {status} \
+                status, 201,
+                "case {case:?}: the racer that named {name:?} expected 201, got {status} \
                  with {body}"
             );
             let assignment_id = body["AssignmentId"]
@@ -967,7 +975,7 @@ async fn racing_creates_of_one_name_commit_exactly_one_assignment() {
         for racer in racers {
             let (status, body) = racer.await.expect("a racing create panicked");
             match status {
-                200 => winners.push(
+                201 => winners.push(
                     body["AssignmentId"]
                         .as_str()
                         .unwrap_or_else(|| {

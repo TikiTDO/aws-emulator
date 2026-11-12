@@ -101,8 +101,8 @@ async fn data_set_fixture(harness: &Harness, account: &str, data_set_id: &str) {
         )
         .await;
     assert_eq!(
-        status, 200,
-        "fixture {data_source_id}: create expected 200, got {status} with body {body}"
+        status, 202,
+        "fixture {data_source_id}: create expected 202, got {status} with body {body}"
     );
     let source_arn = body["Arn"]
         .as_str()

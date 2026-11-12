@@ -180,11 +180,30 @@ impl Harness {
     /// The data source ARN a created source has, as the create response reported it.
     async fn data_source_fixture(&self, account: &str, id: &str, kind: &str) -> String {
         let (status, body) = self.create_data_source(account, id, "fixture source", kind).await;
-        assert_eq!(status, 200, "fixture {id}: create returned {status}: {body}");
+        assert_eq!(status, 202, "fixture {id}: create returned {status}: {body}");
         body["Arn"]
             .as_str()
             .unwrap_or_else(|| panic!("fixture {id}: create returned no Arn: {body}"))
             .to_string()
+    }
+
+    /// Bring the lifecycle transition the clock owes the data source `(account, id)`
+    /// forward, so a case can observe the terminal status without sleeping for the
+    /// span.
+    ///
+    /// `pub(crate)` because every suite that creates a data source needs it: the
+    /// create and the update both leave the resource in a non-terminal status.
+    pub(crate) fn settle_data_source(&self, account: &str, id: &str) {
+        let state = service_com_amazonaws_quicksight_quicksight_20180401::state::service_state(
+            &*self.engine,
+        )
+        .expect("the QuickSight store");
+        let mut store = state.lock();
+        let record = store
+            .data_sources
+            .get_mut(&(account.to_string(), id.to_string()))
+            .unwrap_or_else(|| panic!("case {id:?}: the created data source is not stored"));
+        record.status_settles_at = SystemTime::now() - Duration::from_millis(1);
     }
 }
 
@@ -237,8 +256,8 @@ async fn a_created_data_source_reads_back_for_every_kind_of_source() {
     for (id, name, kind) in DATA_SOURCE_CASES {
         let (status, body) = harness.create_data_source(ACCOUNT, id, name, kind).await;
         assert_eq!(
-            status, 200,
-            "case {id}: create expected 200, got {status} with body {body}"
+            status, 202,
+            "case {id}: create expected 202, got {status} with body {body}"
         );
         assert_eq!(
             body["Arn"],
@@ -252,8 +271,9 @@ async fn a_created_data_source_reads_back_for_every_kind_of_source() {
         );
         assert_eq!(
             body["CreationStatus"],
-            json!("CREATION_SUCCESSFUL"),
-            "case {id}: create expected CreationStatus CREATION_SUCCESSFUL, got {body}"
+            json!("CREATION_IN_PROGRESS"),
+            "case {id}: the create accepts the work, so it expected CreationStatus \
+             CREATION_IN_PROGRESS, got {body}"
         );
         // `Status` is `@httpResponseCode`-bound, so it IS the HTTP status asserted
         // above rather than a body member.
@@ -270,7 +290,26 @@ async fn a_created_data_source_reads_back_for_every_kind_of_source() {
         request_ids.push(request_id);
     }
 
+    // A caller reading the data source straight after the create still sees the
+    // non-terminal status the create reported: the transition is owed, not immediate.
+    for (id, _, _) in DATA_SOURCE_CASES {
+        let (status, body) = harness.describe_data_source(ACCOUNT, id).await;
+        assert_eq!(
+            status, 200,
+            "case {id}: describe expected 200, got {status} with body {body}"
+        );
+        assert_eq!(
+            body["DataSource"]["Status"],
+            json!("CREATION_IN_PROGRESS"),
+            "case {id}: before the span is over the data source is still being \
+             created: {body}"
+        );
+    }
+
     for (id, name, kind) in DATA_SOURCE_CASES {
+        // The terminal status is reached by the clock, materialised on read; bringing
+        // the due instant forward is how a case observes it without waiting.
+        harness.settle_data_source(ACCOUNT, id);
         let (status, body) = harness.describe_data_source(ACCOUNT, id).await;
         assert_eq!(
             status, 200,
@@ -509,7 +548,7 @@ async fn resources_are_invisible_under_another_account_id() {
         .create_data_source(OTHER_ACCOUNT, "ds-shared-id", "Theirs", "S3")
         .await;
     assert_eq!(
-        status, 200,
+        status, 202,
         "the same id under another account is a new resource, got {status} with {body}"
     );
     assert_eq!(
@@ -1112,8 +1151,8 @@ async fn a_create_is_refused_once_the_accounts_ceiling_is_reached() {
         .create_data_source(OTHER_ACCOUNT, "ds-elsewhere", "Fine", "ATHENA")
         .await;
     assert_eq!(
-        status, 200,
-        "case another account under the ceiling: expected 200, got {status} with {body}"
+        status, 202,
+        "case another account under the ceiling: expected 202, got {status} with {body}"
     );
 
     // Freeing a slot lets the create through again.
@@ -1123,8 +1162,8 @@ async fn a_create_is_refused_once_the_accounts_ceiling_is_reached() {
         .create_data_source(ACCOUNT, "ds-over", "Now there is room", "ATHENA")
         .await;
     assert_eq!(
-        status, 200,
-        "case a freed slot: expected 200, got {status} with {body}"
+        status, 202,
+        "case a freed slot: expected 202, got {status} with {body}"
     );
 }
 

@@ -74,8 +74,8 @@ async fn data_source_fixture(harness: &Harness, account: &str, data_set_id: &str
         )
         .await;
     assert_eq!(
-        status, 200,
-        "fixture data source: create expected 200, got {status} with {body}"
+        status, 202,
+        "fixture data source: create expected 202, got {status} with {body}"
     );
     body["Arn"]
         .as_str()

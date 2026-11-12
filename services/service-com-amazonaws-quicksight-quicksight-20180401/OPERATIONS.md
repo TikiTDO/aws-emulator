@@ -182,7 +182,7 @@ contents — read that shape in the model above when you need its own members.
 
 - **Route:** `POST /accounts/{AwsAccountId}/namespaces/{Namespace}/iam-policy-assignments -> 200`
 - **Input:** `AwsAccountId` (string, len 12..12, pattern ^[0-9]{12}$, @httpLabel, required), `AssignmentName` (string, len 1.., pattern ^(?=^.{2,256}$)(?!.*\s)[0-9a-zA-Z-_.:=+@]*$, required), `AssignmentStatus` (AssignmentStatus, one of: DISABLED | DRAFT | ENABLED, required), `PolicyArn` (string), `Identities` (map<string,list<string>>), `Namespace` (string, len 0..64, pattern ^[a-zA-Z0-9._-]*$, @httpLabel, required)
-- **Output:** `AssignmentName` (string, len 1.., pattern ^(?=^.{2,256}$)(?!.*\s)[0-9a-zA-Z-_.:=+@]*$), `AssignmentId` (string), `AssignmentStatus` (AssignmentStatus, one of: DISABLED | DRAFT | ENABLED), `PolicyArn` (string), `Identities` (map<string,list<string>>), `RequestId` (string), `Status` (integer, default 0, @httpResponseCode, required)
+- **Output:** `Arn` (string), `AssignmentName` (string, len 1.., pattern ^(?=^.{2,256}$)(?!.*\s)[0-9a-zA-Z-_.:=+@]*$), `AssignmentId` (string), `AssignmentStatus` (AssignmentStatus, one of: DISABLED | DRAFT | ENABLED), `PolicyArn` (string), `Identities` (map<string,list<string>>), `RequestId` (string), `Status` (integer, default 0, @httpResponseCode, required)
 - **Errors:** `AccessDeniedException (HTTP 401)`, `ConcurrentUpdatingException (HTTP 500)`, `InternalFailureException (HTTP 500)`, `InvalidParameterValueException (HTTP 400)`, `ResourceExistsException (HTTP 409)`, `ResourceNotFoundException (HTTP 404)`, `ThrottlingException (HTTP 429)`
 
 ## CreateIngestion

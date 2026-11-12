@@ -237,8 +237,8 @@ async fn a_group_name_already_in_use_is_refused_with_the_identity_already_exists
         } = row;
         let (status, body) = create_group(&harness, region, account, namespace, &group_name).await;
         assert_eq!(
-            status, 200,
-            "case {case:?}: the first create expected 200, got {status} with {body}"
+            status, 201,
+            "case {case:?}: the first create expected 201, got {status} with {body}"
         );
 
         let (status, body) = create_group(&harness, region, account, namespace, &group_name).await;
@@ -388,13 +388,13 @@ async fn every_data_source_operation_reports_a_source_it_cannot_find_by_its_arn(
     let harness = Harness::new();
     let held = "held-source";
     let (status, body) = create_data_source(&harness, WEST, ACCOUNT, held).await;
-    assert_eq!(status, 200, "fixture create: got {status} with {body}");
+    assert_eq!(status, 202, "fixture create: got {status} with {body}");
 
     // The recorded case generalised: a source that was created and then deleted is as
     // absent as one that never existed, so it is one row among the others.
     let deleted = "deleted-source";
     let (status, body) = create_data_source(&harness, WEST, ACCOUNT, deleted).await;
-    assert_eq!(status, 200, "fixture create: got {status} with {body}");
+    assert_eq!(status, 202, "fixture create: got {status} with {body}");
     let (status, body) = call_data_source(&harness, "DELETE", WEST, ACCOUNT, deleted).await;
     assert_eq!(status, 200, "fixture delete: got {status} with {body}");
 

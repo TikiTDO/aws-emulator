@@ -174,7 +174,7 @@ async fn delete_namespace_takes_the_namespace_and_its_groups() {
         for group_name in row.groups {
             let (status, body) = create_group(&harness, account, namespace, group_name).await;
             assert_eq!(
-                status, 200,
+                status, 201,
                 "case {case:?}: group {group_name:?} was not created: {status} with {body}"
             );
         }
@@ -330,7 +330,7 @@ async fn deleting_a_namespace_leaves_the_others_alone() {
             );
             let (status, body) = create_group(&harness, account, namespace, "analysts").await;
             assert_eq!(
-                status, 200,
+                status, 201,
                 "case {case:?}: the group in {namespace:?} was not created: {status} \
                  with {body}"
             );
@@ -425,7 +425,7 @@ async fn the_default_namespace_cannot_be_deleted() {
     // A group in the default namespace is untouched too.
     let (status, body) = create_group(&harness, ACCOUNT, "default", "analysts").await;
     assert_eq!(
-        status, 200,
+        status, 201,
         "the group in the default namespace was not created: {status} with {body}"
     );
     let (status, body) = delete_namespace(&harness, ACCOUNT, "default").await;

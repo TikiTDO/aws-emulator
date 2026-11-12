@@ -188,9 +188,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             resume_after.as_deref(),
             input.max_results,
         );
+        // Each listed data source reports the status the clock has already made due, as
+        // the describe path does: one instant for the whole page.
+        let now = std::time::SystemTime::now();
         let data_sources = page
             .into_iter()
-            .map(crate::state::DataSourceRecord::to_data_source)
+            .map(|record| record.to_data_source(now))
             .collect();
 
         Ok(ListDataSourcesOutput {

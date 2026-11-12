@@ -751,7 +751,16 @@ pub struct DataSourceRecord {
     pub data_source_id: String,
     pub name: String,
     pub r#type: String,
+    /// The `ResourceStatus` this data source carries until the transition the clock
+    /// owes it falls due: the non-terminal status the create or the update reported.
     pub status: String,
+    /// The `ResourceStatus` it reaches then — the terminal outcome of the create or
+    /// the update that last addressed it.
+    pub settled_status: String,
+    /// When the clock owes this data source its move from [`Self::status`] to
+    /// [`Self::settled_status`]. Stored rather than waited on: a reader materialises
+    /// the transition the clock has already made due.
+    pub status_settles_at: SystemTime,
     pub created_time: DateTime,
     pub last_updated_time: DateTime,
     pub data_source_parameters: Option<DataSourceParameters>,
@@ -763,14 +772,26 @@ pub struct DataSourceRecord {
 }
 
 impl DataSourceRecord {
-    /// The modelled `DataSource` structure this record describes.
-    pub fn to_data_source(&self) -> DataSource {
+    /// This data source's `ResourceStatus` as of `now`: the non-terminal status the
+    /// create or update reported until the transition the clock owes it falls due, the
+    /// terminal one from then on.
+    pub fn status_at(&self, now: SystemTime) -> &str {
+        if now >= self.status_settles_at {
+            &self.settled_status
+        } else {
+            &self.status
+        }
+    }
+
+    /// The modelled `DataSource` structure this record describes, as of `now` — the
+    /// instant that decides which side of the lifecycle transition its status is on.
+    pub fn to_data_source(&self, now: SystemTime) -> DataSource {
         DataSource {
             arn: Some(self.arn.clone()),
             data_source_id: Some(self.data_source_id.clone()),
             name: Some(self.name.clone()),
             r#type: Some(self.r#type.clone()),
-            status: Some(self.status.clone()),
+            status: Some(self.status_at(now).to_string()),
             created_time: Some(self.created_time),
             last_updated_time: Some(self.last_updated_time),
             data_source_parameters: self.data_source_parameters.clone(),
@@ -1026,10 +1047,20 @@ pub const RESOURCE_STATUS_CREATION_SUCCESSFUL: &str = "CREATION_SUCCESSFUL";
 /// [`THEME_CREATION_SPAN`] has elapsed.
 pub const RESOURCE_STATUS_CREATION_IN_PROGRESS: &str = "CREATION_IN_PROGRESS";
 
-/// `ResourceStatus` of a resource whose last update succeeded (same model enum).
-/// `UpdateDataSource` applies the update while serving the call, so the data source
-/// carries this terminal status from the instant the update is stored.
+/// `ResourceStatus` of a resource whose last update succeeded (same model enum). A
+/// data source reaches it once the asynchronous update the service accepted falls due.
 pub const RESOURCE_STATUS_UPDATE_SUCCESSFUL: &str = "UPDATE_SUCCESSFUL";
+
+/// `ResourceStatus` of a resource whose last update is still in flight (same model
+/// enum) — what `UpdateDataSource` reports for the update it accepted.
+pub const RESOURCE_STATUS_UPDATE_IN_PROGRESS: &str = "UPDATE_IN_PROGRESS";
+
+/// How long a data source stays in the non-terminal status its create or its update
+/// reported before the clock owes it the terminal one. Chosen (QuickSight publishes no
+/// duration): long enough that a caller reading the data source straight after the
+/// write still observes the non-terminal status that write reported, short enough to be
+/// over by the time anything polls.
+pub const DATA_SOURCE_LIFECYCLE_SPAN: Duration = Duration::from_secs(3);
 
 /// `ThemeType` of a theme a caller created, as opposed to one of the starting themes
 /// the service itself defines (`QUICKSIGHT`). Model enum
@@ -1458,6 +1489,19 @@ pub fn group_arn(
         region,
         aws_account_id,
         &format!("group/{namespace}/{group_name}"),
+    )
+}
+
+/// The ARN of an IAM policy assignment: `arn:aws:quicksight::<account>:assignment/<AssignmentName>`.
+///
+/// The region segment is EMPTY — unlike every other QuickSight resource, an assignment
+/// is addressed by its account and name alone, which is the form the service reports —
+/// so this one is built with no region rather than with the request's.
+pub fn iam_policy_assignment_arn(aws_account_id: &str, assignment_name: &str) -> String {
+    quicksight_arn(
+        "",
+        aws_account_id,
+        &format!("assignment/{assignment_name}"),
     )
 }
 

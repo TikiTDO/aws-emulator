@@ -161,7 +161,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     const NAME: &'static str = "CreateGroup";
     const INPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::CREATE_GROUP_INPUT_SCHEMA;
     const OUTPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::CREATE_GROUP_OUTPUT_SCHEMA;
-    const SUCCESS_STATUS: u16 = 200u16;
+    // The service reports a created group with the HTTP status its response's
+    // `@httpResponseCode`-bound `Status` member carries, which the handler sets below.
+    // This constant is only the fallback the framework uses when no such member does.
+    const SUCCESS_STATUS: u16 = 201u16;
 
     async fn handle(
         &self,
@@ -280,7 +283,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         Ok(CreateGroupOutput {
             group: Some(group),
             request_id: Some(request_id),
-            status: 200,
+            // `Status` is this response's `@httpResponseCode` member, so it IS the
+            // call's HTTP status: the group was created by this call.
+            status: 201,
         })
     }
 }

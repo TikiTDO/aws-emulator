@@ -10,11 +10,12 @@
 //! the stored resource's mutable configuration with exactly what the request carries —
 //! a member the request omits is cleared — refreshes `LastUpdatedTime`, leaves the
 //! resource's identity (ARN, id, `Type`, `CreatedTime`) and its permissions and tags
-//! alone, reports the terminal update status, and is refused as not found when the
-//! account holds no data source with that id. So the rows below vary what the rule
-//! generalises over — which optional members the create carried and which the update
-//! carries (replaced, added, cleared), the source kind, the name's length at both
-//! modelled bounds, and the account — rather than re-running one call.
+//! alone, is accepted as asynchronous work (HTTP 202 and the in-progress update status,
+//! with the terminal one reached by the clock and reported by a later read), and is
+//! refused as not found when the account holds no data source with that id. So the rows
+//! below vary what the rule generalises over — which optional members the create carried
+//! and which the update carries (replaced, added, cleared), the source kind, the name's
+//! length at both modelled bounds, and the account — rather than re-running one call.
 
 use serde_json::{json, Value};
 
@@ -33,8 +34,10 @@ const SECRET_PASSWORD: &str = "pw-never-echoed-17";
 /// The `ResourceStatus` member a succeeded update leaves behind (model enum
 /// `com.amazonaws.quicksight#ResourceStatus`).
 const UPDATE_SUCCESSFUL: &str = "UPDATE_SUCCESSFUL";
-/// The `ResourceStatus` a create leaves behind — what the status must no longer be
-/// once an update has been applied.
+/// The `ResourceStatus` an accepted update reports until the clock settles it.
+const UPDATE_IN_PROGRESS: &str = "UPDATE_IN_PROGRESS";
+/// The `ResourceStatus` a settled create leaves behind — what the status must no longer
+/// be once an update has been applied.
 const CREATION_SUCCESSFUL: &str = "CREATION_SUCCESSFUL";
 
 fn data_source_arn(account: &str, data_source_id: &str) -> String {
@@ -236,9 +239,10 @@ async fn an_update_replaces_the_stored_configuration_and_reads_back() {
 
         let (status, body) = create_data_source(&harness, account, create.clone()).await;
         assert_eq!(
-            status, 200,
-            "case {label:?}: create expected 200, got {status} with {body}"
+            status, 202,
+            "case {label:?}: create expected 202, got {status} with {body}"
         );
+        harness.settle_data_source(account, id);
         let (_, before) = describe_data_source(&harness, account, id).await;
         let created_time = before["DataSource"]["CreatedTime"].clone();
         assert_eq!(
@@ -249,13 +253,14 @@ async fn an_update_replaces_the_stored_configuration_and_reads_back() {
 
         let (status, body) = update_data_source(&harness, account, id, update.clone()).await;
         assert_eq!(
-            status, 200,
-            "case {label:?}: update expected 200, got {status} with {body}"
+            status, 202,
+            "case {label:?}: update expected 202, got {status} with {body}"
         );
         assert_eq!(
             body["UpdateStatus"],
-            json!(UPDATE_SUCCESSFUL),
-            "case {label:?}: expected UpdateStatus {UPDATE_SUCCESSFUL}, got {body}"
+            json!(UPDATE_IN_PROGRESS),
+            "case {label:?}: the update is accepted, so it expected UpdateStatus \
+             {UPDATE_IN_PROGRESS}, got {body}"
         );
         assert_eq!(
             body["Arn"],
@@ -279,6 +284,17 @@ async fn an_update_replaces_the_stored_configuration_and_reads_back() {
             "case {label:?}: Status is bound to the HTTP status, so it is not a body member: {body}"
         );
         let update_response = body.to_string();
+
+        // The update is still in flight until the clock owes its completion, so a read
+        // taken straight away reports the non-terminal status the update reported.
+        let (_, in_flight) = describe_data_source(&harness, account, id).await;
+        assert_eq!(
+            in_flight["DataSource"]["Status"],
+            json!(UPDATE_IN_PROGRESS),
+            "case {label:?}: before the span is over the update is still in \
+             progress: {in_flight}"
+        );
+        harness.settle_data_source(account, id);
 
         let (status, body) = describe_data_source(&harness, account, id).await;
         assert_eq!(
@@ -370,7 +386,7 @@ async fn an_update_keeps_the_permissions_and_tags_the_create_stored() {
         }),
     )
     .await;
-    assert_eq!(status, 200, "fixture create: got {status} with {body}");
+    assert_eq!(status, 202, "fixture create: got {status} with {body}");
 
     let (status, body) = update_data_source(
         &harness,
@@ -379,7 +395,7 @@ async fn an_update_keeps_the_permissions_and_tags_the_create_stored() {
         json!({ "Name": "tagged-renamed" }),
     )
     .await;
-    assert_eq!(status, 200, "update: got {status} with {body}");
+    assert_eq!(status, 202, "update: got {status} with {body}");
 
     let state = qs_state::service_state(&*harness.engine).expect("the QuickSight store");
     let store = state.lock();
@@ -417,7 +433,8 @@ async fn an_update_of_a_data_source_the_account_does_not_hold_is_not_found() {
         json!({ "DataSourceId": "ds-present", "Name": "present", "Type": "ATHENA" }),
     )
     .await;
-    assert_eq!(status, 200, "fixture create: got {status} with {body}");
+    assert_eq!(status, 202, "fixture create: got {status} with {body}");
+    harness.settle_data_source(ACCOUNT, "ds-present");
     let (status, body) = harness
         .call("DELETE", &format!("/accounts/{ACCOUNT}/data-sources/ds-gone"), None)
         .await;
@@ -475,14 +492,14 @@ async fn a_name_outside_the_models_length_is_refused_and_changes_nothing() {
         json!({ "DataSourceId": "ds-name-bounds", "Name": "original", "Type": "ATHENA" }),
     )
     .await;
-    assert_eq!(status, 200, "fixture create: got {status} with {body}");
+    assert_eq!(status, 202, "fixture create: got {status} with {body}");
 
     // Rows: the model constrains `Name` to 1..128, so both published bounds are
     // accepted and the first length past each is refused — as is a missing required
     // member.
     let cases: [(&str, Value, u16); 5] = [
-        ("length 1", json!({ "Name": "a" }), 200),
-        ("length 128", json!({ "Name": "b".repeat(128) }), 200),
+        ("length 1", json!({ "Name": "a" }), 202),
+        ("length 128", json!({ "Name": "b".repeat(128) }), 202),
         ("length 129", json!({ "Name": "c".repeat(129) }), 400),
         ("length 0", json!({ "Name": "" }), 400),
         ("no Name at all", json!({}), 400),
@@ -496,7 +513,7 @@ async fn a_name_outside_the_models_length_is_refused_and_changes_nothing() {
             status, expected_status,
             "case {label:?}: expected {expected_status}, got {status} with {response}"
         );
-        if status == 200 {
+        if status == 202 {
             last_accepted = submitted;
         } else {
             assert_eq!(

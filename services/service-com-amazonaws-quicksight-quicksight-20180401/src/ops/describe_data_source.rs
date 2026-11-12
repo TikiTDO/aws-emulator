@@ -175,7 +175,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         Ok(DescribeDataSourceOutput {
-            data_source: Some(record.to_data_source()),
+            // The status reported is the one the clock has already made due, computed
+            // from the stored due instant rather than written back to the record.
+            data_source: Some(record.to_data_source(std::time::SystemTime::now())),
             request_id: Some(request_id),
             status: 200,
         })

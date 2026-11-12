@@ -75,6 +75,7 @@
 //!
 //! ## Output
 //!
+//! * `Arn` (Arn) — The Amazon Resource Name (ARN) of the assignment.
 //! * `AssignmentId` (String) — The ID for the assignment.
 //! * `AssignmentName` (IAMPolicyAssignmentName, len 1.., pattern
 //!   ^(?=^.{2,256}$)(?!.*\s)[0-9a-zA-Z-_.:=+@]*$) — The name of the assignment. The name must
@@ -178,7 +179,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     const NAME: &'static str = "CreateIAMPolicyAssignment";
     const INPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::CREATE_IAM_POLICY_ASSIGNMENT_INPUT_SCHEMA;
     const OUTPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::CREATE_IAM_POLICY_ASSIGNMENT_OUTPUT_SCHEMA;
-    const SUCCESS_STATUS: u16 = 200u16;
+    // The service reports a created assignment with the HTTP status its response's
+    // `@httpResponseCode`-bound `Status` member carries, which the handler sets below.
+    // This constant is only the fallback the framework uses when no such member does.
+    const SUCCESS_STATUS: u16 = 201u16;
 
     async fn handle(
         &self,
@@ -275,13 +279,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The response reports the record that was stored, so what a caller is told it
         // created is what a later read of the store answers with.
         let response = CreateIAMPolicyAssignmentOutput {
+            // The assignment's own ARN, derived from the account that owns it and the
+            // name that identifies it there.
+            arn: Some(crate::state::iam_policy_assignment_arn(
+                &record.aws_account_id,
+                &record.assignment_name,
+            )),
             assignment_name: Some(record.assignment_name.clone()),
             assignment_id: Some(record.assignment_id.clone()),
             assignment_status: Some(record.assignment_status.clone()),
             policy_arn: record.policy_arn.clone(),
             identities: record.identities.clone(),
             request_id: Some(request_id),
-            status: 200,
+            // `Status` is this response's `@httpResponseCode` member, so it IS the
+            // call's HTTP status: the assignment was created by this call.
+            status: 201,
         };
         store.iam_policy_assignments.insert(key, record);
 
