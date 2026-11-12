@@ -85,6 +85,8 @@ mod email_address_insights;
 mod email_identity_certificates;
 #[path = "all/email_identity_configuration_set_association.rs"]
 mod email_identity_configuration_set_association;
+#[path = "all/email_identity_cursor_refusal_wording.rs"]
+mod email_identity_cursor_refusal_wording;
 #[path = "all/email_identity_dkim_attributes.rs"]
 mod email_identity_dkim_attributes;
 #[path = "all/email_identity_dkim_inheritance.rs"]
@@ -121,6 +123,8 @@ mod export_job_reads;
 mod export_jobs;
 #[path = "all/import_jobs.rs"]
 mod import_jobs;
+#[path = "all/json_wire.rs"]
+mod json_wire;
 #[path = "all/list_tenants.rs"]
 mod list_tenants;
 #[path = "all/message_insights.rs"]

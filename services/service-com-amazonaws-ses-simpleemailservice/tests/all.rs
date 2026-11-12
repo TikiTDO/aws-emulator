@@ -57,6 +57,8 @@ mod ses_custom_verification_template_sender_gate;
 mod ses_delete_configuration_set_event_destination;
 #[path = "all/ses_delete_receipt_rule.rs"]
 mod ses_delete_receipt_rule;
+#[path = "all/ses_event_destination_sns_topic_existence.rs"]
+mod ses_event_destination_sns_topic_existence;
 #[path = "all/ses_identity_dkim.rs"]
 mod ses_identity_dkim;
 #[path = "all/ses_identity_domain_case.rs"]

@@ -366,18 +366,9 @@ async fn the_neighbouring_routes_in_the_same_space_still_answer() {
     );
 }
 
-/// `value` percent-encoded for a query string, the way an SDK sends it: every
-/// character outside the unreserved set escaped, so a token carrying base64 padding
-/// or `+` arrives as it was minted.
+/// `value` percent-encoded for a query string, the way an SDK sends it — the crate's one
+/// encoder ([`crate::json_wire::query_component`]), so a token carrying base64 padding or
+/// `+` arrives as it was minted.
 fn encoded(value: &str) -> String {
-    value
-        .bytes()
-        .map(|byte| {
-            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-                (byte as char).to_string()
-            } else {
-                format!("%{byte:02X}")
-            }
-        })
-        .collect()
+    crate::json_wire::query_component(value)
 }

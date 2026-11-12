@@ -293,8 +293,7 @@ async fn function_refusal(
 /// Why Amazon SES could not publish to the topic `topic_arn` names for the rule `rule_arn`,
 /// and `None` when it could — or when nothing establishes otherwise.
 ///
-/// The topic has to BE there, which is Amazon SNS's own answer (`GetTopicAttributes`, whose
-/// `NotFound` and `InvalidParameter` are the two it states about a topic it cannot show), and a
+/// The topic has to BE there, which is Amazon SNS's own answer ([`topic_answer`]), and a
 /// topic of ANOTHER account has to grant the service principal the publish: "to enable Amazon
 /// SES to … publish to an Amazon SNS topic of another account, Amazon SES must have permission
 /// to access those resources" (`S3Action`), so a topic of the account the rule belongs to
@@ -308,13 +307,65 @@ async fn topic_refusal(
     topic_arn: &str,
     rule_arn: &str,
 ) -> Option<String> {
+    let attributes = match topic_answer(ctx, region, topic_arn, RECEIPT_RULE_TOPIC).await {
+        // Amazon SNS stated it holds no topic the value names: there is nowhere to publish
+        // the notification to.
+        TopicAnswer::NoSuchTopic => return Some(could_not_publish_message(topic_arn)),
+        TopicAnswer::Unanswered => return None,
+        TopicAnswer::Held(attributes) => attributes,
+    };
+    if owned_by_this_account(topic_arn) {
+        return None;
+    }
+    let policy = attributes
+        .get(TOPIC_POLICY_ATTRIBUTE)
+        .cloned()
+        .unwrap_or_default();
+    let principals = [SES_SERVICE_PRINCIPAL.to_string()];
+    let context = rule_scoped_context(rule_arn);
+    let request = iam::Request::new(PUBLISH_ACTION, topic_arn, &principals)
+        .with_context(&context)
+        .with_published_keys(&[SOURCE_ACCOUNT_KEY, SOURCE_ARN_KEY]);
+    withholds(&policy, &request).then(|| could_not_publish_message(topic_arn))
+}
+
+/// What a topic a receipt rule's action notifies is called in a log line.
+const RECEIPT_RULE_TOPIC: &str = "the receipt rule's Amazon SNS topic";
+
+/// What Amazon SNS said about the topic an ARN names — the ONE reading of that answer, so
+/// every pre-flight of this service agrees on which answers establish what.
+#[derive(Debug, Clone)]
+pub(crate) enum TopicAnswer {
+    /// Amazon SNS holds the topic, and reported these attributes
+    /// (`GetTopicAttributes`: "a map of the topic's attributes").
+    Held(::std::collections::HashMap<String, String>),
+    /// Amazon SNS STATED it holds no topic the value names.
+    NoSuchTopic,
+    /// Amazon SNS did not state the topic's facts at all: an emulator with no Amazon SNS
+    /// mounted beside this service, a transport that carried nothing, any failure to ask.
+    /// Evidence of nothing, so nothing may be refused for it.
+    Unanswered,
+}
+
+/// Ask Amazon SNS about the topic `topic_arn`, in `region`, for the destination `named`.
+///
+/// `GetTopicAttributes` states two faults about a topic it cannot show — the topic is not
+/// there (`NotFoundException`) and the value names no topic it could show
+/// (`InvalidParameterException`) — and under either the account holds no such topic. Any
+/// other failure says nothing about the topic ([`TopicAnswer::Unanswered`]).
+pub(crate) async fn topic_answer(
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    topic_arn: &str,
+    named: &str,
+) -> TopicAnswer {
     let answered = sns_client(ctx, region)
         .get_topic_attributes()
         .topic_arn(topic_arn)
         .send()
         .await;
-    let attributes = match answered {
-        Ok(attributes) => attributes,
+    match answered {
+        Ok(answer) => TopicAnswer::Held(answer.attributes().cloned().unwrap_or_default()),
         Err(failure) => {
             let stated = matches!(
                 failure.as_service_error(),
@@ -325,29 +376,14 @@ async fn topic_refusal(
                             GetTopicAttributesError::InvalidParameterException(_)
                 )
             );
-            if !stated {
-                unanswered("the receipt rule's Amazon SNS topic", topic_arn, &failure);
-                return None;
+            if stated {
+                TopicAnswer::NoSuchTopic
+            } else {
+                unanswered(named, topic_arn, &failure);
+                TopicAnswer::Unanswered
             }
-            // Amazon SNS stated it holds no topic the value names: there is nowhere to
-            // publish the notification to.
-            return Some(could_not_publish_message(topic_arn));
         }
-    };
-    if owned_by_this_account(topic_arn) {
-        return None;
     }
-    let policy = attributes
-        .attributes()
-        .and_then(|held| held.get(TOPIC_POLICY_ATTRIBUTE))
-        .cloned()
-        .unwrap_or_default();
-    let principals = [SES_SERVICE_PRINCIPAL.to_string()];
-    let context = rule_scoped_context(rule_arn);
-    let request = iam::Request::new(PUBLISH_ACTION, topic_arn, &principals)
-        .with_context(&context)
-        .with_published_keys(&[SOURCE_ACCOUNT_KEY, SOURCE_ARN_KEY]);
-    withholds(&policy, &request).then(|| could_not_publish_message(topic_arn))
 }
 
 /// Whether `arn` names a resource of the account this emulator serves, which is the account a
@@ -363,6 +399,9 @@ fn owned_by_this_account(arn: &str) -> bool {
 /// service to ask is one where this half of the pre-flight does not run; the caller's own
 /// value is rendered in its escaped `Debug` form, so an identifier carrying a newline cannot
 /// forge a log line.
+///
+/// At `warn` for a destination of a receipt rule and shared with the event-destination
+/// pre-flight ([`super::event_destination_targets`]), which names its own subject.
 fn unanswered<E, R>(
     destination: &str,
     named: &str,
@@ -375,7 +414,7 @@ fn unanswered<E, R>(
         destination,
         named = ?named,
         error = %::aws_smithy_types::error::display::DisplayErrorContext(failure),
-        "the receipt rule's destination could not be read, so it is not judged"
+        "the destination could not be read, so it is not judged"
     );
 }
 

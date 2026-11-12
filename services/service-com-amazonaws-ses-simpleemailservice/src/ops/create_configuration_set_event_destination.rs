@@ -183,23 +183,39 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 "CreateConfigurationSetEventDestination",
             ));
         };
+        // The set the request IDENTIFIES is resolved next, before any question is
+        // put to another service about what the destination describes: a set this
+        // account does not hold is reported as the set not being there, not as a
+        // fault of the destination it would have carried.
+        if !state
+            .lock()
+            .configuration_sets
+            .contains_key(&configuration_set_name)
+        {
+            return Err(missing_configuration_set(&configuration_set_name));
+        }
+
+        // The destination's TARGET then has to be there: the topic an `SNSDestination`
+        // names is Amazon SNS's resource, so it is resolved against Amazon SNS before
+        // anything is stored, and a destination naming a topic Amazon SNS holds nothing
+        // under is refused instead of being attached to a target no event could ever
+        // reach. Asked with no lock held, because the answer is another service's.
+        if let Some(fault) = crate::state::event_destination_targets::unreachable_event_destination(
+            ctx,
+            &region,
+            &destination,
+        )
+        .await
+        {
+            return Err(refusal(fault, &configuration_set_name, &destination_name));
+        }
+
         let mut state = state.lock();
+        // Read again under the lock the write is made under: the set resolved above
+        // was resolved before the question went out, and the store is shared.
         let Some(configuration_set) = state.configuration_sets.get_mut(&configuration_set_name)
         else {
-            // "Indicates that the configuration set does not exist", in the
-            // wording every operation of this service uses for a set that is not
-            // there.
-            return Err(
-                CreateConfigurationSetEventDestinationErrorModeled::ConfigurationSetDoesNotExistException(
-                    ConfigurationSetDoesNotExistException {
-                        configuration_set_name: Some(configuration_set_name.clone()),
-                        message: Some(format!(
-                            "Configuration set <{configuration_set_name}> does not exist."
-                        )),
-                    },
-                )
-                .into(),
-            );
+            return Err(missing_configuration_set(&configuration_set_name));
         };
         // The name is the destination's key within the set: "the event
         // destination could not be created because of a naming conflict", so the
@@ -243,6 +259,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `DescribeConfigurationSet` reports as `EventDestinations`.
         Ok(CreateConfigurationSetEventDestinationOutput {})
     }
+}
+
+/// "Indicates that the configuration set does not exist", in the wording every
+/// operation of this service uses for a set that is not there.
+fn missing_configuration_set(
+    configuration_set_name: &str,
+) -> CreateConfigurationSetEventDestinationError {
+    CreateConfigurationSetEventDestinationErrorModeled::ConfigurationSetDoesNotExistException(
+        ConfigurationSetDoesNotExistException {
+            configuration_set_name: Some(configuration_set_name.to_string()),
+            message: Some(format!(
+                "Configuration set <{configuration_set_name}> does not exist."
+            )),
+        },
+    )
+    .into()
 }
 
 /// The refusal one of [`crate::state::check_event_destination`]'s faults is

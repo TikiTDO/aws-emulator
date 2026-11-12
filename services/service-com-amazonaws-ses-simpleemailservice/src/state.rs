@@ -47,6 +47,11 @@
 /// stores rather than decided here.
 pub mod receipt_destinations;
 
+/// Whether the resource an event destination publishes to EXISTS — the ONE pre-flight every
+/// operation that stores an event destination runs, asked of the service that owns that
+/// resource rather than decided here.
+pub mod event_destination_targets;
+
 /// Whether Amazon SES may really write a received message into the Amazon S3 destination an
 /// `S3Action` names — the bucket's own policy and the KMS key's — which is read against those
 /// services' own stores rather than decided here.

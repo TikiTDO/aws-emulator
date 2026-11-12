@@ -18609,6 +18609,7 @@ dependencies = [
  "hex",
  "http",
  "mailparse",
+ "percent-encoding",
  "serde_json",
  "service-com-amazonaws-sns-amazonsimplenotificationservice",
  "service-common",

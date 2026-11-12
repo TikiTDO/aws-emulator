@@ -71,6 +71,53 @@ pub fn emulator_and_engine() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>
     (emulator_over(Arc::clone(&engine)), engine)
 }
 
+/// A router holding this service beside Amazon SNS — the service that OWNS every topic a
+/// destination of this service names — over ONE shared engine, plus that engine, for a suite
+/// that mounts a further peer service on it.
+///
+/// Amazon SNS is mounted exactly as the assembled router mounts it, so what a destination
+/// pre-flight resolves is the topic Amazon SNS itself holds. Here rather than in one suite
+/// because every suite about a destination this service resolves against Amazon SNS needs the
+/// same two services on one engine.
+pub fn emulator_with_sns_and_engine() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
+    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+    let mut router = MultiServiceRouter::new();
+    // Verifying signatures is the emulator's concern, not this service's; the awsQuery calls
+    // these suites make sign nothing, so the check is off and the scope header is read for
+    // routing only.
+    router.set_request_authentication(false);
+    router.register_service(EmulatedService::new(Arc::clone(&engine)));
+    router.register_service(
+        service_com_amazonaws_sns_amazonsimplenotificationservice::EmulatedService::new(
+            Arc::clone(&engine),
+        ),
+    );
+    (router, engine)
+}
+
+/// The same router, for a suite that needs no further service on that engine.
+pub fn emulator_with_sns() -> MultiServiceRouter {
+    emulator_with_sns_and_engine().0
+}
+
+/// An Amazon SNS client over `router`'s own in-process callback, so every topic a suite makes
+/// is made through Amazon SNS's own operations and nothing leaves this process.
+pub fn sns(router: &MultiServiceRouter) -> aws_sdk_sns::Client {
+    let callback = smithy_server_runtime::EmbeddedEmulator::from_router(router.clone());
+    let config = aws_sdk_sns::Config::builder()
+        .behavior_version(aws_sdk_sns::config::BehaviorVersion::latest())
+        .region(aws_sdk_sns::config::Region::new(REGION))
+        .endpoint_url(format!("https://sns.{REGION}.amazonaws.com"))
+        .credentials_provider(callback.aws_credentials_provider())
+        .http_client(callback.http_client())
+        .retry_config(aws_sdk_sns::config::retry::RetryConfig::disabled())
+        .timeout_config(aws_sdk_sns::config::timeout::TimeoutConfig::disabled())
+        .identity_cache(aws_sdk_sns::config::IdentityCache::no_cache())
+        .stalled_stream_protection(aws_sdk_sns::config::StalledStreamProtectionConfig::disabled())
+        .build();
+    aws_sdk_sns::Client::from_conf(config)
+}
+
 /// The store as it stands once the clock has carried every requested
 /// verification through to `Success`.
 ///

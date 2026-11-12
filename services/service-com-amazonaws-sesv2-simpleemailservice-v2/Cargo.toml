@@ -51,6 +51,10 @@ hex = { workspace = true }
 # authorization suite, because the topic an event destination names is created and given
 # its access policy through the SNS API the handler reads it through.
 service-com-amazonaws-sns-amazonsimplenotificationservice = { workspace = true }
+# `percent-encoding`: the ONE encoder of a query-string component in this crate's suites —
+# a page cursor a listing refuses is sent on the query string exactly as a client sends it,
+# including its `+`, `/`, `=` and `!`.
+percent-encoding = "2.3"
 
 [lints]
 workspace = true

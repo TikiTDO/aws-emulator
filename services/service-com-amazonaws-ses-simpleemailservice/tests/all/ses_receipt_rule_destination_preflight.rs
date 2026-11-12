@@ -23,7 +23,10 @@
 //! destination exists, and what its policy says (nothing, a grant to this principal, a grant
 //! scoped to another receipt rule, a grant to another principal).
 
-use crate::harness::{call, element, error_envelope, field, Field, REGION};
+// `sns` and the Amazon SNS-mounted router come from the shared harness: every suite about a
+// destination this service resolves against Amazon SNS needs the same two services on one
+// engine and the same in-process client.
+use crate::harness::{call, element, error_envelope, field, sns, Field, REGION};
 use smithy_server_runtime::MultiServiceRouter;
 use std::sync::Arc;
 
@@ -47,24 +50,12 @@ fn account() -> String {
 }
 
 /// A router carrying this service plus the two services the action pre-flight resolves its
-/// destinations against — Lambda (the function and its resource policy) and Amazon SNS (the
-/// topic and its access policy) — all over ONE shared engine.
+/// destinations against — Amazon SNS (the topic and its access policy), mounted by the shared
+/// harness, and Lambda (the function and its resource policy) — all over ONE shared engine.
 fn emulator() -> MultiServiceRouter {
-    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
-    let mut router = MultiServiceRouter::new();
-    // Verifying signatures is the emulator's concern, not this service's; the awsQuery calls
-    // below sign nothing, so the check is off and the scope header is read for routing only.
-    router.set_request_authentication(false);
-    router.register_service(
-        service_com_amazonaws_ses_simpleemailservice::EmulatedService::new(Arc::clone(&engine)),
-    );
+    let (mut router, engine) = crate::harness::emulator_with_sns_and_engine();
     router.register_service(
         service_com_amazonaws_lambda_awsgirapiservice::EmulatedService::new(Arc::clone(&engine)),
-    );
-    router.register_service(
-        service_com_amazonaws_sns_amazonsimplenotificationservice::EmulatedService::new(
-            Arc::clone(&engine),
-        ),
     );
     router
 }
@@ -88,22 +79,6 @@ fn lambda(router: &MultiServiceRouter) -> aws_sdk_lambda::Client {
     aws_sdk_lambda::Client::from_conf(config)
 }
 
-/// An Amazon SNS client over the same callback.
-fn sns(router: &MultiServiceRouter) -> aws_sdk_sns::Client {
-    let callback = smithy_server_runtime::EmbeddedEmulator::from_router(router.clone());
-    let config = aws_sdk_sns::Config::builder()
-        .behavior_version(aws_sdk_sns::config::BehaviorVersion::latest())
-        .region(aws_sdk_sns::config::Region::new(REGION))
-        .endpoint_url(format!("https://sns.{REGION}.amazonaws.com"))
-        .credentials_provider(callback.aws_credentials_provider())
-        .http_client(callback.http_client())
-        .retry_config(aws_sdk_sns::config::retry::RetryConfig::disabled())
-        .timeout_config(aws_sdk_sns::config::timeout::TimeoutConfig::disabled())
-        .identity_cache(aws_sdk_sns::config::IdentityCache::no_cache())
-        .stalled_stream_protection(aws_sdk_sns::config::StalledStreamProtectionConfig::disabled())
-        .build();
-    aws_sdk_sns::Client::from_conf(config)
-}
 
 /// The ARN of the receipt rule `rule_name` of [`RULE_SET`], which is the value a grant written
 /// for one receipt rule scopes itself to (`aws:SourceArn`).

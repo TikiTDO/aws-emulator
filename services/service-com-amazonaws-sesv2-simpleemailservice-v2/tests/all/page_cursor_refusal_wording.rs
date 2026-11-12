@@ -3,10 +3,14 @@
 //! How this service WORDS the refusal of a page cursor it never issued, over HTTP.
 //!
 //! THE RULE: a `NextToken` that is not a position in the listing being read is refused
-//! with HTTP 400, the input error that listing models, and AWS's one fixed sentence for
-//! the bad-cursor class — `"Invalid next token."` — which carries no part of the request
-//! and in particular never echoes the rejected token. One sentence for every listing of
-//! this service and for every form a bad cursor can take, because it is one condition.
+//! with HTTP 400, the input error that listing models, and AWS's own sentence for that
+//! listing's bad-cursor condition. For the listings this table drives that sentence is
+//! `"Invalid next token."` — wholly fixed text, carrying no part of the request and in
+//! particular never echoing the rejected token — one sentence for all of them and for
+//! every form a bad cursor can take. A listing AWS words differently pins its own
+//! sentence beside its own operation (`ListEmailIdentities` echoes the token it rejected:
+//! `tests/all/email_identity_cursor_refusal_wording.rs`), so nothing here is a claim
+//! about a listing this table does not drive.
 //!
 //! The table spans what the rule generalises over:
 //!
@@ -19,109 +23,20 @@
 //!   resource name, and the empty string.
 //!
 //! Every row is answered over the real wire path (`MultiServiceRouter::dispatch` with
-//! this service registered), and each listing's positive control — the same call with no
+//! this service registered, through the crate's shared JSON wire harness
+//! [`crate::json_wire`]), and each listing's positive control — the same call with no
 //! cursor at all — is asserted beside the refusals, so a listing that refused everything
 //! could not pass.
 
-use std::sync::Arc;
-
-use serde_json::{json, Value};
+use serde_json::json;
 use service_com_amazonaws_sesv2_simpleemailservice_v2::state::{
     encode_tagged_page_token, CONTACT_LISTS_PAGE_TOKEN_TAG,
 };
-use service_com_amazonaws_sesv2_simpleemailservice_v2::EmulatedService;
-use smithy_server_runtime::MultiServiceRouter;
 
-/// The Region every call in this suite is signed for.
-const HOME: &str = "us-east-1";
+use crate::json_wire::{query_component, Ses};
 
-/// AWS's fixed sentence for a cursor this service never issued.
+/// AWS's fixed sentence for a cursor the listings below never issued.
 const INVALID_NEXT_TOKEN: &str = "Invalid next token.";
-
-/// One answered request.
-struct Reply {
-    status: u16,
-    error_type: Option<String>,
-    body: Value,
-}
-
-impl Reply {
-    /// The modelled error code the response names, or an empty string on success.
-    fn error_code(&self) -> String {
-        let raw = self
-            .error_type
-            .as_deref()
-            .or_else(|| self.body.get("__type").and_then(Value::as_str))
-            .unwrap_or_default();
-        let name = raw.split('#').next_back().unwrap_or(raw);
-        name.split(':').next().unwrap_or(name).to_string()
-    }
-
-    /// The `message` member of the error body, or an empty string when there is none.
-    fn message(&self) -> String {
-        self.body
-            .get("message")
-            .or_else(|| self.body.get("Message"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string()
-    }
-}
-
-/// The emulated service behind its router.
-struct Ses {
-    router: MultiServiceRouter,
-}
-
-impl Ses {
-    fn new() -> Self {
-        let engine = Arc::new(engine::InMemoryEngine::new());
-        let mut router = MultiServiceRouter::new();
-        // These cases exercise handler behaviour, not SigV4.
-        router.set_request_authentication(false);
-        router.register_service(EmulatedService::new(engine));
-        Self { router }
-    }
-
-    async fn call(&self, method: &str, path: &str, body: Option<Value>) -> Reply {
-        let payload = match &body {
-            Some(value) => bytes::Bytes::from(serde_json::to_vec(value).expect("serialize body")),
-            None => bytes::Bytes::new(),
-        };
-        let request = http::Request::builder()
-            .method(method)
-            .uri(format!("https://email.{HOME}.amazonaws.com{path}"))
-            .header("host", format!("email.{HOME}.amazonaws.com"))
-            .header("content-type", "application/json")
-            .header(
-                "authorization",
-                format!(
-                    "AWS4-HMAC-SHA256 Credential=AKIAEMULATOR0000000/20260101/{HOME}/ses/\
-                     aws4_request, SignedHeaders=host, Signature=00"
-                ),
-            )
-            .body(payload)
-            .expect("build request");
-        let response = self.router.dispatch(request).await;
-        let status = response.status().as_u16();
-        let error_type = response
-            .headers()
-            .get("x-amzn-errortype")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        let bytes = response.into_body();
-        let body = if bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
-        };
-        Reply {
-            status,
-            error_type,
-            body,
-        }
-    }
-}
 
 /// Where a listing carries its `NextToken`: the two wire forms this service's listings
 /// take.
@@ -266,18 +181,4 @@ async fn a_cursor_this_service_never_issued_is_refused_with_aws_sentence() {
             );
         }
     }
-}
-
-/// Percent-encode one query-string component, leaving only RFC 3986's unreserved set, so
-/// a forged cursor's `+`, `/`, `=` and `!` reach the handler as sent.
-fn query_component(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    encoded
 }

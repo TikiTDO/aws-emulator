@@ -180,12 +180,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let filters = page_filters(input.filter)?;
 
         // The token is this operation's own: it names the last identity the previous
-        // page returned, so the next page resumes strictly after it.
+        // page returned, so the next page resumes strictly after it. A value this
+        // listing never issued is no position in it, and is refused in this listing's
+        // own words ([`invalid_next_token_message`]).
         let resume_after = match input.next_token.as_deref() {
             None => None,
-            Some(token) => Some(crate::state::decode_page_token(token).ok_or_else(|| {
-                bad_request("NextToken is not a token returned by ListEmailIdentities.")
-            })?),
+            Some(token) => Some(
+                crate::state::decode_page_token(token)
+                    .ok_or_else(|| bad_request(invalid_next_token_message(token)))?,
+            ),
         };
 
         let mut store = state.lock();
@@ -231,6 +234,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             next_token,
         })
     }
+}
+
+/// How this listing words the refusal of a `NextToken` it never issued: the rejected token,
+/// in angle brackets, called invalid.
+///
+/// Everything around the token is FIXED text and the ONE variable part is the `NextToken` the
+/// request carried, whatever it is — so the sentence hands the caller back the cursor it
+/// sent, which is the one value it has to look for in its own logs. The wording belongs to
+/// the listing that refuses the cursor: this service's other listings state the same
+/// condition in the words AWS words THEM with
+/// (`crate::state::invalid_next_token`), so the two are deliberately not one string.
+fn invalid_next_token_message(token: &str) -> String {
+    format!("Invalid NextToken <{token}>.")
 }
 
 /// Refuse the request with this service's input error.
