@@ -14,16 +14,16 @@
 //!    one the caller reads back from STS for the credentials it signed with. Resolving it
 //!    materialises the session expiries the clock has already made due, a write owed at
 //!    that instant whether or not anybody called.
-//! 2. **what the TABLE's own document says** — [`super::AttachedPolicy`], the document
-//!    `PutResourcePolicy` parsed and this store holds, evaluated by the matcher that lives
-//!    with it: a `Deny` about the request refuses it whatever any grant says, and an
-//!    `Allow` that names the caller itself grants it.
+//! 2. **what the TABLE's own document says** — the revision of [`super::AttachedPolicy`]
+//!    in force at the instant of the call ([`super::ResourcePolicySlot::visible`]): a
+//!    `Deny` about the request refuses it whatever any grant says, and an `Allow` that
+//!    names the caller itself grants it.
 //! 3. **what the CALLER is allowed to do at all** — the identity-based documents the IAM
-//!    store holds for that principal, judged by [`::service_common::iam_authorization`],
-//!    the tree's one evaluation of policy documents against `(action, resource,
-//!    principal)`, so this service and every other one handed the same documents decide
-//!    alike. These documents are IAM's, not this service's, which is why they are not read
-//!    with the matcher above.
+//!    store holds for that principal. Both halves are judged by
+//!    [`::service_common::iam_authorization`], the tree's one evaluation of policy
+//!    documents against `(action, resource, principal, context)`, so this service and
+//!    every other one handed the same documents decide alike — a resource policy's
+//!    statement `Condition` included.
 //! 4. **what the CREDENTIAL itself was scoped to** — the session policies the mint of the
 //!    credential passed, which STS holds on the session the access key id names
 //!    ([`sts_store::session_scoping_documents`]) and which are read by the one reading of a
@@ -84,8 +84,11 @@
 //!   session this emulator's STS registry minted and for nobody else, so only such a
 //!   caller declares that an absent tag key is a tag it does not carry.
 //!
-//! Both are passed through [`::service_common::iam_authorization::Request`], so the clause
-//! is decided by the tree's one evaluation of policy documents rather than here.
+//! Both are passed through [`::service_common::iam_authorization::Request`] — for the
+//! table's own document as much as for the identity's — so the clause is decided by the
+//! tree's one evaluation of policy documents rather than here. A fine-grained statement
+//! over the partitions a call addresses therefore decides that call: it applies to the
+//! partitions its condition selects and to no others.
 
 use ::service_com_amazonaws_sts_awssecuritytokenservicev20110615::state as sts_store;
 use ::service_common::iam_authorization::{self as iam, Decision};
@@ -424,30 +427,26 @@ pub fn denial_addressing(
 ) -> Option<String> {
     let refusal = |reason: &str| Some(not_authorized(&caller.arn, action, &table.arn, reason));
     // "PutResourcePolicy is an asynchronous operation" and "the policy application is
-    // eventually consistent" (the `PutResourcePolicy` doc): a policy whose application is
-    // not due yet states nothing about this request.
-    let policy = table
-        .resource_policy
-        .as_ref()
-        .filter(|policy| now >= policy.effective_at);
-
-    // An explicit deny wins over every grant, including the account's own credential.
-    if let Some(policy) = policy {
-        if let Some(conditioned) = policy.denies_any(&caller.denied_spellings(), action, &table.arn)
-        {
-            let mut message = refusal("with an explicit deny in a resource-based policy")?;
-            if conditioned {
-                // Say what was not evaluated rather than imply the condition matched.
-                message.push_str(
-                    " (the statement carries a Condition, which this emulator does not \
-                     evaluate: it refuses rather than serves what the policy may deny)",
-                );
-            }
-            return Some(message);
-        }
-    }
+    // eventually consistent" (the `PutResourcePolicy` doc): what decides this request is
+    // the revision in force at this instant, which inside the span of the newest write is
+    // the one the resource carried before it ([`super::ResourcePolicySlot::visible`]).
+    let policy = table.resource_policy.visible(now);
     let context = condition_context(caller, addressed);
     let published = published_condition_keys(caller, addressed);
+
+    // An explicit deny wins over every grant, including the account's own credential. It
+    // is decided against every spelling the caller may be named by, its account's
+    // included, and over this request's own condition keys, so a statement whose
+    // `Condition` this request does not satisfy refuses nothing.
+    if let Some(policy) = policy {
+        let denied = caller.denied_spellings();
+        let denying = iam::Request::new(action, &table.arn, &denied)
+            .with_context(&context)
+            .with_published_keys(&published);
+        if policy.decision(&denying) == Decision::Denied {
+            return refusal("with an explicit deny in a resource-based policy");
+        }
+    }
     let granting = iam::Request::new(action, &table.arn, &caller.principals)
         .with_context(&context)
         .with_published_keys(&published);
@@ -481,7 +480,7 @@ pub fn denial_addressing(
     // principal carrying one is granted where the readable documents neither grant nor
     // deny.
     let granted = decided == Decision::Allowed
-        || policy.is_some_and(|policy| policy.grants_any(&caller.principals, action, &table.arn))
+        || policy.is_some_and(|policy| policy.decision(&granting) == Decision::Allowed)
         || caller.unreadable_attachment;
     if !granted {
         return refusal(&format!(

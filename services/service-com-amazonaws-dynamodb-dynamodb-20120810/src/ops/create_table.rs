@@ -300,16 +300,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "When you attach a resource-based policy while creating a table, the policy
         // application is strongly consistent" (`CreateTable$ResourcePolicy`), so the
-        // policy is parsed here, attached to the stored table and effective at once —
-        // the table's first data-plane request already sees it. It is the first revision
-        // of that table's policy, made at the instant of the create — the instant its
-        // `RevisionId` names.
+        // policy is parsed here and seeded into the table's slot in force and readable
+        // at once — the table's first data-plane request already sees it. It is the first
+        // revision of that table's policy, made at the instant of the create — the
+        // instant its `RevisionId` names.
         let resource_policy = match input.resource_policy.as_deref() {
-            Some(document) => Some(
-                crate::state::AttachedPolicy::attach(document, now, now)
-                    .map_err(lift_policy_fault)?,
+            Some(document) => crate::state::ResourcePolicySlot::seeded(
+                crate::state::AttachedPolicy::attach(document, now).map_err(lift_policy_fault)?,
             ),
-            None => None,
+            None => crate::state::ResourcePolicySlot::default(),
         };
 
         let key_schema = validated_key_schema(&declared).map_err(lift)?;
@@ -546,7 +545,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             resource_policy,
             // A stream's policy is the stream's own, and a table minted here publishes
             // to a stream nothing has attached one to yet.
-            stream_resource_policy: None,
+            stream_resource_policy: crate::state::ResourcePolicySlot::default(),
             stream,
             items: ::std::collections::BTreeMap::new(),
             stored_bytes: 0,

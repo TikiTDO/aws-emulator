@@ -2677,20 +2677,19 @@ pub struct Table {
     pub pay_per_request_at: Option<SystemTime>,
     /// When the clock owes this table its removal, set by `DeleteTable`.
     pub removed_at: Option<SystemTime>,
-    /// The resource-based policy attached to this table, parsed once when it was
-    /// attached, or `None` while the table carries none. This is what the data plane
-    /// evaluates before it reads or writes an item, and what `GetResourcePolicy`
-    /// reports.
-    pub resource_policy: Option<AttachedPolicy>,
-    /// The resource-based policy attached to this table's STREAM, or `None` while the
-    /// stream carries none.
+    /// The resource-based policy slot of this table: the revision the writes have left
+    /// on it and the one an eventually consistent read can see yet
+    /// ([`ResourcePolicySlot`]). The revision in force is what the data plane evaluates
+    /// before it reads or writes an item, and what `GetResourcePolicy` reports.
+    pub resource_policy: ResourcePolicySlot,
+    /// The resource-based policy slot of this table's STREAM.
     ///
     /// A stream is a resource of its own — its ARN is "arn:…:table/<name>/stream/<label>"
     /// and `GetResourcePolicy` "returns the resource-based policy document attached to the
     /// resource" that ARN names — so the policy over the stream's own actions is held
     /// beside the table's and never merged with it: attaching one leaves the other where
     /// it was.
-    pub stream_resource_policy: Option<AttachedPolicy>,
+    pub stream_resource_policy: ResourcePolicySlot,
     /// The stream this table publishes to, or `None` for a table that has never had
     /// one. A table whose stream was disabled keeps it here, disabled, because
     /// `LatestStreamArn`/`LatestStreamLabel` report the table's latest stream

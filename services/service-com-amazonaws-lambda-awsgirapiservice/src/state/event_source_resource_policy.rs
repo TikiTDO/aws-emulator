@@ -110,9 +110,9 @@ impl SourcePolicies {
     ///
     /// A policy whose application the clock does not owe yet is not in force:
     /// "PutResourcePolicy is an asynchronous operation" and "the policy application is
-    /// eventually consistent" (the `PutResourcePolicy` doc), which is the instant that
-    /// store records on the policy itself — so the decision made here honours the very span
-    /// the owning service's own data plane honours.
+    /// eventually consistent" (the `PutResourcePolicy` doc), which is the span that store
+    /// holds the revision in force behind its writes — so the decision made here honours
+    /// the very revision the owning service's own data plane honours.
     fn table_stream_policy(&self, arn: &str, now: SystemTime) -> Option<String> {
         let store = self.tables.as_ref()?.lock();
         store
@@ -125,8 +125,7 @@ impl SourcePolicies {
                     .as_ref()
                     .is_some_and(|stream| stream.arn == arn)
             })
-            .and_then(|table| table.stream_resource_policy.as_ref())
-            .filter(|policy| policy.effective_at <= now)
+            .and_then(|table| table.stream_resource_policy.visible(now))
             .map(|policy| policy.document.clone())
     }
 }

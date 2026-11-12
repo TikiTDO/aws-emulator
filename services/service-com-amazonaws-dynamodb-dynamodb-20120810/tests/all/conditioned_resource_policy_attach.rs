@@ -84,6 +84,18 @@ fn revision_id(case: &str, body: &Value) -> String {
     revision_id
 }
 
+/// Wait out the span a policy write takes to be applied, after which the eventually
+/// consistent reader reports it — the span the store itself owes it
+/// (`crate::state::STATUS_TRANSITION`), so a change to that span does not invalidate this
+/// wait, plus room for the round trips.
+async fn wait_for_policy_application() {
+    tokio::time::sleep(
+        service_com_amazonaws_dynamodb_dynamodb_20120810::state::STATUS_TRANSITION
+            + std::time::Duration::from_millis(200),
+    )
+    .await;
+}
+
 /// A `Condition` block, and what makes it a different row.
 struct ConditionCase {
     case: &'static str,
@@ -185,17 +197,17 @@ async fn a_conditioned_policy_management_deny_attaches_without_the_confirmation(
                 );
                 let attached = revision_id(&case, &body);
 
-                let read = ok(&router, "GetResourcePolicy", json!({"ResourceArn": arn})).await;
+                // "If you issue a GetResourcePolicy request immediately after a
+                // PutResourcePolicy request, DynamoDB might return your previous policy,
+                // if there was one, or return the PolicyNotFoundException" (the
+                // `PutResourcePolicy` doc): the attach is not applied yet, and this
+                // resource carried no policy before it.
+                let (status, body) =
+                    call(&router, "GetResourcePolicy", &json!({"ResourceArn": arn})).await;
                 assert_eq!(
-                    read["Policy"],
-                    json!(conditioned),
-                    "case {case}: the document is reported as it was attached, got {read}"
-                );
-                assert_eq!(
-                    read["RevisionId"],
-                    json!(attached),
-                    "case {case}: the reader reports the revision id the attach returned, got \
-                     {read}"
+                    (status, error_code(&body).as_str()),
+                    (400, "PolicyNotFoundException"),
+                    "case {case}: the attach is not readable yet, got {status} {body}"
                 );
 
                 // The revision the delete removed is what it reports, which is the
@@ -212,12 +224,21 @@ async fn a_conditioned_policy_management_deny_attaches_without_the_confirmation(
                     "case {case}: the delete reports the revision id it removed, got {removed}"
                 );
 
-                let (status, body) =
-                    call(&router, "GetResourcePolicy", &json!({"ResourceArn": arn})).await;
+                // "If you issue a GetResourcePolicy request immediately after a
+                // DeleteResourcePolicy request, DynamoDB might return the policy that was
+                // present before the deletion request" (the `GetResourcePolicy` doc), so
+                // the document round trips through the reader exactly as it was attached.
+                let read = ok(&router, "GetResourcePolicy", json!({"ResourceArn": arn})).await;
                 assert_eq!(
-                    (status, error_code(&body).as_str()),
-                    (400, "PolicyNotFoundException"),
-                    "case {case}: the delete left no policy behind, got {status} {body}"
+                    read["Policy"],
+                    json!(conditioned),
+                    "case {case}: the document is reported as it was attached, got {read}"
+                );
+                assert_eq!(
+                    read["RevisionId"],
+                    json!(attached),
+                    "case {case}: the reader reports the revision id the attach returned, got \
+                     {read}"
                 );
 
                 // The SAME statement without the condition denies those actions in every
@@ -334,7 +355,9 @@ async fn a_document_is_judged_by_its_unconditioned_statements() {
                 "case {case}: got {:?}",
                 message(&body)
             );
-            // Refused, so nothing was attached and the next row starts from no policy.
+            // Refused, so nothing was attached and the next row starts from no policy:
+            // the reader is asked once the previous row's removal has been applied, which
+            // the end of the loop waits for.
             let (status, body) =
                 call(&router, "GetResourcePolicy", &json!({"ResourceArn": arn})).await;
             assert_eq!(
@@ -361,6 +384,8 @@ async fn a_document_is_judged_by_its_unconditioned_statements() {
                 "case {case}: no statement locks the caller out, got {status} {body}"
             );
             let attached = revision_id(case, &body);
+            // The attach is asynchronous, so the reader is asked once it is applied.
+            wait_for_policy_application().await;
             let read = ok(&router, "GetResourcePolicy", json!({"ResourceArn": arn})).await;
             assert_eq!(
                 read["Policy"],
@@ -379,6 +404,9 @@ async fn a_document_is_judged_by_its_unconditioned_statements() {
             json!({"ResourceArn": arn}),
         )
         .await;
+        // The removal is asynchronous too, so the next row starts from a resource the
+        // reader reports no policy for.
+        wait_for_policy_application().await;
     }
 }
 

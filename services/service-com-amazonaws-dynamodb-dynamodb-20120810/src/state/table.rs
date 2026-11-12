@@ -310,29 +310,28 @@ impl Table {
     /// replaced — names a resource that is not there, which is the not-found the Streams
     /// surface words over the ARN the request carried.
     pub fn policy_slot(
+        &self,
+        resource: &PolicyResource,
+    ) -> Result<&ResourcePolicySlot, RequestError> {
+        match resource.target {
+            PolicyTarget::Table => Ok(&self.resource_policy),
+            PolicyTarget::Stream => {
+                self.check_addresses_stream(resource)?;
+                Ok(&self.stream_resource_policy)
+            }
+        }
+    }
+
+    /// That same slot, for a call that WRITES it.
+    pub fn policy_slot_mut(
         &mut self,
         resource: &PolicyResource,
-    ) -> Result<&mut Option<AttachedPolicy>, RequestError> {
+    ) -> Result<&mut ResourcePolicySlot, RequestError> {
         match resource.target {
             PolicyTarget::Table => Ok(&mut self.resource_policy),
             PolicyTarget::Stream => {
                 self.check_addresses_stream(resource)?;
                 Ok(&mut self.stream_resource_policy)
-            }
-        }
-    }
-
-    /// The policy that call addressed, for a reader: `None` when the resource carries
-    /// none at all.
-    pub fn attached_policy(
-        &self,
-        resource: &PolicyResource,
-    ) -> Result<Option<&AttachedPolicy>, RequestError> {
-        match resource.target {
-            PolicyTarget::Table => Ok(self.resource_policy.as_ref()),
-            PolicyTarget::Stream => {
-                self.check_addresses_stream(resource)?;
-                Ok(self.stream_resource_policy.as_ref())
             }
         }
     }

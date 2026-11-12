@@ -25,8 +25,8 @@
 //! 5. a resource-based policy is attached to "a table or stream" (the
 //!    `PutResourcePolicy` doc): a stream holds a policy of its own, independent of its
 //!    table's, every statement names actions of the resource it is attached to, an Allow
-//!    may not name a public principal, and a document with no `Version` is stored with
-//!    the one IAM reads it under.
+//!    may not name a public principal, and the document is stored as the request stated
+//!    it — nothing is added to it, the `Version` it is read under included.
 //!
 //! Every test drives the operations over the wire (`POST /` with
 //! `X-Amz-Target: DynamoDB_20120810.<OperationName>`) through the same
@@ -42,6 +42,17 @@ const ACCOUNT: &str = engine::EMULATOR_ACCOUNT_ID;
 
 /// The envelope a violation of a rule over a request's own members is stated inside.
 const ENVELOPE: &str = "1 validation error detected: ";
+
+/// Wait out the span a policy write takes to be applied, after which the eventually
+/// consistent reader reports it — the span the store itself owes it
+/// (`crate::state::STATUS_TRANSITION`), plus room for the round trips.
+async fn wait_for_policy_application() {
+    tokio::time::sleep(
+        service_com_amazonaws_dynamodb_dynamodb_20120810::state::STATUS_TRANSITION
+            + std::time::Duration::from_millis(200),
+    )
+    .await;
+}
 
 /// One table with a string partition key and a numeric sort key, plus a global secondary
 /// index over a numeric attribute, created and waited to `ACTIVE`.
@@ -561,6 +572,8 @@ async fn a_stream_holds_a_policy_of_its_own_and_every_statement_names_the_resour
             "case {case:?}: the attach reports a revision id, got {attached}"
         );
     }
+    // Each attach is asynchronous, so the documents are read back once they are applied.
+    wait_for_policy_application().await;
     for (case, arn, document) in [
         ("the table", &table_arn, &table_policy),
         ("its stream", &stream_arn, &stream_policy),
@@ -584,6 +597,9 @@ async fn a_stream_holds_a_policy_of_its_own_and_every_statement_names_the_resour
         json!({"ResourceArn": &stream_arn}),
     )
     .await;
+    // The removal is asynchronous like the attach, so the reader is asked once it is
+    // applied.
+    wait_for_policy_application().await;
     let (status, answered) = call(
         &router,
         "GetResourcePolicy",
@@ -690,7 +706,7 @@ async fn a_stream_holds_a_policy_of_its_own_and_every_statement_names_the_resour
 }
 
 #[tokio::test]
-async fn a_policy_document_with_no_version_is_stored_with_the_one_iam_reads_it_under() {
+async fn a_policy_document_is_stored_as_the_request_stated_it() {
     let router = emulator();
     let table = "PolicyVersions";
     ok(
@@ -707,21 +723,24 @@ async fn a_policy_document_with_no_version_is_stored_with_the_one_iam_reads_it_u
     let described = crate::emulator::describe_when_active(&router, "policy versions", table).await;
     let arn = described["TableArn"].as_str().unwrap_or_default().to_string();
 
-    // Rows differ along the version the document states: one that states none takes the
-    // IAM default, and one that states a version keeps it exactly as it arrived.
+    // Rows differ along the version the document states: a document that states one
+    // keeps it, and one that states none is stored and reported WITHOUT one — the
+    // `Version` such a document is read under ("if you do not include a Version element,
+    // the value defaults to 2008-10-17") is a reading of the document, not a member of
+    // it, so nothing is added to what the request stated.
     for (case, document, expected_version) in [
         (
             "a document with no Version",
             json!({"Statement": [{"Effect": "Deny", "Principal": {"AWS": "*"},
                                   "Action": "dynamodb:GetItem", "Resource": &arn}]}),
-            "2008-10-17",
+            Value::Null,
         ),
         (
             "a document that states one",
             json!({"Version": "2012-10-17",
                    "Statement": [{"Effect": "Deny", "Principal": {"AWS": "*"},
                                   "Action": "dynamodb:PutItem", "Resource": &arn}]}),
-            "2012-10-17",
+            json!("2012-10-17"),
         ),
     ] {
         ok(
@@ -731,14 +750,21 @@ async fn a_policy_document_with_no_version_is_stored_with_the_one_iam_reads_it_u
                    "ConfirmRemoveSelfResourceAccess": true}),
         )
         .await;
+        // The attach is asynchronous, so the document is read back once it is applied.
+        wait_for_policy_application().await;
         let read = ok(&router, "GetResourcePolicy", json!({"ResourceArn": &arn})).await;
+        assert_eq!(
+            read["Policy"],
+            json!(document.to_string()),
+            "case {case:?}: expected the document the request stated, got {read}"
+        );
         let stored: Value = serde_json::from_str(read["Policy"].as_str().unwrap_or("null"))
             .unwrap_or(Value::Null);
         assert_eq!(
             stored["Version"],
-            json!(expected_version),
-            "case {case:?}: expected the stored document to carry Version {expected_version}, \
-             got {stored}"
+            expected_version,
+            "case {case:?}: expected the stored document to state Version \
+             {expected_version:?}, got {stored}"
         );
         assert_eq!(
             stored["Statement"],

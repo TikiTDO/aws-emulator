@@ -232,19 +232,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The document is parsed BEFORE any table is looked up: whether it is a policy
         // at all does not depend on the resource it would be attached to. Its
         // application is ASYNCHRONOUS — "PutResourcePolicy is an asynchronous
-        // operation" and "the policy application is eventually consistent" — so the
-        // data plane starts honouring it one [`crate::state::STATUS_TRANSITION`] from
-        // now, and a request made straight after this one is still authorized as it
-        // was. Nothing sleeps for that span: the instant is stored.
+        // operation" and "the policy application is eventually consistent" — which is
+        // the lag the policy slot holds the revision behind
+        // ([`crate::state::ResourcePolicySlot`]): a request made straight after this one
+        // is still authorized, and answered, as it was. Nothing sleeps for that span.
         //
         // It is numbered as the revision it replaces once the resource it is attached to
         // is known, below.
-        let mut policy = crate::state::AttachedPolicy::attach(
-            &input.policy,
-            now + crate::state::STATUS_TRANSITION,
-            now,
-        )
-        .map_err(lift_policy_fault)?;
+        let policy = crate::state::AttachedPolicy::attach(&input.policy, now)
+            .map_err(lift_policy_fault)?;
         // A policy over the STREAM decides requests to the stream, so every action it
         // names has to be one a stream has: a table action in it could never be decided
         // by the resource it is attached to.
@@ -276,15 +272,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // table that is still `CREATING`, so a policy is not something only an ACTIVE
         // table can carry. A table whose deletion is already due is gone by the time
         // this lookup runs, and answers `ResourceNotFoundException` above.
+        let slot = table.policy_slot_mut(&resource).map_err(lift)?;
         // "When you provide an expected revision ID, if the revision ID of the existing
         // policy on the resource doesn't match or if there's no policy attached to the
         // resource, your request will be rejected with a PolicyNotFoundException. To
         // conditionally attach a policy when no policy exists for the resource, specify
-        // NO_POLICY for the revision ID" (`PutResourcePolicy$ExpectedRevisionId`).
-        let attached_revision_id = table
-            .attached_policy(&resource)
-            .map_err(lift)?
-            .map(crate::state::AttachedPolicy::revision_id);
+        // NO_POLICY for the revision ID" (`PutResourcePolicy$ExpectedRevisionId`). The
+        // guard is held against the revision the WRITES have left on the resource, which
+        // is what this write replaces, rather than against the one a lagging read reports.
+        let attached_revision_id = slot.stored().map(crate::state::AttachedPolicy::revision_id);
         let attached_revision_id = attached_revision_id.as_deref();
         let unmet_expectation = match input.expected_revision_id.as_deref() {
             None => None,
@@ -311,10 +307,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // re-attaching the document the resource already carries reports the revision it
         // already had, so a client that repeats a put sees one revision and not two
         // ([`crate::state::AttachedPolicy::revise_after`]).
-        let slot = table.policy_slot(&resource).map_err(lift)?;
-        policy.revise_after(slot.as_ref());
-        let revision_id = policy.revision_id();
-        *slot = Some(policy);
+        let revision_id = slot.attach(policy, now);
 
         // The audit record for a state-changing call: who asked, what changed and that
         // it succeeded. Never the document itself, and never a credential.

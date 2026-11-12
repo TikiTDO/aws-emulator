@@ -46,18 +46,13 @@
 //!
 //! ## Why this is not the only pattern matcher in the tree
 //!
-//! Two services carry their own IAM-shaped matcher, and neither is a caller this module
-//! can take over:
-//!
-//! * IAM Access Analyzer's `check_no_new_access` owns a POLICY COMPARISON engine (does
-//!   policy B grant access policy A does not?), which enumerates request contexts under a
-//!   step and time budget and reports WHY it cannot decide, in that operation's own
-//!   vocabulary. Its matcher is charged against that budget; this one answers a single
-//!   access request, where the documents are already bounded by the operations that
-//!   accepted them, so it needs no budget and reports no reasons.
-//! * Amazon DynamoDB's resource-policy reader answers the same shape of question this
-//!   module does and SHOULD move onto it, which is a change to that service's handlers
-//!   (and to its tests) rather than to this one; it is left for the issue that owns it.
+//! One service carries its own IAM-shaped matcher, and it is not a caller this module can
+//! take over: IAM Access Analyzer's `check_no_new_access` owns a POLICY COMPARISON engine
+//! (does policy B grant access policy A does not?), which enumerates request contexts
+//! under a step and time budget and reports WHY it cannot decide, in that operation's own
+//! vocabulary. Its matcher is charged against that budget; this one answers a single
+//! access request, where the documents are already bounded by the operations that accepted
+//! them, so it needs no budget and reports no reasons.
 //!
 //! ## Conditions
 //!

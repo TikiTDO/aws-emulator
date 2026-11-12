@@ -1320,22 +1320,21 @@ async fn a_policy_that_would_lock_the_caller_out_needs_the_confirmation() {
                  the future.",
                 "case a Deny of {action:?} for {principal}: got {stated:?}"
             );
-            // Nothing was attached, so the next attempt starts from no policy at all.
-            let (status, body) =
-                call(&router, "GetResourcePolicy", json!({"ResourceArn": arn})).await;
-            assert_eq!(
-                (status, error_code(&body).as_str()),
-                (400, "PolicyNotFoundException"),
-                "case a Deny of {action:?} for {principal}: the refused attach stored \
-                 nothing, got {status} {body}"
-            );
+            // Nothing was attached, so the next attempt starts from no policy at all —
+            // which is what conditioning the accepted attach below on the ABSENCE of a
+            // policy holds it to ("to conditionally attach a policy when no policy exists
+            // for the resource, specify NO_POLICY for the revision ID"). The stored state
+            // is what that guard reads; a `GetResourcePolicy` of its own would answer
+            // from before this row's writes, because that read is eventually consistent.
+            //
             // The same document WITH the confirmation is accepted: the member is what
             // makes the choice deliberate, not something the service refuses outright.
             ok(
                 &router,
                 "PutResourcePolicy",
                 json!({"ResourceArn": arn, "Policy": document,
-                       "ConfirmRemoveSelfResourceAccess": true}),
+                       "ConfirmRemoveSelfResourceAccess": true,
+                       "ExpectedRevisionId": "NO_POLICY"}),
             )
             .await;
             ok(&router, "DeleteResourcePolicy", json!({"ResourceArn": arn})).await;

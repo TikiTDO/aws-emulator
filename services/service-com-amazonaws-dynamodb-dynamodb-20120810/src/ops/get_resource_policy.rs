@@ -6,12 +6,15 @@
 //! with the revision id that document has. A table carrying no policy is
 //! `PolicyNotFoundException`; an unknown table is `ResourceNotFoundException`.
 //!
-//! This is a REPORTING operation: it reads the stored policy and writes nothing. The
-//! doc below describes an eventually consistent read ("DynamoDB might return a
-//! PolicyNotFoundException" for a read made straight after an attach); this store holds
-//! one copy of the policy, so a read of it reports what is attached — which is inside
-//! what the doc allows, since it says only that a stale answer MIGHT come back, and it
-//! is what lets a caller verify the document it just attached.
+//! This is a REPORTING operation: it reads the stored policy and writes nothing. The read
+//! is EVENTUALLY CONSISTENT, as the doc below states: what it reports is the revision in
+//! force at the instant of the call, so a read made inside the span of the newest write
+//! reports the revision the resource carried before that write — the
+//! `PolicyNotFoundException` the doc describes for a read straight after an attach, and
+//! "the policy that was present before the deletion request" for one straight after a
+//! delete. The lag itself lives with the policy slot
+//! ([`crate::state::ResourcePolicySlot`]), so the data plane and this reader honour the
+//! same revision.
 //!
 //! ## Shape of an operation
 //!
@@ -182,9 +185,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // clock already made due.
         store.apply_due_transitions(now);
         let table = store.table_for_policy(&resource).map_err(lift)?;
+        // What this read reports is the revision in force at this instant: "GetResourcePolicy
+        // uses an eventually consistent query", so inside the span of the newest write it is
+        // the revision the resource carried before that write
+        // ([`crate::state::ResourcePolicySlot::visible`]) — which is why a read made straight
+        // after an attach answers `PolicyNotFoundException` and one made straight after a
+        // delete still answers the policy that was there.
         let policy = table
-            .attached_policy(&resource)
+            .policy_slot(&resource)
             .map_err(lift)?
+            .visible(now)
             .ok_or_else(|| {
                 GetResourcePolicyError::from(
                     GetResourcePolicyErrorModeled::PolicyNotFoundException(PolicyNotFoundException {

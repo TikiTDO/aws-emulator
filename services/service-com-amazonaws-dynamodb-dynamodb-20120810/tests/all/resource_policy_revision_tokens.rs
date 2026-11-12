@@ -32,6 +32,17 @@ use crate::emulator::{call, describe_when_active, emulator, error_code, message,
 /// The modelled bounds on `PolicyRevisionId` (`@length min 1 max 255`).
 const REVISION_ID_BOUNDS: (usize, usize) = (1, 255);
 
+/// Wait out the span a policy write takes to be applied, after which the eventually
+/// consistent reader reports it — the span the store itself owes it
+/// (`crate::state::STATUS_TRANSITION`), plus room for the round trips.
+async fn wait_for_policy_application() {
+    tokio::time::sleep(
+        service_com_amazonaws_dynamodb_dynamodb_20120810::state::STATUS_TRANSITION
+            + std::time::Duration::from_millis(200),
+    )
+    .await;
+}
+
 /// One policy document granting `action` to this emulator's account on `resource`.
 fn document(action: &str, resource: &str) -> String {
     json!({
@@ -164,7 +175,10 @@ async fn every_revision_of_a_policy_gets_its_own_revision_id() {
             seen.push(reported.clone());
             current = reported.clone();
         }
-        // The read reports the revision the write made, every time it is asked.
+        // The read reports the revision the write made, every time it is asked — once
+        // that write has been applied, since `GetResourcePolicy` is eventually
+        // consistent.
+        wait_for_policy_application().await;
         for round in 0..2 {
             let read = ok(
                 &router,
@@ -251,6 +265,20 @@ async fn a_revision_id_is_what_a_conditional_write_is_held_to() {
     )
     .await;
     assert_eq!(
+        (status, read["RevisionId"].as_str()),
+        (200, Some(after.as_str())),
+        "case straight after the removal: the reader still reports the revision that was \
+         present before it ({after}), got {status} with {read}"
+    );
+    // Once the removal has been applied the resource carries none at all.
+    wait_for_policy_application().await;
+    let (status, read) = call(
+        &router,
+        "GetResourcePolicy",
+        json!({"ResourceArn": &arn}),
+    )
+    .await;
+    assert_eq!(
         (status, error_code(&read).as_str()),
         (400, "PolicyNotFoundException"),
         "case the removed policy: the resource carries no policy to read, got {status} with \
@@ -287,6 +315,9 @@ async fn each_resource_carries_its_own_policy_revision() {
         replaced, on_stream,
         "case the stream's policy replaced: the new revision has an id of its own"
     );
+    // Each attach is asynchronous, so the table's own revision is read back once the
+    // writes have been applied.
+    wait_for_policy_application().await;
     let read = ok(
         &router,
         "GetResourcePolicy",

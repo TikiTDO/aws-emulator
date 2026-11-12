@@ -45,6 +45,17 @@ fn table_arn(name: &str) -> String {
     format!("{TABLE_ARN_PREFIX}{name}")
 }
 
+/// Wait out the span a policy write takes to be applied, after which the eventually
+/// consistent reader reports it — the span the store itself owes it
+/// (`crate::state::STATUS_TRANSITION`), plus room for the round trips.
+async fn wait_for_policy_application() {
+    tokio::time::sleep(
+        service_com_amazonaws_dynamodb_dynamodb_20120810::state::STATUS_TRANSITION
+            + std::time::Duration::from_millis(200),
+    )
+    .await;
+}
+
 /// A resource-policy document this emulator accepts, denying `action` on `resource_arn`
 /// so that a different action yields a different document — and so a different
 /// revision id.
@@ -119,6 +130,9 @@ async fn an_unconditioned_policy_read_names_the_requested_resource_arn() {
             json!({"ResourceArn": arn}),
         )
         .await;
+        // Both writes are asynchronous, so the reader is asked once the removal has been
+        // applied.
+        wait_for_policy_application().await;
         let (status, body) = call(&router, "GetResourcePolicy", &json!({"ResourceArn": arn})).await;
         assert_eq!(
             (status, error_code(&body).as_str()),
@@ -225,6 +239,8 @@ async fn a_conditioned_request_names_the_requested_and_the_actual_revision() {
                 json!({"ResourceArn": arn, "Policy": document}),
             )
             .await;
+            // The attach is asynchronous, so the reader below is asked once it is applied.
+            wait_for_policy_application().await;
             Some(
                 put["RevisionId"]
                     .as_str()

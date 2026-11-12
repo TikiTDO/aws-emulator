@@ -8,6 +8,8 @@
 //! the decision it drives, while the parent module is the table and item store itself;
 //! `super` re-exports them, so every caller still names them `crate::state::…`.
 
+use ::service_common::iam_authorization::{self as iam, Decision};
+
 use super::*;
 
 /// Why a resource-based policy document is not one this emulator can attach.
@@ -43,30 +45,25 @@ pub(super) fn invalid_policy_document(detail: &str) -> PolicyFault {
     PolicyFault::Invalid(format!("{INVALID_POLICY_DOCUMENT_CLAUSE}: {detail}"))
 }
 
-/// The `Version` an IAM policy document that states none is read with: "If you do not
-/// include a Version element, the value defaults to 2008-10-17" (the IAM policy grammar
-/// reference), so a document attached without one is stored carrying that version — which
-/// is what a later read of it reports.
-pub const DEFAULT_POLICY_VERSION: &str = "2008-10-17";
-
 /// The service every action of a DynamoDB resource-based policy belongs to: a policy
 /// attached to a DynamoDB resource governs DynamoDB actions, so an action of another
 /// service could never be decided by it.
 const POLICY_ACTION_SERVICE: &str = "dynamodb";
 
-/// A resource-based policy attached to a table.
+/// A resource-based policy attached to a table or to its stream.
 ///
 /// The document is kept as the service READ it, because `GetResourcePolicy` "returns the
-/// resource-based policy document attached to the resource ... in JSON format": a
-/// document that states a `Version` is kept exactly as it arrived, and one that states
-/// none is kept carrying the version IAM reads it under ([`DEFAULT_POLICY_VERSION`]), so
-/// a later read reports the document the decision is actually made on. Its statements are
-/// parsed ONCE here so evaluating a data-plane request never re-parses it. The document is
-/// capped at [`MAX_RESOURCE_POLICY_BYTES`] before it is parsed, which is what bounds the
-/// statements, values and patterns one request can ask the matcher below for.
+/// resource-based policy document attached to the resource ... in JSON format": the same
+/// JSON document in the compact form a read reports it in — insignificant whitespace is
+/// not part of a document, while every member it states, the order they were written in
+/// and every value's own type are kept exactly as they arrived, and nothing is added to
+/// it. It is read ONCE here — into the statements the ATTACH path holds a document to, and
+/// into the document the DECISION is made from ([`Self::decision`]) — so neither re-reads
+/// it per request. The document is capped at [`MAX_RESOURCE_POLICY_BYTES`] before it is
+/// read, which is what bounds the statements, values and patterns one request can ask for.
 #[derive(Debug, Clone)]
 pub struct AttachedPolicy {
-    /// The document as it was attached, carrying the `Version` it is read under.
+    /// The document as it was attached.
     pub document: String,
     /// This revision's TOKEN, rendered on the wire as the `RevisionId` by
     /// [`Self::revision_id`]: the instant the revision was made, in milliseconds since
@@ -81,16 +78,9 @@ pub struct AttachedPolicy {
     /// revisions are ordered, and a revision never reuses the token of the one it
     /// replaced ([`Self::revise_after`]).
     pub revision: u64,
-    /// When the clock owes this policy its application to the data plane.
-    ///
-    /// "PutResourcePolicy is an asynchronous operation" and "the policy application is
-    /// eventually consistent" (the `PutResourcePolicy` doc), so a request made straight
-    /// after the attach is still authorized as it was — while a policy that arrives
-    /// WITH the table is applied at once, because "when you attach a resource-based
-    /// policy while creating a table, the policy application is strongly consistent"
-    /// (`CreateTable$ResourcePolicy`). The attaching operation chooses which of the two
-    /// it is; nothing sleeps for the span.
-    pub effective_at: SystemTime,
+    /// The document as the shared evaluator reads it, so deciding a data-plane request
+    /// walks the statements rather than parsing the document again.
+    prepared: iam::PreparedDocument,
     /// The parsed statements, in document order.
     pub(super) statements: Vec<PolicyStatement>,
 }
@@ -98,16 +88,11 @@ pub struct AttachedPolicy {
 impl AttachedPolicy {
     /// Parse `document` into the policy to attach, or say why it cannot be attached.
     ///
-    /// `effective_at` is when the data plane starts honouring it (see the field) and
     /// `revised_at` is when the revision is being made, which is the instant its
     /// `RevisionId` names ([`policy_revision_token`]). The policy is numbered as the
-    /// revision that replaces the one the resource carries when the attaching operation
-    /// places it there ([`Self::revise_after`]).
-    pub fn attach(
-        document: &str,
-        effective_at: SystemTime,
-        revised_at: SystemTime,
-    ) -> Result<Self, PolicyFault> {
+    /// revision that replaces the one the resource carries when the slot it is attached to
+    /// places it there ([`Self::revise_after`], [`ResourcePolicySlot::attach`]).
+    pub fn attach(document: &str, revised_at: SystemTime) -> Result<Self, PolicyFault> {
         if document.len() > MAX_RESOURCE_POLICY_BYTES {
             return Err(PolicyFault::TooLarge);
         }
@@ -127,19 +112,24 @@ impl AttachedPolicy {
         for statement in listed {
             statements.push(PolicyStatement::parse(statement)?);
         }
-        // "If you do not include a Version element, the value defaults to 2008-10-17":
-        // the document is stored as the service READ it, so a later read of the policy
-        // reports the version it is being evaluated under rather than leaving the client
-        // to apply the default itself. A document that states a version is kept exactly
-        // as it arrived.
-        let document = match object.contains_key("Version") {
-            true => document.to_string(),
-            false => versioned_document(object),
-        };
+        // The document is kept as the service READ it: the same JSON document in the
+        // CANONICAL form a read of it reports. Insignificant whitespace is not part of a
+        // document, and an element the IAM grammar states as "either a single string or
+        // an array of strings" is the same element either way, so a one-element array is
+        // kept as the one string it lists ([`canonical_elements`]); every member the
+        // document states, the order they were written in and every other value's own
+        // type are kept exactly as they arrived. Nothing is ADDED either: the `Version` a
+        // document stating none is read under ("if you do not include a Version element,
+        // the value defaults to 2008-10-17" — the IAM policy grammar reference) is a
+        // READING of the document and not a member of it, so it is not written into the
+        // document the next read reports.
+        let mut canonical = parsed.clone();
+        canonical_elements(&mut canonical);
+        let document = canonical.to_string();
         Ok(Self {
+            prepared: iam::PreparedDocument::read(&document),
             revision: policy_revision_token(revised_at),
             document,
-            effective_at,
             statements,
         })
     }
@@ -174,37 +164,36 @@ impl AttachedPolicy {
         }
     }
 
-    /// Whether this policy EXPLICITLY DENIES `action` on `resource_arn` to a caller any
-    /// of `principals` names, and whether the statement that denied it carried a
-    /// `Condition` the emulator did not evaluate.
+    /// What this document says about `request`: an explicit `Deny` about it, a grant, or
+    /// nothing at all.
     ///
-    /// Only a Deny decides anything here: "an explicit deny in any policy overrides any
-    /// allow" (the IAM policy evaluation logic), so a Deny that matches the request is the
-    /// one outcome this half of the decision reaches. `principals` is every spelling the
-    /// caller may be named by — its own ARN, the ARN of the role an assumed-role session
-    /// is a session of, and the spellings that name its whole account, since a statement
-    /// denying the account denies each of its principals. What GRANTS is
-    /// [`Self::grants_any`], which is decided against the caller's own spellings alone.
-    pub fn denies_any(
-        &self,
-        principals: &[String],
-        action: &str,
-        resource_arn: &str,
-    ) -> Option<bool> {
-        self.statements
-            .iter()
-            .find(|statement| statement.denies(principals, action, resource_arn))
-            .map(PolicyStatement::conditioned)
+    /// Decided by the tree's one evaluation of policy documents against an access request
+    /// ([`::service_common::iam_authorization`]), so the `Condition` of a statement is
+    /// read here exactly as it is for every other service's resource policy: a clause the
+    /// request's own context decides against the statement leaves the statement not
+    /// applying, whichever effect it states, while one that cannot be decided at all
+    /// withholds a grant and keeps a refusal. The condition keys the request carries
+    /// values for, and the ones it models, are the caller's to pass
+    /// ([`iam::Request::with_context`], [`iam::Request::with_published_keys`]).
+    ///
+    /// `request.principals` is what decides WHICH outcome is reachable: a DENY is asked
+    /// for with every spelling the caller may be named by, its account's included, since a
+    /// statement denying the account denies each of its principals, and a GRANT with the
+    /// caller's own spellings alone, because a statement naming the account delegates to
+    /// that account's identity-based policies rather than granting (see
+    /// [`authorization`]).
+    pub fn decision(&self, request: &iam::Request<'_>) -> Decision {
+        iam::resource_outcome_prepared(&self.prepared, request).decision
     }
 
     /// Whether this policy denies `action` on `resource_arn` to a caller any of
     /// `principals` names in EVERY request context — a matching Deny that carries no
     /// `Condition`.
     ///
-    /// What [`denies_any`](Self::denies_any) reports with its condition flag set is a
-    /// deny of only the requests whose context satisfies the condition, so it is not an
-    /// answer to "would this document refuse the action whatever the request looks
-    /// like"; this is. Used where the question is what the document DEFINITELY does
+    /// What [`decision`](Self::decision) answers is about ONE request, and a `Deny` it
+    /// reaches may rest on a condition that request satisfies, so it is not an answer to
+    /// "would this document refuse the action whatever the request looks like"; this is.
+    /// Used where the question is what the document DEFINITELY does
     /// ([`locks_the_caller_out`]) rather than what to do with one request.
     pub fn denies_unconditionally(
         &self,
@@ -216,19 +205,105 @@ impl AttachedPolicy {
             statement.denies(principals, action, resource_arn) && !statement.conditioned()
         })
     }
+}
 
-    /// Whether this policy GRANTS `action` on `resource_arn` to a caller any of
-    /// `principals` names.
+/// The resource-based policy slot of one resource: what the writes have left on it, and
+/// what the EVENTUALLY CONSISTENT reader can see yet.
+///
+/// A write lands on the resource at once and becomes both readable and applied a span
+/// later: "`PutResourcePolicy` is an asynchronous operation. If you issue a
+/// `GetResourcePolicy` request immediately after a `PutResourcePolicy` request, DynamoDB
+/// might return your previous policy, if there was one, or return the
+/// `PolicyNotFoundException`" (the `PutResourcePolicy` doc), and "if you issue a
+/// `GetResourcePolicy` request immediately after a `DeleteResourcePolicy` request,
+/// DynamoDB might return the policy that was present before the deletion request" (the
+/// `GetResourcePolicy` doc). So a read made inside the span of the newest write reports
+/// the revision the resource carried immediately BEFORE that write, and the data plane
+/// honours that same revision, because "the policy application is eventually consistent"
+/// is the same lag. AWS publishes no figure for it, so the span is this emulator's CHOSEN
+/// one — the same [`STATUS_TRANSITION`] every other asynchronous change here takes.
+/// Nothing sleeps for it: the due instant is stored and the reading is derived from it.
+///
+/// A policy that arrives WITH the table is applied at once instead, because "when you
+/// attach a resource-based policy while creating a table, the policy application is
+/// strongly consistent" (`CreateTable$ResourcePolicy`) — [`Self::seeded`].
+#[derive(Debug, Default)]
+pub struct ResourcePolicySlot {
+    /// The revision the writes have left on the resource: what the next write reads and
+    /// what an `ExpectedRevisionId` is held against.
+    stored: Option<AttachedPolicy>,
+    /// The revision the resource carried immediately before the newest write, which is
+    /// what a read inside that write's span reports.
+    superseded: Option<AttachedPolicy>,
+    /// When the clock owes the newest write its application, or `None` when no write is
+    /// propagating and the stored revision is the one in force.
+    applied_at: Option<SystemTime>,
+}
+
+impl ResourcePolicySlot {
+    /// The slot of a resource a `CreateTable` attached `policy` to: in force and readable
+    /// from the create itself (see the type docs).
+    pub fn seeded(policy: AttachedPolicy) -> Self {
+        Self {
+            stored: Some(policy),
+            superseded: None,
+            applied_at: None,
+        }
+    }
+
+    /// The revision the WRITES have left on the resource. This is what a write reads —
+    /// never what a reporting operation reports, which is [`Self::visible`].
+    pub fn stored(&self) -> Option<&AttachedPolicy> {
+        self.stored.as_ref()
+    }
+
+    /// The revision an eventually consistent read reports at `now`, and the one the data
+    /// plane honours then: the stored revision once the newest write's application has
+    /// fallen due, and the revision the resource carried before that write until then.
+    pub fn visible(&self, now: SystemTime) -> Option<&AttachedPolicy> {
+        match self.applied_at {
+            Some(due) if now < due => self.superseded.as_ref(),
+            _ => self.stored.as_ref(),
+        }
+    }
+
+    /// Attach `policy` and report the revision id the resource now carries.
     ///
-    /// A resource-based policy's `Allow` is a permission of its own where it names the
-    /// CALLER: "the resource-based policy and the identity-based policy are evaluated
-    /// together, and access is granted if either allows it". Only the caller's OWN
-    /// spellings may be passed — a statement naming the account delegates to that
-    /// account's identity-based policies rather than granting (see [`authorization`]).
-    pub fn grants_any(&self, principals: &[String], action: &str, resource_arn: &str) -> bool {
-        self.statements
-            .iter()
-            .any(|statement| statement.grants(principals, action, resource_arn))
+    /// The policy is numbered as the revision that replaces the one the resource carries
+    /// ([`AttachedPolicy::revise_after`]), so "running it multiple times on the same
+    /// resource using the same policy document will return the same revision id" (the
+    /// `PutResourcePolicy` doc): re-attaching the document the resource already carries
+    /// changes nothing and reports the revision it already has, so neither the revision
+    /// nor its propagation moves.
+    pub fn attach(&mut self, mut policy: AttachedPolicy, now: SystemTime) -> String {
+        policy.revise_after(self.stored.as_ref());
+        if let Some(current) = &self.stored {
+            if current.document == policy.document {
+                return current.revision_id();
+            }
+        }
+        let revision_id = policy.revision_id();
+        self.record(Some(policy), now);
+        revision_id
+    }
+
+    /// Remove the revision the resource carries and report the revision id that was
+    /// removed, or `None` when it carried none — "this value will be empty if you make a
+    /// request against a resource without a policy"
+    /// (`DeleteResourcePolicyOutput$RevisionId`), which is also a call that changes
+    /// nothing and so starts no propagation.
+    pub fn detach(&mut self, now: SystemTime) -> Option<String> {
+        let removed = self.stored.as_ref().map(AttachedPolicy::revision_id)?;
+        self.record(None, now);
+        Some(removed)
+    }
+
+    /// Record the revision the write at `now` left, due to be in force one span later,
+    /// over the revision it replaced.
+    fn record(&mut self, next: Option<AttachedPolicy>, now: SystemTime) {
+        self.superseded = self.stored.take();
+        self.stored = next;
+        self.applied_at = Some(now + STATUS_TRANSITION);
     }
 }
 
@@ -436,18 +511,64 @@ pub fn policy_too_large_message() -> String {
     )
 }
 
-/// One document carrying the `Version` an IAM document that states none is read with
-/// ([`DEFAULT_POLICY_VERSION`]), beside the rest of the document as it arrived.
-fn versioned_document(object: &serde_json::Map<String, serde_json::Value>) -> String {
-    let mut versioned = serde_json::Map::new();
-    versioned.insert(
-        "Version".to_string(),
-        serde_json::Value::String(DEFAULT_POLICY_VERSION.to_string()),
-    );
-    for (key, value) in object {
-        versioned.insert(key.clone(), value.clone());
+/// Put every element of `document` that the IAM grammar states as "either a single string
+/// or an array of strings" into the form that states ONE value as the value itself.
+///
+/// The grammar admits both spellings of a single-valued element — `"Action":
+/// "dynamodb:GetItem"` and `"Action": ["dynamodb:GetItem"]` are the same element, and so
+/// are the values of a `Principal` kind and of a condition clause — so the canonical form
+/// the stored document is held in states such an element as the string it lists. An
+/// element listing two or more values keeps its array, and every other member is left
+/// exactly as it arrived.
+///
+/// The elements are those the grammar defines that way: `Action`/`NotAction`,
+/// `Resource`/`NotResource`, the `Principal`/`NotPrincipal` element (a string, or a map
+/// from principal kind to its values) and each key of each operator of a `Condition`.
+fn canonical_elements(document: &mut serde_json::Value) {
+    let Some(statement) = document.get_mut("Statement") else {
+        return;
+    };
+    let statements: Vec<&mut serde_json::Value> = match statement {
+        serde_json::Value::Array(list) => list.iter_mut().collect(),
+        single => vec![single],
+    };
+    for statement in statements {
+        for element in ["Action", "NotAction", "Resource", "NotResource"] {
+            if let Some(value) = statement.get_mut(element) {
+                unwrap_single(value);
+            }
+        }
+        for element in ["Principal", "NotPrincipal"] {
+            match statement.get_mut(element) {
+                Some(serde_json::Value::Object(kinds)) => {
+                    for named in kinds.values_mut() {
+                        unwrap_single(named);
+                    }
+                }
+                Some(value) => unwrap_single(value),
+                None => {}
+            }
+        }
+        if let Some(serde_json::Value::Object(operators)) = statement.get_mut("Condition") {
+            for keys in operators.values_mut() {
+                if let serde_json::Value::Object(keys) = keys {
+                    for value in keys.values_mut() {
+                        unwrap_single(value);
+                    }
+                }
+            }
+        }
     }
-    serde_json::Value::Object(versioned).to_string()
+}
+
+/// Replace a one-element array of a string with that string, leaving every other value
+/// alone.
+fn unwrap_single(value: &mut serde_json::Value) {
+    if let serde_json::Value::Array(listed) = value {
+        if let [single @ serde_json::Value::String(_)] = listed.as_slice() {
+            *value = single.clone();
+        }
+    }
 }
 
 /// The revision token a policy revision made at `at` carries: that instant in
@@ -471,20 +592,15 @@ pub fn policy_revision_token(at: SystemTime) -> u64 {
 #[derive(Debug, Clone)]
 pub(super) struct PolicyStatement {
     /// `Effect: Deny`. An Allow statement is parsed and kept so the document round
-    /// trips, but it changes no outcome (see [`AttachedPolicy::denies`]).
+    /// trips and is held to the grammar, but nothing here reads it: what a document
+    /// GRANTS one request is [`AttachedPolicy::decision`].
     pub(super) deny: bool,
     pub(super) principal: Selector,
     pub(super) action: Selector,
     pub(super) resource: Selector,
-    /// Whether the statement carries a `Condition`.
-    ///
-    /// A condition is matched against the REQUEST CONTEXT (the source VPC, the time of
-    /// day, a tag on the caller), and this emulator has no identity or network context
-    /// to supply, so it cannot evaluate one. A Deny that carries one is therefore
-    /// applied anyway — FAIL CLOSED: the emulator never serves a request the attached
-    /// policy might refuse, which is the error that matters for a policy whose whole
-    /// job is to refuse. The flag is kept so the refusal can say the condition was not
-    /// evaluated.
+    /// Whether the statement carries a `Condition`, which is what makes its deny one of
+    /// only the requests whose context satisfies it rather than of every request
+    /// ([`AttachedPolicy::denies_unconditionally`]).
     pub(super) conditioned: bool,
 }
 
@@ -558,23 +674,13 @@ impl PolicyStatement {
         })
     }
 
-    /// Whether this statement denies the request.
-    ///
-    /// A `Condition` is not evaluated (see the field's doc) and does not stop a Deny
-    /// from applying. `principals` is every spelling the caller may be named by; a
-    /// statement naming any of them is about this request.
+    /// Whether this statement denies the request CONTEXT-FREE: it is a `Deny` about the
+    /// action, resource and principal, whatever `Condition` it carries. What decides one
+    /// REQUEST is [`AttachedPolicy::decision`]; this is read only beside
+    /// [`Self::conditioned`], to tell a deny of every request from one of some
+    /// ([`AttachedPolicy::denies_unconditionally`]).
     pub(super) fn denies(&self, principals: &[String], action: &str, resource_arn: &str) -> bool {
         self.deny && self.about(principals, action, resource_arn)
-    }
-
-    /// Whether this statement GRANTS the request.
-    ///
-    /// A conditioned `Allow` grants nothing: the condition is not evaluated (see the
-    /// field's doc), so the same fail-closed reading that applies a conditioned Deny
-    /// withholds a conditioned grant — the emulator never serves on a condition it did
-    /// not check.
-    pub(super) fn grants(&self, principals: &[String], action: &str, resource_arn: &str) -> bool {
-        !self.deny && !self.conditioned && self.about(principals, action, resource_arn)
     }
 
     /// Whether this statement is ABOUT the request at all: its principal, action and
@@ -588,8 +694,8 @@ impl PolicyStatement {
                 .matches(|pattern| resource_matches(pattern, resource_arn))
     }
 
-    /// Whether this statement's decision rests on a `Condition` the emulator did not
-    /// evaluate, so a refusal can say so.
+    /// Whether this statement's deny is gated on a `Condition`, which makes it a deny of
+    /// only the requests whose context satisfies it.
     pub(super) fn conditioned(&self) -> bool {
         self.conditioned
     }

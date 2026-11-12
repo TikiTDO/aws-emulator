@@ -556,7 +556,9 @@ async fn a_resource_policy_decides_whether_the_data_plane_serves_the_request() {
             case: "an action list naming this one",
             statement: json!({
                 "Effect": "Deny",
-                "Principal": {"AWS": ["*"]},
+                // A principal element given as a LIST, which the grammar admits beside
+                // the single string: it names this caller among others.
+                "Principal": {"AWS": ["*", format!("arn:aws:iam::{ACCOUNT_ID}:role/other")]},
                 "Action": ["dynamodb:Query", "dynamodb:GetItem"],
                 "Resource": arn,
             }),
@@ -668,7 +670,11 @@ async fn a_resource_policy_decides_whether_the_data_plane_serves_the_request() {
             }),
         )
         .await;
-        // The document and its revision id round trip through the reader.
+        // The attach is asynchronous, so the data plane is asked only once its
+        // application is due.
+        wait_for_policy_application();
+        // The document and its revision id round trip through the reader, which reports
+        // the revision in force: the one this attach has now applied.
         let stored = ok(
             &router,
             "GetResourcePolicy",
@@ -685,9 +691,6 @@ async fn a_resource_policy_decides_whether_the_data_plane_serves_the_request() {
             "case {case}: the reader reports the revision id the writer returned, got {stored}"
         );
 
-        // The attach is asynchronous, so the data plane is asked only once its
-        // application is due.
-        wait_for_policy_application();
         let (status, body) = call(&router, "GetItem", &read).await;
         if denied {
             assert_eq!(
@@ -815,6 +818,17 @@ async fn a_resource_policy_is_stored_read_back_revised_and_removed() {
         json!(revision),
         "case revise: a different document gets a different revision id, got {revised}"
     );
+    // The revise is asynchronous like the attach: until its application is due the
+    // revision the resource carried BEFORE it is the one in force, so the read it denied
+    // is still denied.
+    let (status, body) = call(&router, "GetItem", &read).await;
+    assert_eq!(
+        (status, error_code(&body).as_str()),
+        (400, "AccessDeniedException"),
+        "case straight after the revise: the superseded policy is still in force, got {status} \
+         {body}"
+    );
+    wait_for_policy_application();
     // The new policy denies writes, so the read works again and the write does not.
     let fetched = ok(&router, "GetItem", read.clone()).await;
     assert_eq!(
@@ -822,7 +836,6 @@ async fn a_resource_policy_is_stored_read_back_revised_and_removed() {
         json!({"S": "v1"}),
         "case revise: the read the previous policy denied is served again, got {fetched}"
     );
-    wait_for_policy_application();
     let (status, body) = call(
         &router,
         "PutItem",
@@ -853,7 +866,8 @@ async fn a_resource_policy_is_stored_read_back_revised_and_removed() {
         "case a stale ExpectedRevisionId: the attached policy is unchanged, got {stored}"
     );
 
-    // Deleting reports what was removed and releases the denial.
+    // Deleting reports what was removed and releases the denial once the removal has
+    // been applied, which takes the same span an attach takes.
     let removed = ok(
         &router,
         "DeleteResourcePolicy",
@@ -863,6 +877,22 @@ async fn a_resource_policy_is_stored_read_back_revised_and_removed() {
     assert_eq!(
         removed["RevisionId"], revised["RevisionId"],
         "case delete: the revision id of what was removed is reported, got {removed}"
+    );
+    // "If you issue a GetResourcePolicy request immediately after a DeleteResourcePolicy
+    // request, DynamoDB might return the policy that was present before the deletion
+    // request" (the `GetResourcePolicy` doc), and that revision is the one still in force.
+    let lagging = ok(&router, "GetResourcePolicy", json!({"ResourceArn": arn})).await;
+    assert_eq!(
+        lagging["RevisionId"], revised["RevisionId"],
+        "case straight after the delete: the reader reports the revision that was present \
+         before it, got {lagging}"
+    );
+    wait_for_policy_application();
+    let (status, body) = call(&router, "GetResourcePolicy", &json!({"ResourceArn": arn})).await;
+    assert_eq!(
+        (status, error_code(&body).as_str()),
+        (400, "PolicyNotFoundException"),
+        "case once the delete is applied: no policy is attached, got {status} {body}"
     );
     ok(
         &router,
@@ -904,9 +934,10 @@ async fn a_policy_document_this_emulator_cannot_honour_is_refused_not_stored() {
         json!({"Version": "2012-10-17", "Statement": [statement]}).to_string()
     };
 
-    // A construct the evaluator does not implement is stored and reported back, and a
-    // Deny that rests on it is applied anyway: the emulator refuses rather than serves
-    // what the attached policy may deny, and says which part it did not evaluate.
+    // A condition over a key this request carries no value for cannot be decided, and a
+    // Deny that rests on it is applied anyway: the emulator never serves a request the
+    // attached policy may deny. The document itself is stored verbatim and reported back
+    // once its application is due.
     let conditioned = statement(json!({
         "Condition": {"StringEquals": {"aws:SourceVpc": "vpc-1"}},
     }));
@@ -916,13 +947,13 @@ async fn a_policy_document_this_emulator_cannot_honour_is_refused_not_stored() {
         json!({"ResourceArn": arn, "Policy": conditioned.clone()}),
     )
     .await;
+    wait_for_policy_application();
     let stored = ok(&router, "GetResourcePolicy", json!({"ResourceArn": arn})).await;
     assert_eq!(
         stored["Policy"],
         json!(conditioned),
         "case a statement Condition: the document is stored verbatim, got {stored}"
     );
-    wait_for_policy_application();
     let (status, body) = call(
         &router,
         "GetItem",
@@ -935,8 +966,8 @@ async fn a_policy_document_this_emulator_cannot_honour_is_refused_not_stored() {
         "case a statement Condition: the deny is applied anyway, got {status} {body}"
     );
     assert!(
-        message_of(&body).contains("Condition"),
-        "case a statement Condition: the refusal says the condition was not evaluated, got {}",
+        message_of(&body).contains("with an explicit deny in a resource-based policy"),
+        "case a statement Condition: the refusal names the document that denied it, got {}",
         message_of(&body)
     );
     ok(
@@ -945,6 +976,8 @@ async fn a_policy_document_this_emulator_cannot_honour_is_refused_not_stored() {
         json!({"ResourceArn": arn}),
     )
     .await;
+    // The removal is asynchronous too, so the reader below is asked once it is applied.
+    wait_for_policy_application();
 
     // Rows that are not policy documents at all.
     let invalid = [

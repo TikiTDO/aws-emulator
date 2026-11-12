@@ -199,15 +199,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut store = state.lock();
         store.apply_due_transitions(now);
         let table = store.table_for_policy_mut(&resource).map_err(lift)?;
+        let slot = table.policy_slot_mut(&resource).map_err(lift)?;
         // "When you provide an expected revision ID, if the revision ID of the existing
         // policy on the resource doesn't match or if there's no policy attached to the
         // resource, the request will fail and return a PolicyNotFoundException"
-        // (`DeleteResourcePolicy$ExpectedRevisionId`).
+        // (`DeleteResourcePolicy$ExpectedRevisionId`). Held against the revision the
+        // WRITES have left on the resource, which is the one this call removes.
         if let Some(expected) = input.expected_revision_id.as_deref() {
-            let attached_revision_id = table
-                .attached_policy(&resource)
-                .map_err(lift)?
-                .map(crate::state::AttachedPolicy::revision_id);
+            let attached_revision_id = slot.stored().map(crate::state::AttachedPolicy::revision_id);
             if attached_revision_id.as_deref() != Some(expected) {
                 // The refusal names the revision the request asked for and what the
                 // target carries instead, so the two situations the modelled error
@@ -226,7 +225,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 );
             }
         }
-        let removed = table.policy_slot(&resource).map_err(lift)?.take();
+        let removed = slot.detach(now);
 
         ::tracing::info!(
             operation = Self::NAME,
@@ -239,7 +238,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // "This value will be empty if you make a request against a resource without a
         // policy" (`DeleteResourcePolicyOutput$RevisionId`).
         Ok(DeleteResourcePolicyOutput {
-            revision_id: removed.as_ref().map(crate::state::AttachedPolicy::revision_id),
+            revision_id: removed,
         })
     }
 }

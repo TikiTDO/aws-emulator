@@ -21,7 +21,10 @@ aws-smithy-types = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 bytes = { workspace = true }
 http = { workspace = true }
-serde_json = { workspace = true }
+# `preserve_order` keeps a JSON object's members in the order they were read, which is
+# what lets a document this service reads and reports back (a resource-based policy) keep
+# the member order it was written in (`state::policies`).
+serde_json = { workspace = true, features = ["preserve_order"] }
 tracing = { workspace = true }
 # Linear-time substring search over BYTES: `contains(path, :operand)` over a binary
 # attribute searches one caller-sized value for another, so the search has to cost the
@@ -33,10 +36,12 @@ bigdecimal = "0.4"
 # Mints the UUID-format `TableId` DynamoDB generates for every table it creates
 # (`state::new_table_id`).
 uuid = { version = "1", features = ["v4"] }
-# The policy revision id is a digest of the policy document, so the same document
-# always gets the same id (PutResourcePolicy's documented idempotency).
+# Digests the canonical form of a transaction's request set, so one `ClientRequestToken`
+# stands for the same set across retries (`state::multi_item`), and fingerprints a PartiQL
+# statement (`state::partiql`).
 sha2 = { workspace = true }
-# Hex rendering for that digest.
+# Hex rendering for those digests, and for the opaque pagination tokens the list
+# operations mint (`ops::list_exports`, `ops::list_imports`).
 hex = { workspace = true }
 # The DynamoDB Streams service owns the stream registry a table publishes into:
 # enabling a stream on CreateTable/UpdateTable registers it through that crate's
