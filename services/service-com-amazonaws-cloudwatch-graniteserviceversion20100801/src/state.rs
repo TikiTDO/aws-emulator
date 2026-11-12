@@ -2279,6 +2279,55 @@ pub fn decode_page_token(token: &str) -> Option<String> {
     String::from_utf8(::hex::decode(token).ok()?).ok()
 }
 
+/// The opaque form a pagination token is carried in: a base64 blob, padded or not, in either of
+/// the two alphabets a service encodes one with — the URL-safe one, which lets a token travel in
+/// a query string unescaped, and the standard one.
+///
+/// Read as loosely as the FORM allows: either alphabet, the padding there or not, and the bits
+/// the last symbol leaves over not held against the value, because what is asked of a token here
+/// is only whether it is a blob at all — not what its bytes say, which is the cursor's question
+/// ([`decode_page_token`]). What no blob can have is a symbol outside both alphabets, or a symbol
+/// count that encodes no whole number of bytes.
+///
+/// This is the form ASSUMED of a token, measured from how the refusals differ rather than stated
+/// by the model: a service carries its tokens in one of these alphabets, and what separates the
+/// two refusals below is exactly whether the value could be read in one at all. The cursor this
+/// service mints is hex-encoded, which is inside both ([`encode_page_token`]), so a token of its
+/// own is always a readable blob and is judged only on the cursor it carries.
+const PAGE_TOKEN_BLOBS: [::base64::engine::general_purpose::GeneralPurpose; 2] = [
+    page_token_blob(&::base64::alphabet::URL_SAFE),
+    page_token_blob(&::base64::alphabet::STANDARD),
+];
+
+/// One reader of that form, over `alphabet`.
+const fn page_token_blob(
+    alphabet: &'static ::base64::alphabet::Alphabet,
+) -> ::base64::engine::general_purpose::GeneralPurpose {
+    ::base64::engine::general_purpose::GeneralPurpose::new(
+        alphabet,
+        ::base64::engine::general_purpose::GeneralPurposeConfig::new()
+            .with_decode_padding_mode(::base64::engine::DecodePaddingMode::Indifferent)
+            .with_decode_allow_trailing_bits(true),
+    )
+}
+
+/// Whether `token` reads as a pagination token AT ALL: an opaque blob of the form one is carried
+/// in ([`PAGE_TOKEN_BLOBS`]), whatever its bytes turn out to say.
+///
+/// The FIRST of the two questions a paginated read asks about a `NextToken`, and the coarser one:
+/// a value whose characters or whose length no blob has is not a token of any service, where one
+/// that is a blob may still be a token this service did not mint — which is the second question,
+/// the cursor it carries ([`decode_page_token`]). The two are different faults to the caller that
+/// sent it, so an operation whose refusal says WHICH reads them apart here, through the
+/// maintained codec rather than a second alphabet table. Every cursor this service mints is such
+/// a blob ([`encode_page_token`]), so a token of its own only ever fails the second question.
+#[must_use]
+pub fn reads_as_a_page_token(token: &str) -> bool {
+    PAGE_TOKEN_BLOBS
+        .iter()
+        .any(|blob| ::base64::Engine::decode(blob, token).is_ok())
+}
+
 /// The token a paginated request asks its page to resume from, or `None` when it asks for the
 /// FIRST page.
 ///

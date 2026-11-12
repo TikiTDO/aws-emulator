@@ -186,10 +186,24 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
                 ),
             ))) as Box<dyn ErasedOperation>,
         );
-        // The two managed Contributor Insights rule operations state a refusal about ONE
-        // request member in CloudWatch's coded form, which includes a required member the
-        // request left out entirely ([`missing_required_member_refusal`]) — a class the
-        // service-wide seam cannot word, because it cannot see which operation was called.
+        // The Contributor Insights rule operations state a refusal about ONE request member in
+        // CloudWatch's coded form, under the parameter fault the class belongs to: a required
+        // member the request left out entirely ([`missing_required_member_refusal`]) and a page
+        // size below the published minimum of the member that names it
+        // ([`non_positive_page_size_refusal`]) — classes the service-wide seam cannot word,
+        // because it cannot see which operation was called.
+        overridden.add_operation(
+            "DescribeInsightRules",
+            Box::new(QueryCompatibleErrors::new(Metering::new(
+                Arc::clone(&engine),
+                JudgingTheValuesThisServiceEnforces::new(
+                    crate::ops::describe_insight_rules::DescribeInsightRules::new(Arc::clone(
+                        &engine,
+                    )),
+                    coded_member_fault,
+                ),
+            ))) as Box<dyn ErasedOperation>,
+        );
         overridden.add_operation(
             "ListManagedInsightRules",
             Box::new(QueryCompatibleErrors::new(Metering::new(
@@ -346,12 +360,55 @@ fn listing_value_fault(violations: &[aws_smithy_schema_server::Violation]) -> Op
     })
 }
 
-/// The refusal policy of the managed Contributor Insights rule operations: a required member
-/// the request did not supply at all, worded the way those operations word a refusal about one
-/// request member ([`missing_required_member_refusal`]), and nothing else — every other class
-/// keeps the service-wide wording behind it ([`the_service_wide_wording`]).
+/// The refusal policy of the Contributor Insights rule operations: a page size below the
+/// published minimum of the member that asks for one ([`non_positive_page_size_refusal`]) and a
+/// required member the request did not supply at all, worded the way those operations word a
+/// refusal about one request member ([`missing_required_member_refusal`]) — and nothing else:
+/// every other class keeps the service-wide wording behind it ([`the_service_wide_wording`]).
 fn coded_member_fault(violations: &[aws_smithy_schema_server::Violation]) -> Option<Refused> {
-    violations.iter().find_map(missing_required_member_refusal)
+    violations
+        .iter()
+        .find_map(non_positive_page_size_refusal)
+        .or_else(|| violations.iter().find_map(missing_required_member_refusal))
+}
+
+/// The refusal of a page size below the published minimum of the member that asks for one, or
+/// `None` when `violation` is not one.
+///
+/// The class is the parameter-value fault ([`PARAMETER_VALUE`], "The value of an input parameter
+/// is bad or out-of-range"), and the sentence is the coded form the Contributor Insights
+/// operations state a refusal about one member in
+/// ([`crate::state::NON_POSITIVE_MAX_RESULTS`]): a listing's smallest page is one result, so a
+/// value under that asks for a page that could report nothing, which is a VALUE the service will
+/// not use rather than a request whose shape it could not read.
+///
+/// Keyed on the CLASS of violation and the member — a page-size member below its modelled range
+/// minimum — so it holds for every listing of these operations that takes one, at any depth
+/// ([`is_page_size`]): the Contributor Insights rule listing is the recorded case. The bound the
+/// sentence states is that member's own: both listings' page size targets `InsightRuleMaxResults`,
+/// whose range minimum is one result
+/// (`smithy_query(query="operation",operation="DescribeInsightRules,ListManagedInsightRules")`),
+/// so a value below it is a value at or under zero.
+fn non_positive_page_size_refusal(
+    violation: &aws_smithy_schema_server::Violation,
+) -> Option<Refused> {
+    let aws_smithy_schema_server::ViolationKind::MinValue(_) = violation.kind else {
+        return None;
+    };
+    if !is_page_size(&violation.path) {
+        return None;
+    }
+    Some(Refused {
+        code: PARAMETER_VALUE.shape_name.to_string(),
+        message: crate::state::NON_POSITIVE_MAX_RESULTS.to_string(),
+    })
+}
+
+/// Whether `path` points at the member a listing of these operations asks for a page size with,
+/// in the spelling the validating walk reports — at whatever depth the walk reports it at, which
+/// is the last segment of the path it builds.
+fn is_page_size(path: &str) -> bool {
+    path.split('.').next_back() == Some("maxResults")
 }
 
 /// The refusal of a required member the request did not supply AT ALL, or `None` when

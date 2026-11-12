@@ -6,11 +6,12 @@
 //! The rule under test: **a batch Contributor Insights rule operation acts on exactly the rules
 //! it was named and holds — `DeleteInsightRules` removing each one with everything stored under
 //! it, so no later read reports it — changes nothing about a rule it was not named, and reports
-//! each name it holds no rule for as one entry of `Failures`**: "Permanently deletes the
+//! no `Failures` entry for a name it holds no rule for**: "Permanently deletes the
 //! specified Contributor Insights rules." / "An array listing the rules that could not be
 //! deleted." (`DeleteInsightRules`, `DeleteInsightRulesOutput$Failures`), empty when every named
-//! rule was processed ("This array is empty if the API operation was successful for all the
-//! rules specified in the request.", `PartialFailure`). An empty `RuleNames` array asks for
+//! rule reached the state the request asked for ("This array is empty if the API operation was
+//! successful for all the rules specified in the request.", `PartialFailure`) — and a name no
+//! rule answers to has reached it already. An empty `RuleNames` array asks for
 //! nothing and is refused as a bad parameter value, under the modelled
 //! `InvalidParameterValueException` (HTTP 400) every one of those operations declares.
 //!
@@ -86,15 +87,6 @@ fn failures(body: &Value) -> Vec<Value> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
-}
-
-/// One member of a failure entry, as a string.
-fn member(entry: &Value, name: &str) -> String {
-    entry
-        .get(name)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
 }
 
 /// The ARN of the Contributor Insights rule `name`: "The ARN format of a Contributor Insights
@@ -217,56 +209,28 @@ async fn every_named_rule_this_service_holds_is_deleted_and_every_other_rule_is_
             );
         }
 
-        // One failure entry per named rule this service holds none of, in the order the
-        // request named them.
-        let expected_failures: Vec<String> = named
-            .iter()
-            .filter(|name| !held.iter().any(|(held_name, _)| held_name == *name))
-            .cloned()
-            .collect();
+        // No failure entry at all: every rule this service holds is one it deletes, and a name
+        // it holds no rule for already names nothing to delete.
         let reported = failures(&answered);
         assert_eq!(
-            reported
-                .iter()
-                .map(|entry| member(entry, "FailureResource"))
-                .collect::<Vec<String>>(),
-            expected_failures,
-            "case {case:?}: expected a failure entry per unknown name, got {answered}"
+            reported,
+            Vec::<Value>::new(),
+            "case {case:?}: expected an empty Failures array, got {answered}"
         );
-        for entry in &reported {
-            let resource = member(entry, "FailureResource");
-            assert!(
-                !member(entry, "ExceptionType").is_empty()
-                    && !member(entry, "FailureCode").is_empty(),
-                "case {case:?}: a failure entry carries the type and code of the error, got \
-                 {entry}"
-            );
-            let description = member(entry, "FailureDescription");
-            assert!(
-                description.contains(&resource),
-                "case {case:?}: the description must name the rule {resource:?}, got {entry}"
-            );
-        }
+        assert!(
+            answered.get("Failures").is_some_and(Value::is_array),
+            "case {case:?}: expected the Failures array to be answered, got {answered}"
+        );
 
-        // The deletion is permanent: naming the same rules again finds none of them, so every
-        // name of the second request is reported back as a failure.
+        // The deletion is permanent and the delete is idempotent: naming the same rules again
+        // finds none of them, changes nothing, and still reports no failure.
         let again = ok(&router, "DeleteInsightRules", &json!({"RuleNames": named})).await;
-        let mut named_once: Vec<String> = Vec::new();
-        for name in named {
-            if !named_once.contains(name) {
-                named_once.push(name.clone());
-            }
-        }
-        let reported_again: Vec<String> = failures(&again)
-            .iter()
-            .map(|entry| member(entry, "FailureResource"))
-            .collect();
-        let expected_again: Vec<String> = named.clone();
         assert_eq!(
-            reported_again, expected_again,
-            "case {case:?}: a second delete of the same names finds no rule, got {again}"
+            failures(&again),
+            Vec::<Value>::new(),
+            "case {case:?}: a second delete of the same names reports no failure, got {again}"
         );
-        for name in &named_once {
+        for name in named {
             let actual = described_rule(&router, name).await;
             assert_eq!(
                 actual, None,

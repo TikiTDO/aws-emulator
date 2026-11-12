@@ -194,12 +194,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "Include this value to get the next set of rules if the value was returned by the
         // previous operation." (`ListManagedInsightRulesInput$NextToken`) — a token this
-        // service did not issue is the `InvalidNextToken` this operation models.
+        // service did not issue is the `InvalidNextToken` this operation models, worded as every
+        // Contributor Insights listing words an unusable token: the fault the token itself has
+        // (`crate::state::invalid_page_token_message`), so the two listings that page these
+        // rules cannot word the same refusal differently. That wording is per FAMILY of
+        // operation, not service-wide — `ListMetricStreams` states its own and `GetMetricData`
+        // answers an EMPTY message — so neither of those is copied onto this one.
         let start_at = match crate::state::requested_page(input.next_token.as_deref()) {
             None => None,
             Some(token) => Some(crate::state::decode_page_token(token).ok_or_else(|| {
                 ListManagedInsightRulesErrorModeled::InvalidNextToken(InvalidNextToken {
-                    message: Some(INVALID_NEXT_TOKEN_MESSAGE.to_string()),
+                    message: Some(crate::state::invalid_page_token_message(token).to_string()),
                 })
             })?),
         };
@@ -279,13 +284,3 @@ const MIN_MAX_RESULTS: usize = 1;
 
 /// `MaxResults`'s modelled maximum (range 1..500).
 const MAX_MAX_RESULTS: usize = 500;
-
-/// How CloudWatch words this operation's refusal of a `NextToken` it did not issue: one fixed
-/// sentence, coded for the condition the way this operation's other refusals are
-/// (`crate::state::INVALID_RESOURCE_ARN`), and carrying nothing of the request — neither the
-/// token nor which part of it was unreadable.
-///
-/// This is the wording MEASURED for this operation. The refusal's wording is per operation —
-/// `ListMetricStreams` states its own and `GetMetricData` answers an EMPTY message — so neither
-/// is copied onto the other.
-const INVALID_NEXT_TOKEN_MESSAGE: &str = "INVALID_TOKEN: Unsupported token version.";

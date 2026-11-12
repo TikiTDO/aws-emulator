@@ -27,6 +27,11 @@ tracing = { workspace = true }
 # Opaque pagination cursors: hex makes a token this service did not mint detectable,
 # which is what lets DescribeAlarms refuse a malformed NextToken.
 hex = { workspace = true }
+# Whether a `NextToken` is an opaque blob AT ALL is answered by the maintained base64 codec
+# (`state::reads_as_a_page_token`), which is what lets a paginated read tell a value that is no
+# token from a token it did not mint; the widget-image suite decodes the `MetricWidgetImage`
+# blob off this service's JSON wire with the same codec.
+base64 = "0.22"
 # `arn`: the ONE parse of a caller-supplied resource ARN, shared with every other service —
 # an alarm action's ARN (and the Region and account of the alarm's own ARN) is read through
 # it rather than split here.
@@ -76,9 +81,6 @@ chrono-tz = { version = "0.10", default-features = false, features = ["std"] }
 emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
-# The `MetricWidgetImage` blob arrives base64-encoded on this service's JSON wire, so the
-# widget-image suite decodes it with the maintained codec before it decodes the PNG.
-base64 = "0.22"
 # SNS is mounted beside CloudWatch on one engine in the alarm-action tests, because an
 # alarm's action is an SNS topic and a notification is asserted where a client sees it: on
 # the topic's subscription.

@@ -6,15 +6,16 @@
 //!
 //! Two rules are under test, one per kind of batch:
 //!
-//! 1. **A batch rule operation reports a rule name it holds no rule for as one `PartialFailure`
-//!    of the resource-not-found class, coded by the member at fault — the rule name — and
-//!    described as the sentence "Rule " + the name the request carried + " does not exist."**
-//!    "An array listing the rules that could not be disabled."
+//! 1. **A batch rule operation that MOVES a rule's state reports a rule name it holds no rule
+//!    for as one `PartialFailure` of the resource-not-found class, coded by the member at fault
+//!    — the rule name — and described as the sentence "Rule " + the name the request carried +
+//!    " does not exist."** "An array listing the rules that could not be disabled."
 //!    (`DisableInsightRulesOutput$Failures`), "If the operation could not process one of the
 //!    rules, the following data is returned for each of those rules." (`PartialFailure`) — a
 //!    name that is well formed but addresses no rule is a resource that is not there, not a
 //!    value the request had no business sending, and the two are what a batch caller branches
-//!    on.
+//!    on. The DELETE of such a name reports NOTHING: the state it asks the rule to reach is
+//!    being gone, which a name no rule answers to has already reached.
 //!
 //! 2. **A `ManagedRule` entry whose `ResourceARN` addresses no resource is reported about that
 //!    ARN — the parameter-fault class, still keyed by the entry's template name, described
@@ -34,15 +35,14 @@ use crate::harness::{build_router, build_router_with_engine, ok, publish_managed
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
-/// Every batch Contributor Insights rule operation that acts on a list of rule NAMES and
-/// reports back the names it could not act on: "The rules can be enabled, disabled, and
+/// The batch Contributor Insights rule operations that MOVE a rule's state, and so report back
+/// a name they could not write the asked-for state on: "The rules can be enabled, disabled, and
 /// deleted using EnableInsightRules, DisableInsightRules, and DeleteInsightRules."
 /// (`PutManagedInsightRules`)
-const NAME_BATCH_OPERATIONS: [&str; 3] = [
-    "DisableInsightRules",
-    "EnableInsightRules",
-    "DeleteInsightRules",
-];
+///
+/// The DELETE is not one of them: the state it asks for is the rule being gone, which a name no
+/// rule answers to already is, so it reports no failure for one — asserted below.
+const STATE_BATCH_OPERATIONS: [&str; 2] = ["DisableInsightRules", "EnableInsightRules"];
 
 /// A rule definition in the Contributor Insights rule syntax, as `PutInsightRule` takes it.
 fn definition() -> String {
@@ -195,7 +195,7 @@ async fn a_name_no_rule_answers_to_is_reported_as_the_rule_that_is_not_there() {
         },
     ];
 
-    for operation in NAME_BATCH_OPERATIONS {
+    for operation in STATE_BATCH_OPERATIONS {
         for row in &rows {
             let case = format!("{operation} / {}", row.case);
             let router = build_router();
@@ -229,6 +229,22 @@ async fn a_name_no_rule_answers_to_is_reported_as_the_rule_that_is_not_there() {
             assert!(
                 answered.get("Failures").is_some_and(Value::is_array),
                 "case {case:?}: expected a Failures array on the answer, got {answered}"
+            );
+
+            // The DELETE of the very same names reports NO entry for one it holds no rule
+            // for: the rule the request asks to be gone is already gone.
+            let case = format!("DeleteInsightRules / {}", row.case);
+            let deleted = ok(&router, "DeleteInsightRules", &json!({"RuleNames": row.named}))
+                .await;
+            assert_eq!(
+                failures(&deleted),
+                Vec::<Value>::new(),
+                "case {case:?}: expected no failure entry for a name that names no rule, got \
+                 {deleted}"
+            );
+            assert!(
+                deleted.get("Failures").is_some_and(Value::is_array),
+                "case {case:?}: expected an empty Failures array on the answer, got {deleted}"
             );
         }
     }

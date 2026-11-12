@@ -155,8 +155,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "The maximum number of results to return in one operation. If you omit this
         // parameter, the default of 500 is used." (`DescribeInsightRulesInput$MaxResults`) —
-        // which is also the member's modelled 1..500 range, so the boundary validator has
-        // already refused anything outside it. A value that somehow arrives outside that
+        // which is also the member's modelled 1..500 range, so a page size outside it never
+        // reaches this handler: one below the published minimum is refused as a parameter
+        // VALUE ahead of the constraint walk (`crate::state::NON_POSITIVE_MAX_RESULTS`) and
+        // one above the maximum by the walk itself. A value that somehow arrives outside that
         // range is read at the nearest modelled bound rather than at the default, so a zero
         // can never make the page empty and the paging non-terminating.
         const DEFAULT_MAX_RESULTS: usize = 500;
@@ -170,12 +172,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "Include this value, if it was returned by the previous operation, to get the next
         // set of rules." (`DescribeInsightRulesInput$NextToken`) — a token this service did
-        // not issue is the `InvalidNextToken` this operation models.
+        // not issue is the `InvalidNextToken` this operation models, worded as the Contributor
+        // Insights listings word an unusable token: the fault the token itself has
+        // (`crate::state::invalid_page_token_message`).
         let start_at = match crate::state::requested_page(input.next_token.as_deref()) {
             None => None,
             Some(token) => Some(crate::state::decode_page_token(token).ok_or_else(|| {
                 DescribeInsightRulesErrorModeled::InvalidNextToken(InvalidNextToken {
-                    message: Some("NextToken is not a token this service issued".into()),
+                    message: Some(crate::state::invalid_page_token_message(token).to_string()),
                 })
             })?),
         };

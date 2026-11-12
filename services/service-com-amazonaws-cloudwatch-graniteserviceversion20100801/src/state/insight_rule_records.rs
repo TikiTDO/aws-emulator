@@ -21,8 +21,6 @@
 //! The EVALUATION of a rule — the syntax its definition carries, read over the log events its
 //! groups receive — is [`super::insight_rules`]; this file holds no evaluation.
 
-use std::collections::HashSet;
-
 use super::{
     insight_rules, ComAmazonawsCloudwatchGraniteserviceversion20100801State as State,
     ARN_NAMESPACE,
@@ -310,6 +308,49 @@ fn unknown_insight_rule_failure(rule_name: &str) -> PartialFailure {
 /// array carrying no entry names nothing to act on, which this service refuses as a bad value
 /// for `RuleNames` rather than as a change it applied to nothing.
 pub const EMPTY_RULE_NAMES: &str = "EMPTY_RULE_NAMES: RuleNames cannot be an empty array.";
+
+/// How CloudWatch refuses a `NextToken` a Contributor Insights listing was given that it cannot
+/// page from, when the value is no pagination token at all.
+///
+/// Those listings state a refusal in the coded form their other refusals use
+/// ([`EMPTY_RULE_NAMES`]): the condition's code, then fixed text for the class, echoing nothing
+/// of the token — neither the value nor where it was unreadable. A value whose characters or
+/// whose length no opaque token has ([`super::reads_as_a_page_token`]) carries no token for the
+/// service to read anything out of, which is what this sentence says.
+pub const UNREADABLE_PAGE_TOKEN: &str = "INVALID_TOKEN: Invalid token.";
+
+/// How it refuses one that IS a pagination token but not one this service issued.
+///
+/// The value reads as an opaque token, so the service reads it — and what it carries is not a
+/// cursor of the form this service mints its tokens in ([`super::decode_page_token`]), which is
+/// a token of some other form: the version the token was written under is not one this service
+/// supports, and that is what this sentence says.
+pub const UNMINTED_PAGE_TOKEN: &str = "INVALID_TOKEN: Unsupported token version.";
+
+/// Which of the two a Contributor Insights listing answers for `token`, read off the token
+/// itself.
+///
+/// Shared by the listings that page these rules, so neither can word the same unusable token
+/// differently from the other, and both tell the caller which of the two faults its value has.
+#[must_use]
+pub fn invalid_page_token_message(token: &str) -> &'static str {
+    if super::reads_as_a_page_token(token) {
+        UNMINTED_PAGE_TOKEN
+    } else {
+        UNREADABLE_PAGE_TOKEN
+    }
+}
+
+/// How CloudWatch refuses a page size a Contributor Insights listing cannot answer: one that
+/// asks for no result at all.
+///
+/// `MaxResults` is "the maximum number of results to return in one operation"
+/// (`DescribeInsightRulesInput$MaxResults`, `InsightRuleMaxResults` range 1..500), so its
+/// published minimum of one is the smallest page there is and a value below it asks for a page
+/// that could report nothing. The listing judges that as a bad parameter VALUE — the coded form
+/// above, naming the member and the bound its minimum states — rather than as the shape of the
+/// request, so a client branching on the parameter-value class reaches its handler.
+pub const NON_POSITIVE_MAX_RESULTS: &str = "INVALID_MAX_RESULTS: MaxResults must be greater than 0.";
 
 /// How CloudWatch states a parameter a Contributor Insights rule operation needs that the
 /// request did not supply at all, naming the request member it was looked for at.
@@ -852,31 +893,33 @@ impl State {
     }
 
     /// Remove every Contributor Insights rule `rule_names` names, reporting back one entry per
-    /// name this store holds no rule for.
+    /// rule it could not delete.
     ///
     /// "Permanently deletes the specified Contributor Insights rules."
     /// (`DeleteInsightRules`) — the rule and everything stored with it (its definition, its
     /// state and its tags) go away, so a later read reports no such rule. "An array listing the
-    /// rules that could not be deleted." (`DeleteInsightRulesOutput$Failures`) is reported the
-    /// same way the state operations report theirs: per name, with the rest of the request
-    /// still taking effect.
+    /// rules that could not be deleted." (`DeleteInsightRulesOutput$Failures`) carries the names
+    /// the request did not leave in the state it asked for, with the rest of the request still
+    /// taking effect.
     ///
-    /// The names a request carries are the SET of rules it deletes, so a name it repeats is
-    /// deleted once and is not a failure the second time — the same way naming a rule twice
-    /// asks the state operations for one state. A rule `PutManagedInsightRules` enabled is
-    /// removed by the same walk: "The rules can be enabled, disabled, and deleted using
-    /// EnableInsightRules, DisableInsightRules, and DeleteInsightRules."
-    /// (`PutManagedInsightRules`).
+    /// The names a request carries are the SET of rules it deletes, so a name it repeats asks
+    /// for one deletion. A rule `PutManagedInsightRules` enabled is removed by the same walk:
+    /// "The rules can be enabled, disabled, and deleted using EnableInsightRules,
+    /// DisableInsightRules, and DeleteInsightRules." (`PutManagedInsightRules`).
     pub fn delete_insight_rules(&mut self, rule_names: &[String]) -> Vec<PartialFailure> {
-        let mut deleted: HashSet<&String> = HashSet::new();
-        let mut failures: Vec<PartialFailure> = Vec::new();
         for rule_name in rule_names {
-            if self.insight_rules.remove(rule_name).is_some() {
-                deleted.insert(rule_name);
-            } else if !deleted.contains(rule_name) {
-                failures.push(unknown_insight_rule_failure(rule_name));
-            }
+            self.insight_rules.remove(rule_name);
         }
-        failures
+        // "An array listing the rules that could not be deleted. You cannot delete built-in
+        // rules." (`DeleteInsightRulesOutput$Failures`) — a DELETE is reported on by what it
+        // left behind, not by what it found: a name this store holds no rule for already names
+        // nothing, which is the end state the request asks for, so the walk above reached it
+        // and there is no failure to report. Every rule this store does hold was put by a
+        // caller or enabled from a managed-rule template, and this operation deletes all of
+        // those, so nothing a request names is a rule it could not delete. That is why the
+        // operations that MOVE a rule's state report the same name as a failure
+        // ([`State::set_insight_rule_state`]) and this one does not: a state cannot be written
+        // on a rule that is not there, while a deletion of one is already done.
+        Vec::new()
     }
 }
