@@ -431,7 +431,7 @@ async fn a_configuration_is_stored_up_to_the_stores_entry_ceiling_and_refused_pa
     );
     let agent_id = at_ceiling.string("/aiAgent/aiAgentId");
     let read = get_agent(&emulator, &assistant, &agent_id).await;
-    assert_reads_the_create(
+    assert_reads_the_record(
         "a configuration at the ceiling",
         "a read of the stored configuration",
         at_ceiling
@@ -522,19 +522,36 @@ pub(crate) fn expected_agent_arn(assistant_id: &str, agent_id: &str) -> String {
     )
 }
 
-/// A read answers with the `AIAgentData` the create stored, member for member.
-fn assert_reads_the_create(case: &str, what: &str, created: &Value, reply: &Reply) {
+/// The ARN a read of one VERSION of an agent reports: the agent's own ARN with the
+/// qualifier of the version read appended. An operation addressed through a label that
+/// may carry a version qualifier names the version it answered for; the create, which
+/// addresses no version, reports the bare resource ARN.
+pub(crate) fn expected_read_arn(assistant_id: &str, agent_id: &str, qualifier: &str) -> String {
+    format!("{}:{qualifier}", expected_agent_arn(assistant_id, agent_id))
+}
+
+/// A read answers with the `AIAgentData` the last write stored, member for member — with
+/// the one member a read renders differently: the ARN it reports names the version it
+/// answered for, which for the agent's working copy is the floating alias.
+pub(crate) fn assert_reads_the_record(case: &str, what: &str, record: &Value, reply: &Reply) {
     assert_eq!(
         reply.status, 200,
         "case {case:?}: {what} must be served, got HTTP {} with body {}",
         reply.status, reply.body
     );
+    let mut expected = record.clone();
+    let stored_arn = expected
+        .get("aiAgentArn")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    expected["aiAgentArn"] = json!(format!("{stored_arn}:{QUALIFIER_LATEST}"));
     let read = reply.field("/aiAgent");
     assert_eq!(
         read,
-        Some(created),
-        "case {case:?}: {what} must answer with the record the create stored, expected \
-         {created}, got {read:?}"
+        Some(&expected),
+        "case {case:?}: {what} must answer with the record the write stored, expected \
+         {expected}, got {read:?}"
     );
 }
 
@@ -671,13 +688,10 @@ async fn a_created_ai_agent_is_reported_out_of_the_stored_record_by_every_later_
             agent_id.clone(),
             expected_agent_arn(&assistant, agent_id),
             format!("{agent_id}:{QUALIFIER_LATEST}"),
-            format!(
-                "{}:{QUALIFIER_LATEST}",
-                expected_agent_arn(&assistant, agent_id)
-            ),
+            expected_read_arn(&assistant, agent_id, QUALIFIER_LATEST),
         ] {
             let reply = get_agent(&emulator, &assistant, &addressed_by).await;
-            assert_reads_the_create(
+            assert_reads_the_record(
                 &case.label,
                 &format!("a read addressed by {addressed_by:?}"),
                 data,
@@ -699,7 +713,7 @@ async fn a_created_ai_agent_is_reported_out_of_the_stored_record_by_every_later_
     // one row's agent is never another's.
     for (case, agent_id, data) in &created {
         let reply = get_agent(&emulator, &assistant, agent_id).await;
-        assert_reads_the_create(&case.label, "a repeated read", data, &reply);
+        assert_reads_the_record(&case.label, "a repeated read", data, &reply);
     }
 
     // The agent the create answered with is the one the tagging surface reports tags for,
@@ -974,7 +988,7 @@ async fn an_agent_this_account_does_not_hold_is_not_found() {
 
     // The agent itself is still there: a refusal changes nothing.
     let reply = get_agent(&emulator, &assistant, &agent_id).await;
-    assert_reads_the_create(
+    assert_reads_the_record(
         "after every refusal",
         "a read of the agent that was held all along",
         created

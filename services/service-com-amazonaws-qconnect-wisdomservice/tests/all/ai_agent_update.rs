@@ -45,11 +45,11 @@ use service_com_amazonaws_qconnect_wisdomservice::state::{
 };
 
 use super::ai_agent::{
-    assert_not_found, assistant_id, association_configuration, create_agent, expected_agent_arn,
-    full_configuration, get_agent, DESCRIPTION_MAX, DESCRIPTION_MIN, MAX_RESULTS_MIN,
-    MESSAGE_AI_AGENT_NOT_FOUND, MESSAGE_ASSISTANT_NOT_FOUND, MESSAGE_IDEMPOTENCY_CONFLICT,
-    ORIGIN_CUSTOMER, QUALIFIER_LATEST, SEARCH_TYPES, STATUS_ACTIVE, TYPE_CONFIGURATIONS,
-    VISIBILITY_PUBLISHED, VISIBILITY_SAVED,
+    assert_not_found, assert_reads_the_record, assistant_id, association_configuration,
+    create_agent, expected_agent_arn, expected_read_arn, full_configuration, get_agent,
+    DESCRIPTION_MAX, DESCRIPTION_MIN, MAX_RESULTS_MIN, MESSAGE_AI_AGENT_NOT_FOUND,
+    MESSAGE_ASSISTANT_NOT_FOUND, MESSAGE_IDEMPOTENCY_CONFLICT, ORIGIN_CUSTOMER, QUALIFIER_LATEST,
+    SEARCH_TYPES, STATUS_ACTIVE, TYPE_CONFIGURATIONS, VISIBILITY_PUBLISHED, VISIBILITY_SAVED,
 };
 use super::resource_tags::{label, tag_map, wisdom_arn, Emulator, Reply, ABSENT_UUID, OTHER_ACCOUNT, REGION};
 
@@ -82,7 +82,12 @@ const PRESERVED_MEMBERS: [&str; 9] = [
 
 /// `UpdateAIAgent` on one agent, as the model's URI binds it
 /// (`POST /assistants/{assistantId}/aiagents/{aiAgentId}`).
-async fn update_agent(emulator: &Emulator, assistant: &str, agent: &str, body: Value) -> Reply {
+pub(crate) async fn update_agent(
+    emulator: &Emulator,
+    assistant: &str,
+    agent: &str,
+    body: Value,
+) -> Reply {
     emulator
         .send(
             "POST",
@@ -293,6 +298,8 @@ fn assert_applies_update(case: &str, what: &str, stored: &Value, update: &Value,
 }
 
 /// The record the update left, read back through `GetAIAgent` however it is addressed.
+/// A read answers with that record, with the one member a read renders differently: the
+/// ARN it reports names the version it answered for.
 async fn assert_reads_back(
     emulator: &Emulator,
     case: &str,
@@ -300,10 +307,13 @@ async fn assert_reads_back(
     agent_id: &str,
     written: &Value,
 ) {
+    let mut expected = written.clone();
+    expected["aiAgentArn"] = json!(expected_read_arn(assistant, agent_id, QUALIFIER_LATEST));
     for addressed_by in [
         agent_id.to_string(),
         expected_agent_arn(assistant, agent_id),
         format!("{agent_id}:{QUALIFIER_LATEST}"),
+        expected_read_arn(assistant, agent_id, QUALIFIER_LATEST),
     ] {
         let reply = get_agent(emulator, assistant, &addressed_by).await;
         assert_eq!(
@@ -315,9 +325,9 @@ async fn assert_reads_back(
         let read = reply.field("/aiAgent");
         assert_eq!(
             read,
-            Some(written),
+            Some(&expected),
             "case {case:?}: a read addressed by {addressed_by:?} must answer with the record \
-             the update wrote, expected {written}, got {read:?}"
+             the update wrote, expected {expected}, got {read:?}"
         );
         // The model: a version number is reported only when the request's `aiAgentId`
         // named a VERSION. An update writes the working copy and publishes nothing, so a
@@ -466,12 +476,11 @@ async fn an_update_never_reaches_another_assistants_agent_or_a_version() {
 
     // Nothing was written: the record is the one the create stored.
     let reply = get_agent(&emulator, &assistant, &agent_id).await;
-    assert_eq!(
-        reply.field("/aiAgent"),
-        Some(&stored),
-        "after every refusal the record must be the one the create stored, expected \
-         {stored}, got body {}",
-        reply.body
+    assert_reads_the_record(
+        "after every refusal",
+        "a read of the record the create stored",
+        &stored,
+        &reply,
     );
 }
 
@@ -541,13 +550,7 @@ async fn a_configuration_for_another_type_than_the_stored_agent_is_refused() {
         // The refusal wrote nothing: neither the configuration it carried nor the
         // visibility status it asked for.
         let read = get_agent(&emulator, &assistant, &agent_id).await;
-        assert_eq!(
-            read.field("/aiAgent"),
-            Some(&stored),
-            "case {case:?}: a refused update must leave the record as it was, expected \
-             {stored}, got body {}",
-            read.body
-        );
+        assert_reads_the_record(&case, "a read after a refused update", &stored, &read);
 
         // The configuration of the agent's OWN type, which the same table otherwise
         // refuses, is written: the refusal is about the PAIR, not about the configuration.
@@ -627,11 +630,11 @@ async fn an_update_is_bounded_by_the_stores_configuration_entry_ceiling() {
         .cloned()
         .unwrap_or_else(|| panic!("the update answered no aiAgent: {}", at_ceiling.body));
     let read = get_agent(&emulator, &assistant, &agent_id).await;
-    assert_eq!(
-        read.field("/aiAgent"),
-        Some(&written),
-        "a read must answer with the configuration the update wrote, body {}",
-        read.body
+    assert_reads_the_record(
+        "a configuration at the ceiling",
+        "a read of the configuration the update wrote",
+        &written,
+        &read,
     );
 
     // One entry past it: refused, and nothing written.
@@ -660,11 +663,11 @@ async fn an_update_is_bounded_by_the_stores_configuration_entry_ceiling() {
         refused.body
     );
     let read = get_agent(&emulator, &assistant, &agent_id).await;
-    assert_eq!(
-        read.field("/aiAgent"),
-        Some(&written),
-        "a refused update must leave the record as it was, body {}",
-        read.body
+    assert_reads_the_record(
+        "a configuration past the ceiling",
+        "a read after the refused update",
+        &written,
+        &read,
     );
 }
 
@@ -821,12 +824,14 @@ async fn a_replayed_client_token_answers_with_the_record_it_already_wrote() {
             reply.body
         );
         let read = get_agent(&emulator, &assistant, &agent_id).await;
-        assert_eq!(
-            read.field("/aiAgent"),
-            first.field("/aiAgent"),
-            "case {agent_type:?}: the refused replay must leave the record the first update \
-             wrote, body {}",
-            read.body
+        assert_reads_the_record(
+            agent_type,
+            "a read after the refused replay",
+            first
+                .field("/aiAgent")
+                .unwrap_or_else(|| panic!("case {agent_type:?}: the first update answered no \
+                     aiAgent: {}", first.body)),
+            &read,
         );
 
         // The same request under a token of its own is written.
@@ -939,10 +944,12 @@ async fn the_tokens_the_store_remembers_are_bounded_to_the_most_recent_ones() {
         reply.body
     );
     let read = get_agent(&emulator, &assistant, &agent_id).await;
-    assert_eq!(
-        read.field("/aiAgent"),
-        reply.field("/aiAgent"),
-        "case {forgotten:?}: a later read must answer with the record that write left, body {}",
-        read.body
+    assert_reads_the_record(
+        &forgotten,
+        "a read after the write under the evicted token",
+        reply
+            .field("/aiAgent")
+            .unwrap_or_else(|| panic!("case {forgotten:?}: that write answered no aiAgent: {}", reply.body)),
+        &read,
     );
 }

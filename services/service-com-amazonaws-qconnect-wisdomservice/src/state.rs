@@ -524,6 +524,20 @@ pub fn message_system_ai_agent_not_modifiable() -> String {
         .to_string()
 }
 
+/// The sentence a DELETE addressed to a built-in ([`AI_AGENT_ORIGIN_SYSTEM`]-origin) AI
+/// agent is refused with: the same rule [`message_system_ai_agent_not_modifiable`] states,
+/// for the write that would remove the record rather than change it — those agents are the
+/// ones Amazon Q in Connect provisions with the assistant, and every binding a fresh
+/// assistant and session reports names one of them.
+///
+/// CHOSEN WORDING: AWS states the rule (a default AI agent is the service's, not an
+/// account's) but publishes no sentence for this refusal, so this one states that rule and
+/// carries nothing from the request. The class is the modelled `ValidationException`
+/// (HTTP 400), which the model declares for a request the service's own constraints refuse.
+pub fn message_system_ai_agent_not_deletable() -> String {
+    "A default AI Agent created by Amazon Q in Connect cannot be deleted.".to_string()
+}
+
 /// The `AIAgentType` one `AIAgentConfiguration` configures.
 ///
 /// The model declares that union as "a typed union that specifies the configuration based
@@ -1792,6 +1806,17 @@ impl AiAgent {
             origin: Some(self.origin.clone()),
             status: Some(self.status.clone()),
             modified_time: Some(::aws_smithy_types::DateTime::from(self.modified_at)),
+        }
+    }
+
+    /// The same `AIAgentData` as [`Self::to_ai_agent_data`], for an operation that
+    /// addressed this agent through a label that may carry a VERSION qualifier: every
+    /// member comes out of the stored record, and the reported ARN names the version the
+    /// request addressed ([`version_qualified_arn`]).
+    pub fn to_ai_agent_data_at_version(&self, qualifier: &str) -> AIAgentData {
+        AIAgentData {
+            ai_agent_arn: version_qualified_arn(&self.ai_agent_arn, qualifier),
+            ..self.to_ai_agent_data()
         }
     }
 }
@@ -3771,16 +3796,46 @@ impl ComAmazonawsQconnectWisdomserviceState {
             .get_mut(&assistant_id)?
             .ai_guardrails
             .remove(&guardrail_id)?;
+        self.forget_idempotency_for(&guardrail_id);
+        Some(guardrail)
+    }
+
+    /// Forget every `clientToken` entry that created the resource `resource_id` names,
+    /// which every delete does once the record itself is gone: a token whose resource no
+    /// longer exists must not resurrect it on a replay.
+    fn forget_idempotency_for(&mut self, resource_id: &str) {
         let gone: Vec<String> = self
             .idempotency
             .iter()
-            .filter(|(_, created)| created.resource_id == guardrail_id)
+            .filter(|(_, created)| created.resource_id == resource_id)
             .map(|(token, _)| token.clone())
             .collect();
         for token in gone {
             self.idempotency.remove(&token);
         }
-        Some(guardrail)
+    }
+
+    /// Forget one AI agent, as `DeleteAIAgent` does, together with the `clientToken`
+    /// entry that created it: a token whose resource is gone must not resurrect it on a
+    /// replay. `None` — nothing removed — when the pair names no agent this account
+    /// holds, which is the caller's not-found.
+    ///
+    /// The name the record held is released by the same call, so a create may take it
+    /// again, and the assistant's agent count drops, so the per-assistant bound is about
+    /// the agents still LIVE.
+    pub fn remove_ai_agent(&mut self, assistant_label: &str, agent_label: &str) -> Option<AiAgent> {
+        let assistant_id = self.assistant(assistant_label)?.assistant_id.clone();
+        let agent_id = self
+            .ai_agent(&assistant_id, agent_label)?
+            .ai_agent_id
+            .clone();
+        let agent = self
+            .assistants
+            .get_mut(&assistant_id)?
+            .ai_agents
+            .remove(&agent_id)?;
+        self.forget_idempotency_for(&agent_id);
+        Some(agent)
     }
 
     /// The id of the live assistant already using this name, if any.

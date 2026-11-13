@@ -15,6 +15,8 @@
 mod agent_assist_query_pipeline;
 #[path = "all/ai_agent.rs"]
 mod ai_agent;
+#[path = "all/ai_agent_lifecycle.rs"]
+mod ai_agent_lifecycle;
 #[path = "all/ai_agent_update.rs"]
 mod ai_agent_update;
 #[path = "all/ai_guardrail.rs"]

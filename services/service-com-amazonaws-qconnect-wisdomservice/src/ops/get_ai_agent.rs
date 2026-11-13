@@ -4,9 +4,12 @@
 //!
 //! REPORTS one AI agent of the assistant the route names, out of the stored record: the
 //! built-in ones the service provisioned the assistant with and every agent a caller
-//! created, answered with the same `AIAgentData` the create answered. A read changes
-//! nothing. An `aiAgentId` its assistant holds no agent under — including an agent of
-//! ANOTHER assistant — is the modelled `ResourceNotFoundException` (HTTP 404).
+//! created, answered with the same `AIAgentData` the create answered — carrying every
+//! member as LAST WRITTEN, so a mutation made after the create is what this read reports.
+//! A read changes nothing. The reported ARN names the version the label addressed, which
+//! for a label carrying no version is the working copy's floating alias. An `aiAgentId`
+//! its assistant holds no agent under — including an agent of ANOTHER assistant, and one
+//! a delete has forgotten — is the modelled `ResourceNotFoundException` (HTTP 404).
 //!
 //! ## Shape of an operation
 //!
@@ -185,7 +188,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         };
         Ok(GetAIAgentOutput {
-            ai_agent: Some(agent.to_ai_agent_data()),
+            // The version this read answered for: the one the label addressed, and the
+            // working copy's floating alias when the label named no version — which is
+            // what the reported ARN carries, so a client can tell which version it read.
+            ai_agent: Some(agent.to_ai_agent_data_at_version(
+                crate::state::resolve_qualified_id(&input.ai_agent_id)
+                    .1
+                    .unwrap_or(crate::state::VERSION_QUALIFIER_LATEST),
+            )),
             // The model's own wording: the version number is "returned if an AI Agent
             // version was specified via use of a qualifier for the `aiAgentId` on the
             // request". This read answered for the agent's working copy rather than for a
