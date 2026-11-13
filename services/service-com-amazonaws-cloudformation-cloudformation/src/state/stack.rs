@@ -500,22 +500,10 @@ impl StoredStack {
             stack_outputs: stack_output_values,
         };
         let mut resources = template::provision(&declared, &scope, &mut budget);
-        let by_logical_id: BTreeMap<String, StoredResource> = resources
+        let mut by_logical_id: BTreeMap<String, StoredResource> = resources
             .iter()
             .map(|resource| (resource.logical_id.clone(), resource.clone()))
             .collect();
-        // Everything resolved against the whole set, now that every resource's identity
-        // is known.
-        let resolved = template::Scope {
-            resources: &by_logical_id,
-            ..scope
-        };
-        // A second pass: each resource's properties are evaluated against the whole set,
-        // so a property naming another resource (a stream's `RoleARN` from an
-        // `Fn::GetAtt`) carries that resource's value. This is the request the service
-        // that owns the resource is asked to create it with, and the properties blob its
-        // events report.
-        template::resolve_properties(&declared, &mut resources, &resolved, &mut budget);
         // A resource this stack ALREADY created in the service that owns it, and that this
         // template declares again unchanged, is still that same created resource: the
         // record carries forward both the fact that it exists there and what that service
@@ -532,6 +520,17 @@ impl StoredStack {
         // not the one the properties above were resolved against.
         let mut adopted_minted_identity = false;
         for resource in &mut resources {
+            // provision() returns dependency order. Carry each dependency's real
+            // identity forward before comparing its consumers' create-only properties.
+            template::resolve_properties(
+                &declared,
+                std::slice::from_mut(resource),
+                &template::Scope {
+                    resources: &by_logical_id,
+                    ..scope
+                },
+                &mut budget,
+            );
             // A resource this stack ADOPTED already exists in the service that owns it, under
             // the identifier the plan that adopted it reported: that identifier is the one in
             // force, so the record takes it over before anything is compared against it
@@ -607,6 +606,7 @@ impl StoredStack {
                     resource.attributes.insert(name.clone(), value.clone());
                 }
             }
+            by_logical_id.insert(resource.logical_id.clone(), resource.clone());
         }
         // A property naming a resource whose identity its owning service MINTED was
         // resolved against the stand-in the naming rules recomputed above, not against the

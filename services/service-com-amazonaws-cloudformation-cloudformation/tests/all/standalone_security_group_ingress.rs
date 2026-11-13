@@ -231,6 +231,7 @@ async fn standalone_ingress_ref_targets_and_out_of_band_absence() {
     let template = json!({"Resources":{
         "Target":{"Type":"AWS::EC2::SecurityGroup","Properties":{"GroupDescription":"target"}},
         "Source":{"Type":"AWS::EC2::SecurityGroup","Properties":{"GroupDescription":"source"}},
+        "OtherSource":{"Type":"AWS::EC2::SecurityGroup","Properties":{"GroupDescription":"other source"}},
         "Ingress":{"Type":"AWS::EC2::SecurityGroupIngress","Properties":{
             "GroupId":{"Fn::GetAtt":["Target","GroupId"]},"SourceSecurityGroupId":{"Ref":"Source"},
             "IpProtocol":"tcp","FromPort":5432,"ToPort":5432
@@ -255,7 +256,17 @@ async fn standalone_ingress_ref_targets_and_out_of_band_absence() {
     changed["Resources"]["Ingress"]["Properties"]["Description"] =
         json!("source-group description");
     update(&router, stack, &changed).await;
-    assert_eq!(status(&router, stack).await, "UPDATE_COMPLETE");
+    let update_status = status(&router, stack).await;
+    let (event_code, events) = call(
+        &router,
+        "DescribeStackEvents",
+        &[member("StackName", stack)],
+    )
+    .await;
+    assert_eq!(
+        update_status, "UPDATE_COMPLETE",
+        "referenced-source description update: events HTTP {event_code}: {events}"
+    );
     assert_eq!(physical(&router, stack, "Ingress").await, id);
     let actual = rule(&router, &id).await;
     assert_eq!(
@@ -266,6 +277,25 @@ async fn standalone_ingress_ref_targets_and_out_of_band_absence() {
         xml_text(&xml_blocks(&actual, "referencedGroupInfo")[0], "groupId").as_deref(),
         Some(source.as_str())
     );
+
+    // A real source-identity change must still replace, not retain an ingress
+    // merely because its dependencies were carried forward before comparison.
+    let unrelated = sibling(&router, &target).await;
+    let other_source = physical(&router, stack, "OtherSource").await;
+    changed["Resources"]["Ingress"]["Properties"]["SourceSecurityGroupId"] =
+        json!({"Ref":"OtherSource"});
+    update(&router, stack, &changed).await;
+    assert_eq!(status(&router, stack).await, "UPDATE_COMPLETE");
+    let replacement = physical(&router, stack, "Ingress").await;
+    assert_ne!(replacement, id);
+    absent(&router, &id).await;
+    let actual = rule(&router, &replacement).await;
+    assert_eq!(
+        xml_text(&xml_blocks(&actual, "referencedGroupInfo")[0], "groupId").as_deref(),
+        Some(other_source.as_str())
+    );
+    rule(&router, &unrelated).await;
+    let id = replacement;
 
     let (code, answer) = ec2(
         &router,
@@ -333,6 +363,8 @@ async fn standalone_ingress_number_parameter_ports_reach_owner_and_delete_by_id(
     let router = router();
     let target = group(&router, "number-parameter-target").await;
     let unrelated = sibling(&router, &target).await;
+    // Preserve the whole pre-existing group, including its default egress rule.
+    let before = ids(&router, &target).await;
     let stack = "standalone-ingress-number-port";
     let mut document = template(&target, 443, None);
     document["Parameters"] = json!({"Port":{"Type":"Number","Default":443}});
@@ -363,7 +395,8 @@ async fn standalone_ingress_number_parameter_ports_reach_owner_and_delete_by_id(
     wait_for_the_transition().await;
     assert_eq!(status(&router, &stack_id).await, "DELETE_COMPLETE");
     absent(&router, &id).await;
-    assert_eq!(ids(&router, &target).await, vec![unrelated]);
+    assert_eq!(ids(&router, &target).await, before);
+    rule(&router, &unrelated).await;
     let (code, answer) = ec2(&router, "DescribeSecurityGroups", &[("GroupId.1", &target)]).await;
     assert_eq!(
         code, 200,
