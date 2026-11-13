@@ -41,6 +41,11 @@ mod stage_access_logging;
 mod stage_proxy_run_logs;
 #[path = "all/stage_trace_context.rs"]
 mod stage_trace_context;
+// Declared here, at the head, for the reason the entry above the proxy suites records: what a
+// body-validating request validator does to a request whose integration names a real Lambda
+// backend spans API Gateway, AWS Lambda and Amazon DynamoDB at once.
+#[path = "all/validated_proxy_stage_spares_its_backend.rs"]
+mod validated_proxy_stage_spares_its_backend;
 // Declared here, at the head, for the reason the entry above the proxy suites records.
 #[path = "all/stage_trace_sampling_decision.rs"]
 mod stage_trace_sampling_decision;
