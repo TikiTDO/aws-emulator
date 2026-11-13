@@ -177,7 +177,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Same identity rule as `CreateCacheSubnetGroup`: `CacheSubnetGroupName`
         // "is stored as a lowercase string", so the name this request resolves
         // against the store is its lowercased form.
-        let name = input.cache_subnet_group_name.to_ascii_lowercase();
+        let name = crate::state::stored_subnet_group_name(&input.cache_subnet_group_name);
         // The FORM of the name is checked before it is resolved against anything:
         // a value the member's own constraint does not admit ("Must contain no
         // more than 255 alphanumeric characters or hyphens") names no group this
@@ -211,9 +211,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(
                 DeleteCacheSubnetGroupErrorModeled::CacheSubnetGroupNotFoundFault(
                     CacheSubnetGroupNotFoundFault {
-                        message: Some(crate::state::delete_subnet_group_not_found_message(
-                            &input.cache_subnet_group_name,
-                        )),
+                        message: Some(crate::state::delete_subnet_group_not_found_message(&name)),
                     },
                 )
                 .into(),
@@ -237,9 +235,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if in_use_by_cluster || in_use_by_replication_group {
             return Err(DeleteCacheSubnetGroupErrorModeled::CacheSubnetGroupInUse(
                 CacheSubnetGroupInUse {
-                    message: Some(crate::state::subnet_group_in_use_message(
-                        &input.cache_subnet_group_name,
-                    )),
+                    message: Some(crate::state::subnet_group_in_use_message(&name)),
                 },
             )
             .into());

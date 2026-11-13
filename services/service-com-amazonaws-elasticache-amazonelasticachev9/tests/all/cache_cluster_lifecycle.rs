@@ -2104,9 +2104,10 @@ async fn a_subnet_group_request_that_cannot_hold_is_refused() {
                 ("CacheSubnetGroupDescription", "none"),
             ]),
             400,
-            // `SubnetIds` is `@required`, so the boundary validator refuses an
-            // absent one before the handler runs.
-            "MalformedInput",
+            // `SubnetIds` is `@required`, so the absence is refused before the
+            // handler runs — as the bad parameter value this service states it
+            // (`service::absent_parameter`).
+            "InvalidParameterValue",
         ),
         (
             "an empty subnet id",
@@ -2780,13 +2781,14 @@ async fn a_reboot_that_cannot_be_performed_is_refused() {
             "ValidationException",
         ),
         (
-            // `CacheNodeIdsToReboot` is `@required`, so the boundary validator
-            // refuses an absent one before the handler runs.
+            // `CacheNodeIdsToReboot` is `@required`, so the absence is refused
+            // before the handler runs, as the bad parameter value this service
+            // states it (`service::absent_parameter`).
             "absent CacheNodeIdsToReboot",
             "reboot-refusals",
             &[],
             400,
-            "MalformedInput",
+            "InvalidParameterValue",
         ),
     ];
 

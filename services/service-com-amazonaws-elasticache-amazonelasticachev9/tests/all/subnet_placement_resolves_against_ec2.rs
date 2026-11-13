@@ -19,11 +19,13 @@
 //!
 //! 2. WORDING — the refusal an operation that would PLACE a resource in a cache subnet
 //!    group answers for a name this account has no group under quotes that name:
-//!    `Cache subnet group '<name>' does not exist.`, built from the request and spelled as
-//!    the request spelled it. The rows span the names a request may send and both
-//!    operations that take a `CacheSubnetGroupName` to place a resource in, with the
-//!    operations that address the GROUP itself as the contrasting rows: each of those words
-//!    the same fault its own way, so the template belongs to the placement.
+//!    `Cache subnet group '<name>' does not exist.`, naming the name's STORED identity —
+//!    `CacheSubnetGroupName` "is stored as a lowercase string", so the service names a
+//!    group under that one identity whatever case the request spelled. The rows span the
+//!    names a request may send and both operations that take a `CacheSubnetGroupName` to
+//!    place a resource in, with the operations that address the GROUP itself as the
+//!    contrasting rows: each of those words the same fault its own way, so the template
+//!    belongs to the placement.
 //!
 //! EC2 is mounted beside ElastiCache on ONE engine by [`crate::harness`] and driven through
 //! the AWS SDK over the same in-process callback this service's own resolution reaches it
@@ -359,20 +361,16 @@ async fn a_cache_subnet_group_holds_only_subnets_the_owner_of_subnets_reports() 
         );
         assert_eq!(
             refused.error_code(),
-            "SubnetNotAllowedFault",
+            "InvalidSubnet",
             "case {case:?}: expected the mismatched-subnet fault, got {}",
             refused.body
         );
-        // The fault's own documented sentence, then which identifier belongs where.
+        // The service's sentence for subnets of two VPCs, naming the two identifiers that
+        // disagree in the order the request listed them.
         assert_eq!(
             refused.error_message(),
-            format!(
-                "At least one subnet ID does not match the other subnet IDs: {} belongs to \
-                 {second_vpc} and {} belongs to {first_vpc}.",
-                ids[1], ids[0]
-            ),
-            "case {case:?}: expected the fault's documented sentence with the VPCs EC2 \
-             reports, got {:?}",
+            format!("Subnets {} and {} are not in the same VPC.", ids[0], ids[1]),
+            "case {case:?}: expected the not-in-one-VPC sentence naming both ids, got {:?}",
             refused.error_message()
         );
         let described = net
@@ -602,8 +600,11 @@ async fn a_placement_naming_no_cache_subnet_group_quotes_the_name_it_was_given()
             );
             assert_eq!(
                 refused.error_message(),
-                format!("Cache subnet group '{name}' does not exist."),
-                "case {action} / {name:?}: the refusal must quote the name the request sent, \
+                format!(
+                    "Cache subnet group '{}' does not exist.",
+                    name.to_ascii_lowercase()
+                ),
+                "case {action} / {name:?}: the refusal must quote the name's stored identity, \
                  got {:?}",
                 refused.error_message()
             );
@@ -664,7 +665,10 @@ async fn a_placement_naming_no_cache_subnet_group_quotes_the_name_it_was_given()
         );
         assert_eq!(
             described.error_message(),
-            format!("Cache subnet group {name} not found."),
+            format!(
+                "Cache subnet group {} not found.",
+                name.to_ascii_lowercase()
+            ),
             "case describe / {name:?}: the describe keeps its own wording, got {:?}",
             described.error_message()
         );
@@ -684,7 +688,10 @@ async fn a_placement_naming_no_cache_subnet_group_quotes_the_name_it_was_given()
         );
         assert_eq!(
             deleted.error_message(),
-            format!("Cache Subnet Group {name} does not exist."),
+            format!(
+                "Cache Subnet Group {} does not exist.",
+                name.to_ascii_lowercase()
+            ),
             "case delete / {name:?}: the delete keeps its own wording, got {:?}",
             deleted.error_message()
         );

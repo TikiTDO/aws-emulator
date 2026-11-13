@@ -170,7 +170,8 @@ async fn every_error_envelope_names_the_request_it_answers() {
             "ValidationException",
         ),
         (
-            // The boundary validator, before any handler runs.
+            // The boundary validator, before any handler runs: the service states
+            // an absent parameter itself (`crate::service::absent_parameter`).
             "an absent required member",
             "CreateCacheSubnetGroup",
             params(&[
@@ -178,7 +179,7 @@ async fn every_error_envelope_names_the_request_it_answers() {
                 ("CacheSubnetGroupDescription", "none"),
             ]),
             400,
-            "MalformedInput",
+            "InvalidParameterValue",
         ),
         (
             // A scaffolded operation: the 501 is an error too.

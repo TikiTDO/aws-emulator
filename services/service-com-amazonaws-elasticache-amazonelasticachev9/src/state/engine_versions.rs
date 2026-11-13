@@ -95,19 +95,61 @@ pub const CACHE_ENGINE_VERSIONS: [PublishedEngineVersion; 33] = [
 /// (`CacheEngineVersion$CacheEngineDescription`: "the description of the cache
 /// engine").
 ///
-/// The catalog describes an engine by the engine's OWN published name, spelled
-/// the way that engine spells it rather than re-cased by this service:
-/// `memcached` writes its name in lower case, `Redis` and `Valkey` capitalise
-/// theirs. That spelling is also what
-/// `CacheEngineVersion$CacheEngineVersionDescription` is built from (see
-/// [`published_cache_engine_versions`]), so a client selecting an engine by
-/// matching either description string finds the entry under one name.
+/// The catalog describes an engine by the WHOLE label ElastiCache publishes for
+/// it, not by the engine token the `Engine` member carries: `memcached` and
+/// `Redis` are published under the engine's own product name, spelled the way
+/// that project spells it, and Valkey under the longer label ElastiCache gives
+/// its Valkey offering. A label is therefore stated here per engine rather than
+/// derived from the token by re-casing it.
+///
+/// `CacheEngineVersion$CacheEngineVersionDescription` is built from the engine's
+/// API name instead (see [`published_cache_engine_versions`]), which is why that
+/// string is not derived from this one.
 pub fn engine_description(engine: &str) -> &'static str {
     match engine {
         "memcached" => "memcached",
-        ENGINE_VALKEY => "Valkey",
+        ENGINE_VALKEY => "Valkey Engine for ElastiCache",
         _ => "Redis",
     }
+}
+
+/// The patch-level release behind each version ElastiCache names by its LINE
+/// alone, as `(engine, published version, release)`.
+///
+/// Source: the release AWS lists for each of those engine lines among the
+/// ElastiCache engine versions it supports — Redis OSS 6.0 is 6.0.5, 6.2 is
+/// 6.2.6, 7.0 is 7.0.7 and 7.1 is 7.1.0; Valkey 7.2 is 7.2.6 and 8.0 is 8.0.1.
+/// The Valkey 9.0 line this catalog publishes beside them (see
+/// [`CACHE_ENGINE_VERSIONS`], family `valkey9`) is this emulator's own current
+/// generation rather than an AWS line, so it has no published release to cite:
+/// its release is the `.0` every engine line's FIRST release is numbered with.
+///
+/// Every other published version already NAMES a patch release (`1.6.22`,
+/// `5.0.6`), so it is its own release and is absent from this table — see
+/// [`patch_release`].
+const LINE_PATCH_RELEASES: [(&str, &str, &str); 7] = [
+    ("redis", "6.0", "6.0.5"),
+    ("redis", "6.2", "6.2.6"),
+    ("redis", "7.0", "7.0.7"),
+    ("redis", "7.1", "7.1.0"),
+    (ENGINE_VALKEY, "7.2", "7.2.6"),
+    (ENGINE_VALKEY, "8.0", "8.0.1"),
+    (ENGINE_VALKEY, "9.0", "9.0.0"),
+];
+
+/// The full release `engine_version` of `engine` stands for: the patch release
+/// behind a version ElastiCache names by its version LINE
+/// ([`LINE_PATCH_RELEASES`]), and the version itself where it already names a
+/// patch release.
+///
+/// This is what the version DESCRIPTION publishes, because the description is
+/// the only place an entry whose `EngineVersion` is a line states the release
+/// behind it.
+pub fn patch_release<'a>(engine: &str, engine_version: &'a str) -> &'a str {
+    LINE_PATCH_RELEASES
+        .iter()
+        .find(|(line_engine, line, _)| *line_engine == engine && *line == engine_version)
+        .map_or(engine_version, |(_, _, release)| *release)
 }
 
 /// `version` with every numeric component zero-padded to a fixed width, so

@@ -712,7 +712,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // echo.
         let cache_subnet_group_name = match input.cache_subnet_group_name.as_deref() {
             Some(name) => {
-                let key = name.to_ascii_lowercase();
+                let key = crate::state::stored_subnet_group_name(name);
                 match store.cache_subnet_groups.get(&key) {
                     Some(group) => Some(group.name.clone()),
                     None => {
@@ -721,7 +721,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                                 CacheSubnetGroupNotFoundFault {
                                     message: Some(
                                         crate::state::placement_subnet_group_not_found_message(
-                                            name,
+                                            &key,
                                         ),
                                     ),
                                 },

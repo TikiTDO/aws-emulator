@@ -14,8 +14,10 @@
 //!
 //! The VPC and the Availability Zone a cache subnet group reports come from the record EC2
 //! answered with, never from anything built here, so the placement this service reports is
-//! the network the account really has. An identifier EC2 reports no subnet for resolves to
-//! nothing, and that is the only case a create is refused for.
+//! the network the account really has — and so do the address families a subnet is
+//! addressed in, which say which network types a placement in it supports. An identifier
+//! EC2 reports no subnet for resolves to nothing, and that is the only case a create is
+//! refused for.
 //!
 //! Nothing is cached: a subnet created a moment ago resolves at once, and one that was
 //! deleted stops resolving at once.
@@ -108,6 +110,20 @@ async fn described(
                             .availability_zone()
                             .unwrap_or_default()
                             .to_string(),
+                        // The address families the subnet is addressed in, as EC2 holds
+                        // them: its IPv4 block, and any IPv6 block associated with it.
+                        // They are what says which network types a placement in this
+                        // subnet supports (`super::network_types`), so they are read off
+                        // the owner's record like everything else here.
+                        has_ipv4_cidr: subnet.cidr_block().is_some_and(|cidr| !cidr.is_empty()),
+                        has_ipv6_cidr: subnet
+                            .ipv6_cidr_block_association_set()
+                            .iter()
+                            .any(|association| {
+                                association
+                                    .ipv6_cidr_block()
+                                    .is_some_and(|cidr| !cidr.is_empty())
+                            }),
                     })
                 }));
                 match output.next_token() {

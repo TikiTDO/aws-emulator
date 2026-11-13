@@ -72,6 +72,10 @@
 //!
 //! * `CacheSubnetGroupNotFoundFault` (HTTP 400) — The requested cache subnet group name does
 //!   not refer to an existing cache subnet group.
+//! * `InvalidParameterValueException` (HTTP 400, awsQuery code `InvalidParameterValue`) —
+//!   widened in through `extra_errors` (see below): the SERVICE models it and ElastiCache
+//!   answers it for a `MaxRecords` outside its documented bounds or a `Marker` it did not
+//!   mint, which the model's `errors` list for this operation omits.
 
 #[allow(unused_imports)]
 use super::types::*;
@@ -87,10 +91,22 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-elasticache-amazonelast
 // here — hence the `DescribeCacheSubnetGroupsError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
-#[smithy_macros::operation_error("com.amazonaws.elasticache#DescribeCacheSubnetGroups")]
+#[smithy_macros::operation_error(
+    "com.amazonaws.elasticache#DescribeCacheSubnetGroups",
+    extra_errors = ["InvalidParameterValueException"]
+)]
 #[derive(Debug)]
 pub enum DescribeCacheSubnetGroupsErrorModeled {
     CacheSubnetGroupNotFoundFault(CacheSubnetGroupNotFoundFault),
+    // The model lists only the not-found fault for this operation, which is a gap
+    // rather than a claim that nothing else can be refused: `MaxRecords` documents
+    // "minimum 20; maximum 100" and `Marker` is "an optional marker returned from a
+    // prior request". `InvalidParameterValueException` — the shape this SERVICE
+    // models for exactly that, and the one every sibling describe answers such a
+    // value with — is widened in through `extra_errors`, so a value this operation
+    // cannot serve is refused with the same 400 `InvalidParameterValue` a client
+    // already handles.
+    InvalidParameterValueException(InvalidParameterValueException),
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
@@ -153,20 +169,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         };
 
-        // This operation models only `CacheSubnetGroupNotFoundFault`, so a
-        // `MaxRecords` outside the documented 20..100 or a `Marker` this service
-        // did not mint is refused through the synthetic `ValidationException` —
-        // the channel for a rule the service enforces but the model does not
-        // give it an error for.
-        let page_size = match crate::state::page_size(input.max_records) {
-            Ok(size) => size,
-            Err(message) => return Err(crate::scaffolded::Scaffolded::validation(message)),
-        };
+        // A `MaxRecords` outside the documented 20..100 and a `Marker` this
+        // service did not mint are values the request cannot be served with, so
+        // each is refused with the `InvalidParameterValue` every paginated
+        // describe of this service answers one with.
+        let page_size =
+            crate::state::page_size(input.max_records).map_err(invalid_parameter_value)?;
         let resume_from = match input.marker.as_deref() {
             Some(marker) => match crate::state::decode_marker(marker) {
                 Some(key) => Some(key),
                 None => {
-                    return Err(crate::scaffolded::Scaffolded::validation(format!(
+                    return Err(invalid_parameter_value(format!(
                         "Invalid value {marker} for Marker."
                     )))
                 }
@@ -180,12 +193,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // modelled not-found; pagination does not apply to a single-resource
         // lookup.
         if let Some(name) = input.cache_subnet_group_name.as_deref() {
-            let key = name.to_ascii_lowercase();
+            // The name has ONE identity, whatever case the request spelled it in
+            // (`crate::state::stored_subnet_group_name`), and that identity is
+            // both what the group is looked up under and what the refusal names.
+            let key = crate::state::stored_subnet_group_name(name);
             let Some(group) = store.cache_subnet_groups.get(&key) else {
                 return Err(
                     DescribeCacheSubnetGroupsErrorModeled::CacheSubnetGroupNotFoundFault(
                         CacheSubnetGroupNotFoundFault {
-                            message: Some(format!("Cache subnet group {name} not found.")),
+                            message: Some(
+                                crate::state::describe_subnet_group_not_found_message(&key),
+                            ),
                         },
                     )
                     .into(),
@@ -218,4 +236,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             cache_subnet_groups: Some(page),
         })
     }
+}
+
+/// `message` as this operation's `InvalidParameterValueException`.
+fn invalid_parameter_value(message: String) -> DescribeCacheSubnetGroupsError {
+    DescribeCacheSubnetGroupsErrorModeled::InvalidParameterValueException(
+        InvalidParameterValueException {
+            message: Some(message),
+        },
+    )
+    .into()
 }

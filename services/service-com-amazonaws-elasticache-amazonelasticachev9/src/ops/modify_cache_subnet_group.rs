@@ -68,7 +68,9 @@
 //!   not refer to an existing cache subnet group.
 //! * `CacheSubnetQuotaExceededFault` (HTTP 400) — The request cannot be processed because it
 //!   would exceed the allowed number of subnets in a cache subnet group.
-//! * `InvalidSubnet` (HTTP 400) — An invalid subnet identifier was specified.
+//! * `InvalidSubnet` (HTTP 400) — An invalid subnet identifier was specified. Also what
+//!   ElastiCache answers a `SubnetIds` list whose subnets do not all belong to one VPC
+//!   (`Subnets <a> and <b> are not in the same VPC.`), as on the create.
 //! * `InvalidParameterValueException` (HTTP 400) — widened in through `extra_errors` (see
 //!   below): the value for a parameter is invalid.
 //! * `SubnetInUse` (HTTP 400) — The requested subnet is being used by another cache subnet
@@ -76,7 +78,8 @@
 //! * `SubnetNotAllowedFault` (HTTP 400) — At least one subnet ID does not match the other
 //!   subnet IDs. This mismatch typically occurs when a user sets one subnet ID to a regional
 //!   Availability Zone and a different one to an outpost. Or when a user sets the subnet ID
-//!   to an Outpost when not subscribed on this service.
+//!   to an Outpost when not subscribed on this service. This emulator places nothing on an
+//!   Outpost, so nothing answers it.
 
 #[allow(unused_imports)]
 use super::types::*;
@@ -175,7 +178,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Same identity rule as the create and the delete: `CacheSubnetGroupName`
         // "is stored as a lowercase string", so the name this request resolves
         // against the store is its lowercased form.
-        let name = input.cache_subnet_group_name.to_ascii_lowercase();
+        let name = crate::state::stored_subnet_group_name(&input.cache_subnet_group_name);
         // The FORM of the name before it is resolved against anything: a value the
         // member's own constraint does not admit ("Must contain no more than 255
         // alphanumeric characters or hyphens") names no group this account could
@@ -249,9 +252,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(
                 ModifyCacheSubnetGroupErrorModeled::CacheSubnetGroupNotFoundFault(
                     CacheSubnetGroupNotFoundFault {
-                        message: Some(crate::state::delete_subnet_group_not_found_message(
-                            &input.cache_subnet_group_name,
-                        )),
+                        message: Some(crate::state::delete_subnet_group_not_found_message(&name)),
                     },
                 )
                 .into(),
@@ -281,24 +282,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             Vec::new()
         };
         // A group is where a cluster is placed and a cluster sits in ONE VPC, so
-        // the resolved subnets must all belong to one VPC — the fault the model
-        // declares for exactly that, in the sentence its own documentation states
-        // ("At least one subnet ID does not match the other subnet IDs"), followed
-        // by which identifier belongs where, read off EC2's records.
+        // the resolved subnets must all belong to one VPC — refused as naming an
+        // invalid subnet, in the sentence the create states the same rule with
+        // (`crate::state::subnets_not_in_one_vpc_message`), naming the two
+        // identifiers that disagree, read off EC2's records.
         let placement = resolved.first().cloned().unwrap_or_default();
         if let Some(mismatched) = resolved
             .iter()
             .find(|subnet| subnet.vpc_id != placement.vpc_id)
         {
-            return Err(ModifyCacheSubnetGroupErrorModeled::SubnetNotAllowedFault(
-                SubnetNotAllowedFault {
-                    message: Some(format!(
-                        "At least one subnet ID does not match the other subnet IDs: {} belongs \
-                         to {} and {} belongs to {}.",
-                        mismatched.subnet_id,
-                        mismatched.vpc_id,
-                        placement.subnet_id,
-                        placement.vpc_id
+            return Err(ModifyCacheSubnetGroupErrorModeled::InvalidSubnet(
+                InvalidSubnet {
+                    message: Some(crate::state::subnets_not_in_one_vpc_message(
+                        &placement.subnet_id,
+                        &mismatched.subnet_id,
                     )),
                 },
             )
@@ -313,9 +310,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(
                 ModifyCacheSubnetGroupErrorModeled::CacheSubnetGroupNotFoundFault(
                     CacheSubnetGroupNotFoundFault {
-                        message: Some(crate::state::delete_subnet_group_not_found_message(
-                            &input.cache_subnet_group_name,
-                        )),
+                        message: Some(crate::state::delete_subnet_group_not_found_message(&name)),
                     },
                 )
                 .into(),
@@ -336,6 +331,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             group.subnets = resolved
                 .into_iter()
                 .map(|subnet| crate::state::SubnetRecord {
+                    // As on the create: the network types a subnet supports come
+                    // from the blocks EC2 reported for it.
+                    supported_network_types: subnet.supported_network_types(),
                     subnet_identifier: subnet.subnet_id,
                     availability_zone: subnet.availability_zone,
                 })

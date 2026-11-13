@@ -14,10 +14,10 @@
 //!   could not have been created on; an identifier that names nothing is the refusal, in
 //!   that resolution's own sentence;
 //! * a group this account does not hold is the modelled `CacheSubnetGroupNotFoundFault`,
-//!   worded with the name the REQUEST spelled, and a name no group could carry is refused
+//!   worded with the name's STORED identity, and a name no group could carry is refused
 //!   as the bad parameter it is before it is resolved against anything;
 //! * a group holds the subnets of ONE VPC, so a request whose subnets span two is the
-//!   modelled `SubnetNotAllowedFault`, and the VPC the group reports is the one EC2
+//!   modelled `InvalidSubnet`, and the VPC the group reports is the one EC2
 //!   reported for the subnets it now holds.
 //!
 //! The tests are tables: the rows span which members the request names (description only,
@@ -424,7 +424,7 @@ async fn a_modify_is_refused_with_the_rule_it_broke() {
             GROUP.to_string(),
             Some(spanning.clone()),
             400,
-            "SubnetNotAllowedFault",
+            "InvalidSubnet",
         ),
     ];
 
@@ -456,10 +456,13 @@ async fn a_modify_is_refused_with_the_rule_it_broke() {
     }
 }
 
-/// The two refusals a modify shares with its sibling operations are worded with the name
-/// and the identifiers the REQUEST spelled, not with the stored ones.
+/// The two refusals a modify shares with its sibling operations: the not-found names the
+/// name's STORED identity (`CacheSubnetGroupName` "is stored as a lowercase string", so the
+/// service names the group under that one identity whatever case the request spelled), and
+/// the unresolved-subnet sentence names the identifiers the request listed, which are EC2's
+/// own and carry no case rule.
 #[tokio::test]
-async fn a_refused_modify_is_worded_from_the_request() {
+async fn a_refused_modify_is_worded_from_the_stored_identity() {
     let emulator = Emulator::new();
     let defaults = account_subnet_ids(&emulator).await;
     create_group(&emulator, "the group under test", GROUP, &defaults[..1]).await;
@@ -475,10 +478,11 @@ async fn a_refused_modify_is_worded_from_the_request() {
             "case {case:?}: expected the modelled not-found, got {}",
             refused.body
         );
+        let stored = spelled.to_ascii_lowercase();
         assert_eq!(
             refused.error_message(),
-            format!("Cache Subnet Group {spelled} does not exist."),
-            "case {case:?}: expected the not-found sentence for {spelled:?}, got {:?}",
+            format!("Cache Subnet Group {stored} does not exist."),
+            "case {case:?}: expected the not-found sentence for {stored:?}, got {:?}",
             refused.error_message()
         );
     }

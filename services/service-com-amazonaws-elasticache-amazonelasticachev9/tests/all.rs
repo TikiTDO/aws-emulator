@@ -299,3 +299,13 @@ mod global_replication_group_secondary;
 mod deferred_change_reporting;
 #[path = "all/fixed_refusal_sentences.rs"]
 mod fixed_refusal_sentences;
+
+// Appended for the same reason: the suite about the network types a cache subnet group and
+// its subnets publish, the suite about the engine-version catalog's two description strings,
+// and the suite about WHICH refusal a parameter this service cannot take gets.
+#[path = "all/cache_subnet_group_network_types.rs"]
+mod cache_subnet_group_network_types;
+#[path = "all/engine_catalog_descriptions.rs"]
+mod engine_catalog_descriptions;
+#[path = "all/parameter_refusal_classification.rs"]
+mod parameter_refusal_classification;

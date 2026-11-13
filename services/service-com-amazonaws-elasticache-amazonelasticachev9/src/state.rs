@@ -191,7 +191,9 @@ mod shard_configuration;
 mod engine_versions;
 mod serverless_caches;
 mod migrations;
+mod network_types;
 mod snapshots;
+pub use network_types::*;
 pub use snapshots::*;
 pub use migrations::*;
 pub use serverless_caches::*;
@@ -1186,6 +1188,10 @@ pub struct AccountSubnet {
     pub vpc_id: String,
     /// The Availability Zone this subnet sits in.
     pub availability_zone: String,
+    /// Whether EC2 reports an IPv4 CIDR block for this subnet.
+    pub has_ipv4_cidr: bool,
+    /// Whether EC2 reports an IPv6 CIDR block for this subnet.
+    pub has_ipv6_cidr: bool,
 }
 
 /// How ElastiCache words a request naming subnets the account does not have,
@@ -1344,12 +1350,43 @@ pub fn invalid_subnet_group_name_message(value: &str) -> String {
     )
 }
 
+/// How ElastiCache words a request whose `SubnetIds` do not all belong to one
+/// VPC: `Subnets <first> and <other> are not in the same VPC.`
+///
+/// The fixed text is `Subnets `, ` and ` and ` are not in the same VPC.`; the two
+/// variable parts are the identifiers that disagree, in the order the request
+/// listed them — the first subnet it named, whose VPC the group would be placed
+/// in, and the first one belonging to another VPC.
+///
+/// One helper for the two operations that build a cache subnet group out of
+/// subnet ids, so they cannot word one refusal two ways. `CreateServerlessCache`
+/// states the same rule in the sentence ITS own member documents ("All the
+/// subnetIds must belong to the same VPC"), which is why it is not this
+/// template.
+pub fn subnets_not_in_one_vpc_message(first: &str, other: &str) -> String {
+    format!("Subnets {first} and {other} are not in the same VPC.")
+}
+
+/// The stored identity of a `CacheSubnetGroupName` the request sent.
+///
+/// "This value is stored as a lowercase string"
+/// (`CreateCacheSubnetGroup$CacheSubnetGroupName`), so the name has ONE identity
+/// whatever case a request spells it in: that is what a group is stored and
+/// looked up under, and what the service names the group by — in a response and
+/// in the message of a refusal alike. A refusal that echoed the request's
+/// spelling instead would name a group under a name no read of this service ever
+/// reports.
+pub fn stored_subnet_group_name(value: &str) -> String {
+    value.to_ascii_lowercase()
+}
+
 /// How ElastiCache words a cache subnet group that cannot be deleted because a
 /// cluster is placed in it: `Cache subnet group <name> is currently in use.`
 ///
-/// The one variable part is the `CacheSubnetGroupName` exactly as the request
-/// spelled it, as in [`delete_subnet_group_not_found_message`] — the two refusals
-/// of one delete echo the name the one way.
+/// The one variable part is the group's stored name
+/// ([`stored_subnet_group_name`]), as in
+/// [`delete_subnet_group_not_found_message`] — the two refusals of one delete
+/// name the group the one way.
 pub fn subnet_group_in_use_message(name: &str) -> String {
     format!("Cache subnet group {name} is currently in use.")
 }
@@ -1359,9 +1396,9 @@ pub fn subnet_group_in_use_message(name: &str) -> String {
 /// `Cache subnet group '<name>' does not exist.`
 ///
 /// The fixed text is `Cache subnet group '` and `' does not exist.`; the one
-/// variable part is the `CacheSubnetGroupName` exactly as the request spelled
-/// it, QUOTED, because the message is built from the request and a client that
-/// named several resources in one call reads the missing one out of the quotes.
+/// variable part is the group's stored name ([`stored_subnet_group_name`]),
+/// QUOTED, because a client that named several resources in one call reads the
+/// missing one out of the quotes.
 ///
 /// One helper, so every create that places a resource in a cache subnet group —
 /// a cache cluster, a replication group — words its
@@ -1378,14 +1415,25 @@ pub fn placement_subnet_group_not_found_message(name: &str) -> String {
 /// `Cache Subnet Group <name> does not exist.`
 ///
 /// The fixed text is `Cache Subnet Group ` and ` does not exist.`; the one
-/// variable part is the `CacheSubnetGroupName` exactly as the request spelled it,
-/// because the message is built from the request. One helper for the two
-/// operations that address the group itself by name and change it
-/// (`DeleteCacheSubnetGroup`, `ModifyCacheSubnetGroup`), so they cannot word one
-/// fault two ways; the describe that resolves the same member answers `Cache
+/// variable part is the group's stored name ([`stored_subnet_group_name`]). One
+/// helper for the two operations that address the group itself by name and change
+/// it (`DeleteCacheSubnetGroup`, `ModifyCacheSubnetGroup`), so they cannot word
+/// one fault two ways; the describe that resolves the same member answers `Cache
 /// subnet group <name> not found.`, which is its own wording.
 pub fn delete_subnet_group_not_found_message(name: &str) -> String {
     format!("Cache Subnet Group {name} does not exist.")
+}
+
+/// How ElastiCache words a `CacheSubnetGroupName` that names no cache subnet
+/// group of this account to the DESCRIBE of groups: `Cache subnet group <name>
+/// not found.`
+///
+/// The one variable part is the group's stored name
+/// ([`stored_subnet_group_name`]). The sibling wordings of the same fault are
+/// [`placement_subnet_group_not_found_message`] and
+/// [`delete_subnet_group_not_found_message`].
+pub fn describe_subnet_group_not_found_message(name: &str) -> String {
+    format!("Cache subnet group {name} not found.")
 }
 
 /// How ElastiCache refuses a change to a family's OWN default parameter group,
@@ -1902,6 +1950,9 @@ pub struct SubnetRecord {
     /// The Availability Zone chosen for this subnet when the group was created
     /// and stored since, so every read reports the same one.
     pub availability_zone: String,
+    /// The network types this subnet supports, from the blocks EC2 reported for
+    /// it when the group was created — see [`network_types`].
+    pub supported_network_types: Vec<String>,
 }
 
 /// One cache subnet group, as this emulator persists it.
@@ -1936,12 +1987,16 @@ impl CacheSubnetGroupRecord {
                             name: Some(subnet.availability_zone.clone()),
                         }),
                         subnet_outpost: None,
-                        supported_network_types: None,
+                        supported_network_types: reported_network_types(
+                            subnet.supported_network_types.clone(),
+                        ),
                     })
                     .collect(),
             ),
             arn: Some(self.arn.clone()),
-            supported_network_types: None,
+            // What the GROUP supports is what all of its subnets support; see
+            // [`group_network_types`].
+            supported_network_types: reported_network_types(group_network_types(&self.subnets)),
         }
     }
 }
@@ -1997,10 +2052,13 @@ impl NodeSnapshotRecord {
 /// The published cache-engine-version catalog, keyed by
 /// [`engine_version_key`].
 ///
-/// An entry's two descriptions come from two different names: the ENGINE's own
-/// product name describes the engine ([`engine_description`]), and the engine's
-/// API name — the `Engine` value itself — is what the version description is
-/// built from, `<engine> version <version>`.
+/// An entry's two descriptions come from two different names: the label
+/// ElastiCache publishes for the ENGINE describes the engine
+/// ([`engine_description`]), and the engine's API name — the `Engine` value
+/// itself — is what the version description is built from, `<engine> version
+/// <release>`, naming the full release the entry's version stands for
+/// ([`patch_release`]) rather than the version line the entry is published
+/// under.
 ///
 /// A `BTreeMap` is what gives `DescribeCacheEngineVersions` the stable total
 /// order its `Marker` indexes into, and the per-engine order its `DefaultOnly`
@@ -2022,7 +2080,8 @@ pub fn published_cache_engine_versions() -> BTreeMap<String, CacheEngineVersionR
                     cache_engine_description: engine_description(row.engine).to_string(),
                     cache_engine_version_description: format!(
                         "{} version {}",
-                        row.engine, row.engine_version
+                        row.engine,
+                        patch_release(row.engine, row.engine_version)
                     ),
                 },
             )

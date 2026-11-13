@@ -250,9 +250,9 @@ async fn a_value_the_describe_cannot_serve_is_refused() {
     // The axis: which parameter carries a value the service cannot serve — a
     // page size that is no page, and a `Marker` that is not a token this
     // service could have minted at all (a non-hex character, an odd number of
-    // hex digits, nothing hex about it). `DescribeUsers` models no
-    // `InvalidParameterValueException`, so the refusal travels on the synthetic
-    // validation channel.
+    // hex digits, nothing hex about it). Each is refused with the
+    // `InvalidParameterValue` every paginated describe of this service answers
+    // such a value with.
     let rows: [(&str, &[(&str, &str)]); 5] = [
         ("MaxRecords 0", &[("MaxRecords", "0")]),
         ("MaxRecords -5", &[("MaxRecords", "-5")]),
@@ -275,8 +275,8 @@ async fn a_value_the_describe_cannot_serve_is_refused() {
         );
         assert_eq!(
             reply.error_code(),
-            "ValidationException",
-            "case {case}: must be refused as a validation error, got {:?}: {}",
+            "InvalidParameterValue",
+            "case {case}: must be refused as a bad parameter value, got {:?}: {}",
             reply.error_code(),
             reply.body
         );

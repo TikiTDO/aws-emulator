@@ -37,7 +37,8 @@ struct ErrorCase {
 /// code (`smithy_query(query="operation", operation="…")` — `CacheParameterGroupNotFound`,
 /// `InvalidParameterValue`, `InvalidCacheParameterGroupState`, `CacheClusterNotFound`,
 /// `SnapshotNotFoundFault`, `ServiceUpdateNotFoundFault`), a scaffolded operation
-/// `NotImplemented`, a body the codec could not read `MalformedInput`, and an `Action`
+/// `NotImplemented`, a body the codec could not read `MalformedInput`, an absent required
+/// parameter the `InvalidParameterValue` this service states one with, and an `Action`
 /// naming no modelled operation `InvalidAction`.
 const ERROR_CASES: &[ErrorCase] = &[
     ErrorCase {
@@ -148,7 +149,7 @@ const ERROR_CASES: &[ErrorCase] = &[
         action: "DescribeEngineDefaultParameters",
         params: &[],
         status: 400,
-        code: "MalformedInput",
+        code: "InvalidParameterValue",
     },
     ErrorCase {
         case: "an Action naming no modelled operation",

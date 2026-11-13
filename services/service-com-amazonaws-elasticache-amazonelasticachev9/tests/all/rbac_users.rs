@@ -1067,8 +1067,8 @@ async fn describe_pages_over_the_stored_users() {
         );
         assert_eq!(
             reply.error_code(),
-            "ValidationException",
-            "case {case}: expected ValidationException, got {}",
+            "InvalidParameterValue",
+            "case {case}: expected InvalidParameterValue, got {}",
             reply.body
         );
     }

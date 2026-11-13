@@ -71,7 +71,11 @@
 //!   service could carry is refused as the bad parameter it is.
 //! * [`replication_group_not_found`] — the second of the two templates the service answers
 //!   a `ReplicationGroupNotFoundFault` with, for the two operations that take it.
+//! * [`absent_parameter`] — the code and the sentence a request that omits a parameter the
+//!   model requires is refused with, which belongs to no handler at all: the framework
+//!   refuses it before one runs.
 
+pub mod absent_parameter;
 pub mod access_string_categories;
 pub mod cache_parameter_group_not_found;
 pub mod identifier_length_rules;
@@ -144,15 +148,11 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
     fn override_refusal(&self, refusal: &Refusal) -> Option<Refused> {
         // The centralized walk calls this on a framework-level refusal (an absent
         // required member, or a value outside a declared bound) to let this
-        // service reword it. Returning `None` keeps the framework's default
-        // wording. To state a refusal the way the emulated service states it,
-        // replace this body with a `match refusal { .. }` that returns
-        // `Some(Refused { code, message })` for the cases you reword and `None`
-        // for the rest. Replace BOTH the code and the message: a client branches
-        // on the code, so a message without its matching code is worse than
-        // leaving both alone.
-        let _ = refusal;
-        None
+        // service reword it. An ABSENT parameter is the one this service states
+        // itself — code and message together, as [`absent_parameter`] words it;
+        // every other refusal keeps the framework's wording, which already names
+        // the value and the constraint it failed.
+        absent_parameter::absent_parameter_refusal(refusal)
     }
 
     fn override_routing_error(

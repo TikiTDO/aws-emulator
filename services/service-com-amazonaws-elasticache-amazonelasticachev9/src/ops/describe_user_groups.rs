@@ -73,6 +73,10 @@
 //! * `ServiceLinkedRoleNotFoundFault` (HTTP 400) — The specified service linked role (SLR)
 //!   was not found.
 //! * `UserGroupNotFoundFault` (HTTP 404) — The user group was not found or does not exist
+//! * `InvalidParameterValueException` (HTTP 400, awsQuery code `InvalidParameterValue`) —
+//!   widened in through `extra_errors` (see below): the SERVICE models it and ElastiCache
+//!   answers it for a `MaxRecords` outside its documented bounds or a `Marker` it did not
+//!   mint, which the model's `errors` list for this operation omits.
 
 #[allow(unused_imports)]
 use super::types::*;
@@ -88,10 +92,18 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-elasticache-amazonelast
 // here — hence the `DescribeUserGroupsError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
-#[smithy_macros::operation_error("com.amazonaws.elasticache#DescribeUserGroups")]
+#[smithy_macros::operation_error(
+    "com.amazonaws.elasticache#DescribeUserGroups",
+    extra_errors = ["InvalidParameterValueException"]
+)]
 #[derive(Debug)]
 pub enum DescribeUserGroupsErrorModeled {
     InvalidParameterCombinationException(InvalidParameterCombinationException),
+    // Widened in through `extra_errors` for the reason the sibling describes state:
+    // the model lists no error for a `MaxRecords` outside its documented bounds or a
+    // `Marker` this service did not mint, and `InvalidParameterValueException` is what
+    // this SERVICE models for such a value.
+    InvalidParameterValueException(InvalidParameterValueException),
     ServiceLinkedRoleNotFoundFault(ServiceLinkedRoleNotFoundFault),
     UserGroupNotFoundFault(UserGroupNotFoundFault),
 }
@@ -157,17 +169,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         };
 
-        let page_size = match crate::state::page_size(input.max_records) {
-            Ok(size) => size,
-            // This operation models no bad-parameter-value error, so an
-            // unserveable page size is refused through the wrapper.
-            Err(message) => return Err(crate::scaffolded::Scaffolded::validation(message)),
-        };
+        // A `MaxRecords` outside the documented bounds and a `Marker` this
+        // service did not mint are values the request cannot be served with, so
+        // each is refused with the `InvalidParameterValue` every paginated
+        // describe of this service answers one with.
+        let page_size =
+            crate::state::page_size(input.max_records).map_err(invalid_parameter_value)?;
         let resume_from = match input.marker.as_deref() {
             Some(marker) => match crate::state::decode_marker(marker) {
                 Some(key) => Some(key),
                 None => {
-                    return Err(crate::scaffolded::Scaffolded::validation(format!(
+                    return Err(invalid_parameter_value(format!(
                         "Invalid value {marker} for Marker."
                     )))
                 }
@@ -213,4 +225,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             marker,
         })
     }
+}
+
+/// `message` as this operation's `InvalidParameterValueException`.
+fn invalid_parameter_value(message: String) -> DescribeUserGroupsError {
+    DescribeUserGroupsErrorModeled::InvalidParameterValueException(InvalidParameterValueException {
+        message: Some(message),
+    })
+    .into()
 }

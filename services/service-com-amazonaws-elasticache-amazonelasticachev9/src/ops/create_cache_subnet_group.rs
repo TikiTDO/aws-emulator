@@ -73,18 +73,22 @@
 //!   because it would exceed the allowed number of cache subnet groups.
 //! * `CacheSubnetQuotaExceededFault` (HTTP 400) — The request cannot be processed because it
 //!   would exceed the allowed number of subnets in a cache subnet group.
-//! * `InvalidSubnet` (HTTP 400) — An invalid subnet identifier was specified.
+//! * `InvalidSubnet` (HTTP 400) — An invalid subnet identifier was specified. Also what
+//!   ElastiCache answers a `SubnetIds` list whose subnets do not all belong to one VPC
+//!   (`Subnets <a> and <b> are not in the same VPC.`): the subnets cannot together be a
+//!   group's placement, so the list names one that does not belong in it.
+//! * `SubnetNotAllowedFault` (HTTP 400) — At least one subnet ID does not match the other
+//!   subnet IDs. This mismatch typically occurs when a user sets one subnet ID to a regional
+//!   Availability Zone and a different one to an outpost. Or when a user sets the subnet ID
+//!   to an Outpost when not subscribed on this service. This emulator places nothing on an
+//!   Outpost, so nothing answers it.
+//! * `TagQuotaPerResourceExceeded` (HTTP 400) — The request cannot be processed because it
+//!   would cause the resource to have more than the allowed number of tags. The maximum
+//!   number of tags permitted on a resource is 50.
 //! * `InvalidParameterValueException` (HTTP 400, awsQuery code `InvalidParameterValue`) —
 //!   widened in through `extra_errors` (see below): the SERVICE models it and ElastiCache
 //!   answers it for a `SubnetIds` entry that names no subnet of the account, which the
 //!   model's `errors` list for this operation omits.
-//! * `SubnetNotAllowedFault` (HTTP 400) — At least one subnet ID does not match the other
-//!   subnet IDs. This mismatch typically occurs when a user sets one subnet ID to a regional
-//!   Availability Zone and a different one to an outpost. Or when a user sets the subnet ID
-//!   to an Outpost when not subscribed on this service.
-//! * `TagQuotaPerResourceExceeded` (HTTP 400) — The request cannot be processed because it
-//!   would cause the resource to have more than the allowed number of tags. The maximum
-//!   number of tags permitted on a resource is 50.
 
 #[allow(unused_imports)]
 use super::types::*;
@@ -178,8 +182,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // `CacheSubnetGroupName`: "This value is stored as a lowercase string",
         // so that is the identity a cluster's `CacheSubnetGroupName` and a later
-        // Describe resolve against.
-        let name = input.cache_subnet_group_name.to_ascii_lowercase();
+        // Describe resolve against (`crate::state::stored_subnet_group_name`).
+        let name = crate::state::stored_subnet_group_name(&input.cache_subnet_group_name);
         // The name carries no modelled `@length` or `@pattern`, so the
         // documented rule is enforced here, worded by the one helper that rule
         // has (`crate::state::invalid_subnet_group_name_message`) — the same
@@ -301,29 +305,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The VPC the group reports is the one its subnets sit in, as EC2
         // reported it. A group is where a cluster is placed and a cluster sits
         // in ONE VPC, so a request whose resolved subnets do not all belong to
-        // one VPC is refused with the fault the model declares for exactly that,
-        // in the sentence that fault's own documentation states
-        // (`smithy_query(query="doc", shape="SubnetNotAllowedFault")`: "At least
-        // one subnet ID does not match the other subnet IDs"), followed by which
-        // identifier belongs where — read off EC2's records, not built here.
-        // Without it the group would be stored reporting one of the two VPCs.
+        // one VPC is refused as naming an invalid subnet, in the sentence this
+        // service states that with (`crate::state::subnets_not_in_one_vpc_message`),
+        // naming the two identifiers that disagree — read off EC2's records, not
+        // built here. Without it the group would be stored reporting one of the
+        // two VPCs.
         let placement = resolved.first().cloned().unwrap_or_default();
         let vpc_id = placement.vpc_id.clone();
         if let Some(mismatched) = resolved.iter().find(|subnet| subnet.vpc_id != vpc_id) {
-            return Err(CreateCacheSubnetGroupErrorModeled::SubnetNotAllowedFault(
-                SubnetNotAllowedFault {
-                    message: Some(format!(
-                        "At least one subnet ID does not match the other subnet IDs: {} belongs \
-                         to {} and {} belongs to {vpc_id}.",
-                        mismatched.subnet_id, mismatched.vpc_id, placement.subnet_id
-                    )),
-                },
-            )
+            return Err(CreateCacheSubnetGroupErrorModeled::InvalidSubnet(InvalidSubnet {
+                message: Some(crate::state::subnets_not_in_one_vpc_message(
+                    &placement.subnet_id,
+                    &mismatched.subnet_id,
+                )),
+            })
             .into());
         }
         let subnets: Vec<crate::state::SubnetRecord> = resolved
             .into_iter()
             .map(|subnet| crate::state::SubnetRecord {
+                // The network types the subnet supports follow from the blocks
+                // EC2 reported for it; see `crate::state::network_types`.
+                supported_network_types: subnet.supported_network_types(),
                 subnet_identifier: subnet.subnet_id,
                 availability_zone: subnet.availability_zone,
             })

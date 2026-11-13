@@ -99,16 +99,24 @@ async fn all_group_names(emulator: &Emulator) -> Vec<String> {
 }
 
 /// The sentence this operation words a cache subnet group it cannot find with,
-/// built from the name the request spelled — the delete's own template, which is
-/// not the describe's (`Cache subnet group <name> not found.`).
+/// built from the name's STORED identity — `CacheSubnetGroupName` "is stored as a
+/// lowercase string", so the service names a group under that one identity
+/// whatever case the request spelled. The delete's own template, which is not the
+/// describe's (`Cache subnet group <name> not found.`).
 fn not_found_message(name: &str) -> String {
-    format!("Cache Subnet Group {name} does not exist.")
+    format!(
+        "Cache Subnet Group {} does not exist.",
+        name.to_ascii_lowercase()
+    )
 }
 
 /// The sentence this operation refuses a group a cluster is placed in with, built
-/// from the name the request spelled.
+/// from the name's stored identity; see [`not_found_message`].
 fn in_use_message(name: &str) -> String {
-    format!("Cache subnet group {name} is currently in use.")
+    format!(
+        "Cache subnet group {} is currently in use.",
+        name.to_ascii_lowercase()
+    )
 }
 
 /// Assert that `name` names no group any more: the describe and a second delete

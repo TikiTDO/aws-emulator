@@ -40,16 +40,18 @@ use crate::harness::{params, Emulator, Reply};
 /// One engine-naming row: the engine, the description its catalog entries carry
 /// and a version of it the catalog publishes.
 ///
-/// The descriptions are the engines' own product names, spelled the way each
-/// project spells its own name — `memcached` in lower case, `Redis` and
-/// `Valkey` capitalised — which is the convention
+/// The descriptions are the labels ElastiCache publishes for each engine —
+/// `memcached` and `Redis` under the engine's own product name, spelled the way
+/// that project spells it, and Valkey under the longer label ElastiCache gives
+/// its Valkey offering — which is what
 /// `CacheEngineVersion$CacheEngineDescription` reports. The VERSION description
 /// is built from the engine's API name instead (the `Engine` value itself), as
-/// `<engine> version <version>`.
+/// `<engine> version <release>`, naming the full release the entry's version
+/// stands for.
 const ENGINE_NAMING: [(&str, &str, &str); 3] = [
     ("memcached", "memcached", "1.4.14"),
     ("redis", "Redis", "7.1"),
-    ("valkey", "Valkey", "7.2"),
+    ("valkey", "Valkey Engine for ElastiCache", "7.2"),
 ];
 
 /// One catalog-floor row: the engine, the oldest version the service offers for
@@ -167,11 +169,24 @@ async fn every_published_version_is_described_by_its_engines_own_name() {
                 "case {case}: expected the engine description {description:?}, got \
                  {engine_description:?}"
             );
-            assert_eq!(
-                version_description,
-                &format!("{engine} version {version}"),
-                "case {case}: expected the version description {:?}, got {version_description:?}",
-                format!("{engine} version {version}")
+            // `<engine> version <release>`, over the engine's API name and the full
+            // release the entry's version stands for: the version itself where it
+            // already names a release, and the patch release behind the line where
+            // ElastiCache publishes a version by its line alone. Which release that
+            // is per entry is the `engine_catalog_descriptions` suite's table; here
+            // the SHAPE is asserted, independent of that table.
+            let release = version_description
+                .strip_prefix(&format!("{engine} version "))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "case {case}: expected '{engine} version <release>', got \
+                         {version_description:?}"
+                    )
+                });
+            assert!(
+                release.starts_with(version.as_str()) && release.split('.').count() == 3,
+                "case {case}: the version description must name the patch-level release of \
+                 {version:?}, got {version_description:?}"
             );
         }
     }
