@@ -64,6 +64,10 @@ pub mod xml_schema;
 /// the offending value.
 pub mod tag_resource_id;
 
+/// Authoritative DNS responder serving this store's hosted zones over UDP and TCP inside the
+/// local container sandbox when [`sandbox_dns::LISTEN_ADDRESS_VARIABLE`] is configured.
+pub mod sandbox_dns;
+
 use smithy_server_runtime::{
     http, ErasedOperation, ErasedServiceDefinition, Refusal, Refused, Service,
 };
@@ -190,6 +194,7 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// generated [`ServiceDefinition`], which constructs each operation from it; the
     /// operation's behaviour lives in that operation's own `impl Operation`.
     pub fn new(engine: Arc<Eng>) -> Self {
+        sandbox_dns::start_if_configured(&engine);
         Self {
             entry: envelope::Route53Definition::new(engine),
             envelope: envelope::ErrorEnvelope,

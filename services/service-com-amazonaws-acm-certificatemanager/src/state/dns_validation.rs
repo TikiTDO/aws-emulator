@@ -54,6 +54,11 @@ impl ComAmazonawsAcmCertificatemanagerState {
     ) {
         self.resolve_dns_validations(engine, now);
         self.materialize_due(now);
+        let key_directory = super::certificate_key_material_directory(engine);
+        super::sandbox_ca::populate_issued_key_material(
+            &mut self.certificates,
+            key_directory.as_ref(),
+        );
     }
 
     /// Resolve every pending DNS validation against the account's hosted zones.

@@ -99,6 +99,7 @@
 //! issuance.
 
 mod dns_validation;
+pub mod sandbox_ca;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, SystemTime};
