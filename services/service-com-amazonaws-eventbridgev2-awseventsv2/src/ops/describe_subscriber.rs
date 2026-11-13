@@ -1,15 +1,7 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeSubscriber
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeSubscriber`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeSubscriber::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Implemented: projects a stored subscriber.
 //!
 //! ## Shape of an operation
 //!
@@ -125,9 +117,13 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-eventbridgev2-awsevents
 // here — hence the `DescribeSubscriberError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
-#[smithy_macros::operation_error("com.amazonaws.eventbridgev2#DescribeSubscriber")]
+#[smithy_macros::operation_error(
+    "com.amazonaws.eventbridgev2#DescribeSubscriber",
+    extra_errors = ["InternalException"]
+)]
 #[derive(Debug)]
 pub enum DescribeSubscriberErrorModeled {
+    InternalException(InternalException),
     ResourceNotFoundException(ResourceNotFoundException),
 }
 
@@ -182,18 +178,53 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeSubscriber` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeSubscriberErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeSubscriber"))
+        let _ = ctx;
+        let Some(store) = crate::state::service_state(&*self.engine) else {
+            return Err(DescribeSubscriberErrorModeled::InternalException(
+                InternalException {
+                    message: Some("the event bus store is unavailable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+        let now = ::std::time::SystemTime::now();
+
+        let mut state = store.lock();
+        // Reporting only: the sole write is materialising the bus lifecycle
+        // transitions the clock already made due, which is also what retires a
+        // subscriber whose bus has finished disappearing.
+        state.settle_lifecycles(now);
+
+        let Some(subscriber) = state.subscriber(&input.subscriber_arn) else {
+            return Err(DescribeSubscriberErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: Some(format!("subscriber {} does not exist", input.subscriber_arn)),
+                },
+            )
+            .into());
+        };
+
+        Ok(DescribeSubscriberOutput {
+            subscriber_arn: Some(subscriber.arn.clone()),
+            name: Some(subscriber.name.clone()),
+            event_bus_arn: Some(subscriber.event_bus_arn.clone()),
+            invoke_configuration: Some(subscriber.invoke_configuration.clone()),
+            description: subscriber.description.clone(),
+            filter_configuration: subscriber.filter_configuration.clone(),
+            r#type: Some(subscriber.ordering_type.clone()),
+            starting_position: Some(subscriber.starting_position.clone()),
+            point_in_time_configuration: subscriber.point_in_time_configuration.clone(),
+            batch_configuration: subscriber.batch_configuration.clone(),
+            transformer: subscriber.transformer.clone(),
+            retry_policy: subscriber.retry_policy.clone(),
+            on_failure_configuration: subscriber.on_failure_configuration.clone(),
+            log_configuration: subscriber.log_configuration.clone(),
+            state: Some(subscriber.state.wire_value().to_string()),
+            // `Revoked` carries the FACT of a revocation, so a subscriber
+            // nobody has revoked reports none.
+            revoked: subscriber.revoked.then_some(true),
+            creation_time: Some(crate::state::to_date_time(subscriber.creation_time)),
+            last_modified_time: Some(crate::state::to_date_time(subscriber.last_modified_time)),
+        })
     }
 }

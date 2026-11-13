@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateSubscriber
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateSubscriber`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateSubscriber::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Implemented: mints a subscriber on an event bus, which `PutEvents` then
+//! delivers that bus's matching events to.
 //!
 //! ## Shape of an operation
 //!
@@ -150,11 +143,16 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-eventbridgev2-awsevents
 // here — hence the `CreateSubscriberError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
-#[smithy_macros::operation_error("com.amazonaws.eventbridgev2#CreateSubscriber")]
+#[smithy_macros::operation_error(
+    "com.amazonaws.eventbridgev2#CreateSubscriber",
+    extra_errors = ["InternalException", "InvalidInputException"]
+)]
 #[derive(Debug)]
 pub enum CreateSubscriberErrorModeled {
     ConcurrentModificationException(ConcurrentModificationException),
     IdempotentParameterMismatchException(IdempotentParameterMismatchException),
+    InternalException(InternalException),
+    InvalidInputException(InvalidInputException),
     InvalidStateException(InvalidStateException),
     LimitExceededException(LimitExceededException),
     ResourceAlreadyExistsException(ResourceAlreadyExistsException),
@@ -212,18 +210,327 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateSubscriber` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateSubscriberErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateSubscriber"))
+        let Some(store) = crate::state::service_state(&*self.engine) else {
+            return Err(CreateSubscriberErrorModeled::InternalException(
+                InternalException {
+                    message: Some("the event bus store is unavailable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+        let now = ::std::time::SystemTime::now();
+
+        // The store's lock is taken for the create alone and released with this
+        // statement, because the deliveries that follow are calls into other
+        // services of this same emulator, which reach those services' own
+        // stores.
+        let created = create(&mut store.lock(), &input, now)?;
+
+        // What the new subscriber is already owed: a subscriber whose
+        // `StartingPosition` puts it inside the bus's retained log has that
+        // log's events behind its position, and they are due as soon as it
+        // exists. A `LATEST` subscriber is at the end of the log and is owed
+        // nothing yet, so this delivers nothing for it.
+        crate::state::subscriber_delivery::deliver_due(ctx.callback(), &created.due).await;
+
+        Ok(created.response)
+    }
+}
+
+/// What one create leaves behind: the response it answers, and the backlog the
+/// new subscriber's starting position already owes it.
+struct Created {
+    response: CreateSubscriberOutput,
+    due: Vec<crate::state::DueDelivery>,
+}
+
+/// Mint the subscriber this request asks for, and report what it is owed.
+///
+/// SYNCHRONOUS, and handed the store rather than the engine, because it runs
+/// under the store's lock from end to end: the name check, the client-token
+/// replay and the insert are one atomic step, so two creates racing for one
+/// name cannot both mint. The deliveries it makes due are made by the caller,
+/// with the lock released.
+fn create(
+    state: &mut crate::state::ComAmazonawsEventbridgev2Awseventsv2State,
+    input: &CreateSubscriberInput,
+    now: ::std::time::SystemTime,
+) -> Result<Created, CreateSubscriberError> {
+    state.settle_lifecycles(now);
+
+    // The bus the subscriber is created on has to exist, and "The bus must
+    // be ACTIVE": a bus that is still provisioning or on its way out cannot
+    // take on a new subscriber.
+    let Some(bus) = state.bus(&input.event_bus_arn) else {
+        return Err(CreateSubscriberErrorModeled::ResourceNotFoundException(
+            ResourceNotFoundException {
+                message: Some(format!("event bus {} does not exist", input.event_bus_arn)),
+            },
+        )
+        .into());
+    };
+    if bus.state != crate::state::BusLifecycleState::Active {
+        return Err(CreateSubscriberErrorModeled::InvalidStateException(
+            InvalidStateException {
+                message: Some(format!(
+                    "event bus {} is in state {} and cannot accept a subscriber",
+                    bus.arn,
+                    bus.state.wire_value()
+                )),
+            },
+        )
+        .into());
+    }
+    let bus_arn = bus.arn.clone();
+    let region = bus.region.clone();
+
+    // Where on the bus's log this subscriber begins: the end of it for
+    // `LATEST`, the point its `PointInTimeConfiguration` names for
+    // `POINT_IN_TIME`. Read against the bus as it stands now, before anything
+    // else can publish to it.
+    let starting_position = input
+        .starting_position
+        .clone()
+        .unwrap_or_else(|| crate::state::STARTING_POSITION_LATEST.to_string());
+    let next_sequence_number = crate::state::starting_sequence_number(
+        bus,
+        &starting_position,
+        input.point_in_time_configuration.as_ref(),
+    );
+
+    // Every filter is stored only if it is a pattern this service can
+    // evaluate: `FilterConfiguration$Language` declares one language,
+    // `EVENT_BRIDGE_PATTERN`, and a text that is not a pattern of that
+    // language would select nothing for the lifetime of the subscriber.
+    for filter in input
+        .filter_configuration
+        .as_ref()
+        .and_then(|configuration| configuration.filters.as_deref())
+        .unwrap_or_default()
+    {
+        if let Err(reason) = crate::state::parse_filter_pattern(&filter.pattern) {
+            return Err(CreateSubscriberErrorModeled::InvalidInputException(
+                InvalidInputException {
+                    message: Some(format!("FilterConfiguration.Filters: {reason}")),
+                },
+            )
+            .into());
+        }
+    }
+
+    // A retry carrying the same ClientToken replays the subscriber that
+    // token minted — identical parameters only; different ones are the
+    // mismatch the model names. The record is per region, because a
+    // subscriber belongs to the region of its bus.
+    if let Some(token) = input.client_token.as_deref() {
+        let replay_key = crate::state::idempotency_key(&region, token);
+        if let Some(arn) = state.subscriber_idempotency.get(&replay_key).cloned() {
+            if let Some(subscriber) = state.subscriber(&arn) {
+                if !matches_stored(subscriber, input) {
+                    return Err(
+                        CreateSubscriberErrorModeled::IdempotentParameterMismatchException(
+                            IdempotentParameterMismatchException {
+                                message: Some(format!(
+                                    "ClientToken {token} was already used to create \
+                                     subscriber {arn} with different parameters"
+                                )),
+                            },
+                        )
+                        .into(),
+                    );
+                }
+                // A replay mints nothing and so makes nothing newly due: the
+                // subscriber the token already minted was handed its backlog
+                // when it was created.
+                return Ok(Created {
+                    response: created_response(subscriber),
+                    due: Vec::new(),
+                });
+            }
+            // The subscriber that token minted is gone, so the token no
+            // longer replays anything and the name is free again.
+            state.subscriber_idempotency.remove(&replay_key);
+        }
+    }
+
+    // A `SubscriberArn` names a subscriber by its name and a minted id
+    // alone, so a subscriber name is unique per account AND region: only a
+    // subscriber in the region of this request's bus can collide with it.
+    if let Some(existing) = state.subscriber_by_name(&region, &input.name) {
+        return Err(CreateSubscriberErrorModeled::ResourceAlreadyExistsException(
+            ResourceAlreadyExistsException {
+                message: Some(format!(
+                    "subscriber {} already exists as {}",
+                    input.name, existing.arn
+                )),
+            },
+        )
+        .into());
+    }
+
+    // The EMULATOR's own bound on the registry, reported through the quota
+    // error this operation models: without it any caller could grow one
+    // process's heap without limit.
+    if state.subscribers.len() >= crate::state::MAX_SUBSCRIBERS_PER_EMULATOR {
+        return Err(CreateSubscriberErrorModeled::LimitExceededException(
+            LimitExceededException {
+                message: Some(format!(
+                    "this emulator holds the maximum of {} subscribers; delete a subscriber \
+                     before creating another",
+                    crate::state::MAX_SUBSCRIBERS_PER_EMULATOR
+                )),
+            },
+        )
+        .into());
+    }
+
+    let Some(run_state) = crate::state::SubscriberRunState::from_wire(input.state.as_deref()) else {
+        return Err(CreateSubscriberErrorModeled::InvalidInputException(
+            InvalidInputException {
+                message: Some(format!(
+                    "State: {} is not a SubscriberState this service declares",
+                    input.state.as_deref().unwrap_or_default()
+                )),
+            },
+        )
+        .into());
+    };
+
+    // The ARN's id segment is minted from the store's own counter, so no
+    // two subscribers can share one.
+    let arn = crate::state::subscriber_arn(
+        &region,
+        &input.name,
+        &crate::state::new_subscriber_id(state.next_id_seed(), now),
+    );
+    let subscriber = crate::state::Subscriber {
+        arn: arn.clone(),
+        name: input.name.clone(),
+        event_bus_arn: bus_arn,
+        account_id: ::engine::emulator_account_id().to_string(),
+        region: region.clone(),
+        invoke_configuration: input.invoke_configuration.clone(),
+        description: input.description.clone(),
+        filter_configuration: input.filter_configuration.clone(),
+        ordering_type: input
+            .r#type
+            .clone()
+            .unwrap_or_else(|| crate::state::ORDERING_TYPE_UNORDERED.to_string()),
+        starting_position,
+        point_in_time_configuration: input.point_in_time_configuration.clone(),
+        batch_configuration: input.batch_configuration.clone(),
+        transformer: input.transformer.clone(),
+        retry_policy: input.retry_policy.clone(),
+        on_failure_configuration: input.on_failure_configuration.clone(),
+        log_configuration: input.log_configuration.clone(),
+        state: run_state,
+        revoked: false,
+        // Provisioning is synchronous for a subscriber, so it is
+        // operational as soon as this call returns.
+        creation_time: now,
+        last_modified_time: now,
+        tags: input
+            .tags
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<::std::collections::BTreeMap<_, _>>(),
+        client_token: input.client_token.clone(),
+        next_sequence_number,
+    };
+
+    if let Some(token) = input.client_token.as_deref() {
+        let replay_key = crate::state::idempotency_key(&region, token);
+        state.subscriber_idempotency.insert(replay_key, arn.clone());
+    }
+    state.subscribers.insert(arn.clone(), subscriber);
+    let stored = state
+        .subscriber(&arn)
+        .expect("the subscriber just inserted is in the store");
+    let response = created_response(stored);
+    Ok(Created {
+        response,
+        // Taken under this same lock, so the backlog is handed to this
+        // subscriber once however many calls follow.
+        due: state.take_due_delivery(&arn).into_iter().collect(),
+    })
+}
+
+/// Project a stored subscriber into `CreateSubscriberResponse`. Every member is
+/// read back out of the store.
+fn created_response(subscriber: &crate::state::Subscriber) -> CreateSubscriberOutput {
+    CreateSubscriberOutput {
+        subscriber_arn: Some(subscriber.arn.clone()),
+        name: Some(subscriber.name.clone()),
+        event_bus_arn: Some(subscriber.event_bus_arn.clone()),
+        r#type: Some(subscriber.ordering_type.clone()),
+        starting_position: Some(subscriber.starting_position.clone()),
+        point_in_time_configuration: subscriber.point_in_time_configuration.clone(),
+        state: Some(subscriber.state.wire_value().to_string()),
+        creation_time: Some(crate::state::to_date_time(subscriber.creation_time)),
+    }
+}
+
+/// Whether a repeat create describes the subscriber already stored, which is
+/// what separates an idempotent replay from an
+/// `IdempotentParameterMismatchException`.
+///
+/// The members compared are the ones that decide what the subscriber IS and
+/// does: where it is created, what it invokes, which events it selects, how it
+/// delivers them and whether it delivers at all. Presence is compared as well
+/// as value, so an omitted member and a present-but-empty one are not the same
+/// request.
+fn matches_stored(subscriber: &crate::state::Subscriber, input: &CreateSubscriberInput) -> bool {
+    let requested_tags: ::std::collections::BTreeMap<String, String> = input
+        .tags
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let requested_state = crate::state::SubscriberRunState::from_wire(input.state.as_deref());
+
+    subscriber.name == input.name
+        && subscriber.event_bus_arn == input.event_bus_arn
+        && subscriber.description == input.description
+        && subscriber.tags == requested_tags
+        && requested_state.is_some_and(|state| state == subscriber.state)
+        && subscriber.invoke_configuration.target_arn == input.invoke_configuration.target_arn
+        && subscriber.invoke_configuration.role_arn == input.invoke_configuration.role_arn
+        && same_filters(
+            subscriber.filter_configuration.as_ref(),
+            input.filter_configuration.as_ref(),
+        )
+        && input
+            .r#type
+            .as_ref()
+            .is_none_or(|requested| *requested == subscriber.ordering_type)
+        && input
+            .starting_position
+            .as_ref()
+            .is_none_or(|requested| *requested == subscriber.starting_position)
+}
+
+/// Whether two filter configurations select the same events: the same language,
+/// and the same patterns in the same scopes in the same order.
+///
+/// `FilterConfiguration` is a modelled structure with no equality of its own,
+/// which is why this is written out rather than compared with `==`.
+fn same_filters(left: Option<&FilterConfiguration>, right: Option<&FilterConfiguration>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.language == right.language
+                && match (left.filters.as_deref(), right.filters.as_deref()) {
+                    (None, None) => true,
+                    (Some(left), Some(right)) => {
+                        left.len() == right.len()
+                            && left.iter().zip(right).all(|(left, right)| {
+                                left.pattern == right.pattern && left.scope == right.scope
+                            })
+                    }
+                    _ => false,
+                }
+        }
+        _ => false,
     }
 }

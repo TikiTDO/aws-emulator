@@ -268,6 +268,12 @@ pub struct LogConfiguration {
     pub include_payload: Option<String>,
 }
 
+#[smithy_macros::smithy(shape = "com.amazonaws.eventbridgev2#InvalidInputException")]
+#[derive(Debug, Clone, Default)]
+pub struct InvalidInputException {
+    pub message: Option<String>,
+}
+
 #[smithy_macros::smithy(shape = "com.amazonaws.eventbridgev2#ConflictException")]
 #[derive(Debug, Clone, Default)]
 pub struct ConflictException {

@@ -17,3 +17,5 @@ mod event_bus_lifecycle;
 mod event_source_lifecycle;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/subscriber_delivery.rs"]
+mod subscriber_delivery;

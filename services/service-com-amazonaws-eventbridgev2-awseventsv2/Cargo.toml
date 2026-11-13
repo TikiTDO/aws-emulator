@@ -28,6 +28,25 @@ hex = { workspace = true }
 # PutEvents entries on: a fixed-width key keeps that index small whatever the
 # size of the event.
 sha2 = { workspace = true }
+# `event_pattern`: the ONE reading and evaluation of an EventBridge event
+# pattern, which is the language a subscriber's `FilterConfiguration` filters
+# are written in; `arn`: the one parse of a target ARN, so this crate does not
+# split a caller's ARN its own way (`state::subscribers`,
+# `state::subscriber_delivery`).
+service-common = { path = "../common" }
+# The AWS SDK for Amazon SQS, driven over the in-process callback
+# (`OperationContext::callback`): a subscriber whose target is a queue delivers
+# each matching event with `SendMessageBatch`, the API `SqsParameters` states
+# its values are forwarded to. Only the generated client is needed — the
+# emulator supplies the transport, so the SDK's own HTTPS stack and runtime are
+# left out.
+aws-sdk-sqs = { version = "1", default-features = false }
+
+[dev-dependencies]
+# Amazon SQS, mounted beside this service on one engine in the delivery suite,
+# because a delivery is asserted where a client sees it: on the queue the
+# subscriber's target names.
+service-com-amazonaws-sqs-amazonsqs = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

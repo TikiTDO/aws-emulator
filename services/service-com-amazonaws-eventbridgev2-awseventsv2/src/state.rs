@@ -10,11 +10,15 @@
 //!
 //! The resources that hang off a bus live in their own modules, re-exported
 //! here so every handler reaches one store: [`event_sources`] holds the
-//! EventSource registry.
+//! EventSource registry and [`subscribers`] the subscriber registry, whose
+//! deliveries are made by [`subscriber_delivery`].
 
 mod event_sources;
+pub mod subscriber_delivery;
+mod subscribers;
 
 pub use event_sources::*;
+pub use subscribers::*;
 
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
@@ -287,6 +291,14 @@ pub struct ComAmazonawsEventbridgev2Awseventsv2State {
     /// client token is scoped to the request that carried it: the same token
     /// used for a bus and for an EventSource names two different resources.
     pub event_source_idempotency: BTreeMap<String, String>,
+    /// Subscribers keyed by `SubscriberArn`, so an ARN-addressed read is
+    /// O(log n) and enumeration is in a stable order.
+    pub subscribers: BTreeMap<String, Subscriber>,
+    /// [`idempotency_key`] -> the `SubscriberArn` the create carrying that
+    /// client token minted. Kept apart from the other two records for the
+    /// reason [`Self::event_source_idempotency`] gives: a client token is
+    /// scoped to the request that carried it.
+    pub subscriber_idempotency: BTreeMap<String, String>,
     /// How many service-assigned identifiers this store has handed out.
     ///
     /// This is what makes every minted id UNIQUE: [`Self::next_id_seed`] hands
@@ -335,6 +347,8 @@ impl ComAmazonawsEventbridgev2Awseventsv2State {
             self.idempotency.retain(|_, minted| *minted != arn);
             // An EventSource forwards onto one bus, so it goes with the bus.
             self.forget_event_sources_of_bus(&arn);
+            // A subscriber is created on one bus, so it goes with the bus too.
+            self.forget_subscribers_of_bus(&arn);
         }
     }
 
