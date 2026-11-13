@@ -31,6 +31,8 @@ mod fleet;
 mod job_run_status;
 #[path = "all/limit.rs"]
 mod limit;
+#[path = "all/list_limits.rs"]
+mod list_limits;
 #[path = "all/not_found_message_template.rs"]
 mod not_found_message_template;
 #[path = "all/queue_fleet_association.rs"]
