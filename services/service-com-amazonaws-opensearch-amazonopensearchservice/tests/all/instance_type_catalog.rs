@@ -119,7 +119,10 @@ const PUBLISHED_ROLES: [&str; 4] = ["data", "master", "coordinator", "ultrawarm"
 /// `ListInstanceTypeDetails`:
 /// `GET /2021-01-01/opensearch/instanceTypeDetails/{EngineVersion}`, with `query` as
 /// its `@httpQuery` members (empty for a request that sends none).
-async fn list(emulator: &Emulator, engine_version: &str, query: &str) -> Answer {
+///
+/// Shared with [`super::catalog_publication_order`], which states the rules about the
+/// listing's publication this suite does not.
+pub(crate) async fn list(emulator: &Emulator, engine_version: &str, query: &str) -> Answer {
     let uri = if query.is_empty() {
         format!("{PREFIX}/opensearch/instanceTypeDetails/{engine_version}")
     } else {
@@ -148,7 +151,11 @@ fn details(answer: &Answer, case: &str) -> Vec<Value> {
 
 /// The whole listing of one version: this operation reports the version's catalog
 /// complete in a single answer, so the answer carries no continuation token.
-async fn whole_listing(emulator: &Emulator, engine_version: &str, query: &str) -> Vec<Value> {
+pub(crate) async fn whole_listing(
+    emulator: &Emulator,
+    engine_version: &str,
+    query: &str,
+) -> Vec<Value> {
     let answer = list(emulator, engine_version, query).await;
     assert_eq!(
         answer.body.get("NextToken"),
@@ -161,7 +168,7 @@ async fn whole_listing(emulator: &Emulator, engine_version: &str, query: &str) -
 }
 
 /// The `InstanceType` of every entry of a listing, in the order reported.
-fn instance_types(listing: &[Value]) -> Vec<String> {
+pub(crate) fn instance_types(listing: &[Value]) -> Vec<String> {
     listing
         .iter()
         .map(|entry| {

@@ -33,6 +33,8 @@ mod application_updates;
 mod applications;
 #[path = "all/authorized_principal_type.rs"]
 mod authorized_principal_type;
+#[path = "all/catalog_publication_order.rs"]
+mod catalog_publication_order;
 #[path = "all/change_progress.rs"]
 mod change_progress;
 #[path = "all/clock_owed_readiness.rs"]

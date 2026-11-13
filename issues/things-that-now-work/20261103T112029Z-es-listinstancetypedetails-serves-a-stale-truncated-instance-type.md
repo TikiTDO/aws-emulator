@@ -64,3 +64,62 @@ Smithy cited (services/service-com-amazonaws-opensearch-amazonopensearchservice)
 2. Compare the InstanceTypeDetails list against the recording: the emulator's list is shorter, starts at c5.large.search instead of m7i.2xlarge.search, contains no m7i./c8g./oi2./r7i. entries, reports InstanceRole ['data','master','coordinator'] for storage-optimized types the recording reports as ['data'], and omits the AvailabilityZones member from every entry.
 3. Replay esdef-list-instance-type-details-max-results-ignored, step task#1 (same GET with maxResults set) and observe the first page's element 0 is c5.large.search instead of m7i.2xlarge.search.
 4. Replay opensearch-domain-version-capacity-and-software-update-management, step task#5 and observe the same enum-ordered catalog served for that flow's engine version, with ~140 recorded entries absent.
+
+## Resolution
+
+The code base drifted from the commit this was filed against: the enum projection the
+three causes describe is gone. `ListInstanceTypeDetails` reads the service's own
+per-release catalog data
+(`services/service-com-amazonaws-opensearch-amazonopensearchservice/src/state/instance_types.rs`,
+`INSTANCE_TYPE_CATALOG` → `offered_instance_types` → `instance_type_details`), which
+publishes the current-generation families the modelled value set does not list at all —
+`m7i`, `c7i`, `m8g`, `c8g`, `r7i`, `r8g`, `r8gd`, `r7gd`, `i8ge`, `im4gn`, `oi2`, `om2`,
+`or1`, `or2` — keyed by the release each family is offered from, with each entry's
+`InstanceRole` taken from its family (data-only for the OpenSearch-optimized families,
+the warm role for the warm tier, the coordinator role only where a node of the family
+can be provisioned in it) and `AvailabilityZones` reported exactly when `retrieveAZs`
+asks for them. So:
+
+* Cause 1 — FIXED for catalog content, per-type `InstanceRole` and the feature flags.
+  `tests/all/instance_type_catalog.rs` writes the whole entry out for one type of every
+  family rule, including the three the evidence names (`m7i.2xlarge.search`,
+  `c8g.12xlarge.search` and `oi2.8xlarge.search` with `["data"]`), and
+  `tests/all/current_generation_instance_types.rs` holds every current-generation family
+  to being published, to not being published by the release before its prerequisite, and
+  to its own role set.
+* Cause 2 — FIXED by the same data: the head of the page is the head of the corrected
+  listing, and `MaxResults` does not bound what is reported (the recorded answers carry
+  the catalog complete and no token), which `tests/all/instance_type_catalog.rs` holds
+  over a table of page sizes.
+* Cause 3 — FIXED by the same data; the catalog is a function of the release, so the
+  flow's release gets its own listing rather than one shared dump.
+
+DECLINED, as in 20261030T001859Z and 20261101T032039Z: the INDEX POSITIONS, which are
+what the replay key still reports. `InstanceTypeDetailsList` carries no ordering trait
+and no documented order, and the recordings disagree with each other about it — this
+issue's own evidence has one fixture reporting `oi2.8xlarge.search` then
+`r7i.12xlarge.search` at indices 3 and 4 and another reporting `r7i.12xlarge.search`
+then `c8g.8xlarge.search` at the same indices, a third recording leads with
+`r5.large.search`, and the same value set appears in yet another order in the recorded
+refusal of an unknown instance type. It is therefore the service's own collection
+iteration order for that run, not published content, and writing one recording's
+positions in would be a memorised prefix rather than a rule. This emulator publishes the
+catalog in the generation grouping AWS's supported-instance-types documentation lists
+(`state::catalog_rank`), and — unlike the service it emulates — publishes it
+deterministically: `tests/all/catalog_publication_order.rs` holds a release's listing to
+being identical across repeated reads, across two independently constructed emulators
+and across a store that gained a domain, and holds an earlier release's listing to being
+a subsequence of a later release's, so a release that adds families never moves a type
+ahead of one it followed.
+
+DECLINED: `AvailabilityZones` on an entry of a request that did not ask for zones. The
+member is modelled optional, the protocol does not distinguish an absent member from an
+explicit `null` (an SDK drops both), and the schema serializer omits a `None` member, so
+there is no value a client reads differently.
+
+NOT CLOSED by this change, and not nameable from anything in this checkout: the entry
+COUNT. A current release publishes 208 instance types here against the recording's ~230;
+every copy of the service's own accepted-value list in the corpus is truncated by the
+reporter, and the families it does name are all published already, so the remaining types
+cannot be identified — inventing families or sizes would be the synthesized catalog this
+issue objects to.
