@@ -75,8 +75,8 @@ pub const TAGGED_SUB_RESOURCE_SEGMENTS: [(&str, TaggedSubResource); 6] = [
 /// one of the detector's collections holds it, under which id.
 ///
 /// Form only. Nothing here is resolved against the store, and the claimed scope
-/// is not checked either: both are the job of
-/// [`ComAmazonawsGuarddutyGuarddutyapiserviceState::tagged_resource_tags_mut`].
+/// is not checked either: the scope is [`scoped_tagged_resource`]'s job and the
+/// records are the job of the resolution both halves of the tagging surface share.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaggedResource {
     /// The partition the ARN claims.
@@ -206,120 +206,173 @@ pub fn created_tag_count_rejection(tags: Option<&HashMap<String, String>>) -> Op
     )
 }
 
+/// The resource `arn` names, once the SCOPE it claims has been checked against the
+/// endpoint serving `region`.
+///
+/// `None` unless the ARN could name a resource this endpoint serves: the partition
+/// and account it claims must be this emulator's ([`::engine::emulator_arn`] mints
+/// every ARN here under them) and the Region must be the one serving the request,
+/// because a detector and everything hanging off it are regional — "you must create
+/// a detector in each Region where you enable the service"
+/// (`smithy_query(query="doc",shape="CreateDetector")`).
+///
+/// Form and scope only: nothing here is resolved against the store. Both halves of
+/// the tagging surface reach the store through this one check, so neither can admit
+/// an ARN the other turns away.
+fn scoped_tagged_resource(region: &str, arn: &str) -> Option<TaggedResource> {
+    let resource = parse_tagged_resource_arn(arn)?;
+    (resource.partition == PARTITION
+        && resource.region == region
+        && resource.account_id == ::engine::emulator_account_id())
+    .then_some(resource)
+}
+
+/// Whether a sub-resource whose delete has already been ACCEPTED still resolves —
+/// the ONE way the two halves of the tagging surface differ, named here so it is the
+/// only thing either half decides for itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeletedSubResources {
+    /// Resolved: such a record is RETAINED to be reported and its own `Get` still
+    /// reports it, so REPORTING its tags is consistent.
+    Resolved,
+    /// Resolved by nothing: a record that is out of use takes no WRITE, so it is
+    /// refused exactly like an id the detector never held.
+    Unresolved,
+}
+
+impl DeletedSubResources {
+    /// Whether a record resolves under this rule, given whether its delete has
+    /// been accepted ([`IpSetRecord::is_deleting`],
+    /// [`ThreatIntelSetRecord::is_deleting`], [`EntitySetRecord::is_deleting`]).
+    fn resolves(self, is_deleting: bool) -> bool {
+        matches!(self, Self::Resolved) || !is_deleting
+    }
+}
+
+/// The whole `ResourceArn` -> tag-map resolution, written ONCE for both borrow
+/// kinds: the scope check, the detector lookup and the per-collection dispatch over
+/// every sub-resource [`TAGGED_SUB_RESOURCE_SEGMENTS`] names.
+///
+/// [`ComAmazonawsGuarddutyGuarddutyapiserviceState::tagged_resource_tags`] and
+/// [`ComAmazonawsGuarddutyGuarddutyapiserviceState::tagged_resource_tags_mut`]
+/// differ only in the map lookup (`get` or `get_mut`), in the detector accessor they
+/// borrow through and in whether a record whose delete has been accepted resolves
+/// ([`DeletedSubResources`]), so the decision tree itself lives here: a seventh
+/// taggable sub-resource is resolved once and both halves gain it together, which is
+/// what makes "a report and a write cannot disagree about which ARN names which
+/// resource" a property of the code rather than of two bodies kept in step by hand.
+///
+/// An ARN that names no taggable resource of this service early-returns `None` from
+/// the enclosing function, which is why this expands only inside one returning
+/// `Option`.
+macro_rules! tagged_resource_tags_of {
+    (
+        $state:expr, $region:expr, $arn:expr,
+        $detector_in:ident, $get:ident, $deleted:expr
+        $(, $mutability:tt)?
+    ) => {{
+        let region: &str = $region;
+        let deleted: DeletedSubResources = $deleted;
+        let resource = scoped_tagged_resource(region, $arn)?;
+        let detector = $state.$detector_in(region, &resource.detector_id)?;
+        let Some((sub_resource, id)) = &resource.sub_resource else {
+            return Some(& $($mutability)? detector.tags);
+        };
+        match sub_resource {
+            // A filter and a publishing destination carry no deleting status at
+            // all: their delete DROPS the record, so the id resolving at all is
+            // already the whole liveness check.
+            TaggedSubResource::Filter => detector
+                .filters
+                .$get(id)
+                .map(|f| & $($mutability)? f.tags),
+            TaggedSubResource::IpSet => detector
+                .ip_sets
+                .$get(id)
+                .filter(|s| deleted.resolves(s.is_deleting()))
+                .map(|s| & $($mutability)? s.tags),
+            TaggedSubResource::ThreatIntelSet => detector
+                .threat_intel_sets
+                .$get(id)
+                .filter(|s| deleted.resolves(s.is_deleting()))
+                .map(|s| & $($mutability)? s.tags),
+            TaggedSubResource::TrustedEntitySet => detector
+                .trusted_entity_sets
+                .$get(id)
+                .filter(|s| deleted.resolves(s.is_deleting()))
+                .map(|s| & $($mutability)? s.tags),
+            TaggedSubResource::ThreatEntitySet => detector
+                .threat_entity_sets
+                .$get(id)
+                .filter(|s| deleted.resolves(s.is_deleting()))
+                .map(|s| & $($mutability)? s.tags),
+            TaggedSubResource::PublishingDestination => detector
+                .publishing_destinations
+                .$get(id)
+                .map(|d| & $($mutability)? d.tags),
+        }
+    }};
+}
+
 impl ComAmazonawsGuarddutyGuarddutyapiserviceState {
     /// The tag map of the resource `arn` names, as `region`'s endpoint holds it,
     /// for an operation that only REPORTS tags.
     ///
-    /// Resolution is [`Self::tagged_resource_tags_mut`]'s — same ARN form, same
-    /// scope check, same records — except that this one keeps resolving a
-    /// sub-resource whose delete has been accepted, because such a record is
-    /// RETAINED to be reported and its own `Get` still reports it, so reporting
-    /// its tags is consistent while writing them is not. This one borrows the
-    /// store immutably, so reporting tags cannot move anything a later caller
-    /// reads.
+    /// Resolution is [`Self::tagged_resource_tags_mut`]'s — the same ARN form, the
+    /// same scope check and the same records, because both expand the one
+    /// resolution `tagged_resource_tags_of!` holds — except that this one keeps
+    /// resolving a sub-resource whose delete has been accepted
+    /// ([`DeletedSubResources::Resolved`]), because such a record is RETAINED to be
+    /// reported and its own `Get` still reports it, so reporting its tags is
+    /// consistent while writing them is not. This one borrows the store immutably,
+    /// so reporting tags cannot move anything a later caller reads.
     pub fn tagged_resource_tags(
         &self,
         region: &str,
         arn: &str,
     ) -> Option<&BTreeMap<String, String>> {
-        let resource = parse_tagged_resource_arn(arn)?;
-        if resource.partition != PARTITION
-            || resource.region != region
-            || resource.account_id != ::engine::emulator_account_id()
-        {
-            return None;
-        }
-        let detector = self.detector_in(region, &resource.detector_id)?;
-        let Some((sub_resource, id)) = &resource.sub_resource else {
-            return Some(&detector.tags);
-        };
-        match sub_resource {
-            TaggedSubResource::Filter => detector.filters.get(id).map(|f| &f.tags),
-            TaggedSubResource::IpSet => detector.ip_sets.get(id).map(|s| &s.tags),
-            TaggedSubResource::ThreatIntelSet => {
-                detector.threat_intel_sets.get(id).map(|s| &s.tags)
-            }
-            TaggedSubResource::TrustedEntitySet => {
-                detector.trusted_entity_sets.get(id).map(|s| &s.tags)
-            }
-            TaggedSubResource::ThreatEntitySet => {
-                detector.threat_entity_sets.get(id).map(|s| &s.tags)
-            }
-            TaggedSubResource::PublishingDestination => {
-                detector.publishing_destinations.get(id).map(|d| &d.tags)
-            }
-        }
+        tagged_resource_tags_of!(
+            self,
+            region,
+            arn,
+            detector_in,
+            get,
+            DeletedSubResources::Resolved
+        )
     }
 
     /// The tag map of the resource `arn` names, as `region`'s endpoint holds it,
     /// for an operation that WRITES tags.
     ///
     /// `None` unless the ARN names a resource this endpoint serves: the scope it
-    /// claims must be this emulator's partition and account
-    /// ([`::engine::emulator_arn`] mints every ARN here under them) and the
-    /// Region serving the request, because a detector and everything hanging off
-    /// it are regional — "you must create a detector in each Region where you
-    /// enable the service" (`smithy_query(query="doc",shape="CreateDetector")`) —
-    /// and the record must exist.
+    /// claims must be the one [`scoped_tagged_resource`] admits, and the record must
+    /// exist.
     ///
     /// Tags are kept on the resource's own record, so the map this hands back is
     /// the one its read reports: nothing can tag a resource in a place its
     /// `Get`/`Describe` does not look.
     ///
     /// A sub-resource whose delete has already been ACCEPTED resolves to `None`
-    /// here, so it is refused exactly like an id the detector never held. A
-    /// record in that state is retained only to be REPORTED — it is named by no
-    /// listing, occupies none of the detector's slots and no update may move it
-    /// ([`IpSetRecord::is_deleting`], [`ThreatIntelSetRecord::is_deleting`],
-    /// [`EntitySetRecord::is_deleting`]) — so a write against it is a write
-    /// against a resource that is out of use. The REPORTING seam
-    /// ([`Self::tagged_resource_tags`]) keeps resolving it, because its own
-    /// `Get` still reports it.
+    /// here ([`DeletedSubResources::Unresolved`]), so it is refused exactly like an
+    /// id the detector never held. A record in that state is retained only to be
+    /// REPORTED — it is named by no listing, occupies none of the detector's slots
+    /// and no update may move it — so a write against it is a write against a
+    /// resource that is out of use. The REPORTING seam
+    /// ([`Self::tagged_resource_tags`]) keeps resolving it, because its own `Get`
+    /// still reports it.
     pub fn tagged_resource_tags_mut(
         &mut self,
         region: &str,
         arn: &str,
     ) -> Option<&mut BTreeMap<String, String>> {
-        let resource = parse_tagged_resource_arn(arn)?;
-        if resource.partition != PARTITION
-            || resource.region != region
-            || resource.account_id != ::engine::emulator_account_id()
-        {
-            return None;
-        }
-        let detector = self.detector_in_mut(region, &resource.detector_id)?;
-        let Some((sub_resource, id)) = &resource.sub_resource else {
-            return Some(&mut detector.tags);
-        };
-        match sub_resource {
-            // A filter and a publishing destination carry no deleting status at
-            // all: their delete DROPS the record, so the id resolving at all is
-            // already the whole liveness check.
-            TaggedSubResource::Filter => detector.filters.get_mut(id).map(|f| &mut f.tags),
-            TaggedSubResource::IpSet => detector
-                .ip_sets
-                .get_mut(id)
-                .filter(|s| !s.is_deleting())
-                .map(|s| &mut s.tags),
-            TaggedSubResource::ThreatIntelSet => detector
-                .threat_intel_sets
-                .get_mut(id)
-                .filter(|s| !s.is_deleting())
-                .map(|s| &mut s.tags),
-            TaggedSubResource::TrustedEntitySet => detector
-                .trusted_entity_sets
-                .get_mut(id)
-                .filter(|s| !s.is_deleting())
-                .map(|s| &mut s.tags),
-            TaggedSubResource::ThreatEntitySet => detector
-                .threat_entity_sets
-                .get_mut(id)
-                .filter(|s| !s.is_deleting())
-                .map(|s| &mut s.tags),
-            TaggedSubResource::PublishingDestination => detector
-                .publishing_destinations
-                .get_mut(id)
-                .map(|d| &mut d.tags),
-        }
+        tagged_resource_tags_of!(
+            self,
+            region,
+            arn,
+            detector_in_mut,
+            get_mut,
+            DeletedSubResources::Unresolved,
+            mut
+        )
     }
 }

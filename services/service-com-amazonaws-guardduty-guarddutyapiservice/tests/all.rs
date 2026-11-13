@@ -283,6 +283,8 @@ mod sample_finding_detector_timestamp;
 mod set_delete_terminality;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/tag_arn_resolution_seam.rs"]
+mod tag_arn_resolution_seam;
 #[path = "all/tag_map_projection.rs"]
 mod tag_map_projection;
 #[path = "all/tags_per_resource_ceiling.rs"]
