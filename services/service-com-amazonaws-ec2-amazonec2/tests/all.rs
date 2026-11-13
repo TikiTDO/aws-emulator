@@ -1946,3 +1946,9 @@ mod create_coip_pool;
 // cannot resolve, and how much capacity a source has to give. Declared beside `prefix_lists`
 #[path = "all/capacity_reservation_split_refusals.rs"]
 mod capacity_reservation_split_refusals;
+// The tag keys EC2 Capacity Manager monitors for the account: what
+// `UpdateCapacityManagerMonitoredTagKeys` activates and deactivates, the statuses the clock
+// carries a key through, and what `GetCapacityManagerMonitoredTagKeys` reports and pages over
+// — declared at the tail of this file, which is where every new ec2 suite lands.
+#[path = "all/capacity_manager_monitored_tag_keys.rs"]
+mod capacity_manager_monitored_tag_keys;

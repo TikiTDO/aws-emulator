@@ -2312,6 +2312,14 @@ pub use instance_boots::*;
 pub mod capacity_manager_metrics;
 pub use capacity_manager_metrics::*;
 
+/// The tag keys EC2 Capacity Manager monitors for the account: what one is stored as, the
+/// statuses the clock carries it through, and the one writer and the one reader every
+/// operation that answers along them shares. A SUBMODULE for the same reason
+/// [`image_usage_reports`] is one, and `pub use` keeps every name reachable as
+/// `crate::state::<name>`.
+pub mod capacity_manager_monitored_tags;
+pub use capacity_manager_monitored_tags::*;
+
 // ---------------------------------------------------------------------------
 // Managed resource visibility (the account-wide setting)
 // ---------------------------------------------------------------------------

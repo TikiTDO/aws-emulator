@@ -3205,6 +3205,18 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// `DeleteCapacityManagerDataExport` the one that removes it. Ordered by id, which is
     /// the order a report of them pages over.
     pub capacity_manager_data_exports: BTreeMap<String, CapacityManagerDataExportResponse>,
+    /// The tag keys EC2 Capacity Manager monitors for the account, by tag key, as
+    /// [`MonitoredTagKeyRecord`]s — the instants the clock owes each key's activation and
+    /// deactivation at, from which the status a reader sees is derived. See the
+    /// [`capacity_manager_monitored_tags`] module docs.
+    ///
+    /// ONE set rather than one per Region, because the keys are a fact of the account the way
+    /// the Capacity Manager setting above is. Written only through
+    /// [`Self::update_monitored_tag_keys`] and read through [`Self::monitored_tag_keys_at`],
+    /// so the update and the report of the monitored keys cannot disagree. Ordered by tag
+    /// key, which is the order a report of them pages over. PRIVATE, like the other
+    /// account-level settings above, so those accessors are the only way in.
+    pub(super) capacity_manager_monitored_tag_keys: BTreeMap<String, MonitoredTagKeyRecord>,
     /// The longer-ID (17-character ID) preference each principal has EXPLICITLY set, by
     /// principal ARN and then by resource type — see the module docs.
     ///
@@ -3629,6 +3641,10 @@ impl Default for ComAmazonawsEc2Amazonec2State {
             // A fresh account holds no Capacity Manager data export configuration until
             // `CreateCapacityManagerDataExport` makes one.
             capacity_manager_data_exports: BTreeMap::new(),
+            // An account that has never called `UpdateCapacityManagerMonitoredTagKeys`
+            // monitors no tag key at all, so Capacity Manager includes no tag dimension in
+            // its capacity metric data.
+            capacity_manager_monitored_tag_keys: BTreeMap::new(),
             // No principal has overridden its ID format settings yet, so every one of
             // them follows the root user, which follows `DEFAULT_USE_LONG_IDS`.
             id_format_overrides: BTreeMap::new(),

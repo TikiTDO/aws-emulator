@@ -293,10 +293,13 @@ impl ComAmazonawsEc2Amazonec2State {
                         .clone(),
                     // "Only tags that have been activated for monitoring via
                     // UpdateCapacityManagerMonitoredTagKeys are included"
-                    // (`CapacityManagerDimension$Tags`). Nothing activates a tag key yet —
-                    // that operation is still a scaffold — so no row carries a tag
-                    // dimension, rather than this reporting every tag a resource happens
-                    // to have.
+                    // (`CapacityManagerDimension$Tags`). A reported combination carries
+                    // exactly the dimensions the request grouped by
+                    // ([`capacity_manager_dimension_projection`]) and the modelled
+                    // `GroupBy` catalog names no tag dimension at all, so no combination of
+                    // this report is one along a tag key and a row carries none — rather
+                    // than this reporting every tag a resource happens to have, monitored
+                    // or not.
                     tags: None,
                 })
             })

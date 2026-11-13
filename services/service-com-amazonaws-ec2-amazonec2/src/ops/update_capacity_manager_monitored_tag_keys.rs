@@ -1,15 +1,21 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateCapacityManagerMonitoredTagKeys
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateCapacityManagerMonitoredTagKeys`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: activates and deactivates tag keys for monitoring by EC2 Capacity Manager —
+//! the account's set of monitored tag keys, the configuration that decides which tags
+//! Capacity Manager may include as dimensions in capacity metric data — and answers the keys
+//! the update affected with the status each now holds. This is the ONLY file to touch for
+//! this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateCapacityManagerMonitoredTagKeys::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! The one WRITER of that set, through
+//! [`crate::state::ComAmazonawsEc2Amazonec2State::update_monitored_tag_keys`], so what
+//! `GetCapacityManagerMonitoredTagKeys` reports is always what this left behind. Activation
+//! and deactivation are moves the CLOCK owes: a key starts `activating` and reaches
+//! `activated` one [`crate::state::TRANSITION_DELAY`] later, and a deactivated key is
+//! `deactivating` until its own instant falls due, after which the account monitors it no
+//! more. Both directions are idempotent, which is what makes a repeat of the same request —
+//! the same `ClientToken` presented twice — leave the account exactly where the first one
+//! did.
 //!
 //! ## Shape of an operation
 //!
@@ -141,18 +147,123 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateCapacityManagerMonitoredTagKeys` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateCapacityManagerMonitoredTagKeysErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateCapacityManagerMonitoredTagKeys"))
+        use std::collections::BTreeSet;
+        use std::time::Instant;
+
+        use crate::scaffolded::Scaffolded;
+        use crate::state;
+
+        // `ctx` carries request metadata only, and this operation reads none of it: the
+        // monitored tag keys are a fact of the ACCOUNT — "tag keys for monitoring by EC2
+        // Capacity Manager" names no Region — the way the Capacity Manager setting itself is.
+        let _ = ctx;
+
+        // "Unique, case-sensitive identifier that you provide to ensure the idempotency of
+        // the request" (`ClientToken`), held to the published constraint every client token
+        // of this crate is held to ([`state::MAX_CLIENT_TOKEN_CHARS`]). Nothing is stored for
+        // it, and nothing needs to be: this update mints no resource and is idempotent in
+        // both directions — a repeat of the same request leaves the account exactly where
+        // the first one did — so no caller-chosen bytes are added to the store for a token.
+        if input
+            .client_token
+            .as_ref()
+            .is_some_and(|token| token.chars().count() > state::MAX_CLIENT_TOKEN_CHARS)
+        {
+            return Err(state::invalid_parameter_value(format!(
+                "clientToken accepts at most {} characters",
+                state::MAX_CLIENT_TOKEN_CHARS
+            )));
+        }
+
+        let activate: &[String] = input.activate_tag_keys.as_deref().unwrap_or_default();
+        let deactivate: &[String] = input.deactivate_tag_keys.as_deref().unwrap_or_default();
+
+        // "Activates or deactivates tag keys for monitoring": a request that names neither
+        // list asks for nothing at all, so it is missing the member the update acts on rather
+        // than served as an update that changes nothing.
+        if activate.is_empty() && deactivate.is_empty() {
+            return Err(state::missing_parameter(
+                "The request must specify either ActivateTagKeys or DeactivateTagKeys",
+            ));
+        }
+
+        // Each list is caller-sized — `ValueStringList` carries no modelled `@length` — and
+        // every entry is a TAG KEY, so each is bounded the way every other tag key this
+        // service accepts is ([`state::validate_tag_key`], the same entry point the
+        // registration of scheduled event notification tag keys checks its keys with). The
+        // count is capped BEFORE anything is read, so a single request cannot store
+        // caller-chosen megabytes.
+        for (member, keys) in [
+            ("ActivateTagKeys", activate),
+            ("DeactivateTagKeys", deactivate),
+        ] {
+            if keys.len() > state::MAX_MONITORED_TAG_KEYS_PER_REQUEST {
+                return Err(state::invalid_parameter_value(format!(
+                    "{member} carries {} tag keys, above the maximum of {}",
+                    keys.len(),
+                    state::MAX_MONITORED_TAG_KEYS_PER_REQUEST
+                )));
+            }
+            for key in keys {
+                if key.is_empty() {
+                    return Err(state::invalid_parameter_value("A tag key cannot be empty"));
+                }
+                state::validate_tag_key(key)?;
+            }
+        }
+
+        // One key named for activation AND for deactivation names no outcome — the two ask
+        // for opposite things about the same key — so the request is refused as the
+        // contradictory combination it is rather than served by whichever list is applied
+        // last.
+        let activated: BTreeSet<&str> = activate.iter().map(String::as_str).collect();
+        if let Some(both) = deactivate
+            .iter()
+            .find(|key| activated.contains(key.as_str()))
+        {
+            return Err(state::invalid_parameter_combination(format!(
+                "The tag key '{both}' cannot be both activated and deactivated in one request"
+            )));
+        }
+
+        let store = state::require_service_state(&*self.engine)?;
+        let mut store = store.lock();
+        let now = Instant::now();
+
+        // The number of keys the account may monitor at once has its own ceiling
+        // ([`state::MAX_MONITORED_TAG_KEYS`]): every key is caller-chosen text, so without
+        // one repeated updates would grow this process's memory without bound. Only the
+        // DISTINCT keys the account is not monitoring yet cost anything — naming one key
+        // twice stores it once — and a key the same request deactivates cannot be one of
+        // them (refused above), so the question is asked about the net growth, through the
+        // store's own one reading of it.
+        let added = activated
+            .iter()
+            .filter(|key| store.monitored_tag_key_status(key, now).is_none())
+            .count();
+        if !store.has_monitored_tag_key_capacity_for(added, now) {
+            return Err(Scaffolded::tag_limit_exceeded(format!(
+                "This emulator monitors at most {} tag keys for Capacity Manager, and the \
+                 account already monitors {}",
+                state::MAX_MONITORED_TAG_KEYS,
+                store.monitored_tag_key_count(now)
+            )));
+        }
+
+        // A `DryRun` request that would have succeeded stops HERE, having written nothing:
+        // "If you have the required permissions, the error response is DryRunOperation"
+        // (`DryRun`). Everything above only reads state.
+        if input.dry_run == Some(true) {
+            return Err(state::dry_run_operation());
+        }
+
+        // Answer the keys read back OUT of the store, so the caller sees what a later
+        // `GetCapacityManagerMonitoredTagKeys` will see rather than what the request asked
+        // for: "the list of tag keys affected by the update, including their current status
+        // and metadata" (`CapacityManagerTagKeys`).
+        let affected = store.update_monitored_tag_keys(activate, deactivate, now);
+        Ok(UpdateCapacityManagerMonitoredTagKeysOutput {
+            capacity_manager_tag_keys: Some(affected),
+        })
     }
 }

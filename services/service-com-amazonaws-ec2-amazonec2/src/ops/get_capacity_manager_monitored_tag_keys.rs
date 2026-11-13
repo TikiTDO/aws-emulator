@@ -1,15 +1,22 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetCapacityManagerMonitoredTagKeys
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetCapacityManagerMonitoredTagKeys`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: reports the tag keys EC2 Capacity Manager monitors for the account — each
+//! with the status the clock has carried it to — in tag-key order, cut into
+//! `MaxResults`-sized pages followed by the token this service mints. This is the ONLY file
+//! to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetCapacityManagerMonitoredTagKeys::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! A pure report: it writes nothing, so two identical calls answer identically and asking
+//! changes nothing a later caller sees. Which keys the account monitors, and what status each
+//! of them holds, is [`crate::state::capacity_manager_monitored_tags`]' — one reading, shared
+//! with `UpdateCapacityManagerMonitoredTagKeys`, the only writer of the set, so the two
+//! cannot disagree about what the account monitors. A key whose deactivation has fallen due
+//! is monitored no more and is reported by nothing.
+//!
+//! The monitored set is the account's CONFIGURATION of which tags Capacity Manager includes
+//! as metric dimensions rather than a reading of ingested capacity data, so it is reported
+//! whatever the account's Capacity Manager status is — unlike the reports of the capacity
+//! data itself, which have no analytics to answer from while Capacity Manager is off.
 //!
 //! ## Shape of an operation
 //!
@@ -143,18 +150,76 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetCapacityManagerMonitoredTagKeys` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetCapacityManagerMonitoredTagKeysErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetCapacityManagerMonitoredTagKeys"))
+        use std::time::Instant;
+
+        use crate::state;
+
+        // `ctx` carries request metadata only, and this operation reads none of it: the
+        // monitored tag keys are a fact of the ACCOUNT — "the tag keys that are currently
+        // being monitored by EC2 Capacity Manager" names no Region — the way the Capacity
+        // Manager setting itself is.
+        let _ = ctx;
+
+        // "The token for the next page of results. Use the value returned from a previous
+        // call" (`NextToken`) — a token this service did not mint is refused rather than
+        // read as a position, and it is refused before the store is read, so whether a bogus
+        // token is caught never depends on what the account monitors.
+        let cursor = match input.next_token.as_deref() {
+            None => None,
+            Some(token) => Some(
+                state::decode_page_token(token)
+                    .ok_or_else(|| state::invalid_pagination_token_for(token))?,
+            ),
+        };
+
+        // "The maximum number of results to return in a single call ... If not specified, up
+        // to 1000 results are returned" (`MaxResults`), which is the largest page this
+        // service serves ([`state::MAX_PAGE_SIZE`]) and the ceiling the member's own modelled
+        // `range 1..1000` publishes — already enforced by the boundary before this handler
+        // runs. The clamp is applied anyway, so a page size of zero — which would mint a
+        // token for a page that carried nothing and leave a paging client in a loop that
+        // never advances — stays unreachable however the request is read.
+        let limit = input
+            .max_results
+            .and_then(|max_results| usize::try_from(max_results).ok())
+            .unwrap_or(state::MAX_PAGE_SIZE)
+            .clamp(1, state::MAX_PAGE_SIZE);
+
+        // The permission question, answered after every parameter has been read and before
+        // the account's state is: the flag asks whether the CALLER MAY make the request. "If
+        // you have the required permissions, the error response is DryRunOperation"
+        // (`DryRun`).
+        if input.dry_run == Some(true) {
+            return Err(state::dry_run_operation());
+        }
+
+        let store = state::require_service_state(&*self.engine)?;
+        let store = store.lock();
+
+        // REPORTING ONLY: every entry is derived from the stored record and the clock, so an
+        // activation the clock has carried to `activated` is reported as such without this
+        // read writing anything, and the account monitors exactly what the last update left
+        // it monitoring.
+        let monitored = store.monitored_tag_keys_at(Instant::now());
+
+        // Tag-key order is both the paging order and the cursor, so a token names the key the
+        // next page resumes after and a walk always advances. "This value is null when there
+        // are no more results to return" (`NextToken`) — a token only when a key follows this
+        // page.
+        let (page, next_token) = state::page_from_cursor(
+            &monitored,
+            cursor.as_deref(),
+            Some(limit),
+            state::PageTokenRule::WhenAnotherItemFollows,
+            |key| key.tag_key.as_deref().unwrap_or_default(),
+        );
+
+        Ok(GetCapacityManagerMonitoredTagKeysOutput {
+            // "The list of tag keys being monitored by Capacity Manager, including their
+            // current status and metadata" (`CapacityManagerTagKeys`): the account's own set,
+            // reported as the one projection of a stored key builds it.
+            capacity_manager_tag_keys: Some(page.to_vec()),
+            next_token,
+        })
     }
 }
