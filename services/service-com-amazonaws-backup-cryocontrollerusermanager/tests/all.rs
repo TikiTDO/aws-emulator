@@ -57,6 +57,8 @@ mod plan_and_selection_refusals;
 mod recovery_point_cross_account_authorization;
 #[path = "all/recovery_point_deletion.rs"]
 mod recovery_point_deletion;
+#[path = "all/recovery_point_denial_sentence.rs"]
+mod recovery_point_denial_sentence;
 #[path = "all/recovery_point_read.rs"]
 mod recovery_point_read;
 #[path = "all/restore_access_vault.rs"]

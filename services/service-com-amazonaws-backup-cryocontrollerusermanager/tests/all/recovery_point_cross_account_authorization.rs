@@ -5,12 +5,13 @@
 //!
 //! The rule under test: when the account field of the `RecoveryPointArn` a
 //! request carries is not the account serving the request, the call is refused
-//! HTTP 403 with the error type `AccessDeniedException` and this service's own
-//! insufficient-privileges sentence, and the refusal discloses nothing about
-//! whether that point exists — not even the ARN or the action it was asked for. A
-//! recovery point belongs to the account its ARN names, and only that account's
-//! own policies could grant a caller anything on it, so there is nothing here to
-//! resolve it against and nothing to report as absent.
+//! HTTP 403 with the error type `AccessDeniedException` and AWS's authorization
+//! sentence — the calling principal, the action (this service's namespace plus
+//! the API name) and the `RecoveryPointArn` exactly as the request carried it —
+//! and the refusal discloses nothing about whether that point exists. A recovery
+//! point belongs to the account its ARN names, and only that account's own
+//! resource-based policy could grant a caller anything on it, so there is nothing
+//! here to resolve it against and nothing to report as absent.
 //!
 //! The table spans every implemented operation that addresses a recovery point
 //! by the ARN the request supplies (the delete and the read, which bind it into
@@ -44,13 +45,26 @@ const DESTINATION_VAULT: &str = "authz-destination";
 /// The principal every request to this emulator is authenticated as: the one IAM
 /// user of the single account it serves, the identity `sts:GetCallerIdentity`
 /// answers with (`service_common::caller_principal::ambient_user_arn`).
-fn caller_principal() -> String {
+pub(crate) fn caller_principal() -> String {
     format!("arn:aws:iam::{ACCOUNT}:user/emulator")
 }
 
-/// The sentence AWS Backup refuses a request for lack of privileges with: the
-/// service's own fixed text, built from nothing in the request.
-const DENIAL: &str = "Insufficient privileges to perform this action.";
+/// The sentence AWS refuses a request with when no resource-based policy grants
+/// the calling principal the action it asked for on the resource it named: the
+/// fixed text, filled in from the caller's principal, the action and the ARN the
+/// request carried
+/// (`service_common::iam_authorization::not_authorized_by_resource_policy`).
+pub(crate) fn denial(action: &str, resource: &str) -> String {
+    format!(
+        "User: {} is not authorized to perform: {action} on resource: {resource} \
+         because no resource-based policy allows the {action} action",
+        caller_principal()
+    )
+}
+
+/// The IAM action namespace AWS Backup publishes its actions under, the service's
+/// own namespace (`OPERATIONS.md`: "ARN namespace: `backup`").
+pub(crate) const ACTION_NAMESPACE: &str = "backup";
 
 /// The role every request that needs one names.
 fn role() -> String {
@@ -68,15 +82,15 @@ fn role() -> String {
 /// `StartCopyJob` (`PUT /copy-jobs`) and `StartRestoreJob` (`PUT /restore-jobs`)
 /// carry it in the body. Every other operation that takes one is still a 501
 /// stub.
-struct Addressed {
-    operation: &'static str,
+pub(crate) struct Addressed {
+    pub(crate) operation: &'static str,
     method: &'static str,
     path: fn(&str) -> String,
     body: Option<fn(&str) -> String>,
 }
 
 /// The four of them, each addressing the recovery point `arn`.
-fn addressed_operations() -> Vec<Addressed> {
+pub(crate) fn addressed_operations() -> Vec<Addressed> {
     vec![
         Addressed {
             operation: "DeleteRecoveryPoint",
@@ -124,7 +138,7 @@ fn addressed_operations() -> Vec<Addressed> {
 
 /// Address `arn` through `operation` and report the status, the
 /// `x-amzn-errortype` header and the parsed body.
-async fn address(
+pub(crate) async fn address(
     router: &MultiServiceRouter,
     operation: &Addressed,
     arn: &str,
@@ -135,7 +149,7 @@ async fn address(
 }
 
 /// The vaults and the one settled recovery point every case runs against.
-async fn stored_point(router: &MultiServiceRouter) -> String {
+pub(crate) async fn stored_point(router: &MultiServiceRouter) -> String {
     for vault in [VAULT, DESTINATION_VAULT] {
         let (status, created) = create_vault(router, vault, "{}").await;
         assert_eq!(
@@ -185,15 +199,21 @@ async fn a_recovery_point_arn_of_another_account_is_denied() {
         let stored = stored_point(&router).await;
 
         for (case, arn) in &foreign {
+            let action = format!("{ACTION_NAMESPACE}:{}", operation.operation);
             let (status, error_type, refused) = address(&router, &operation, arn).await;
             assert_eq!(
                 (
                     status,
                     error_type.as_str(),
                     error_code(&refused).as_str(),
-                    string_at(&refused, "Message").as_str()
+                    string_at(&refused, "Message")
                 ),
-                (403, "AccessDeniedException", "AccessDeniedException", DENIAL),
+                (
+                    403,
+                    "AccessDeniedException",
+                    "AccessDeniedException",
+                    denial(&action, arn)
+                ),
                 "case {case:?} on {}: expected the authorization refusal, got {status} \
                  {error_type} {refused:?}",
                 operation.operation
@@ -205,16 +225,6 @@ async fn a_recovery_point_arn_of_another_account_is_denied() {
                  got {rendered}",
                 operation.operation
             );
-            // The refusal is taken before anything is resolved, so it discloses
-            // neither what was asked for nor who asked.
-            for disclosed in [arn.as_str(), operation.operation, &caller_principal()] {
-                assert!(
-                    !rendered.contains(disclosed),
-                    "case {case:?} on {}: the refusal must not disclose {disclosed:?}, \
-                     got {rendered}",
-                    operation.operation
-                );
-            }
         }
 
         // The control: the account's OWN stored point is still addressable

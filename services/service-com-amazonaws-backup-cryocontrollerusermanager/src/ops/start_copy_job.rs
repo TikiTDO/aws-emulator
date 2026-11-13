@@ -271,7 +271,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> StartCopyJob<Eng>
         // refused for lack of privileges rather than reported absent, so a copy
         // the service refused never reads as a source that is not there
         // (`crate::state::authorized_recovery_point`).
-        crate::state::authorized_recovery_point(&input.recovery_point_arn)?;
+        crate::state::authorized_recovery_point(
+            <Self as smithy_server_runtime::Operation>::NAME,
+            &input.recovery_point_arn,
+        )?;
 
         let mut store = state.lock();
         // The one store whose KEYS a caller chooses: forget expired records and

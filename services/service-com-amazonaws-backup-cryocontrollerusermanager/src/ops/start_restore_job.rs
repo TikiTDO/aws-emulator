@@ -212,7 +212,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // taken BEFORE it is resolved: an ARN of another account is refused for
         // lack of privileges rather than reported as a value that names no
         // stored point (`crate::state::authorized_recovery_point`).
-        crate::state::authorized_recovery_point(&input.recovery_point_arn)?;
+        crate::state::authorized_recovery_point(Self::NAME, &input.recovery_point_arn)?;
 
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             StartRestoreJobErrorModeled::ServiceUnavailableException(ServiceUnavailableException {

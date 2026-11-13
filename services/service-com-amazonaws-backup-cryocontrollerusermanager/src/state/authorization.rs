@@ -13,35 +13,40 @@
 //! account holds can grant access to it — only that account's own resource-based
 //! policy could, and this emulator serves exactly one account
 //! ([`engine::emulator_account_id`]). So an ARN whose account field is not that
-//! account is refused for lack of privileges, with THIS SERVICE'S OWN sentence for
-//! a refusal of that kind
-//! ([`crate::scaffolded::AccessDeniedException::insufficient_privileges`]): AWS
-//! Backup states its own fixed sentence rather than IAM's decision sentence, as
-//! the recorded refusal of such a call shows, and it is the same sentence this
-//! service already answers a vault outside the caller's visibility with
-//! (`crate::state::ComAmazonawsBackupCryocontrollerusermanagerState::vault_visible_to_caller`),
-//! so one condition has one wording across the service.
+//! account is refused for lack of privileges, with the sentence AWS states when a
+//! resource grants the calling principal nothing
+//! ([`::service_common::iam_authorization::not_authorized_by_resource_policy`]):
+//! the principal that signed, the action asked for and the resource ARN as the
+//! request carried it. That sentence is one rule across this tree, so the
+//! namespace is the only part this service supplies.
 //!
 //! Refusing it as ABSENT would be wrong twice over: a caller would learn from the
 //! refusal what another account does or does not hold, and a client that branches
 //! on the authorization refusal — to re-assume a role, to surface a permissions
-//! error, to stop retrying — would instead read a delete the service refused as a
-//! point that is already gone. The sentence names nothing the request carried for
-//! the same reason: a refusal that is taken before anything is resolved has
-//! nothing to disclose.
+//! error, to stop retrying — would instead read a call the service refused as a
+//! point that is already gone. Naming the principal, the action and the ARN the
+//! request carried discloses nothing about the other account either: all three are
+//! values the caller already supplied or already holds, which is why the sentence
+//! can be stated before anything is resolved.
 //!
 //! The decision is taken from the REQUEST alone, so it needs no store and runs
 //! ahead of every lookup. It is stated once here, for every call that addresses a
 //! recovery point by ARN, so the delete, the read and the two jobs that take one
 //! as input cannot drift into different answers for one condition.
 
+/// The IAM action namespace AWS Backup publishes its actions under, which is the
+/// same namespace its ARNs carry (`OPERATIONS.md`: "ARN namespace: `backup`").
+const ACTION_NAMESPACE: &str = super::ARN_NAMESPACE;
+
 /// The authorization decision for a call that addresses the recovery point
 /// `recovery_point_arn` names: `Ok(())` when the ARN names a recovery point of
 /// the account this emulator serves, and the refusal otherwise.
 ///
-/// It takes no action name, because the sentence this service answers is fixed:
-/// the action and the ARN decide the outcome, and neither appears in the refusal.
+/// `api_name` is the API name of the calling operation — its `Operation::NAME`,
+/// so no handler spells an action string — and the action the decision is taken
+/// on is that name under [`ACTION_NAMESPACE`].
 pub fn authorized_recovery_point(
+    api_name: &str,
     recovery_point_arn: &str,
 ) -> Result<(), crate::scaffolded::AccessDeniedException> {
     let own_account = ::service_common::arn::parse(recovery_point_arn)
@@ -49,5 +54,11 @@ pub fn authorized_recovery_point(
     if own_account {
         return Ok(());
     }
-    Err(crate::scaffolded::AccessDeniedException::insufficient_privileges())
+    Err(crate::scaffolded::AccessDeniedException::new(
+        ::service_common::iam_authorization::not_authorized_by_resource_policy(
+            &::service_common::caller_principal::ambient_user_arn(),
+            &format!("{ACTION_NAMESPACE}:{api_name}"),
+            recovery_point_arn,
+        ),
+    ))
 }
