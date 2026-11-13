@@ -304,6 +304,72 @@ pub(crate) fn withheld(message: String) -> Failure {
     }
 }
 
+/// The failure a RAW answer came to, for an invocation made without a typed client:
+/// the error code and the message that answer itself carries.
+///
+/// A universal target's invocation is the invoked operation's own call
+/// ([`super::universal_target`]), made over the in-process transport rather than
+/// through one service's generated client, so what the answer reports is read off the
+/// answer: an AWS JSON refusal names its error shape in the `x-amzn-errortype` header
+/// and in the body's `__type` discriminator — read through the one reading of those two
+/// places this tree has ([`::service_common::error_type_locator`]) — and carries its
+/// message under either spelling the protocol allows. An answer naming no class at all
+/// is reported under [`UNREADABLE_FAILURE_CODE`], and one carrying no message of its own
+/// is reported as the text that came back.
+///
+/// Whether another attempt is worth making is the STATUS's, exactly as it is for a
+/// typed client's failure ([`failure_of`]).
+pub(crate) fn failure_of_answer(status: u16, error_type: Option<&str>, payload: &[u8]) -> Failure {
+    use ::service_common::error_type_locator::{shape_named, SHAPE_DISCRIMINATOR};
+
+    let document: Option<::serde_json::Value> = ::serde_json::from_slice(payload).ok();
+    let named = error_type.map(ToString::to_string).or_else(|| {
+        document
+            .as_ref()?
+            .get(SHAPE_DISCRIMINATOR)
+            .and_then(::serde_json::Value::as_str)
+            .map(ToString::to_string)
+    });
+    // The header may carry a URL after the class, which is no part of the name, and
+    // either place may qualify the shape by its namespace.
+    let code = named
+        .as_deref()
+        .map(|named| shape_named(named.split(':').next().unwrap_or(named)).trim())
+        .filter(|code| !code.is_empty())
+        .unwrap_or(UNREADABLE_FAILURE_CODE)
+        .to_string();
+    let message = document
+        .as_ref()
+        .and_then(|document| {
+            ["message", "Message"]
+                .iter()
+                .find_map(|member| document.get(*member).and_then(::serde_json::Value::as_str))
+        })
+        .map_or_else(
+            || String::from_utf8_lossy(payload).to_string(),
+            ToString::to_string,
+        );
+    Failure {
+        code,
+        message,
+        retryable: status == TOO_MANY_REQUESTS || status >= SERVER_ERROR_FLOOR,
+    }
+}
+
+/// The failure an invocation whose call was never ANSWERED came to.
+///
+/// Nothing came back, so nothing is established about the request — exactly the case
+/// [`failure_of`] retries an unanswered call for — and `detail` is what went wrong on
+/// the way, so the dead-letter report says that rather than naming a refusal no service
+/// gave.
+pub(crate) fn unanswered(detail: &str) -> Failure {
+    Failure {
+        code: UNREADABLE_FAILURE_CODE.to_string(),
+        message: detail.to_string(),
+        retryable: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

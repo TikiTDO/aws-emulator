@@ -46,11 +46,15 @@
 //! ## What reaches the target
 //!
 //! `Target$Input` with the schedule's context attributes substituted
-//! ([`rendered_input`]), handed to the one API the target's service is invoked by:
+//! ([`rendered_input`]), handed to the API the target names. A TEMPLATED target names
+//! a RESOURCE, and the API is the one that kind of resource is invoked by:
 //! `sqs:SendMessage` for a queue, `sns:Publish` for a topic,
 //! `lambda:InvokeFunction` for a function and `states:StartExecution` for a state
-//! machine. The call is made over the in-process callback, so what the target holds
-//! afterwards is what that service's own handlers wrote.
+//! machine. A UNIVERSAL target names the CALL itself
+//! (`arn:aws:scheduler:::aws-sdk:<service>:<operation>`), and the invocation is that
+//! operation with the input as its own request ([`super::universal_target`]). The call
+//! is made over the in-process callback either way, so what the target holds afterwards
+//! is what that service's own handlers wrote.
 //!
 //! ## When a schedule is done
 //!
@@ -74,10 +78,11 @@
 //! policy admits, and what the dead-letter message carries — is [`super::dead_letter`];
 //! the attempts themselves wait on this clock, so nothing sleeps between them either.
 //!
-//! The remaining target kinds (the ECS task, the EventBridge bus, the Kinesis stream,
-//! the SageMaker pipeline and the universal `aws-sdk` target) are NOT invoked here: an
-//! occurrence whose target kind this does not invoke is recorded as not attempted —
-//! never as delivered, and never as a failure of a call nothing made.
+//! The remaining templated target kinds (the ECS task, the EventBridge bus, the Kinesis
+//! stream and the SageMaker pipeline) are NOT invoked here: an occurrence whose target
+//! kind this does not invoke is recorded as not attempted — never as delivered, and
+//! never as a failure of a call nothing made. The same holds for a universal target
+//! naming an operation this emulator makes no call for.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
@@ -88,6 +93,7 @@ use super::dead_letter::{
     dead_letter_attributes, failure_of, withheld, Attempt, Exhaustion, Failure, Report,
     RetryBounds, RETRY_INTERVAL,
 };
+use super::universal_target::{self, UniversalCall};
 use super::{
     occurrence::Occurrences, service_state, ComAmazonawsSchedulerAwschronosserviceState,
     ScheduleRecord, FALLBACK_REGION,
@@ -861,8 +867,21 @@ async fn attempt(
     dead_letter(callback, &pending, &body, &failure, exhausted, retries_made).await;
 }
 
+/// WHAT one occurrence calls, which is what the target's own ARN names.
+#[derive(Debug)]
+enum Called {
+    /// A TEMPLATED target: the ARN names a resource, and the call is the one API that
+    /// kind of resource is invoked by ([`invoking_action`]).
+    Templated(&'static str),
+    /// A UNIVERSAL target: the ARN names the operation itself, and the call is that
+    /// operation with the invocation's payload as its request. Held behind an
+    /// indirection, because a resolved call carries the invoked operation's whole
+    /// request while the other kind carries one action name.
+    Universal(Box<UniversalCall>),
+}
+
 /// Make one attempt's calls: the permissions the invocation is made under, and then
-/// the one API the target's service is invoked by.
+/// the API the target names.
 async fn perform(
     callback: &::smithy_server_runtime::EmbeddedEmulator,
     pending: &Pending,
@@ -872,11 +891,25 @@ async fn perform(
     let Some(parsed) = ::service_common::arn::parse(arn) else {
         return Attempt::NotAttempted(format!("the target ARN {arn} names no resource"));
     };
-    let Some(action) = invoking_action(parsed.vendor) else {
-        return Attempt::NotAttempted(format!(
-            "this emulator does not invoke a target of {}",
-            parsed.vendor
-        ));
+    // The target is reached in ITS OWN Region — the one its ARN names — falling back
+    // to the schedule's when the ARN carries no Region label, which is every universal
+    // target: such an ARN names a call rather than a resource in a Region.
+    let region = ::service_common::arn::region_of(arn, parsed.vendor).unwrap_or(&pending.region);
+    let called = if universal_target::names_universal_target(&parsed) {
+        match universal_target::universal_call(&parsed, body) {
+            Ok(call) => Called::Universal(Box::new(call)),
+            Err(why) => return Attempt::NotAttempted(why),
+        }
+    } else {
+        match invoking_action(parsed.vendor) {
+            Some(action) => Called::Templated(action),
+            None => {
+                return Attempt::NotAttempted(format!(
+                    "this emulator does not invoke a target of {}",
+                    parsed.vendor
+                ))
+            }
+        }
     };
     // The role is assumed BEFORE anything is invoked: "EventBridge Scheduler will
     // use [this role] for this target when the schedule is invoked", so a role this
@@ -887,13 +920,22 @@ async fn perform(
     {
         return Attempt::Failed(withheld(refusal));
     }
-    if let Some(failure) = withheld_action(callback, pending, action, arn).await {
-        return Attempt::Failed(failure);
+    // The access request the call is subject to: a templated target names the resource
+    // the call acts on ITSELF, while a universal target's REQUEST names it, and a
+    // request naming none leaves the decision to the invoked operation.
+    let access = match &called {
+        Called::Templated(action) => Some(((*action).to_string(), arn.to_string())),
+        Called::Universal(call) => call.access_request(region),
+    };
+    if let Some((action, resource)) = access {
+        if let Some(failure) = withheld_action(callback, pending, &action, &resource).await {
+            return Attempt::Failed(failure);
+        }
     }
-    // The target is reached in ITS OWN Region — the one its ARN names — falling back
-    // to the schedule's when the ARN carries no Region label.
-    let region = ::service_common::arn::region_of(arn, parsed.vendor).unwrap_or(&pending.region);
-    deliver(callback, region, &parsed, &pending.target, body).await
+    match called {
+        Called::Templated(_) => deliver(callback, region, &parsed, &pending.target, body).await,
+        Called::Universal(call) => call.invoke(callback, region).await,
+    }
 }
 
 /// The IAM action a target of this kind's invocation is authorized by, or `None` for

@@ -214,6 +214,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .or_else(|| {
                 crate::state::schedule_window_violation(input.start_date, input.end_date, now)
             })
+            // A universal target names the CALL the occurrence makes rather than a
+            // resource, so the service and operation it names are request validation
+            // too: a schedule whose target names no call is refused rather than
+            // stored.
+            .or_else(|| crate::state::universal_target_violation(&input.target.arn))
         {
             return Err(
                 CreateScheduleErrorModeled::ValidationException(ValidationException { message })

@@ -417,7 +417,12 @@ impl Api {
     /// That is a different token from the ARN namespace the OPTIMIZED family names
     /// the same service by (`states:startExecution` beside
     /// `aws-sdk:sfn:startExecution`), so each family is looked up under its own.
-    fn sdk_token(&self) -> String {
+    ///
+    /// Public for the same reason [`aws_sdk_call`] is: Amazon EventBridge Scheduler's
+    /// universal target names a service by this same token, and holds a schedule's
+    /// target to it rather than restating which of a service's names is which.
+    #[must_use]
+    pub fn sdk_token(&self) -> String {
         self.sdk_id
             .chars()
             .filter(|character| !character.is_whitespace())
@@ -2840,6 +2845,33 @@ pub fn read(resource: &str) -> Result<Call, String> {
     })
 }
 
+/// The AWS SDK call the operation `operation` of the service `service` names, for a
+/// caller that names an API operation the way this service's AWS SDK integration family
+/// does.
+///
+/// `service` is the token the AWS SDKs give the service ([`Api::sdk_token`]) — its SDK
+/// service id, which is not always the endpoint prefix its API answers on (`sfn` for AWS
+/// Step Functions, whose endpoint and signing name are `states`) — and `operation` is
+/// that SDK's own name for the operation, in the lowerCamelCase the family writes
+/// (`startExecution`). The reading is [`read`]'s, over the `Resource` form that family
+/// states, so the wire facts of every service this emulator calls are stated ONCE
+/// ([`APIS`]) however the caller named the operation.
+///
+/// Public because this service is not the only one whose target names an API operation
+/// rather than a resource: Amazon EventBridge Scheduler's UNIVERSAL target
+/// (`arn:aws:scheduler:::aws-sdk:<service>:<operation>`) names the same service and the
+/// same operation, and resolves it here rather than carrying a second copy of those
+/// facts. The `Err` says what was named and what about it is not called, for a caller
+/// that reports work nothing was run for.
+pub fn aws_sdk_call(service: &str, operation: &str) -> Result<Call, String> {
+    // The family's own `Resource` form, which [`read`] is the one reading of; the
+    // partition and the empty Region and account fields are the form's, and no field of
+    // it is read as an address.
+    read(&format!(
+        "arn:aws:{STATES_NAMESPACE}:::{AWS_SDK_SEGMENT}:{service}:{operation}"
+    ))
+}
+
 /// The HTTP Task `arn:aws:states:::http:invoke` names: one HTTP request to the endpoint
 /// the state's own parameters name, made and reported by [`super::http_task`].
 ///
@@ -4652,8 +4684,29 @@ async fn dispatch(
     })
 }
 
+/// Make one integration call and answer the RAW answer the invoked service gave: the
+/// status, the error shape it named and its body.
+///
+/// The seam for a caller that reports what a call came to in ITS OWN vocabulary rather
+/// than as a `Task` state's result: Amazon EventBridge Scheduler's universal target
+/// reports a failed invocation by the error code and the message the answer carries and
+/// decides from the status whether the invocation is retried
+/// ([`Target$RetryPolicy`](https://docs.aws.amazon.com/scheduler/latest/APIReference/API_RetryPolicy.html)),
+/// which the ASL error names [`call_api`] reads an answer into do not carry. The request
+/// is built and signed exactly as [`call_api`] builds and signs it, so both callers make
+/// the same call.
+pub async fn call_answered(
+    callback: &smithy_server_runtime::EmbeddedEmulator,
+    region: &str,
+    call: &Call,
+    request: &Value,
+) -> Result<Answered, String> {
+    let built = wired(call, request)?;
+    dispatch(callback, call.api, region, built).await
+}
+
 /// What one in-process call came back with.
-struct Answered {
+pub struct Answered {
     /// The HTTP status the service answered.
     status: u16,
     /// The error shape it named in [`ERROR_TYPE_HEADER`], for a refusal.
@@ -4665,6 +4718,25 @@ struct Answered {
 }
 
 impl Answered {
+    /// The HTTP status the invoked service answered.
+    #[must_use]
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// The error shape it named in [`ERROR_TYPE_HEADER`]; `None` for an answer that
+    /// named none.
+    #[must_use]
+    pub fn error_type(&self) -> Option<&str> {
+        self.error_type.as_deref()
+    }
+
+    /// Its body, as it answered it.
+    #[must_use]
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
     /// The first value the answer carried `name` under, compared without regard to
     /// case as HTTP field names are.
     fn header(&self, name: &str) -> Option<String> {

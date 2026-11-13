@@ -16,8 +16,10 @@
 //! also INVOKED. Which instants one runs at lives in [`occurrence`], and the clock
 //! that performs them — and the hand-over that reaches each target — in
 //! [`invocation`], which the operations that write a schedule arm. What becomes of
-//! an invocation that did not reach its target — the attempts its retry policy
-//! admits, and the dead-letter route the last of them takes — is [`dead_letter`].
+//! an invocation that did not reach its target — the attempts its
+//! retry policy admits, and the dead-letter route the last of them takes — is
+//! [`dead_letter`]. A target that names an API OPERATION rather than a resource — a
+//! UNIVERSAL target — is [`universal_target`].
 //!
 //! Whether the CALLER may hand this service the execution role its request names at
 //! all — the `iam:PassRole` every operation that carries a `Target.RoleArn` charges
@@ -26,6 +28,7 @@
 mod dead_letter;
 mod occurrence;
 mod schedule_definition;
+mod universal_target;
 
 pub mod invocation;
 pub mod pass_role;
@@ -33,6 +36,7 @@ pub mod pass_role;
 pub use invocation::{drive_invocation_clock, Invocations};
 pub use occurrence::Occurrences;
 pub use schedule_definition::*;
+pub use universal_target::universal_target_violation;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};

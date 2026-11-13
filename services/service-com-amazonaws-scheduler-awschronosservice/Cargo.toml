@@ -60,6 +60,13 @@ aws-sdk-sqs = { version = "1", default-features = false }
 aws-sdk-sns = { version = "1", default-features = false }
 aws-sdk-lambda = { version = "1", default-features = false }
 aws-sdk-sfn = { version = "1", default-features = false }
+# The tree's ONE statement of how an AWS API call is made in process — which service an
+# SDK service id names, its endpoint, signing name and protocol, and how an operation's
+# input is bound to a request — which AWS Step Functions' AWS SDK integration family
+# owns (`state::integration`). A schedule's UNIVERSAL target names a service and an
+# operation the same way, so it resolves and makes the call there rather than restating
+# those facts (`state::universal_target`).
+service-com-amazonaws-sfn-awsstepfunctions = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

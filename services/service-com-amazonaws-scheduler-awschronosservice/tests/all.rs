@@ -39,5 +39,7 @@ mod schedule_lifecycle;
 mod state_roundtrip;
 #[path = "all/tagging_refusal_messages.rs"]
 mod tagging_refusal_messages;
+#[path = "all/universal_target_invocation.rs"]
+mod universal_target_invocation;
 #[path = "all/wire_harness.rs"]
 mod wire_harness;
