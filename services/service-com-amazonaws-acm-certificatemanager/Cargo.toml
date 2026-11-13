@@ -54,6 +54,10 @@ pkcs1 = "0.7"
 # The SEC1 elliptic-curve private key structure, for matching an EC private key with
 # the certificate it was imported with.
 sec1 = "0.7"
+# Generates sandbox CA and leaf certificates when `EMULATOR_HOST_WORKLOADS` or
+# `EMULATOR_SANDBOX_CA_DIR` is enabled so issued ACM certificates carry real TLS key material
+# for HTTPS listeners in the local container sandbox.
+rcgen = "0.13"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
