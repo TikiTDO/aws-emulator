@@ -131,8 +131,8 @@ use super::types::*;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::state::{
-    patch_enum_string, patch_enum_string_refused_with, patch_f64_checked, patch_f64_in,
-    patch_i32_in,
+    patch_enum_string, patch_enum_string_refused_with, patch_f64_checked, patch_f64_refused_with,
+    patch_i32_refused_with,
     patch_optional_string, patch_string_map, Patch, PatchFailure, PatchOpKind, StageEntry,
     MAX_COLLECTION_ENTRIES, MAX_STRING_CHARS,
 };
@@ -298,36 +298,33 @@ fn invalid_cache_ttl() -> String {
     )
 }
 
-/// Apply `patch` to a method setting's `cacheTtlInSeconds`: as
-/// [`crate::state::patch_i32_in`], except that EVERY value the setting cannot take — a
-/// text that is no integer as much as an integer outside [`CACHE_TTL_RANGE`] — is refused
-/// with [`invalid_cache_ttl`], the one sentence API Gateway states that rule in. `remove`
-/// is not reached here: a `remove` of a method setting is applied against the settings the
-/// stage already carries.
+/// Apply `patch` to a method setting's `cacheTtlInSeconds`: EVERY value the setting cannot
+/// take — a text that is no integer as much as an integer outside [`CACHE_TTL_RANGE`] — is
+/// refused with [`invalid_cache_ttl`], the one sentence API Gateway states that rule in.
+/// `remove` is not reached here: a `remove` of a method setting is applied against the
+/// settings the stage already carries.
 fn patch_cache_ttl(current: &mut i32, patch: &Patch) -> Result<(), PatchFailure> {
-    patch.require_single_valued()?;
-    match patch.op {
-        PatchOpKind::Add | PatchOpKind::Replace => {
-            let value = patch.require_value()?;
-            *current = value
-                .trim()
-                .parse()
-                .ok()
-                .filter(|seconds| CACHE_TTL_RANGE.contains(seconds))
-                .ok_or_else(|| PatchFailure::BadRequest(invalid_cache_ttl()))?;
-        }
-        _ => return Err(patch.unsupported_op()),
-    }
-    Ok(())
+    patch_i32_refused_with(
+        current,
+        patch,
+        |seconds| CACHE_TTL_RANGE.contains(&seconds),
+        invalid_cache_ttl,
+    )
 }
 
-/// The range of a method setting's throttle limits: a non-negative number. API Gateway
-/// publishes DEFAULT account-level throttle limits that an account can have raised, so no
-/// maximum is a contract and only the lower bound is a refusal.
-const THROTTLE_BURST_RANGE: ::std::ops::RangeInclusive<i32> = 0..=i32::MAX;
-
-/// The throttle rate's range; see [`THROTTLE_BURST_RANGE`].
-const THROTTLE_RATE_RANGE: ::std::ops::RangeInclusive<f64> = 0.0..=f64::MAX;
+/// The `BadRequestException` message API Gateway refuses a method setting's THROTTLE limit
+/// it cannot meter with.
+///
+/// A method's throttle is one setting of a stage — a steady-state rate and a burst
+/// (`/{resourcePath}/{httpMethod}/throttling/rateLimit` and `…/burstLimit`) — and API
+/// Gateway answers every value either limit cannot take with this one sentence: entirely
+/// fixed text, naming neither the limit, nor the method-setting path the value arrived on,
+/// nor the value itself. The limits a stage's method setting takes are the ones
+/// [`crate::state::accepts_throttle_burst`] and [`crate::state::accepts_throttle_rate`]
+/// state: a count and a rate of requests, so neither can be negative and a rate has to be a
+/// finite number. API Gateway publishes DEFAULT account-level throttle limits that an
+/// account can have raised, so no maximum is a contract and only those rules are refusals.
+const INVALID_THROTTLING_SETTING: &str = "Invalid throttling setting";
 
 /// The context variables an access log format may carry the REQUEST IDENTIFIER as, one of
 /// which every format has to name.
@@ -1151,15 +1148,17 @@ fn apply_method_setting_patch(
             invalid_logging_level,
         ),
         "logging/dataTrace" => patch_stage_bool(&mut settings.data_trace_enabled, &nested),
-        "throttling/burstLimit" => patch_i32_in(
+        "throttling/burstLimit" => patch_i32_refused_with(
             &mut settings.throttling_burst_limit,
             &nested,
-            THROTTLE_BURST_RANGE,
+            crate::state::accepts_throttle_burst,
+            || INVALID_THROTTLING_SETTING.to_string(),
         ),
-        "throttling/rateLimit" => patch_f64_in(
+        "throttling/rateLimit" => patch_f64_refused_with(
             &mut settings.throttling_rate_limit,
             &nested,
-            THROTTLE_RATE_RANGE,
+            crate::state::accepts_throttle_rate,
+            || INVALID_THROTTLING_SETTING.to_string(),
         ),
         "caching/enabled" => patch_stage_bool(&mut settings.caching_enabled, &nested),
         "caching/ttlInSeconds" => patch_cache_ttl(&mut settings.cache_ttl_in_seconds, &nested),

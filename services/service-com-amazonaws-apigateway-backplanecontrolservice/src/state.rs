@@ -3375,17 +3375,21 @@ pub fn invalid_tag() -> String {
 /// up to 128 characters and must not start with aws:. The tag value can be up to 256
 /// characters." — so the one check serves every operation that takes tags, whether the
 /// tags ride on a create (`CreateRestApi`, `CreateStage`, `CreateApiKey`) or on
-/// `TagResource`. A key or a value past its bound earns the one tag-contract sentence
-/// [`invalid_tag`] states, whichever of the two it was. The member's documented "valid
+/// `TagResource`. A key or a value outside the contract — an empty key as much as a key or
+/// a value past its bound — earns the one tag-contract sentence
+/// [`invalid_tag`] states, whichever rule it broke. The member's documented "valid
 /// character set is [a-zA-Z+-=._:/]" is NOT enforced: AWS accepts a key and a value
 /// outside it (the recorded units `apigateway.tag-resource-unicode-key-value-round-trip`
 /// and `apigateway.tag-value-unicode-round-trip` round-trip non-ASCII tags), so refusing
 /// them would be stricter than the service.
 pub fn bound_tag(key: &str, value: &str) -> Result<(), String> {
-    if key.is_empty() {
-        return Err("a tag key may not be empty".to_string());
-    }
-    if key.chars().count() > MAX_TAG_KEY_CHARS || value.chars().count() > MAX_TAG_VALUE_CHARS {
+    // A key is what names a tag, so a tag has to carry one: an EMPTY key names nothing and
+    // is outside the contract exactly as a key past its bound is, which is why it earns the
+    // same sentence rather than one of this emulator's own.
+    if key.is_empty()
+        || key.chars().count() > MAX_TAG_KEY_CHARS
+        || value.chars().count() > MAX_TAG_VALUE_CHARS
+    {
         return Err(invalid_tag());
     }
     // The reserved namespace is AWS's own, and a prefix is a prefix whatever its case.
@@ -3425,13 +3429,27 @@ pub fn reserved_tag_key_prefix() -> String {
 /// later operation that takes the shape — so one value is refused the same way wherever
 /// it appears.
 pub fn bound_throttle_settings(throttle: &ThrottleSettings) -> Result<(), String> {
-    if throttle.burst_limit < 0
-        || !throttle.rate_limit.is_finite()
-        || throttle.rate_limit < 0.0
+    if !accepts_throttle_burst(throttle.burst_limit) || !accepts_throttle_rate(throttle.rate_limit)
     {
         return Err(INVALID_THROTTLE_SETTINGS.to_string());
     }
     Ok(())
+}
+
+/// Whether `burst_limit` is a request burst API Gateway can meter: "The API target request
+/// burst rate limit" (`ThrottleSettings$burstLimit`) is a COUNT of requests, so it cannot be
+/// negative. The rule lives here once, so the member is judged the same whether a whole
+/// structure rides on a request or a patch names the one member
+/// ([`bound_throttle_settings`]).
+pub fn accepts_throttle_burst(burst_limit: i32) -> bool {
+    burst_limit >= 0
+}
+
+/// Whether `rate_limit` is a request rate API Gateway can meter: "The API target request
+/// rate limit" (`ThrottleSettings$rateLimit`) is requests per second, so it has to be a
+/// finite, non-negative number. See [`accepts_throttle_burst`].
+pub fn accepts_throttle_rate(rate_limit: f64) -> bool {
+    rate_limit.is_finite() && rate_limit >= 0.0
 }
 
 /// The refusal for a usage plan's throttle settings, whichever of the two limits is not a

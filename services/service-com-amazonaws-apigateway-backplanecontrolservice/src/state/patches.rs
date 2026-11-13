@@ -421,57 +421,6 @@ impl Patch {
         })
     }
 
-    /// The op's `value` read as an integer inside `range`, for a member documented with
-    /// bounds.
-    pub fn require_i32_in(
-        &self,
-        range: ::std::ops::RangeInclusive<i32>,
-    ) -> Result<i32, PatchFailure> {
-        let parsed = self.require_i32()?;
-        if !range.contains(&parsed) {
-            return Err(PatchFailure::BadRequest(format!(
-                "{} must be between {} and {}, inclusive: {parsed}",
-                self.path,
-                range.start(),
-                range.end()
-            )));
-        }
-        Ok(parsed)
-    }
-
-    /// The op's `value` read as a double inside `range`, for a member documented with
-    /// bounds. A `range` ending at [`f64::MAX`] is a member bounded only from BELOW —
-    /// the service publishes no maximum for it — and the refusal says so rather than
-    /// quoting that number back at the caller.
-    pub fn require_f64_in(
-        &self,
-        range: ::std::ops::RangeInclusive<f64>,
-    ) -> Result<f64, PatchFailure> {
-        let value = self.require_value()?;
-        let parsed: f64 = value.trim().parse().map_err(|_| {
-            PatchFailure::BadRequest(format!(
-                "{} takes a number value, got {value:?}",
-                self.path
-            ))
-        })?;
-        if !parsed.is_finite() || !range.contains(&parsed) {
-            let bound = if *range.end() == f64::MAX {
-                format!("must be a number of at least {}", range.start())
-            } else {
-                format!(
-                    "must be between {} and {}, inclusive",
-                    range.start(),
-                    range.end()
-                )
-            };
-            return Err(PatchFailure::BadRequest(format!(
-                "{} {bound}: {value}",
-                self.path
-            )));
-        }
-        Ok(parsed)
-    }
-
     /// This patch with a refusal of its `path` worded the way `invalid_path` words one,
     /// for a handler that dispatches the pointer into a part of the resource whose
     /// refusals the service words differently — a nested structure that enumerates its
@@ -803,32 +752,60 @@ pub fn patch_bool(current: &mut bool, patch: &Patch) -> Result<(), PatchFailure>
     Ok(())
 }
 
-/// Apply `patch` to an integer member declared with a default, bounded by `range`.
-/// `remove` is refused for the reason [`patch_bool`] gives: a member the model declares
-/// with a default always has a value.
-pub fn patch_i32_in(
+/// Apply `patch` to an integer member EVERY value of which the service refuses with the
+/// member's OWN sentence, `refusal`.
+///
+/// Where a setting publishes a sentence of its own, that sentence is the answer for every
+/// value the setting cannot take: a text that is no integer is as far outside the member as
+/// an integer the member will not have, so one `refusal` words both and the caller is told
+/// the rule rather than which half of the read failed — and neither the pointer the value
+/// arrived on nor the value itself appears in it. `accept` is the member's own rule, given
+/// once by the member that owns it; `remove` is refused for the reason [`patch_bool`] gives.
+pub fn patch_i32_refused_with(
     current: &mut i32,
     patch: &Patch,
-    range: ::std::ops::RangeInclusive<i32>,
+    accept: impl Fn(i32) -> bool,
+    refusal: impl FnOnce() -> String,
 ) -> Result<(), PatchFailure> {
     patch.require_single_valued()?;
     match patch.op {
-        PatchOpKind::Add | PatchOpKind::Replace => *current = patch.require_i32_in(range)?,
+        PatchOpKind::Add | PatchOpKind::Replace => {
+            *current = patch
+                .require_value()?
+                .trim()
+                .parse()
+                .ok()
+                .filter(|parsed| accept(*parsed))
+                .ok_or_else(|| PatchFailure::BadRequest(refusal()))?;
+        }
         _ => return Err(patch.unsupported_op()),
     }
     Ok(())
 }
 
-/// Apply `patch` to a double member declared with a default, bounded by `range`; see
-/// [`patch_i32_in`] for why `remove` is refused.
-pub fn patch_f64_in(
+/// Apply `patch` to a double member EVERY value of which earns the member's own sentence;
+/// see [`patch_i32_refused_with`].
+///
+/// A double member of this service's records carries a finite number — a rate, a share of
+/// traffic — so a text spelling an infinity or a not-a-number is outside the member as much
+/// as a text that is no number at all, and all three earn `refusal`.
+pub fn patch_f64_refused_with(
     current: &mut f64,
     patch: &Patch,
-    range: ::std::ops::RangeInclusive<f64>,
+    accept: impl Fn(f64) -> bool,
+    refusal: impl FnOnce() -> String,
 ) -> Result<(), PatchFailure> {
     patch.require_single_valued()?;
     match patch.op {
-        PatchOpKind::Add | PatchOpKind::Replace => *current = patch.require_f64_in(range)?,
+        PatchOpKind::Add | PatchOpKind::Replace => {
+            *current = patch
+                .require_value()?
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|parsed| parsed.is_finite() && accept(*parsed))
+                .ok_or_else(|| PatchFailure::BadRequest(refusal()))?;
+        }
         _ => return Err(patch.unsupported_op()),
     }
     Ok(())

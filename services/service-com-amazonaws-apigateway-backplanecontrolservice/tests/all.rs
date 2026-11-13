@@ -528,6 +528,11 @@ mod stage_internal_error_class;
 // other answer omits, beside the status a call that earned no decision reports.
 #[path = "all/test_invoke_authorizer_cognito_claims.rs"]
 mod test_invoke_authorizer_cognito_claims;
+// Appended for the reason the note above gives: the sentences a THROTTLE limit and a TAG
+// outside its contract are refused with — one fixed sentence per setting class, carrying
+// neither the patch path nor the rejected value.
+#[path = "all/throttle_and_tag_contract_sentences.rs"]
+mod throttle_and_tag_contract_sentences;
 // Appended for the reason the note above gives: the GRANT of a remaining quota — what
 // `UpdateUsage` writes into the metering period of one `(usage plan, API key)` pair, and what
 // the data plane then admits against it.

@@ -87,7 +87,8 @@ use super::types::*;
 use std::collections::BTreeMap;
 
 use crate::state::{
-    patch_enum_string_refused_with, patch_f64_checked, patch_i32_checked, patch_optional_string,
+    patch_enum_string_refused_with, patch_f64_refused_with, patch_i32_checked,
+    patch_i32_refused_with, patch_optional_string,
     patch_required_string, InvalidPathRefusal, Patch, PatchFailure, PatchOpKind, RestApiEntry,
     SupportedPatchPaths, UsagePlanEntry, MAX_COLLECTION_ENTRIES, MAX_STRING_CHARS,
 };
@@ -203,14 +204,29 @@ fn require_stage(
 /// Apply one patch to a `ThrottleSettings`, whether it is the plan's own or the one an
 /// `apiStages` entry holds for a single method.
 ///
-/// Both limits are checked by the SAME checker the create runs over this shape, applied to
-/// the patched settings, so a limit this service refuses on one path cannot be stored
-/// through the other. Neither member can be removed: the model declares both with a
-/// default, so each always has a value.
+/// Both limits are judged by the SAME rules the create runs over this shape
+/// ([`crate::state::accepts_throttle_burst`] / [`crate::state::accepts_throttle_rate`]), so
+/// a limit this service refuses on one path cannot be stored through the other, and EVERY
+/// value a limit cannot take — a text that is no number as much as a number outside the
+/// rule — earns the one sentence the shape publishes
+/// ([`crate::state::INVALID_THROTTLE_SETTINGS`]) rather than a diagnostic naming the patch
+/// path. Neither member can be removed: the model declares both with a default, so each
+/// always has a value.
 fn patch_throttle_member(limits: &mut ThrottleSettings, nested: &Patch) -> Result<(), PatchFailure> {
+    let refusal = || crate::state::INVALID_THROTTLE_SETTINGS.to_string();
     match nested.member() {
-        "burstLimit" => patch_i32_checked(&mut limits.burst_limit, nested, Ok)?,
-        "rateLimit" => patch_f64_checked(&mut limits.rate_limit, nested, Ok)?,
+        "burstLimit" => patch_i32_refused_with(
+            &mut limits.burst_limit,
+            nested,
+            crate::state::accepts_throttle_burst,
+            refusal,
+        )?,
+        "rateLimit" => patch_f64_refused_with(
+            &mut limits.rate_limit,
+            nested,
+            crate::state::accepts_throttle_rate,
+            refusal,
+        )?,
         _ => return Err(nested.unsupported_path()),
     }
     crate::state::bound_throttle_settings(limits).map_err(PatchFailure::BadRequest)
