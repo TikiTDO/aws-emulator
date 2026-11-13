@@ -661,6 +661,8 @@ pub(super) fn declared_name_property(resource_type: &str) -> Option<&'static str
         | crate::state::provisioning::logs_resources::LOGS_SUBSCRIPTION_FILTER => {
             Some("FilterName")
         }
+        "AWS::SES::EmailIdentity" => Some("EmailIdentity"),
+        "AWS::WAFv2::LoggingConfiguration" => Some("ResourceArn"),
         _ => None,
     }
 }
