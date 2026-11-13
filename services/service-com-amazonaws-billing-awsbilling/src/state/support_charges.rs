@@ -2,13 +2,15 @@
 
 //! The Support-eligible spend each linked account of this emulator's
 //! consolidated billing family accrued in a billing month — the records
-//! `ListBusinessSupportAccountCharges` prices.
+//! `ListBusinessSupportAccountCharges` and `GetEnterpriseSupportChargeSummary`
+//! price.
 //!
 //! A Support charge is NOT stored here: it is COMPUTED from the spend below by
 //! the tiered price schedule of the account's Support plan (see
-//! `crate::ops::list_business_support_account_charges`), so the per-account
-//! breakdown, the month's totals and the account count are readings of one
-//! store and cannot disagree.
+//! `crate::ops::list_business_support_account_charges`) or, for an account
+//! inside the Enterprise Support profile, by the profile's pricing plan (see
+//! the `enterprise_support` module), so the per-account breakdown, the month's
+//! totals and the account count are readings of one store and cannot disagree.
 //!
 //! Empty on a fresh emulator: spend accrues from a billing pipeline, which this
 //! emulator does not run, so only a future operation that bills usage — or this
@@ -114,6 +116,25 @@ pub struct SupportEligibleSpend {
     /// The Support-eligible spend, broken down by contributing service. Their
     /// sum is the account's usage basis.
     pub by_service: Vec<SupportServiceSpend>,
+    /// The Support-eligible Reserved Instance spend on the account's bill, in
+    /// minor units of [`SupportEligibleSpend::currency_code`].
+    ///
+    /// Reserved Instance fees are Support-eligible spend for an Enterprise
+    /// Support profile (the `GetEnterpriseSupportChargeSummary` output reports
+    /// them beside usage and Savings Plan spend), and not for a Business
+    /// Support charge, whose `totalSupportEligibleSpend` the model documents as
+    /// spend "from usage of Amazon Web Services". So the bill holds them and
+    /// each reader takes the part its own charge is computed from.
+    pub reserved_instance_spend_minor: i64,
+    /// The Support-eligible Savings Plan spend on the account's bill, in minor
+    /// units of [`SupportEligibleSpend::currency_code`] — Support-eligible for
+    /// the same reason [`SupportEligibleSpend::reserved_instance_spend_minor`]
+    /// is.
+    pub savings_plan_spend_minor: i64,
+    /// `true` when the account's bill for the month is not yet finalized, so
+    /// the charges computed from this record are estimates — the same reading
+    /// of a bill [`CreditAllocation::is_estimated_bill`] carries.
+    pub is_estimated_bill: bool,
     /// The discount that reduces this account's Support charge, when one
     /// applies; `None` is an account with no discount, which reports no
     /// `supportDiscount` member.
@@ -160,6 +181,20 @@ impl SupportEligibleSpend {
             .fold(0_i64, |sum, spend| {
                 sum.saturating_add(spend.charge_amount_minor)
             })
+    }
+
+    /// The account's whole Support-eligible spend for the month: its usage
+    /// basis, its Reserved Instance spend and its Savings Plan spend.
+    ///
+    /// The `GetEnterpriseSupportChargeSummary` output documents its
+    /// `totalSupportEligibleSpend` as including "eligible spend from usage of
+    /// Amazon Web Services, Reserved Instances, and Savings Plans", which is
+    /// exactly these three parts. Saturating, for the same reason
+    /// [`Self::usage_basis_minor`] is.
+    pub fn total_support_eligible_spend_minor(&self) -> i64 {
+        self.usage_basis_minor()
+            .saturating_add(self.reserved_instance_spend_minor)
+            .saturating_add(self.savings_plan_spend_minor)
     }
 }
 

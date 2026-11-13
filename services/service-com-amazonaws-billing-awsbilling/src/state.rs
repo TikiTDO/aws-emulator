@@ -27,7 +27,12 @@
 //! [`ComAmazonawsBillingAwsbillingState::support_eligible_spend`] holds the
 //! Support-eligible spend of each linked account and billing month, from which
 //! `ListBusinessSupportAccountCharges` PRICES the Support charges it reports —
-//! see the `support_charges` module below.
+//! see the `support_charges` module below. The same spend is what
+//! `GetEnterpriseSupportChargeSummary` prices for the accounts of the
+//! Enterprise Support profile, by the pricing plan of
+//! [`ComAmazonawsBillingAwsbillingState::enterprise_support_contract`] — see
+//! the `enterprise_support` module. The money and billing-month arithmetic both
+//! reports share lives in the `money` and `billing_month` modules.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -43,6 +48,22 @@ use crate::ops::types::{
 mod support_charges;
 
 pub use support_charges::*;
+
+/// The `YYYY-MM` billing-month arithmetic the monthly charge reports share.
+mod billing_month;
+
+pub use billing_month::*;
+
+/// The Enterprise Support contract `GetEnterpriseSupportChargeSummary` prices
+/// the profile's spend by.
+mod enterprise_support;
+
+pub use enterprise_support::*;
+
+/// The money and rate arithmetic the charge reports share.
+mod money;
+
+pub use money::*;
 
 /// `CUSTOM`, the `BillingViewType` a view created through `CreateBillingView`
 /// carries (one of `BILLING_VIEW_TYPE_VALUES` in `ops::types`).
@@ -633,6 +654,12 @@ pub struct ComAmazonawsBillingAwsbillingState {
     /// emulator does not perform. The Support CHARGE is not held here — it is
     /// computed from this spend by the subscribed plan's price schedule.
     pub support_eligible_spend: BTreeMap<String, SupportEligibleSpend>,
+    /// The Enterprise Support contract the consolidated billing family's
+    /// Support profile is billed under: the pricing plans
+    /// `GetEnterpriseSupportChargeSummary` prices the profile's
+    /// Support-eligible spend by, and the method that distributes the charge
+    /// across the accounts it covers.
+    pub enterprise_support_contract: EnterpriseSupportContract,
     /// The `BillingFeature` values whose preferences this account's caller may
     /// reach — read through `GetBillingPreferences` and write through
     /// `UpdateBillingPreferences`.
@@ -699,6 +726,11 @@ impl Default for ComAmazonawsBillingAwsbillingState {
             // spend: AWS documents no charge every account carries by
             // default, the way it documents the PRIMARY billing view.
             support_eligible_spend: BTreeMap::new(),
+            // The published Enterprise Support price schedule, in effect for
+            // every billing month until a negotiated plan is stored beside it:
+            // a profile is billed under the standard plan unless its contract
+            // names another.
+            enterprise_support_contract: EnterpriseSupportContract::default(),
             // Every feature except the ones behind the Billing-console access
             // activation this account does not have.
             feature_access: BILLING_FEATURE_VALUES

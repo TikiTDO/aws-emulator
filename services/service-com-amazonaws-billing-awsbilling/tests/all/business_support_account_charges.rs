@@ -181,6 +181,12 @@ impl Seed {
                     discount_source: source.map(ToString::to_string),
                 }
             }),
+            // A Business Support charge is priced from usage spend alone, so
+            // these rows carry none of the Reserved Instance or Savings Plan
+            // spend the bill can also hold, and their bills are finalized.
+            reserved_instance_spend_minor: 0,
+            savings_plan_spend_minor: 0,
+            is_estimated_bill: false,
         }
     }
 }
@@ -913,6 +919,9 @@ async fn estimates_the_current_month_and_refuses_one_that_has_not_begun() {
                     charge_amount_minor: units(20_000),
                 }],
                 discount: None,
+                reserved_instance_spend_minor: 0,
+                savings_plan_spend_minor: 0,
+                is_estimated_bill: false,
             }),
             "case \"current month\": the seeded spend must fit in the store"
         );

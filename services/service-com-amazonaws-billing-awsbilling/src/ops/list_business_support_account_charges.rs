@@ -169,13 +169,13 @@ const DEFAULT_MAX_RESULTS: usize = 100;
 const MIN_MAX_RESULTS: usize = 1;
 const MAX_MAX_RESULTS: usize = 100;
 
-/// One minor unit of currency (a cent), the scale every stored and computed
-/// amount here is held on — see [`crate::state::MINOR_UNITS_PER_UNIT`].
-const MINOR_UNITS_PER_UNIT: i64 = crate::state::MINOR_UNITS_PER_UNIT;
-
-/// Basis points in one whole unit: a rate is held in hundredths of one percent,
-/// so 10_000 of them is the whole amount.
-const BASIS_POINTS_PER_UNIT: i64 = 10_000;
+// The money, rate and billing-month arithmetic this handler shares with the
+// service's other charge report — amounts in minor units
+// (`crate::state::MINOR_UNITS_PER_UNIT`) and rates in basis points.
+use crate::state::{
+    amount, apply_rate, month_index, month_period, parse_month, rate_decimal,
+    MINOR_UNITS_PER_UNIT,
+};
 
 /// One tier of a Support plan's monthly price: the top of the spend slice it
 /// prices and the rate charged inside that slice.
@@ -245,45 +245,6 @@ fn price_schedule(support_plan_name: &str) -> PriceSchedule {
     }
 }
 
-/// A basis-point rate applied to an amount of minor units, rounded half up —
-/// integer arithmetic throughout, so a charge is never a binary float's
-/// approximation of one. Computed at a width the product cannot overflow.
-fn apply_rate(amount_minor: i64, rate_basis_points: i64) -> i64 {
-    let scaled = i128::from(amount_minor) * i128::from(rate_basis_points)
-        + i128::from(BASIS_POINTS_PER_UNIT / 2);
-    i64::try_from(scaled.div_euclid(i128::from(BASIS_POINTS_PER_UNIT))).unwrap_or(i64::MAX)
-}
-
-/// An amount of minor units as the decimal string the modeled money members
-/// carry (`totalCharge`, `usageSlice`, `discountAmount`, ...), with the two
-/// fraction digits [`MINOR_UNITS_PER_UNIT`] gives it.
-fn amount(minor: i64) -> String {
-    let sign = if minor < 0 { "-" } else { "" };
-    let magnitude = minor.unsigned_abs();
-    let scale = MINOR_UNITS_PER_UNIT.unsigned_abs();
-    format!(
-        "{sign}{}.{:02}",
-        magnitude / scale,
-        magnitude % scale
-    )
-}
-
-/// A basis-point rate as the decimal fraction the modeled rate members carry.
-///
-/// From the `discountPercentage` doc: "expressed as a decimal (for example,
-/// 0.12 for a 12% discount)" — the form `tierRate`, the rate applied to the
-/// spend inside a tier, carries too. Two fraction digits for a rate that is a
-/// whole percent, four for a finer one, so no rate is reported rounded.
-fn rate_decimal(rate_basis_points: i64) -> String {
-    let whole = rate_basis_points / BASIS_POINTS_PER_UNIT;
-    let fraction = (rate_basis_points % BASIS_POINTS_PER_UNIT).unsigned_abs();
-    if fraction.is_multiple_of(100) {
-        format!("{whole}.{:02}", fraction / 100)
-    } else {
-        format!("{whole}.{fraction:04}")
-    }
-}
-
 /// A basis-point rate as the percentage a tier description reads with: `10`, or
 /// `10.50` for a rate finer than a whole percent.
 fn rate_percent(rate_basis_points: i64) -> String {
@@ -314,50 +275,6 @@ fn tier_description(tier: &PriceTier, lower_minor: i64, currency_code: &str) -> 
             amount(lower_minor),
         ),
     }
-}
-
-/// The year and month of a modeled `BusinessSupportBillingMonth` (`YYYY-MM`).
-fn parse_month(billing_month: &str) -> Option<(i32, i32)> {
-    let (year, month) = billing_month.split_once('-')?;
-    Some((year.parse().ok()?, month.parse().ok()?))
-}
-
-/// A month as the count of whole calendar months before it, so two months
-/// compare and subtract.
-fn month_index((year, month): (i32, i32)) -> i32 {
-    year * 12 + month - 1
-}
-
-/// The first instant of a month, read off the UTC civil calendar.
-///
-/// `None` for a year the modeled `Timestamp` cannot render at four digits,
-/// which only the month after the last `YYYY-MM` month is.
-fn first_instant_of(year: i32, month: i32) -> Option<::aws_smithy_types::DateTime> {
-    ::aws_smithy_types::DateTime::from_str(
-        &format!("{year:04}-{month:02}-01T00:00:00Z"),
-        ::aws_smithy_types::date_time::Format::DateTime,
-    )
-    .ok()
-}
-
-/// The half-open UTC period a billing month's charges accrue in: the first
-/// instant of the month, and the first instant of the month after it.
-///
-/// AWS bills on UTC calendar months, so both bounds come from the month's own
-/// position on the civil calendar — never from a fixed month length.
-fn month_period(
-    billing_month: &str,
-) -> Option<(::aws_smithy_types::DateTime, ::aws_smithy_types::DateTime)> {
-    let (year, month) = parse_month(billing_month)?;
-    let (next_year, next_month) = if month == 12 {
-        (year + 1, 1)
-    } else {
-        (year, month + 1)
-    };
-    Some((
-        first_instant_of(year, month)?,
-        first_instant_of(next_year, next_month)?,
-    ))
 }
 
 /// Refuse a request member as invalid, in the modeled `ValidationException`

@@ -1,15 +1,31 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetEnterpriseSupportChargeSummary
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetEnterpriseSupportChargeSummary`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetEnterpriseSupportChargeSummary::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: this operation PRICES the Support-eligible spend persisted in
+//! [`crate::state::ComAmazonawsBillingAwsbillingState::support_eligible_spend`]
+//! for the accounts of the Enterprise Support profile, by the pricing plan of
+//! [`crate::state::ComAmazonawsBillingAwsbillingState::enterprise_support_contract`]
+//! that is in effect for the requested billing month.
+//!
+//! It is a REPORTING operation (`@readonly`): it reads the store and writes
+//! nothing, so a caller cannot change another caller's answer by reading. For
+//! the requested month it sums the Support-eligible usage, Reserved Instance
+//! and Savings Plan spend of every account of the caller's consolidated
+//! billing family that was subscribed to Enterprise Support, charges that total
+//! by the effective pricing plan — the greater of the plan's monthly minimum
+//! and what its tiers price the total at, less the plan discount — reports the
+//! percentage the charge works out to, and allocates the caller's own share of
+//! it by the contract's allocation method.
+//!
+//! NOTE: nothing in this emulator writes that store yet — spend accrues from a
+//! billing run, and the emulator performs none. So on a running emulator this
+//! reports a month with no Support charge until an operation that bills usage
+//! exists; the suite at `tests/all/enterprise_support_charge_summary.rs`
+//! persists spend through
+//! `ComAmazonawsBillingAwsbillingState::record_support_eligible_spend` to
+//! exercise the pricing, allocation, profile-membership and refusal rules.
+//! Nothing here synthesises a record.
 //!
 //! ## Shape of an operation
 //!
@@ -103,6 +119,14 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+// The money and billing-month arithmetic this handler shares with the service's
+// other charge report — amounts in minor units
+// (`crate::state::MINOR_UNITS_PER_UNIT`) and rates in basis points.
+use crate::state::{
+    amount, effective_rate_basis_points, month_index, month_period, parse_month, rate_decimal,
+    timestamp, EnterpriseSupportCharge, EnterpriseSupportPricingPlan,
+};
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -158,6 +182,72 @@ impl<Eng> GetEnterpriseSupportChargeSummary<Eng> {
     }
 }
 
+/// Refuse a request member as invalid, in the modeled `ValidationException`
+/// shape (HTTP 400) this operation declares.
+///
+/// `constraint` continues the sentence the member name starts, so the refusal
+/// names the member and the constraint the request broke without echoing the
+/// offending value back — the form this service's other reads of a billing
+/// month use.
+fn invalid_field(member: &str, constraint: &str) -> GetEnterpriseSupportChargeSummaryError {
+    GetEnterpriseSupportChargeSummaryErrorModeled::ValidationException(ValidationException {
+        message: format!("InvalidArgument: {member} (DetailedCode={member} {constraint})"),
+        reason: crate::state::VALIDATION_REASON_FIELD.to_string(),
+        field_list: Some(vec![ValidationExceptionField {
+            name: member.to_string(),
+            message: format!("Member {constraint}"),
+        }]),
+    })
+    .into()
+}
+
+/// Report a failure of this emulator itself, in the modeled
+/// `InternalServerException` shape (HTTP 500) this operation declares.
+fn unavailable(what: &str) -> GetEnterpriseSupportChargeSummaryError {
+    GetEnterpriseSupportChargeSummaryErrorModeled::InternalServerException(
+        InternalServerException {
+            message: format!("{what} is unavailable"),
+        },
+    )
+    .into()
+}
+
+/// The stored pricing plan as the modeled `PricingPlan` reports it.
+///
+/// Every amount comes from the plan's own stored amount and every rate from its
+/// own stored rate, so the plan a response reports is the one the charge beside
+/// it was computed by. The plan models no incremental `increment`, so the two
+/// members that describe one are absent rather than invented.
+fn pricing_plan(plan: &EnterpriseSupportPricingPlan) -> PricingPlan {
+    PricingPlan {
+        pricing_plan_id: Some(plan.pricing_plan_id.clone()),
+        name: Some(plan.name.clone()),
+        description: plan.description.clone(),
+        start_date: Some(timestamp(plan.start_date)),
+        end_date: plan.end_date.map(timestamp),
+        plan_discount_percent: Some(rate_decimal(plan.plan_discount_basis_points)),
+        discount_applies_to_minimum_charge: Some(plan.discount_applies_to_minimum_charge),
+        minimum_charge: Some(amount(plan.minimum_charge_minor)),
+        tiered: Some(plan.tiered.to_string()),
+        tiers: plan
+            .tiers
+            .iter()
+            .map(|tier| PricingPlanTier {
+                tier_minimum: amount(tier.tier_minimum_minor),
+                tier_maximum: tier.tier_maximum_minor.map(amount),
+                base_charge: amount(tier.base_charge_minor),
+                additional_percentage_of_aggregate_charges: rate_decimal(
+                    tier.additional_rate_basis_points,
+                ),
+                aggregate_charges_adjustment: amount(tier.aggregate_charges_adjustment_minor),
+                incremental: tier.incremental,
+                increment: None,
+                increment_charge: None,
+            })
+            .collect(),
+    }
+}
+
 impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_runtime::Operation
     for GetEnterpriseSupportChargeSummary<Eng>
 {
@@ -175,18 +265,162 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetEnterpriseSupportChargeSummary` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetEnterpriseSupportChargeSummaryErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetEnterpriseSupportChargeSummary"))
+        // The modeled `billingMonth` pattern is refused by the boundary
+        // validator before this runs; what is checked here is which months the
+        // operation documents an answer for, and whether the caller is the
+        // payer account whose Support profile that answer is about.
+        let state = crate::state::service_state(&*self.engine)
+            .ok_or_else(|| unavailable("the Support charge store"))?;
+        // A reporting operation: the guard is only read through, so two callers
+        // reading the same month see the same answer.
+        let state = state.lock();
+
+        // `payerAccountId` is "the payer account ID that is authorized to view
+        // Enterprise Support data for all accounts in its Support profile": the
+        // profile's data belongs to the account that pays for the family, so a
+        // caller that pays for nobody is refused rather than answered with
+        // another profile's charges.
+        let payer_account_id = state.billing_family_management_account_id.clone();
+        let caller_account_id = crate::state::caller_account_id();
+        if payer_account_id != caller_account_id {
+            return Err(
+                GetEnterpriseSupportChargeSummaryErrorModeled::AccessDeniedException(
+                    AccessDeniedException {
+                        message: format!(
+                            "User: {} is not authorized to perform: {}:{} because only the \
+                             payer account of the Enterprise Support profile may view its \
+                             Enterprise Support data",
+                            crate::state::caller_identity_arn(&*self.engine, ctx),
+                            crate::state::BILLING_SERVICE_CODE,
+                            Self::NAME,
+                        ),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        let requested = parse_month(&input.billing_month)
+            .ok_or_else(|| invalid_field("billingMonth", "must name a calendar month"))?;
+        let current = crate::state::billing_period(::std::time::SystemTime::now())
+            .ok_or_else(|| unavailable("the current billing month"))?;
+        // The `EnterpriseSupportBillingMonth` doc: "This must be a month in the
+        // past." The current month's billing period has not closed and a later
+        // one has not begun, so neither has a Support charge to summarise and
+        // both are refused rather than answered with an empty month.
+        if month_index(requested) >= month_index(current) {
+            return Err(invalid_field("billingMonth", "must be a month in the past"));
+        }
+        let (billing_period_start_date, billing_period_end_date) =
+            month_period(&input.billing_month)
+                .ok_or_else(|| unavailable("the requested billing period"))?;
+
+        // The profile's spend for the month: the Support-eligible usage,
+        // Reserved Instance and Savings Plan spend of every account of the
+        // caller's consolidated billing family that was subscribed to
+        // Enterprise Support, which the output documents as the three parts of
+        // `totalSupportEligibleSpend`. The payer's own spend is accumulated
+        // beside them, because it is what its share of the total charge is
+        // allocated from.
+        let mut usage_spend_minor = 0_i64;
+        let mut reserved_instance_spend_minor = 0_i64;
+        let mut savings_plan_spend_minor = 0_i64;
+        let mut payer_spend_minor = 0_i64;
+        let mut subscribed_account_months = 0_usize;
+        let mut is_estimated = false;
+        for spend in
+            state.enterprise_support_spend_for_month(&payer_account_id, &input.billing_month)
+        {
+            usage_spend_minor = usage_spend_minor.saturating_add(spend.usage_basis_minor());
+            reserved_instance_spend_minor =
+                reserved_instance_spend_minor.saturating_add(spend.reserved_instance_spend_minor);
+            savings_plan_spend_minor =
+                savings_plan_spend_minor.saturating_add(spend.savings_plan_spend_minor);
+            if spend.account_id == payer_account_id {
+                payer_spend_minor =
+                    payer_spend_minor.saturating_add(spend.total_support_eligible_spend_minor());
+            }
+            // "When false, the charge amount is finalized": the month's charge
+            // is an estimate while any bill it is computed from still is.
+            is_estimated |= spend.is_estimated_bill;
+            subscribed_account_months += 1;
+        }
+        let total_spend_minor = usage_spend_minor
+            .saturating_add(reserved_instance_spend_minor)
+            .saturating_add(savings_plan_spend_minor);
+
+        // `supportEffectivePricingPlan` is "the effective pricing plan used for
+        // the support charge calculation" — the one the contract was billed
+        // under in the requested billing period. A month no stored plan covers
+        // was not billed under this contract, so there is no charge to report
+        // for it.
+        let plan = state
+            .enterprise_support_contract
+            .effective_pricing_plan(crate::state::date_time_secs(&billing_period_start_date))
+            .ok_or_else(|| {
+                GetEnterpriseSupportChargeSummaryError::from(
+                    GetEnterpriseSupportChargeSummaryErrorModeled::ResourceNotFoundException(
+                        ResourceNotFoundException {
+                            message: format!(
+                                "No Enterprise Support pricing plan is in effect for billing \
+                                 month {}",
+                                input.billing_month
+                            ),
+                            resource_id: input.billing_month.clone(),
+                            resource_type: crate::state::ENTERPRISE_SUPPORT_CHARGE_RESOURCE_TYPE
+                                .to_string(),
+                        },
+                    ),
+                )
+            })?;
+
+        // A month in which no account of the profile was subscribed to
+        // Enterprise Support carries no Support charge: the plan's monthly
+        // minimum is the least a SUBSCRIBED profile is charged, not a charge
+        // for a profile that was not billed under the plan at all.
+        let charge = if subscribed_account_months == 0 {
+            EnterpriseSupportCharge::default()
+        } else {
+            plan.charge(total_spend_minor)
+        };
+        // `supportCharge` is "the Support charge amount for the account" — the
+        // caller's own share of the profile's total, distributed by the
+        // contract's allocation method.
+        let support_charge_minor = state.allocated_support_charge_minor(
+            caller_account_id,
+            charge.total_minor,
+            payer_spend_minor,
+            total_spend_minor,
+        );
+
+        Ok(GetEnterpriseSupportChargeSummaryOutput {
+            payer_account_id,
+            billing_month: input.billing_month.clone(),
+            billing_period_start_date,
+            billing_period_end_date,
+            is_estimated,
+            // "The date the bill was generated": a billing month's bill is
+            // generated when its billing period closes, so the bill carries
+            // that instant — the same one for every reader of the month.
+            bill_date: billing_period_end_date,
+            support_charge: amount(support_charge_minor),
+            total_support_charge: amount(charge.total_minor),
+            // A discount is reported as the reduction it makes to the charge,
+            // the way this service's other discount member is ("This value is
+            // negative, representing a reduction in the charge").
+            support_discount: amount(-charge.discount_minor),
+            total_support_eligible_spend: amount(total_spend_minor),
+            total_support_eligible_usage_spend: amount(usage_spend_minor),
+            total_support_eligible_reserved_instance_spend: amount(reserved_instance_spend_minor),
+            total_support_eligible_savings_plan_spend: amount(savings_plan_spend_minor),
+            // "The percentage applied to the total Support-eligible spend to
+            // calculate the total Support charge": the rate the reported charge
+            // works out to on the reported spend, so the three cannot disagree.
+            support_charge_percentage: rate_decimal(effective_rate_basis_points(
+                charge.total_minor,
+                total_spend_minor,
+            )),
+            support_effective_pricing_plan: pricing_plan(plan),
+        })
     }
 }

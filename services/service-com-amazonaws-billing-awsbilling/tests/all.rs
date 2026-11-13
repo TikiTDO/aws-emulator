@@ -35,6 +35,8 @@ mod credit_allocation_family;
 mod credit_allocation_history;
 #[path = "all/credits.rs"]
 mod credits;
+#[path = "all/enterprise_support_charge_summary.rs"]
+mod enterprise_support_charge_summary;
 #[path = "all/refusal_and_projection_fidelity.rs"]
 mod refusal_and_projection_fidelity;
 #[path = "all/refusal_message_text.rs"]
