@@ -65,10 +65,12 @@ const FUNCTION_TIMEOUT: u64 = 30;
 
 /// How long this suite waits for a condition another service owes, and how often it looks
 /// while waiting. Generous: every wait here is for a CONDITION, and the budget is bounded
-/// only so a suite cannot hang.
+/// only so a suite cannot hang — a whole rotation runs four interpreted invocations behind
+/// each wait, so the budget has to hold on a host that is busy building and running the rest
+/// of the workspace rather than only on an idle one.
 const POLL: Duration = Duration::from_millis(50);
 /// See [`POLL`].
-const POLLS: usize = 1_200;
+const POLLS: usize = 4_800;
 
 /// The emulator as it is ASSEMBLED, on one engine (`aws_emulator_router::build_router`): the
 /// rotation function's own SDK calls are dispatched back into this same router, so the secret

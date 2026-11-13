@@ -208,8 +208,10 @@ fn every_table() -> Vec<Hit> {
 ///
 /// The rows differ along the shape of the text: a bare word that several databases hold
 /// a table for (the recorded case), the model's own fuzzy-match example and its
-/// counter-example, a value carrying punctuation, text that only the PARENT database
-/// carries, a column name, two terms that must both match, and the quoted exact form.
+/// counter-example, a value carrying punctuation, a name joined by underscores (which are
+/// word characters of a catalog name, not punctuation to split on), text in another case,
+/// text that only the PARENT database carries, a column name, two terms that must both
+/// match, and the quoted exact form.
 #[tokio::test]
 async fn a_search_text_selects_tables_by_their_metadata_in_every_database() {
     let router = seeded_catalog().await;
@@ -222,8 +224,17 @@ async fn a_search_text_selects_tables_by_their_metadata_in_every_database() {
                 ("archive", "events"),
                 ("marketing", "events"),
                 ("sales", "events"),
-                ("sales", "events_raw"),
             ]),
+        ),
+        (
+            "an underscored name is ONE token, so it is reached only in full",
+            json!({ "SearchText": "events_raw" }),
+            expected(&[("sales", "events_raw")]),
+        ),
+        (
+            "the same text in another case matches nothing",
+            json!({ "SearchText": "EVENTS" }),
+            Vec::new(),
         ),
         (
             "the model's fuzzy-match example: link",
@@ -311,12 +322,15 @@ async fn a_search_text_selects_tables_by_their_metadata_in_every_database() {
 // ---------------------------------------------------------------------------
 
 /// A `PropertyPredicate` narrows by the property its `Key` names, under the same fuzzy
-/// match, and several predicates must all hold.
+/// match applied to BOTH sides — the stored value and the wanted one are tokenized by the
+/// same algorithm and the predicate holds when they share a token — and several predicates
+/// must all hold.
 ///
-/// The rows differ along the property named: the table's own name, its parent
-/// database's name, its owner, its type, its storage location, a key of its
-/// `Parameters` map (a property the issue never cited), a key the catalog holds no
-/// property for, a predicate naming NO key, and two predicates together.
+/// The rows differ along the property named (the table's own name, its parent database's
+/// name, its owner, its storage location), along the shape of the wanted value (a bare
+/// word, one carrying punctuation, one joined by underscores, one in another case) and
+/// along how the key is spelled, plus a predicate naming NO key and two predicates
+/// together.
 #[tokio::test]
 async fn b_property_predicates_select_tables_by_one_named_property() {
     let router = seeded_catalog().await;
@@ -329,12 +343,31 @@ async fn b_property_predicates_select_tables_by_one_named_property() {
                 ("archive", "events"),
                 ("marketing", "events"),
                 ("sales", "events"),
-                ("sales", "events_raw"),
             ]),
+        ),
+        (
+            "Name, a wanted value carrying punctuation is tokenized too",
+            json!({ "Filters": [ { "Key": "Name", "Value": "customer-link" } ] }),
+            expected(&[("sales", "customer-link"), ("sales", "xx-link-yy")]),
+        ),
+        (
+            "Name, an underscored value is one token and selects only that name",
+            json!({ "Filters": [ { "Key": "Name", "Value": "events_raw" } ] }),
+            expected(&[("sales", "events_raw")]),
+        ),
+        (
+            "Name, the same value in another case selects nothing",
+            json!({ "Filters": [ { "Key": "Name", "Value": "EVENTS" } ] }),
+            Vec::new(),
         ),
         (
             "DatabaseName selects one database's tables",
             json!({ "Filters": [ { "Key": "DatabaseName", "Value": "archive" } ] }),
+            expected(&[("archive", "events"), ("archive", "ledger")]),
+        ),
+        (
+            "the same key in lower camel case names the same property",
+            json!({ "Filters": [ { "Key": "databaseName", "Value": "archive" } ] }),
             expected(&[("archive", "events"), ("archive", "ledger")]),
         ),
         (
@@ -347,29 +380,9 @@ async fn b_property_predicates_select_tables_by_one_named_property() {
             ]),
         ),
         (
-            "TableType",
-            json!({ "Filters": [ { "Key": "TableType", "Value": "VIRTUAL_VIEW" } ] }),
-            expected(&[("marketing", "events")]),
-        ),
-        (
             "Location, which only one table carries",
             json!({ "Filters": [ { "Key": "Location", "Value": "events" } ] }),
             expected(&[("sales", "events")]),
-        ),
-        (
-            "a Parameters key: classification=csv",
-            json!({ "Filters": [ { "Key": "classification", "Value": "csv" } ] }),
-            expected(&[("marketing", "events")]),
-        ),
-        (
-            "a Parameters key: classification=parquet",
-            json!({ "Filters": [ { "Key": "classification", "Value": "parquet" } ] }),
-            expected(&[("archive", "ledger")]),
-        ),
-        (
-            "a key the catalog holds no property for",
-            json!({ "Filters": [ { "Key": "NoSuchProperty", "Value": "events" } ] }),
-            Vec::new(),
         ),
         (
             "a predicate naming no key matches any property",
@@ -394,7 +407,7 @@ async fn b_property_predicates_select_tables_by_one_named_property() {
                 "SearchText": "events",
                 "Filters": [ { "Key": "DatabaseName", "Value": "sales" } ]
             }),
-            expected(&[("sales", "events"), ("sales", "events_raw")]),
+            expected(&[("sales", "events")]),
         ),
     ];
 
@@ -579,7 +592,6 @@ async fn d_sort_criteria_order_the_result_by_one_field() {
                 hit("archive", "events"),
                 hit("marketing", "events"),
                 hit("sales", "events"),
-                hit("sales", "events_raw"),
             ],
         ),
         (
@@ -592,7 +604,6 @@ async fn d_sort_criteria_order_the_result_by_one_field() {
                 hit("archive", "events"),
                 hit("marketing", "events"),
                 hit("sales", "events"),
-                hit("sales", "events_raw"),
             ],
         ),
         (
@@ -602,7 +613,6 @@ async fn d_sort_criteria_order_the_result_by_one_field() {
                 "SortCriteria": [ { "FieldName": "Name", "Sort": "DESC" } ]
             }),
             vec![
-                hit("sales", "events_raw"),
                 hit("sales", "events"),
                 hit("marketing", "events"),
                 hit("archive", "events"),
@@ -616,7 +626,6 @@ async fn d_sort_criteria_order_the_result_by_one_field() {
             }),
             vec![
                 hit("sales", "events"),
-                hit("sales", "events_raw"),
                 hit("archive", "events"),
                 hit("marketing", "events"),
             ],
@@ -630,7 +639,6 @@ async fn d_sort_criteria_order_the_result_by_one_field() {
             vec![
                 hit("marketing", "events"),
                 hit("sales", "events"),
-                hit("sales", "events_raw"),
                 hit("archive", "events"),
             ],
         ),
@@ -642,7 +650,6 @@ async fn d_sort_criteria_order_the_result_by_one_field() {
             }),
             vec![
                 hit("archive", "events"),
-                hit("sales", "events_raw"),
                 hit("sales", "events"),
                 hit("marketing", "events"),
             ],
@@ -657,7 +664,18 @@ async fn d_sort_criteria_order_the_result_by_one_field() {
                 hit("archive", "events"),
                 hit("marketing", "events"),
                 hit("sales", "events"),
-                hit("sales", "events_raw"),
+            ],
+        ),
+        (
+            "a sort field in lower camel case orders by the same property",
+            json!({
+                "SearchText": "events",
+                "SortCriteria": [ { "FieldName": "databaseName", "Sort": "DESC" } ]
+            }),
+            vec![
+                hit("sales", "events"),
+                hit("marketing", "events"),
+                hit("archive", "events"),
             ],
         ),
     ];
@@ -727,7 +745,6 @@ async fn e_a_walk_over_any_page_size_serves_every_hit_exactly_once() {
         hit("archive", "events"),
         hit("marketing", "events"),
         hit("sales", "events"),
-        hit("sales", "events_raw"),
     ];
     let descending: Vec<Hit> = ascending.iter().rev().cloned().collect();
 
@@ -911,9 +928,9 @@ async fn g_a_searched_table_is_the_table_the_single_read_serves() {
 /// to order and a search that applied the predicate anyway would answer a filter the
 /// caller did not ask for.
 ///
-/// The rows differ along which non-time key the comparator was sent beside — a text
-/// property of the table, a property of its parent database, a `Parameters` key, and a
-/// predicate naming no key at all — and every value of the `Comparator` enum is covered by
+/// The rows differ along which non-time key the comparator was sent beside — the table's
+/// own name, a property of its parent database, its storage location, and a predicate
+/// naming no key at all — and every value of the `Comparator` enum is covered by
 /// the time-field suite above, which keeps serving them.
 #[tokio::test]
 async fn h_a_comparator_beside_a_key_that_is_no_time_field_is_refused() {
@@ -932,9 +949,9 @@ async fn h_a_comparator_beside_a_key_that_is_no_time_field_is_refused() {
             ] }),
         ),
         (
-            "a comparator beside a Parameters key",
+            "a comparator beside the table's storage Location",
             json!({ "Filters": [
-                { "Key": "classification", "Value": "parquet", "Comparator": "LESS_THAN" }
+                { "Key": "Location", "Value": "events", "Comparator": "LESS_THAN" }
             ] }),
         ),
         (
@@ -982,6 +999,27 @@ async fn h_a_comparator_beside_a_key_that_is_no_time_field_is_refused() {
              with {body}"
         );
     }
+
+    // A comparator beside a key that names no searchable property at all is the SAME
+    // refusal: the comparator is judged before the key, so the caller is told about the
+    // member that orders nothing rather than about the one that selects nothing.
+    let (status, body) = call(
+        &router,
+        "SearchTables",
+        &json!({ "Filters": [
+            { "Key": "NoSuchProperty", "Value": "events", "Comparator": "EQUALS" }
+        ] }),
+    )
+    .await;
+    assert_eq!(
+        status, 400,
+        "case \"a comparator beside an unsupported key\": expected 400, got {status} with {body}"
+    );
+    assert_eq!(
+        body.get("Message").and_then(Value::as_str).unwrap_or_default(),
+        "Comparator can only apply to time fields",
+        "case \"a comparator beside an unsupported key\": unexpected wording, got {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,6 +1080,224 @@ async fn h_a_request_the_search_cannot_evaluate_is_refused() {
         assert!(
             error_code(&body).contains(code),
             "case {case:?}: expected {code}, got {}",
+            error_code(&body)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The property namespace a Key and a FieldName name
+// ---------------------------------------------------------------------------
+
+/// A predicate's `Key` and a `SortCriterion`'s `FieldName` name a property out of ONE
+/// namespace — the table's own name, its parent database's name, its description, its
+/// owner, its storage location and the four time fields — without regard to case; a name
+/// outside that namespace selects, or orders by, nothing and is refused.
+///
+/// The rows differ along the key named: each property of the namespace in turn (the source
+/// of the list is the `Table` shape's own members, `Table$Name`, `Table$DatabaseName`,
+/// `Table$Description`, `Table$Owner` and `StorageDescriptor$Location`, plus
+/// `Table$CreateTime`, `Table$UpdateTime`, `Table$LastAccessTime` and
+/// `Table$LastAnalyzedTime`), each in two spellings, then names outside it: a member of the
+/// table the search holds no property for, a key of the table's `Parameters` map, and a
+/// name no shape declares.
+#[tokio::test]
+async fn i_a_key_outside_the_searchable_property_namespace_is_refused() {
+    let router = seeded_catalog().await;
+
+    // Every property of the namespace, each spelled as the `Table` shape spells it and in
+    // the lower camel case an SDK's field names use.
+    let served: Vec<&str> = vec![
+        "Name",
+        "name",
+        "DatabaseName",
+        "databaseName",
+        "Description",
+        "description",
+        "Owner",
+        "owner",
+        "Location",
+        "location",
+        "CreateTime",
+        "createTime",
+        "UpdateTime",
+        "updateTime",
+        "LastAccessTime",
+        "lastAccessTime",
+        "LastAnalyzedTime",
+        "lastAnalyzedTime",
+    ];
+    for key in served {
+        // A time field is compared against an instant, every other property against text,
+        // so the value is written for the property the key names.
+        let value = if key.to_ascii_lowercase().ends_with("time") {
+            MIDDLE.to_string()
+        } else {
+            "events".to_string()
+        };
+        let (status, body) = call(
+            &router,
+            "SearchTables",
+            &json!({ "Filters": [ { "Key": key, "Value": value } ] }),
+        )
+        .await;
+        assert_eq!(
+            status, 200,
+            "case {key:?}: a predicate on a searchable property is served, got {status} with \
+             {body}"
+        );
+        let (status, body) = call(
+            &router,
+            "SearchTables",
+            &json!({ "SortCriteria": [ { "FieldName": key } ] }),
+        )
+        .await;
+        assert_eq!(
+            status, 200,
+            "case {key:?}: a sort on a searchable property is served, got {status} with {body}"
+        );
+    }
+
+    let outside: Vec<(&str, &str)> = vec![
+        ("a member the search holds no property for", "TableType"),
+        ("the same member in lower camel case", "tableType"),
+        ("a key of the table's Parameters map", "classification"),
+        ("a name no shape declares", "NoSuchProperty"),
+    ];
+    for (case, key) in outside {
+        let (status, body) = call(
+            &router,
+            "SearchTables",
+            &json!({ "Filters": [ { "Key": key, "Value": "events" } ] }),
+        )
+        .await;
+        assert_eq!(
+            status, 400,
+            "case {case:?}: a predicate key outside the namespace is refused, got {status} \
+             with {body}"
+        );
+        assert!(
+            error_code(&body).contains("InvalidInputException"),
+            "case {case:?}: expected InvalidInputException, got {}",
+            error_code(&body)
+        );
+        assert_eq!(
+            body.get("Message").and_then(Value::as_str).unwrap_or_default(),
+            "Predicate key not supported",
+            "case {case:?}: unexpected wording, got {body}"
+        );
+
+        let (status, body) = call(
+            &router,
+            "SearchTables",
+            &json!({ "SortCriteria": [ { "FieldName": key, "Sort": "ASC" } ] }),
+        )
+        .await;
+        assert_eq!(
+            status, 400,
+            "case {case:?}: a sort field outside the namespace is refused, got {status} with \
+             {body}"
+        );
+        assert_eq!(
+            body.get("Message").and_then(Value::as_str).unwrap_or_default(),
+            "Invalid sort field name",
+            "case {case:?}: unexpected wording, got {body}"
+        );
+    }
+
+    // Wrong about both: the ORDERING is judged first, so that is what the caller is told.
+    let (status, body) = call(
+        &router,
+        "SearchTables",
+        &json!({
+            "Filters": [ { "Key": "tableType", "Value": "EXTERNAL_TABLE" } ],
+            "SortCriteria": [ { "FieldName": "NoSuchProperty", "Sort": "ASC" } ]
+        }),
+    )
+    .await;
+    assert_eq!(
+        status, 400,
+        "case \"both the sort field and the predicate key are outside the namespace\": \
+         expected 400, got {status} with {body}"
+    );
+    assert_eq!(
+        body.get("Message").and_then(Value::as_str).unwrap_or_default(),
+        "Invalid sort field name",
+        "case \"both the sort field and the predicate key are outside the namespace\": \
+         unexpected wording, got {body}"
+    );
+
+    // An EMPTY field name never reaches the namespace check: `SortCriterion$FieldName`
+    // carries the model's own minimum length, which the boundary walk enforces, so the
+    // refusal is the constraint's rather than this search's.
+    let (status, body) = call(
+        &router,
+        "SearchTables",
+        &json!({ "SortCriteria": [ { "FieldName": "", "Sort": "ASC" } ] }),
+    )
+    .await;
+    assert_eq!(
+        status, 400,
+        "case \"an empty sort field name\": expected 400, got {status} with {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// MaxResults
+// ---------------------------------------------------------------------------
+
+/// `MaxResults` truncates the page, and the search does not hold it to the range its
+/// modelled type declares: a request that asks for NO results is SERVED, with the empty
+/// `TableList` it asked for and no continuation token, a page larger than the maximum is
+/// served as asked (the same leniency the catalog's other table listing has), and only a
+/// NEGATIVE page size is refused with the operation's own `InvalidInputException`.
+///
+/// The rows are each published bound of the member's modelled range (`PageSize`, range
+/// 1..1000) and one past it on each side, plus the zero the range excludes.
+#[tokio::test]
+async fn j_max_results_outside_its_modelled_range_is_served_or_refused_by_the_search() {
+    let router = seeded_catalog().await;
+
+    // (case, MaxResults, how many tables the page holds).
+    let served: Vec<(&str, i64, usize)> = vec![
+        ("the smallest page the range admits", 1, 1),
+        ("the largest page the range admits", 1_000, every_table().len()),
+        ("one past that maximum", 1_001, every_table().len()),
+        ("no page at all", 0, 0),
+    ];
+    for (case, max_results, held) in served {
+        let answer = ok(&router, "SearchTables", &json!({ "MaxResults": max_results })).await;
+        let page = answer["TableList"]
+            .as_array()
+            .unwrap_or_else(|| panic!("case {case:?}: TableList must be present, got {answer}"));
+        assert_eq!(
+            page.len(),
+            held,
+            "case {case:?}: expected {held} tables, got {}",
+            page.len()
+        );
+        if held == 0 {
+            assert!(
+                answer.get("NextToken").is_none() || answer["NextToken"].is_null(),
+                "case {case:?}: a page of nothing carries no continuation token, got {answer}"
+            );
+        }
+    }
+
+    for (case, max_results) in [("one below zero", -1), ("far below zero", -1_000)] {
+        let (status, body) = call(
+            &router,
+            "SearchTables",
+            &json!({ "MaxResults": max_results }),
+        )
+        .await;
+        assert_eq!(
+            status, 400,
+            "case {case:?}: a page smaller than none is refused, got {status} with {body}"
+        );
+        assert!(
+            error_code(&body).contains("InvalidInputException"),
+            "case {case:?}: expected InvalidInputException, got {}",
             error_code(&body)
         );
     }

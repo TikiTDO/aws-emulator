@@ -15,11 +15,17 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-glue-awsglue.json");
 // targets is a Glue input error — this operation's own `InvalidInputException`, naming the
 // value the request sent — and not the cross-service `ValidationException` the boundary
 // walk answers with. The handler judges the value against the model-derived value set
+// (`crate::ops::search_tables`).
+// `MaxResults` carries it for a different reason: the search does NOT hold this member to
+// the `@range(min: 1, max: 1000)` its modelled type (`PageSize`) declares — a search that
+// asks for NO results is a served search whose page is empty, not a refusal — and a page
+// size the search does reject is a Glue input error rather than the cross-service
+// `ValidationException`. The handler decides what the page size may be
 // (`crate::ops::search_tables`). Every other member keeps its modelled constraint at the
 // boundary.
 #[smithy_macros::smithy(
     shape = "com.amazonaws.glue#SearchTablesRequest",
-    skip_validation = ["ResourceShareType"]
+    skip_validation = ["ResourceShareType", "MaxResults"]
 )]
 #[derive(Debug, Clone, Default)]
 pub struct SearchTablesInput {

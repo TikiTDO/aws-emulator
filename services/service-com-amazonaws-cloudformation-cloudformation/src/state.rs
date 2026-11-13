@@ -486,11 +486,19 @@ pub const STATUS_TRANSITION_DELAY: Duration = Duration::from_millis(500);
 /// resource nothing will ever bring up fails the operation inside a client's poll loop
 /// instead of outliving it, so every status a client polls reaches a terminal value.
 ///
+/// It is WALL-CLOCK, so "many times over" has to hold on the slowest host the emulator runs
+/// on and not only on an idle one: a resource whose coming-up runs work of its own through
+/// this emulator — a rotation that invokes a function four times, a nested stack that deploys
+/// a stack — takes as long as that work takes, and that work is itself slower on a machine
+/// that is busy. The value is therefore a multiple of the longest such chain rather than a
+/// tight fit around it; a resource no service will ever bring up still fails well inside a
+/// client's poll loop.
+///
 /// The wait for the success signals a resource's DECLARATION asks for is not bounded by
 /// this: that span is the one the template stated, so it runs for exactly as long as it asked
 /// ([`wait_conditions::WaitConditionBarrier::deadline`]) and gives up at the deadline its own
 /// `Timeout` names.
-pub const MAX_HELD_WAIT: Duration = Duration::from_secs(15);
+pub const MAX_HELD_WAIT: Duration = Duration::from_secs(90);
 
 /// The region an unsigned request is served as. The emulator's own default; a signed
 /// request is served in the region of its SigV4 credential scope.
