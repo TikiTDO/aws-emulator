@@ -37,14 +37,14 @@
 //! wiring lives in. Every expected aggregate is computed from the row's own messages, never
 //! taken from a recording.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::cloudwatch_alarm_action_reaches_its_subscribed_queue::{
-    authorization, cw, drain, drain_until, given_topic_with_subscriber, router as emulator, Grant,
+    authorization, cw, drain, given_topic_with_subscriber, router as emulator, Grant,
 };
 
 /// CloudWatch Logs' `X-Amz-Target` prefix and the signing name its credential scope carries.
@@ -56,9 +56,20 @@ const LOGS_SIGNING_NAME: &str = "logs";
 const ALARM_PERIOD: i64 = 60;
 const EVALUATION_PERIODS: i64 = 1;
 
-/// How long a row watches the quiet alarm for a transition it must NOT make, once the subject
-/// alarm has fired: long enough to span several of the alarm clock's own wake-ups.
-const QUIET_WATCH: Duration = Duration::from_secs(3);
+/// How long a row keeps looking for something the clock owes before calling it undelivered.
+///
+/// Generous on purpose, and never measured: what a row asserts is WHAT arrived, never how long
+/// it took. The transition is owed inside the framework's window for one the clock makes due
+/// and the delivery follows it, so this deadline is only the point at which a delivery that is
+/// not coming becomes a failure rather than a hang — a loaded host takes longer and still
+/// decides the same way.
+const DELIVERY_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How many further rounds the quiet alarm's queue is read AFTER that alarm has settled into
+/// the state its empty series implies: enough rounds to span several of the alarm clock's own
+/// wake-ups, each round waiting on the queue's own long poll rather than on a span of this
+/// host's clock.
+const QUIET_ROUNDS: usize = 3;
 
 /// The `StateValue` an alarm reports once its series breaches, and the one it reports while the
 /// series it watches holds nothing and its `TreatMissingData` is `notBreaching`. Source: the
@@ -301,6 +312,66 @@ async fn datapoints(
         .as_array()
         .cloned()
         .unwrap_or_default()
+}
+
+/// Read the queue at `url` until `wanted` notifications have arrived on it, or the deadline
+/// passes, and answer every notification that did arrive.
+///
+/// The wait is on the CONDITION: each round is one long-polling receive
+/// ([`drain`] asks for `WaitTimeSeconds`), which answers the instant the queue has something
+/// and otherwise costs that poll's own wait — so a slow host delays a row instead of deciding
+/// it, and nothing here sleeps for a span of its own.
+async fn delivered_until(
+    router: &MultiServiceRouter,
+    case: &str,
+    region: &str,
+    url: &str,
+    wanted: usize,
+) -> Vec<Value> {
+    let deadline = Instant::now() + DELIVERY_DEADLINE;
+    let mut arrived: Vec<Value> = Vec::new();
+    loop {
+        arrived.extend(drain(router, case, region, url).await);
+        if arrived.len() >= wanted || Instant::now() >= deadline {
+            return arrived;
+        }
+    }
+}
+
+/// Watch the quiet alarm until the evaluation the clock owes has SETTLED it — looking again
+/// until it reports the state a series with no datapoint and `notBreaching` implies — and
+/// answer the state it last reported beside every notification its own queue received while
+/// the watch ran.
+///
+/// The settled state is the condition the watch waits for, so the window the silence is
+/// established over is decided by what the emulator did rather than by a span of this host's
+/// clock; the watch then keeps reading for [`QUIET_ROUNDS`] more rounds, so a delivery made on
+/// a later wake-up of that same settled state is still caught. Every round reads the queue
+/// first, so nothing that arrived at any point in the watch is missed, and the `DescribeAlarms`
+/// each round makes can only strengthen the silence: it materialises whatever the clock has
+/// made due, so a transition this alarm did owe would have fired its action and shown up in a
+/// later round. [`DELIVERY_DEADLINE`] only decides when a settle that never comes is a failure
+/// rather than a hang.
+async fn watched_quiet(
+    router: &MultiServiceRouter,
+    case: &str,
+    region: &str,
+    alarm: &str,
+    url: &str,
+) -> (String, Vec<Value>) {
+    let deadline = Instant::now() + DELIVERY_DEADLINE;
+    let mut arrived: Vec<Value> = Vec::new();
+    let mut settled_rounds = 0;
+    loop {
+        arrived.extend(drain(router, case, region, url).await);
+        let state = alarm_state(router, case, region, alarm).await;
+        if state == STATE_OK {
+            settled_rounds += 1;
+        }
+        if settled_rounds >= QUIET_ROUNDS || Instant::now() >= deadline {
+            return (state, arrived);
+        }
+    }
 }
 
 /// One row: the filter the alarm watches, the quiet twin whose pattern nothing matches, the
@@ -570,7 +641,7 @@ async fn an_ingested_log_event_drives_its_metric_filters_alarm_to_the_subscribed
         // 6. The chain: the evaluation the clock owes moves the alarm, its action publishes to
         //    the topic, and the subscribed queue receives the notification — with no call
         //    forcing any of it.
-        let delivered = drain_until(&router, case, region, &subject_url, 1).await;
+        let delivered = delivered_until(&router, case, region, &subject_url, 1).await;
         assert_eq!(
             delivered.len(),
             1,
@@ -607,14 +678,16 @@ async fn an_ingested_log_event_drives_its_metric_filters_alarm_to_the_subscribed
 
         // 7. And the quiet twin, whose filter matched nothing, never transitioned: its state
         //    stays OK and its own subscribed queue stays empty, however many wake-ups pass.
-        tokio::time::sleep(QUIET_WATCH).await;
-        let quiet_state = alarm_state(&router, case, region, &quiet_alarm).await;
+        //    The watch waits for that settled state and keeps reading the queue across several
+        //    further wake-ups, so what it establishes is the alarm's silence rather than how
+        //    fast this host ran.
+        let (quiet_state, quiet_delivered) =
+            watched_quiet(&router, case, region, &quiet_alarm, &quiet_url).await;
         assert_eq!(
             quiet_state, STATE_OK,
             "case {case:?}: an alarm over a metric no matching event published to must stay \
              {STATE_OK}, got {quiet_state:?}"
         );
-        let quiet_delivered = drain(&router, case, region, &quiet_url).await;
         assert!(
             quiet_delivered.is_empty(),
             "case {case:?}: an alarm that never fired may deliver nothing, got \
