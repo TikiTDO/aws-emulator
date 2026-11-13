@@ -306,22 +306,7 @@ async fn the_upload_past_the_cap_is_refused() {
 
     // One short of the cap, so the next wire call is the one that fills it.
     let seeded = state::MAX_LAYER_UPLOADS - 1;
-    {
-        let store = state::service_state(&*engine).expect("the ecr store");
-        let mut store = store.lock();
-        for index in 0..seeded {
-            store.uploads.insert(
-                format!("seeded-upload-{index}"),
-                state::LayerUpload {
-                    registry_principal: None,
-                    repository_name: "capped".to_string(),
-                    part_size: state::REPORTED_LAYER_PART_SIZE,
-                    started_at: std::time::SystemTime::now(),
-                    received_bytes: Vec::new(),
-                },
-            );
-        }
-    }
+    crate::wire::seed_empty_uploads(&engine,"capped",std::time::SystemTime::now(),seeded).await;
 
     let last = call(
         &router,
@@ -510,22 +495,7 @@ async fn the_registry_bounds_the_caller_bytes_it_retains() {
         - state::ABANDONED_UPLOAD_AGE
         - std::time::Duration::from_secs(1);
     let fill = state::MAX_LAYER_UPLOADS - stored_uploads(&engine).len();
-    {
-        let store = state::service_state(&*engine).expect("the ecr store");
-        let mut store = store.lock();
-        for index in 0..fill {
-            store.uploads.insert(
-                format!("abandoned-upload-{index}"),
-                state::LayerUpload {
-                    registry_principal: None,
-                    repository_name: "accounted".to_string(),
-                    part_size: state::REPORTED_LAYER_PART_SIZE,
-                    started_at: abandoned_at,
-                    received_bytes: Vec::new(),
-                },
-            );
-        }
-    }
+    crate::wire::seed_empty_uploads(&engine,"accounted",abandoned_at,fill).await;
     assert_eq!(
         stored_uploads(&engine).len(),
         state::MAX_LAYER_UPLOADS,

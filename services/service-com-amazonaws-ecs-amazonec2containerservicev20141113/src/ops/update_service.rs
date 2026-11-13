@@ -570,6 +570,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // store's own lock.
         crate::state::settle_ec2_capacity(&*self.engine, now);
 
+        let (view, registrations) = {
         let mut guard = state.lock();
         guard.advance_clock(now);
 
@@ -1189,7 +1190,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // OUR guard dropped first since that write takes the Cloud Map store's lock
         // ([`crate::state::reconcile_cloud_map_instances`]).
         let registrations = guard.cloud_map_registrations();
-        drop(guard);
+        (view, registrations)
+        }; // only owned views/plans escape this synchronous state phase
         crate::state::reconcile_cloud_map_instances(&*self.engine, &registrations);
         // The steps a task this update placed needs taken before its containers start are
         // settled here: the execution role is assumed, and the image fetch is attempted from

@@ -324,6 +324,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let documented_instance_id = documented_instance_id(&input, &region);
 
         let now = ::std::time::SystemTime::now();
+        let output = (|| -> Result<RegisterContainerInstanceOutput, RegisterContainerInstanceError> {
         let mut guard = state.lock();
         guard.advance_clock(now);
 
@@ -450,12 +451,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // a placement with no path to the registry, is what settles such a task into
             // STOPPED. Read with OUR guard dropped, since it takes the IAM, Amazon EC2 and
             // Amazon ECR stores' locks ([`crate::state::settle_task_launches`]).
-            drop(guard);
-            crate::state::settle_task_launches(&*self.engine).await;
+
             // The placement this registration gave each parked task moves that task, which
             // is an `ECS Task State Change` on the account's default event bus
             // ([`crate::state::publish_task_state_changes`]).
-            crate::state::publish_task_state_changes(ctx, &self.engine, &region);
+
             return Ok(RegisterContainerInstanceOutput { container_instance });
         }
 
@@ -518,13 +518,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // with no path to the registry, is what settles such a task into STOPPED. Read with
         // OUR guard dropped, since it takes the IAM, Amazon EC2 and Amazon ECR stores' locks
         // ([`crate::state::settle_task_launches`]).
-        drop(guard);
-        crate::state::settle_task_launches(&*self.engine).await;
+
         // The placement this registration gave each parked task moves that task, which is
         // an `ECS Task State Change` on the account's default event bus
         // ([`crate::state::publish_task_state_changes`]).
-        crate::state::publish_task_state_changes(ctx, &self.engine, &region);
+
 
         Ok(RegisterContainerInstanceOutput { container_instance })
+        })()?;
+        // Registration/re-registration share the same post-lock launch/event phase.
+        crate::state::settle_task_launches(&*self.engine).await;
+        crate::state::publish_task_state_changes(ctx, &self.engine, &region);
+        Ok(output)
     }
 }

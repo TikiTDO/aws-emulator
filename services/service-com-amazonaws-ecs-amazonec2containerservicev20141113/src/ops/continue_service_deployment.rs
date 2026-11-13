@@ -210,6 +210,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .clone()
             .unwrap_or_else(|| crate::state::LIFECYCLE_HOOK_ACTION_CONTINUE.to_string());
 
+        let acted = {
         let mut guard = state.lock();
         let now = ::std::time::SystemTime::now();
         // The stage a paused rollout stands at is one the clock took it to, so the hook
@@ -221,7 +222,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // place, so this call has placed tasks: their launch steps are taken here, with the
         // guard dropped, exactly as every other call that places a task takes them
         // ([`crate::state::settle_task_launches`]).
-        drop(guard);
+        acted
+        }; // only owned views/plans escape this synchronous state phase
         crate::state::settle_task_launches(&*self.engine).await;
 
         match acted {

@@ -179,6 +179,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .clone()
             .unwrap_or_else(|| crate::state::STOP_TYPE_ROLLBACK.to_string());
 
+        let stopped = {
         let mut guard = state.lock();
         let now = ::std::time::SystemTime::now();
         // Whether a rollout is still ongoing is a question about NOW: the end the clock
@@ -190,7 +191,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // so this call has placed tasks: their launch steps are taken here, with the guard
         // dropped, exactly as every other call that places a task takes them
         // ([`crate::state::settle_task_launches`]).
-        drop(guard);
+        stopped
+        }; // only owned views/plans escape this synchronous state phase
         crate::state::settle_task_launches(&*self.engine).await;
 
         match stopped {

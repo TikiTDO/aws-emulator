@@ -638,6 +638,7 @@ async fn registry_v2_push_real_docker_push_then_cacheless_pull() {
             let image = repo.images.get(digest).ok_or("missing pushed manifest")?;
             (digest.clone(), image.manifest.clone())
         };
+        let document = document.read(&crate::wire::payload_store(&engine)).await.map_err(|_| "stored manifest read failed")?;
         // An independent HTTP client, not Docker's local content cache, must
         // receive and hash every actual manifest/config/layer byte.
         let client = reqwest::Client::builder()

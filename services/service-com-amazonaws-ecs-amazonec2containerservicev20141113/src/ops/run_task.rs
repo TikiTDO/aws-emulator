@@ -414,6 +414,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // reads the Amazon EC2 store under that store's own lock.
         crate::state::settle_ec2_capacity(&*self.engine, now);
 
+        let created = {
         let mut guard = state.lock();
         guard.advance_clock(now);
 
@@ -812,7 +813,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // path to the registry, is what settles such a task into STOPPED. Read with OUR guard
         // dropped, since it takes the IAM, Amazon EC2 and Amazon ECR stores' locks
         // ([`crate::state::settle_task_launches`]).
-        drop(guard);
+        created
+        }; // only owned views/plans escape this synchronous state phase
         crate::state::settle_task_launches(&*self.engine).await;
         // The status each task this call placed now reports is an `ECS Task State Change`
         // on the account's default event bus, and the transitions the clock still owes
