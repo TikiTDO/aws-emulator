@@ -4021,9 +4021,42 @@ pub fn target_type(configuration: &TargetConfiguration) -> &'static str {
 /// the nested union failed.
 pub const LAMBDA_ARN_MEMBER: &str = "targetConfiguration.mcp.lambda.lambdaArn";
 
-/// Why a gateway target naming a function that does not exist is refused.
+/// Why a gateway target naming a function that does not exist is refused, in the
+/// `fieldList` entry the refusal carries for [`LAMBDA_ARN_MEMBER`]: what is
+/// wrong with that member's value.
 pub const LAMBDA_FUNCTION_ABSENT: &str =
     "names a Lambda function that does not exist in this account and Region";
+
+/// The modelled validation error for a gateway target whose Lambda MCP
+/// configuration names a function Lambda does not hold ("Lambda function not
+/// found: <arn>. Verify the function ARN is correct and retry.").
+///
+/// A reference to a resource of ANOTHER service that resolves to nothing is not
+/// a complaint about the member's shape — the value parsed; it just names
+/// nothing — so the message identifies the MISSING RESOURCE and quotes the
+/// identifier the request supplied, verbatim, followed by the one remedy the
+/// caller has. That is what lets a caller tell a malformed ARN from a function
+/// that has not been created yet (the retryable one) and lets an operator read
+/// which function is missing straight out of the log line. The two sentences
+/// around the ARN are fixed text; the ARN is the request's own value.
+///
+/// The member path stays where the shape declares a member complaint belongs —
+/// the `fieldList` — exactly as the sibling cross-service check for an absent
+/// code object words its own refusal ([`code_object_not_found`]), and `reason`
+/// says a field failed validation.
+pub fn lambda_function_not_found(lambda_arn: &str) -> ValidationException {
+    ValidationException {
+        message: format!(
+            "Lambda function not found: {lambda_arn}. Verify the function ARN is correct and \
+             retry."
+        ),
+        reason: VALIDATION_REASON_FIELD_VALIDATION_FAILED.to_string(),
+        field_list: Some(vec![ValidationExceptionField {
+            name: LAMBDA_ARN_MEMBER.to_string(),
+            message: LAMBDA_FUNCTION_ABSENT.to_string(),
+        }]),
+    }
+}
 
 /// The ARN vendor (service namespace) whose endpoint a Lambda MCP target is resolved
 /// against. `aws.api#service$arnNamespace` of the Lambda model, and the first label of

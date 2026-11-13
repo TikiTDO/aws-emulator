@@ -9,6 +9,11 @@
 //! the operation's modelled validation error and nothing is persisted, while a target
 //! naming one that does exist is written and reads back.
 //!
+//! The refusal IDENTIFIES THE MISSING RESOURCE: its message is the fixed two sentences
+//! around the function ARN the request supplied, verbatim, so a caller can read which
+//! function is absent out of it. `UpdateGatewayTarget` resolves the same reference for the
+//! same reason and words the refusal the same way.
+//!
 //! Rows span what the rule generalises over: whether the function exists, which Region
 //! and name its ARN carries, a qualified (`:version`) ARN, and target shapes that name no
 //! function at all — for which Lambda is not consulted and nothing may be refused.
@@ -104,6 +109,12 @@ fn error_code(body: &Value) -> String {
         .to_string()
 }
 
+/// How a refusal of a target naming a function Lambda does not hold reads: fixed text
+/// around the `lambdaArn` the request supplied, which is the only variable part.
+fn function_not_found(lambda_arn: &str) -> String {
+    format!("Lambda function not found: {lambda_arn}. Verify the function ARN is correct and retry.")
+}
+
 fn text(body: &Value, member: &str) -> String {
     body.get(member)
         .and_then(Value::as_str)
@@ -195,6 +206,26 @@ async fn create_target(
     .await
 }
 
+/// Reconfigure a stored target. The body carries the credential provider the operation
+/// reports as required, so the row is judged on the configuration it sends.
+async fn update_target(
+    router: &MultiServiceRouter,
+    gateway_id: &str,
+    target_id: &str,
+    mut body: Value,
+) -> (u16, Value) {
+    body["credentialProviderConfigurations"] =
+        json!([{"credentialProviderType": "GATEWAY_IAM_ROLE"}]);
+    call(
+        router,
+        "bedrock-agentcore",
+        "PUT",
+        &format!("/gateways/{gateway_id}/targets/{target_id}/"),
+        body,
+    )
+    .await
+}
+
 #[tokio::test]
 async fn a_gateway_target_requires_the_lambda_function_it_names_to_exist() {
     let router = router();
@@ -268,7 +299,116 @@ async fn a_gateway_target_requires_the_lambda_function_it_names_to_exist() {
              {status} {} ({answer})",
             error_code(&answer)
         );
+        if !expected_code.is_empty() {
+            // The refusal names the function that is missing, by the ARN the row sent.
+            let expected_message = function_not_found(&lambda_arn);
+            assert_eq!(
+                text(&answer, "message"),
+                expected_message,
+                "case {case:?} ({lambda_arn}): expected the refusal {expected_message:?}, got {}",
+                text(&answer, "message")
+            );
+        }
     }
+}
+
+/// `UpdateGatewayTarget` resolves the function a new configuration names against Lambda
+/// too, and refuses an absent one in the same words — and a configuration naming a
+/// function that is there is written.
+#[tokio::test]
+async fn reconfiguring_a_target_requires_the_lambda_function_it_names_to_exist() {
+    let router = router();
+    let gateway_id = create_gateway(&router, "reconfigure").await;
+    let present = create_function(&router, "mcp-update").await;
+
+    let (status, created) = create_target(
+        &router,
+        &gateway_id,
+        lambda_target("updatable", &present),
+    )
+    .await;
+    assert_eq!(
+        status, 202,
+        "setup: expected HTTP 202 from CreateGatewayTarget, got {status} ({created})"
+    );
+    let target_id = text(&created, "targetId");
+
+    // (case, the lambdaArn the update sends) — every ARN here names no function.
+    let absent: [(&str, String); 3] = [
+        (
+            "a function name nothing created",
+            format!("arn:aws:lambda:{REGION}:{ACCOUNT}:function:never-updated"),
+        ),
+        (
+            "the stored function qualified with an unpublished version",
+            format!("{present}:12"),
+        ),
+        (
+            "a name nothing created, through another Region's endpoint",
+            format!("arn:aws:lambda:eu-central-1:{ACCOUNT}:function:absent-elsewhere"),
+        ),
+    ];
+
+    for (case, lambda_arn) in absent {
+        let (status, refused) = update_target(
+            &router,
+            &gateway_id,
+            &target_id,
+            json!({"targetConfiguration": lambda_target("updatable", &lambda_arn)
+                ["targetConfiguration"]}),
+        )
+        .await;
+        assert_eq!(
+            (status, error_code(&refused).as_str()),
+            (400, "ValidationException"),
+            "case {case:?} ({lambda_arn}): expected HTTP 400 ValidationException, got {status} {} \
+             ({refused})",
+            error_code(&refused)
+        );
+        let expected_message = function_not_found(&lambda_arn);
+        assert_eq!(
+            text(&refused, "message"),
+            expected_message,
+            "case {case:?} ({lambda_arn}): expected the refusal {expected_message:?}, got {}",
+            text(&refused, "message")
+        );
+    }
+
+    // The stored configuration survived every refusal, and a function that IS there is
+    // accepted.
+    let (status, fetched) = call(
+        &router,
+        "bedrock-agentcore",
+        "GET",
+        &format!("/gateways/{gateway_id}/targets/{target_id}/"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "case \"GetGatewayTarget after the refused updates\": expected HTTP 200, got {status} \
+         ({fetched})"
+    );
+    assert_eq!(
+        fetched["targetConfiguration"], created["targetConfiguration"],
+        "case \"GetGatewayTarget after the refused updates\": the stored configuration must be \
+         the one created, got {} for {}",
+        fetched["targetConfiguration"], created["targetConfiguration"]
+    );
+
+    let other = create_function(&router, "mcp-update-v2").await;
+    let (status, updated) = update_target(
+        &router,
+        &gateway_id,
+        &target_id,
+        json!({"targetConfiguration": lambda_target("updatable", &other)["targetConfiguration"]}),
+    )
+    .await;
+    assert_eq!(
+        status, 202,
+        "case \"an update naming a function that exists\": expected HTTP 202, got {status} \
+         ({updated})"
+    );
 }
 
 /// A refused target is not persisted, and an accepted one reads back.
@@ -295,11 +435,23 @@ async fn only_an_accepted_lambda_target_is_persisted() {
          {status} {} ({refused})",
         error_code(&refused)
     );
-    assert!(
-        text(&refused, "message").contains("lambdaArn"),
-        "case \"a target naming a missing function\": the refusal names the member that failed, \
-         got {}",
+    let absent_arn = format!("arn:aws:lambda:{REGION}:{ACCOUNT}:function:never-created");
+    let expected_message = function_not_found(&absent_arn);
+    assert_eq!(
+        text(&refused, "message"),
+        expected_message,
+        "case \"a target naming a missing function\": expected the refusal \
+         {expected_message:?}, got {}",
         text(&refused, "message")
+    );
+    // The member whose value failed is still reported, where the shape declares a member
+    // complaint belongs: the `fieldList`, not the message.
+    assert_eq!(
+        refused["fieldList"][0]["name"],
+        json!("targetConfiguration.mcp.lambda.lambdaArn"),
+        "case \"a target naming a missing function\": expected the failing member path in the \
+         fieldList, got {}",
+        refused["fieldList"]
     );
 
     let (status, accepted) = create_target(

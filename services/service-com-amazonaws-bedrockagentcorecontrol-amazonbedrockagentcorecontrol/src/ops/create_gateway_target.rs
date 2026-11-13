@@ -290,10 +290,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if let Some(lambda_arn) = crate::state::mcp_lambda_arn(&input.target_configuration) {
             if crate::state::lambda_function_is_absent(ctx, lambda_arn).await {
                 return Err(CreateGatewayTargetErrorModeled::ValidationException(
-                    crate::state::field_validation_failed(
-                        crate::state::LAMBDA_ARN_MEMBER,
-                        crate::state::LAMBDA_FUNCTION_ABSENT,
-                    ),
+                    crate::state::lambda_function_not_found(lambda_arn),
                 )
                 .into());
             }
