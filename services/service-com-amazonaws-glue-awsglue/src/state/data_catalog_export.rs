@@ -364,13 +364,14 @@ pub fn create_export_table_bucket<Eng: Send + Sync + 'static>(
             bucket_type: s3tables::TableBucketType::Aws,
             created_at: now,
             encryption,
-            // The export asks for no storage class, no metrics, no replication and no tags,
-            // so the bucket carries none of them: each is reported from what a caller of that
-            // service asked for, and this bucket's caller asked for nothing but its
-            // encryption.
+            // The export asks for no storage class, no metrics, no replication, no
+            // maintenance configuration and no tags, so the bucket carries none of them:
+            // each is reported from what a caller of that service asked for, and this
+            // bucket's caller asked for nothing but its encryption.
             storage_class: None,
             metrics: None,
             replication: None,
+            maintenance: BTreeMap::new(),
             tags: BTreeMap::new(),
             // A bucket S3 Tables has just taken holds no namespaces: what a namespace or a
             // table in it is created by is that service's own writes.

@@ -366,6 +366,44 @@ impl Emulator {
         .await
     }
 
+    /// `GetTableBucketMaintenanceConfiguration`: the bucket's ARN is the one
+    /// path label.
+    pub async fn get_table_bucket_maintenance_configuration(
+        &self,
+        region: &str,
+        arn: &str,
+    ) -> Reply {
+        self.call(
+            "GET",
+            &format!("/buckets/{}/maintenance", encode(arn)),
+            region,
+            None,
+        )
+        .await
+    }
+
+    /// `PutTableBucketMaintenanceConfiguration`: the maintenance type is a path
+    /// label too, and the configuration travels as the body's `value`.
+    pub async fn put_table_bucket_maintenance_configuration(
+        &self,
+        region: &str,
+        arn: &str,
+        maintenance_type: &str,
+        value: &Value,
+    ) -> Reply {
+        self.call(
+            "PUT",
+            &format!(
+                "/buckets/{}/maintenance/{}",
+                encode(arn),
+                encode(maintenance_type)
+            ),
+            region,
+            Some(&serde_json::json!({ "value": value })),
+        )
+        .await
+    }
+
     /// `GetTableMaintenanceConfiguration`: the bucket's ARN, the namespace and
     /// the table's name are path labels.
     pub async fn get_table_maintenance_configuration(

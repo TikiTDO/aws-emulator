@@ -679,6 +679,168 @@ pub fn effective_table_maintenance(
         .collect()
 }
 
+/// `TableBucketMaintenanceType` — the maintenance tasks S3 Tables runs on a
+/// table bucket, as opposed to the per-table tasks
+/// [`TableMaintenanceType`] names. Values from
+/// `com.amazonaws.s3tables#TableBucketMaintenanceType`.
+///
+/// Ordered, for the same reason as [`TableMaintenanceType`]: a bucket's
+/// configurations are stored in a map keyed by this type, so a read reports them
+/// in one stable order whatever order they were written in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TableBucketMaintenanceType {
+    /// Deleting the files a table bucket's tables no longer reference.
+    IcebergUnreferencedFileRemoval,
+}
+
+impl TableBucketMaintenanceType {
+    /// Every modeled value, for exhaustiveness checks.
+    pub const ALL: &'static [Self] = &[Self::IcebergUnreferencedFileRemoval];
+
+    /// The value as it goes on the wire.
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::IcebergUnreferencedFileRemoval => "icebergUnreferencedFileRemoval",
+        }
+    }
+
+    /// Parse a wire value, or `None` when it names no modeled value.
+    pub fn from_wire(value: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|candidate| candidate.as_wire() == value)
+    }
+}
+
+/// The stored form of the `IcebergUnreferencedFileRemovalSettings` structure.
+///
+/// Both members are optional on the wire, so both are optional here, as on
+/// [`CompactionSettings`]: a put persists what the caller asked for and
+/// [`effective_bucket_maintenance`] is where an absent member's value is
+/// decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnreferencedFileRemovalSettings {
+    /// How many days a file has to have been unreferenced before it is marked
+    /// noncurrent — a `PositiveInteger` the model bounds at
+    /// `@range(1..2147483647)`, so the boundary has already refused a value
+    /// outside it by the time one is stored.
+    pub unreferenced_days: Option<i32>,
+    /// How many days a noncurrent file is kept before it is deleted, bounded
+    /// the same way.
+    pub non_current_days: Option<i32>,
+}
+
+/// The stored form of the `TableBucketMaintenanceSettings` union: the settings
+/// of ONE table bucket maintenance task, so which task a stored configuration
+/// settles is carried by the value itself and not only by the key it is filed
+/// under — the rule [`MaintenanceSettings`] follows for a table's tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BucketMaintenanceSettings {
+    IcebergUnreferencedFileRemoval(UnreferencedFileRemovalSettings),
+}
+
+impl BucketMaintenanceSettings {
+    /// The maintenance task these settings configure — the union member's own
+    /// name, which is what a put checks against the type it was addressed with.
+    pub fn maintenance_type(&self) -> TableBucketMaintenanceType {
+        match self {
+            Self::IcebergUnreferencedFileRemoval(..) => {
+                TableBucketMaintenanceType::IcebergUnreferencedFileRemoval
+            }
+        }
+    }
+}
+
+/// The stored form of the `TableBucketMaintenanceConfigurationValue` structure:
+/// one table bucket maintenance task's status and settings for one bucket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableBucketMaintenance {
+    pub status: Option<MaintenanceStatus>,
+    pub settings: Option<BucketMaintenanceSettings>,
+}
+
+/// How long a file has to have been unreferenced before unreferenced file
+/// removal marks it noncurrent when nothing asked for a number: the S3 Tables
+/// maintenance documentation states the default as 3 days.
+pub const DEFAULT_UNREFERENCED_DAYS: i32 = 3;
+
+/// How long a noncurrent file is kept before unreferenced file removal deletes
+/// it when nothing asked for a number: the same documentation states the
+/// default as 10 days.
+pub const DEFAULT_NON_CURRENT_DAYS: i32 = 10;
+
+/// The maintenance configuration a table bucket runs `kind` under when no put
+/// ever set one on it.
+///
+/// Every S3 Tables table bucket is maintained from the moment it is created —
+/// the task is on, under the service's own settings — so a read reports a
+/// configuration for each modeled task whether or not one was ever written, as
+/// [`default_table_maintenance`] does for a table's tasks.
+pub fn default_bucket_maintenance(kind: TableBucketMaintenanceType) -> TableBucketMaintenance {
+    TableBucketMaintenance {
+        status: Some(MaintenanceStatus::Enabled),
+        settings: Some(match kind {
+            TableBucketMaintenanceType::IcebergUnreferencedFileRemoval => {
+                BucketMaintenanceSettings::IcebergUnreferencedFileRemoval(
+                    UnreferencedFileRemovalSettings {
+                        unreferenced_days: Some(DEFAULT_UNREFERENCED_DAYS),
+                        non_current_days: Some(DEFAULT_NON_CURRENT_DAYS),
+                    },
+                )
+            }
+        }),
+    }
+}
+
+/// The maintenance configuration in force for one task of a table bucket: the
+/// configuration the store holds for it with every member a put left out filled
+/// in from [`default_bucket_maintenance`], so a caller that set only a status
+/// still reads the settings the task runs under — the rule
+/// [`effective_task_maintenance`] follows for a table's tasks.
+pub fn effective_bucket_task_maintenance(
+    kind: TableBucketMaintenanceType,
+    stored: Option<&TableBucketMaintenance>,
+) -> TableBucketMaintenance {
+    let default = default_bucket_maintenance(kind);
+    let Some(stored) = stored else {
+        return default;
+    };
+    let settings = match (stored.settings, default.settings) {
+        // A stored setting for the task, with each member the put left out
+        // taken from the task's default.
+        (
+            Some(BucketMaintenanceSettings::IcebergUnreferencedFileRemoval(stored)),
+            Some(BucketMaintenanceSettings::IcebergUnreferencedFileRemoval(default)),
+        ) => Some(BucketMaintenanceSettings::IcebergUnreferencedFileRemoval(
+            UnreferencedFileRemovalSettings {
+                unreferenced_days: stored.unreferenced_days.or(default.unreferenced_days),
+                non_current_days: stored.non_current_days.or(default.non_current_days),
+            },
+        )),
+        // The put carried no settings for the task, so it runs under the task's
+        // own defaults.
+        _ => default.settings,
+    };
+    TableBucketMaintenance {
+        status: stored.status.or(default.status),
+        settings,
+    }
+}
+
+/// The whole maintenance configuration in force for a table bucket: one entry
+/// per modeled table bucket maintenance task, each resolved by
+/// [`effective_bucket_task_maintenance`].
+pub fn effective_bucket_maintenance(
+    stored: &BTreeMap<TableBucketMaintenanceType, TableBucketMaintenance>,
+) -> BTreeMap<TableBucketMaintenanceType, TableBucketMaintenance> {
+    TableBucketMaintenanceType::ALL
+        .iter()
+        .copied()
+        .map(|kind| (kind, effective_bucket_task_maintenance(kind, stored.get(&kind))))
+        .collect()
+}
+
 /// The stored form of the `TableBucketReplicationConfiguration` structure: the
 /// role S3 Tables replicates with, the rules that say where to, and the token
 /// that names this state of the configuration.
@@ -734,6 +896,11 @@ pub struct TableBucket {
     /// read or a delete of a bucket that has none is refused rather than
     /// answered with a default.
     pub replication: Option<ReplicationConfiguration>,
+    /// The maintenance configurations a put has set on this bucket, keyed by
+    /// the task each settles. A task with no entry runs under the service's own
+    /// defaults, which [`effective_bucket_maintenance`] is where it is reported
+    /// from.
+    pub maintenance: BTreeMap<TableBucketMaintenanceType, TableBucketMaintenance>,
     pub tags: BTreeMap<String, String>,
     /// The namespaces resident in this bucket, keyed by namespace name, so a
     /// list has one stable order to page over.
