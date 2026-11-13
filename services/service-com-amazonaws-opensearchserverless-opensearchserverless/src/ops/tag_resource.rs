@@ -156,11 +156,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // and the rule is held here: a member that names one key twice is the invalid input
         // `ValidationException` describes, and nothing is stored.
         if let Some(repeated) =
-            crate::state::first_repeated_tag_key(input.tags.iter().map(|tag| tag.key.as_str()))
+            crate::state::first_repeated_element(input.tags.iter().map(|tag| tag.key.as_str()))
         {
             return Err(TagResourceErrorModeled::ValidationException(
                 ValidationException {
-                    message: Some(crate::state::repeated_tag_key_message("tags", &repeated)),
+                    message: Some(crate::state::repeated_element_message("tags", &repeated)),
                 },
             )
             .into());

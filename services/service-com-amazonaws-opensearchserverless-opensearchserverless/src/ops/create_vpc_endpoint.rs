@@ -4,8 +4,8 @@
 //! IMPLEMENTED: mints a `VpcEndpointId`, stores a `VpcEndpointRecord` in [`crate::state`]
 //! holding the VPC, subnets and security groups the request named, and answers that stored
 //! record in the non-terminal `PENDING` status it settles out of — refusing an endpoint
-//! name already taken and a create past the account's endpoint bound, and replaying the
-//! record a spent `clientToken` first created.
+//! name already taken, an id list that names one id twice, and a create past the account's
+//! endpoint bound, and replaying the record a spent `clientToken` first created.
 //!
 //! ## Shape of an operation
 //!
@@ -177,6 +177,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 },
             )
             .into());
+        }
+
+        // Each id list is a SET of ids the endpoint holds — `crate::state::changed_ids`
+        // cannot leave one held twice, however many updates change it — so a member that
+        // names one id more than once describes no one set and is the invalid input
+        // `ValidationException` describes, refused before an id is minted or anything is
+        // stored. The lists are bounded above first, so the set built here is never larger
+        // than a list this operation would accept.
+        for (member, named) in [
+            ("subnetIds", input.subnet_ids.as_slice()),
+            (
+                "securityGroupIds",
+                input.security_group_ids.as_deref().unwrap_or_default(),
+            ),
+        ] {
+            if let Some(repeated) =
+                crate::state::first_repeated_element(named.iter().map(String::as_str))
+            {
+                return Err(CreateVpcEndpointErrorModeled::ValidationException(
+                    ValidationException {
+                        message: Some(crate::state::repeated_element_message(member, &repeated)),
+                    },
+                )
+                .into());
+            }
         }
 
         let mut store = state.lock();

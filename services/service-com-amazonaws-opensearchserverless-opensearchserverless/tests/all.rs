@@ -125,6 +125,8 @@ mod vpc_endpoint_batch_read;
 mod vpc_endpoint_delete;
 #[path = "all/vpc_endpoint_delete_token.rs"]
 mod vpc_endpoint_delete_token;
+#[path = "all/vpc_endpoint_id_set_uniqueness.rs"]
+mod vpc_endpoint_id_set_uniqueness;
 #[path = "all/vpc_endpoint_listing.rs"]
 mod vpc_endpoint_listing;
 #[path = "all/vpc_endpoint_retained_subnets.rs"]

@@ -202,6 +202,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
                 .into());
             }
+            // Each list names a SET of ids to add to or remove from the endpoint's own sets,
+            // which `crate::state::changed_ids` keeps as sets, so a member that names one id
+            // more than once describes no one change and is refused as invalid input rather
+            // than counted twice against the bounds above. Checked after the length bound,
+            // so the set built here is never larger than a list this operation would accept.
+            if let Some(repeated) =
+                crate::state::first_repeated_element(named.iter().map(String::as_str))
+            {
+                return Err(UpdateVpcEndpointErrorModeled::ValidationException(
+                    ValidationException {
+                        message: Some(crate::state::repeated_element_message(member, &repeated)),
+                    },
+                )
+                .into());
+            }
         }
 
         // A request that asks for the same member to be added and removed describes no one

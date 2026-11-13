@@ -23,7 +23,7 @@
 use serde_json::{json, Value};
 
 use crate::collection_lifecycle::{at, call, emulator, text, CLIENT_ERROR};
-use crate::vpc_endpoint::{await_active, create_endpoint, read_one, ACTIVE, PENDING};
+use crate::vpc_endpoint::{await_active, create_endpoint, ids, read_one, ACTIVE, PENDING};
 
 /// `SecurityGroupIds`' own published maximum, from
 /// `smithy_query(query="shape", shape="SecurityGroupIds")` -> `@length(min: 1, max: 5)`.
@@ -74,19 +74,6 @@ async fn accepted_update(
         "case {case}: expected 200 from UpdateVpcEndpoint, got {status} {code} with {answer}"
     );
     at(&answer, "UpdateVpcEndpointDetail").clone()
-}
-
-/// The list of strings at `path`, or an empty list when the member is absent.
-fn ids(value: &Value, path: &str) -> Vec<String> {
-    at(value, path)
-        .as_array()
-        .map(|entries| {
-            entries
-                .iter()
-                .map(|entry| entry.as_str().unwrap_or_default().to_string())
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// A JSON array of `entries`.

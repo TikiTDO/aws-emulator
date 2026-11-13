@@ -122,6 +122,20 @@ pub(crate) async fn await_active(
     panic!("case {case}: the endpoint {id} never reached {ACTIVE}");
 }
 
+/// The list of strings at `path` of a VPC endpoint detail, or an empty list when the member
+/// is absent.
+pub(crate) fn ids(value: &Value, path: &str) -> Vec<String> {
+    at(value, path)
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| entry.as_str().unwrap_or_default().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Assert that `detail` reports the identity and the inputs of the endpoint `request`
 /// created, whatever status it is in.
 pub(crate) fn assert_members(case: &str, id: &str, request: &Value, detail: &Value) {

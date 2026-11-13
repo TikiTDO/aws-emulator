@@ -2840,40 +2840,44 @@ pub fn validate_index_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The first tag key a request names more than once, if one does.
+/// The first element a request member names more than once, if one does.
 ///
-/// A tag set is a map keyed by tag key, which the model states for every member that
-/// carries tags: `TagResourceRequest$tags` and `UntagResourceRequest$tagKeys` each document
-/// "All tag keys in the request must be unique", and the create requests' `tags` is
-/// documented as "an arbitrary SET of tags (key–value pairs)". Neither `Tags` nor `TagKeys`
-/// carries `@uniqueItems` (`smithy_query(query="shape", shape="Tags,TagKeys")`), so the
-/// boundary validator admits a repeat and the rule is enforced by the handler that takes
-/// the member. Keys are compared as sent, since a tag key is case-sensitive.
-pub fn first_repeated_tag_key<'keys>(
-    keys: impl IntoIterator<Item = &'keys str>,
+/// Several members carry a SET rather than a sequence — a value named twice describes no one
+/// set — and the model states it in prose on each of them: a tag set is a map keyed by tag
+/// key (`TagResourceRequest$tags` and `UntagResourceRequest$tagKeys` each document "All tag
+/// keys in the request must be unique", and the create requests' `tags` is documented as "an
+/// arbitrary SET of tags (key–value pairs)"), and an endpoint's subnets and security groups
+/// are the ids it holds, which [`apply_id_change`] keeps as a set however many updates
+/// change them. None of those list shapes carries `@uniqueItems`
+/// (`smithy_query(query="shape", shape="Tags,TagKeys,SubnetIds,SecurityGroupIds")`), so the
+/// boundary validator admits a repeat and the rule is enforced by the handler that takes the
+/// member. Elements are compared as sent, since both a tag key and a resource id are
+/// case-sensitive.
+pub fn first_repeated_element<'elements>(
+    elements: impl IntoIterator<Item = &'elements str>,
 ) -> Option<String> {
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for key in keys {
-        if !seen.insert(key) {
-            return Some(key.to_string());
+    for element in elements {
+        if !seen.insert(element) {
+            return Some(element.to_string());
         }
     }
     None
 }
 
-/// How this service words a tagging member that names one tag key twice: the clause the
+/// How this service words a member that names one element of a SET twice: the clause the
 /// boundary validator renders for a repeated element of a list, at the member that carried
 /// it, so a repeat refused by a handler reads exactly like one refused at the boundary.
 ///
 /// The sentence itself comes from the framework's own renderer rather than being spelled
 /// here, so this refusal cannot drift from the ones `src/service.rs` words.
-pub fn repeated_tag_key_message(member: &str, key: &str) -> String {
+pub fn repeated_element_message(member: &str, element: &str) -> String {
     use ::aws_smithy_schema_server::constraints::{envelope, Violation, ViolationKind};
 
     let violation = Violation {
         path: member.to_string(),
         kind: ViolationKind::UniqueItems,
-        value: Some(key.to_string()),
+        value: Some(element.to_string()),
         sensitive: false,
     };
     // One violation always renders; the bare clause is the same sentence without the
