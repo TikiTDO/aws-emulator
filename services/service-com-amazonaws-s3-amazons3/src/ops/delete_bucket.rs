@@ -11,6 +11,17 @@
 //! bucket another emulated service provisioned as the object store of one of its own
 //! resources is refused too, with `AccessDenied` (403): that service owns its lifecycle.
 //!
+//! The delete is AUTHORIZED before anything is removed: "you must have the `s3:DeleteBucket`
+//! permission on the specified bucket in a policy", so a signed request is judged against the
+//! identity-based documents in force on the principal it speaks for and against the bucket's
+//! own policy ([`crate::service::request_authorization`]), and a principal no policy allows it
+//! to is refused 403 `AccessDenied` with the bucket left in place. The decision is taken once
+//! the addressed bucket has been resolved, because WHICH document and WHICH action decide it
+//! are the bucket's own (a directory bucket is judged by an identity-based policy alone, under
+//! the `s3express` action): a name the account holds no bucket under is `NoSuchBucket` as it is
+//! for every other request, and this emulator serves one account, so no caller learns from
+//! that what the bucket owner's own reads would not tell it.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -154,6 +165,16 @@ impl From<DeleteBucketErrorModeled> for DeleteBucketError {
     }
 }
 
+/// The IAM action a general purpose bucket's delete is authorized under: "you must have the
+/// `s3:DeleteBucket` permission on the specified bucket in a policy" (this operation's own
+/// documentation of its general purpose bucket permissions).
+const DELETE_BUCKET_ACTION: &str = "s3:DeleteBucket";
+
+/// The action a DIRECTORY bucket's delete is authorized under instead: "you must have the
+/// `s3express:DeleteBucket` permission in an IAM identity-based policy instead of a bucket
+/// policy" (this operation's own documentation of its directory bucket permissions).
+const DIRECTORY_DELETE_BUCKET_ACTION: &str = "s3express:DeleteBucket";
+
 /// The `DeleteBucket` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -188,7 +209,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         // The confused-deputy guard the request itself asks for: "if the account ID that you
         // provide does not match the actual owner of the bucket, the request fails with the
@@ -208,11 +229,53 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 "the shared S3 store is unreachable from this engine",
             )
         })?;
+        // WHO is asking, resolved BEFORE the store is locked, so the STS and IAM stores this
+        // service reads the calling principal and its policies from are never reached while
+        // this service's own guard is held.
+        let caller = crate::service::request_authorization::request_caller(&*self.engine, ctx);
+        let region = crate::state::request_region(ctx.parts());
         let mut store = state.lock();
 
         let bucket = store
             .bucket(&input.bucket)
             .ok_or(DeleteBucketErrorModeled::NoSuchBucket(NoSuchBucket {}))?;
+
+        // "You must have the `s3:DeleteBucket` permission on the specified bucket in a
+        // policy" — or, for a directory bucket, "the `s3express:DeleteBucket` permission in
+        // an IAM identity-based policy instead of a bucket policy" (this operation's own
+        // documentation of its permissions). A signed request is judged against the
+        // identity-based documents in force on the principal it speaks for and against the
+        // bucket's own policy, the way every other authorized call of this service is
+        // (`crate::service::request_authorization` carries IAM's own order), before anything
+        // is removed — so a refused delete leaves the bucket and everything it holds in
+        // place.
+        let (delete_action, resource, policy) = match bucket.is_directory() {
+            // A directory bucket is judged by an identity-based policy alone, which is what
+            // "instead of a bucket policy" says, and is named by its own Regional ARN.
+            true => (
+                DIRECTORY_DELETE_BUCKET_ACTION,
+                crate::state::directory_bucket_arn(&region, &input.bucket),
+                None,
+            ),
+            false => (
+                DELETE_BUCKET_ACTION,
+                crate::state::bucket_arn(&input.bucket),
+                bucket.policy.clone(),
+            ),
+        };
+        if let Some(message) = crate::service::request_authorization::denial(
+            &caller,
+            policy.as_deref(),
+            delete_action,
+            &resource,
+            &crate::service::authorization::read_conditions(),
+        ) {
+            return Err(crate::scaffolded::Scaffolded::unmodeled(
+                crate::state::ACCESS_DENIED_CODE,
+                crate::state::ACCESS_DENIED_STATUS,
+                message,
+            ));
+        }
 
         // A bucket another emulated service provisioned as the object store of one of ITS
         // resources (a Lightsail bucket — `Bucket::provisioned_by`) is deleted by that

@@ -17,19 +17,6 @@
 // else appends to.
 #[path = "all/cloudformation_fifo_resource_generated_names.rs"]
 mod cloudformation_fifo_resource_generated_names;
-// Declared here, in this same head region, for the reason the entry above records: what a
-// stack deploys for a property written as a `{{resolve:secretsmanager:…}}` dynamic reference
-// spans CloudFormation (which resolves it), AWS Secrets Manager (which holds the secret) and
-// the service that owns the configured resource at once, so no single crate's test target can
-// ask it.
-#[path = "all/cloudformation_secretsmanager_dynamic_references.rs"]
-mod cloudformation_secretsmanager_dynamic_references;
-// Declared here, in this same head region, for the reason the entry above records: the
-// reference RabbitMQ-consumer estate deployed from scratch in one stack spans CloudFormation,
-// AWS Secrets Manager, Amazon MQ, IAM and AWS Lambda at once, so no single service crate's
-// test target can deploy it.
-#[path = "all/scratch_estate.rs"]
-mod scratch_estate;
 // Declared here, in this same head region, for the reason the entry above records: the
 // identifiers a stack publishes for the Amazon Cognito user pool, app client, resource server
 // and identity provider it declares are the ones that service minted or is addressed by, which
@@ -1569,6 +1556,22 @@ mod cloudformation_rotation_schedule_rotates_its_secret;
 // destination that decides the refusal) at once.
 #[path = "all/cloudformation_rollback_deletes_the_buckets_it_created.rs"]
 mod cloudformation_rollback_deletes_the_buckets_it_created;
+// Declared in the appended tail: the IDENTITY-BASED authorization of a bucket's own lifecycle
+// — the permissions a create's headers ask for and the one a delete asks for — which spans
+// IAM (the documents), STS (the session) and Amazon S3 (the decision) at once, so no single
+// service crate's test target can see both sides.
+#[path = "all/s3_bucket_lifecycle_identity_authorization.rs"]
+mod s3_bucket_lifecycle_identity_authorization;
+// stack deploys for a property written as a `{{resolve:secretsmanager:…}}` dynamic reference
+// spans CloudFormation (which resolves it), AWS Secrets Manager (which holds the secret) and
+// the service that owns the configured resource at once, so no single crate's test target can
+#[path = "all/cloudformation_secretsmanager_dynamic_references.rs"]
+mod cloudformation_secretsmanager_dynamic_references;
+// reference RabbitMQ-consumer estate deployed from scratch in one stack spans CloudFormation,
+// AWS Secrets Manager, Amazon MQ, IAM and AWS Lambda at once, so no single service crate's
+// test target can deploy it.
+#[path = "all/scratch_estate.rs"]
+mod scratch_estate;
 // completed stack PUBLISHES for the Amazon Redshift resources it declared — an `OutputValue`
 // on every output, carrying the endpoint, port and parameter-group name Amazon Redshift
 // itself reports — which spans CloudFormation (the outputs) and Amazon Redshift (the cluster

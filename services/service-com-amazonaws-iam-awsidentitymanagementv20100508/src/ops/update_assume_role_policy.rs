@@ -274,8 +274,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // "Updates the policy that grants an IAM entity permission to assume a role":
         // the document REPLACES the one the role held, and is stored as the plain JSON
         // text the request carried — the one form this crate holds every policy
-        // document in, so a later read hands it back exactly as it was sent whether
-        // `CreateRole` or this operation wrote it.
+        // document in — apart from the ONE spelling IAM saves a policy's account
+        // principals in: an account named by its id alone is stored as that account's
+        // root-user ARN (`crate::state::stored_trust_policy`), so a later read hands
+        // back the same form whether `CreateRole` or this operation wrote the role.
         let Some(role) = store.roles.get_mut(&key) else {
             return Err(UpdateAssumeRolePolicyErrorModeled::NoSuchEntityException(
                 NoSuchEntityException {
@@ -287,7 +289,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
-        role.assume_role_policy_document = Some(input.policy_document);
+        role.assume_role_policy_document =
+            Some(crate::state::stored_trust_policy(&input.policy_document));
 
         Ok(UpdateAssumeRolePolicyOutput)
     }

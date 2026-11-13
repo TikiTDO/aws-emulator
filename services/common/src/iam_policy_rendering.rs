@@ -38,7 +38,9 @@
 //! domain and repository permissions policy (`stored_policy_document` in that crate's
 //! `state.rs`) still holds its own. Nothing new should write another: a store that reports an
 //! element's values in a spelling of its own states that spelling as an [`ElementValues`] and
-//! renders through [`rendered_rewriting`], so the document is still walked once.
+//! renders through [`rendered_rewriting`], so the document is still walked once — or, where the
+//! store keeps the caller's own bytes rather than rendering them, through
+//! [`rewritten_values`], which writes that one element's values and nothing else.
 
 use super::json_document::minified;
 
@@ -115,6 +117,21 @@ pub fn rendered_rewriting(document: &str, values: &ElementValues<'_>) -> String 
     collapsed(&minified(document), &STRING_OR_ARRAY_ELEMENTS, Some(values))
 }
 
+/// `document` with the values of the one element `values` names written as it writes them, and
+/// every other byte exactly as it arrived — the whitespace between the tokens, the member order
+/// and the list form of every element included.
+///
+/// For a store that keeps the caller's own text (because the member carrying the document admits
+/// the whitespace a caller indents with) and still reports that one element's values in the
+/// service's own spelling. [`rendered_rewriting`] is the same spelling applied to the RENDERED
+/// form, for a store that renders.
+///
+/// Writing what was written changes nothing, so long as `written_as` is itself a fixed point.
+#[must_use]
+pub fn rewritten_values(document: &str, values: &ElementValues<'_>) -> String {
+    collapsed(document, &[], Some(values))
+}
+
 /// [`rendered`] collapsing only the elements `elements` names: the whitespace between the
 /// document's JSON tokens dropped, and a one-element array of one string written as that
 /// string for those elements alone.
@@ -129,8 +146,9 @@ pub fn rendered_collapsing(document: &str, elements: &[&str]) -> String {
 
 /// Every one-element array of one string an element of `elements` carries in `document`,
 /// written as that string, and every value of the element `values` names written as it writes
-/// it. `document` carries no whitespace between its tokens (it is [`minified`]'s output), so
-/// what is left to walk is the tokens themselves.
+/// it. The whitespace a document may carry BETWEEN its tokens is copied as it arrived and ends
+/// no element's reach, so the walk reads the same elements whether or not it was handed
+/// [`minified`]'s output.
 fn collapsed(document: &str, elements: &[&str], values: Option<&ElementValues<'_>>) -> String {
     let bytes = document.as_bytes();
     let mut out = String::with_capacity(bytes.len());
@@ -145,10 +163,11 @@ fn collapsed(document: &str, elements: &[&str], values: Option<&ElementValues<'_
         match bytes[at] {
             b'"' => {
                 let end = string_end(bytes, at);
-                // A string is an element NAME exactly when a `:` follows it. A literal that
-                // never closed (only reachable for text that is not JSON) names nothing.
+                // A string is an element NAME exactly when a `:` follows it, across any
+                // whitespace between the two. A literal that never closed (only reachable
+                // for text that is not JSON) names nothing.
                 let closed = end > at + 1 && bytes[end - 1] == b'"';
-                let names_an_element = closed && bytes.get(end) == Some(&b':');
+                let names_an_element = closed && next_token(bytes, end) == Some(b':');
                 let contents = closed.then(|| &document[at + 1..end - 1]);
                 // A string no `:` follows is a VALUE, so it is the one a store that writes
                 // this element's values writes.
@@ -164,12 +183,21 @@ fn collapsed(document: &str, elements: &[&str], values: Option<&ElementValues<'_
                 element = names_an_element.then(|| contents.unwrap_or_default());
                 at = end;
             }
-            b'[' if element.is_some_and(|name| elements.contains(&name)) => {
-                // `["value"]` is rendered as `"value"`. Anything else — an empty array,
-                // several elements, or one that is not a string — is copied as it is.
-                let single = (bytes.get(at + 1) == Some(&b'"'))
-                    .then(|| string_end(bytes, at + 1))
-                    .filter(|end| bytes.get(*end) == Some(&b']'));
+            b'[' if element
+                .is_some_and(|name| elements.contains(&name) || rewrites(values, name)) =>
+            {
+                // `["value"]` is rendered as `"value"` for an element the store COLLAPSES;
+                // one whose values are merely rewritten keeps the list the caller wrote.
+                // Anything else — an empty array, several elements, or one that is not a
+                // string — is copied as it is.
+                let single = element
+                    .is_some_and(|name| elements.contains(&name))
+                    .then(|| {
+                        (bytes.get(at + 1) == Some(&b'"'))
+                            .then(|| string_end(bytes, at + 1))
+                            .filter(|end| bytes.get(*end) == Some(&b']'))
+                    })
+                    .flatten();
                 match single {
                     Some(end) => {
                         // The one value the list held is this element's, so a store that
@@ -202,8 +230,10 @@ fn collapsed(document: &str, elements: &[&str], values: Option<&ElementValues<'_
                 let token = &document[start..at];
                 out.push_str(token);
                 // `:` is what introduces an element's value; every other token ends the
-                // name's reach, and the end of a list ends its own.
-                if token != ":" {
+                // name's reach, and the end of a list ends its own. Whitespace between the
+                // tokens is part of neither, so it ends nothing.
+                let significant = token.trim();
+                if !significant.is_empty() && significant != ":" {
                     element = None;
                 }
                 if token.contains(']') {
@@ -228,6 +258,21 @@ fn written_as(
         return None;
     }
     (values.written_as)(contents?)
+}
+
+/// Whether `values` writes the values of the element named `element`.
+fn rewrites(values: Option<&ElementValues<'_>>, element: &str) -> bool {
+    values.is_some_and(|values| values.element == element)
+}
+
+/// The first byte from `at` on that is not whitespace, or `None` past the end of the input:
+/// the next JSON token of a document that carries whitespace between them.
+fn next_token(bytes: &[u8], at: usize) -> Option<u8> {
+    bytes
+        .get(at..)?
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
 }
 
 /// Write one string value: its contents between the quotes a JSON string carries.
@@ -465,6 +510,97 @@ mod tests {
             assert_eq!(
                 again, actual,
                 "case {case:?}: the rendered form must be a fixed point, got {again:?}"
+            );
+        }
+    }
+
+    /// RULE: a store that keeps the caller's own text still writes the values of the one
+    /// element it spells itself, and changes nothing else about the document — the whitespace
+    /// between the tokens, the member order and every list form included.
+    #[test]
+    fn only_the_named_elements_values_move_when_the_text_is_kept() {
+        // The same spelling as above: an account named by its id alone is written as that
+        // account's root ARN, and every other value is left as it arrived.
+        let account_root = |value: &str| {
+            (value.len() == 12 && value.bytes().all(|digit| digit.is_ascii_digit()))
+                .then(|| format!("arn:aws:iam::{value}:root"))
+        };
+        let values = ElementValues {
+            element: "AWS",
+            written_as: &account_root,
+        };
+
+        // The rows differ along what the rule generalises over: how the submitted text is
+        // spaced (minified, spaced after each `:`, indented across lines), where the value
+        // sits (alone, in a one-element list, in a list of several), whether the spelling
+        // applies to the value at all, which element carries it (`Principal` and its
+        // complement `NotPrincipal`), and the same text under another element.
+        let rows: [Row; 11] = [
+            (
+                "an account named by its id alone",
+                r#"{"Statement":[{"Effect":"Allow","Principal":{"AWS":"210987654321"},"Action":"svc:A"}]}"#,
+                r#"{"Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::210987654321:root"},"Action":"svc:A"}]}"#,
+            ),
+            (
+                "a space after every ':' keeps its spacing",
+                r#"{"Principal": {"AWS": "210987654321"}, "Action": ["svc:A"]}"#,
+                r#"{"Principal": {"AWS": "arn:aws:iam::210987654321:root"}, "Action": ["svc:A"]}"#,
+            ),
+            (
+                "an indented document across lines",
+                "{\n\t\"Principal\" : {\n\t\t\"AWS\" : \"210987654321\"\n\t}\n}",
+                "{\n\t\"Principal\" : {\n\t\t\"AWS\" : \"arn:aws:iam::210987654321:root\"\n\t}\n}",
+            ),
+            (
+                "a one-element list keeps its list form",
+                r#"{"Principal":{"AWS":["210987654321"]}}"#,
+                r#"{"Principal":{"AWS":["arn:aws:iam::210987654321:root"]}}"#,
+            ),
+            (
+                "a spaced one-element list keeps its list form",
+                r#"{"Principal": {"AWS": ["210987654321"]}}"#,
+                r#"{"Principal": {"AWS": ["arn:aws:iam::210987654321:root"]}}"#,
+            ),
+            (
+                "a list of several, each written, spaced",
+                r#"{"Principal": {"AWS": ["210987654321", "arn:aws:iam::000000000000:root", "123456789012"]}}"#,
+                r#"{"Principal": {"AWS": ["arn:aws:iam::210987654321:root", "arn:aws:iam::000000000000:root", "arn:aws:iam::123456789012:root"]}}"#,
+            ),
+            (
+                "the complement element carries them too",
+                r#"{"NotPrincipal": {"AWS": "210987654321"}}"#,
+                r#"{"NotPrincipal": {"AWS": "arn:aws:iam::210987654321:root"}}"#,
+            ),
+            (
+                "values the spelling does not apply to",
+                r#"{"Principal": {"AWS": "*"}, "NotPrincipal": {"AWS": "arn:aws:iam::000000000000:user/u"}}"#,
+                r#"{"Principal": {"AWS": "*"}, "NotPrincipal": {"AWS": "arn:aws:iam::000000000000:user/u"}}"#,
+            ),
+            (
+                "the same text under another element",
+                r#"{"Statement": [{"Sid": "210987654321", "Principal": {"Service": "210987654321"}}]}"#,
+                r#"{"Statement": [{"Sid": "210987654321", "Principal": {"Service": "210987654321"}}]}"#,
+            ),
+            (
+                "the element's own name inside a string literal",
+                r#"{"Sid": "\"AWS\": \"210987654321\"", "Principal": {"AWS": "210987654321"}}"#,
+                r#"{"Sid": "\"AWS\": \"210987654321\"", "Principal": {"AWS": "arn:aws:iam::210987654321:root"}}"#,
+            ),
+            ("the empty text", "", ""),
+        ];
+
+        for (case, submitted, kept) in rows {
+            let actual = rewritten_values(submitted, &values);
+            assert_eq!(
+                actual, kept,
+                "case {case:?}: expected {kept:?}, got {actual:?}"
+            );
+            // Writing what was written changes nothing: a caller that puts back what it read
+            // stores the same bytes again.
+            let again = rewritten_values(&actual, &values);
+            assert_eq!(
+                again, actual,
+                "case {case:?}: the written form must be a fixed point, got {again:?}"
             );
         }
     }

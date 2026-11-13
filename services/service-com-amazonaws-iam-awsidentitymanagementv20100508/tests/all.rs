@@ -301,6 +301,8 @@ mod role_template_acquisition;
 mod role_template_version_reads;
 #[path = "all/role_trust_policy.rs"]
 mod role_trust_policy;
+#[path = "all/role_trust_policy_account_principals.rs"]
+mod role_trust_policy_account_principals;
 #[path = "all/saml_provider_deletion.rs"]
 mod saml_provider_deletion;
 #[path = "all/saml_provider_listing.rs"]

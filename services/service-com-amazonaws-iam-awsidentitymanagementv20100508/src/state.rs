@@ -31,6 +31,7 @@ pub mod reported_services;
 pub mod role_templates;
 pub mod simulated_decisions;
 pub mod ssh_public_keys;
+pub mod trust_policy;
 pub mod virtual_mfa_devices;
 mod managed_policy_catalog;
 pub use managed_policy_catalog::*;
@@ -45,6 +46,7 @@ pub use outbound_web_identity_federation::*;
 pub use reported_services::*;
 pub use role_templates::*;
 pub use ssh_public_keys::*;
+pub use trust_policy::*;
 pub use virtual_mfa_devices::*;
 
 /// IAM's default entity path: every entity whose request omits `Path` is created

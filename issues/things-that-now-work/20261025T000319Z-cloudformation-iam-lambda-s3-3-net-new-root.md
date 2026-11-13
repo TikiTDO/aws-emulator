@@ -49,3 +49,26 @@ Cause 3: AssertionError: Command failed (rc=254): cmd: ['aws','--output','json',
 3. Cause 2: CreateRole with a trust document whose principal is {"AWS": "<account-id>"}, then GetRole and inspect the returned principal.
 4. Cause 3: create a function, UpdateFunctionCode from S3, then `aws lambda invoke --function-name <fn>`.
 5. Re-replay the three check ids in trace_ids to confirm.
+
+## Resolution
+
+All three causes of this report are resolved:
+
+* Cause 1 — `CreateChangeSet` with `TemplateURL` resolves the object from this emulator's own
+  Amazon S3 and follows the `TemplateBody` path (`ops/create_change_set.rs`,
+  `state::template_url`). Replay: fixed.
+* Cause 2 — a trust policy's account principal named by the account's id alone is stored and
+  reported as that account's root-user ARN
+  (`state::trust_policy::stored_trust_policy`, applied by `CreateRole`,
+  `UpdateAssumeRolePolicy` and `AcquireRole`). Replay: the unit gets past that assertion.
+* Cause 3 — `Invoke` runs a `python3.12` deployment package in process
+  (`state::execution::python`). Replay: fixed.
+
+One leg of the `cdk-deploy-role-passrole-rejects-non-cfn-exec-role` check is still open and is
+NOT one of this report's causes: once the trust-principal assertion passes, that check goes on
+to require a bucket create made with a narrowly-granted role session to be refused. Amazon S3
+now authorizes a bucket's create and delete against the identity-based policies in force on the
+caller (`ops/create_bucket.rs`, `ops/delete_bucket.rs`), but the recorded session is still
+served, so the remaining divergence belongs to whichever caller class that gate deliberately
+does not bound (`service/request_authorization`'s module docs name them). It needs a report of
+its own.

@@ -303,12 +303,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             path,
             role_id: store.next_role_id(),
             create_date: crate::state::now(),
-            // Held as the plain JSON text the request carried, which is how this
-            // crate holds every policy document: `CreateServiceLinkedRole` stores a
-            // role's trust policy that way and `PutUserPolicy` an inline policy, and
-            // the readers hand a stored document back verbatim — so one form is
-            // stored and one form is reported, whichever operation wrote the role.
-            assume_role_policy_document: Some(input.assume_role_policy_document),
+            // Held as the plain JSON text the request carried — the one form this crate
+            // holds every policy document in, `CreateServiceLinkedRole`'s trust policy and
+            // `PutUserPolicy`'s inline policy included — apart from the ONE spelling IAM
+            // saves a policy's account principals in: an account named by its id alone is
+            // stored as that account's root-user ARN
+            // (`crate::state::stored_trust_policy`), so one form is stored and one form is
+            // reported, whichever operation wrote the role.
+            assume_role_policy_document: Some(crate::state::stored_trust_policy(
+                &input.assume_role_policy_document,
+            )),
             description: input.description,
             // "If you do not specify a value for this setting, the default value of
             // one hour is applied."

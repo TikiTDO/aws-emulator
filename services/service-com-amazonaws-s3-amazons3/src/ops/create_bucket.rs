@@ -2,6 +2,14 @@
 
 //! @op CreateBucket
 //!
+//! The create is AUTHORIZED before anything is written: "anonymous requests are never
+//! allowed to create buckets", and a signed one is judged against the identity-based policy
+//! documents in force on the principal it speaks for, under the `s3:CreateBucket` permission
+//! plus one further permission per header the request carries ([`authorized_actions`]) — so a
+//! principal no policy allows the create to is refused 403 `AccessDenied` and no bucket comes
+//! into being. The decision itself is the one every authorized call of this service takes
+//! ([`crate::service::request_authorization`]).
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -186,6 +194,72 @@ impl From<CreateBucketErrorModeled> for CreateBucketError {
     fn from(modeled: CreateBucketErrorModeled) -> Self {
         crate::scaffolded::Scaffolded::Modeled(modeled)
     }
+}
+
+/// The IAM action a general purpose bucket's create is authorized under: "in addition to the
+/// `s3:CreateBucket` permission, the following permissions are required in a policy when your
+/// `CreateBucket` request includes specific headers" (this operation's own documentation of
+/// its general purpose bucket permissions).
+const CREATE_BUCKET_ACTION: &str = "s3:CreateBucket";
+
+/// The action a DIRECTORY bucket's create is authorized under instead: "you must have the
+/// `s3express:CreateBucket` permission in an IAM identity-based policy instead of a bucket
+/// policy" (this operation's own documentation of its directory bucket permissions).
+const DIRECTORY_CREATE_BUCKET_ACTION: &str = "s3express:CreateBucket";
+
+/// The further action a create naming an ACL beyond the owner's own needs: "if you specify an
+/// access control list (ACL) and set it to `public-read`, `public-read-write`,
+/// `authenticated-read`, or if you explicitly specify any other custom ACLs, both
+/// `s3:CreateBucket` and `s3:PutBucketAcl` permissions are required. In your `CreateBucket`
+/// request, if you set the ACL to `private`, or if you don't specify any ACLs, only the
+/// `s3:CreateBucket` permission is required" (same documentation).
+const PUT_BUCKET_ACL_ACTION: &str = "s3:PutBucketAcl";
+
+/// One of the two further actions a create that enables Object Lock needs: "if you set
+/// `x-amz-bucket-object-lock-enabled` to true, the `s3:PutBucketObjectLockConfiguration` and
+/// `s3:PutBucketVersioning` permissions are required" (same documentation).
+const PUT_BUCKET_OBJECT_LOCK_CONFIGURATION_ACTION: &str = "s3:PutBucketObjectLockConfiguration";
+
+/// The other one. See [`PUT_BUCKET_OBJECT_LOCK_CONFIGURATION_ACTION`].
+const PUT_BUCKET_VERSIONING_ACTION: &str = "s3:PutBucketVersioning";
+
+/// The further action a create that names an Object Ownership setting needs: "if your
+/// `CreateBucket` request includes the `x-amz-object-ownership` header, then the
+/// `s3:PutBucketOwnershipControls` permission is required" (same documentation).
+const PUT_BUCKET_OWNERSHIP_CONTROLS_ACTION: &str = "s3:PutBucketOwnershipControls";
+
+/// Every IAM action this create has to be allowed, read off the request itself.
+///
+/// The create always needs the action that MINTS a bucket, and one further action per header
+/// it carries that configures the bucket as it comes into being — the permissions this
+/// operation's own documentation lists, each on its constant above. A create that names the
+/// canned `private` ACL, or none at all, needs no further action for its ACL: that is the ACL
+/// every bucket carries anyway.
+///
+/// A DIRECTORY bucket's create needs the one `s3express` action and no other, because "the
+/// permissions for ACLs, Object Lock, S3 Object Ownership, and S3 Block Public Access are not
+/// supported for directory buckets" (same documentation).
+fn authorized_actions(
+    directory_bucket: bool,
+    names_an_acl_beyond_the_owners: bool,
+    enables_object_lock: bool,
+    names_object_ownership: bool,
+) -> Vec<&'static str> {
+    if directory_bucket {
+        return vec![DIRECTORY_CREATE_BUCKET_ACTION];
+    }
+    let mut actions = vec![CREATE_BUCKET_ACTION];
+    if names_an_acl_beyond_the_owners {
+        actions.push(PUT_BUCKET_ACL_ACTION);
+    }
+    if enables_object_lock {
+        actions.push(PUT_BUCKET_OBJECT_LOCK_CONFIGURATION_ACTION);
+        actions.push(PUT_BUCKET_VERSIONING_ACTION);
+    }
+    if names_object_ownership {
+        actions.push(PUT_BUCKET_OWNERSHIP_CONTROLS_ACTION);
+    }
+    actions
 }
 
 /// The `CreateBucket` operation.
@@ -378,6 +452,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the one a read of an ACL-disabled bucket still reports — so a create naming the
         // `private` canned ACL beside the enforced setting is served.
         let grants = requested_grants(&input, &region)?;
+        // Whether this create names an ACL BEYOND the one every bucket carries — the owner's
+        // own `FULL_CONTROL`, which is what the canned `private` ACL stands for — which is
+        // what decides whether the create needs the ACL permission as well
+        // ([`authorized_actions`]).
+        let names_an_acl_beyond_the_owners = grants
+            .as_deref()
+            .is_some_and(|grants| grants != crate::state::default_acl_grants());
         // The TAGS this create asks the bucket to come into being with: "an array of tags
         // that you can apply to the bucket that you're creating"
         // (`CreateBucketConfiguration$Tags`). Judged against the BUCKET's own published tag
@@ -385,16 +466,60 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // tag set by — BEFORE the bucket is recorded, so a create carrying a tag set S3 does
         // not hold leaves nothing behind.
         let tags = requested_tags(configuration, crate::state::tag_key_origin(ctx))?;
-        if ownership == crate::state::BUCKET_OWNER_ENFORCED
-            && grants
-                .as_deref()
-                .is_some_and(|grants| grants != crate::state::default_acl_grants())
-        {
+        if ownership == crate::state::BUCKET_OWNER_ENFORCED && names_an_acl_beyond_the_owners {
             return Err(crate::scaffolded::Scaffolded::unmodeled(
                 crate::state::INVALID_BUCKET_ACL_WITH_OBJECT_OWNERSHIP_CODE,
                 crate::state::INVALID_ARGUMENT_STATUS,
                 crate::state::INVALID_BUCKET_ACL_WITH_OBJECT_OWNERSHIP_MESSAGE,
             ));
+        }
+
+        // WHO is asking, and whether the policies in force on it leave this create to it.
+        // "Anonymous requests are never allowed to create buckets": a signed request is
+        // judged against the identity-based documents in force on the principal it speaks
+        // for, under every action this particular create needs
+        // ([`authorized_actions`]), the way every other authorized call of this service is
+        // judged (`crate::service::request_authorization` carries IAM's own order). No
+        // bucket exists yet, so no resource policy stands beside those documents, and a
+        // create no policy allows falls to IAM's implicit deny.
+        //
+        // The caller is resolved BEFORE the store is locked, so the STS and IAM stores are
+        // never reached while this service's own guard is held, and the decision is taken
+        // before anything is written, so a refused create leaves no bucket behind.
+        let caller = crate::service::request_authorization::request_caller(&*self.engine, ctx);
+        let resource = match placement.is_some() {
+            true => crate::state::directory_bucket_arn(&region, &input.bucket),
+            false => crate::state::bucket_arn(&input.bucket),
+        };
+        // The condition context the decision is taken under carries the canned ACL this
+        // create names, which is a published S3 request-header condition key
+        // (`s3:x-amz-acl`): a grant whose clause is written over the ACL a create may set
+        // decides for this request rather than standing undecided. The other write members
+        // of that context belong to an OBJECT write and are absent from a create.
+        let conditions = crate::service::authorization::ObjectWriteContext {
+            acl: input.acl.as_deref(),
+            ..Default::default()
+        }
+        .conditions();
+        for action in authorized_actions(
+            placement.is_some(),
+            names_an_acl_beyond_the_owners,
+            input.object_lock_enabled_for_bucket == Some(true),
+            input.object_ownership.is_some(),
+        ) {
+            if let Some(message) = crate::service::request_authorization::denial(
+                &caller,
+                None,
+                action,
+                &resource,
+                &conditions,
+            ) {
+                return Err(crate::scaffolded::Scaffolded::unmodeled(
+                    crate::state::ACCESS_DENIED_CODE,
+                    crate::state::ACCESS_DENIED_STATUS,
+                    message,
+                ));
+            }
         }
 
         let mut store = state.lock();

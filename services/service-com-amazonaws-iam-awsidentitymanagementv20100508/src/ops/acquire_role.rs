@@ -464,11 +464,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // "The trust policy template that grants an entity permission to assume roles that
         // you create from this template": rendered, then held to what a trust policy is —
         // the shared rule every operation taking a policy document applies, worded with
-        // IAM's own trust-policy sentences, exactly as `CreateRole` words it.
+        // IAM's own trust-policy sentences, exactly as `CreateRole` words it — and stored in
+        // the form IAM saves a trust policy's account principals in, so a role acquired from
+        // a template reports its principals the same way one created by hand does
+        // (`crate::state::stored_trust_policy`).
         let assume_role_policy_document = version
             .assume_role_policy_document_template
             .as_deref()
-            .map(render);
+            .map(render)
+            .map(|document| crate::state::stored_trust_policy(&document));
         if let Some(defect) = assume_role_policy_document
             .as_deref()
             .and_then(crate::state::policy_document_defect)
