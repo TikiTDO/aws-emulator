@@ -36,13 +36,16 @@ const DELIVERY_DEADLINE: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// The `lastErrorCode` the error output names for a record the conversion could not read.
-const PARSE_ERROR: &str = "DataFormatConversion.ParseError";
+///
+/// `pub(crate)`, like the Glue helpers below, so the sibling suite over the serializer's own
+/// parameters reads the error output by the same name rather than re-spelling it.
+pub(crate) const PARSE_ERROR: &str = "DataFormatConversion.ParseError";
 
 /// The `lastErrorCode` the error output names when the bound schema could not be read.
 const INVALID_SCHEMA: &str = "DataFormatConversion.InvalidSchema";
 
 /// What `!{firehose:error-output-type}` expands to for a record the conversion failed on.
-const FAILED_OUTPUT_TYPE: &str = "format-conversion-failed";
+pub(crate) const FAILED_OUTPUT_TYPE: &str = "format-conversion-failed";
 
 /// One record that must convert: the JSON document a producer puts, and the row it must
 /// land as — every column rendered as text, so one table serves every column type.
@@ -524,7 +527,7 @@ fn rendered(field: &Field) -> String {
 
 /// Every key under `prefix` once at least `want` of them are there, or a failure naming
 /// `case` once [`DELIVERY_DEADLINE`] has passed.
-async fn delivered(
+pub(crate) async fn delivered(
     emulator: &Emulator,
     case: &str,
     bucket: &str,
@@ -546,7 +549,7 @@ async fn delivered(
 }
 
 /// Create the Glue database the bound tables live in, through Glue's own wire.
-async fn create_database(emulator: &Emulator, database: &str) {
+pub(crate) async fn create_database(emulator: &Emulator, database: &str) {
     let (status, answered) = emulator
         .json_rpc(
             "glue",
@@ -562,7 +565,7 @@ async fn create_database(emulator: &Emulator, database: &str) {
 }
 
 /// Create the Glue table whose columns the conversion reads, through Glue's own wire.
-async fn create_table(
+pub(crate) async fn create_table(
     emulator: &Emulator,
     database: &str,
     table: &str,

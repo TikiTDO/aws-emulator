@@ -85,6 +85,8 @@ mod not_found_message_name_space;
 mod opensearch_destination_delivery;
 #[path = "all/opensearch_fgac_destination_delivery.rs"]
 mod opensearch_fgac_destination_delivery;
+#[path = "all/parquet_serializer_parameters.rs"]
+mod parquet_serializer_parameters;
 #[path = "all/processor_parameters.rs"]
 mod processor_parameters;
 #[path = "all/refusal_messages.rs"]
