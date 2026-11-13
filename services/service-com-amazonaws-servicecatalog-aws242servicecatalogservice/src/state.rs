@@ -2,6 +2,10 @@
 
 //! Engine state for the com-amazonaws-servicecatalog-aws242servicecatalogservice service.
 
+mod cloudformation;
+
+pub use cloudformation::*;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::SystemTime;
 
@@ -15,10 +19,11 @@ pub use principal_identity::{
 
 use crate::ops::types::{
     ConstraintDetail, ConstraintSummary, PortfolioDetail, ProductViewDetail, ProductViewSummary,
-    ProvisionedProductAttribute, ProvisionedProductDetail,
+    ProvisionedProductAttribute, ProvisionedProductDetail, ProvisionedProductPlanDetails,
     ProvisioningArtifact as ModelledProvisioningArtifact, ProvisioningArtifactDetail,
     ProvisioningArtifactSummary, RecordDetail, RecordTag, ResourceDetail, ServiceActionDetail,
     ServiceActionSummary, SourceConnectionDetail, Tag, TagOptionDetail,
+    UpdateProvisioningParameter,
 };
 
 /// The `ResourceType` naming a portfolio, one of the two kinds a TagOption can be
@@ -710,6 +715,19 @@ pub struct ProvisionedProduct {
     /// exists no longer, which is the clock's doing and not any caller's
     /// ([`ProvisionedProduct::is_terminated`]).
     pub terminated_at: Option<SystemTime>,
+    /// Whether a PLAN brought this provisioned product into existence, rather than a
+    /// provisioning request.
+    ///
+    /// Such a provisioned product has had no operation performed on it — "the plan
+    /// operations were performed to provision a new product, but resources have not yet
+    /// been created" — which is what makes it
+    /// [`PROVISIONED_PRODUCT_STATUS_PLAN_IN_PROGRESS`] until one is
+    /// ([`ComAmazonawsServicecatalogAws242servicecatalogserviceState::provisioned_product_status`]).
+    /// It is stored rather than inferred from an empty history, because a history can
+    /// also be empty for a provisioned product whose records the store evicted to stay
+    /// within [`MAX_RECORDS`], and that provisioned product's last operation did
+    /// complete.
+    pub plan_created: bool,
 }
 
 impl ProvisionedProduct {
@@ -722,6 +740,121 @@ impl ProvisionedProduct {
     /// its name is free for a later provisioning.
     pub fn is_terminated(&self, now: SystemTime) -> bool {
         self.terminated_at.is_some_and(|settled| now >= settled)
+    }
+}
+
+/// A persisted plan — "a plan includes the list of resources to be created (when
+/// provisioning a new product) or modified (when updating a provisioned product) when
+/// the plan is executed", which `CreateProvisionedProductPlan` mints and
+/// `DescribeProvisionedProductPlan` reports.
+///
+/// A plan belongs to ONE provisioned product — "you can create one plan for each
+/// provisioned product" — so it names that provisioned product and every member a
+/// response reports about it is read from this record or from the provisioned product
+/// it names, never from the request that read it.
+#[derive(Debug, Clone)]
+pub struct ProvisionedProductPlan {
+    /// The minted plan id (`plan-…`), also this record's key in
+    /// [`ComAmazonawsServicecatalogAws242servicecatalogserviceState::provisioned_product_plans`].
+    pub id: String,
+    /// `PlanName`, as the request asked for it.
+    pub name: String,
+    /// A `ProvisionedProductPlanType` value — the model declares exactly
+    /// `CLOUDFORMATION` (`smithy_query query="shape"
+    /// shape="ProvisionedProductPlanType"`).
+    pub plan_type: String,
+    /// The provisioned product this plan changes: the one the request named, or the
+    /// one the plan itself created, which stays in
+    /// [`PROVISIONED_PRODUCT_STATUS_PLAN_IN_PROGRESS`] until the plan is executed.
+    pub provisioned_product_id: String,
+    /// The product the plan provisions a version of.
+    pub product_id: String,
+    /// The product version the plan provisions.
+    pub provisioning_artifact_id: String,
+    /// The launch path the plan provisions through: the id of the portfolio that path
+    /// is the product's relationship with, resolved exactly as a provisioning request
+    /// resolves it.
+    pub path_id: String,
+    /// The SNS topic ARNs the request passed, in request order — "passed to
+    /// CloudFormation", which takes them as an ordered list.
+    pub notification_arns: Vec<String>,
+    /// The provisioning parameters the request carried, verbatim and in request
+    /// order: the list `ProvisionedProductPlanDetails$ProvisioningParameters` reports
+    /// back. A parameter carries `UsePreviousValue` beside its key and value, so the
+    /// set is not a key -> value map.
+    pub provisioning_parameters: Vec<UpdateProvisioningParameter>,
+    /// Tag key -> tag value, as the request asked for them. A map rather than a list
+    /// because a resource holds each tag key once, exactly as a provisioned product's
+    /// tags are stored.
+    pub tags: BTreeMap<String, String>,
+    /// Creation instant, minted once when the plan was created. Also the instant the
+    /// plan record was last written: nothing in this service updates a stored plan
+    /// after it is created — the status it reports lives in the change set behind it —
+    /// so this is the "UTC time stamp when the plan was last updated" too.
+    pub created_time: SystemTime,
+    /// The `IdempotencyToken` the request that created this plan carried.
+    pub idempotency_token: String,
+    /// The Region the change set behind this plan was created in — the Region the
+    /// request that created the plan was signed for.
+    ///
+    /// A change set belongs to the Region it was made in, so the plan is read back
+    /// there: the Region of the request that READS a plan does not move the change set
+    /// the plan is.
+    pub region: String,
+    /// The CloudFormation change set this plan IS: the one the create asked for, or the
+    /// reason CloudFormation could not plan the change at all.
+    ///
+    /// `None` only between the instant the plan is stored and the instant the create
+    /// records what CloudFormation answered — a plan whose change set is still being
+    /// asked for, which is a plan still being created.
+    pub change_set: Option<PlanChangeSet>,
+}
+
+/// What CloudFormation answered when it was asked to compute the change set a plan is.
+#[derive(Debug, Clone)]
+pub enum PlanChangeSet {
+    /// The id of the change set CloudFormation is computing, or has computed: the plan's
+    /// status and its resource changes are read from it
+    /// ([`plan_report`]).
+    Created(String),
+    /// CloudFormation could not plan the change, and this is the reason it gave — which
+    /// is what the plan reports as its status message.
+    Refused(String),
+}
+
+/// `ProvisionedProductPlanStatus`'s non-terminal value for a plan whose creation is
+/// still in flight (`smithy_query query="shape"
+/// shape="ProvisionedProductPlanStatus"`: `CREATE_IN_PROGRESS` | `CREATE_SUCCESS` |
+/// `CREATE_FAILED` | `EXECUTE_IN_PROGRESS` | `EXECUTE_SUCCESS` | `EXECUTE_FAILED`).
+pub const PLAN_STATUS_CREATE_IN_PROGRESS: &str = "CREATE_IN_PROGRESS";
+
+/// `ProvisionedProductPlanStatus`'s terminal value for a plan that was created: the
+/// plan can be described and executed from this status on.
+pub const PLAN_STATUS_CREATE_SUCCESS: &str = "CREATE_SUCCESS";
+
+/// `ProvisionedProductPlanStatus`'s terminal value for a plan that could not be
+/// created: the change set behind it failed, or could not be computed at all, and the
+/// plan's status message is the reason CloudFormation gave.
+pub const PLAN_STATUS_CREATE_FAILED: &str = "CREATE_FAILED";
+
+/// The resource kind a plan is, as its not-found names it.
+pub const KIND_PROVISIONED_PRODUCT_PLAN: &str = "Plan";
+
+/// The `ProvisionedProductStatus` values an EXISTING provisioned product must be in
+/// for a plan to be created for it: "to create a plan for an existing provisioned
+/// product, the product status must be AVAILABLE or TAINTED"
+/// (`smithy_query query="doc" shape="CreateProvisionedProductPlan"`). Both are the
+/// stable statuses the status member documents; the transitive ones are what a plan
+/// cannot be created against.
+pub const PLAN_READY_PROVISIONED_PRODUCT_STATUSES: &[&str] = &[
+    PROVISIONED_PRODUCT_STATUS_AVAILABLE,
+    PROVISIONED_PRODUCT_STATUS_TAINTED,
+];
+
+impl ProvisionedProductPlan {
+    /// The stored tags as the modelled `Tags` list, in key order.
+    pub fn tag_list(&self) -> Vec<Tag> {
+        tag_list(&self.tags)
     }
 }
 
@@ -791,6 +924,20 @@ pub const PROVISIONED_PRODUCT_STATUS_UNDER_CHANGE: &str = "UNDER_CHANGE";
 /// `ProvisionedProductStatus`'s stable value: "ready to perform any operation. The
 /// most recent operation succeeded and completed".
 pub const PROVISIONED_PRODUCT_STATUS_AVAILABLE: &str = "AVAILABLE";
+
+/// `ProvisionedProductStatus`'s other stable value, which the model documents as
+/// "ready to perform any operation. The stack has completed the requested operation
+/// but is not exactly what was requested" — a status nothing in this emulator reaches,
+/// named here because a plan may be created for a provisioned product in it
+/// ([`PLAN_READY_PROVISIONED_PRODUCT_STATUSES`]).
+pub const PROVISIONED_PRODUCT_STATUS_TAINTED: &str = "TAINTED";
+
+/// `ProvisionedProductStatus`'s other transitive value, which the model documents as
+/// "the plan operations were performed to provision a new product, but resources have
+/// not yet been created. After reviewing the list of resources to be created, execute
+/// the plan" — the status of a provisioned product a plan created and nothing has
+/// executed yet.
+pub const PROVISIONED_PRODUCT_STATUS_PLAN_IN_PROGRESS: &str = "PLAN_IN_PROGRESS";
 
 /// How long after the request that starts it a provisioning operation stays in
 /// flight.
@@ -1090,6 +1237,15 @@ pub struct ComAmazonawsServicecatalogAws242servicecatalogserviceState {
     /// answered. A `BTreeMap` so the walk the eviction in [`Self::remember_product_copy`]
     /// makes is deterministic. Bounded by [`MAX_PRODUCT_COPIES`].
     pub product_copies: BTreeMap<String, ProductCopy>,
+    /// Every created, not-yet-deleted plan, keyed by plan id. A `BTreeMap` so every
+    /// walk over the set has one stable order.
+    ///
+    /// A plan whose provisioned product no longer exists is dropped with it
+    /// ([`Self::forget_terminated_provisioned_products`]), so the set is bounded by
+    /// [`MAX_PROVISIONED_PRODUCTS`]: a provisioned product carries at most one plan.
+    /// Read it through [`Self::provisioned_product_plan`], which skips a plan whose
+    /// provisioned product the clock has already removed.
+    pub provisioned_product_plans: BTreeMap<String, ProvisionedProductPlan>,
     /// `CreatePortfolio` idempotency: `IdempotencyToken` -> portfolio id, so a
     /// repeated create replays the first one instead of minting a second portfolio.
     ///
@@ -1120,6 +1276,11 @@ pub struct ComAmazonawsServicecatalogAws242servicecatalogserviceState {
     /// provisioning a second product. Private and pruned on every write, exactly as
     /// the maps above, so it is bounded by [`MAX_PROVISIONED_PRODUCTS`].
     provision_idempotency: HashMap<String, String>,
+    /// `CreateProvisionedProductPlan` idempotency: `IdempotencyToken` -> plan id, so a
+    /// repeated create replays the plan the first one minted instead of planning a
+    /// second change. Private and pruned on every write, exactly as the maps above,
+    /// so it holds at most one entry per stored plan.
+    plan_idempotency: HashMap<String, String>,
     /// Counter behind every `next_*_id`. Deterministic, so a fresh
     /// emulator mints the same id sequence every run.
     pub next_id_seed: u64,
@@ -1360,44 +1521,167 @@ impl ComAmazonawsServicecatalogAws242servicecatalogserviceState {
     /// asked — so the store does not keep an entry for a resource that no longer
     /// exists. Called by the operations that WRITE the store; a read reports the same
     /// set without it ([`Self::live_provisioned_products`]).
+    ///
+    /// A plan plans the change of ONE provisioned product, so a plan whose provisioned
+    /// product this drops is dropped with it: nothing is left planning a change to a
+    /// resource that no longer exists.
     pub fn forget_terminated_provisioned_products(&mut self, now: SystemTime) {
         self.provisioned_products
             .retain(|_, provisioned| !provisioned.is_terminated(now));
+        let provisioned = &self.provisioned_products;
+        self.provisioned_product_plans
+            .retain(|_, plan| provisioned.contains_key(&plan.provisioned_product_id));
+        let plans = &self.provisioned_product_plans;
+        self.plan_idempotency.retain(|_, id| plans.contains_key(id));
+    }
+
+    /// The plan `plan_id` addresses, or `None` when this account holds none by that id
+    /// at `now` — including a plan whose provisioned product has been terminated, which
+    /// plans the change of a resource that no longer exists.
+    pub fn provisioned_product_plan(
+        &self,
+        plan_id: &str,
+        now: SystemTime,
+    ) -> Option<&ProvisionedProductPlan> {
+        let plan = self.provisioned_product_plans.get(plan_id)?;
+        self.provisioned_product(&plan.provisioned_product_id, now)
+            .map(|_| plan)
+    }
+
+    /// The plan of the provisioned product `provisioned_product_id` names, or `None`
+    /// for one no plan has been created for: "you can create one plan for each
+    /// provisioned product", so there is at most one.
+    pub fn plan_of_provisioned_product(
+        &self,
+        provisioned_product_id: &str,
+        now: SystemTime,
+    ) -> Option<&ProvisionedProductPlan> {
+        self.provisioned_product_plans
+            .values()
+            .find(|plan| plan.provisioned_product_id == provisioned_product_id)
+            .filter(|plan| self.provisioned_product(&plan.provisioned_product_id, now).is_some())
+    }
+
+    /// The plan a create carrying `token` already made, if that plan is still stored.
+    /// `None` for an unseen token, or one whose plan is gone — which is no longer a
+    /// replay.
+    pub fn replayed_provisioned_product_plan(
+        &self,
+        token: &str,
+        now: SystemTime,
+    ) -> Option<&ProvisionedProductPlan> {
+        self.provisioned_product_plan(self.plan_idempotency.get(token)?, now)
+    }
+
+    /// Remember a `CreateProvisionedProductPlan` idempotency token so a repeat replays
+    /// `plan_id`, bounded exactly as [`Self::remember_portfolio_token`] is: every entry
+    /// whose plan is no longer stored is dropped first, so the map holds at most one
+    /// entry per stored plan.
+    pub fn remember_provisioned_product_plan_token(&mut self, token: String, plan_id: String) {
+        let plans = &self.provisioned_product_plans;
+        self.plan_idempotency.retain(|_, id| plans.contains_key(id));
+        self.plan_idempotency.insert(token, plan_id);
+    }
+
+    /// `plan` as the modelled `ProvisionedProductPlanDetails`, EXCEPT the two members
+    /// the change set behind it owns: its `Status` and that status's message, which the
+    /// caller fills in from [`plan_report`] — the status of a plan is the status of the
+    /// change set it is, and reading it is a call into CloudFormation rather than a read
+    /// of this store.
+    ///
+    /// Every other member comes from the stored plan or from the provisioned product it
+    /// plans the change of, so the create and the describe of one plan cannot report it
+    /// two ways.
+    pub fn provisioned_product_plan_details(
+        &self,
+        plan: &ProvisionedProductPlan,
+    ) -> ProvisionedProductPlanDetails {
+        ProvisionedProductPlanDetails {
+            created_time: Some(reported_time(plan.created_time)),
+            path_id: Some(plan.path_id.clone()),
+            product_id: Some(plan.product_id.clone()),
+            plan_name: Some(plan.name.clone()),
+            plan_id: Some(plan.id.clone()),
+            provision_product_id: Some(plan.provisioned_product_id.clone()),
+            provision_product_name: self.planned_provisioned_product_name(plan),
+            plan_type: Some(plan.plan_type.clone()),
+            provisioning_artifact_id: Some(plan.provisioning_artifact_id.clone()),
+            status: None,
+            // Nothing updates a stored plan after it is created, so the instant it was
+            // last updated is the instant it was created.
+            updated_time: Some(reported_time(plan.created_time)),
+            notification_arns: Some(plan.notification_arns.clone()),
+            provisioning_parameters: Some(plan.provisioning_parameters.clone()),
+            tags: Some(plan.tag_list()),
+            status_message: None,
+        }
+    }
+
+    /// The name of the provisioned product `plan` plans the change of.
+    pub fn planned_provisioned_product_name(
+        &self,
+        plan: &ProvisionedProductPlan,
+    ) -> Option<String> {
+        self.provisioned_products
+            .get(&plan.provisioned_product_id)
+            .map(|provisioned| provisioned.name.clone())
     }
 
     /// Store the record of one request operation, keeping the map at [`MAX_RECORDS`].
     ///
     /// Every record goes through here, so the one place a record is stored is also the
-    /// one place the store is bounded: the record that is evicted to make room is the
-    /// oldest one whose provisioned product the store no longer holds, which is why a
-    /// caller who provisions and terminates repeatedly cannot grow this map while every
-    /// record of a provisioned product that still exists stays readable.
+    /// one place the store is bounded, and the cap holds whatever the store contains:
+    /// the record evicted to make room is the oldest one whose provisioned product the
+    /// store no longer holds, so a caller who provisions and terminates repeatedly
+    /// cannot grow this map while every record of a provisioned product that still
+    /// exists stays readable — and once there is no such record left, the oldest record
+    /// of all is evicted, so a caller operating on ONE provisioned product forever
+    /// cannot grow it either.
     pub fn remember_record(&mut self, record: Record) {
         while self.records.len() >= MAX_RECORDS {
+            let provisioned = &self.provisioned_products;
+            let collectable =
+                |record: &Record| !provisioned.contains_key(&record.provisioned_product_id);
             let evictable = self
                 .records
                 .values()
-                .filter(|stored| {
-                    !self
-                        .provisioned_products
-                        .contains_key(&stored.provisioned_product_id)
-                })
                 .min_by(|left, right| {
-                    left.created_time
-                        .cmp(&right.created_time)
+                    // A record whose provisioned product is gone goes first (`false`
+                    // sorts before `true`, so the sides are compared the other way
+                    // round), then the oldest, then by id so the choice is
+                    // deterministic.
+                    collectable(right)
+                        .cmp(&collectable(left))
+                        .then_with(|| left.created_time.cmp(&right.created_time))
                         .then_with(|| left.id.cmp(&right.id))
                 })
                 .map(|stored| stored.id.clone());
             match evictable {
-                Some(id) => {
-                    self.records.remove(&id);
-                }
-                // Every stored record belongs to a provisioned product the store still
-                // holds, and those are bounded by [`MAX_PROVISIONED_PRODUCTS`].
+                Some(id) => self.forget_record(&id),
+                // The store is empty, so there is nothing to evict and nothing the cap
+                // has to hold back.
                 None => break,
             }
         }
         self.records.insert(record.id.clone(), record);
+    }
+
+    /// Drop one stored record, and the reference to it the provisioned product it
+    /// describes holds.
+    ///
+    /// A provisioned product's history names only records the store still holds, so
+    /// that history is bounded by [`MAX_RECORDS`] along with the store itself: evicting
+    /// a record is what keeps both from growing.
+    fn forget_record(&mut self, record_id: &str) {
+        let Some(record) = self.records.remove(record_id) else {
+            return;
+        };
+        if let Some(provisioned) = self
+            .provisioned_products
+            .get_mut(&record.provisioned_product_id)
+        {
+            provisioned.record_ids.retain(|id| id != record_id);
+        }
     }
 
     /// The records of the operations performed on `provisioned`, oldest first.
@@ -1428,6 +1712,11 @@ impl ComAmazonawsServicecatalogAws242servicecatalogserviceState {
     /// `provisioned`'s `ProvisionedProductStatus` at `now`: the transitive one while
     /// the operation its last record describes is still in flight, the stable one once
     /// the clock owes that record's completion.
+    ///
+    /// A provisioned product a PLAN created and nothing has performed an operation on
+    /// yet reports the transitive status the model documents for exactly that:
+    /// [`PROVISIONED_PRODUCT_STATUS_PLAN_IN_PROGRESS`]
+    /// ([`ProvisionedProduct::plan_created`]).
     pub fn provisioned_product_status(
         &self,
         provisioned: &ProvisionedProduct,
@@ -1437,7 +1726,11 @@ impl ComAmazonawsServicecatalogAws242servicecatalogserviceState {
             Some(last) if last.status(now) == RECORD_STATUS_CREATED => {
                 PROVISIONED_PRODUCT_STATUS_UNDER_CHANGE
             }
-            _ => PROVISIONED_PRODUCT_STATUS_AVAILABLE,
+            Some(_) => PROVISIONED_PRODUCT_STATUS_AVAILABLE,
+            None if provisioned.plan_created => PROVISIONED_PRODUCT_STATUS_PLAN_IN_PROGRESS,
+            // A provisioned product with no readable history is one whose records the
+            // store has evicted: its last operation completed.
+            None => PROVISIONED_PRODUCT_STATUS_AVAILABLE,
         }
     }
 
@@ -1701,6 +1994,16 @@ impl ComAmazonawsServicecatalogAws242servicecatalogserviceState {
         loop {
             let id = self.mint_id("pp");
             if !self.provisioned_products.contains_key(&id) {
+                return id;
+            }
+        }
+    }
+
+    /// Mint an unused plan id (`plan-…`), the same shape as a portfolio id.
+    pub fn next_provisioned_product_plan_id(&mut self) -> String {
+        loop {
+            let id = self.mint_id("plan");
+            if !self.provisioned_product_plans.contains_key(&id) {
                 return id;
             }
         }

@@ -1,16 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeProvisionedProductPlan
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeProvisionedProductPlan`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeProvisionedProductPlan::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
-//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -150,18 +140,106 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeProvisionedProductPlan` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeProvisionedProductPlanErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        let state = crate::state::service_state(&*self.engine)
+            .ok_or_else(crate::state::state_unavailable)?;
+        let now = std::time::SystemTime::now();
+
+        // A pure read: this operation reports the plan `CreateProvisionedProductPlan`
+        // stored and the change set behind it, and writes nothing, so a later caller
+        // sees exactly what this one saw.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeProvisionedProductPlan"))
+        // The store's lock is released before the change set is read, so no lock is
+        // held across an await.
+        let read = {
+            let state = state.lock();
+            state
+                .provisioned_product_plan(&input.plan_id, now)
+                .map(|plan| {
+                    (
+                        state.provisioned_product_plan_details(plan),
+                        plan.change_set.clone(),
+                        // The change set is read in the Region the plan was created in,
+                        // which is where it was made: the Region THIS request was
+                        // signed for does not move it.
+                        plan.region.clone(),
+                    )
+                })
+        };
+        // The plan is addressed by id alone. A plan whose provisioned product has been
+        // terminated plans the change of a resource that no longer exists, so it does
+        // not resolve either and takes exactly this refusal.
+        let (mut details, change_set, region) = match read {
+            Some(read) => read,
+            None => {
+                return Err(
+                    DescribeProvisionedProductPlanErrorModeled::ResourceNotFoundException(
+                        ResourceNotFoundException {
+                            message: Some(crate::state::not_found_message(
+                                crate::state::KIND_PROVISIONED_PRODUCT_PLAN,
+                                &input.plan_id,
+                            )),
+                        },
+                    )
+                    .into(),
+                )
+            }
+        };
+
+        // `PageToken` pages over the plan's resource changes: this service's own opaque
+        // cursor, the POSITION in that list the next page resumes at. Anything else is
+        // a bad parameter — the same refusal every paged read in this service answers.
+        let resume_at = match input.page_token.as_deref().filter(|token| !token.is_empty()) {
+            Some(token) => match crate::state::decode_page_cursor(token)
+                .and_then(|cursor| cursor.parse::<usize>().ok())
+            {
+                Some(position) => position,
+                None => {
+                    return Err(
+                        DescribeProvisionedProductPlanErrorModeled::InvalidParametersException(
+                            InvalidParametersException {
+                                message: Some("PageToken is not a valid page token.".to_string()),
+                            },
+                        )
+                        .into(),
+                    )
+                }
+            },
+            None => 0,
+        };
+
+        // "Information about the resource changes that will occur when the plan is
+        // executed": the plan IS a CloudFormation change set over the product version's
+        // template, so its status, that status's message and its resource changes are
+        // read from that change set rather than derived here. The read is dispatched IN
+        // PROCESS, by the framework's callback connector, to the CloudFormation mounted
+        // beside this service: no socket is opened and no host name is resolved
+        // (`crate::state::in_process_cloudformation`).
+        let report = crate::state::plan_report(ctx, &region, change_set.as_ref()).await;
+        details.status = Some(report.status);
+        details.status_message = report.status_message;
+
+        // `PageSize` is modelled `0..20` with a default of 0, and 0 asks for no
+        // caller-imposed bound: the whole remaining list is reported.
+        let page_size = if input.page_size > 0 {
+            input.page_size as usize
+        } else {
+            report.resource_changes.len()
+        };
+        let total = report.resource_changes.len();
+        let resource_changes: Vec<_> = report
+            .resource_changes
+            .into_iter()
+            .skip(resume_at)
+            .take(page_size)
+            .collect();
+        let reported_through = resume_at.saturating_add(resource_changes.len());
+        let next_page_token = (reported_through < total)
+            .then(|| crate::state::encode_page_cursor(&reported_through.to_string()));
+
+        Ok(DescribeProvisionedProductPlanOutput {
+            provisioned_product_plan_details: Some(details),
+            resource_changes: Some(resource_changes),
+            next_page_token,
+        })
     }
 }

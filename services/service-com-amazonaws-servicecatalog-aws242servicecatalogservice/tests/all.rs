@@ -31,6 +31,8 @@ mod portfolio_principal_identifiers;
 mod portfolios_for_product;
 #[path = "all/product_copies.rs"]
 mod product_copies;
+#[path = "all/provisioned_product_plans.rs"]
+mod provisioned_product_plans;
 #[path = "all/provisioned_product_termination.rs"]
 mod provisioned_product_termination;
 #[path = "all/provisioned_products.rs"]

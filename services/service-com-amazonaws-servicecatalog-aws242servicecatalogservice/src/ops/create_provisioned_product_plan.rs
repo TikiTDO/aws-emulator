@@ -1,16 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateProvisionedProductPlan
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateProvisionedProductPlan`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateProvisionedProductPlan::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
-//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -109,6 +99,10 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+// The sentences this service refuses an unresolved resource with, shared with every
+// other operation that resolves the same launch.
+use crate::state::{KIND_LAUNCH_PATH, KIND_PROVISIONING_ARTIFACT};
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -179,18 +173,322 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateProvisionedProductPlan` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateProvisionedProductPlanErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        let state = crate::state::service_state(&*self.engine)
+            .ok_or_else(crate::state::state_unavailable)?;
+        let region = crate::state::request_region(ctx);
+        let now = std::time::SystemTime::now();
+
+        // Everything this service itself holds is resolved and stored under the lock,
+        // which is RELEASED before the change set behind the plan is asked for: no store
+        // lock is held across an await.
+        let (plan_id, planned, output) = {
+            let mut state = state.lock();
+
+            // A provisioned product whose termination the clock has settled stopped
+            // existing at that instant — and so did the plan that planned a change to
+            // it — so those entries are dropped before anything is resolved.
+            state.forget_terminated_provisioned_products(now);
+
+            // `IdempotencyToken` is `@idempotencyToken`: "a unique identifier that you
+            // provide to ensure idempotency. If multiple requests differ only by the
+            // idempotency token, the same response is returned for each repeated
+            // request", so a token already spent on a plan REPLAYS that plan rather
+            // than planning a second change. The replay keys on the TOKEN ALONE: this
+            // operation models no mismatch error for a token reused with different
+            // members.
+            if let Some(plan) =
+                state.replayed_provisioned_product_plan(&input.idempotency_token, now)
+            {
+                return Ok(plan_output(&state, plan));
+            }
+
+            // Every resource this request names is resolved BEFORE anything is stored,
+            // so a request naming one that does not resolve is refused with no effect at
+            // all: the product, then the launch path to provision through, then the
+            // product version. A plan plans a provisioning, so it resolves that triple
+            // exactly as `ProvisionProduct` does.
+            //
+            // A launch path is the product's relationship with a portfolio it can be
+            // launched through, so a product that sits in no portfolio — and a product
+            // id nothing stored carries, which resolves no path either — has no path to
+            // provision through.
+            let paths: Vec<String> = state
+                .launch_path_portfolios(&input.product_id)
+                .into_iter()
+                .map(|portfolio| portfolio.id.clone())
+                .collect();
+            let product = match state
+                .products
+                .get(&input.product_id)
+                .filter(|_| !paths.is_empty())
+            {
+                Some(product) => product,
+                None => return Err(no_launch_paths(&input.product_id)),
+            };
+
+            // The path to provision through: the one the request names, or the product's
+            // default path. `PathId` "is optional if the product has a default path, and
+            // required if the product has more than one path", and a product reachable
+            // through exactly one portfolio needs no disambiguation — the same
+            // derivation `ProductViewSummary$HasDefaultPath` reports. A request that
+            // names no path for a product with several names no path this service can
+            // infer, which is the parameter error the shared sentence states.
+            let path_id = match input.path_id.as_deref().filter(|id| !id.is_empty()) {
+                Some(requested) => match paths.iter().find(|id| *id == requested) {
+                    Some(id) => id.clone(),
+                    None => return Err(not_found(KIND_LAUNCH_PATH, requested)),
+                },
+                None => match paths.as_slice() {
+                    [only] => only.clone(),
+                    _ => return Err(invalid_parameters(crate::state::PATH_REQUIRED.to_string())),
+                },
+            };
+
+            // The product version to provision, resolved among THIS product's
+            // provisioning artifacts: an artifact of another product is no version of
+            // this one. The version is also what NAMES the template the change is
+            // planned from.
+            let (artifact_id, template) = match product
+                .provisioning_artifacts
+                .get(&input.provisioning_artifact_id)
+            {
+                Some(artifact) => (
+                    artifact.id.clone(),
+                    crate::state::template_source(&artifact.info),
+                ),
+                None => {
+                    return Err(not_found(
+                        KIND_PROVISIONING_ARTIFACT,
+                        &input.provisioning_artifact_id,
+                    ))
+                }
+            };
+            let product_id = product.id.clone();
+            let provisioned_product_type =
+                crate::state::provisioned_product_type(&product.product_type).to_string();
+
+            // A plan holds each tag key once, so a repeated key in `Tags` collapses to
+            // its last value. The modelled 0..50 bound on the input list is already
+            // enforced by the time this handler runs.
+            let tags: std::collections::BTreeMap<String, String> = input
+                .tags
+                .unwrap_or_default()
+                .into_iter()
+                .map(|tag| (tag.key, tag.value))
+                .collect();
+
+            // The provisioned product the plan changes: the one this account already
+            // holds under that name, or a new one the plan itself creates.
+            let provisioned_product_id =
+                match state.provisioned_product_by_name(&input.provisioned_product_name, now) {
+                    Some(existing) => {
+                        let existing_id = existing.id.clone();
+                        // "To create a plan for an existing provisioned product, the
+                        // product status must be AVAILABLE or TAINTED": a provisioned
+                        // product in a transitive status is being changed already, so
+                        // there is nothing stable for a plan to plan a change to.
+                        let status = state.provisioned_product_status(existing, now);
+                        if !crate::state::PLAN_READY_PROVISIONED_PRODUCT_STATUSES
+                            .contains(&status)
+                        {
+                            return Err(invalid_state(format!(
+                                "A plan cannot be created for provisioned product {} in status \
+                                 {status}: the provisioned product must be in status {} or {}.",
+                                input.provisioned_product_name,
+                                crate::state::PROVISIONED_PRODUCT_STATUS_AVAILABLE,
+                                crate::state::PROVISIONED_PRODUCT_STATUS_TAINTED
+                            )));
+                        }
+                        // "You can create one plan for each provisioned product", so a
+                        // provisioned product that already carries one is in no state to
+                        // carry a second.
+                        if let Some(planned) = state.plan_of_provisioned_product(&existing_id, now)
+                        {
+                            return Err(invalid_state(format!(
+                                "A plan already exists for provisioned product {}: {}",
+                                input.provisioned_product_name, planned.id
+                            )));
+                        }
+                        existing_id
+                    }
+                    None => {
+                        // The account's provisioned-product quota, refused before
+                        // anything is stored, so a caller cannot grow the store past it
+                        // by repeating the call. This operation models no limit error,
+                        // so the refusal is the parameter error it does model, naming
+                        // the bound the request broke.
+                        if state.provisioned_products.len()
+                            >= crate::state::MAX_PROVISIONED_PRODUCTS
+                        {
+                            return Err(invalid_parameters(format!(
+                                "An account cannot hold more than {} provisioned products.",
+                                crate::state::MAX_PROVISIONED_PRODUCTS
+                            )));
+                        }
+
+                        // A plan for a name this account does not hold plans the
+                        // provisioning of a NEW provisioned product: it exists from here
+                        // on, in `PLAN_IN_PROGRESS` — "the plan operations were performed
+                        // to provision a new product, but resources have not yet been
+                        // created" — which is what it stays in until the plan is
+                        // executed. It carries no record, because no operation has been
+                        // performed on it yet, and that is what its status is derived
+                        // from.
+                        let new_id = state.next_provisioned_product_id();
+                        // AWS addresses a provisioned product as
+                        // `arn:${Partition}:servicecatalog:${Region}:${Account}:stack/${ProvisionedProductName}/${ProvisionedProductId}`
+                        // — the stack a launch stands up, named by the provisioned
+                        // product.
+                        let arn = ::emulator_server::emulator_arn(
+                            "servicecatalog",
+                            &region,
+                            &format!("stack/{}/{new_id}", input.provisioned_product_name),
+                        );
+                        state.provisioned_products.insert(
+                            new_id.clone(),
+                            crate::state::ProvisionedProduct {
+                                id: new_id.clone(),
+                                arn,
+                                name: input.provisioned_product_name.clone(),
+                                r#type: provisioned_product_type,
+                                product_id: product_id.clone(),
+                                provisioning_artifact_id: artifact_id.clone(),
+                                path_id: path_id.clone(),
+                                created_time: now,
+                                provision_token: input.idempotency_token.clone(),
+                                tags: tags.clone(),
+                                record_ids: Vec::new(),
+                                terminated_at: None,
+                                // This provisioned product exists because this plan
+                                // created it, and nothing has provisioned it yet.
+                                plan_created: true,
+                            },
+                        );
+                        new_id
+                    }
+                };
+
+            let plan_id = state.next_provisioned_product_plan_id();
+            let plan = crate::state::ProvisionedProductPlan {
+                id: plan_id.clone(),
+                name: input.plan_name,
+                plan_type: input.plan_type,
+                provisioned_product_id: provisioned_product_id.clone(),
+                product_id,
+                provisioning_artifact_id: artifact_id,
+                path_id,
+                notification_arns: input.notification_arns.unwrap_or_default(),
+                provisioning_parameters: input.provisioning_parameters.unwrap_or_default(),
+                tags,
+                created_time: now,
+                idempotency_token: input.idempotency_token.clone(),
+                // The change set is created in the Region this request was signed for,
+                // and that is where every later read of this plan looks for it.
+                region: region.clone(),
+                // The change set this plan IS has not been asked for yet: this call does
+                // that next, and records what CloudFormation answered.
+                change_set: None,
+            };
+            // The change CloudFormation is asked to plan, read from the plan that was
+            // just stored: the change set is computed over the product version's
+            // template, on the stack this provisioned product's launch stands up.
+            let planned = crate::state::PlannedChange {
+                change_set_name: plan_id.clone(),
+                stack_name: crate::state::provisioned_product_stack_name(&provisioned_product_id),
+                template,
+                parameters: plan.provisioning_parameters.clone(),
+                tags: plan.tags.clone(),
+                notification_arns: plan.notification_arns.clone(),
+            };
+            state
+                .provisioned_product_plans
+                .insert(plan_id.clone(), plan);
+            state
+                .remember_provisioned_product_plan_token(input.idempotency_token, plan_id.clone());
+
+            let plan = state
+                .provisioned_product_plan(&plan_id, now)
+                .ok_or_else(crate::state::state_unavailable)?;
+            (plan_id, planned, plan_output(&state, plan))
+        };
+
+        // "A plan includes the list of resources to be created ... when the plan is
+        // executed": that list is a CloudFormation change set over the product version's
+        // template, which CloudFormation is what computes. What it answers — the change
+        // set, or the reason it could not plan the change — is recorded on the plan, and
+        // is what the plan's status and resource changes are read from afterwards.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateProvisionedProductPlan"))
+        // The ask is dispatched IN PROCESS, by the framework's callback connector, to
+        // the CloudFormation mounted beside this service on the same engine: no socket
+        // is opened, no host name is resolved, and nothing this request carries — the
+        // template the version names, the stack name, the parameters, the Region — can
+        // make this process connect anywhere (`crate::state::in_process_cloudformation`).
+        let change_set = match crate::state::plan_change_set(ctx, &region, &planned).await {
+            Ok(id) => crate::state::PlanChangeSet::Created(id),
+            Err(reason) => crate::state::PlanChangeSet::Refused(reason),
+        };
+        if let Some(plan) = state.lock().provisioned_product_plans.get_mut(&plan_id) {
+            plan.change_set = Some(change_set);
+        }
+
+        Ok(output)
     }
+}
+
+/// This create's answer, read from the STORED plan: every member is the same stored
+/// value `DescribeProvisionedProductPlan` reports for it, so the two cannot report one
+/// plan two ways — and a replayed create answers exactly what the create it replays
+/// did.
+fn plan_output(
+    state: &crate::state::ComAmazonawsServicecatalogAws242servicecatalogserviceState,
+    plan: &crate::state::ProvisionedProductPlan,
+) -> CreateProvisionedProductPlanOutput {
+    CreateProvisionedProductPlanOutput {
+        plan_name: Some(plan.name.clone()),
+        plan_id: Some(plan.id.clone()),
+        provision_product_id: Some(plan.provisioned_product_id.clone()),
+        provisioned_product_name: state.planned_provisioned_product_name(plan),
+        provisioning_artifact_id: Some(plan.provisioning_artifact_id.clone()),
+    }
+}
+
+/// This operation's parameter error, carrying `message`.
+fn invalid_parameters(message: String) -> CreateProvisionedProductPlanError {
+    CreateProvisionedProductPlanErrorModeled::InvalidParametersException(
+        InvalidParametersException {
+            message: Some(message),
+        },
+    )
+    .into()
+}
+
+/// This operation's state error: the resource the request names exists, but not in a
+/// state this operation can act on.
+fn invalid_state(message: String) -> CreateProvisionedProductPlanError {
+    CreateProvisionedProductPlanErrorModeled::InvalidStateException(InvalidStateException {
+        message: Some(message),
+    })
+    .into()
+}
+
+/// This operation's not-found error for a product that resolves no launch path: the
+/// product sits in no portfolio, or nothing stored carries the identifier at all. The
+/// sentence is this service's own ([`crate::state::no_launch_paths_message`]), shared
+/// with every other operation that resolves the same triple.
+fn no_launch_paths(identifier: &str) -> CreateProvisionedProductPlanError {
+    CreateProvisionedProductPlanErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+        message: Some(crate::state::no_launch_paths_message(identifier)),
+    })
+    .into()
+}
+
+/// This operation's not-found error for an identifier that resolves to nothing: the
+/// message names the KIND of resource the request addressed and the identifier it used,
+/// the shape every not-found in this service reports
+/// ([`crate::state::not_found_message`]).
+fn not_found(kind: &str, identifier: &str) -> CreateProvisionedProductPlanError {
+    CreateProvisionedProductPlanErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+        message: Some(crate::state::not_found_message(kind, identifier)),
+    })
+    .into()
 }

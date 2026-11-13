@@ -227,24 +227,10 @@ struct Launch {
     preferences: Option<ProvisioningArtifactPreferences>,
 }
 
-/// Where the template of one provisioning artifact is, as that version's `Info` names
-/// it: "specify the template source with one of the following options, but not both.
-/// Keys accepted: [ LoadTemplateFromURL, ImportFromPhysicalId ]."
-///
-/// Both are addresses rather than bodies, and CloudFormation is what resolves either —
-/// a URL names an object in this account's object store, and a physical id names a
-/// CloudFormation stack ("currently supports CloudFormation stack ARN") whose own
-/// template is the version's.
-enum TemplateSource {
-    /// `LoadTemplateFromURL`: "the URL of the CloudFormation template in Amazon S3 or
-    /// GitHub in JSON format".
-    Url(String),
-    /// `ImportFromPhysicalId`: "the physical id of the resource that contains the
-    /// template".
-    Stack(String),
-    /// A version whose `Info` names neither, so no template is addressed at all.
-    Unaddressed,
-}
+// Where the template of one provisioning artifact is, as that version's `Info` names
+// it: the shared reading every operation that resolves a launch's template uses
+// (`crate::state::template_source`).
+use crate::state::TemplateSource;
 
 /// Resolve the launch the request names out of the store: the product, the path it is
 /// launched through, and the version to launch — then everything this service holds
@@ -364,7 +350,7 @@ fn resolve(
         .collect();
 
     Ok(Launch {
-        template: template_source(&artifact.info),
+        template: crate::state::template_source(&artifact.info),
         constraint_summaries: constraints
             .iter()
             .map(|constraint| constraint.summary())
@@ -407,34 +393,6 @@ fn resolve_path(
         },
     }
 }
-
-/// Where the version's template is, read from the `Info` map the version was created
-/// with ([`TemplateSource`]). A map naming both keys is not one `CreateProduct` stores
-/// — it refuses that request — so the URL is read first and the physical id answers for
-/// a version that names one instead.
-fn template_source(info: &std::collections::BTreeMap<String, String>) -> TemplateSource {
-    if let Some(url) = info
-        .get(LOAD_TEMPLATE_FROM_URL)
-        .filter(|url| !url.is_empty())
-    {
-        return TemplateSource::Url(url.clone());
-    }
-    match info
-        .get(IMPORT_FROM_PHYSICAL_ID)
-        .filter(|id| !id.is_empty())
-    {
-        Some(physical_id) => TemplateSource::Stack(physical_id.clone()),
-        None => TemplateSource::Unaddressed,
-    }
-}
-
-/// The `Info` key naming a template to read from a URL
-/// (`ProvisioningArtifactProperties$Info`: "Keys accepted: [ `LoadTemplateFromURL`,
-/// `ImportFromPhysicalId` ]").
-const LOAD_TEMPLATE_FROM_URL: &str = "LoadTemplateFromURL";
-
-/// The `Info` key naming the physical id of a resource that contains the template.
-const IMPORT_FROM_PHYSICAL_ID: &str = "ImportFromPhysicalId";
 
 /// "Information about the TagOptions associated with the resource": the TagOptions this
 /// launch offers, one entry per KEY, with the values the launch may use for it.
@@ -562,13 +520,14 @@ const STACK_SET_REGION_LIST: &str = "RegionList";
 /// (its constraints, its TagOptions, its preferences) is still this service's to give,
 /// so the call is served with no parameters rather than refused.
 ///
-/// Nothing here opens a socket or leaves the host: the call goes over the framework's
-/// in-process callback into this same emulator ([`cloudformation_client`]).
+/// Nothing here opens a socket or leaves the host: the call is dispatched IN PROCESS by
+/// the framework's callback connector, to the CloudFormation mounted beside this service
+/// ([`crate::state::in_process_cloudformation`]).
 async fn template_parameters(
     ctx: &smithy_server_runtime::OperationContext<'_>,
     template: &TemplateSource,
 ) -> Vec<ProvisioningArtifactParameter> {
-    let cloudformation = cloudformation_client(ctx, &crate::state::request_region(ctx));
+    let cloudformation = in_process_cloudformation(ctx, &crate::state::request_region(ctx));
     let summary = cloudformation
         .get_template_summary()
         // A summary is NOT a deployment: this call reports what the template declares,
@@ -634,36 +593,9 @@ fn provisioning_artifact_parameter(
     }
 }
 
-/// A CloudFormation client over the in-process callback into this same emulator.
-///
-/// The callback is the framework's documented seam for calling another emulated service:
-/// it routes in process, so no socket is opened, no name is resolved and nothing outside
-/// this process is reachable from it. The endpoint URL is addressing for that transport,
-/// built from the Region alone, and the credentials are the emulator's own — the
-/// caller's `Authorization` header is never forwarded. The transport is in-process, so
-/// there is nothing to retry, time out or watch for a stalled stream, and each of those
-/// would need a sleep implementation this client is not given.
-fn cloudformation_client(
-    ctx: &smithy_server_runtime::OperationContext<'_>,
-    region: &str,
-) -> ::aws_sdk_cloudformation::Client {
-    let config = ::aws_sdk_cloudformation::Config::builder()
-        .behavior_version(::aws_sdk_cloudformation::config::BehaviorVersion::latest())
-        .region(::aws_sdk_cloudformation::config::Region::new(
-            region.to_string(),
-        ))
-        .endpoint_url(format!("https://cloudformation.{region}.amazonaws.com"))
-        .credentials_provider(ctx.callback().aws_credentials_provider())
-        .http_client(ctx.callback().http_client())
-        .retry_config(::aws_sdk_cloudformation::config::retry::RetryConfig::disabled())
-        .timeout_config(::aws_sdk_cloudformation::config::timeout::TimeoutConfig::disabled())
-        .identity_cache(::aws_sdk_cloudformation::config::IdentityCache::no_cache())
-        .stalled_stream_protection(
-            ::aws_sdk_cloudformation::config::StalledStreamProtectionConfig::disabled(),
-        )
-        .build();
-    ::aws_sdk_cloudformation::Client::from_conf(config)
-}
+/// A CloudFormation client whose transport is the framework's in-process callback: the
+/// shared seam (`crate::state::in_process_cloudformation`).
+use crate::state::in_process_cloudformation;
 
 /// This operation's parameter error, carrying `message`.
 fn invalid_parameters(message: String) -> DescribeProvisioningParametersError {

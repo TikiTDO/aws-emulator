@@ -388,6 +388,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // Nothing has terminated this provisioned product: it is provisioned here
             // and stops existing only once a termination's completion falls due.
             terminated_at: None,
+            // This request provisions the product, so no plan created it.
+            plan_created: false,
         };
 
         let record_detail = record.detail(now);

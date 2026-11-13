@@ -40,6 +40,97 @@ pub(crate) fn emulator() -> MultiServiceRouter {
     router
 }
 
+/// The bucket a suite stages its templates in, as an administrator stages a product's
+/// template before creating the product from it.
+pub(crate) const TEMPLATE_BUCKET: &str = "service-catalog-staged-templates";
+
+/// One emulator carrying Service Catalog, the service that owns a CloudFormation template,
+/// and the object store a staged template lives in — all three on the ONE shared engine,
+/// exactly as `core/router/src/lib.rs` mounts them.
+///
+/// A version's template is not held by Service Catalog: the version names it, and reading
+/// it is a call into CloudFormation, which reads the staged object out of Amazon S3. So a
+/// suite that asserts what a version declares — or what a plan over that version would
+/// change — must have those services there, the same way the CloudFormation suites mount
+/// the services a stack's resources are created in.
+pub(crate) fn emulator_with_template_services() -> MultiServiceRouter {
+    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+    let mut router = MultiServiceRouter::new();
+    // The harness signs nothing, so authentication is off for this router only.
+    router.set_request_authentication(false);
+    router.register_service(
+        service_com_amazonaws_servicecatalog_aws242servicecatalogservice::EmulatedService::new(
+            Arc::clone(&engine),
+        ),
+    );
+    router.register_service(
+        service_com_amazonaws_cloudformation_cloudformation::EmulatedService::new(Arc::clone(
+            &engine,
+        )),
+    );
+    router.register_service(service_com_amazonaws_s3_amazons3::EmulatedService::new(
+        Arc::clone(&engine),
+    ));
+    router
+}
+
+/// Drive one Amazon S3 request through the same router, as a client's own SDK sends it.
+pub(crate) async fn s3(
+    router: &MultiServiceRouter,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> (u16, String) {
+    let request = ::http::Request::builder()
+        .method(method)
+        .uri(format!("https://s3.{DEFAULT_REGION}.amazonaws.com{path}"))
+        .header("host", format!("s3.{DEFAULT_REGION}.amazonaws.com"))
+        .header(
+            "authorization",
+            format!(
+                "AWS4-HMAC-SHA256 Credential=AKIDTESTHARNESS/20260101/{DEFAULT_REGION}/s3/\
+                 aws4_request, SignedHeaders=host, Signature=0"
+            ),
+        )
+        .body(Bytes::copy_from_slice(body))
+        .expect("a well-formed S3 request");
+    let response = router.dispatch(request).await;
+    let status = response.status().as_u16();
+    let read = String::from_utf8_lossy(&response.into_body()).to_string();
+    (status, read)
+}
+
+/// Create the staging bucket, once per router.
+pub(crate) async fn create_template_bucket(router: &MultiServiceRouter) {
+    let (status, body) = s3(router, "PUT", &format!("/{TEMPLATE_BUCKET}"), b"").await;
+    assert_eq!(
+        status, 200,
+        "the staging bucket must be created first, got {status} with {body}"
+    );
+}
+
+/// Stage one template object, as an administrator's own `PutObject` stores it.
+pub(crate) async fn stage_template(router: &MultiServiceRouter, key: &str, template: &str) {
+    let (status, body) = s3(
+        router,
+        "PUT",
+        &format!("/{TEMPLATE_BUCKET}/{key}"),
+        template.as_bytes(),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "the template {key} must be staged first, got {status} with {body}"
+    );
+}
+
+/// The path-style URL of one staged template object, which is what
+/// `ProvisioningArtifactProperties$Info` takes as "the URL of the CloudFormation
+/// template in Amazon S3".
+pub(crate) fn staged_template_url(key: &str) -> String {
+    format!("https://s3.{DEFAULT_REGION}.amazonaws.com/{TEMPLATE_BUCKET}/{key}")
+}
+
 /// Send one awsJson1_1 request signed for `region` and return its status and body.
 pub(crate) async fn call_in(
     router: &MultiServiceRouter,
