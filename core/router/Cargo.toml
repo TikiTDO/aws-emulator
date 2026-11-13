@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 engine = { workspace = true }
+service-common = { path = "../../services/common" }
 service-com-amazonaws-accessanalyzer-accessanalyzer = { workspace = true }
 service-com-amazonaws-account-account = { workspace = true }
 service-com-amazonaws-accountaccess-awsaccountaccess = { workspace = true }

@@ -33,6 +33,8 @@ use engine::InMemoryEngine;
 use std::io::Write;
 use std::sync::Arc;
 
+mod boot_profile;
+
 /// The version `--version` prints and telemetry reports: the release version the
 /// release build stamps as `EMULATOR_VERSION`, and the package version with `-dev`
 /// appended for any other build.
@@ -177,12 +179,24 @@ async fn build_and_serve(options: RunOptions) {
 
     tracing::info!("aws-emulator emulator starting");
 
+    let profile = boot_profile::BootProfile::from_environment().unwrap_or_else(|error| {
+        eprintln!("emulator bootstrap failed: {error}");
+        std::process::exit(1);
+    });
+
     let telemetry = start_telemetry(options.telemetry);
     if let Some(idle_timeout) = options.idle_timeout {
         emulator_server::cli::stop_after_idle(idle_timeout);
     }
 
     let engine: Arc<InMemoryEngine> = Arc::new(InMemoryEngine::new());
+
+    // Store binding MUST precede B5 snapshot restoration, router construction and listeners.
+    // Persistence::all(engine.clone()).restore() joins immediately AFTER this installation.
+    if let Err(error) = profile.install_payload_store(&engine).await {
+        eprintln!("emulator bootstrap failed: {error}");
+        std::process::exit(1);
+    }
 
     let router = aws_emulator_router::build_router(engine);
 

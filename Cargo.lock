@@ -879,6 +879,7 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "rcgen",
+ "rustix",
  "rustls",
  "serde",
  "serde_json",

@@ -35,3 +35,6 @@ yasna = "0.5"
 emulator-paths = { path = "../emulator-paths", package = "aws-emulator-emulator-paths", version = "*" }
 emulator-telemetry = { path = "../emulator-telemetry", package = "aws-emulator-emulator-telemetry", version = "*" }
 aws-smithy-schema-server = { path = "../smithy-schema-server", package = "aws-emulator-smithy-schema-server", version = "*" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.6", features = ["fs", "process"] }

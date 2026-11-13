@@ -5,6 +5,7 @@
 //! Provides AKID extraction, error response helpers, tenant isolation,
 //! and reusable HTTP infrastructure for building in-process AWS service emulators.
 
+pub mod boot_identity;
 pub mod cli;
 pub mod runtime_profile;
 pub mod transport;
