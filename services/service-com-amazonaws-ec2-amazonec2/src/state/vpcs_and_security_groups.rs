@@ -1848,6 +1848,51 @@ impl ComAmazonawsEc2Amazonec2State {
         self.resync_security_group_permissions(&group_id);
         Some(answer)
     }
+
+    /// Write `description` onto the stored rule `rule_id` and answer the rule as it now
+    /// stands — or `None` when the store holds no such rule.
+    ///
+    /// A rule's description is the ONE member of it this writer touches: "you can replace an
+    /// existing description, or add a description to a rule that did not have one previously
+    /// … you can remove a description for a security group rule by omitting the description
+    /// parameter" (`UpdateSecurityGroupRuleDescriptionsEgress`), so `None` removes the one the
+    /// rule carried and everything that makes the rule the rule it is — its id, its ARN, its
+    /// group, its owner, its direction, its protocol, its port range, the one source or
+    /// destination it names and its tags — is left exactly as stored. That is what separates
+    /// this from [`Self::replace_security_group_rule`], which rewrites what a rule SAYS from a
+    /// permission.
+    ///
+    /// BOUNDED: the record's caller-chosen bytes are recharged here — what it held is given
+    /// back and what it now holds is charged ([`security_group_rule_payload_bytes`]) — so a
+    /// description that grows cannot grow the store's budget-counted bytes without the budget
+    /// seeing it. A caller whose new description may be longer than the one it replaces asks
+    /// [`Self::would_exceed_stored_bytes_after_refund`] first and refuses the whole request.
+    /// The group's aggregate `IpPermissions` are recomputed, so the description
+    /// `DescribeSecurityGroups` reports for this grant cannot disagree with the rule
+    /// `DescribeSecurityGroupRules` reports.
+    pub fn set_security_group_rule_description(
+        &mut self,
+        rule_id: &str,
+        description: Option<String>,
+    ) -> Option<SecurityGroupRule> {
+        let (group_id, refund, charge, answer) = {
+            let record = self.security_group_rules.get_mut(rule_id)?;
+            let refund = record.payload_bytes;
+            record.rule.description = description;
+            let charge = security_group_rule_payload_bytes(record);
+            record.payload_bytes = charge;
+            (
+                record.rule.group_id.clone().unwrap_or_default(),
+                refund,
+                charge,
+                record.rule.clone(),
+            )
+        };
+        self.release_stored_bytes(refund);
+        self.add_stored_bytes(charge);
+        self.resync_security_group_permissions(&group_id);
+        Some(answer)
+    }
 }
 
 /// EC2's error code for a `CreateDefaultVpc` in a Region whose account already holds a

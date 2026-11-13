@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateSecurityGroupRuleDescriptionsEgress
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateSecurityGroupRuleDescriptionsEgress`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateSecurityGroupRuleDescriptionsEgress::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Writes the DESCRIPTION of the outbound security group rules a request names, out of
+//! [`crate::state`]: each named rule keeps everything that makes it the rule it is — its
+//! `SecurityGroupRuleId`, its ARN, its group, its owner, its direction, its protocol, its
+//! port range, the one destination it names and its tags — and only its description becomes
+//! the one the request carries, or none where the request carries none. The rules are named
+//! either by `SecurityGroupRuleDescriptions` or by `IpPermissions`, read through
+//! [`rule_descriptions`], and the whole request is read into a plan before anything is
+//! written, so a request naming one rule the group does not hold writes none of the
+//! descriptions beside it.
 //!
 //! ## Shape of an operation
 //!
@@ -78,6 +79,23 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+/// Which stored rules an update-descriptions request names, and the description each one
+/// takes — the reading BOTH directions of the operation make, so one rule is identified the
+/// same way inbound and outbound.
+///
+/// The `#[path]` is what points the declaration into this operation's own directory: the ops
+/// modules are themselves declared with a path, so a bare `mod` here would resolve beside
+/// them rather than inside `update_security_group_rule_descriptions_egress/`.
+#[path = "update_security_group_rule_descriptions_egress/rule_descriptions.rs"]
+pub mod rule_descriptions;
+
+/// The direction this operation describes rules in: the OUTBOUND ones — "updates the
+/// description of an egress (outbound) security group rule"
+/// (`UpdateSecurityGroupRuleDescriptionsEgress`). A group's inbound and outbound rules are
+/// held apart by this flag, so a rule on the other side of the group is not a rule this
+/// operation can describe.
+const IS_EGRESS: bool = true;
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -145,18 +163,87 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateSecurityGroupRuleDescriptionsEgress` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateSecurityGroupRuleDescriptionsEgressErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateSecurityGroupRuleDescriptionsEgress"))
+        use crate::state;
+
+        // `ctx` carries the Region this request was signed for, which is what says which VPC
+        // of the account is the DEFAULT one and therefore which VPC a group named by NAME is
+        // looked for in; the store is reached through the engine held on `self`.
+        let region = state::request_region(ctx.parts());
+
+        let descriptions: &[SecurityGroupRuleDescription] = input
+            .security_group_rule_descriptions
+            .as_deref()
+            .unwrap_or_default();
+        let permissions: &[IpPermission] = input.ip_permissions.as_deref().unwrap_or_default();
+        // Everything the request alone decides is decided before the store is reached at all.
+        rule_descriptions::validate_request(descriptions, permissions)?;
+
+        // Both handles are modelled `clientOptional`, so a member sent with no value reaches
+        // this handler: an empty one has named nothing, which is what the shared resolver is
+        // asked.
+        let named_group_id = input.group_id.as_deref().filter(|id| !id.is_empty());
+        let named_group_name = input.group_name.as_deref().filter(|name| !name.is_empty());
+        // "The ID of the security group" (`$GroupId`): a value that is not a security group id
+        // names no group of any account, which is a malformed parameter rather than a group
+        // that is missing — asked before the store, the way every other security group
+        // operation of this crate reads its handle.
+        if let Some(group_id) = named_group_id {
+            if !state::security_group_id_is_well_formed(group_id) {
+                return Err(state::invalid_group_id_malformed(group_id));
+            }
+        }
+
+        let state_handle = state::require_service_state(&*self.engine)?;
+        let mut store = state_handle.lock();
+
+        // "You must specify either the security group ID or the security group name in the
+        // request. For security groups in a nondefault VPC, you must specify the security
+        // group ID" (`$GroupName`): the shared resolver is the one place that rule lives, so
+        // this operation and the revoke path cannot read it two ways.
+        let group_id =
+            state::resolve_security_group_id(&mut store, &region, named_group_id, named_group_name)?;
+        // A group id this account holds no group for has no rules to describe.
+        let Some(group) = store.security_groups.get(&group_id) else {
+            return Err(state::invalid_group_not_found(&group_id));
+        };
+        // Every group this crate stores is created INTO a VPC, so a record carrying no `VpcId`
+        // is one no writer here can produce; it is read as "no VPC of this account", in which
+        // a referenced group named by name names nothing.
+        let vpc_id = group.vpc_id.clone().unwrap_or_default();
+
+        let planned = rule_descriptions::planned_descriptions(
+            &store,
+            &group_id,
+            &vpc_id,
+            IS_EGRESS,
+            descriptions,
+            permissions,
+        )?;
+
+        // An update replaces caller-chosen text with caller-chosen text, so what the store's
+        // byte budget has to be asked is the NET change over the whole request.
+        let (charge, refund) = rule_descriptions::stored_bytes_change(&store, &planned);
+        if store.would_exceed_stored_bytes_after_refund(charge, refund) {
+            return Err(crate::scaffolded::Scaffolded::tag_limit_exceeded(format!(
+                "This emulator holds {held} of at most {max} bytes of caller-supplied data, \
+                 so it cannot store {charge} more for these rule descriptions",
+                held = store.stored_bytes(),
+                max = state::MAX_STORED_BYTES,
+            )));
+        }
+
+        // The request is one that would have succeeded, so a dry run stops HERE: "if you have
+        // the required permissions, the error response is DryRunOperation" (`$DryRun`).
+        // Nothing has been written yet, and nothing is.
+        if input.dry_run.unwrap_or(false) {
+            return Err(state::dry_run_operation());
+        }
+
+        rule_descriptions::apply(&mut store, &planned);
+
+        // "Returns true if the request succeeds; otherwise, returns an error" (`$Return`).
+        Ok(UpdateSecurityGroupRuleDescriptionsEgressOutput {
+            r#return: Some(true),
+        })
     }
 }

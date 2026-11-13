@@ -2015,3 +2015,10 @@ mod describe_tags;
 // read back through `DescribeVpcs`, beside what it refuses and what it leaves alone. Declared
 #[path = "all/modify_vpc_tenancy.rs"]
 mod modify_vpc_tenancy;
+// `UpdateSecurityGroupRuleDescriptionsEgress`: the description it writes onto each outbound
+// rule a request names — by rule id or by the rule's own properties — read back through
+// `DescribeSecurityGroupRules` and `DescribeSecurityGroups`, beside what it refuses and what
+// it leaves alone. Declared at the tail of this file, which is where every new ec2 suite
+// lands.
+#[path = "all/update_security_group_rule_descriptions_egress.rs"]
+mod update_security_group_rule_descriptions_egress;
