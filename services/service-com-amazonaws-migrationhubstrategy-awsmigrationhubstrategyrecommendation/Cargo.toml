@@ -33,6 +33,9 @@ sha2 = { workspace = true }
 # report object with, over the in-process callback into this same emulator (no network
 # client feature is enabled: the transport is the emulator's own).
 aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# Writes the Excel workbook a recommendation report generation task uploads when the call
+# asks for the `Excel` output format, so the object a caller fetches really is that format.
+rust_xlsxwriter = "0.102"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

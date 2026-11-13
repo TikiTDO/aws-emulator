@@ -65,7 +65,11 @@
 //! ([`RecommendationReport`]): what `StartRecommendationReportGeneration` mints — one at
 //! a time, a start call made while one is still in flight coalescing onto that task and
 //! answering its id ([`RegionState::ongoing_report_generation`]) rather than minting a
-//! second — and `GetRecommendationReportDetails` reports.
+//! second — and `GetRecommendationReportDetails` reports. A task's artifact is the report
+//! FILE the start call writes into the bucket the account named for what this service
+//! uploads ([`RegionState::report_data_bucket`]), in the `OutputFormat` the call asked for
+//! ([`report_file`]); the completed task names that object, and a task that produced none
+//! names no location at all.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
@@ -103,6 +107,10 @@ pub mod import_file;
 /// A member's modelled `@pattern` as a requirement on the whole value, checked over an
 /// operation's input before the handler reads it.
 pub mod patterns;
+
+/// The recommendation report FILE a report generation task writes into the account's
+/// report data bucket, and the key it is written under.
+pub mod report_file;
 
 pub use regions::{
     request_region, ComAmazonawsMigrationhubstrategyAwsmigrationhubstrategyrecommendationState,
@@ -187,11 +195,14 @@ pub const REPORT_IN_PROGRESS: &str = "IN_PROGRESS";
 ///
 /// It is the status the service's recorded behaviour shows a started task settling on (a
 /// task is `IN_PROGRESS` and then `SUCCESS`), so a task of this emulator settles there
-/// too. What this emulator cannot do is DELIVER the artifact: a recommendation report is
-/// an Excel or JSON FILE the service uploads to the account's S3 report bucket, and there
-/// is no S3 data plane here to upload it to. That is reported rather than papered over —
-/// the task's [`RecommendationReport::status_message`] says no report file was written,
-/// and `s3Bucket`/`s3Keys` stay absent, so nothing names a file nothing wrote.
+/// too. The artifact that status means is DELIVERED: the report is an Excel or JSON FILE
+/// the service uploads to the account's report data bucket, so the start call generates it
+/// and writes it there ([`report_file`]) and the completed task names it —
+/// [`RecommendationReport::s3_bucket`] and [`RecommendationReport::s3_keys`]. An account
+/// that named no bucket for the reports this service generates
+/// ([`RegionState::report_data_bucket`]) has nowhere for the file to go, so that task
+/// names no location at all rather than one nothing wrote — the same rule the import's
+/// status report follows ([`ImportFileTask::status_report_s3_key`]).
 pub const REPORT_SUCCESS: &str = "SUCCESS";
 
 /// The `OutputFormat` a report generation task takes when the request names none:
@@ -232,6 +243,28 @@ pub const ASSESSMENT_QUOTA: usize = 1_000;
 /// no quota error, so the refusal is its modelled `ThrottlingException` (HTTP 429) — the
 /// request is denied because too many have been made.
 pub const REPORT_QUOTA: usize = 1_000;
+
+/// The reason a report generation task has no report file to name, when the account named
+/// no bucket for the reports this service generates: there is nowhere for the file to go,
+/// so the task names no location at all.
+///
+/// It is the service's own words for the condition, carrying nothing from the request and
+/// nothing about what serves it, and it is interpolated into the task's `statusMessage`
+/// once the clock gives the task its terminal status ([`RecommendationReport::settle`]).
+pub const NO_REPORT_DATA_BUCKET: &str =
+    "this account has configured no Amazon S3 bucket for report data";
+
+/// The reason a report generation task has no report file to name, when the account's
+/// report data bucket would not take the object — it no longer holds a bucket of that
+/// name, say.
+pub const REPORT_FILE_NOT_WRITTEN: &str =
+    "the report file could not be written to the account's report data bucket";
+
+/// The reason a report generation task has no report file to name, when the portfolio its
+/// filter selected is larger than one report file covers
+/// ([`report_file::MAX_REPORT_ROWS`]).
+pub const REPORT_SCOPE_TOO_LARGE: &str =
+    "the portfolio in scope is larger than one recommendation report file covers";
 
 /// How many `groupIdFilter` entries `StartRecommendationReportGeneration` accepts.
 ///
@@ -788,6 +821,23 @@ pub struct RecommendationReport {
     /// also what makes the task "in progress": a start call made while one is owed is
     /// refused for this task rather than minting a second one.
     pub completion_due: Option<SystemTime>,
+    /// `RecommendationReportDetails$s3Bucket` — "The S3 bucket where the report file is
+    /// located": the account's report data bucket
+    /// ([`RegionState::report_data_bucket`]), set by the start call once the report file is
+    /// THERE. `None` when the account named no bucket for the reports this service
+    /// generates, or when the object could not be written: a location is only ever held
+    /// for an object a caller can fetch.
+    pub s3_bucket: Option<String>,
+    /// `RecommendationReportDetails$s3Keys` — "The Amazon S3 key name of the report
+    /// file", the keys this task's report file was written under inside
+    /// [`Self::s3_bucket`] ([`report_file::report_key`]). Empty for a task whose file was
+    /// not written, and filled by the same call that fills the bucket, so the pair is
+    /// either followable or absent.
+    pub s3_keys: Vec<String>,
+    /// Why this task has no report file to name, in the service's own words, for a task
+    /// that could not produce one — the account named no report data bucket, or the object
+    /// could not be written. `None` for a task whose file was written.
+    pub no_file_reason: Option<String>,
 }
 
 impl RecommendationReport {
@@ -795,8 +845,9 @@ impl RecommendationReport {
     /// instant.
     ///
     /// `completion_time` is the DUE instant rather than `now`, so a task reports the same
-    /// completion time however late it is first read. The status is [`REPORT_SUCCESS`]:
-    /// see that constant for what the accompanying message reports.
+    /// completion time however late it is first read. The status is [`REPORT_SUCCESS`],
+    /// and the message reports what the task covered and what became of its report file
+    /// ([`Self::terminal_message`]).
     pub fn settle(&mut self, now: SystemTime) {
         let Some(due) = self.completion_due else {
             return;
@@ -807,11 +858,46 @@ impl RecommendationReport {
         self.status = REPORT_SUCCESS.to_string();
         self.completion_time = Some(due);
         self.completion_due = None;
-        self.status_message = Some(format!(
-            "{} server(s) of the portfolio were in scope. No {} recommendation report file was \
-             written: this emulator serves no Amazon S3 data plane to upload one to.",
-            self.servers_covered, self.output_format
-        ));
+        self.status_message = Some(self.terminal_message());
+    }
+
+    /// `RecommendationReportDetails$statusMessage` for this task once it is terminal: how
+    /// many servers of the portfolio it covered, and the report file it produced.
+    ///
+    /// Both halves come from the record — the scope the start call counted, and whether
+    /// the file was written — and it carries nothing from the request that reads the task.
+    /// `RecommendationReportStatusMessage` bounds the member at 512 characters, which
+    /// every sentence below stays inside: the only interpolated values are a counted
+    /// number and an `OutputFormat` value.
+    fn terminal_message(&self) -> String {
+        let scope = format!(
+            "{} server(s) of the portfolio were in scope.",
+            self.servers_covered
+        );
+        if self.file_location().is_some() {
+            return format!(
+                "{scope} The recommendation report was generated in {} format and uploaded to \
+                 the report data bucket.",
+                self.output_format
+            );
+        }
+        match &self.no_file_reason {
+            Some(reason) => format!("{scope} No recommendation report file was generated: {reason}"),
+            None => format!("{scope} No recommendation report file was generated."),
+        }
+    }
+
+    /// Where this task's report file is, once it is there: the bucket it was written into
+    /// and the keys it was written under.
+    ///
+    /// The two are reported together or not at all, so no read can name a bucket without
+    /// the key inside it that a caller would fetch.
+    fn file_location(&self) -> Option<(String, Vec<String>)> {
+        let bucket = self.s3_bucket.clone()?;
+        if self.s3_keys.is_empty() {
+            return None;
+        }
+        Some((bucket, self.s3_keys.clone()))
     }
 
     /// True while this task has not reached a terminal `RecommendationReportStatus`, so a
@@ -821,13 +907,22 @@ impl RecommendationReport {
     }
 
     /// The `RecommendationReportDetails` `GetRecommendationReportDetails` reports: this
-    /// record's status, message and timestamps, and nothing derived from the request that
-    /// reads it.
+    /// record's status, message, timestamps and the location of the report file it wrote,
+    /// and nothing derived from the request that reads it.
     ///
-    /// `s3Bucket` and `s3Keys` are left unset — they name where the report FILE is, and
-    /// no file was written (see [`REPORT_SUCCESS`]), so there is no bucket holding one and
-    /// no key naming one.
+    /// `s3Bucket` and `s3Keys` name where the report FILE is, so they are reported with
+    /// the other completion member: the file is the artifact of a FINISHED task, and a task
+    /// that produced none names no location at all ([`REPORT_SUCCESS`]).
     pub fn to_details(&self) -> RecommendationReportDetails {
+        let location = if self.is_in_progress() {
+            None
+        } else {
+            self.file_location()
+        };
+        let (s3_bucket, s3_keys) = match location {
+            Some((bucket, keys)) => (Some(bucket), Some(keys)),
+            None => (None, None),
+        };
         RecommendationReportDetails {
             status: Some(self.status.clone()),
             status_message: self.status_message.clone(),
@@ -835,8 +930,8 @@ impl RecommendationReport {
             completion_time: self
                 .completion_time
                 .map(::aws_smithy_types::DateTime::from),
-            s3_bucket: None,
-            s3_keys: None,
+            s3_bucket,
+            s3_keys,
         }
     }
 }
@@ -1881,6 +1976,21 @@ pub struct RegionState {
     /// `PutPortfolioPreferences` and reported by `GetPortfolioPreferences`. `None` until a
     /// save stores them: no preference is set in a fresh account.
     pub portfolio_preferences: Option<PortfolioPreferences>,
+    /// The bucket this account named for what this service uploads in this Region, as the
+    /// latest start call that named one set it —
+    /// `StartAssessmentRequest$s3bucketForReportData` ("The S3 bucket where all the
+    /// reports generated by the service are stored") or
+    /// `StartImportFileTaskRequest$s3bucketForReportData` ("The S3 bucket where Strategy
+    /// Recommendations uploads import results").
+    ///
+    /// It is where a recommendation report generation task writes its report FILE
+    /// ([`report_file`]) and so what the completed task reports as
+    /// `RecommendationReportDetails$s3Bucket`. `None` until a start call names one, which
+    /// is what makes a report generation in such an account name no file location: there
+    /// is nowhere for the file to go ([`NO_REPORT_DATA_BUCKET`]). Held here, beside
+    /// [`Self::latest_assessment_id`], because it is the account's standing configuration
+    /// rather than any one task's member.
+    pub report_data_bucket: Option<String>,
 }
 
 /// One completion the clock owes a portfolio, and the record it is owed to.
@@ -2168,29 +2278,39 @@ impl RegionState {
             })
     }
 
-    /// How many servers of this account's portfolio a report scoped by `groups` covers.
-    ///
-    /// An EMPTY filter names no group, so it scopes nothing and the whole inventory is in
-    /// scope; otherwise a server is in scope when it came in with one of the groups named
-    /// — both halves of a `Group` agreeing, as [`ServerRecord::in_any_group`] decides it.
-    ///
-    /// The groups are collected into a set first, so the count costs one pass over the
-    /// inventory and one over the filter rather than the product of the two.
+    /// How many servers of this account's portfolio a report scoped by `groups` covers —
+    /// the count the task keeps, off the scope itself ([`Self::servers_in_scope`]).
     ///
     /// The inventory is the one the portfolio holds when the report starts, so call
     /// [`Self::settle_all`] first: a server an import whose completion is already due
     /// brought in is part of that inventory, so the count does not depend on whether an
     /// unrelated read materialised the completion first.
     pub fn servers_in_groups(&self, groups: &[Group]) -> i32 {
+        count_of(self.servers_in_scope(groups).len())
+    }
+
+    /// WHICH servers of this account's portfolio a report scoped by `groups` covers, in the
+    /// inventory's own order.
+    ///
+    /// The ONE place this service decides that scope, so the count a task keeps
+    /// ([`Self::servers_in_groups`]) and the resources its report FILE reports on
+    /// ([`Self::report_scope`]) cannot select different servers.
+    ///
+    /// An EMPTY filter names no group, so it scopes nothing and the whole inventory is in
+    /// scope; otherwise a server is in scope when it came in with one of the groups named
+    /// — both halves of a `Group` agreeing, as [`ServerRecord::in_any_group`] decides it.
+    ///
+    /// The groups are collected into a set first, so the pass costs one walk over the
+    /// inventory and one over the filter rather than the product of the two.
+    pub fn servers_in_scope(&self, groups: &[Group]) -> Vec<&ServerRecord> {
         if groups.is_empty() {
-            return count_of(self.servers.len());
+            return self.servers.values().collect();
         }
         let wanted: BTreeSet<(Option<&str>, Option<&str>)> = groups
             .iter()
             .map(|group| (group.name.as_deref(), group.value.as_deref()))
             .collect();
-        let covered = self
-            .servers
+        self.servers
             .values()
             .filter(|server| {
                 server
@@ -2198,8 +2318,47 @@ impl RegionState {
                     .iter()
                     .any(|held| wanted.contains(&(held.name.as_deref(), held.value.as_deref())))
             })
-            .count();
-        count_of(covered)
+            .collect()
+    }
+
+    /// What a report scoped by `groups` reports on: the servers in scope and the
+    /// application components running on them, each as the row the report file reports for
+    /// it, up to `limit` rows.
+    ///
+    /// The components are the ones whose stored server associations name a server in scope
+    /// — "the IDs of the servers on which the application component is running" — so a
+    /// component of a server the filter left out is left out with it, and a component no
+    /// server association was recorded for is in no report.
+    ///
+    /// A scope holding more rows than `limit` is reported as exceeding it and collects
+    /// NOTHING ([`report_file::ReportScope::exceeds_limit`]), so the work this does — and
+    /// the render that follows it — is bounded by `limit` rather than by the size of the
+    /// portfolio the account imported.
+    pub fn report_scope(&self, groups: &[Group], limit: usize) -> report_file::ReportScope {
+        let servers = self.servers_in_scope(groups);
+        let in_scope: BTreeSet<String> = servers.iter().map(|server| server.id.clone()).collect();
+        let components: Vec<&ApplicationComponentRecord> = self
+            .application_components
+            .values()
+            .filter(|component| component.runs_on_any(&in_scope))
+            .collect();
+        if servers.len().saturating_add(components.len()) > limit {
+            return report_file::ReportScope {
+                exceeds_limit: true,
+                ..Default::default()
+            };
+        }
+        report_file::ReportScope {
+            servers: servers
+                .into_iter()
+                .map(report_file::ReportedServer::of)
+                .collect(),
+            components: components
+                .into_iter()
+                .map(report_file::ReportedComponent::of)
+                .collect(),
+            exceeds_limit: false,
+        }
     }
 
     /// The task of this account that has not reached a terminal status at `now`, if there
@@ -3231,10 +3390,37 @@ pub fn s3_client(
 
 /// Write `body` as the object `key` of `bucket`, through the in-process callback.
 ///
-/// `Ok` only once the object is THERE, which is what lets the task record the key: a
-/// later read reports `statusReportS3Key` only for an object a caller can fetch. The
-/// `Err` carries the reason the object could not be written — no bucket of that name,
-/// say — for the caller to report rather than to name a report nothing wrote.
+/// `Ok` only once the object is THERE, which is what lets a task record the key: a later
+/// read names a location only for an object a caller can fetch. The `Err` carries the
+/// reason the object could not be written — no bucket of that name, say — for the caller to
+/// report rather than to name a file nothing wrote.
+///
+/// One write for every object this service produces (an import's status report, a
+/// recommendation report file), so `content_type` is what tells a fetching caller which of
+/// them it holds.
+pub async fn put_object(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    bucket: &str,
+    key: &str,
+    body: Vec<u8>,
+    content_type: &str,
+) -> Result<(), String> {
+    s3_client(ctx, region)
+        .put_object()
+        .bucket(bucket)
+        .key(key)
+        .body(::aws_sdk_s3::primitives::ByteStream::from(body))
+        .content_type(content_type)
+        .send()
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            ::aws_smithy_types::error::display::DisplayErrorContext(&error).to_string()
+        })
+}
+
+/// Write the import's status report document `body` as the object `key` of `bucket`.
 pub async fn put_import_status_report(
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
@@ -3242,20 +3428,15 @@ pub async fn put_import_status_report(
     key: &str,
     body: String,
 ) -> Result<(), String> {
-    s3_client(ctx, region)
-        .put_object()
-        .bucket(bucket)
-        .key(key)
-        .body(::aws_sdk_s3::primitives::ByteStream::from(
-            body.into_bytes(),
-        ))
-        .content_type("application/json")
-        .send()
-        .await
-        .map(|_| ())
-        .map_err(|error| {
-            ::aws_smithy_types::error::display::DisplayErrorContext(&error).to_string()
-        })
+    put_object(
+        ctx,
+        region,
+        bucket,
+        key,
+        body.into_bytes(),
+        "application/json",
+    )
+    .await
 }
 
 /// This service's store in the shared engine: call it with a handler's `&*self.engine`.

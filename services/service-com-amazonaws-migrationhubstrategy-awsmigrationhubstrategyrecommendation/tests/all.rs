@@ -95,6 +95,9 @@ mod preferences_conflict;
 #[path = "all/recommendation_report.rs"]
 mod recommendation_report;
 
+#[path = "all/recommendation_report_file.rs"]
+mod recommendation_report_file;
+
 #[path = "all/refusal_messages.rs"]
 mod refusal_messages;
 

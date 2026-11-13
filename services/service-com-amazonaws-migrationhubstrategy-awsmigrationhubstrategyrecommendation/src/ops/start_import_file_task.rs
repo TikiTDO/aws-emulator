@@ -364,7 +364,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     crate::state::import_status_report_document(&task, &ingestion),
                 )
             });
+            let report_bucket = task.status_report_s3_bucket.clone();
             store.region_entry(&region).import_tasks.insert(id.clone(), task);
+            // `s3bucketForReportData` is "The S3 bucket where Strategy Recommendations
+            // uploads import results", so a start call that names one also sets where this
+            // account's uploads go from here on — including the report file a recommendation
+            // report generation task writes (`crate::state::RegionState::report_data_bucket`).
+            // A call that names none leaves the account's bucket as it was.
+            if let Some(bucket) = report_bucket {
+                store.region_entry(&region).report_data_bucket = Some(bucket);
+            }
             (id, report)
         };
 

@@ -15,10 +15,11 @@
 //!    its terminal status a start call mints a new task;
 //! 3. the clock owes the task a terminal status after the completion span, and that
 //!    status is `SUCCESS` — the status the service's recorded behaviour shows a started
-//!    task settling on — with a status message reporting what was in scope and that no
-//!    report FILE was written (this emulator serves no Amazon S3 data plane to upload an
-//!    Excel or JSON report to), so `s3Bucket` and `s3Keys` stay absent rather than naming
-//!    a file nothing wrote;
+//!    task settling on — with a status message reporting what was in scope; this account
+//!    named no bucket for the reports the service generates, so its tasks write no report
+//!    FILE and name no location at all (`s3Bucket` and `s3Keys` stay absent rather than
+//!    naming a file nothing wrote — what an account that DID name one reports is
+//!    `recommendation_report_file.rs`);
 //! 4. an `id` that names no task of this account is refused with the modelled
 //!    `ResourceNotFoundException` (HTTP 404), and a request carrying an enum value the
 //!    model does not declare with 400 `ValidationException`;
@@ -285,8 +286,9 @@ async fn a_report_generation_task_is_reported_from_what_was_stored() {
             "case {case:?}: every task reports the start time it was stored with, got {:?}",
             at(&reported.body, "/recommendationReportDetails/startTime")
         );
-        // No report FILE is written, so nothing names one — on a running task and on a
-        // settled one alike.
+        // This account named no bucket for the reports the service generates, so no report
+        // FILE was written and nothing names one — on a running task and on a settled one
+        // alike.
         for member in ["/s3Bucket", "/s3Keys"] {
             let pointer = format!("/recommendationReportDetails{member}");
             assert_eq!(
@@ -529,7 +531,8 @@ async fn a_settled_task_reports_its_terminal_status_and_its_scope() {
             assert_eq!(
                 at(&settled.body, &pointer),
                 Value::Null,
-                "case {case:?}: no report file was written, so {member} must be absent, got {:?}",
+                "case {case:?}: this account named no report data bucket, so no report file was \
+                 written and {member} must be absent, got {:?}",
                 at(&settled.body, &pointer)
             );
         }
@@ -705,6 +708,11 @@ async fn a_start_call_past_the_quota_is_refused() {
                     // Settled: nothing is owed, so the call below is not refused for a
                     // task still running.
                     completion_due: None,
+                    // Seeded settled, and this account named no report data bucket, so
+                    // there is no report file for the task to name.
+                    s3_bucket: None,
+                    s3_keys: Vec::new(),
+                    no_file_reason: None,
                 },
             );
         }

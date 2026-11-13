@@ -72,9 +72,13 @@
 //! # What this emulator serves
 //!
 //! The report generation task `StartRecommendationReportGeneration` minted, reported from
-//! the stored record: its status, its status message and its timestamps. An id that names
-//! no task of this account is refused with the modelled `ResourceNotFoundException`
-//! (HTTP 404) rather than answered with an empty `recommendationReportDetails`.
+//! the stored record: its status, its status message, its timestamps and — once the task is
+//! complete — where the report FILE it wrote is, `s3Bucket` and `s3Keys` naming the object
+//! the start call put in the account's report data bucket. A task that produced no file
+//! names no location at all, so no reported pair sends a caller to an object it cannot
+//! fetch. An id that names no task of this account is refused with the modelled
+//! `ResourceNotFoundException` (HTTP 404) rather than answered with an empty
+//! `recommendationReportDetails`.
 
 #[allow(unused_imports)]
 use super::types::*;

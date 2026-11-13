@@ -83,10 +83,14 @@
 //!   the modelled `ConflictException`: the service's recorded behaviour shows a start
 //!   issued inside the first one's span answering that first task's id with HTTP 200.
 //! * The task's terminal status is `SUCCESS`, the status the service's recorded behaviour
-//!   shows a started task settling on, with a `statusMessage` reporting what was in scope
-//!   and that no report FILE was written: the report is an Excel or JSON file uploaded to
-//!   S3, and this emulator serves no S3 data plane to upload it to. `s3Bucket` and
-//!   `s3Keys` therefore stay absent (see `crate::state::REPORT_SUCCESS`).
+//!   shows a started task settling on, and the report FILE is its artifact: this call
+//!   generates it in the `outputFormat` asked for — a JSON document or an Excel workbook —
+//!   and writes it into the bucket the account named for what this service uploads
+//!   (`crate::state::RegionState::report_data_bucket`), so the completed task reports
+//!   `s3Bucket` and `s3Keys` and a caller can fetch the object they name. An account that
+//!   named no such bucket has nowhere for the file to go, so its task names no location and
+//!   says so in `statusMessage` (`crate::state::NO_REPORT_DATA_BUCKET`) rather than naming
+//!   a file nothing wrote.
 //! * The store is bounded: a `groupIdFilter` past
 //!   `crate::state::MAX_GROUP_FILTER_ENTRIES` is refused with 400 `ValidationException`
 //!   (and the filter is never stored, only the count of servers it selected), and past
@@ -222,94 +226,197 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // and everything below — the task a repeat coalesces onto, the quota, the inventory
         // it counts — is that Region's.
         let region = crate::state::request_region(ctx.parts());
-        let mut store = state.lock();
 
-        // The portfolio runs one report generation task, and the start is idempotent over
-        // that task's span: while a task is still owed its terminal status a further start
-        // mints nothing and answers that task's own id, so a duplicate, a retried or a
-        // concurrent start coalesces onto the task the caller polls rather than being told
-        // its request was not acted on. WHICH task that is comes from the STORE (is one
-        // still owed its terminal status?), never from what this request carries, so a
-        // call of any parameters inside one task's span is answered with that task's id
-        // and the running task keeps the parameters of the call that minted it.
-        // Both of the things this call reads out of the portfolio — the task already
-        // running and the inventory the new task's scope is counted from — are read with
-        // every completion the clock already owed this portfolio materialised first
-        // (`RegionState::settle_all`): owed at this same instant even if nobody had
-        // called, so what the call answers and stores does not depend on whether some
-        // unrelated read happened to materialise them first. A Region nothing was
-        // imported in holds nothing to settle and gets no partition minted for it.
-        let in_flight = store.region_mut(&region).and_then(|portfolio| {
-            portfolio.settle_all(now);
-            portfolio.ongoing_report_generation(now)
-        });
-        if let Some(in_flight) = in_flight {
-            return Ok(StartRecommendationReportGenerationOutput {
-                id: Some(in_flight.id),
+        // The store is read and written inside this block, so the lock is released at its
+        // end: the report file write below is an in-process call into the emulator's own
+        // S3 service, and nothing awaits while the store is held.
+        let (id, write) = {
+            let mut store = state.lock();
+
+            // The portfolio runs one report generation task, and the start is idempotent
+            // over that task's span: while a task is still owed its terminal status a
+            // further start mints nothing and answers that task's own id, so a duplicate, a
+            // retried or a concurrent start coalesces onto the task the caller polls rather
+            // than being told its request was not acted on. WHICH task that is comes from
+            // the STORE (is one still owed its terminal status?), never from what this
+            // request carries, so a call of any parameters inside one task's span is
+            // answered with that task's id and the running task keeps the parameters of the
+            // call that minted it.
+            // Both of the things this call reads out of the portfolio — the task already
+            // running and the inventory the new task's scope is counted from — are read
+            // with every completion the clock already owed this portfolio materialised
+            // first (`RegionState::settle_all`): owed at this same instant even if nobody
+            // had called, so what the call answers and stores does not depend on whether
+            // some unrelated read happened to materialise them first. A Region nothing was
+            // imported in holds nothing to settle and gets no partition minted for it.
+            let in_flight = store.region_mut(&region).and_then(|portfolio| {
+                portfolio.settle_all(now);
+                portfolio.ongoing_report_generation(now)
             });
-        }
+            if let Some(in_flight) = in_flight {
+                return Ok(StartRecommendationReportGenerationOutput {
+                    id: Some(in_flight.id),
+                });
+            }
 
-        // The store is bounded: past its quota no further task is minted, so the state
-        // cannot grow without end. The operation models no quota error, so the refusal is
-        // its `ThrottlingException` — the request is denied because too many were made.
-        if store.region(&region).recommendation_reports.len() >= crate::state::REPORT_QUOTA {
-            return Err(
-                StartRecommendationReportGenerationErrorModeled::ThrottlingException(
-                    ThrottlingException {
-                        message: Some(format!(
-                            "this account already holds the maximum of {} recommendation report \
-                             generation tasks",
-                            crate::state::REPORT_QUOTA
-                        )),
-                    },
-                )
-                .into(),
-            );
-        }
+            // The store is bounded: past its quota no further task is minted, so the state
+            // cannot grow without end. The operation models no quota error, so the refusal
+            // is its `ThrottlingException` — the request is denied because too many were
+            // made.
+            if store.region(&region).recommendation_reports.len() >= crate::state::REPORT_QUOTA {
+                return Err(
+                    StartRecommendationReportGenerationErrorModeled::ThrottlingException(
+                        ThrottlingException {
+                            message: Some(format!(
+                                "this account already holds the maximum of {} recommendation \
+                                 report generation tasks",
+                                crate::state::REPORT_QUOTA
+                            )),
+                        },
+                    )
+                    .into(),
+                );
+            }
 
-        // And the store keeps a portfolio for a bounded number of Regions: the Region
-        // comes from the caller's own credential scope, so this is what stops made-up
-        // Regions growing the store without bound.
-        if store.region_capacity_reached(&region) {
-            return Err(
-                StartRecommendationReportGenerationErrorModeled::ThrottlingException(
-                    ThrottlingException {
-                        message: Some(format!(
-                            "this emulator holds recommendation report generation tasks in at \
-                             most {} Regions",
-                            crate::state::MAX_REGIONS
-                        )),
-                    },
-                )
-                .into(),
-            );
-        }
+            // And the store keeps a portfolio for a bounded number of Regions: the Region
+            // comes from the caller's own credential scope, so this is what stops made-up
+            // Regions growing the store without bound.
+            if store.region_capacity_reached(&region) {
+                return Err(
+                    StartRecommendationReportGenerationErrorModeled::ThrottlingException(
+                        ThrottlingException {
+                            message: Some(format!(
+                                "this emulator holds recommendation report generation tasks in \
+                                 at most {} Regions",
+                                crate::state::MAX_REGIONS
+                            )),
+                        },
+                    )
+                    .into(),
+                );
+            }
 
-        // The report covers the servers the filter names, counted from this Region's
-        // inventory as it stands now — the inventory every completion the clock already
-        // owed has been materialised over above, so a server an import whose completion
-        // was already due brought in is counted. The count is what the task keeps; the
-        // filter itself is not stored.
-        let servers_covered = store.region(&region).servers_in_groups(&group_id_filter);
+            let id = store.mint_recommendation_report_id(&region);
+            // The report covers the servers the filter names, out of this Region's
+            // inventory as it stands now — the inventory every completion the clock already
+            // owed has been materialised over above, so a server an import whose completion
+            // was already due brought in is covered. The task keeps the COUNT; the
+            // resources themselves are what the report file reports on, and the filter
+            // itself is not stored.
+            let portfolio = store.region(&region);
+            let servers_covered = portfolio.servers_in_groups(&group_id_filter);
+            // The rows the file is rendered from, bounded by how many one report file
+            // covers: a scope past that bound collects nothing and produces no file, so
+            // neither the copy made here nor the render below is sized by the portfolio
+            // the account imported.
+            let scope =
+                portfolio.report_scope(&group_id_filter, crate::state::report_file::MAX_REPORT_ROWS);
+            // The report FILE the task produces, and the bucket it goes into: the one the
+            // account named for what this service uploads. An account that named none has
+            // nowhere for the file to go, so the task reports that rather than a location
+            // nothing wrote.
+            let bucket = portfolio.report_data_bucket.clone();
+            let key = crate::state::report_file::report_key(&id, &output_format);
+            let content_type = crate::state::report_file::content_type(&output_format);
+            let no_file_reason = if bucket.is_none() {
+                Some(crate::state::NO_REPORT_DATA_BUCKET.to_string())
+            } else if scope.exceeds_limit {
+                Some(crate::state::REPORT_SCOPE_TOO_LARGE.to_string())
+            } else {
+                None
+            };
+            // Rendering the file is work over the scope above, so the scope travels out of
+            // this block and the document is rendered (and written) with the store
+            // released: nothing but the store's own reads and writes happens under the lock.
+            let pending = bucket
+                .clone()
+                .filter(|_| !scope.exceeds_limit)
+                .map(|bucket| (bucket, key.clone(), content_type, output_format.clone(), scope));
 
-        let id = store.mint_recommendation_report_id(&region);
-        let report = crate::state::RecommendationReport {
-            id: id.clone(),
-            // Generating the report is not done the instant the call returns: the clock
-            // owes the task a terminal status once the completion span has passed, and
-            // until then it is the task a further start call is refused for.
-            status: crate::state::REPORT_IN_PROGRESS.to_string(),
-            status_message: None,
-            output_format,
-            servers_covered,
-            start_time: now,
-            completion_time: None,
-            completion_due: Some(now + crate::state::COMPLETION_SPAN),
+            let report = crate::state::RecommendationReport {
+                id: id.clone(),
+                // Generating the report is not done the instant the call returns: the clock
+                // owes the task a terminal status once the completion span has passed, and
+                // until then it is the task a further start call coalesces onto.
+                status: crate::state::REPORT_IN_PROGRESS.to_string(),
+                status_message: None,
+                output_format,
+                servers_covered,
+                start_time: now,
+                completion_time: None,
+                completion_due: Some(now + crate::state::COMPLETION_SPAN),
+                // Where the report file is, filled in below once that object has actually
+                // been written: until then the task names no location, and an account that
+                // named no bucket for it never will.
+                s3_bucket: None,
+                s3_keys: Vec::new(),
+                no_file_reason,
+            };
+            store
+                .region_entry(&region)
+                .recommendation_reports
+                .insert(id.clone(), report);
+            (id, pending)
         };
-        store
-            .region_entry(&region)
-            .recommendation_reports
-            .insert(id.clone(), report);
+
+        // The report file itself: the artifact `RecommendationReportDetails$s3Bucket` and
+        // `s3Keys` name. It is produced HERE, where the generation runs, because the read
+        // that materialises the task's terminal status is a reporting operation and may not
+        // write an object; what it holds is the scope settled above, so the file reports the
+        // same portfolio the completed task reports the count of.
+        //
+        // The render itself is CPU work over that scope, so it runs on the BLOCKING pool
+        // rather than on this async worker: the await below is where a timeout or a
+        // cancellation lands, and nothing else this emulator is serving waits behind the
+        // render. Its size is bounded before it starts (`report_file::MAX_REPORT_ROWS`) and
+        // its bytes before they are written (`report_file::MAX_REPORT_FILE_BYTES`).
+        if let Some((bucket, key, content_type, output_format, scope)) = write {
+            let rendered_for = id.clone();
+            let rendered = ::tokio::task::spawn_blocking(move || {
+                crate::state::report_file::report_document(
+                    &rendered_for,
+                    &output_format,
+                    now,
+                    &scope,
+                )
+            })
+            .await
+            .unwrap_or_else(|error| Err(format!("the report file was not rendered: {error}")));
+            let written = match rendered {
+                Ok(bytes) => {
+                    crate::state::put_object(ctx, &region, &bucket, &key, bytes, content_type).await
+                }
+                Err(reason) => Err(reason),
+            };
+            let mut store = state.lock();
+            if let Some(report) = store
+                .region_mut(&region)
+                .and_then(|portfolio| portfolio.recommendation_reports.get_mut(&id))
+            {
+                match written {
+                    // The object is there, so the task can name it: `s3Bucket` and `s3Keys`
+                    // are reported from here on, once the task is complete.
+                    Ok(()) => {
+                        report.s3_bucket = Some(bucket);
+                        report.s3_keys = vec![key];
+                        report.no_file_reason = None;
+                    }
+                    // Nothing was written, so the task names nothing: a reported location
+                    // would send a caller to an object it cannot fetch.
+                    Err(reason) => {
+                        ::tracing::warn!(
+                            report_task_id = %id,
+                            %bucket,
+                            %key,
+                            %reason,
+                            "the recommendation report file could not be written",
+                        );
+                        report.no_file_reason =
+                            Some(crate::state::REPORT_FILE_NOT_WRITTEN.to_string());
+                    }
+                }
+            }
+        }
 
         Ok(StartRecommendationReportGenerationOutput { id: Some(id) })
     }
