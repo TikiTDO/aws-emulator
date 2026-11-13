@@ -2266,3 +2266,6 @@ mod tests {
 pub mod host_workloads;
 /// The one client every service runs a real container through, when host workloads are on.
 pub mod host_runtime;
+/// What a service asks for when it runs something real on the host: desired and observed state,
+/// placed per kind of workload.
+pub mod workload;
