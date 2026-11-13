@@ -115,7 +115,8 @@ use crate::ops::types::{
     DatasetSource, DatasetStatus, EnrichmentJobConfiguration, EnrichmentJobSummary,
     ErrorReportLocation,
     ExecutionEnvironmentVariables, ExecutionStatus, ExecutionSummary, ExportErrorReportLocation,
-    ExpressionVariable, File, GatewayCapabilitySummary, GatewayPlatform, HierarchyMapping, Identity,
+    ExpressionVariable, File, FileFormat, GatewayCapabilitySummary, GatewayPlatform,
+    HierarchyMapping, Identity,
     ImageFile, ImageLocation, JobConfiguration, LoggingOptions, Mount, MountOverrides,
     MultiLayerStorage,
     PipelineExecutionStateDetails, PipelineExecutionStatus, PortalStatus,
@@ -136,6 +137,8 @@ use crate::ops::types::{
 //   materialisation and propagation every handler asks the store for.
 // * `asset_records` — the asset-model and asset records, and the time-series and
 //   capture records an asset's samples live in.
+// * `capture_ingest` — how an import's `mp4` files become the video a
+//   workspace's capture sources hold.
 // * `workspace_records` — the gateway-capability, dataset, data-segment,
 //   workspace and compute-node-execution records.
 // * `pipeline_task_records` — the pipeline, portal, project, access-policy,
@@ -149,6 +152,7 @@ use crate::ops::types::{
 //   model, the notification block a reported asset property carries, and which
 //   of a model's composite models are built-in.
 mod asset_records;
+mod capture_ingest;
 mod computation_models;
 mod jobs;
 mod paths;
@@ -159,6 +163,7 @@ mod store;
 mod workspace_records;
 
 pub use asset_records::*;
+pub use capture_ingest::*;
 pub use computation_models::*;
 pub use jobs::*;
 pub use paths::*;

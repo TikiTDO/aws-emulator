@@ -32,9 +32,23 @@ sqlparser = "0.59"
 # may be spelled as, read through the workspace's one maintained reading of that
 # grammar rather than a second one here.
 service-common = { path = "../common" }
+# Reads the MP4 container an imported video file is, with a maintained ISO base
+# media reader: the span a stored segment covers is the duration the media itself
+# declares rather than a guess.
+mp4 = "0.14"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
+
+[dev-dependencies]
+# The capture-import suite mounts Amazon S3 beside this service on ONE engine,
+# exactly as the assembled router mounts them, and stages the video an import reads
+# through that service's OWN `PutObject`. DEV-ONLY: this crate depends on no other
+# service's crate outside its tests, and the shipped crate reaches the object store
+# only through `service-common`'s one shared read.
+service-com-amazonaws-s3-amazons3 = { workspace = true }
+# The generated Amazon S3 client that suite stages its objects with.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
 
 [lints]
 workspace = true

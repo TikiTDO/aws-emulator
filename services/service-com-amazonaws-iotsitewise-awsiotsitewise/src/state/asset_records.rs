@@ -101,9 +101,10 @@ pub struct CaptureSegment {
 /// so the record carries both identities plus the `VideoDataType` of the media it
 /// holds, which a read reports rather than assuming.
 ///
-/// The PRODUCER side (video an edge gateway publishes for the source, and the
-/// bulk import of `mp4` files a `CreateBulkImportJob` asks for) is not
-/// implemented in this emulator yet, so today the only writer of this log is
+/// The PRODUCER side is the bulk import of `mp4` files a `CreateBulkImportJob`
+/// into a workspace asks for
+/// ([`ComAmazonawsIotsitewiseAwsiotsitewiseState::ingest_capture_segments`]),
+/// and every segment it brings in goes through
 /// [`ComAmazonawsIotsitewiseAwsiotsitewiseState::put_capture_segment`] — the one
 /// entry point a producer path (or a test seeding a capture source) calls.
 /// `GetCaptureData` itself never appends a segment and never creates a source.

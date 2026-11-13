@@ -15,14 +15,17 @@ use super::*;
 /// where it has got to.
 ///
 /// That status is a RECORD of the lifecycle the create owed, not a report on
-/// work something performed: the files a job names live in Amazon S3, which this
-/// emulator does not reach, so nothing is read from them and no sample appears
-/// because a job ran. What an accepted import DOES record is the destination
-/// session dataset's data segments, taken from the data this store really holds
-/// for the stream each file names ([`ComAmazonawsIotsitewiseAwsiotsitewiseState::ingest_data_segments`]);
-/// an operation that comes to ingest a job's files must likewise take them from
-/// somewhere this emulator really holds, never synthesise values to match the
-/// status reached here.
+/// work something performed: no SAMPLE appears because a job ran, since the
+/// values a `csv` or `parquet` file holds are not read from it. What an accepted
+/// import DOES record is the destination session dataset's data segments, taken
+/// from the data this store really holds for the stream each file names
+/// ([`ComAmazonawsIotsitewiseAwsiotsitewiseState::ingest_data_segments`]), and
+/// the video its `mp4` files carry, read from the objects themselves in the
+/// emulator's own Amazon S3
+/// ([`ComAmazonawsIotsitewiseAwsiotsitewiseState::ingest_capture_segments`]). An
+/// operation that comes to ingest the rest of a job's files must likewise take
+/// them from somewhere this emulator really holds, never synthesise values to
+/// match the status reached here.
 #[derive(Debug, Clone)]
 pub struct BulkImportJobRecord {
     /// The `jobId` this job was minted with ([`new_id`]).
@@ -47,7 +50,8 @@ pub struct BulkImportJobRecord {
     /// The modelled `adaptiveIngestion`, as the create stated it.
     pub adaptive_ingestion: Option<bool>,
     /// The modelled `deleteFilesAfterImport`, as the create stated it. This
-    /// service deletes nothing: the files are in S3, which it does not reach.
+    /// service deletes nothing: an import READS the files it takes video from and
+    /// removes none of them.
     pub delete_files_after_import: Option<bool>,
     /// "The ID of the session dataset to ingest data into", for a job that
     /// ingests into one; `None` for a job ingesting into time series outside a

@@ -16,9 +16,10 @@
 //! nothing, and a span overlapping a segment already held records nothing, so a
 //! repeated import adds no second segment.
 //!
-//! Nothing is read from Amazon S3, which this emulator does not reach: the data a
-//! segment covers is the data the store really holds for the stream the file
-//! names, ingested through `BatchPutAssetPropertyValue`.
+//! No SAMPLE is read from Amazon S3: the data a segment covers is the data the
+//! store really holds for the stream the file names, ingested through
+//! `BatchPutAssetPropertyValue`. (An `mp4` file carries media rather than
+//! samples, and what one brings in is video — `tests/all/capture_import.rs`.)
 //!
 //! The rows differ along what the rule generalises over: where the file's
 //! `startTime` falls relative to the stream's samples (at the first, between two,

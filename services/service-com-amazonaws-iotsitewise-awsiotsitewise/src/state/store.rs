@@ -826,13 +826,15 @@ impl ComAmazonawsIotsitewiseAwsiotsitewiseState {
     /// data begins ("the nanosecond-precision start time for the file data"),
     /// which is the span of that stream the dataset comes to hold.
     ///
-    /// The files themselves are in Amazon S3, which this emulator does not
-    /// reach, so nothing is read from them and NO sample is invented (see
+    /// The files themselves are in Amazon S3, and a `csv` or `parquet` file's
+    /// SAMPLES are not read from it, so no sample is invented (see
     /// [`BulkImportJobRecord`]): the data a segment covers is the data this
     /// store really holds for the stream the file names. A file naming no
     /// alias, an alias no stored stream answers to, or an instant past every
     /// sample that stream holds therefore brings in nothing and records no
-    /// segment.
+    /// segment. (An `mp4` file carries media rather than samples, and what it
+    /// brings in is video read from the object itself —
+    /// [`Self::ingest_capture_segments`].)
     ///
     /// A span overlapping a segment this store already holds of that series
     /// records nothing either — "Data segments that belong to the same time
@@ -1598,12 +1600,11 @@ impl ComAmazonawsIotsitewiseAwsiotsitewiseState {
     /// names, creating the source on first write.
     ///
     /// This is the PRODUCER-side entry point — the one writer of a workspace's
-    /// video, which `GetCaptureData` then reads. The producer paths themselves
-    /// (video an edge gateway publishes for a capture source, and the bulk import
-    /// of `mp4` files `CreateBulkImportJob` takes) are not implemented in this
-    /// emulator yet, so a test seeding a capture source is today's only caller;
-    /// everything a read of that video must answer from is written here and
-    /// nowhere else.
+    /// video, which `GetCaptureData` then reads. The producer path that reaches
+    /// it is the bulk import of `mp4` files `CreateBulkImportJob` takes
+    /// ([`Self::ingest_capture_segments`]); a test seeding a capture source
+    /// reaches the same writer, so everything a read of that video must answer
+    /// from is written here and nowhere else.
     ///
     /// `alias` BINDS that alias to the source, so the alias form of a lookup
     /// reaches the same record; an alias another source of the same workspace

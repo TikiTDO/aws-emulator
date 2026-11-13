@@ -8,8 +8,14 @@
 //! answers with the lifecycle the create owes it. A job whose destination is a
 //! session dataset also records that dataset's data segments: one per file whose
 //! alias names a stream this store holds, covering the data it holds for that
-//! stream from the instant the file states. Nothing is read from Amazon S3 and no
-//! sample is invented.
+//! stream from the instant the file states.
+//!
+//! An import into a WORKSPACE also ingests the video its `mp4` files carry onto
+//! that workspace's capture sources ([`crate::state::read_capture_files`]), which
+//! is what `GetCaptureData` reads back: the bytes are read from the object each
+//! file names in the emulator's own Amazon S3, so a file no object store serves
+//! brings in nothing. No SAMPLE is read or invented: the `csv` and `parquet`
+//! files hold time-series values, and this emulator reads none of them.
 //!
 //! ## Shape of an operation
 //!
@@ -202,7 +208,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             CreateBulkImportJobError::Modeled(
@@ -233,138 +239,196 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         };
 
-        let mut store = state.lock();
+        // The format the JOB states for every file that states none of its own:
+        // "contains the configuration information of a job, such as the file format
+        // used to save data in Amazon S3".
+        let job_format = input
+            .job_configuration
+            .as_ref()
+            .and_then(|configuration| configuration.file_format.as_ref());
 
-        match dataset {
-            Some((workspace, dataset_id)) => {
-                // The destination is a session dataset of a workspace, so both are
-                // resources of this service's own control plane: one this store does
-                // not hold is the absence every other operation addressing it
-                // reports.
-                if !store.workspaces.contains_key(workspace) {
-                    return Err(not_found(crate::state::RESOURCE_WORKSPACE, workspace));
+        // Everything this create decides from the store, and everything it
+        // writes to it, under ONE lock — which is released before the video an
+        // import brings in is read below, because that read reaches another
+        // service of this emulator and nothing may hold this service's state
+        // while it waits.
+        let output = {
+            let mut store = state.lock();
+
+            match dataset {
+                Some((workspace, dataset_id)) => {
+                    // The destination is a session dataset of a workspace, so both are
+                    // resources of this service's own control plane: one this store does
+                    // not hold is the absence every other operation addressing it
+                    // reports.
+                    if !store.workspaces.contains_key(workspace) {
+                        return Err(not_found(crate::state::RESOURCE_WORKSPACE, workspace));
+                    }
+                    // `workspaceName` is "the name of the workspace that CONTAINS the
+                    // session dataset", so the lookup is scoped to it: a dataset of
+                    // another workspace, and one that belongs to no workspace at all,
+                    // is not the dataset this request names — the same narrowing every
+                    // other workspace-scoped lookup in this service applies.
+                    let dataset_type = store
+                        .datasets
+                        .get(dataset_id)
+                        .filter(|dataset| dataset.workspace_name.as_deref() == Some(workspace))
+                        .ok_or_else(|| not_found(crate::state::RESOURCE_DATASET, dataset_id))?
+                        .dataset_type
+                        .clone();
+
+                    // The destination member names "the ID of the SESSION dataset to
+                    // ingest data into", and a session dataset is the one that holds its
+                    // own ingested data: a curated dataset only references segments
+                    // selected from source session datasets, and an external one connects
+                    // to a datasource outside this service, so neither is a dataset data
+                    // can be ingested INTO. A dataset the store holds no type for states
+                    // which side of that rule it falls on, so it is not refused here —
+                    // `CreateDataset` keeps `datasetType` absent rather than guessing one.
+                    if let Some(dataset_type) =
+                        dataset_type.filter(|held| held != DATASET_TYPE_SESSION)
+                    {
+                        return Err(invalid_request(format!(
+                            "Data can be ingested only into a {DATASET_TYPE_SESSION} dataset, \
+                             but the dataset {dataset_id} is a {dataset_type} dataset."
+                        )));
+                    }
                 }
-                // `workspaceName` is "the name of the workspace that CONTAINS the
-                // session dataset", so the lookup is scoped to it: a dataset of
-                // another workspace, and one that belongs to no workspace at all,
-                // is not the dataset this request names — the same narrowing every
-                // other workspace-scoped lookup in this service applies.
-                let dataset_type = store
-                    .datasets
-                    .get(dataset_id)
-                    .filter(|dataset| dataset.workspace_name.as_deref() == Some(workspace))
-                    .ok_or_else(|| not_found(crate::state::RESOURCE_DATASET, dataset_id))?
-                    .dataset_type
-                    .clone();
-
-                // The destination member names "the ID of the SESSION dataset to
-                // ingest data into", and a session dataset is the one that holds its
-                // own ingested data: a curated dataset only references segments
-                // selected from source session datasets, and an external one connects
-                // to a datasource outside this service, so neither is a dataset data
-                // can be ingested INTO. A dataset the store holds no type for states
-                // which side of that rule it falls on, so it is not refused here —
-                // `CreateDataset` keeps `datasetType` absent rather than guessing one.
-                if let Some(dataset_type) =
-                    dataset_type.filter(|held| held != DATASET_TYPE_SESSION)
-                {
-                    return Err(invalid_request(format!(
-                        "Data can be ingested only into a {DATASET_TYPE_SESSION} dataset, but \
-                         the dataset {dataset_id} is a {dataset_type} dataset."
-                    )));
+                None => {
+                    // "Before you create a bulk import job that ingests data into time
+                    // series outside of a workspace, you must enable IoT SiteWise warm
+                    // tier or IoT SiteWise cold tier" — a precondition on the account's
+                    // storage configuration, read from the configuration in force rather
+                    // than from anything this call stores. The cold tier is the
+                    // multi-layer storage type, the warm tier is its own enabled flag.
+                    let configuration = store.storage_configuration(now);
+                    let cold_tier = configuration.selection.storage_type
+                        == crate::state::STORAGE_TYPE_MULTI_LAYER;
+                    let warm_tier = configuration.selection.warm_tier.as_deref()
+                        == Some(crate::state::STORAGE_STATE_ENABLED);
+                    if !cold_tier && !warm_tier {
+                        return Err(invalid_request(
+                            "Before you create a bulk import job that ingests data into time \
+                             series outside of a workspace, you must enable IoT SiteWise warm \
+                             tier or IoT SiteWise cold tier."
+                                .to_string(),
+                        ));
+                    }
                 }
             }
-            None => {
-                // "Before you create a bulk import job that ingests data into time
-                // series outside of a workspace, you must enable IoT SiteWise warm
-                // tier or IoT SiteWise cold tier" — a precondition on the account's
-                // storage configuration, read from the configuration in force rather
-                // than from anything this call stores. The cold tier is the
-                // multi-layer storage type, the warm tier is its own enabled flag.
-                let configuration = store.storage_configuration(now);
-                let cold_tier =
-                    configuration.selection.storage_type == crate::state::STORAGE_TYPE_MULTI_LAYER;
-                let warm_tier = configuration.selection.warm_tier.as_deref()
-                    == Some(crate::state::STORAGE_STATE_ENABLED);
-                if !cold_tier && !warm_tier {
-                    return Err(invalid_request(
-                        "Before you create a bulk import job that ingests data into time series \
-                         outside of a workspace, you must enable IoT SiteWise warm tier or IoT \
-                         SiteWise cold tier."
-                            .to_string(),
-                    ));
+
+            // "You can specify up to 100 files for each bulk import job": the list shape
+            // carries no length constraint, so the quota is enforced here, with the
+            // modelled quota refusal.
+            if input.files.len() > crate::state::MAX_FILES_PER_BULK_IMPORT_JOB {
+                return Err(limit_exceeded(format!(
+                    "You can specify up to {} files for each bulk import job.",
+                    crate::state::MAX_FILES_PER_BULK_IMPORT_JOB
+                )));
+            }
+
+            // The store is bounded: a create is the only thing that adds a job and
+            // nothing evicts one, so past the cap this is a quota refusal.
+            if store.bulk_import_jobs.len() >= crate::state::MAX_BULK_IMPORT_JOBS {
+                return Err(limit_exceeded(format!(
+                    "This emulator holds at most {} bulk import jobs.",
+                    crate::state::MAX_BULK_IMPORT_JOBS
+                )));
+            }
+
+            // The video an import brings in is held in this process as the media bytes
+            // of a segment, so this emulator reads at most
+            // `MAX_IMPORTED_CAPTURE_FILES` of them per import. Past that the import is
+            // REFUSED, with the quota refusal this operation models, rather than
+            // accepted with some of the video it named silently left unread — a job
+            // reported as having run must have brought in everything it named. Checked
+            // before anything is written, so a refused create starts no job.
+            let video_files = input
+                .files
+                .iter()
+                .filter(|file| crate::state::is_video_file(file, job_format))
+                .count();
+            if video_files > crate::state::MAX_IMPORTED_CAPTURE_FILES {
+                return Err(limit_exceeded(format!(
+                    "This emulator reads at most {} video files for each bulk import job.",
+                    crate::state::MAX_IMPORTED_CAPTURE_FILES
+                )));
+            }
+
+            let job_id = loop {
+                let candidate = crate::state::new_id();
+                if !store.bulk_import_jobs.contains_key(&candidate) {
+                    break candidate;
+                }
+            };
+
+            let record = crate::state::BulkImportJobRecord {
+                job_id,
+                job_name: input.job_name.clone(),
+                job_role_arn: input.job_role_arn.clone(),
+                files: input.files.clone(),
+                error_report_location: input.error_report_location.clone(),
+                job_configuration: input.job_configuration.clone(),
+                adaptive_ingestion: input.adaptive_ingestion,
+                delete_files_after_import: input.delete_files_after_import,
+                dataset_id: input.dataset_id.clone(),
+                workspace_name: input.workspace_name.clone(),
+                // The job's whole lifecycle is owed from here; the status is derived from
+                // this instant rather than stored, and nothing is slept on.
+                created_at: now,
+            };
+
+            let output = CreateBulkImportJobOutput {
+                job_id: record.job_id.clone(),
+                job_name: record.job_name.clone(),
+                job_status: record.status(now).to_string(),
+            };
+            store.bulk_import_jobs.insert(record.job_id.clone(), record);
+
+            // "The ID of the session dataset to ingest data into": what the import
+            // this create accepted brings into that dataset is the dataset's own data
+            // segments — a session dataset "contains data segments of time series
+            // data" — so they are recorded with the job, each file naming the time
+            // series its alias identifies and the instant its data begins. A `csv` or
+            // `parquet` file's own samples are not read from Amazon S3, so no sample
+            // is invented: a segment covers the data this store really holds for that
+            // stream, and a file naming nothing this store holds brings in nothing
+            // (`crate::state::ingest_data_segments`).
+            //
+            // The write lands now and the dataset reports `UPDATING` until the
+            // transition it owes falls due, exactly as every other accepted write to
+            // a dataset does; the job's own `jobStatus` records the lifecycle the
+            // import was owed.
+            if let Some((_, dataset_id)) = dataset {
+                if store.ingest_data_segments(dataset_id, &input.files) > 0 {
+                    if let Some(dataset) = store.datasets.get_mut(dataset_id) {
+                        dataset.begin_update(now);
+                    }
                 }
             }
-        }
-
-        // "You can specify up to 100 files for each bulk import job": the list shape
-        // carries no length constraint, so the quota is enforced here, with the
-        // modelled quota refusal.
-        if input.files.len() > crate::state::MAX_FILES_PER_BULK_IMPORT_JOB {
-            return Err(limit_exceeded(format!(
-                "You can specify up to {} files for each bulk import job.",
-                crate::state::MAX_FILES_PER_BULK_IMPORT_JOB
-            )));
-        }
-
-        // The store is bounded: a create is the only thing that adds a job and
-        // nothing evicts one, so past the cap this is a quota refusal.
-        if store.bulk_import_jobs.len() >= crate::state::MAX_BULK_IMPORT_JOBS {
-            return Err(limit_exceeded(format!(
-                "This emulator holds at most {} bulk import jobs.",
-                crate::state::MAX_BULK_IMPORT_JOBS
-            )));
-        }
-
-        let job_id = loop {
-            let candidate = crate::state::new_id();
-            if !store.bulk_import_jobs.contains_key(&candidate) {
-                break candidate;
-            }
+            output
         };
 
-        let record = crate::state::BulkImportJobRecord {
-            job_id,
-            job_name: input.job_name.clone(),
-            job_role_arn: input.job_role_arn.clone(),
-            files: input.files.clone(),
-            error_report_location: input.error_report_location.clone(),
-            job_configuration: input.job_configuration.clone(),
-            adaptive_ingestion: input.adaptive_ingestion,
-            delete_files_after_import: input.delete_files_after_import,
-            dataset_id: input.dataset_id.clone(),
-            workspace_name: input.workspace_name.clone(),
-            // The job's whole lifecycle is owed from here; the status is derived from
-            // this instant rather than stored, and nothing is slept on.
-            created_at: now,
-        };
-
-        let output = CreateBulkImportJobOutput {
-            job_id: record.job_id.clone(),
-            job_name: record.job_name.clone(),
-            job_status: record.status(now).to_string(),
-        };
-        store.bulk_import_jobs.insert(record.job_id.clone(), record);
-
-        // "The ID of the session dataset to ingest data into": what the import
-        // this create accepted brings into that dataset is the dataset's own data
-        // segments — a session dataset "contains data segments of time series
-        // data" — so they are recorded with the job, each file naming the time
-        // series its alias identifies and the instant its data begins. The files
-        // are in Amazon S3, which this emulator does not reach, so no sample is
-        // read or invented: a segment covers the data this store really holds for
-        // that stream, and a file naming nothing this store holds brings in
-        // nothing (`crate::state::ingest_data_segments`).
-        //
-        // The write lands now and the dataset reports `UPDATING` until the
-        // transition it owes falls due, exactly as every other accepted write to
-        // a dataset does; the job's own `jobStatus` records the lifecycle the
-        // import was owed.
-        if let Some((_, dataset_id)) = dataset {
-            if store.ingest_data_segments(dataset_id, &input.files) > 0 {
-                if let Some(dataset) = store.datasets.get_mut(dataset_id) {
-                    dataset.begin_update(now);
-                }
+        // The VIDEO an import brings in: an `mp4` file is media rather than a
+        // list of samples, so what it ingests is a segment of the workspace's
+        // capture source its alias names — the producer side of the video
+        // `GetCaptureData` reads and the workspace-scoped time-series
+        // operations report. The bytes are read from the object store over the
+        // emulator's own in-process callback, outside the state lock, so a file
+        // nothing serves brings in nothing and no media is invented
+        // (`crate::state::read_capture_files`).
+        if let Some((workspace, _)) = dataset {
+            let ingested = crate::state::read_capture_files(
+                ctx,
+                &crate::state::request_region(ctx.parts()),
+                &input.files,
+                job_format,
+            )
+            .await;
+            if !ingested.is_empty() {
+                state
+                    .lock()
+                    .ingest_capture_segments(workspace, &ingested, now);
             }
         }
 

@@ -7,7 +7,9 @@
 //!
 //! A capture source is a time series of a workspace, named by its `timeSeriesId` or by
 //! the `propertyAlias` bound to it, and its video is kept as the segments the producer
-//! ingested ([`crate::state::CaptureSegment`]). A segment is ATOMIC — this emulator
+//! ingested ([`crate::state::CaptureSegment`]) — the `mp4` files a `CreateBulkImportJob`
+//! into that workspace brings in ([`crate::state::read_capture_files`]). A segment is
+//! ATOMIC — this emulator
 //! stores media exactly as it arrived and decodes nothing — so one answer carries one
 //! segment, reports the span that segment really covers, and hands back the `nextToken`
 //! that resumes at the following overlapping segment. Reading writes nothing: the

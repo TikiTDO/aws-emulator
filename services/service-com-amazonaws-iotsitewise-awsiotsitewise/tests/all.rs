@@ -1108,3 +1108,10 @@ mod dataset_enrichment;
 #[path = "all/aggregate_window_edge.rs"]
 mod aggregate_window_edge;
 
+// Declared at the very END of this file, after every suite above, for the reason
+// the notes higher up give: the sorted list and the stretches of declarations
+// ahead of it are where every concurrent iotsitewise change inserts a
+// declaration of its own. Fold it into the sorted list once the churn settles.
+#[path = "all/capture_import.rs"]
+mod capture_import;
+
