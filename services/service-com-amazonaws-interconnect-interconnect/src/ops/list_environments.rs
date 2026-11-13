@@ -210,8 +210,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 let Some(key) = key else {
                     return Err(ListEnvironmentsErrorModeled::InterconnectValidationException(
                         InterconnectValidationException {
-                            message: "nextToken is not a pagination token issued by ListEnvironments"
-                                .to_string(),
+                            message: crate::state::cursor_not_issued_message("ListEnvironments"),
                         },
                     )
                     .into());

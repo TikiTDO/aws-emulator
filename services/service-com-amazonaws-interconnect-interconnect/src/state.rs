@@ -1010,7 +1010,8 @@ pub fn remote_identifier_violation(
 /// `environment` is an `Option` because a writer that reaches the catalog by id may
 /// find no record there, and `environment_id` is taken separately for exactly that
 /// case — the refusal names the Environment the request resolved against whether or
-/// not the catalog still holds it.
+/// not the catalog still holds it. The sentence carries this service's
+/// [`REFUSAL_ENVELOPE`], like every other client-fault refusal it words itself.
 pub fn bandwidth_availability_violation(
     environment: Option<&Environment>,
     environment_id: &str,
@@ -1021,7 +1022,7 @@ pub fn bandwidth_availability_violation(
         .unwrap_or_default();
     (!available.iter().any(|offered| offered == bandwidth)).then(|| {
         format!(
-            "bandwidth '{bandwidth}' is not available on environment '{environment_id}'; available bandwidths are [{}]",
+            "{REFUSAL_ENVELOPE}bandwidth '{bandwidth}' is not available on environment '{environment_id}'; available bandwidths are [{}]",
             available.join(", ")
         )
     })
@@ -1111,6 +1112,41 @@ pub const REFUSAL_ENVELOPE: &str = "Unable to process request: ";
 /// message is built from the id the request carried.
 pub fn environment_not_found_message(environment_id: &str) -> String {
     format!("{REFUSAL_ENVELOPE}This environment model with id {environment_id} could not be found")
+}
+
+/// How the service words a create against an Environment that is not taking new
+/// connections, naming the Environment and the state it is in.
+///
+/// The sibling of [`environment_not_found_message`] — the Environment resolved, but
+/// its own state says no connection can be requested across it — so it is worded the
+/// same way: a CLIENT fault carrying this service's [`REFUSAL_ENVELOPE`].
+pub fn environment_unavailable_message(environment_id: &str, state: &str) -> String {
+    format!(
+        "{REFUSAL_ENVELOPE}environment '{environment_id}' is {state} and cannot take new connections"
+    )
+}
+
+/// How `CreateConnection` words a `clientToken` that already created a connection but
+/// arrived with different parameters, naming the token and the connection it created.
+///
+/// A fault in the REQUEST — the token names a connection other than the one this call
+/// describes — so it carries this service's [`REFUSAL_ENVELOPE`] like every other
+/// client-fault refusal this service words.
+pub fn client_token_reused_message(client_token: &str, connection_id: &str) -> String {
+    format!(
+        "{REFUSAL_ENVELOPE}clientToken '{client_token}' was already used to create connection '{connection_id}' with different parameters"
+    )
+}
+
+/// How `CreateConnection` words the account's connection quota ([`MAX_CONNECTIONS`])
+/// being full.
+///
+/// Entirely FIXED text but for the limit itself, which is read from the one constant
+/// the create counts against, so the number the caller is told is the number that
+/// refused it. It carries this service's [`REFUSAL_ENVELOPE`] like the service's other
+/// client-facing refusals.
+pub fn connection_quota_exceeded_message() -> String {
+    format!("{REFUSAL_ENVELOPE}the account already holds the maximum of {MAX_CONNECTIONS} connections")
 }
 
 /// How a connection READ (`GetConnection`, `DeleteConnection`) words an identifier
@@ -1832,6 +1868,18 @@ pub const ATTACH_POINT_CURSOR_TAG: &str = "ap:";
 /// than silently answering with an empty page.
 pub fn decode_cursor<'a>(token: &'a str, tag: &str) -> Option<&'a str> {
     token.strip_prefix(tag).filter(|key| !key.is_empty())
+}
+
+/// How a list operation words a `nextToken` it did not issue, naming the operation
+/// whose cursors it would have had to be one of.
+///
+/// The ONE wording every paginated operation of this service refuses an unknown cursor
+/// with ([`decode_cursor`] answering `None`), so the three listings cannot word the
+/// same fault differently. It is a fault in the request's own value, so it carries this
+/// service's [`REFUSAL_ENVELOPE`], and it reproduces nothing of the token the caller
+/// sent.
+pub fn cursor_not_issued_message(operation: &str) -> String {
+    format!("{REFUSAL_ENVELOPE}nextToken is not a pagination token issued by {operation}")
 }
 
 /// Cut one page out of an ordered, already-filtered sequence of keyed items.

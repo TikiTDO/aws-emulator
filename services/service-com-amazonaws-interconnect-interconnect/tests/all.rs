@@ -51,6 +51,8 @@ mod billing_tier;
 mod caller_created_gateways_are_attach_points;
 #[path = "all/client_fault_status_and_validation_wording.rs"]
 mod client_fault_status_and_validation_wording;
+#[path = "all/client_refusals_carry_the_envelope.rs"]
+mod client_refusals_carry_the_envelope;
 #[path = "all/connection_lifecycle.rs"]
 mod connection_lifecycle;
 #[path = "all/connection_proposal.rs"]

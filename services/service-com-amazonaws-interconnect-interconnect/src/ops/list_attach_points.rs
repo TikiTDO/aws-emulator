@@ -178,9 +178,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 else {
                     return Err(ListAttachPointsErrorModeled::InterconnectValidationException(
                         InterconnectValidationException {
-                            message:
-                                "nextToken is not a pagination token issued by ListAttachPoints"
-                                    .to_string(),
+                            message: crate::state::cursor_not_issued_message("ListAttachPoints"),
                         },
                     )
                     .into());

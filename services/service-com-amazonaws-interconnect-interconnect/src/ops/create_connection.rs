@@ -259,9 +259,9 @@ fn judge_against_store(
             if !created.matches(input) {
                 return Err(CreateConnectionErrorModeled::InterconnectValidationException(
                     InterconnectValidationException {
-                        message: format!(
-                            "clientToken '{token}' was already used to create connection '{}' with different parameters",
-                            created.connection_id
+                        message: crate::state::client_token_reused_message(
+                            token,
+                            &created.connection_id,
                         ),
                     },
                 )
@@ -298,9 +298,9 @@ fn judge_against_store(
     if environment.state == crate::state::UNAVAILABLE_ENVIRONMENT_STATE {
         return Err(CreateConnectionErrorModeled::InterconnectClientException(
             InterconnectClientException {
-                message: format!(
-                    "environment '{}' is {} and cannot take new connections",
-                    environment.environment_id, environment.state
+                message: crate::state::environment_unavailable_message(
+                    &environment.environment_id,
+                    &environment.state,
                 ),
             },
         )
@@ -471,10 +471,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if live_connections >= crate::state::MAX_CONNECTIONS {
             return Err(CreateConnectionErrorModeled::ServiceQuotaExceededException(
                 ServiceQuotaExceededException {
-                    message: Some(format!(
-                        "the account already holds the maximum of {} connections",
-                        crate::state::MAX_CONNECTIONS
-                    )),
+                    message: Some(crate::state::connection_quota_exceeded_message()),
                 },
             )
             .into());

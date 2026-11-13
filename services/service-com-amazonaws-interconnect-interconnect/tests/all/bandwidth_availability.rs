@@ -19,6 +19,8 @@
 
 use serde_json::{json, Map, Value};
 
+use service_com_amazonaws_interconnect_interconnect::state::REFUSAL_ENVELOPE;
+
 use crate::emulator::{
     available_bandwidths, code, creatable_environments, message, remote_account_for, text, Emulator,
 };
@@ -33,12 +35,13 @@ use crate::emulator::{
 const NOT_OFFERED: [&str; 4] = ["1Mbps", "250Mbps", "40Gbps", "999Gbps"];
 
 /// How the service words a bandwidth the Environment does not currently offer: the
-/// requested size, the Environment it was requested on, and the list that Environment
-/// does offer, in the order the Environment reports it.
+/// service's refusal envelope, then the requested size, the Environment it was
+/// requested on, and the list that Environment does offer, in the order the
+/// Environment reports it.
 fn not_available(bandwidth: &str, environment_id: &str, available: &[String]) -> String {
     format!(
-        "bandwidth '{bandwidth}' is not available on environment '{environment_id}'; \
-         available bandwidths are [{}]",
+        "{REFUSAL_ENVELOPE}bandwidth '{bandwidth}' is not available on environment \
+         '{environment_id}'; available bandwidths are [{}]",
         available.join(", ")
     )
 }

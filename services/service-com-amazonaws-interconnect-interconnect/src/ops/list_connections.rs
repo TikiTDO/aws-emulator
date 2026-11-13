@@ -247,8 +247,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 else {
                     return Err(ListConnectionsErrorModeled::InterconnectValidationException(
                         InterconnectValidationException {
-                            message: "nextToken is not a pagination token issued by ListConnections"
-                                .to_string(),
+                            message: crate::state::cursor_not_issued_message("ListConnections"),
                         },
                     )
                     .into());

@@ -29,10 +29,10 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Map, Value};
 
 use service_com_amazonaws_interconnect_interconnect::state::{
-    environment_not_found_message, not_a_connection_arn_message, not_a_gateway_identifier_message,
-    proposal_already_accepted_message, proposal_not_acceptable_message,
-    proposal_not_retrievable_message, MAX_TAGS_PER_RESOURCE, REFUSAL_ENVELOPE,
-    REMOTE_IDENTIFIER_LENGTH, RESERVED_TAG_KEY_PREFIX, TAG_KEY_LENGTH,
+    client_token_reused_message, environment_not_found_message, not_a_connection_arn_message,
+    not_a_gateway_identifier_message, proposal_already_accepted_message,
+    proposal_not_acceptable_message, proposal_not_retrievable_message, MAX_TAGS_PER_RESOURCE,
+    REFUSAL_ENVELOPE, REMOTE_IDENTIFIER_LENGTH, RESERVED_TAG_KEY_PREFIX, TAG_KEY_LENGTH,
 };
 
 use crate::emulator::{
@@ -697,9 +697,7 @@ async fn a_creates_own_faults_are_reported_before_what_it_names_is_resolved() {
             ],
             status: 400,
             code: VALIDATION_CODE,
-            message: format!(
-                "clientToken '{token}' was already used to create connection '{token_connection_id}' with different parameters"
-            ),
+            message: client_token_reused_message(token, &token_connection_id),
         },
     ];
 
