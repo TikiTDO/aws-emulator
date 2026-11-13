@@ -1618,3 +1618,9 @@ mod cloudformation_half_made_resource_is_not_left_behind;
 // service crate's test target can ask it.
 #[path = "all/lambda_in_function_dynamodb_partition_conditions.rs"]
 mod lambda_in_function_dynamodb_partition_conditions;
+// Declared in the appended tail, which is where every new suite inserts its lines: that a
+// function a completed stack declared really exists in AWS Lambda, and that the records of its
+// runs land in the one group it logs to — CloudFormation, IAM, AWS Lambda and CloudWatch Logs
+// at once, so no single service crate's test target can ask it.
+#[path = "all/cloudformation_lambda_function_log_destination.rs"]
+mod cloudformation_lambda_function_log_destination;
