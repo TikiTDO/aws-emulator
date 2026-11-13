@@ -344,9 +344,8 @@ async fn list_tags_for_resource_reports_the_tags_the_create_persisted() {
         );
 
         // The other reader of the same record agrees, which is what says both answers
-        // come from one stored record. It omits the member for a resource carrying no
-        // tags, where the listing answers the empty map, so only a non-empty set is
-        // compared member for member.
+        // come from one stored record: it reports the member whatever the tag set, the
+        // empty map included, so every set is compared member for member.
         let id = inquiry_id_of(&resource_arn, &case);
         let described = call(
             &router,
@@ -360,19 +359,11 @@ async fn list_tags_for_resource_reports_the_tags_the_create_persisted() {
             "case {case:?}: the inquiry must be readable, got {} with {:?}",
             described.status, described.body
         );
-        if tags.as_object().is_some_and(serde_json::Map::is_empty) {
-            assert_eq!(
-                tags_of(&list_tags(&router, &resource_arn).await, &case),
-                json!({}),
-                "case {case:?}: an untagged resource lists an empty map"
-            );
-        } else {
-            assert_eq!(
-                described.body["tags"], tags,
-                "case {case:?}: GetComplianceInquiryMetadata must report the same tags, got {:?}",
-                described.body
-            );
-        }
+        assert_eq!(
+            described.body["tags"], tags,
+            "case {case:?}: GetComplianceInquiryMetadata must report the same tags, got {:?}",
+            described.body
+        );
 
         // Rule 3: the read changed nothing, so the second answer is the first.
         assert_eq!(

@@ -230,12 +230,9 @@ fn created_id(answer: &Answer) -> String {
         .to_string()
 }
 
-/// The tags a case submitted, in the shape [`Answer::tags`] reports — `None` for an
-/// untagged submission, because an untagged resource reports no `tags` member at all.
+/// The tags a case submitted, in the shape [`Answer::tags`] reports — present whatever
+/// the tag set, so an untagged submission is the EMPTY map rather than no member.
 fn submitted_tags(tags: &[(&str, &str)]) -> Option<BTreeMap<String, String>> {
-    if tags.is_empty() {
-        return None;
-    }
     Some(
         tags.iter()
             .map(|(key, value)| ((*key).to_string(), (*value).to_string()))

@@ -201,10 +201,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         Ok(ListTagsForResourceOutput {
-            // Every entry read off the one stored record, so this answer and the
-            // resource's own projections cannot disagree. An untagged resource reports
-            // the empty map: this member IS the listing.
-            tags: Some(resource.tags_map()),
+            // The one tags projection every operation that reports a resource's tag set
+            // answers with ([`crate::state::ComplianceInquiry::reported_tags`]), so this
+            // listing and the inquiry's own answers cannot disagree: every entry read off
+            // the one stored record, and the empty map for an untagged resource.
+            tags: resource.reported_tags(),
         })
     }
 }

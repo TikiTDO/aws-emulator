@@ -203,8 +203,8 @@ fn pairs(tags: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The tags a body reports, in a comparable order. An inquiry projection omits the member
-/// altogether for an untagged resource, so an absent member is the empty set here.
+/// The tags a body reports, in a comparable order. The member is present whatever the tag
+/// set, so the empty map and (defensively) an absent member are both the empty set here.
 fn reported_tags(body: &Value) -> BTreeMap<String, String> {
     body.get("tags")
         .and_then(Value::as_object)

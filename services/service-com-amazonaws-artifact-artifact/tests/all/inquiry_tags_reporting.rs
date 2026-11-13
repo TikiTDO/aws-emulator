@@ -1,20 +1,18 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! The ONE optional-`tags` projection every compliance-inquiry operation answers with,
-//! driven end to end over HTTP through all three operations that report it.
+//! The ONE `tags` projection every compliance-inquiry operation answers with, driven end
+//! to end over HTTP through every operation that reports it.
 //!
-//! RULE: an inquiry operation that reports the inquiry's tags beside its own payload
-//! reports exactly the tag set the stored record holds, and reports NO `tags` member at
-//! all — rather than an empty map — when that record holds none. One rule, in one place
-//! ([`ComplianceInquiry::reported_tags`]), so the create, the metadata read and the export
-//! cannot disagree about what an untagged inquiry reports. `ListTagsForResource` is NOT
-//! this projection: there the member IS the listing, so it is present and empty for an
-//! untagged resource — which is what makes the two answers distinguishable here.
+//! RULE: an operation whose output models a map member reporting a resource's tag set
+//! serializes that member as PRESENT, carrying exactly the tag set the stored record
+//! holds — the empty map when the record holds none, never an absent member. One rule, in
+//! one place ([`ComplianceInquiry::reported_tags`]), so the create, the metadata read, the
+//! export and the tag listing cannot disagree about what an untagged inquiry reports.
 //!
-//! The three reporters are `CreateComplianceInquiry` (the former copy 1), the metadata
-//! read `GetComplianceInquiryMetadata` (copy 2) and `ExportComplianceInquiry` (copy 3);
-//! every case drives all three over one stored record, so a projection that differs
-//! between them fails.
+//! The reporters are `CreateComplianceInquiry`, the metadata read
+//! `GetComplianceInquiryMetadata`, `ExportComplianceInquiry` and the tag listing
+//! `ListTagsForResource`; every case drives all of them over one stored record, so a
+//! projection that differs between them fails.
 //!
 //! Rows differ along what the rule generalises over — the SIZE and the SHAPE of the tag
 //! set: none at all, one entry, several, a value at `TagValue`'s published floor of 0
@@ -54,8 +52,9 @@ struct Answer {
 
 impl Answer {
     /// The `tags` member of this answer as a map, or `None` when the answer carries no
-    /// such member at all. The two are what the rule distinguishes, so an absent member
-    /// is never defaulted to the empty map here.
+    /// such member at all. The two are what the rule distinguishes — an untagged resource
+    /// reports the empty map, not nothing — so an absent member is never defaulted to the
+    /// empty map here.
     fn reported_tags(&self) -> Option<BTreeMap<String, String>> {
         let member = self.body.get("tags")?;
         if member.is_null() {
@@ -121,15 +120,22 @@ fn expected(tags: &[(String, String)]) -> BTreeMap<String, String> {
     tags.iter().cloned().collect()
 }
 
-/// `POST /v1/compliance-inquiry/create` carrying `tags` — the first of the three
-/// reporters, and what persists the record the other two read.
-async fn create(router: &MultiServiceRouter, name: &str, tags: &[(String, String)]) -> Answer {
+/// `POST /v1/compliance-inquiry/create` carrying `tags` — the first reporter, and what
+/// persists the record the others read. `send_member` says whether the request carries a
+/// `tags` member at all, which is the dimension the untagged rows differ along: the rule
+/// is about what the RESPONSE reports, not about what the request wrote.
+async fn create(
+    router: &MultiServiceRouter,
+    name: &str,
+    tags: &[(String, String)],
+    send_member: bool,
+) -> Answer {
     let mut body = json!({
         "name": name,
         "inquiryContent": { "query": "Which controls does this report cover?" },
         "supportMode": "AI_ONLY",
     });
-    if !tags.is_empty() {
+    if send_member {
         body["tags"] = tags_object(tags);
     }
     call(router, "POST", "/v1/compliance-inquiry/create", Some(body)).await
@@ -157,9 +163,7 @@ async fn export(router: &MultiServiceRouter, inquiry_id: &str) -> Answer {
     .await
 }
 
-/// `GET /tags/{resourceArn}` — the tag LISTING, whose member is present and empty for an
-/// untagged resource. Not the projection under test: the control that tells the two
-/// answers apart.
+/// `GET /tags/{resourceArn}` — the tag LISTING, the fourth reporter of the same tag set.
 async fn list_tags(router: &MultiServiceRouter, resource_arn: &str) -> Answer {
     call(router, "GET", &format!("/tags/{}", label(resource_arn)), None).await
 }
@@ -185,11 +189,14 @@ async fn untag(router: &MultiServiceRouter, resource_arn: &str, keys: &[String])
     .await
 }
 
-/// One row of the table: a tag set the rule has to project the same way through all three
-/// reporters.
+/// One row of the table: a tag set the rule has to project the same way through every
+/// reporter, and whether the create that persists it carries a `tags` member at all.
 struct Case {
     label: &'static str,
     tags: Vec<(String, String)>,
+    /// Whether the create request carries the `tags` member. The two untagged rows differ
+    /// along exactly this: the response reports the resource's tag set either way.
+    send_member: bool,
 }
 
 /// The tag sets under test. Every key and value is drawn from the character class
@@ -198,12 +205,19 @@ struct Case {
 fn cases() -> Vec<Case> {
     vec![
         Case {
-            label: "no tags at all",
+            label: "no tags member at all",
             tags: Vec::new(),
+            send_member: false,
+        },
+        Case {
+            label: "a tags member present and empty",
+            tags: Vec::new(),
+            send_member: true,
         },
         Case {
             label: "one tag",
             tags: vec![("Team".to_string(), "Compliance".to_string())],
+            send_member: true,
         },
         Case {
             label: "several tags",
@@ -212,6 +226,7 @@ fn cases() -> Vec<Case> {
                 ("Environment".to_string(), "Production".to_string()),
                 ("cost.center".to_string(), "eu/west=1".to_string()),
             ],
+            send_member: true,
         },
         Case {
             label: "a value at TagValue's floor of 0 characters",
@@ -219,6 +234,7 @@ fn cases() -> Vec<Case> {
                 ("Reviewed".to_string(), String::new()),
                 ("Team".to_string(), "Compliance".to_string()),
             ],
+            send_member: true,
         },
         Case {
             label: "a key and a value at their published ceilings",
@@ -226,12 +242,14 @@ fn cases() -> Vec<Case> {
                 ("k".repeat(MAX_TAG_KEY), "v".repeat(MAX_TAG_VALUE)),
                 ("Team".to_string(), "Compliance".to_string()),
             ],
+            send_member: true,
         },
         Case {
             label: "a tag set at TagsMap's entry ceiling",
             tags: (0..MAX_TAG_ENTRIES)
                 .map(|index| (format!("key.{index}"), format!("value.{index}")))
                 .collect(),
+            send_member: true,
         },
     ]
 }
@@ -249,20 +267,21 @@ fn created_identity(answer: &Answer, case: &str) -> (String, String) {
     (id, arn)
 }
 
-/// Assert the three reporters agree with `want` for the inquiry `inquiry_id`/`arn`, and
-/// that the tag LISTING of the same record still answers the map form.
-async fn assert_all_three_report(
+/// Assert every reporter of the projection answers the map `want` for the inquiry
+/// `inquiry_id`/`arn` — the create (when this case drove one), the metadata read, the
+/// export and the tag listing.
+async fn assert_every_reporter_agrees(
     router: &MultiServiceRouter,
     case: &str,
     inquiry_id: &str,
     arn: &str,
     created: Option<&Answer>,
-    want: Option<BTreeMap<String, String>>,
+    want: BTreeMap<String, String>,
 ) {
     if let Some(created) = created {
         assert_eq!(
             created.reported_tags(),
-            want,
+            Some(want.clone()),
             "case {case:?}: CreateComplianceInquiry must report the projection, got {:?}",
             created.body
         );
@@ -276,7 +295,7 @@ async fn assert_all_three_report(
     );
     assert_eq!(
         read.reported_tags(),
-        want,
+        Some(want.clone()),
         "case {case:?}: GetComplianceInquiryMetadata must report the projection, got {:?}",
         read.body
     );
@@ -289,13 +308,13 @@ async fn assert_all_three_report(
     );
     assert_eq!(
         exported.reported_tags(),
-        want,
+        Some(want.clone()),
         "case {case:?}: ExportComplianceInquiry must report the projection, got {:?}",
         exported.body
     );
 
-    // The LISTING of the same record: present whatever the tag set, so the absent member
-    // above is this operation's projection choice rather than a tag set that vanished.
+    // The LISTING of the same record answers the same one projection, so every reporter
+    // of this tag set is covered by the rule.
     let listed = list_tags(router, arn).await;
     assert_eq!(
         listed.status, 200,
@@ -304,7 +323,7 @@ async fn assert_all_three_report(
     );
     assert_eq!(
         listed.reported_tags(),
-        Some(want.unwrap_or_default()),
+        Some(want),
         "case {case:?}: the tag listing reports the map form even when empty, got {:?}",
         listed.body
     );
@@ -315,21 +334,22 @@ async fn every_inquiry_operation_reports_the_one_tags_projection() {
     let router = emulator();
 
     for case in cases() {
-        let created = create(&router, "Annual audit", &case.tags).await;
+        let created = create(&router, "Annual audit", &case.tags, case.send_member).await;
         assert_eq!(
             created.status, 202,
             "case {:?}: the create must be accepted, got {} with {:?}",
             case.label, created.status, created.body
         );
         let (inquiry_id, arn) = created_identity(&created, case.label);
-        let want = (!case.tags.is_empty()).then(|| expected(&case.tags));
+        let want = expected(&case.tags);
 
-        assert_all_three_report(&router, case.label, &inquiry_id, &arn, Some(&created), want).await;
+        assert_every_reporter_agrees(&router, case.label, &inquiry_id, &arn, Some(&created), want)
+            .await;
     }
 }
 
 #[tokio::test]
-async fn removing_every_tag_makes_all_three_operations_omit_the_member() {
+async fn removing_every_tag_makes_every_operation_report_the_empty_map() {
     let router = emulator();
 
     for case in cases() {
@@ -338,7 +358,7 @@ async fn removing_every_tag_makes_all_three_operations_omit_the_member() {
             continue;
         }
         let label = format!("{} then untagged", case.label);
-        let created = create(&router, "Annual audit", &case.tags).await;
+        let created = create(&router, "Annual audit", &case.tags, case.send_member).await;
         assert_eq!(
             created.status, 202,
             "case {label:?}: the create must be accepted, got {} with {:?}",
@@ -355,7 +375,8 @@ async fn removing_every_tag_makes_all_three_operations_omit_the_member() {
         );
 
         // The record now holds no tags, so the same one projection applies: every
-        // reporter omits the member, and the listing answers the empty map.
-        assert_all_three_report(&router, &label, &inquiry_id, &arn, None, None).await;
+        // reporter answers the present, empty map.
+        assert_every_reporter_agrees(&router, &label, &inquiry_id, &arn, None, BTreeMap::new())
+            .await;
     }
 }

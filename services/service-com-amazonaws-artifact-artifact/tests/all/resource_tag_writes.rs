@@ -302,21 +302,16 @@ async fn assert_tag_set(
         "case {case:?}: GetComplianceInquiryMetadata must answer HTTP 200, got {} with {:?}",
         read.status, read.body
     );
-    // That projection omits the member for an untagged resource, where
-    // `ListTagsForResource` reports an empty map: the tag SET it reports is the same one.
-    let from_metadata = reported_tags(&read.body).unwrap_or_default();
+    // Both readers report the SAME tag set in the same form: the member is present
+    // whatever the tag set, and the empty map stands for a resource with no tags.
+    let from_metadata = reported_tags(&read.body);
     assert_eq!(
-        from_metadata, want,
-        "case {case:?}: the metadata read must report the same tag set, got {:?}",
+        from_metadata,
+        Some(want.clone()),
+        "case {case:?}: the metadata read must report the same tag set (present even when \
+         empty), got {:?}",
         read.body
     );
-    if want.is_empty() {
-        assert!(
-            read.body.get("tags").is_none(),
-            "case {case:?}: an untagged inquiry reports no tags member, got {:?}",
-            read.body
-        );
-    }
 }
 
 /// Assert that `answer` carries no members: `TagResourceResponse` and

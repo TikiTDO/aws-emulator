@@ -351,8 +351,8 @@ fn cases() -> Vec<Case> {
     ]
 }
 
-/// The tags an answer reports, as comparable pairs. An untagged resource reports no
-/// `tags` member at all.
+/// The tags an answer reports, as comparable pairs. The member is present whatever the
+/// tag set: an untagged resource reports the empty map.
 fn reported_tags(body: &Value) -> Vec<(String, String)> {
     let mut pairs: Vec<(String, String)> = body["tags"]
         .as_object()
