@@ -351,6 +351,116 @@ pub fn custom_error_responses_from_request(
         .collect())
 }
 
+/// The method sets `CacheSettings$allowedHTTPMethods` admits, and the ones
+/// `CacheSettings$cachedHTTPMethods` admits.
+///
+/// Both members are modelled as a free-form `NonEmptyString`, so the closed
+/// domain lives only in each member's own documentation — "You can specify the
+/// following options": three sets for the methods a distribution "processes and
+/// forwards to the distribution's origin", and two for "the HTTP method
+/// responses that are cached by your distribution". A distribution cannot
+/// advertise a method set the service does not offer, so a string outside its
+/// member's list is refused the same way an unpublished TLS policy name is.
+///
+/// SOURCE: the two members of `CacheSettings` —
+/// `smithy_query(query="shape", shape="com.amazonaws.lightsail#CacheSettings")`.
+pub const ALLOWED_HTTP_METHODS_OPTIONS: &[&str] = &[
+    "GET,HEAD",
+    "GET,HEAD,OPTIONS",
+    "GET,HEAD,OPTIONS,PUT,PATCH,POST,DELETE",
+];
+/// See [`ALLOWED_HTTP_METHODS_OPTIONS`].
+pub const CACHED_HTTP_METHODS_OPTIONS: &[&str] = &["GET,HEAD", "GET,HEAD,OPTIONS"];
+
+/// The `ForwardValues` member that says a distribution forwards every request
+/// header to its origin: "`all` - Forward all headers to your origin"
+/// (`HeaderObject$option`).
+pub const FORWARD_ALL_HEADERS_OPTION: &str = "all";
+
+/// The `minimumTTL` a distribution that forwards all headers to its origin has
+/// to be given.
+///
+/// From the modelled `CacheSettings$minimumTTL` documentation: "A value of `0`
+/// must be specified for `minimumTTL` if the distribution is configured to
+/// forward all headers to the origin."
+pub const MINIMUM_TTL_FORWARDING_ALL_HEADERS: i64 = 0;
+
+/// The refusal message for a cache settings object outside what the members of
+/// `CacheSettings` document, and `None` when the settings are ones a
+/// distribution may serve under.
+///
+/// Two of that structure's rules the model itself cannot express:
+///
+/// * `allowedHTTPMethods` and `cachedHTTPMethods` each carry a closed list of
+///   option strings in a free-form member — see
+///   [`ALLOWED_HTTP_METHODS_OPTIONS`];
+/// * `minimumTTL` has to be [`MINIMUM_TTL_FORWARDING_ALL_HEADERS`] when the
+///   settings forward all headers to the origin, because the cache key then
+///   varies with every header value. A request that states no `minimumTTL`
+///   states no value that rule can be broken by.
+///
+/// The ONE owner of them, so `CreateDistribution` and `UpdateDistribution`
+/// cannot admit a cache configuration two different ways: the update replaces
+/// the whole object ("The `cacheBehaviorSettings` specified in your
+/// `UpdateDistributionRequest` will replace your distribution's existing
+/// settings"), so the settings the request carries are the settings the
+/// distribution would serve under and are held to exactly the same rules.
+pub fn cache_behavior_settings_refusal(settings: &CacheSettings) -> Option<String> {
+    for (member, value, options) in [
+        (
+            "allowedHTTPMethods",
+            settings.allowed_http_methods.as_deref(),
+            ALLOWED_HTTP_METHODS_OPTIONS,
+        ),
+        (
+            "cachedHTTPMethods",
+            settings.cached_http_methods.as_deref(),
+            CACHED_HTTP_METHODS_OPTIONS,
+        ),
+    ] {
+        let Some(value) = value else {
+            continue;
+        };
+        if !options.contains(&value) {
+            return Some(format!(
+                "cacheBehaviorSettings.{member} '{value}' is not an HTTP method set a \
+                 distribution offers: you can specify {}",
+                quoted_options_phrase(options)
+            ));
+        }
+    }
+    let forwards_all_headers = settings
+        .forwarded_headers
+        .as_ref()
+        .and_then(|headers| headers.option.as_deref())
+        == Some(FORWARD_ALL_HEADERS_OPTION);
+    if forwards_all_headers {
+        if let Some(minimum_ttl) = settings.minimum_ttl {
+            if minimum_ttl != MINIMUM_TTL_FORWARDING_ALL_HEADERS {
+                return Some(format!(
+                    "cacheBehaviorSettings.minimumTTL is {minimum_ttl}: a value of \
+                     {MINIMUM_TTL_FORWARDING_ALL_HEADERS} must be specified for minimumTTL if the \
+                     distribution is configured to forward all headers to the origin, which \
+                     cacheBehaviorSettings.forwardedHeaders.option \
+                     '{FORWARD_ALL_HEADERS_OPTION}' asks for"
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// `options` as a refusal lists a closed set of option strings: each one
+/// quoted, the last introduced by "or".
+fn quoted_options_phrase(options: &[&str]) -> String {
+    let quoted: Vec<String> = options.iter().map(|option| format!("'{option}'")).collect();
+    match quoted.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, leading)) => format!("{}, or {last}", leading.join(", ")),
+    }
+}
+
 /// What an origin name resolves to: the kind of resource it addresses, and the
 /// public DNS name this store publishes for that resource, if it publishes one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -463,6 +573,10 @@ pub struct StoredDistribution {
     /// The cache behaviour settings the request carried, or `None` when it
     /// carried none — the model documents no default for any member of
     /// `CacheSettings`, so nothing is invented for a request that set none.
+    /// What a request DOES carry is held to the rules of that structure's
+    /// members by [`cache_behavior_settings_refusal`] before it is recorded, so
+    /// no stored settings advertise a method set the service does not offer or a
+    /// minimum TTL the headers it forwards rule out.
     pub cache_behavior_settings: Option<CacheSettings>,
     pub cache_behaviors: Vec<CacheBehaviorPerPath>,
     pub ip_address_type: String,

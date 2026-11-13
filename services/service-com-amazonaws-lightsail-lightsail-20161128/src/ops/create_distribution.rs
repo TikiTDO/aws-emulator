@@ -228,7 +228,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // centralized walk refused anything outside them before this body ran.
         // What is left is what the model cannot express: the origin has to name
         // a resource, its response timeout has to be within the documented
-        // range, a default cache behaviour has to say what it is, the bundle
+        // range, a default cache behaviour has to say what it is, the cache
+        // settings have to be ones a distribution may serve under, the bundle
         // has to be a plan a new distribution may use, the address type has to
         // be one a DISTRIBUTION may carry (its own member documents a narrower
         // domain than the enum), the caller-sized lists have to be within their
@@ -292,6 +293,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             input.custom_error_responses.as_deref().unwrap_or_default(),
         )
         .map_err(invalid)?;
+        // The cache settings the distribution would serve under have to be
+        // settings the members of `CacheSettings` document: the two members
+        // whose closed option list the free-form model cannot express, and the
+        // minimum TTL a distribution forwarding every header to its origin has
+        // to carry. Asked of the crate's one owner of those rules, the same one
+        // `UpdateDistribution` asks when it replaces the object.
+        if let Some(settings) = &input.cache_behavior_settings {
+            if let Some(message) = crate::state::cache_behavior_settings_refusal(settings) {
+                return Err(invalid(message));
+            }
+        }
         // "The IP address type for the distribution. The possible values are
         // ipv4 for IPv4 only, and dualstack for IPv4 and IPv6. The default value
         // is dualstack." A distribution's documented domain is NARROWER than the

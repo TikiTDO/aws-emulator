@@ -157,6 +157,8 @@ mod disk_snapshot_listing_region_scope;
 mod distribution_bundle_update;
 #[path = "all/distribution_bundles.rs"]
 mod distribution_bundles;
+#[path = "all/distribution_cache_behavior_settings.rs"]
+mod distribution_cache_behavior_settings;
 #[path = "all/distribution_cache_reset.rs"]
 mod distribution_cache_reset;
 #[path = "all/distribution_cache_reset_clock.rs"]

@@ -225,7 +225,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the SAME rule each member answers to on a create: an origin the request
         // replaces has to name a resource and its response timeout has to be
         // within the documented range, a default cache behaviour has to say what
-        // it is, the caller-sized lists have to be within their bounds, private
+        // it is, the cache settings have to be ones a distribution may serve
+        // under, the caller-sized lists have to be within their bounds, private
         // origin access comes with the origin it is about and is only for a
         // bucket origin, and a certificate the request names has to be an issued
         // certificate of this account. Each is checked BEFORE the first write, so
@@ -298,6 +299,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .map(crate::state::custom_error_responses_from_request)
             .transpose()
             .map_err(invalid)?;
+        // A request that carries the cache settings replaces the distribution's
+        // with them — "The cacheBehaviorSettings specified in your
+        // UpdateDistributionRequest will replace your distribution's existing
+        // settings" — so the settings it carries are the ones the distribution
+        // would serve under, held to the same rules a create's are through the
+        // crate's one owner of them.
+        if let Some(settings) = &input.cache_behavior_settings {
+            if let Some(message) = crate::state::cache_behavior_settings_refusal(settings) {
+                return Err(invalid(message));
+            }
+        }
         // "When you include this parameter, you must also include the origin
         // parameter with the resource name, even if the origin is not changing."
         if input.enable_private_origin_access.is_some() && origin_patch.is_none() {
