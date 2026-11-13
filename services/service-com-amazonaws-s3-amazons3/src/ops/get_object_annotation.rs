@@ -204,6 +204,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         }
 
+        // The NAME, judged against the naming rules before the annotation it addresses is
+        // resolved: a name outside them addresses no annotation of any object, so what the
+        // caller is told is which rule it broke rather than that this object carries no such
+        // annotation. Judged and reported through the one place every annotation operation
+        // judges a name ([`crate::scaffolded::Scaffolded::annotation_name`]), so the write
+        // and this read refuse the same name with the same code and sentence.
+        if let Some(rejection) = crate::state::annotation_name_rejection(&input.annotation_name) {
+            return Err(crate::scaffolded::Scaffolded::annotation_name(&rejection));
+        }
+
         // A `versionId` that is not SHAPED like one cannot name a version of anything, so
         // it is a malformed argument rather than an absent version — the way `GetObject`
         // answers the same argument.
@@ -246,9 +256,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         // The annotation the name addresses, or the modelled `NoSuchAnnotation` (404) —
-        // "The specified annotation does not exist on this object" — which is also what a
-        // name no write could have recorded (one past the documented bounds, or under a
-        // reserved prefix) answers, since no object can be carrying it.
+        // "The specified annotation does not exist on this object". A name no write could
+        // have recorded never reaches here: the naming rules are judged above, so a name past
+        // the documented bounds or under a reserved prefix is refused for breaking the rule
+        // instead of being reported as an annotation that is not there.
         let Some(annotation) = object.annotation(&input.annotation_name) else {
             // An annotation-scoped refusal names the ANNOTATION it is about: the name the
             // request addressed, which is the only place this refusal says which of an

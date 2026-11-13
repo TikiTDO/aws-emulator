@@ -251,18 +251,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         //
         // "Journal table records must be retained for a minimum of 7 days. To set this
         // value, specify any whole number from 7 to 2147483647"
-        // (`RecordExpiration$Days`): the model bounds that member at neither end, so a day
-        // count outside the published range reaches this handler, and a value that is not
-        // valid for the parameter carrying it is what `InvalidArgument` (HTTP 400) reports.
-        // Checked wherever a `RecordExpiration` is carried, which on this operation is the
-        // journal table's own — the shared rule, so this create and the update that changes
-        // the same setting judge it identically.
+        // (`RecordExpiration$Days`): the model bounds that member at neither end and makes
+        // it optional, so an unusable retention period — one outside the published range,
+        // and an enabled expiration naming no period at all — reaches this handler, and the
+        // class S3 answers it with is `InvalidRequest` (HTTP 400) carrying that class's own
+        // fixed sentence. Checked wherever a `RecordExpiration` is carried, which on this
+        // operation is the journal table's own — the shared rule, so this create and the
+        // update that changes the same setting judge it identically.
         if let Some(message) = crate::state::metadata_record_expiration_refusal(
             &configuration.journal_table_configuration.record_expiration,
         ) {
             return Err(crate::scaffolded::Scaffolded::unmodeled(
-                crate::state::INVALID_ARGUMENT_CODE,
-                crate::state::INVALID_ARGUMENT_STATUS,
+                crate::state::INVALID_REQUEST_CODE,
+                crate::state::INVALID_REQUEST_STATUS,
                 message,
             ));
         }

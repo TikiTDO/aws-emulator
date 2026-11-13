@@ -255,7 +255,7 @@ async fn a_listing_reports_every_annotation_the_writes_recorded() {
             vec![
                 ("com.example.pipeline.stage".to_string(), b"ingest".to_vec()),
                 (
-                    "données-✓".to_string(),
+                    "données-été".to_string(),
                     "valeur — oui".as_bytes().to_vec(),
                 ),
                 ("my-aws-notes".to_string(), b"not reserved".to_vec()),
@@ -390,7 +390,7 @@ const FILTERED_NAMES: [&str; 7] = [
     "alpha",
     "alpha.beta",
     "beta",
-    "données-✓",
+    "données-été",
     "report/2024",
     "report/2025",
     "zeta",
@@ -442,7 +442,7 @@ async fn a_listing_filters_by_annotation_prefix() {
         (
             "a prefix of multi-byte UTF-8 text",
             Some("donné"),
-            vec!["données-✓"],
+            vec!["données-été"],
         ),
         ("a prefix nothing is named under", Some("omega"), Vec::new()),
         (

@@ -922,8 +922,8 @@ async fn an_annotation_selector_no_name_can_begin_with_is_refused() {
         );
         assert_eq!(
             written.error_code(),
-            "InvalidAnnotationName",
-            "case {case:?}: expected the code \"InvalidAnnotationName\", got {:?}",
+            "InvalidAnnotation",
+            "case {case:?}: expected the code \"InvalidAnnotation\", got {:?}",
             written.error_code()
         );
     }

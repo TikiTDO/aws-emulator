@@ -1734,6 +1734,69 @@ impl<E> Scaffolded<E> {
         )
     }
 
+    /// The refusal every operation that addresses an OBJECT answers a key holding no live
+    /// object with: [`crate::state::NO_SUCH_KEY_CODE`] at
+    /// [`crate::state::NO_SUCH_KEY_STATUS`] carrying that code's published sentence.
+    ///
+    /// ONE place, so the code, the status and the sentence cannot drift apart — what the
+    /// conditional write and the conditional delete answer for an `If-Match` that names the
+    /// entity tag of nothing at all ([`crate::state::unmet_write_precondition`]).
+    pub fn no_such_key() -> Self {
+        Self::unmodeled(
+            crate::state::NO_SUCH_KEY_CODE,
+            crate::state::NO_SUCH_KEY_STATUS,
+            crate::state::NO_SUCH_KEY_MESSAGE,
+        )
+    }
+
+    /// The refusal every operation that takes an annotation NAME answers a name outside the
+    /// naming rules with ([`crate::state::annotation_name_rejection`] decides which rule it
+    /// breaks): a name past the published byte maximum is
+    /// [`crate::state::ANNOTATION_NAME_TOO_LONG_CODE`], and every other break of the rules is
+    /// [`crate::state::INVALID_ANNOTATION_CODE`], both at HTTP 400. Each carries the fixed
+    /// sentence of the rule it broke — the length, the reserved prefixes
+    /// ([`crate::state::RESERVED_ANNOTATION_PREFIX_MESSAGE`]) or the characters a name is
+    /// spelled out of ([`crate::state::INVALID_ANNOTATION_CHARACTERS_MESSAGE`]) — with
+    /// nothing of the request in it.
+    ///
+    /// ONE place, so the name is judged and reported identically wherever it arrives — the
+    /// write that records an annotation, the read, the delete — and a name no write could
+    /// have stored is refused for breaking the rule rather than reported as an annotation
+    /// that is simply not there.
+    pub fn annotation_name(rejection: &crate::state::AnnotationNameRejection) -> Self {
+        match rejection {
+            crate::state::AnnotationNameRejection::TooLong { .. } => Self::unmodeled(
+                crate::state::ANNOTATION_NAME_TOO_LONG_CODE,
+                crate::state::ANNOTATION_NAME_TOO_LONG_STATUS,
+                documented_error_message(crate::state::ANNOTATION_NAME_TOO_LONG_CODE)
+                    .unwrap_or_default(),
+            ),
+            crate::state::AnnotationNameRejection::ReservedPrefix { .. } => Self::invalid_annotation(
+                crate::state::RESERVED_ANNOTATION_PREFIX_MESSAGE,
+            ),
+            crate::state::AnnotationNameRejection::LeadingCharacter { .. }
+            | crate::state::AnnotationNameRejection::Character { .. } => Self::invalid_annotation(
+                crate::state::INVALID_ANNOTATION_CHARACTERS_MESSAGE,
+            ),
+            // A name with no character at all breaks the published minimum length rather
+            // than any rule above, and the model's own sentence for an invalid name is what
+            // states that.
+            crate::state::AnnotationNameRejection::Empty => {
+                Self::invalid_annotation(crate::state::INVALID_ANNOTATION_MESSAGE)
+            }
+        }
+    }
+
+    /// [`Self::annotation_name`]'s refusal for every break of the naming rules that is not
+    /// the length: the one code, at the one status, carrying the sentence of the rule broken.
+    fn invalid_annotation(message: &'static str) -> Self {
+        Self::unmodeled(
+            crate::state::INVALID_ANNOTATION_CODE,
+            crate::state::INVALID_ANNOTATION_STATUS,
+            message,
+        )
+    }
+
     /// The refusal every operation that takes a canned ACL answers a request naming an ACL
     /// in BOTH header forms with: `InvalidRequest` at
     /// [`crate::state::INVALID_REQUEST_STATUS`] carrying the sentence that names the two

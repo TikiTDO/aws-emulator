@@ -5,8 +5,11 @@
 //! IMPLEMENTED: this is the DISCARD of the multipart upload loop — it resolves
 //! `(Bucket, Key, UploadId)` against the uploads `CreateMultipartUpload` recorded in this
 //! service's state ([`crate::state::MultipartUpload`]), removes that one upload with every
-//! part it held and answers the modelled 204, and refuses an upload this emulator does not
-//! have in progress under that id and key with `NoSuchUpload`.
+//! part it held and answers the modelled 204. An abort of an upload this bucket HELD at that
+//! address and no longer has in progress — a completion or an earlier abort took it away — is
+//! a NO-OP answered with the same 204, because the state it asks for already holds; an id this
+//! bucket never had an upload in progress under is refused `NoSuchUpload`, and a bucket this
+//! emulator does not hold `NoSuchBucket`.
 //!
 //! ## Shape of an operation
 //!
@@ -295,23 +298,35 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         // The store reports what the abort did, because it may refuse: a bucket this
-        // emulator does not hold, and an upload it has none of in progress under that id
-        // and key. Only the named upload is removed, so every other upload the bucket has
-        // in progress stays listed.
-        let outcome =
-            state
-                .lock()
-                .abort_multipart_upload(&input.bucket, &input.upload_id, &input.key);
-        let Some(outcome) = outcome else {
+        // emulator does not hold, and an id that names no upload of that bucket at all. Only
+        // the named upload is removed, so every other upload the bucket has in progress stays
+        // listed.
+        //
+        // An abort is IDEMPOTENT for an upload this bucket HELD at that address and no longer
+        // has in progress — a completion or an earlier abort took it away
+        // ([`crate::state::UploadAbort::AlreadyDiscarded`]) — because the state the abort asks
+        // for, "no such upload in progress", already holds: that answers the operation's own
+        // success status, 204 with no body, so the cleanup a caller runs after a completion or
+        // in a teardown path never has to special-case an upload that is already gone, which
+        // is the recorded response for an id a completion consumed. What the store remembers
+        // to tell that case apart is one `(Key, UploadId)` pair per upload it retires, bounded
+        // by [`crate::state::MAX_RETIRED_MULTIPART_UPLOADS_PER_BUCKET`] with the oldest pair
+        // dropped first ([`crate::state::Bucket::retire_multipart_upload`]), so a caller
+        // looping on initiate-and-abort cannot grow it.
+        //
+        // An id this bucket never had an upload in progress under — one nothing ever issued,
+        // and one issued for another key or in another bucket — addresses no upload of this
+        // bucket at all, and the recorded refusal for it is the one failure this operation
+        // models: "The specified multipart upload does not exist" (`NoSuchUpload`, HTTP 404).
+        let aborted = state
+            .lock()
+            .abort_multipart_upload(&input.bucket, &input.upload_id, &input.key);
+        let Some(outcome) = aborted else {
             return Err(AbortMultipartUploadErrorModeled::NoSuchBucket(NoSuchBucket {}).into());
         };
         match outcome {
-            crate::state::UploadAbort::Discarded => {}
-            // An upload id this bucket never had in progress, one initiated for another
-            // key, and one a completion or an earlier abort already took away all name no
-            // upload — which is the single failure this operation models: "The specified
-            // multipart upload does not exist" (`NoSuchUpload`, HTTP 404), and the refusal
-            // the behavioral corpus records for an abort of an upload that is not there.
+            crate::state::UploadAbort::Discarded
+            | crate::state::UploadAbort::AlreadyDiscarded => {}
             crate::state::UploadAbort::NoSuchUpload => {
                 return Err(AbortMultipartUploadErrorModeled::NoSuchUpload(NoSuchUpload {}).into());
             }

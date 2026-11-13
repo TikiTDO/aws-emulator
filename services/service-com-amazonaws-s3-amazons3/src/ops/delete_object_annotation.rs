@@ -257,6 +257,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         }
 
+        // The NAME, judged against the naming rules before the annotation it addresses is
+        // resolved, through the one place every annotation operation judges a name
+        // ([`crate::scaffolded::Scaffolded::annotation_name`]): a name outside the rules
+        // addresses no annotation of any object, so the removal reports which rule it broke
+        // rather than describing an annotation that could never have been recorded.
+        if let Some(rejection) = crate::state::annotation_name_rejection(&input.annotation_name) {
+            return Err(crate::scaffolded::Scaffolded::annotation_name(&rejection));
+        }
+
         // A `versionId` that is not SHAPED like one cannot name a version of anything, so
         // it is a malformed argument rather than an absent version — the way `GetObject`
         // and the writer and reader of this subresource answer the same argument.

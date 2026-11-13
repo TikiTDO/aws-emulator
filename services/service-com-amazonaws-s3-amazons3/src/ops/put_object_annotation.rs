@@ -266,30 +266,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
         })?;
 
-        // The NAME, judged against its own documented bounds before anything else about
-        // the request is: `AnnotationName` carries no `length` trait in the model, so
-        // nothing refused an over-long or empty one at the boundary. Each rejection has its
-        // own modelled error — a name past 512 bytes is `AnnotationNameTooLong`, and a name
-        // that is empty, that opens with a character no name opens with, or that starts with
-        // a prefix S3 reserves is `InvalidAnnotationName`.
-        match crate::state::annotation_name_rejection(&input.annotation_name) {
-            None => {}
-            Some(crate::state::AnnotationNameRejection::TooLong { .. }) => {
-                return Err(PutObjectAnnotationErrorModeled::AnnotationNameTooLong(
-                    AnnotationNameTooLong {},
-                )
-                .into())
-            }
-            Some(
-                crate::state::AnnotationNameRejection::Empty
-                | crate::state::AnnotationNameRejection::LeadingCharacter { .. }
-                | crate::state::AnnotationNameRejection::ReservedPrefix { .. },
-            ) => {
-                return Err(PutObjectAnnotationErrorModeled::InvalidAnnotationName(
-                    InvalidAnnotationName {},
-                )
-                .into())
-            }
+        // The NAME, judged against its own documented rules before anything else about the
+        // request is: `AnnotationName` carries neither a `length` nor a `pattern` trait in
+        // the model, so nothing refused an over-long, empty or ill-spelled one at the
+        // boundary. Judged and reported through the one place every annotation operation
+        // judges a name ([`crate::scaffolded::Scaffolded::annotation_name`]), so a name this
+        // write would refuse is not a name a read of the same object reports as absent.
+        if let Some(rejection) = crate::state::annotation_name_rejection(&input.annotation_name) {
+            return Err(crate::scaffolded::Scaffolded::annotation_name(&rejection));
         }
 
         // "must be valid UTF-8 encoded text. If the payload contains invalid UTF-8 bytes,

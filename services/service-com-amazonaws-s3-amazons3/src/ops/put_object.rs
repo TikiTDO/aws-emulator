@@ -933,15 +933,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutObject<Eng> {
         // ([`crate::state::unmet_write_precondition`]). A refused write stores nothing, so
         // the object the key holds is left exactly as it was and the caller can read its tag
         // and retry — and the refusal names the header that did not hold, which is what tells
-        // the caller which of the two to change.
-        if let Some(condition) = crate::state::unmet_write_precondition(
+        // the caller which of the two to change. An `If-Match` at a key holding no live
+        // object — nothing ever written there, or a delete marker hiding what was — names a
+        // tag of nothing at all, so what the caller is told is that the key is not there.
+        if let Some(unmet) = crate::state::unmet_write_precondition(
             bucket_record
                 .object(&input.key)
                 .map(|object| object.etag.as_str()),
             input.if_match.as_deref(),
             input.if_none_match.as_deref(),
         ) {
-            return Err(crate::scaffolded::Scaffolded::precondition_failed(condition));
+            return Err(match unmet {
+                crate::state::UnmetWriteCondition::NoSuchKey => {
+                    crate::scaffolded::Scaffolded::no_such_key()
+                }
+                crate::state::UnmetWriteCondition::Condition(condition) => {
+                    crate::scaffolded::Scaffolded::precondition_failed(condition)
+                }
+            });
         }
 
         let etag = crate::state::object_etag(&body);

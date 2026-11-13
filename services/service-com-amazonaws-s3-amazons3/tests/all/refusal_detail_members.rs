@@ -547,7 +547,12 @@ async fn an_upload_scoped_refusal_names_the_upload_the_request_addressed() {
     ];
     for (upload_id, reported) in absent_ids {
         // The completion of an upload that is not there, and the same id through the three
-        // other calls that address an upload: one rule, every operation that answers it.
+        // other calls that address an upload: one rule, every operation that answers it. Each
+        // id here is one this bucket never had an upload in progress under, which is the
+        // address `AbortMultipartUpload` refuses `NoSuchUpload` too — an abort of an upload
+        // the bucket DID hold and has already lost is the no-op answered 204 instead
+        // ([`super::multipart_upload_abort`]), and that one has no error document to name an
+        // upload in.
         let completed = complete(
             &router,
             name,

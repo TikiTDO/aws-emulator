@@ -474,12 +474,24 @@ fn unmet_destination_condition(
     input: &RenameObjectInput,
     held: Option<&crate::state::Object>,
 ) -> Option<&'static str> {
-    if let Some(condition) = crate::state::unmet_write_precondition(
+    if let Some(unmet) = crate::state::unmet_write_precondition(
         held.map(|object| object.etag.as_str()),
         input.destination_if_match.as_deref(),
         input.destination_if_none_match.as_deref(),
     ) {
-        return Some(condition);
+        return Some(match unmet {
+            // The shared rule reports an `If-Match` against a key holding no live object as
+            // the key not being there, because that is what a conditional WRITE of an object
+            // answers. A rename's destination is different: it is the name the object is
+            // being MOVED to, which normally holds nothing, and this operation's own members
+            // document one refusal for a destination condition that does not hold — "if the
+            // ETag values do not match, the operation returns a 412 Precondition Failed
+            // error" (`RenameObjectRequest$DestinationIfMatch`), which is also what RFC 9110
+            // §13.1.1 gives an `If-Match` against a resource with no current representation.
+            // So the destination condition is reported as the condition that did not hold.
+            crate::state::UnmetWriteCondition::NoSuchKey => crate::state::IF_MATCH_CONDITION,
+            crate::state::UnmetWriteCondition::Condition(condition) => condition,
+        });
     }
     let held = held?;
     let conditions = crate::state::CopySourceConditions {

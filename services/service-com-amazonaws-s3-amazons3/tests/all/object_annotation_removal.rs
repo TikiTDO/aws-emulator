@@ -19,9 +19,11 @@
 //!   as they were.
 //! * The annotation is addressed by bucket, key and name, so the first missing link of that
 //!   chain is what the request answers: `NoSuchBucket`, `NoSuchKey` or `NoSuchAnnotation`,
-//!   each HTTP 404 with the `<Message>` S3's error document carries for that code. A name no
-//!   write could have recorded — past the published 512-byte bound, or under a prefix S3
-//!   reserves — is one no object can be carrying.
+//!   each HTTP 404 with the `<Message>` S3's error document carries for that code. A name
+//!   outside the naming rules — past the published 512-byte bound, or under a prefix S3
+//!   reserves — is judged BEFORE that chain and refused for the rule it breaks
+//!   (`AnnotationNameTooLong` / `InvalidAnnotation`, both 400), the same refusal the write
+//!   of that name answers.
 //! * "Use the x-amz-object-if-match header to perform a conditional delete that only
 //!   succeeds if the object's ETag matches the provided value" (same documentation), so a
 //!   condition that does not hold is `PreconditionFailed` (412) and removes nothing.
@@ -53,6 +55,11 @@ const NOT_THE_OWNER: &str = "123456789012";
 const NO_SUCH_BUCKET_MESSAGE: &str = "The specified bucket does not exist";
 const NO_SUCH_KEY_MESSAGE: &str = "The specified key does not exist.";
 const NO_SUCH_ANNOTATION_MESSAGE: &str = "The specified annotation does not exist.";
+/// The `<Message>` each NAME-RULE refusal carries: the fixed sentence of its own class, the
+/// same text the write of that name answers.
+const ANNOTATION_NAME_TOO_LONG_MESSAGE: &str = "Your annotation name is too long.";
+const RESERVED_ANNOTATION_PREFIX_MESSAGE: &str =
+    "Your annotation name cannot start with 'aws' or 's3'.";
 
 /// `DELETE /<bucket>/<key>?annotation&annotationName=<name>` — `DeleteObjectAnnotation`,
 /// with whatever extra query parameters and bound headers the case under test carries.
@@ -156,7 +163,7 @@ async fn a_delete_takes_one_annotation_and_leaves_the_object_and_its_other_annot
         ),
         (
             "a name of UTF-8 text, more bytes than characters",
-            "données-✓".to_string(),
+            "données-été".to_string(),
             "valeur — oui".as_bytes().to_vec(),
         ),
         (
@@ -316,8 +323,9 @@ async fn a_delete_is_addressed_by_bucket_key_and_name() {
     // The rows walk the chain bucket → object → annotation: each link absent in turn, a key
     // that is only a PREFIX of a stored one, two names no write could ever have recorded
     // (one byte past the published 512-byte bound, and a reserved prefix), and the address
-    // that is there. The two unrecordable names are the rule's edge: the object carries no
-    // such annotation, so the delete answers the same 404 the reader answers for them.
+    // that is there. The two unrecordable names are the rule's edge: the name is judged
+    // before the chain is walked, so the delete answers the same name-rule refusal the write
+    // of that name does.
     let rows: [AddressRow<'_>; 6] = [
         (
             "a bucket this emulator does not hold",
@@ -360,18 +368,18 @@ async fn a_delete_is_addressed_by_bucket_key_and_name() {
             "annotation-address-bucket",
             "present.txt",
             name_of(MAX_ANNOTATION_NAME_BYTES + 1),
-            404,
-            "NoSuchAnnotation",
-            NO_SUCH_ANNOTATION_MESSAGE,
+            400,
+            "AnnotationNameTooLong",
+            ANNOTATION_NAME_TOO_LONG_MESSAGE,
         ),
         (
             "a name under a prefix S3 reserves, which no write could record",
             "annotation-address-bucket",
             "present.txt",
             "aws-owned".to_string(),
-            404,
-            "NoSuchAnnotation",
-            NO_SUCH_ANNOTATION_MESSAGE,
+            400,
+            "InvalidAnnotation",
+            RESERVED_ANNOTATION_PREFIX_MESSAGE,
         ),
     ];
 

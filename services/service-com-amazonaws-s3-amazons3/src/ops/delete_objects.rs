@@ -415,7 +415,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteObjects<Eng
                 || identifier.last_modified_time.is_some()
                 || identifier.size.is_some()
             {
-                let unmet = store.bucket(&input.bucket).is_some_and(|bucket| {
+                let unmet = store.bucket(&input.bucket).and_then(|bucket| {
                     let addressed = match identifier.version_id.as_deref() {
                         None => bucket.object(key),
                         Some(version_id) => bucket
@@ -431,14 +431,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteObjects<Eng
                             .and_then(crate::state::instant_of),
                         identifier.size,
                     )
-                    .is_some()
                 });
-                if unmet {
+                // An entity tag named for an address holding no live object is the tag of
+                // nothing at all, so that identifier's failure is the key not being there,
+                // the same code a single-object conditional delete answers for it.
+                if let Some(unmet) = unmet {
+                    let (code, message) = match unmet {
+                        crate::state::UnmetWriteCondition::NoSuchKey => (
+                            crate::state::NO_SUCH_KEY_CODE,
+                            crate::state::NO_SUCH_KEY_MESSAGE,
+                        ),
+                        crate::state::UnmetWriteCondition::Condition(_) => (
+                            crate::state::PRECONDITION_FAILED_CODE,
+                            crate::state::PRECONDITION_FAILED_MESSAGE,
+                        ),
+                    };
                     errors.push(Error {
                         key: Some(key.to_string()),
                         version_id: identifier.version_id.clone(),
-                        code: Some(crate::state::PRECONDITION_FAILED_CODE.to_string()),
-                        message: Some(crate::state::PRECONDITION_FAILED_MESSAGE.to_string()),
+                        code: Some(code.to_string()),
+                        message: Some(message.to_string()),
                     });
                     continue;
                 }

@@ -43,6 +43,9 @@ pub fn no_such_bucket_message(bucket: &str) -> &'static str {
 pub const NO_SUCH_KEY_CODE: &str = "NoSuchKey";
 /// See [`NO_SUCH_KEY_CODE`].
 pub const NO_SUCH_KEY_MESSAGE: &str = "The specified key does not exist.";
+/// The HTTP status [`NO_SUCH_KEY_CODE`] is rendered with: 404, from Amazon S3's "Error
+/// responses" list of error codes ("404 Not Found").
+pub const NO_SUCH_KEY_STATUS: u16 = 404;
 /// The code S3 answers a read or a write that names a `versionId` the bucket holds no
 /// version for: "Indicates that the version ID specified in the request does not match an
 /// existing version", with HTTP 404. Not a shape in this model, so it is answered through
@@ -761,6 +764,67 @@ pub const RESTORE_ALREADY_IN_PROGRESS_MESSAGE: &str = "Object restore is already
 pub const INVALID_ARGUMENT_CODE: &str = "InvalidArgument";
 /// The HTTP status [`INVALID_ARGUMENT_CODE`] is rendered with: 400, from the same list.
 pub const INVALID_ARGUMENT_STATUS: u16 = 400;
+
+/// The `<Message>` S3 sends with [`INVALID_ARGUMENT_CODE`] for a part number outside the
+/// published range a part of a multipart upload is addressed by
+/// ([`MIN_PART_NUMBER`]..=[`MAX_PART_NUMBER`]).
+///
+/// FIXED text stating that range, with nothing of the request in it: the number the request
+/// carried is what the envelope's `<PartNumber>` member says
+/// ([`crate::scaffolded::ErrorDetail`]), not part of the sentence. Read through here by every
+/// operation that addresses a part by number, so one rejected part number cannot be worded
+/// two ways.
+pub fn invalid_part_number_message() -> String {
+    format!("Part number must be an integer between {MIN_PART_NUMBER} and {MAX_PART_NUMBER}, inclusive")
+}
+
+/// The code S3 answers an annotation NAME that breaks the naming rules with — a name that
+/// carries no character, one carrying a character no annotation name may carry, and one
+/// under a prefix S3 keeps for itself ([`annotation_name_rejection`]) — with HTTP 400.
+///
+/// Recorded behaviour: this is the code on the wire for that whole class. The model's own
+/// shape for it is spelled `InvalidAnnotationName`
+/// (`smithy_query(query="operation",operation="PutObjectAnnotation")`), which is the shape
+/// id and not the code the service sends, so the refusal goes out through the unmodelled
+/// channel — the same way [`NO_SUCH_VERSION_CODE`] does for a code this model carries no
+/// shape for at all.
+pub const INVALID_ANNOTATION_CODE: &str = "InvalidAnnotation";
+
+/// The HTTP status [`INVALID_ANNOTATION_CODE`] is rendered with: 400, the status the model
+/// binds to the error shape of that class.
+pub const INVALID_ANNOTATION_STATUS: u16 = 400;
+
+/// See [`INVALID_ANNOTATION_CODE`] — the sentence the model states for this condition
+/// (`smithy_query(query="shape",shape="InvalidAnnotationName")`: "The annotation name you
+/// provided is invalid"), which is what a name that breaks no rule this service words a
+/// sentence of its own for is refused with.
+pub const INVALID_ANNOTATION_MESSAGE: &str = "The annotation name you provided is invalid.";
+
+/// See [`INVALID_ANNOTATION_CODE`] — the sentence that code carries for a name spelled with
+/// a character no annotation name is spelled with ([`annotation_names_carry`]), which is the
+/// break of the rules it reports for every name whose characters are not the namespace's.
+///
+/// Recorded behaviour: fixed text naming the rule, with nothing of the request in it — the
+/// offending character is not spliced into it.
+pub const INVALID_ANNOTATION_CHARACTERS_MESSAGE: &str =
+    "Your annotation name contains invalid characters.";
+
+/// See [`INVALID_ANNOTATION_CODE`] — the sentence that code carries for a name under one of
+/// the prefixes S3 keeps for itself: "Annotation names are UTF-8 encoded and cannot start
+/// with `aws` or `s3` (case-insensitive)" (`DeleteObjectAnnotationRequest$AnnotationName`),
+/// which is the rule this sentence states. Recorded behaviour: fixed text, naming both
+/// reserved prefixes however the refused name was spelled after one.
+pub const RESERVED_ANNOTATION_PREFIX_MESSAGE: &str =
+    "Your annotation name cannot start with 'aws' or 's3'.";
+
+/// The code S3 answers an annotation name longer than [`MAX_ANNOTATION_NAME_BYTES`] bytes
+/// with, with HTTP 400 — answered identically by every operation that takes an annotation
+/// name, since the name is judged before the annotation it addresses is resolved.
+pub const ANNOTATION_NAME_TOO_LONG_CODE: &str = "AnnotationNameTooLong";
+
+/// The HTTP status [`ANNOTATION_NAME_TOO_LONG_CODE`] is rendered with: 400, the status the
+/// model binds to that error shape.
+pub const ANNOTATION_NAME_TOO_LONG_STATUS: u16 = 400;
 
 /// The zone the rendering above names, and renders the instant in: the one S3's own error
 /// documents are written in, which its `<ArgumentValue>` dates show to be US Pacific.

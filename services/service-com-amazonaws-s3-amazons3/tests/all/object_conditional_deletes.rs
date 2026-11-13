@@ -13,7 +13,9 @@
 //!   matches the ETag of the object in S3. If the ETag values do not match, the operation
 //!   returns a 412 Precondition Failed error", and "`If-Match` does accept a string value of
 //!   an '*' (asterisk) character to denote a match of any ETag"
-//!   (`DeleteObjectRequest$IfMatch`) — so a request addressing nothing has no tag to match;
+//!   (`DeleteObjectRequest$IfMatch`) — a tag is the tag OF an object, so a request that
+//!   addresses no live object has none to compare and is refused `NoSuchKey` (404): what the
+//!   condition named is not there at all;
 //! * "the object is deleted only if its modification times matches the provided `Timestamp`.
 //!   If the `Timestamp` values do not match, the operation returns a 412 Precondition Failed
 //!   error. If the `Timestamp` matches or if the object doesn't exist, the operation returns
@@ -40,7 +42,7 @@
 use aws_smithy_types::date_time::Format;
 use aws_smithy_types::DateTime;
 use service_com_amazonaws_s3_amazons3::state::{
-    PRECONDITION_FAILED_CODE, PRECONDITION_FAILED_MESSAGE,
+    NO_SUCH_KEY_CODE, NO_SUCH_KEY_MESSAGE, PRECONDITION_FAILED_CODE, PRECONDITION_FAILED_MESSAGE,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -178,12 +180,12 @@ async fn a_conditional_delete_is_carried_out_only_when_every_condition_holds() {
             status: 412,
         },
         Row {
-            case: "If-Match against a key holding nothing, which matches no tag",
+            case: "If-Match against a key holding nothing, which has no tag to match",
             bytes: None,
             tag: Tag::Other,
             size: Fact::Unnamed,
             time: Fact::Unnamed,
-            status: 412,
+            status: 404,
         },
         Row {
             case: "If-Match with the wildcard against a key holding nothing",
@@ -191,7 +193,7 @@ async fn a_conditional_delete_is_carried_out_only_when_every_condition_holds() {
             tag: Tag::Wildcard,
             size: Fact::Unnamed,
             time: Fact::Unnamed,
-            status: 412,
+            status: 404,
         },
         Row {
             case: "the size the object really is",
@@ -366,6 +368,23 @@ async fn a_conditional_delete_is_carried_out_only_when_every_condition_holds() {
             assert_eq!(
                 answer.error_message(),
                 PRECONDITION_FAILED_MESSAGE,
+                "case {case:?}: expected the published sentence, got {:?}",
+                answer.error_message()
+            );
+        }
+        // An `If-Match` at a key holding no live object names the entity tag of nothing at
+        // all, so the delete is refused about the KEY rather than about a precondition.
+        if row.status == 404 {
+            assert_eq!(
+                answer.error_code(),
+                NO_SUCH_KEY_CODE,
+                "case {case:?}: expected the published code for a key that is not there, \
+                 got {:?}",
+                answer.error_code()
+            );
+            assert_eq!(
+                answer.error_message(),
+                NO_SUCH_KEY_MESSAGE,
                 "case {case:?}: expected the published sentence, got {:?}",
                 answer.error_message()
             );

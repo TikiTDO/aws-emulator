@@ -21,12 +21,14 @@
 //!   long end of what a general purpose bucket name may be);
 //! * the annotation-scoped table over the FORM and SIZE of the annotation name (plain,
 //!   dotted, mixed case, one at the published 512-byte ceiling of
-//!   `PutObjectAnnotationRequest$AnnotationName`, one spelled with characters that have to
-//!   be percent-encoded in the query, one carrying XML metacharacters — which must come
-//!   back through the envelope escaped, so a caller-influenced name cannot break the
-//!   document) and over the CALL that answers it (the read and the delete), including a
-//!   name that another object DOES carry — so what the envelope names can only have come
-//!   from the request.
+//!   `PutObjectAnnotationRequest$AnnotationName`, one spelled with a character that has to
+//!   be percent-encoded in the query) and over the CALL that answers it (the read and the
+//!   delete), including a name that another object DOES carry — so what the envelope names
+//!   can only have come from the request. A name carrying XML metacharacters is not a name
+//!   of this namespace at all (it is refused for its characters before any annotation is
+//!   resolved — see [`super::object_annotations`]), so the envelope's escaping of a
+//!   caller-influenced value is pinned on the upload id instead
+//!   ([`super::refusal_detail_members`]);
 //!
 //! Every assertion drives a real HTTP request through the router (the harness the
 //! bucket-lifecycle suite in this crate owns), so what is pinned is the wire document.
@@ -408,14 +410,9 @@ async fn an_annotation_scoped_refusal_names_the_annotation_in_its_error_document
             annotation: "c".repeat(MAX_ANNOTATION_NAME_BYTES),
         },
         AnnotationRow {
-            case: "a name spelled with characters the query has to percent-encode",
+            case: "a name spelled with a character the query has to percent-encode",
             key: "bare.txt",
-            annotation: "quarterly report/2026".to_string(),
-        },
-        AnnotationRow {
-            case: "a name carrying XML metacharacters, which must not break the envelope",
-            key: "bare.txt",
-            annotation: "a<b>&\"c'".to_string(),
+            annotation: "quarterly/report-2026".to_string(),
         },
         AnnotationRow {
             case: "a name ANOTHER object carries, addressed on an object that does not",

@@ -462,7 +462,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteObject<Eng>
                     .stored_version(&input.key, version_id)
                     .and_then(|held| held.as_object()),
             };
-            if let Some(condition) = crate::state::unmet_delete_precondition(
+            if let Some(unmet) = crate::state::unmet_delete_precondition(
                 addressed,
                 input.if_match.as_deref(),
                 input
@@ -471,7 +471,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteObject<Eng>
                     .and_then(crate::state::instant_of),
                 input.if_match_size,
             ) {
-                return Err(crate::scaffolded::Scaffolded::precondition_failed(condition));
+                return Err(match unmet {
+                    // An `If-Match` at an address holding no live object names the entity tag
+                    // of nothing at all, so what the caller is told is that the key is not
+                    // there — the same answer a conditional WRITE gives, which is what lets a
+                    // caller tell "someone else changed it" from "it is already gone".
+                    crate::state::UnmetWriteCondition::NoSuchKey => {
+                        crate::scaffolded::Scaffolded::no_such_key()
+                    }
+                    crate::state::UnmetWriteCondition::Condition(condition) => {
+                        crate::scaffolded::Scaffolded::precondition_failed(condition)
+                    }
+                });
             }
         }
 

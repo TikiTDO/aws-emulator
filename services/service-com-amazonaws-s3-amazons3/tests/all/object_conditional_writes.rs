@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! A write made CONDITIONAL on what the key holds: served when the condition holds, refused
-//! with HTTP 412 when it does not, and storing nothing either way when it does not.
+//! when it does not, and storing nothing either way when it does not.
 //!
 //! Every assertion drives a real HTTP request through the router, so what is pinned is the
 //! wire behaviour (status, error code, message) and what the key holds afterwards.
@@ -10,15 +10,16 @@
 //!
 //! * "Uploads the object only if the ETag (entity tag) value provided during the WRITE
 //!   operation matches the ETag of the object in S3. If the ETag values do not match, the
-//!   operation returns a 412 Precondition Failed error" (`PutObjectRequest$IfMatch`) — so a
-//!   key holding nothing matches no tag either.
+//!   operation returns a 412 Precondition Failed error" (`PutObjectRequest$IfMatch`) — a tag
+//!   is the tag OF an object, so a key holding no live object has none to compare and the
+//!   write is refused `NoSuchKey` (404): what the condition named is not there at all.
 //! * "Uploads the object only if the object key name does not already exist in the bucket
 //!   specified. Otherwise, Amazon S3 returns a 412 Precondition Failed error"
 //!   (`PutObjectRequest$IfNoneMatch`).
 //!
-//! The refusal carries the code and the sentence Amazon S3's list of error codes publishes
-//! for a precondition that did not hold, and a refused write leaves the object the key holds
-//! exactly as it was — which is what makes the pair usable as a compare-and-swap.
+//! A precondition that does not hold carries the code and the sentence Amazon S3's list of
+//! error codes publishes for it, and a refused write leaves the object the key holds exactly
+//! as it was — which is what makes the pair usable as a compare-and-swap.
 //!
 //! The rows differ along what the rule generalises over: WHICH member carries the condition,
 //! whether the key holds an object at all, whether the tag names the object the key holds,
@@ -27,7 +28,7 @@
 //! write and the completion of a multipart upload are judged by the same rule.
 
 use service_com_amazonaws_s3_amazons3::state::{
-    PRECONDITION_FAILED_CODE, PRECONDITION_FAILED_MESSAGE,
+    NO_SUCH_KEY_CODE, NO_SUCH_KEY_MESSAGE, PRECONDITION_FAILED_CODE, PRECONDITION_FAILED_MESSAGE,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -191,22 +192,30 @@ async fn a_conditional_write_is_served_when_it_holds_and_refused_when_it_does_no
                 read.body.len()
             );
         } else {
+            // WHICH refusal depends on why the condition does not hold: an `If-Match` at a
+            // key holding no live object names the entity tag of nothing at all, so what the
+            // caller is told is that the key is not there (404 `NoSuchKey`); every other
+            // condition that does not hold is the 412 of a failed precondition.
+            let (status, code, message) = match (*member, *key_holds_an_object) {
+                ("if-match", false) => (404, NO_SUCH_KEY_CODE, NO_SUCH_KEY_MESSAGE),
+                _ => (412, PRECONDITION_FAILED_CODE, PRECONDITION_FAILED_MESSAGE),
+            };
             assert_eq!(
-                answer.status, 412,
-                "case {case:?}: a condition that does not hold must be refused with HTTP 412, \
-                 got {} with body {:?}",
+                answer.status, status,
+                "case {case:?}: a condition that does not hold must be refused with HTTP \
+                 {status}, got {} with body {:?}",
                 answer.status,
                 text(&answer)
             );
             assert_eq!(
                 answer.error_code(),
-                PRECONDITION_FAILED_CODE,
-                "case {case:?}: expected the PreconditionFailed code, got {:?}",
+                code,
+                "case {case:?}: expected the {code} code, got {:?}",
                 answer.error_code()
             );
             assert_eq!(
                 answer.error_message(),
-                PRECONDITION_FAILED_MESSAGE,
+                message,
                 "case {case:?}: expected the published sentence, got {:?}",
                 answer.error_message()
             );
@@ -309,6 +318,39 @@ async fn the_completion_of_a_multipart_upload_is_judged_by_the_same_rule() {
     // upload assembled.
     let parts = vec![sized_payload(7, 1_024)];
     let assembled: Vec<u8> = parts.concat();
+
+    // A key holding nothing has no entity tag to match, so the completion's `If-Match` is
+    // refused `NoSuchKey` — the same answer the one-shot write gives, which is what makes
+    // this one rule rather than two.
+    let absent = complete_upload(
+        &router,
+        "conditional-mpu",
+        "assembled.bin",
+        &parts,
+        &[("if-match", "\"00000000000000000000000000000000\"")],
+    )
+    .await;
+    assert_eq!(
+        absent.status, 404,
+        "case \"If-Match onto a key holding nothing\": expected HTTP 404, got {} with body \
+         {:?}",
+        absent.status,
+        text(&absent)
+    );
+    assert_eq!(
+        absent.error_code(),
+        NO_SUCH_KEY_CODE,
+        "case \"If-Match onto a key holding nothing\": expected the {NO_SUCH_KEY_CODE} code, \
+         got {:?}",
+        absent.error_code()
+    );
+    assert_eq!(
+        absent.error_message(),
+        NO_SUCH_KEY_MESSAGE,
+        "case \"If-Match onto a key holding nothing\": expected the published sentence, got \
+         {:?}",
+        absent.error_message()
+    );
 
     // A key holding nothing: `If-None-Match: *` holds, so the completion lands.
     let created = complete_upload(

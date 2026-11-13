@@ -33,7 +33,7 @@
 //!   (`JournalTableConfigurationResult$TableStatus`).
 //! * "Journal table records must be retained for a minimum of 7 days. To set this value,
 //!   specify any whole number from `7` to `2147483647`" (`RecordExpiration$Days`): a day
-//!   count inside that range round-trips, one outside it is refused with `InvalidArgument`
+//!   count inside that range round-trips, one outside it is refused with `InvalidRequest`
 //!   (HTTP 400) and nothing is recorded.
 //! * "If server-side encryption with Key Management Service (KMS) keys (SSE-KMS) is
 //!   specified, you must also specify the KMS key Amazon Resource Name (ARN)"
@@ -48,7 +48,9 @@
 
 use std::time::Duration;
 
-use service_com_amazonaws_s3_amazons3::state::METADATA_TABLE_ACTIVATION_DELAY;
+use service_com_amazonaws_s3_amazons3::state::{
+    INVALID_RECORD_EXPIRATION_MESSAGE, METADATA_TABLE_ACTIVATION_DELAY,
+};
 use smithy_server_runtime::MultiServiceRouter;
 
 use super::bucket_lifecycle::{create_bucket, router, send, Answer};
@@ -659,9 +661,15 @@ async fn a_day_count_outside_the_published_range_is_refused_and_records_nothing(
         );
         assert_eq!(
             answer.error_code(),
-            "InvalidArgument",
-            "case {name:?}: a value that is not valid for the parameter carrying it is an \
-             InvalidArgument"
+            "InvalidRequest",
+            "case {name:?}: a record expiration that states no usable retention period is an \
+             InvalidRequest"
+        );
+        assert_eq!(
+            answer.error_message(),
+            INVALID_RECORD_EXPIRATION_MESSAGE,
+            "case {name:?}: the refusal carries that class's fixed sentence, got {:?}",
+            answer.error_message()
         );
         // Refused BEFORE anything is written, so the bucket still carries no configuration.
         let reading = get_metadata_configuration(&router, &bucket, &[]).await;

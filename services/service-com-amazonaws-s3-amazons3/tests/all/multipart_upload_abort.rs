@@ -19,18 +19,19 @@
 //! 2. The discard is SCOPED to that upload: every other upload the bucket has in progress
 //!    stays listed by `ListMultipartUploads` and keeps its own parts, including another
 //!    upload of the very same key, and an upload of the same key in another bucket.
-//! 3. An id the discarded upload was addressed by names no upload afterwards: a second
-//!    abort, and a `ListParts` of it, are each refused 404 `NoSuchUpload` — "An in-progress
-//!    multipart upload is a multipart upload that has been initiated by the
-//!    CreateMultipartUpload request, but has not yet been completed or aborted"
-//!    (`ListMultipartUploads`'s own documentation).
-//! 4. A triple that addresses no in-progress upload is refused 404 `NoSuchUpload` and
-//!    changes nothing — an id the store never minted, an id named under another key, an id
-//!    named against another bucket, and an id already aborted — while a bucket this
-//!    emulator does not hold at all is 404 `NoSuchBucket`.
-//! 5. The `NoSuchUpload` message is the FIXED sentence S3 sends for that error class: the
-//!    same text for every row, with no value from the request (the key, the id) spliced
-//!    into it.
+//! 3. An id the discarded upload was addressed by names no upload in progress afterwards: a
+//!    `ListParts` of it is refused 404 `NoSuchUpload` — "An in-progress multipart upload is a
+//!    multipart upload that has been initiated by the CreateMultipartUpload request, but has
+//!    not yet been completed or aborted" (`ListMultipartUploads`'s own documentation) — while
+//!    a SECOND abort of that id answers the same 204 the first did.
+//! 4. An abort is IDEMPOTENT at an address the bucket HELD an upload under: an id an earlier
+//!    abort discarded, and an id a completion took away, are NO-OPs answered 204 with no
+//!    body, changing nothing — the state such an abort asks for already holds.
+//! 5. An id the bucket never had an upload in progress under addresses no upload of it at
+//!    all and is refused 404 `NoSuchUpload`: an id nothing ever issued, an id issued for
+//!    another key, and an id issued in another bucket. A bucket this emulator does not hold
+//!    is 404 `NoSuchBucket`. The `NoSuchUpload` message is the FIXED sentence S3 sends for
+//!    that error class, with no value from the request (the key, the id) spliced into it.
 //! 6. A request this emulator cannot carry out as asked is refused rather than answered
 //!    with a 204 that would claim the upload was discarded: a Requester Pays confirmation
 //!    and the directory-bucket-only `x-amz-if-match-initiated-time` conditional with 501,
@@ -327,19 +328,26 @@ async fn an_abort_discards_the_upload_it_names_and_only_that_upload() {
             "case {case:?}: expected the wire error code \"NoSuchUpload\", got {:?}",
             read_back.error_code()
         );
+        // The `NoSuchUpload` class carries the FIXED sentence S3 sends for it: the same text
+        // whatever was read, with no value from the request (the key, the id) spliced in.
+        assert_eq!(
+            read_back.error_message(),
+            NO_SUCH_UPLOAD_MESSAGE,
+            "case {case:?}: expected the fixed NoSuchUpload sentence, got {:?}",
+            read_back.error_message()
+        );
         let again = abort(&router, name, key, &upload_id, &[]).await;
         assert_eq!(
-            again.status, 404,
-            "case {case:?}: a second abort of the same id must be refused 404, got {} with \
-             body {:?}",
+            again.status, 204,
+            "case {case:?}: a second abort of the same id is a no-op answered 204, got {} \
+             with body {:?}",
             again.status,
             text(&again)
         );
-        assert_eq!(
-            again.error_code(),
-            "NoSuchUpload",
-            "case {case:?}: expected the wire error code \"NoSuchUpload\", got {:?}",
-            again.error_code()
+        assert!(
+            again.body.is_empty(),
+            "case {case:?}: a 204 carries no body, got {:?}",
+            text(&again)
         );
 
         // The witness upload is untouched by every row's abort: still listed, still
@@ -441,9 +449,8 @@ async fn an_abort_leaves_another_upload_of_the_same_key_and_other_buckets_alone(
         text(&peer)
     );
 
-    // The id minted in the first bucket addresses nothing in the second one, and the
-    // second bucket's id addresses nothing in the first: an abort across buckets is a miss
-    // and removes nothing.
+    // The id minted in the first bucket addresses no upload the second one ever held, so an
+    // abort across buckets is refused and removes nothing.
     let crossed = abort(&router, second_bucket, key, &kept_upload, &[]).await;
     assert_eq!(
         crossed.status, 404,
@@ -468,6 +475,169 @@ async fn an_abort_leaves_another_upload_of_the_same_key_and_other_buckets_alone(
     );
 }
 
+/// One row of the no-op table: the case name and the address the abort carries, for an
+/// address the bucket HELD an upload under that is already gone.
+struct NoOpCase {
+    case: &'static str,
+    bucket: String,
+    key: String,
+    upload_id: String,
+}
+
+#[tokio::test]
+async fn an_abort_of_an_upload_that_is_already_gone_is_a_no_op() {
+    // Rule 4: the abort's own post-condition — that the address holds no upload in progress
+    // — already holds for every row here, so each is answered with the operation's success
+    // status rather than a refusal, and the cleanup a caller runs after a completion or in a
+    // teardown path never has to special-case an upload that is already gone.
+    let router = router();
+    let name = "multipart-abort-idempotent";
+    bucket(&router, name).await;
+
+    // A WITNESS upload no row names: whatever each no-op answers, nothing may be removed.
+    let witness_key = "live/upload.bin";
+    let witness = initiate(&router, name, witness_key).await;
+    upload_part(&router, name, witness_key, &witness, 1, "still here").await;
+    let other_key = "live/other.bin";
+    let other = initiate(&router, name, other_key).await;
+
+    // An id an abort already discarded, and the same again for a key whose upload held no
+    // part at all, so the rows span both forms of an upload that was there.
+    let aborted_key = "dead/upload.bin";
+    let aborted = initiate(&router, name, aborted_key).await;
+    upload_part(&router, name, aborted_key, &aborted, 1, "going").await;
+    let empty_key = "dead/empty.bin";
+    let empty = initiate(&router, name, empty_key).await;
+    for (key, upload_id) in [(aborted_key, &aborted), (empty_key, &empty)] {
+        let discarded = abort(&router, name, key, upload_id, &[]).await;
+        assert_eq!(
+            discarded.status,
+            204,
+            "the row's upload must be aborted once first, got {} with body {:?}",
+            discarded.status,
+            text(&discarded)
+        );
+    }
+
+    // And an id a COMPLETION took away, which is the id a cleanup path aborts after the
+    // upload it was looping over finished.
+    let completed_key = "completed/upload.bin";
+    let completed_upload = initiate(&router, name, completed_key).await;
+    let part = send(
+        &router,
+        "PUT",
+        &format!(
+            "/{name}/{}?partNumber=1&uploadId={completed_upload}&x-id=UploadPart",
+            in_path(completed_key)
+        ),
+        &[],
+        "assembled",
+    )
+    .await;
+    assert_eq!(
+        part.status,
+        200,
+        "the part of the completed upload must be recorded, got {} with body {:?}",
+        part.status,
+        text(&part)
+    );
+    let etag = part
+        .header("etag")
+        .expect("a part upload must report an ETag header");
+    let completion = send(
+        &router,
+        "POST",
+        &format!(
+            "/{name}/{}?uploadId={completed_upload}",
+            in_path(completed_key)
+        ),
+        &[],
+        &format!("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{etag}</ETag></Part></CompleteMultipartUpload>"),
+    )
+    .await;
+    assert_eq!(
+        completion.status,
+        200,
+        "the upload must be completed first, got {} with body {:?}",
+        completion.status,
+        text(&completion)
+    );
+
+    // The rows differ along WHAT took the upload away (an earlier abort, a completion), what
+    // the upload held when it went (one part, no part at all), and how many times the abort
+    // is repeated — a no-op stays a no-op however often it is made.
+    let rows = vec![
+        NoOpCase {
+            case: "an upload id an earlier abort already discarded",
+            bucket: name.to_string(),
+            key: aborted_key.to_string(),
+            upload_id: aborted.clone(),
+        },
+        NoOpCase {
+            case: "an upload that held no part when an earlier abort discarded it",
+            bucket: name.to_string(),
+            key: empty_key.to_string(),
+            upload_id: empty.clone(),
+        },
+        NoOpCase {
+            case: "an upload id a completion already took away",
+            bucket: name.to_string(),
+            key: completed_key.to_string(),
+            upload_id: completed_upload.clone(),
+        },
+    ];
+
+    for row in &rows {
+        let NoOpCase {
+            case,
+            bucket: row_bucket,
+            key: row_key,
+            upload_id: row_upload,
+        } = row;
+        // Twice, so what is pinned is idempotence rather than one repeat.
+        for attempt in 1..=2 {
+            let answered = abort(&router, row_bucket, row_key, row_upload, &[]).await;
+            assert_eq!(
+                answered.status, 204,
+                "case {case:?} (attempt {attempt}): expected the no-op's HTTP 204, got {} \
+                 with body {:?}",
+                answered.status,
+                text(&answered)
+            );
+            assert!(
+                answered.body.is_empty(),
+                "case {case:?} (attempt {attempt}): a 204 carries no body, got {:?}",
+                text(&answered)
+            );
+        }
+    }
+
+    // Nothing above was removed: the two uploads that were in progress still are, and the
+    // one no row named still holds its part.
+    let listed = uploads_in_progress(&router, name).await;
+    assert_eq!(
+        listed,
+        vec![
+            (other_key.to_string(), other.clone()),
+            (witness_key.to_string(), witness.clone()),
+        ],
+        "a no-op abort removes nothing, so both uploads must still be listed, got {listed:?}"
+    );
+    let survivor = list_parts(&router, name, witness_key, &witness).await;
+    assert_eq!(
+        survivor.status, 200,
+        "the witness upload must still read back, got {} with body {:?}",
+        survivor.status,
+        text(&survivor)
+    );
+    assert_eq!(
+        reported_parts(&survivor),
+        1,
+        "the witness upload must still hold its part, got {:?}",
+        text(&survivor)
+    );
+}
+
 /// One row of the refusal table: the case name, the address and headers the abort carries,
 /// and the status and wire error code it must be refused with.
 struct RefusalCase {
@@ -484,29 +654,21 @@ struct RefusalCase {
 async fn an_address_or_a_feature_this_emulator_cannot_serve_is_refused() {
     let router = router();
     let name = "multipart-abort-refusals";
+    let elsewhere = "multipart-abort-refusals-peer";
     bucket(&router, name).await;
+    bucket(&router, elsewhere).await;
 
     let key = "live/upload.bin";
     let live = initiate(&router, name, key).await;
     upload_part(&router, name, key, &live, 1, "still here").await;
     let other_key = "live/other.bin";
     let other = initiate(&router, name, other_key).await;
-    // An id that WAS minted and is already gone, so the "already aborted" row names a real
-    // id rather than a fabricated one.
-    let dead = initiate(&router, name, "dead/upload.bin").await;
-    let discarded = abort(&router, name, "dead/upload.bin", &dead, &[]).await;
-    assert_eq!(
-        discarded.status,
-        204,
-        "the row's upload must be aborted once first, got {} with body {:?}",
-        discarded.status,
-        text(&discarded)
-    );
 
-    // The rows differ along what the rule generalises over: WHICH part of the address
-    // misses (the bucket, the key, the id, the bucket an id was minted in), why the id
-    // names no upload (never minted, minted elsewhere, already discarded), and the two
-    // headers whose behaviour this emulator cannot carry out.
+    // The rows differ along what the rule generalises over: WHY the id names no upload of
+    // this bucket (never minted, minted for another key, minted in another bucket) and on a
+    // key that has an upload in progress or one that never had any, the ADDRESS an abort
+    // cannot reach at all (a bucket this emulator does not hold), and the two headers whose
+    // behaviour this emulator cannot carry out beside the owner assertion that does not hold.
     let rows = vec![
         RefusalCase {
             case: "an upload id the store never minted",
@@ -536,10 +698,10 @@ async fn an_address_or_a_feature_this_emulator_cannot_serve_is_refused() {
             code: "NoSuchUpload",
         },
         RefusalCase {
-            case: "an upload id an earlier abort already discarded",
-            bucket: name.to_string(),
-            key: "dead/upload.bin".to_string(),
-            upload_id: dead.clone(),
+            case: "a real upload id named against another bucket",
+            bucket: elsewhere.to_string(),
+            key: key.to_string(),
+            upload_id: live.clone(),
             headers: Vec::new(),
             status: 404,
             code: "NoSuchUpload",

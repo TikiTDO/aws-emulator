@@ -413,6 +413,22 @@ pub struct Bucket {
     /// [`ComAmazonawsS3Amazons3State::create_multipart_upload`], which is the only place
     /// that sees the ceilings an in-progress upload counts against.
     pub(super) multipart_uploads: BTreeMap<String, MultipartUpload>,
+    /// The `(Key, UploadId)` addresses the bucket HELD an upload under that is now gone:
+    /// completed, or already aborted.
+    ///
+    /// What an abort needs to tell the two cases apart — "this upload is already gone", which
+    /// is the state an abort asks for and so a no-op, from "this id names no upload of this
+    /// bucket at all", which is `NoSuchUpload`. An id lands here the moment the upload it
+    /// addressed leaves `multipart_uploads`, and nothing takes it out again: an id is minted
+    /// once ([`mint_upload_id`]) and never re-issued, so the address stays retired for the
+    /// life of the bucket.
+    ///
+    /// Bounded by [`MAX_RETIRED_MULTIPART_UPLOADS_PER_BUCKET`] with the oldest address
+    /// dropped first (an emulator guard, not an AWS limit: a caller looping on
+    /// initiate-and-abort must not grow this for the life of the process), which is why it is
+    /// a queue rather than a set. Private, like `multipart_uploads`, and written only through
+    /// [`Bucket::retire_multipart_upload`].
+    pub(super) retired_multipart_uploads: VecDeque<(String, String)>,
     /// The bucket's S3 Metadata configuration, as `CreateBucketMetadataConfiguration`
     /// recorded it, or `None` while the bucket carries none — the state a bucket is
     /// created in, and what makes `GetBucketMetadataConfiguration` answer
@@ -2038,6 +2054,38 @@ impl Bucket {
     /// that sees every ceiling.
     pub fn multipart_uploads(&self) -> &BTreeMap<String, MultipartUpload> {
         &self.multipart_uploads
+    }
+
+    /// Record that the bucket's upload at `(key, upload_id)` is GONE: a completion or an
+    /// abort has taken it away.
+    ///
+    /// Called wherever an upload leaves [`Bucket::multipart_uploads`], so the two addresses
+    /// an abort has to tell apart — an upload that is already gone, and an id that never
+    /// addressed an upload here — stay distinguishable
+    /// ([`Bucket::held_multipart_upload`]). Bounded by
+    /// [`MAX_RETIRED_MULTIPART_UPLOADS_PER_BUCKET`], oldest address first, and an address
+    /// already recorded is not recorded twice.
+    pub(super) fn retire_multipart_upload(&mut self, key: &str, upload_id: &str) {
+        if self.held_multipart_upload(key, upload_id) {
+            return;
+        }
+        while self.retired_multipart_uploads.len() >= MAX_RETIRED_MULTIPART_UPLOADS_PER_BUCKET {
+            self.retired_multipart_uploads.pop_front();
+        }
+        self.retired_multipart_uploads
+            .push_back((key.to_string(), upload_id.to_string()));
+    }
+
+    /// Whether the bucket HELD an upload at `(key, upload_id)` that is now gone — completed,
+    /// or already aborted ([`Bucket::retire_multipart_upload`] records it).
+    ///
+    /// What makes a repeated `AbortMultipartUpload` a no-op rather than a refusal: the state
+    /// such an abort asks for already holds. An id this bucket never addressed an upload by
+    /// is not one of these.
+    pub fn held_multipart_upload(&self, key: &str, upload_id: &str) -> bool {
+        self.retired_multipart_uploads
+            .iter()
+            .any(|(held_key, held_id)| held_key == key && held_id == upload_id)
     }
 
     /// Delete `key` the way a `DeleteObject` that named NO `versionId` does, reporting

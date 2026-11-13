@@ -381,19 +381,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // all, so nothing refuses a number outside that range before this: a part number
         // S3 does not address a part by is a parameter whose value is not valid, which is
         // `InvalidArgument` (400) — the code `ListParts` answers an out-of-range
-        // `max-parts` with.
+        // `max-parts` with. The sentence is that class's own FIXED text, stating the range
+        // and nothing of the request ([`crate::state::invalid_part_number_message`]): the
+        // number the request carried is not part of it.
         if !(crate::state::MIN_PART_NUMBER..=crate::state::MAX_PART_NUMBER)
             .contains(&input.part_number)
         {
             return Err(crate::scaffolded::Scaffolded::unmodeled(
                 crate::state::INVALID_ARGUMENT_CODE,
                 crate::state::INVALID_ARGUMENT_STATUS,
-                format!(
-                    "Part number must be an integer between {} and {}, inclusive: {}",
-                    crate::state::MIN_PART_NUMBER,
-                    crate::state::MAX_PART_NUMBER,
-                    input.part_number
-                ),
+                crate::state::invalid_part_number_message(),
             ));
         }
 

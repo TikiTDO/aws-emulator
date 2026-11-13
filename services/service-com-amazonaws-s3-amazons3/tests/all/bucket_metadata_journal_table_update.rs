@@ -32,6 +32,7 @@
 //!   does not hold `NoSuchBucket` (HTTP 404), and an `x-amz-expected-bucket-owner` that is
 //!   not the account's HTTP 403 `AccessDenied` — each with nothing recorded.
 
+use service_com_amazonaws_s3_amazons3::state::INVALID_RECORD_EXPIRATION_MESSAGE;
 use smithy_server_runtime::MultiServiceRouter;
 
 use super::bucket_lifecycle::{create_bucket, router, send, Answer};
@@ -355,18 +356,15 @@ async fn a_day_count_outside_the_published_range_is_refused_and_records_nothing(
         );
         assert_eq!(
             refused.error_code(),
-            "InvalidArgument",
-            "case {days:?}: a value that is not valid for the parameter carrying it is an \
-             InvalidArgument, got {:?}",
+            "InvalidRequest",
+            "case {days:?}: a record expiration that states no usable retention period is an \
+             InvalidRequest, got {:?}",
             String::from_utf8_lossy(&refused.body)
         );
         assert_eq!(
             refused.error_message(),
-            format!(
-                "RecordExpiration.Days must be a whole number from {MIN_DAYS} to {MAX_DAYS}, \
-                 got {days}"
-            ),
-            "case {days:?}: the refusal names the published range and the value sent, got {:?}",
+            INVALID_RECORD_EXPIRATION_MESSAGE,
+            "case {days:?}: the refusal carries that class's fixed sentence, got {:?}",
             String::from_utf8_lossy(&refused.body)
         );
         let unchanged = get_metadata_configuration(&router, bucket, &[]).await;

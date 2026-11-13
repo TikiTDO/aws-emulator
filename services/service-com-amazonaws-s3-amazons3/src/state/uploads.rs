@@ -270,6 +270,19 @@ pub fn etag_value(etag: &str) -> &str {
     etag.trim_matches('"')
 }
 
+/// What a conditional WRITE's members say about the key it addresses, when they do not all
+/// hold — see [`unmet_write_precondition`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnmetWriteCondition {
+    /// `If-Match` names an entity tag at a key holding no live object at all: nothing was
+    /// ever written there, or the version the key currently resolves to is a delete marker.
+    /// There is no tag to compare, so what the request named is not there.
+    NoSuchKey,
+    /// The condition carried by the request header this names did not hold against the
+    /// object the key holds.
+    Condition(&'static str),
+}
+
 /// The conditional WRITE member a request carries that does NOT hold at a key whose current
 /// object carries `held_etag` (`None` for a key holding nothing), named by its header, or
 /// `None` when every one of them holds.
@@ -278,8 +291,14 @@ pub fn etag_value(etag: &str) -> &str {
 ///
 /// * "Uploads the object only if the ETag (entity tag) value provided during the WRITE
 ///   operation matches the ETag of the object in S3. If the ETag values do not match, the
-///   operation returns a 412 Precondition Failed error" (`PutObjectRequest$IfMatch`) — so a
-///   key holding nothing at all matches no tag either.
+///   operation returns a 412 Precondition Failed error" (`PutObjectRequest$IfMatch`) — a tag
+///   is the tag OF an object, so a key holding no live object has none to compare: the
+///   address the condition is about is not there, which is
+///   [`UnmetWriteCondition::NoSuchKey`] ([`NO_SUCH_KEY_CODE`], 404) rather than a
+///   precondition that failed. A key hidden by a delete marker holds no live object either,
+///   so it is answered the same way — and a caller using `If-Match` for optimistic
+///   concurrency can tell "someone else changed it" (retry with a fresh tag) from "it is
+///   gone" (create it) instead of retrying forever.
 /// * "Uploads the object only if the object key name does not already exist in the bucket
 ///   specified. Otherwise, Amazon S3 returns a 412 Precondition Failed error"
 ///   (`PutObjectRequest$IfNoneMatch`), whose value "expects the '*' (asterisk) character":
@@ -296,14 +315,16 @@ pub fn unmet_write_precondition(
     held_etag: Option<&str>,
     if_match: Option<&str>,
     if_none_match: Option<&str>,
-) -> Option<&'static str> {
+) -> Option<UnmetWriteCondition> {
     if if_none_match.is_some() && held_etag.is_some() {
-        return Some(IF_NONE_MATCH_CONDITION);
+        return Some(UnmetWriteCondition::Condition(IF_NONE_MATCH_CONDITION));
     }
-    let match_fails = if_match.is_some_and(|expected| {
-        held_etag.is_none_or(|held| etag_value(held) != etag_value(expected))
-    });
-    match_fails.then_some(IF_MATCH_CONDITION)
+    let if_match = if_match?;
+    let Some(held) = held_etag else {
+        return Some(UnmetWriteCondition::NoSuchKey);
+    };
+    (etag_value(held) != etag_value(if_match))
+        .then_some(UnmetWriteCondition::Condition(IF_MATCH_CONDITION))
 }
 
 /// The `If-Match` value that matches whatever entity tag the addressed object carries:
@@ -320,8 +341,12 @@ pub const ANY_ENTITY_TAG: &str = "*";
 /// * "Deletes the object if the ETag (entity tag) value provided during the delete operation
 ///   matches the ETag of the object in S3. If the ETag values do not match, the operation
 ///   returns a `412 Precondition Failed` error" (`DeleteObjectRequest$IfMatch`), with
-///   [`ANY_ENTITY_TAG`] matching any tag — so a request addressing nothing has no tag to
-///   match and is refused;
+///   [`ANY_ENTITY_TAG`] matching any tag — a tag is the tag OF an object, so a request that
+///   addresses no live object has none to compare: the address the condition is about is not
+///   there, which is [`UnmetWriteCondition::NoSuchKey`] ([`NO_SUCH_KEY_CODE`], 404) rather
+///   than a precondition that failed, exactly as it is for a conditional WRITE
+///   ([`unmet_write_precondition`]). A key whose current version is a delete marker holds no
+///   live object either, so it is answered the same way;
 /// * "the object is deleted only if its modification times matches the provided `Timestamp`.
 ///   If the `Timestamp` values do not match, the operation returns a `412 Precondition
 ///   Failed` error. If the `Timestamp` matches or if the object doesn't exist, the operation
@@ -344,12 +369,14 @@ pub fn unmet_delete_precondition(
     if_match: Option<&str>,
     if_match_last_modified_time: Option<SystemTime>,
     if_match_size: Option<i64>,
-) -> Option<&'static str> {
-    let match_fails = if_match.is_some_and(|expected| {
-        held.is_none_or(|object| !entity_tag_matches(expected, &object.etag))
-    });
-    if match_fails {
-        return Some(IF_MATCH_CONDITION);
+) -> Option<UnmetWriteCondition> {
+    if let Some(expected) = if_match {
+        let Some(object) = held else {
+            return Some(UnmetWriteCondition::NoSuchKey);
+        };
+        if !entity_tag_matches(expected, &object.etag) {
+            return Some(UnmetWriteCondition::Condition(IF_MATCH_CONDITION));
+        }
     }
     let time_fails = if_match_last_modified_time.is_some_and(|expected| {
         held.is_some_and(|object| {
@@ -357,14 +384,16 @@ pub fn unmet_delete_precondition(
         })
     });
     if time_fails {
-        return Some(IF_MATCH_LAST_MODIFIED_TIME_CONDITION);
+        return Some(UnmetWriteCondition::Condition(
+            IF_MATCH_LAST_MODIFIED_TIME_CONDITION,
+        ));
     }
     let size_fails = if_match_size.is_some_and(|expected| {
         held.is_some_and(|object| {
             i64::try_from(object.body.len()).unwrap_or(i64::MAX) != expected
         })
     });
-    size_fails.then_some(IF_MATCH_SIZE_CONDITION)
+    size_fails.then_some(UnmetWriteCondition::Condition(IF_MATCH_SIZE_CONDITION))
 }
 
 /// The conditional READ member a request carries that does NOT hold against an object whose

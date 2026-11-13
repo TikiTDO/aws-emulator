@@ -1059,7 +1059,13 @@ impl ComAmazonawsS3Amazons3State {
     ///
     /// An upload is addressed by its id AND the key it was initiated for, exactly as
     /// [`Self::upload_part`] and a read of the upload address it, so an id named under
-    /// another key names no upload ([`UploadAbort::NoSuchUpload`]) and nothing is removed.
+    /// another key names no upload.
+    ///
+    /// What the address holds decides which of the three outcomes goes back: the upload
+    /// itself ([`UploadAbort::Discarded`]), an upload this bucket HELD there and a completion
+    /// or an earlier abort has taken away ([`UploadAbort::AlreadyDiscarded`], the state an
+    /// abort asks for), or nothing this bucket ever held there
+    /// ([`UploadAbort::NoSuchUpload`]).
     ///
     /// The upload goes away with every part it held — "the storage consumed by any
     /// previously uploaded parts will be freed" (`AbortMultipartUpload`'s own
@@ -1078,9 +1084,15 @@ impl ComAmazonawsS3Amazons3State {
             .multipart_upload(upload_id)
             .is_none_or(|upload| upload.key != key)
         {
-            return Some(UploadAbort::NoSuchUpload);
+            return Some(match held_bucket.held_multipart_upload(key, upload_id) {
+                true => UploadAbort::AlreadyDiscarded,
+                false => UploadAbort::NoSuchUpload,
+            });
         }
         held_bucket.multipart_uploads.remove(upload_id);
+        // The address is retired as the upload leaves, so a second abort of the same id sees
+        // an upload that is already gone rather than an id that names nothing.
+        held_bucket.retire_multipart_upload(key, upload_id);
         Some(UploadAbort::Discarded)
     }
 
@@ -1127,6 +1139,12 @@ impl ComAmazonawsS3Amazons3State {
         let write = self.put_object(bucket, key, object);
         match write {
             Some(write @ (ObjectWrite::Created | ObjectWrite::Replaced)) => {
+                // The address is retired as the upload becomes the object, so a cleanup
+                // abort of the id the completion consumed sees an upload that is already
+                // gone rather than an id that names nothing.
+                if let Some(held_bucket) = self.buckets.get_mut(bucket) {
+                    held_bucket.retire_multipart_upload(key, upload_id);
+                }
                 Some(UploadCompletion::Completed(write))
             }
             // Either refusal leaves the upload where it was: the bucket is reached again

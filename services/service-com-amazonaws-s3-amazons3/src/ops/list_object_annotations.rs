@@ -242,15 +242,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Judged by the one place the name rules live
         // ([`crate::state::annotation_name_rejection`]), so the prefix filter and the writer
         // agree on which names exist: past the 512-byte name maximum, opening with a
-        // character no name opens with, or under a prefix S3 reserves for itself. An EMPTY
-        // prefix is not a name — it filters nothing out — so it is the whole listing, exactly
-        // as an empty `prefix` is for an object listing.
+        // character no name opens with, carrying a character no name carries, or under a
+        // prefix S3 reserves for itself. An EMPTY prefix is not a name — it filters nothing
+        // out — so it is the whole listing, exactly as an empty `prefix` is for an object
+        // listing. Judged before the page it would filter is taken, so a prefix that is not
+        // one is refused rather than carried into a response.
         if let Some(prefix) = input.annotation_prefix.as_deref() {
             match crate::state::annotation_name_rejection(prefix) {
                 None | Some(crate::state::AnnotationNameRejection::Empty) => {}
                 Some(
                     crate::state::AnnotationNameRejection::TooLong { .. }
                     | crate::state::AnnotationNameRejection::LeadingCharacter { .. }
+                    | crate::state::AnnotationNameRejection::Character { .. }
                     | crate::state::AnnotationNameRejection::ReservedPrefix { .. },
                 ) => {
                     return Err(

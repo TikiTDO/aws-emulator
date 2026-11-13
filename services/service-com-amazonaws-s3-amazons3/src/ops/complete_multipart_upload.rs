@@ -645,16 +645,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CompleteMultipart
         // did not hold).
         //
         // A refused completion leaves the upload in progress with every part it held, so the
-        // caller can read the object's tag and retry.
+        // caller can read the object's tag and retry. An `If-Match` at a key holding no live
+        // object names the tag of nothing at all, so what the caller is told there is that
+        // the key is not there, the same answer the one-shot write gives it.
         let held_etag = bucket_record
             .object(&input.key)
             .map(|object| object.etag.clone());
-        if let Some(condition) = crate::state::unmet_write_precondition(
+        if let Some(unmet) = crate::state::unmet_write_precondition(
             held_etag.as_deref(),
             input.if_match.as_deref(),
             input.if_none_match.as_deref(),
         ) {
-            return Err(crate::scaffolded::Scaffolded::precondition_failed(condition));
+            return Err(match unmet {
+                crate::state::UnmetWriteCondition::NoSuchKey => {
+                    crate::scaffolded::Scaffolded::no_such_key()
+                }
+                crate::state::UnmetWriteCondition::Condition(condition) => {
+                    crate::scaffolded::Scaffolded::precondition_failed(condition)
+                }
+            });
         }
 
         // Everything else about the object is what the INITIATING request settled — "when

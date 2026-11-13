@@ -18,7 +18,8 @@
 //! * The name is bounded: "Minimum length of 1. Maximum length of 512 bytes"
 //!   (`PutObjectAnnotationRequest$AnnotationName`) — a longer one is
 //!   `AnnotationNameTooLong` — and "cannot start with `aws` or `s3` (case-insensitive)"
-//!   (`DeleteObjectAnnotationRequest$AnnotationName`), which is `InvalidAnnotationName`.
+//!   (`DeleteObjectAnnotationRequest$AnnotationName`), which with every other break of the
+//!   naming rules is `InvalidAnnotation`.
 //! * The payload is bounded and must be text: "Must be between 1 byte and 1 MiB in size,
 //!   and must be valid UTF-8 encoded text. If the payload contains invalid UTF-8 bytes, the
 //!   request fails with HTTP 415 (Unsupported Media Type)"
@@ -188,7 +189,7 @@ async fn annotations_round_trip_through_put_and_get() {
         ),
         (
             "a name of UTF-8 text, more bytes than characters",
-            "données-✓".to_string(),
+            "données-été".to_string(),
             "valeur — oui".as_bytes().to_vec(),
         ),
         (
@@ -289,10 +290,13 @@ async fn an_annotation_name_outside_its_published_rules_is_refused() {
     object(&router, "name-rule-bucket", "data.json", b"{}").await;
 
     // The rows walk the published bound (the 512-byte maximum, and one byte past it, in
-    // ASCII and in multi-byte UTF-8 where the two units differ) and the reserved prefixes,
-    // in both cases, at and past the prefix itself. `AnnotationNameTooLong` is "Your
-    // annotation name is too long." and `InvalidAnnotationName` is "The annotation
-    // name you provided is invalid", so each row names the one its own rule earns.
+    // ASCII and in multi-byte UTF-8 where the two units differ), the characters a name is
+    // spelled out of (a symbol, a space and a colon, and the path separator the namespace IS
+    // spelled with, at the front of a name and inside one) and the reserved prefixes, in both
+    // cases, at and past the prefix itself. `AnnotationNameTooLong` is "Your annotation name
+    // is too long." and every other break of the rules is `InvalidAnnotation`, so each row
+    // names the one its own rule earns — and the READ of the same name earns the same
+    // refusal, because the name is judged before the annotation it addresses is resolved.
     let too_long_in_bytes = "é".repeat(MAX_ANNOTATION_NAME_BYTES / 2 + 1);
     assert_eq!(
         too_long_in_bytes.len(),
@@ -300,7 +304,7 @@ async fn an_annotation_name_outside_its_published_rules_is_refused() {
         "the test's own multi-byte name must be past the bound in BYTES, got {} bytes",
         too_long_in_bytes.len()
     );
-    let rows: [RefusalRow<'_>; 7] = [
+    let rows: [RefusalRow<'_>; 12] = [
         (
             "one byte past the published maximum",
             name_of(MAX_ANNOTATION_NAME_BYTES + 1),
@@ -320,28 +324,63 @@ async fn an_annotation_name_outside_its_published_rules_is_refused() {
             "aws-owned".to_string(),
             b"reserved".to_vec(),
             400,
-            "InvalidAnnotationName",
+            "InvalidAnnotation",
         ),
         (
             "that prefix in another case",
             "AwS".to_string(),
             b"reserved".to_vec(),
             400,
-            "InvalidAnnotationName",
+            "InvalidAnnotation",
         ),
         (
             "the other reserved prefix",
             "s3-managed".to_string(),
             b"reserved".to_vec(),
             400,
-            "InvalidAnnotationName",
+            "InvalidAnnotation",
         ),
         (
             "that prefix uppercased, with nothing after it",
             "S3".to_string(),
             b"reserved".to_vec(),
             400,
-            "InvalidAnnotationName",
+            "InvalidAnnotation",
+        ),
+        (
+            "a symbol inside the name",
+            "bad!name".to_string(),
+            b"not a name".to_vec(),
+            400,
+            "InvalidAnnotation",
+        ),
+        (
+            "a space inside the name",
+            "two words".to_string(),
+            b"not a name".to_vec(),
+            400,
+            "InvalidAnnotation",
+        ),
+        (
+            "a path separator inside the name, which the namespace is spelled with",
+            "notes/2026".to_string(),
+            b"a name".to_vec(),
+            200,
+            "",
+        ),
+        (
+            "a leading path separator",
+            "/notes".to_string(),
+            b"not a name".to_vec(),
+            400,
+            "InvalidAnnotation",
+        ),
+        (
+            "a colon-namespaced name, which this namespace is not spelled with",
+            "team:review".to_string(),
+            b"not a name".to_vec(),
+            400,
+            "InvalidAnnotation",
         ),
         (
             "a name that only ends with a reserved prefix",
@@ -381,20 +420,29 @@ async fn an_annotation_name_outside_its_published_rules_is_refused() {
             !put.error_message().is_empty(),
             "case {case:?}: an S3 error document carries a message beside its code, got none"
         );
-        // Nothing was recorded, so the name the refusal was about addresses no annotation.
+        // A name the write refuses for breaking the rules is not a name any object can be
+        // carrying, so the READ of it answers the same refusal rather than reporting an
+        // annotation that is simply absent.
         let got = get_annotation(&router, "name-rule-bucket", "data.json", &name).await;
         assert_eq!(
-            got.status, 404,
-            "case {case:?}: a refused write records nothing, so the read must answer 404, \
+            got.status, status,
+            "case {case:?}: expected the read to be refused HTTP {status} like the write, \
              got {} with body {:?}",
             got.status,
             text(&got)
         );
         assert_eq!(
             got.error_code(),
-            "NoSuchAnnotation",
-            "case {case:?}: expected NoSuchAnnotation from the read, got {:?}",
+            code,
+            "case {case:?}: expected the read to carry the write's code {code:?}, got {:?}",
             got.error_code()
+        );
+        assert_eq!(
+            got.error_message(),
+            put.error_message(),
+            "case {case:?}: expected the read to carry the write's message {:?}, got {:?}",
+            put.error_message(),
+            got.error_message()
         );
     }
 }

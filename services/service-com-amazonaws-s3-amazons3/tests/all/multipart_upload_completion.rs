@@ -28,8 +28,9 @@
 //!    404 `NoSuchBucket`, and `x-amz-expected-bucket-owner` naming another account with 403.
 //! 5. The conditional members are judged against what the key holds at the moment of the
 //!    write: `If-None-Match: *` serves a key holding nothing and is refused with 412
-//!    `PreconditionFailed` once the key holds an object, and `If-Match` serves exactly the
-//!    tag the key holds.
+//!    `PreconditionFailed` once the key holds an object, `If-Match` serves exactly the
+//!    tag the key holds, and an `If-Match` at a key holding nothing — which has no tag to
+//!    match — is refused 404 `NoSuchKey`.
 
 use md5::{Digest, Md5};
 use smithy_server_runtime::MultiServiceRouter;
@@ -1372,12 +1373,12 @@ fn condition_cases() -> Vec<ConditionCase> {
             code: "PreconditionFailed",
         },
         ConditionCase {
-            case: "If-Match onto a key holding nothing, which matches no tag",
+            case: "If-Match onto a key holding nothing, which has no tag to match",
             key_holds_an_object: false,
             header: "if-match",
             value: Some("\"00000000000000000000000000000000\""),
-            status: 412,
-            code: "PreconditionFailed",
+            status: 404,
+            code: "NoSuchKey",
         },
     ]
 }
@@ -1460,9 +1461,15 @@ async fn a_conditional_completion_is_judged_against_what_the_key_holds() {
                 "case {case:?}: expected the wire code {code:?}, got {:?}",
                 answered.error_code()
             );
+            // Each refusal carries the fixed sentence of its own class: the precondition
+            // that did not hold, or the key that is not there.
+            let expected_message = match code {
+                "NoSuchKey" => "The specified key does not exist.",
+                _ => "At least one of the pre-conditions you specified did not hold",
+            };
             assert_eq!(
                 answered.error_message(),
-                "At least one of the pre-conditions you specified did not hold",
+                expected_message,
                 "case {case:?}: expected the published message for {code:?}, got {:?}",
                 answered.error_message()
             );
