@@ -162,7 +162,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut store = state.lock();
         // What the clock already owes the store, so the status this listing reports for a
         // request is the same one `GetResourceRequestStatus` reports for it.
-        let native = crate::state::native::NativeResources::for_engine(&*self.engine);
+        let native =
+            crate::state::native::NativeResources::for_engine(&*self.engine, ctx.endpoint());
         store.materialise_due(::std::time::SystemTime::now(), &native);
 
         // A continuation token carries the position it names, so only the authenticator

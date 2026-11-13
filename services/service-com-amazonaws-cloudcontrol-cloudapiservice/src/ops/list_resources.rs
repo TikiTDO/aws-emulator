@@ -260,7 +260,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx.parts());
         // What the clock already owes the store, so one listing cannot report a resource
         // another read says no longer exists.
-        let native = crate::state::native::NativeResources::for_engine(&*self.engine);
+        let native =
+            crate::state::native::NativeResources::for_engine(&*self.engine, ctx.endpoint());
         store.materialise_due(::std::time::SystemTime::now(), &native);
 
         // A continuation token carries the position it names, so only the authenticator

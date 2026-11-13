@@ -264,7 +264,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The Region this call addressed, as its SigV4 credential scope names it: the
         // Region a resource the OWNING service provisions is created in.
         let region = crate::state::request_region(ctx.parts());
-        let native = crate::state::native::NativeResources::for_engine(&*self.engine);
+        let native =
+            crate::state::native::NativeResources::for_engine(&*self.engine, ctx.endpoint());
         // For a type whose primary identifier the OWNING service ASSIGNS — one the type's
         // schema declares read-only, so no desired state carries it — the identifier is
         // that service's to name rather than something read off the model.

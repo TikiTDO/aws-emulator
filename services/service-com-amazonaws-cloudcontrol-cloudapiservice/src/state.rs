@@ -2292,7 +2292,7 @@ mod tests {
     /// can carry is a case — the terminal ones and the two a cancellation itself reaches.
     #[test]
     fn a_cancel_acts_only_inside_the_cancelable_window() {
-        let native = NativeResources::for_engine(&());
+        let native = NativeResources::for_engine(&(), ::smithy_server_runtime::EndpointUrl::test_value());
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         for status in crate::ops::types::OPERATION_STATUS_VALUES {
             let mut store = ComAmazonawsCloudcontrolCloudapiserviceState::default();

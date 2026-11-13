@@ -182,7 +182,10 @@ impl NativeResources {
     ///
     /// A store the engine does not carry contributes no provider, so its type falls back
     /// to this service's own store rather than resolving to nothing.
-    pub fn for_engine<Eng: Send + Sync + 'static>(engine: &Eng) -> Self {
+    pub fn for_engine<Eng: Send + Sync + 'static>(
+        engine: &Eng,
+        endpoint: ::smithy_server_runtime::EndpointUrl,
+    ) -> Self {
         let mut providers: Vec<Box<dyn NativeResourceProvider>> = Vec::new();
         if let Some(provider) = log_groups::LogGroupProvider::for_engine(engine) {
             providers.push(Box::new(provider));
@@ -190,7 +193,7 @@ impl NativeResources {
         if let Some(provider) = destinations::DestinationProvider::for_engine(engine) {
             providers.push(Box::new(provider));
         }
-        if let Some(provider) = queues::QueueProvider::for_engine(engine) {
+        if let Some(provider) = queues::QueueProvider::for_engine(engine, endpoint) {
             providers.push(Box::new(provider));
         }
         if let Some(provider) = topics::TopicProvider::for_engine(engine) {
@@ -414,7 +417,7 @@ mod tests {
     #[test]
     fn only_a_backed_type_resolves_to_a_provider() {
         let engine = ::engine::InMemoryEngine::new();
-        let native = NativeResources::for_engine(&engine);
+        let native = NativeResources::for_engine(&engine, ::smithy_server_runtime::EndpointUrl::test_value());
         assert!(
             native.provider("AWS::Logs::LogGroup").is_some(),
             "expected the log group provider, got {native:?}"
@@ -442,7 +445,7 @@ mod tests {
             );
         }
         assert!(
-            NativeResources::for_engine(&())
+            NativeResources::for_engine(&(), ::smithy_server_runtime::EndpointUrl::test_value())
                 .provider("AWS::Logs::LogGroup")
                 .is_none(),
             "a deployment whose engine carries no owning store must stand behind no type"

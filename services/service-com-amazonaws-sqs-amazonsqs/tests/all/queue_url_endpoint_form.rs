@@ -4,14 +4,9 @@
 //! wire (`POST /` with `X-Amz-Target: AmazonSQS.<OperationName>`) through the shared
 //! harness in [`super::support`].
 //!
-//! The rule under test: **a queue url is the service's regional endpoint for the region
-//! the call was made in followed by the queue's account and name —
-//! `https://sqs.<region>.amazonaws.com/<accountId>/<QueueName>` — so the same queue
-//! reports one url through every operation that carries one, whatever address the request
-//! reached the emulator on.** The authority is a property of the region and the service,
-//! not of the socket a request arrived on: a client stores the url, derives the queue ARN
-//! from it, embeds it in a policy document and infers region and account from it, so a
-//! per-caller or per-boot authority would make all of that wrong.
+//! The rule under test: each address uses the emulator's published endpoint, not an AWS
+//! hostname or the request's Host header. Region remains in the resource path so the
+//! same name in different regions has a distinct canonical Cloud Control identifier.
 //!
 //! The tables span what the rule generalises over: the REGION the call is made in (four of
 //! them), the queue NAME (every character class the member admits, its shortest value, the
@@ -37,7 +32,7 @@ const REGIONS: &[&str] = &[REGION, "us-west-2", "eu-central-1", "ap-southeast-2"
 /// The endpoint prefix Amazon SQS publishes its regional endpoints under, which is the
 /// first label of the authority a queue url carries. Spelled out here rather than read from
 /// the crate, so a row fails if the service starts rendering urls on some other host.
-const ENDPOINT_PREFIX: &str = "sqs";
+const PUBLISHED_AUTHORITY: &str = "emulator.invalid";
 
 /// One queue name the url form is asserted over.
 struct NameCase {
@@ -60,7 +55,10 @@ struct NameCase {
 /// published length bound, one character past it, and a FIFO name — none of them the name
 /// any recorded call used.
 fn name_cases() -> Vec<NameCase> {
-    let at_the_bound = format!("url-form-{}", "a".repeat(MAX_QUEUE_NAME_LENGTH - "url-form-".len()));
+    let at_the_bound = format!(
+        "url-form-{}",
+        "a".repeat(MAX_QUEUE_NAME_LENGTH - "url-form-".len())
+    );
     let past_the_bound = format!("{at_the_bound}b");
     assert_eq!(
         (at_the_bound.chars().count(), past_the_bound.chars().count()),
@@ -117,7 +115,7 @@ fn name_cases() -> Vec<NameCase> {
 /// rule ever drift apart.
 fn regional_url(region: &str, name: &str) -> String {
     format!(
-        "https://{ENDPOINT_PREFIX}.{region}.amazonaws.com/{}/{name}",
+        "https://{PUBLISHED_AUTHORITY}/sqs/{region}/{}/{name}",
         account()
     )
 }
@@ -137,14 +135,13 @@ fn assert_regional_form(case: &str, region: &str, name: &str, url: &str) {
         .split_once('/')
         .unwrap_or_else(|| panic!("case {case} in {region}: expected a path, got {url:?}"));
     assert_eq!(
-        authority,
-        format!("{ENDPOINT_PREFIX}.{region}.amazonaws.com"),
+        authority, PUBLISHED_AUTHORITY,
         "case {case} in {region}: the authority must be the regional endpoint, \
          got {authority:?}"
     );
     assert_eq!(
         path.split('/').collect::<Vec<&str>>(),
-        vec![account(), name],
+        vec!["sqs", region, account(), name],
         "case {case} in {region}: expected /<accountId>/<QueueName>, got {path:?}"
     );
     // The harness's own derivation of the same form, so the suite and every other suite
@@ -352,7 +349,7 @@ async fn a_queue_url_is_the_same_whatever_address_the_call_arrived_on() {
             "case ListQueues on {address}: expected the listing to hold {shared_url:?} and \
              {minted:?}, got {urls:?}"
         );
-        let authority = format!("https://{ENDPOINT_PREFIX}.{REGION}.amazonaws.com/");
+        let authority = format!("https://{PUBLISHED_AUTHORITY}/sqs/{REGION}/");
         for url in &urls {
             assert!(
                 url.starts_with(&authority),
@@ -484,4 +481,49 @@ async fn a_reported_url_round_trips_through_the_operations_that_take_one() {
         Some("url-form"),
         "case ListQueueTags through a reported url: expected the tag just set, got {tags}"
     );
+}
+
+/// The configured base, including its port, is the resource-address authority even
+/// when the request arrives with another Host. Region stays a path identity, not a
+/// public AWS hostname. This uses only the existing in-process transport.
+#[tokio::test]
+async fn published_endpoint_not_request_host_owns_queue_addresses() {
+    let mut router = emulator();
+    let base = "https://sandbox.test.invalid:18443";
+    router.set_url_base(smithy_server_runtime::EndpointUrl::parse(base).unwrap());
+    let mut urls = Vec::new();
+    for region in ["us-east-1", "us-west-2"] {
+        let name = "same-name-published-base";
+        let expected = format!("{base}/sqs/{region}/{}/{name}", account());
+        let created = ok_on_host(
+            &router,
+            "untrusted.test.invalid:9297",
+            region,
+            "CreateQueue",
+            json!({"QueueName": name}),
+        )
+        .await;
+        assert_eq!(created["QueueUrl"], expected);
+        let repeated = ok_in(&router, region, "CreateQueue", json!({"QueueName": name})).await;
+        assert_eq!(repeated["QueueUrl"], expected);
+        let resolved = ok_in(&router, region, "GetQueueUrl", json!({"QueueName": name})).await;
+        assert_eq!(resolved["QueueUrl"], expected);
+        let listed = ok_in(&router, region, "ListQueues", json!({})).await;
+        assert_eq!(listed["QueueUrls"], json!([expected]));
+        let attributes = ok_in(
+            &router,
+            region,
+            "GetQueueAttributes",
+            json!({
+                "QueueUrl": expected, "AttributeNames": ["QueueArn"]
+            }),
+        )
+        .await;
+        assert_eq!(
+            attributes["Attributes"]["QueueArn"],
+            expected_arn_in(region, name)
+        );
+        urls.push(expected);
+    }
+    assert_ne!(urls[0], urls[1]);
 }

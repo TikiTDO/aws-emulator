@@ -248,7 +248,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // What the clock already owes the store: a create whose work has fallen due has
         // provisioned its resource and a delete whose work has fallen due has removed
         // one, whether or not anybody called in between.
-        let native = crate::state::native::NativeResources::for_engine(&*self.engine);
+        let native =
+            crate::state::native::NativeResources::for_engine(&*self.engine, ctx.endpoint());
         store.materialise_due(::std::time::SystemTime::now(), &native);
         // "You can use this action to return information about an existing resource in
         // your account and Amazon Web Services Region, whether those resources were
