@@ -208,6 +208,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // Resolve cancelled publication/checkpoint outcomes BEFORE policy and snapshot.
+        let mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| catalog_failure())?;
+        let payload_store = crate::state::payloads::bound_store(&*self.engine).map_err(|_| catalog_failure())?;
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(StartImageScanErrorModeled::ServerException(ServerException {
                 message: Some("the ecr repository store is unavailable".to_string()),
@@ -230,28 +234,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         crate::state::check_registry(input.registry_id.as_ref()).map_err(fault_error)?;
 
         let now = ::std::time::SystemTime::now();
-        let mut store = state.lock();
-
-        // The registry's own scan budget, counted from the scans it holds. Read before
-        // the repository is borrowed, because it spans every repository.
-        let scans_started =
-            store.basic_scans_started_within(crate::state::BASIC_SCAN_INTERVAL, now);
-
-        let repo = store
-            .repository_mut(&input.repository_name)
-            .map_err(fault_error)?;
+        let (scans_started, before) = {
+            let store = state.lock();
+            (store.basic_scans_started_within(crate::state::BASIC_SCAN_INTERVAL, now),
+                store.repository(&input.repository_name).map_err(fault_error)?.clone())
+        };
+        let mut repo = before.clone();
         let registry_id = repo.registry_id.clone();
         let repository_name = repo.name.clone();
 
         // A restore the clock has already made due is written down before the image's
         // storage class is judged, so a scan started straight after one falls due is
         // started on the image as it already stands.
-        repo.settle_image_storage_classes(now);
+        // Only this event target is materialized; unrelated clocks remain derived views.
 
         // The identifier must name a stored image; the resolution lives on `Repo`, so
         // this operation refuses an identifier exactly as every other one does, and the
         // record it hands back is the one this call writes its scan onto.
         let image = repo.resolve_image_mut(&input.image_id).map_err(fault_error)?;
+        image.settle_storage_class(now);
         // The digest reported is the stored image's own, and the tag only where it really
         // points at that image.
         let image_id = image.identifier(input.image_id.image_tag.as_deref());
@@ -272,7 +273,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // A basic scan reads the operating system packages in an image's filesystem, so
         // a manifest that declares no layer is of a type that cannot be scanned.
-        if !crate::state::is_scannable_image_manifest(&image.manifest) {
+        if !image.scannable_manifest {
             return Err(StartImageScanErrorModeled::UnsupportedImageTypeException(
                 UnsupportedImageTypeException {
                     message: Some(format!(
@@ -336,6 +337,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .start_basic_scan(&input.image_id, now)
             .map_err(fault_error)?;
 
+        crate::state::catalog::publish_images(&mutation, &payload_store, &before, &mut repo).await.map_err(|_| catalog_failure())?;
+        state.lock().repositories.insert(repo.name.clone(),repo);
+
         Ok(StartImageScanOutput {
             registry_id: Some(registry_id),
             repository_name: Some(repository_name),
@@ -343,4 +347,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             image_scan_status: Some(image_scan_status),
         })
     }
+}
+
+fn catalog_failure() -> StartImageScanError {
+    StartImageScanErrorModeled::ServerException(ServerException { message: Some("the durable ecr image catalog is unavailable".to_string()) }).into()
 }

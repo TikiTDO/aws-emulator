@@ -5,6 +5,7 @@
 //! Provides AKID extraction, error response helpers, tenant isolation,
 //! and reusable HTTP infrastructure for building in-process AWS service emulators.
 
+pub mod boot_identity;
 pub mod cli;
 pub mod runtime_profile;
 pub mod transport;
@@ -4492,7 +4493,11 @@ mod ecr_body_capacity_tests {
             observed.store(0, std::sync::atomic::Ordering::SeqCst);
             let req = http::Request::builder().method("PATCH").uri(path)
                 .body(axum::body::Body::from(vec![42u8; length])).unwrap();
-            let response = emulator_service_fallback(axum::extract::State(service.clone()), req).await;
+            let response = emulator_service_fallback(
+                axum::extract::State((service.clone(), transport::ExchangeScope::default())),
+                req,
+            )
+            .await;
             assert_eq!(response.status(), expected, "{path}");
             assert_eq!(observed.load(std::sync::atomic::Ordering::SeqCst),
                 if expected == http::StatusCode::CREATED { length } else { 0 });

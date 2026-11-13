@@ -369,6 +369,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let now = ::std::time::SystemTime::now();
+        let (effective_capacity, arn) = {
         let mut guard = state.lock();
         let state = &mut *guard;
         crate::state::apply_due_scheduled_actions(state, now);
@@ -475,7 +476,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // within these bounds, even if you don't include the MinCapacity or MaxCapacity
         // request parameters."
         let effective_capacity = enforce_capacity_window(state, &key, resolved_capacity, now);
-        drop(guard);
+        (effective_capacity, arn)
+        }; // only owned view/plan data escapes the state phase
+
 
         // Suspending or resuming a scaling activity changes which alarms the target's
         // policies want to exist, and a capacity move changes what their thresholds are
@@ -490,7 +493,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // target is clamped into, and the movement this call may have made is one the scaled
         // resource is owed, so both are settled here — and the clock is left watching for the
         // next breach of the target's policies.
-        crate::state::policy_execution::settle_policy_executions(&*self.engine, &region);
+        crate::state::policy_execution::settle_policy_executions(&*self.engine, &region).await;
         crate::state::policy_execution::drive_scaling_clock(&self.engine, &region, ctx.callback());
 
         // "Application Auto Scaling uses a service-linked role, which it creates if it does

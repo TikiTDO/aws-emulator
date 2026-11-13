@@ -253,37 +253,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         crate::state::check_registry(input.registry_id.as_ref())
             .map_err(|fault| refusal("another registry", &caller_akid, fault_error(fault)))?;
 
-        let mut store = state.lock();
-
-        // The part goes into a layer of a repository, so there has to be one: a part for
-        // a repository that does not exist is refused rather than kept.
-        store
-            .repository(&input.repository_name)
-            .map_err(|fault| refusal("no such repository", &caller_akid, fault_error(fault)))?;
-
-        // The bytes the registry already holds, read before the upload is borrowed for
-        // mutation. The per-upload cap bounds ONE upload; this is the registry-wide budget
-        // the bytes of every in-flight upload and every stored manifest share, so a client
-        // cannot hold the product of the per-record caps in this process's memory. See
-        // [`crate::state::MAX_REGISTRY_CALLER_BYTES`].
-        let caller_bytes_held = store.caller_bytes_held();
-
-        // An upload id is only valid for the repository it was issued for, so an id this
-        // registry never handed out and one opened against another repository are the
-        // same refusal.
-        let Some(upload) = store.upload_mut(&input.repository_name, &input.upload_id) else {
-            return Err(refusal(
-                "no such upload",
-                &caller_akid,
-                UploadLayerPartErrorModeled::UploadNotFoundException(UploadNotFoundException {
-                    message: Some(crate::state::upload_not_found_message(
-                        &input.upload_id,
-                        &input.repository_name,
-                    )),
-                }),
-            )
-            .into());
+        let storage_error = || UploadLayerPartError::from(UploadLayerPartErrorModeled::ServerException(ServerException {
+            message: Some("durable layer upload unavailable".to_string()),
+        }));
+        let _mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| storage_error())?;
+        let payload_store = crate::state::payloads::bound_store(&*self.engine).map_err(|_| storage_error())?;
+        let (owner, caller_bytes_held) = {
+            let store = state.lock();
+            let repo = store.repository(&input.repository_name)
+                .map_err(|fault| refusal("no such repository", &caller_akid, fault_error(fault)))?;
+            (crate::state::payloads::repository_owner(repo).map_err(|_| storage_error())?, store.caller_bytes_held())
         };
+        let bound = crate::state::payload_upload::lookup(&payload_store, &owner, &input.upload_id)
+            .await.map_err(|_| storage_error())?;
+        let Some(mut bound) = bound else {
+            return Err(refusal("no such upload", &caller_akid,
+                UploadLayerPartErrorModeled::UploadNotFoundException(UploadNotFoundException {
+                    message: Some(crate::state::upload_not_found_message(&input.upload_id, &input.repository_name)),
+                })).into());
+        };
+        let upload = bound.index_projection();
 
         // The addressed upload resolved, so the part is now charged against the
         // registry-wide budget: it is refused before any byte of it is kept.
@@ -310,11 +299,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // that offset out of the refusal, so it is stated rather than left to be derived.
         let last_valid_byte_received = upload.last_byte_received();
         let expected_part_first_byte = upload.next_part_first_byte();
-        let outcome = upload.receive_part(
-            input.part_first_byte,
-            input.part_last_byte,
-            &input.layer_part_blob,
-        );
+        let outcome = crate::state::payload_upload::validate_part(
+            &bound.snapshot.checkpoint, input.part_first_byte, input.part_last_byte,
+            input.layer_part_blob.len(), capacity.layer_bytes as u64,
+        ).map(|()| input.part_last_byte);
         // Everything the answer reports comes from the stored upload, not from the
         // request: the repository the upload was opened against, and the byte count it
         // now holds.
@@ -376,6 +364,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 return Err(refusal(reason, &caller_akid, error).into());
             }
         };
+
+        bound.snapshot.checkpoint = crate::state::payload_upload::append_modeled_part(
+            &_mutation, &payload_store, &bound, input.layer_part_blob.as_ref(),
+        ).await.map_err(|_| storage_error())?;
+        state.lock().uploads.insert(input.upload_id.clone(), bound.index_projection());
 
         // Audit record for a state-changing operation: who asked, what changed, how it
         // ended. Only wire metadata, server-held counts and the upload's own id.

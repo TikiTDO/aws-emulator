@@ -250,7 +250,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The store is written under its lock, which the helper below holds for its own
         // body alone: the guard is not `Send`, and the publication that follows is awaited.
         let (output, pushed) =
-            Self::store_pushed_image(&state, &input, digest, now, planned_signings)?;
+            Self::store_pushed_image(&*self.engine, &state, &input, digest, now, planned_signings).await?;
         // The push STORED an image, so the registry publishes the image action it
         // performed, with the store's lock released — EventBridge delivers the event to the
         // rules that match it, and a target of one may call back into this service.
@@ -260,13 +260,33 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     }
 }
 
-impl<Eng> PutImage<Eng> {
+impl<Eng: Send + Sync + 'static> PutImage<Eng> {
     /// Store the pushed manifest and its tag, and answer both the response the push gives
     /// its caller and the image action it performed.
     ///
     /// Everything this operation writes happens here, under the store's lock; the caller
     /// publishes the action once that lock is gone.
-    pub(crate) fn store_pushed_image(
+    pub(crate) async fn store_pushed_image(
+        engine: &Eng,
+        state: &::engine::ServiceState<
+            crate::state::ComAmazonawsEcrAmazonec2containerregistryV20150921State,
+        >,
+        input: &PutImageInput,
+        digest: String,
+        now: ::std::time::SystemTime,
+        planned_signings: Vec<crate::state::signing::ImageSigning>,
+    ) -> Result<(PutImageOutput, crate::state::image_events::ImageAction), PutImageError> {
+        let mutation = crate::state::payloads::mutation_guard(engine).await.map_err(|_| {
+            PutImageError::from(PutImageErrorModeled::ServerException(ServerException {
+                message: Some("durable image admission unavailable".to_string()),
+            }))
+        })?;
+        Self::store_pushed_image_guarded(engine, &mutation, state, input, digest, now, planned_signings).await
+    }
+
+    pub(crate) async fn store_pushed_image_guarded(
+        engine: &Eng,
+        mutation: &crate::state::payloads::MutationGuard,
         state: &::engine::ServiceState<
             crate::state::ComAmazonawsEcrAmazonec2containerregistryV20150921State,
         >,
@@ -280,7 +300,12 @@ impl<Eng> PutImage<Eng> {
                 message: Some("invalid ECR capacity configuration".to_string()),
             }))
         })?;
-        let mut store = state.lock();
+        let storage_error = || PutImageError::from(PutImageErrorModeled::ServerException(ServerException {
+            message: Some("durable image publication unavailable".to_string()),
+        }));
+        let payload_store = crate::state::payloads::bound_store(engine).map_err(|_| storage_error())?;
+        let (planned_replications,before) = {
+        let store = state.lock();
 
         // The repository the push addresses has to exist before anything is charged
         // against the registry's capacity: a push to a repository the registry does not
@@ -319,9 +344,10 @@ impl<Eng> PutImage<Eng> {
         // repository is borrowed for writing.
         let planned_replications = store.planned_replications(&input.repository_name, now);
 
-        let repo = store
-            .repository_mut(&input.repository_name)
-            .map_err(fault_error)?;
+        let before = store.repository(&input.repository_name).map_err(fault_error)?.clone();
+        (planned_replications,before)
+        };
+        let mut repo = before.clone();
 
         // A manifest is only pushable once every blob it references is in the
         // repository: "when an image is pushed and all new image layers have been
@@ -485,7 +511,7 @@ impl<Eng> PutImage<Eng> {
                     image_digest: Some(stored.digest.clone()),
                     image_tag: input.image_tag.clone(),
                 }),
-                image_manifest: Some(stored.manifest.clone()),
+                image_manifest: Some(input.image_manifest.clone()),
                 image_manifest_media_type: stored.manifest_media_type.clone(),
                 // The byte length of the manifest this response carries, so a client that
                 // streams or verifies the document knows how much of it there is.
@@ -501,6 +527,8 @@ impl<Eng> PutImage<Eng> {
             image_tag: input.image_tag.clone(),
             at: now,
         };
+        crate::state::catalog::publish_images(mutation, &payload_store, &before, &mut repo).await.map_err(|_| storage_error())?;
+        state.lock().repositories.insert(repo.name.clone(), repo);
         Ok((output, pushed))
     }
 }

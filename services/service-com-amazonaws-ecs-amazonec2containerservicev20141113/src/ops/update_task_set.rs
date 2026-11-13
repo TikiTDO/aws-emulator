@@ -211,6 +211,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx);
         let now = ::std::time::SystemTime::now();
 
+        let view = {
         let mut guard = state.lock();
         guard.advance_clock(now);
 
@@ -317,8 +318,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // no path to the registry, is what settles such a task into STOPPED. Read with OUR
         // guard dropped, since it takes the IAM, Amazon EC2 and Amazon ECR stores' locks
         // ([`crate::state::settle_task_launches`]).
-        drop(guard);
-        crate::state::settle_task_launches(&*self.engine);
+        view
+        }; // only owned views/plans escape this synchronous state phase
+        crate::state::settle_task_launches(&*self.engine).await;
         // The statuses this rescale left on the task set's tasks are `ECS Task State
         // Change` events on the account's default event bus, and the transitions the clock
         // still owes them are published as they fall due

@@ -153,14 +153,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let Some(state) = crate::state::service_state(&*self.engine) else {
+        let mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| catalog_failure())?;
+        let mut candidate = crate::state::catalog_global::snapshot(&*self.engine).map_err(|_| catalog_failure())?;
+        let result: Result<Self::Output, Self::Error> = async {
+
+        let Some(_state) = crate::state::service_state(&*self.engine) else {
             return Err(PutAccountSettingErrorModeled::ServerException(ServerException {
                 message: Some("the ecr account setting store is unavailable".to_string()),
             })
             .into());
         };
 
-        let mut store = state.lock();
+        let store = &mut candidate;
         // The model admits any 1..64 character string as `name` and any string as
         // `value`, so neither a name this registry does not serve nor a value the named
         // setting does not take can be refused at the boundary. Both are refused here as
@@ -177,5 +181,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             name: Some(input.name),
             value: Some(value),
         })
+        }.await;
+        let output = result?;
+        crate::state::catalog_global::publish(&*self.engine, &mutation, candidate).await.map_err(|_| catalog_failure())?;
+        Ok(output)
     }
+}
+
+/// Storage failures never masquerade as a successful in-memory mutation.
+fn catalog_failure() -> PutAccountSettingError {
+    PutAccountSettingErrorModeled::ServerException(ServerException { message: Some("the durable ecr registry catalog is unavailable".to_string()) }).into()
 }

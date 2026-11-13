@@ -299,6 +299,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let now = ::std::time::SystemTime::now();
+        {
         let mut state = state.lock();
         crate::state::apply_due_scheduled_actions(&mut state, now);
 
@@ -391,11 +392,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 last_applied: Some(now),
             },
         );
-        drop(state);
+        } // synchronous state phase ends before resource fulfilment
+
 
         // An occurrence this call materialised moved the target's capacity, which the scaled
         // resource is owed; delivered with this service's lock released.
-        crate::state::policy_execution::settle_policy_executions(&*self.engine, &region);
+        crate::state::policy_execution::settle_policy_executions(&*self.engine, &region).await;
         crate::state::policy_execution::drive_scaling_clock(&self.engine, &region, ctx.callback());
 
         // The audit record for a state-changing call.

@@ -247,6 +247,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         };
 
+        let (scheduled_actions, next_token) = {
         let mut state = state.lock();
         // An occurrence the clock has already made due has moved the target's capacity
         // bounds whether or not anybody called, so it is materialised before this report
@@ -293,12 +294,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 ],
             )
         });
-        drop(state);
+        (scheduled_actions, next_token)
+        }; // only owned view/plan data escapes the state phase
+
 
         // A movement an occurrence just made is one the scaled resource is owed, and a policy
         // whose alarm is in ALARM was owed its execution from the instant that alarm
         // transitioned: both are settled here, with this service's lock released.
-        crate::state::policy_execution::settle_policy_executions(&*self.engine, &region);
+        crate::state::policy_execution::settle_policy_executions(&*self.engine, &region).await;
         crate::state::policy_execution::drive_scaling_clock(&self.engine, &region, ctx.callback());
 
         Ok(DescribeScheduledActionsOutput {

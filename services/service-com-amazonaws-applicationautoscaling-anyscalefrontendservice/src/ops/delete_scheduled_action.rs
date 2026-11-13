@@ -213,6 +213,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             scheduled_action_name: input.scheduled_action_name.clone(),
         };
 
+        {
         let mut state = state.lock();
         // An occurrence the clock had already made due moved the target's capacity bounds
         // at the instant it was owed, whether or not anybody called — so it is
@@ -251,12 +252,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         }
-        drop(state);
+        } // synchronous state phase ends before resource fulfilment
+
 
         // An occurrence materialised above moved the target's capacity, which the scaled
         // resource is owed; delivered with this service's lock released.
         let region = crate::state::request_region(ctx.parts());
-        crate::state::policy_execution::settle_policy_executions(&*self.engine, &region);
+        crate::state::policy_execution::settle_policy_executions(&*self.engine, &region).await;
         crate::state::policy_execution::drive_scaling_clock(&self.engine, &region, ctx.callback());
 
         // The audit record for a destructive call.

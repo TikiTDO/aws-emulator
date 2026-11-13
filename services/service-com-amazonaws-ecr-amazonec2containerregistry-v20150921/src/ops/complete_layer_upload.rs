@@ -247,44 +247,32 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         crate::state::check_registry(input.registry_id.as_ref())
             .map_err(|fault| refusal("another registry", &caller_akid, fault_error(fault)))?;
 
-        let mut store = state.lock();
-
-        // The blob is registered on a repository, so there has to be one.
-        store
-            .repository(&input.repository_name)
-            .map_err(|fault| refusal("no such repository", &caller_akid, fault_error(fault)))?;
-
-        // An upload id is only valid for the repository it was issued for, so an id this
-        // registry never handed out, one opened against another repository, and one a
-        // previous completion already closed are the same refusal.
-        let Some(upload) = store.upload_mut(&input.repository_name, &input.upload_id) else {
-            return Err(refusal(
-                "no such upload",
-                &caller_akid,
-                CompleteLayerUploadErrorModeled::UploadNotFoundException(
-                    UploadNotFoundException {
-                        message: Some(crate::state::upload_not_found_message(
-                            &input.upload_id,
-                            &input.repository_name,
-                        )),
-                    },
-                ),
-            )
-            .into());
+        let storage_error = || CompleteLayerUploadError::from(CompleteLayerUploadErrorModeled::ServerException(ServerException {
+            message: Some("durable layer completion unavailable".to_string()),
+        }));
+        let _mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| storage_error())?;
+        let payload_store = crate::state::payloads::bound_store(&*self.engine).map_err(|_| storage_error())?;
+        let owner = {
+            let store = state.lock();
+            let repo = store.repository(&input.repository_name)
+                .map_err(|fault| refusal("no such repository", &caller_akid, fault_error(fault)))?;
+            crate::state::payloads::repository_owner(repo).map_err(|_| storage_error())?
         };
-
-        // The layer is the concatenation of the parts the upload accepted, so the digest
-        // is computed over those bytes — "the layer digest calculation performed by
-        // Amazon ECR upon receipt of the image layer" — and the byte count the registry
-        // records for the blob is its own count of them.
-        let assembled = ::std::mem::take(&mut upload.received_bytes);
-        let digest = crate::state::content_digest(&assembled);
-        let layer_size = i64::try_from(assembled.len()).unwrap_or(i64::MAX);
-        let repository_name = upload.repository_name.clone();
+        let Some(bound) = crate::state::payload_upload::lookup(&payload_store, &owner, &input.upload_id)
+            .await.map_err(|_| storage_error())? else {
+            return Err(refusal("no such upload", &caller_akid,
+                CompleteLayerUploadErrorModeled::UploadNotFoundException(UploadNotFoundException {
+                    message: Some(crate::state::upload_not_found_message(&input.upload_id, &input.repository_name)),
+                })).into());
+        };
+        let digest = bound.snapshot.sealed.as_ref().map_or(bound.snapshot.checkpoint.sha256(), |v| v.sha256()).to_string();
+        let length = bound.snapshot.sealed.as_ref().map_or(bound.snapshot.checkpoint.offset(), |v| v.len());
+        let layer_size = i64::try_from(length).map_err(|_| storage_error())?;
+        let repository_name = input.repository_name.clone();
         // An upload that accepted no part carries no layer to close: the parts, and
         // therefore the upload, stay exactly as they were so a client can still send
         // them.
-        if assembled.is_empty() {
+        if length == 0 {
             return Err(refusal(
                 "upload carries no layer part",
                 &caller_akid,
@@ -301,7 +289,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // computed over the bytes it received. A mismatch leaves the upload's bytes in
         // place, so the client can complete it again with the right digest.
         if !input.layer_digests.contains(&digest) {
-            upload.received_bytes = assembled;
             return Err(refusal(
                 "layer digest does not match the assembled layer",
                 &caller_akid,
@@ -323,66 +310,50 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Past the registry's own ceiling on how many blobs one repository holds a
         // record of, the completion is refused rather than registering another.
         // See [`crate::state::MAX_LAYERS_PER_REPOSITORY`].
-        let repo = store
-            .repository_mut(&input.repository_name)
-            .map_err(|fault| refusal("no such repository", &caller_akid, fault_error(fault)))?;
-        if !repo.layer_blobs.contains_key(&digest)
-            && repo.layer_blobs.len() >= crate::state::MAX_LAYERS_PER_REPOSITORY
         {
-            return Err(refusal(
-                "repository layer ceiling reached",
-                &caller_akid,
-                CompleteLayerUploadErrorModeled::ServerException(ServerException {
-                    message: Some(format!(
-                        "the repository with name '{repository_name}' already holds the \
-                         maximum of {} layers",
-                        crate::state::MAX_LAYERS_PER_REPOSITORY
-                    )),
-                }),
-            )
-            .into());
+            let store = state.lock();
+            let repo = store.repository(&repository_name).map_err(|fault| fault_error(fault))?;
+            if !repo.layer_blobs.contains_key(&digest) && repo.layer_blobs.len() >= crate::state::MAX_LAYERS_PER_REPOSITORY {
+                return Err(refusal("repository layer ceiling reached", &caller_akid,
+                    CompleteLayerUploadErrorModeled::ServerException(ServerException {
+                        message: Some(format!("the repository with name '{repository_name}' already holds the maximum of {} layers", crate::state::MAX_LAYERS_PER_REPOSITORY)),
+                    })).into());
+            }
         }
-        // The repository already holds this blob, so there is nothing to register: the
-        // upload is closed either way, because its bytes have been accounted for. The
-        // refusal names the upload by the id the REQUEST addressed it by — see
-        // `crate::state::layer_already_exists_message`.
-        if repo.layer_blobs.contains_key(&digest) {
+        // A seal failure leaves the ACK checkpoint intact. A retained successful
+        // seal is reused after a conditional-publication conflict, never resumed.
+        let payload = match &bound.snapshot.sealed {
+            Some(payload) => payload.clone(),
+            None => {
+                let stage = payload_store.resume(&bound.snapshot.id, bound.snapshot.checkpoint.clone()).await.map_err(|_| storage_error())?;
+                _mutation.seal(stage, service_common::payload_store::IntegrityExpectation {
+                    length: Some(length), sha256: Some(bound.snapshot.checkpoint.sha256()),
+                }).await.map_err(|_| storage_error())?
+            }
+        };
+        _mutation.reconcile(&*self.engine).await.map_err(|_| storage_error())?;
+        let reader = payload_store.open(&payload, None).await.map_err(|_| storage_error())?;
+        let filesystem = crate::state::payloads::scan_payload(reader).await.map_err(|_| storage_error())?;
+        let (fresh, revision) = crate::state::payloads::publish_layer(
+            &_mutation, &payload_store, owner, payload_store.new_commit_id(), payload.clone(), &bound,
+            None, filesystem.clone(),
+        ).await.map_err(|_| storage_error())?;
+        {
+            let mut store = state.lock();
+            let repo = store.repository_mut(&repository_name).map_err(|fault| fault_error(fault))?;
+            repo.payload_revision = Some(revision);
+            repo.layer_blobs.entry(digest.clone()).or_insert_with(|| crate::state::LayerBlob {
+                digest: digest.clone(), size: Some(layer_size), media_type: None,
+                filesystem, payload: Some(payload),
+            });
             store.uploads.remove(&input.upload_id);
-            return Err(refusal(
-                "layer already in the repository",
-                &caller_akid,
-                CompleteLayerUploadErrorModeled::LayerAlreadyExistsException(
-                    LayerAlreadyExistsException {
-                        message: Some(crate::state::layer_already_exists_message(
-                            &input.upload_id,
-                            &repository_name,
-                        )),
-                    },
-                ),
-            )
-            .into());
         }
-
-        // The blob joins the repository, addressed by the digest the registry computed,
-        // and the upload it came from is closed: its id resolves to nothing afterwards.
-        // The media type stays unset — a blob's media type is what a manifest
-        // referencing it declares, which this call carries nothing of. The assembled
-        // BYTES are what the repository now holds the layer as, so a later
-        // `GetDownloadUrlForLayer` serves exactly them; what they are a filesystem OF is
-        // read here, once, while they are in hand, so a later basic image scan does not
-        // walk the archive again.
-        let filesystem = crate::state::scan_layer_filesystem(&assembled);
-        repo.layer_blobs.insert(
-            digest.clone(),
-            crate::state::LayerBlob {
-                digest: digest.clone(),
-                size: Some(layer_size),
-                media_type: None,
-                filesystem,
-                content: assembled,
-            },
-        );
-        store.uploads.remove(&input.upload_id);
+        if !fresh {
+            return Err(refusal("layer already in the repository", &caller_akid,
+                CompleteLayerUploadErrorModeled::LayerAlreadyExistsException(LayerAlreadyExistsException {
+                    message: Some(crate::state::layer_already_exists_message(&input.upload_id, &repository_name)),
+                })).into());
+        }
 
         // Audit record for a state-changing operation: who asked, what changed, how it
         // ended. Only wire metadata, server-held counts and the upload's own id.

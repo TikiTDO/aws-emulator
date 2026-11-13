@@ -179,6 +179,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
+        // Settle any cancelled/unknown catalog publication before policy or
+        // projection reads. An unresolved outcome refuses, never serves stale RAM.
+        let _mutation = crate::state::payloads::mutation_guard(&*self.engine).await
+            .map_err(|_| ListPullTimeUpdateExclusionsError::from(ListPullTimeUpdateExclusionsErrorModeled::ServerException(ServerException {
+                message: Some("durable ECR read admission unavailable".to_string()),
+            })))?;
         // The exclusion list belongs to the registry, and this emulator serves exactly
         // one registry, so nothing in the request metadata selects which list to read.
         let _ = ctx;

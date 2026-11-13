@@ -180,10 +180,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // exactly one registry — its own account's.
         crate::state::check_registry(input.registry_id.as_ref()).map_err(fault_error)?;
 
-        let mut store = state.lock();
-        let repo = store
-            .repository_mut(&input.repository_name)
-            .map_err(fault_error)?;
+        let storage_error = || DeleteRepositoryPolicyError::from(DeleteRepositoryPolicyErrorModeled::ServerException(ServerException {
+            message: Some("durable repository configuration unavailable".to_string()),
+        }));
+        let mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| storage_error())?;
+        let payload_store = crate::state::payloads::bound_store(&*self.engine).map_err(|_| storage_error())?;
+        if let Some(denied) = crate::state::authorization::denied_on_repository(&*self.engine, ctx, Self::NAME, &input.repository_name) { return Err(denied); }
+        let mut repo = { state.lock().repository(&input.repository_name).map_err(fault_error)?.clone() };
         // The policy the caller gets back is the one that was stored, and the repository
         // is left carrying none — so a later read reports
         // `RepositoryPolicyNotFoundException` again.
@@ -199,6 +202,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into(),
             );
         };
+
+        let (change, retirement) = crate::state::catalog::repository_change(&payload_store, &repo).await.map_err(|_| storage_error())?;
+        if let Some(denied) = crate::state::authorization::denied_on_repository(&*self.engine, ctx, Self::NAME, &repo.name) { return Err(denied); }
+        let receipt = mutation.commit(&payload_store, service_common::payload_store::ReferenceTransaction {
+            id: payload_store.new_commit_id(), owner: crate::state::payloads::registry_owner().map_err(|_| storage_error())?,
+            changes: vec![change], retire: vec![retirement],
+        }).await.map_err(|_| storage_error())?;
+        repo.payload_revision = Some(receipt.revision);
+        state.lock().repositories.insert(repo.name.clone(), repo.clone());
 
         Ok(DeleteRepositoryPolicyOutput {
             registry_id: Some(repo.registry_id.clone()),

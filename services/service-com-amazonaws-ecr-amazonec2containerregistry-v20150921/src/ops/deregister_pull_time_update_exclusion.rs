@@ -148,7 +148,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let Some(state) = crate::state::service_state(&*self.engine) else {
+        let mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| catalog_failure())?;
+        let mut candidate = crate::state::catalog_global::snapshot(&*self.engine).map_err(|_| catalog_failure())?;
+        let result: Result<Self::Output, Self::Error> = async {
+
+        let Some(_state) = crate::state::service_state(&*self.engine) else {
             return Err(
                 DeregisterPullTimeUpdateExclusionErrorModeled::ServerException(ServerException {
                     message: Some(
@@ -166,7 +170,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // pattern are refused at the boundary, so what arrives here is a well-formed
         // principal ARN.
         let principal_arn = input.principal_arn;
-        let mut store = state.lock();
+        let store = &mut candidate;
 
         if store
             .pull_time_update_exclusions
@@ -193,5 +197,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         Ok(DeregisterPullTimeUpdateExclusionOutput {
             principal_arn: Some(principal_arn),
         })
+        }.await;
+        let output = result?;
+        crate::state::catalog_global::publish(&*self.engine, &mutation, candidate).await.map_err(|_| catalog_failure())?;
+        Ok(output)
     }
+}
+
+/// Storage failures never masquerade as a successful in-memory mutation.
+fn catalog_failure() -> DeregisterPullTimeUpdateExclusionError {
+    DeregisterPullTimeUpdateExclusionErrorModeled::ServerException(ServerException { message: Some("the durable ecr registry catalog is unavailable".to_string()) }).into()
 }

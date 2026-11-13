@@ -198,6 +198,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })
             .into());
         };
+        // Settle any cancelled/unknown catalog publication before policy or
+        // projection reads. An unresolved outcome refuses, never serves stale RAM.
+        let _mutation = crate::state::payloads::mutation_guard(&*self.engine).await
+            .map_err(|_| BatchGetImageError::from(BatchGetImageErrorModeled::ServerException(ServerException {
+                message: Some("durable ECR read admission unavailable".to_string()),
+            })))?;
         // A private registry's images are private: whether any policy in force lets this
         // caller reach this repository is decided before anything is read
         // (`crate::state::authorization`).
@@ -222,23 +228,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // `imageIds` is modelled `@length(1..100)`, so a batch asking for nothing, or
         // for more than the batch maximum, was already refused at the boundary.
-        let store = state.lock();
-        let repo = store
-            .repository(&input.repository_name)
-            .map_err(fault_error)?;
+        let (registry_id, repository_name, snapshots) = {
+            let store = state.lock();
+            let repo = store.repository(&input.repository_name).map_err(fault_error)?;
+            (repo.registry_id.clone(), repo.name.clone(), input.image_ids.iter().map(|id| repo.lookup_image(id).cloned()).collect::<Vec<_>>())
+        };
+        // The authenticated snapshot is owned; payload I/O does not hold the
+        // service-wide metadata gate or serialize unrelated catalog mutations.
+        drop(_mutation);
+        let storage_error = || BatchGetImageError::from(BatchGetImageErrorModeled::ServerException(ServerException {
+            message: Some("committed manifest unavailable".to_string()),
+        }));
+        let payload_store = crate::state::payloads::bound_store(&*self.engine).map_err(|_| storage_error())?;
 
         let mut images = Vec::new();
         let mut failures = Vec::new();
         // One answer per requested identifier, in request order: a batch reports on
         // every entry it was handed, including two entries that name one image.
-        for id in &input.image_ids {
-            match repo.lookup_image(id) {
+        for (id, snapshot) in input.image_ids.iter().zip(snapshots) {
+            match snapshot {
                 Ok(stored) => {
-                    let (manifest, media_type) =
-                        crate::state::negotiated_manifest(stored, accepted);
+                    let document = stored.manifest.read(&payload_store).await.map_err(|_| storage_error())?;
+                    let (manifest, media_type) = crate::state::negotiated_manifest(&stored, &document, accepted);
                     images.push(Image {
-                        registry_id: Some(repo.registry_id.clone()),
-                        repository_name: Some(repo.name.clone()),
+                        registry_id: Some(registry_id.clone()),
+                        repository_name: Some(repository_name.clone()),
                         // The stored image's own digest, plus the tag the request addressed
                         // it by — the one rule for that identifier lives on the record. It
                         // is the identity of the image in this repository, so it is the

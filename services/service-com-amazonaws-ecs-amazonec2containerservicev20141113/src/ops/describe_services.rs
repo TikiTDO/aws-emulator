@@ -196,7 +196,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Made with NO guard of this store held, since each half reads another service's
         // store under that store's own lock.
         let now = ::std::time::SystemTime::now();
-        crate::state::advance_task_clock(&*self.engine, now);
+        crate::state::advance_task_clock(&*self.engine, now).await;
 
         let mut guard = state.lock();
         guard.advance_clock(now);

@@ -14,10 +14,15 @@
 //!   than starting that service empty.
 //! - **Every request.** [`PersistingRouter`] answers a request only after writing every listed
 //!   service whose state the request changed, so a change a caller was told succeeded is on
-//!   disk before the caller hears it, and a `kill -9` loses only unanswered requests. "Every
+//!   disk before the caller hears it, and a `kill -9` loses only unanswered requests. If a
+//!   write fails, the caller gets a 500 saying the outcome is unknown and not durable instead
+//!   of the success, and the next save retries it. "Every
 //!   listed service", not "the service the request named": a CloudFormation deploy changes EC2
 //!   and IAM through in-process calls the outer request does not name. Unchanged services are
 //!   compared, not written.
+//! - **Streaming.** A payload exchange the router selects (B1) is wrapped the same way: the
+//!   handler runs, changed services are written, then the response head goes out, with neither
+//!   body collected.
 //! - **Background.** Work that changes state after its response (a container a task launched, a
 //!   clock move) is written by a two-second periodic save in `main.rs`; that is the window
 //!   such a change can be lost in.
@@ -27,6 +32,9 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use emulator_server::transport::{
+    ExchangeContext, ExchangeFuture, PayloadExchange, TransportBody, TransportSelection,
+};
 use engine::InMemoryEngine;
 use service_common::persist::{PersistError, Persisted, StateDir};
 use smithy_server_runtime::MultiServiceRouter;
@@ -111,10 +119,12 @@ impl Persistence {
     }
 
     /// Write every service whose state differs from what was last written. Returns the
-    /// services written.
-    pub async fn save_changed(&self) -> Vec<&'static str> {
+    /// services written, or, if any write failed, which ones did not reach disk. A failed
+    /// service keeps its old fingerprint, so the next save tries it again.
+    pub async fn save_changed(&self) -> Result<Vec<&'static str>, NotDurable> {
         let mut written = self.written.lock().await;
         let mut saved = Vec::new();
+        let mut failed = Vec::new();
         for entry in &self.entries {
             let snapshot = (entry.snapshot)(&self.engine);
             let print = fingerprint(&snapshot);
@@ -126,12 +136,47 @@ impl Persistence {
                     written.insert(entry.service, print);
                     saved.push(entry.service);
                 }
-                // The change stays in memory and the next request tries again; it is not
-                // durable until then, which is what the log says.
-                Err(error) => tracing::error!(service = entry.service, %error, "snapshot not written"),
+                Err(error) => {
+                    tracing::error!(service = entry.service, %error, "snapshot not written");
+                    failed.push((entry.service, error.to_string()));
+                }
             }
         }
-        saved
+        if failed.is_empty() {
+            Ok(saved)
+        } else {
+            Err(NotDurable { failed })
+        }
+    }
+}
+
+/// Some changed services could not be written: their changes are applied in memory but would
+/// not survive a restart.
+#[derive(Debug)]
+pub struct NotDurable {
+    pub failed: Vec<(&'static str, String)>,
+}
+
+impl NotDurable {
+    /// What a caller is told instead of success. The change may well have been applied (it is
+    /// in memory, and the next save retries it), so this claims no rollback: it says the
+    /// outcome is unknown and not durable. A 500 `InternalFailure`, which SDKs surface as a
+    /// server error.
+    fn response(&self) -> http::Response<bytes::Bytes> {
+        let services: Vec<&str> = self.failed.iter().map(|(service, _)| *service).collect();
+        let message = format!(
+            "The request may have been applied, but the emulator could not make it durable \
+             (state not written for: {}). Its outcome after a restart is unknown.",
+            services.join(", ")
+        );
+        http::Response::builder()
+            .status(http::StatusCode::INTERNAL_SERVER_ERROR)
+            .header("content-type", "application/json")
+            .header("x-amzn-errortype", "InternalFailure")
+            .body(bytes::Bytes::from(
+                serde_json::json!({ "__type": "InternalFailure", "message": message }).to_string(),
+            ))
+            .expect("a static status and headers")
     }
 }
 
@@ -157,16 +202,55 @@ impl PersistingRouter {
 }
 
 impl emulator_server::EmulatorService for PersistingRouter {
+    /// The wrapped router's choice, unchanged, except that a selected payload exchange is
+    /// wrapped so it, too, writes its changes before the caller hears success. Without this
+    /// the trait's default (`Buffered`) would quietly turn streaming off in persistent mode.
+    fn select_transport(&self, parts: &http::request::Parts) -> TransportSelection {
+        match self.router.select_transport(parts) {
+            TransportSelection::Payload(exchange) => {
+                TransportSelection::Payload(Arc::new(PersistingExchange {
+                    exchange,
+                    persistence: Arc::clone(&self.persistence),
+                }))
+            }
+            other => other,
+        }
+    }
+
     async fn handle_request(
         &self,
         request: http::Request<bytes::Bytes>,
     ) -> http::Response<bytes::Bytes> {
         let response = self.router.dispatch(request).await;
-        self.persistence.save_changed().await;
-        response
+        match self.persistence.save_changed().await {
+            Ok(_) => response,
+            Err(not_durable) => not_durable.response(),
+        }
     }
 
     fn serving_at(&self, endpoint_url: &str) {
         self.router.serving_at(endpoint_url);
+    }
+}
+
+/// A streaming exchange that writes every changed service after the handler has finished and
+/// before its response head is returned. The bodies are never collected: the request body is
+/// the handler's to consume, and the response body still streams to the caller afterwards.
+/// What the handler committed by the time it returns its response (an upload's object record)
+/// is therefore on disk before the caller sees the status.
+struct PersistingExchange {
+    exchange: Arc<dyn PayloadExchange>,
+    persistence: Arc<Persistence>,
+}
+
+impl PayloadExchange for PersistingExchange {
+    fn run(self: Arc<Self>, request: http::Request<TransportBody>, context: ExchangeContext) -> ExchangeFuture {
+        Box::pin(async move {
+            let response = Arc::clone(&self.exchange).run(request, context).await;
+            match self.persistence.save_changed().await {
+                Ok(_) => response,
+                Err(not_durable) => not_durable.response().map(TransportBody::from),
+            }
+        })
     }
 }

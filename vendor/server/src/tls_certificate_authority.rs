@@ -41,6 +41,9 @@ impl TlsCertificateAuthority {
     /// The first call decides the names, so a `client_host` the certificate was not made for is
     /// not added later: check [`Self::covers`].
     pub(crate) fn covering(client_host: Option<IpAddr>) -> Result<&'static Self, rcgen::Error> {
+        if let Some(identity) = crate::boot_identity::retained_or_ephemeral() {
+            return Ok(&identity.tls);
+        }
         if let Some(made) = PROCESS.get() {
             return Ok(made);
         }
@@ -54,14 +57,42 @@ impl TlsCertificateAuthority {
                 names.push(name);
             }
         }
+        let _ = PROCESS.set(Self::generate(names)?);
+        Ok(PROCESS.get().expect("set above"))
+    }
+
+    pub(crate) fn generate(names: Vec<String>) -> Result<Self, rcgen::Error> {
         let made = rcgen::generate_simple_self_signed(names.clone())?;
-        let _ = PROCESS.set(Self {
+        Ok(Self {
             der: made.cert.der().clone(),
             pem: made.cert.pem(),
             key_der: made.key_pair.serialize_der(),
             names,
-        });
-        Ok(PROCESS.get().expect("set above"))
+        })
+    }
+
+    pub(crate) fn private_key_der(&self) -> &[u8] {
+        &self.key_der
+    }
+
+    // Only the private boot identity owner calls this after native key/name/time validation.
+    pub(crate) fn restored(der: Vec<u8>, key_der: Vec<u8>, names: Vec<String>) -> Self {
+        let encoded = aws_smithy_types::base64::encode(&der);
+        let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+        for chunk in encoded.as_bytes().chunks(64) {
+            // Base64 is ASCII, so these bytes are always valid UTF-8.
+            for byte in chunk {
+                pem.push(char::from(*byte));
+            }
+            pem.push('\n');
+        }
+        pem.push_str("-----END CERTIFICATE-----\n");
+        Self {
+            der: CertificateDer::from(der),
+            pem,
+            key_der,
+            names,
+        }
     }
 
     /// The certificate in DER, for a rustls, tokio-rustls or hyper-rustls root store, or

@@ -90,6 +90,9 @@
 /// the layer download plane is.
 mod registry_v2;
 mod registry_v2_push;
+mod payload_read;
+mod payload_write;
+mod payload_manifest;
 
 use aws_smithy_runtime_api::http::{Request as RtRequest, Response as RtResponse, StatusCode};
 use aws_smithy_types::body::SdkBody;
@@ -498,6 +501,12 @@ fn unanchored(pattern: &str) -> &str {
 }
 
 impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
+    fn payload_route(&self, parts: &http::request::Parts) -> Option<smithy_server_runtime::transport::PayloadRoute> {
+        payload_read::route(Arc::clone(&self.engine), parts)
+            .or_else(|| payload_write::route(Arc::clone(&self.engine), parts))
+            .or_else(|| payload_manifest::route(Arc::clone(&self.engine), parts))
+    }
+
     fn definition(&self) -> &dyn smithy_server_runtime::ErasedServiceDefinition {
         // The model-derived half of this service — identity, protocol, routing
         // table, and the default error renderers — lives in the generated entry.
@@ -700,7 +709,10 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
         };
 
         // A `GET` carries the layer's bytes and a `HEAD` reports its length without them.
-        layer_response(&blob.content, req.method() == "GET")
+        // This synchronous legacy entry cannot carry a reader lease. Production
+        // and generated HttpConnector select payload_route before body collection.
+        let _ = blob;
+        download_error(501, "NotImplemented", "use the streaming HTTP connector for layer downloads")
     }
 }
 

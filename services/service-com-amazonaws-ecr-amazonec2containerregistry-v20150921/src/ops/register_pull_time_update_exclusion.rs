@@ -153,7 +153,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let Some(state) = crate::state::service_state(&*self.engine) else {
+        let mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| catalog_failure())?;
+        let mut candidate = crate::state::catalog_global::snapshot(&*self.engine).map_err(|_| catalog_failure())?;
+        let result: Result<Self::Output, Self::Error> = async {
+
+        let Some(_state) = crate::state::service_state(&*self.engine) else {
             return Err(RegisterPullTimeUpdateExclusionErrorModeled::ServerException(
                 ServerException {
                     message: Some(
@@ -171,7 +175,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // that reaches here is one this list can hold.
         let principal_arn = input.principal_arn;
         let created_at = ::std::time::SystemTime::now();
-        let mut store = state.lock();
+        let store = &mut candidate;
 
         // One exclusion per principal: a register naming a principal the registry
         // already excludes is refused rather than re-creating the record, so the
@@ -220,5 +224,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             principal_arn: Some(principal_arn),
             created_at: Some(::aws_smithy_types::DateTime::from(created_at)),
         })
+        }.await;
+        let output = result?;
+        crate::state::catalog_global::publish(&*self.engine, &mutation, candidate).await.map_err(|_| catalog_failure())?;
+        Ok(output)
     }
+}
+
+/// Storage failures never masquerade as a successful in-memory mutation.
+fn catalog_failure() -> RegisterPullTimeUpdateExclusionError {
+    RegisterPullTimeUpdateExclusionErrorModeled::ServerException(ServerException { message: Some("the durable ecr registry catalog is unavailable".to_string()) }).into()
 }

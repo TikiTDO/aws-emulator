@@ -200,16 +200,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         crate::state::check_exclusion_filters(&input.image_tag_mutability, &filters)
             .map_err(fault_error)?;
 
-        let mut store = state.lock();
-        let repo = store
-            .repository_mut(&input.repository_name)
-            .map_err(fault_error)?;
+        let storage_error = || PutImageTagMutabilityError::from(PutImageTagMutabilityErrorModeled::ServerException(ServerException {
+            message: Some("durable repository configuration unavailable".to_string()),
+        }));
+        let mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| storage_error())?;
+        let payload_store = crate::state::payloads::bound_store(&*self.engine).map_err(|_| storage_error())?;
+        if let Some(denied) = crate::state::authorization::denied_on_repository(&*self.engine, ctx, Self::NAME, &input.repository_name) { return Err(denied); }
+        let mut repo = { state.lock().repository(&input.repository_name).map_err(fault_error)?.clone() };
 
         // A put REPLACES the configuration: the setting and the filters this request
         // carries are the repository's from here on, and filters it omits are gone.
         let previous =
             ::std::mem::replace(&mut repo.image_tag_mutability, input.image_tag_mutability);
         repo.image_tag_mutability_exclusion_filters = filters;
+
+        let (change, retirement) = crate::state::catalog::repository_change(&payload_store, &repo).await.map_err(|_| storage_error())?;
+        if let Some(denied) = crate::state::authorization::denied_on_repository(&*self.engine, ctx, Self::NAME, &repo.name) { return Err(denied); }
+        let receipt = mutation.commit(&payload_store, service_common::payload_store::ReferenceTransaction {
+            id: payload_store.new_commit_id(), owner: crate::state::payloads::registry_owner().map_err(|_| storage_error())?,
+            changes: vec![change], retire: vec![retirement],
+        }).await.map_err(|_| storage_error())?;
+        repo.payload_revision = Some(receipt.revision);
+        state.lock().repositories.insert(repo.name.clone(), repo.clone());
 
         // This call rewrites whether a later push may overwrite a tag, so the change is
         // recorded: the repository it was made on, the region it was signed for, and

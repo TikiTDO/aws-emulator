@@ -159,6 +159,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into(),
             );
         };
+        // Settle any cancelled/unknown catalog publication before policy or
+        // projection reads. An unresolved outcome refuses, never serves stale RAM.
+        let _mutation = crate::state::payloads::mutation_guard(&*self.engine).await
+            .map_err(|_| BatchGetRepositoryScanningConfigurationError::from(BatchGetRepositoryScanningConfigurationErrorModeled::ServerException(ServerException {
+                message: Some("durable ECR read admission unavailable".to_string()),
+            })))?;
         // Nothing here is regional or registry-scoped: the request names only repository
         // names, and every repository this emulator holds is in its own registry.
         let _ = ctx;

@@ -666,6 +666,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // store held, since it reads the Amazon EC2 store under that store's own lock.
         crate::state::settle_ec2_capacity(&*self.engine, now);
 
+        let (view, registrations) = {
         let mut guard = state.lock();
         guard.advance_clock(now);
 
@@ -1147,7 +1148,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // OUR guard dropped first, since that write takes the Cloud Map store's lock
         // ([`crate::state::reconcile_cloud_map_instances`]).
         let registrations = guard.cloud_map_registrations();
-        drop(guard);
+        (view, registrations)
+        }; // only owned views/plans escape this synchronous state phase
         crate::state::reconcile_cloud_map_instances(&*self.engine, &registrations);
         // The steps a task this create placed needs taken before its containers start are
         // settled here: the execution role is assumed, and the image fetch is attempted from
@@ -1155,7 +1157,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // no path to the registry, is what settles such a task into STOPPED. Read with OUR
         // guard dropped, since it takes the IAM, Amazon EC2 and Amazon ECR stores' locks
         // ([`crate::state::settle_task_launches`]).
-        crate::state::settle_task_launches(&*self.engine);
+        crate::state::settle_task_launches(&*self.engine).await;
         // A service that binds a target group registers each of its tasks in that group once
         // the task is running, so the group is brought in line with what this create placed —
         // with OUR guard dropped, since the write takes the Elastic Load Balancing v2 store's

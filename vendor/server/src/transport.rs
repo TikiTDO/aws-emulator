@@ -207,6 +207,13 @@ fn admission() -> Result<&'static Admission, &'static str> {
         .map_err(|error| *error)
 }
 
+/// Freeze and validate the process's transport budgets before opening listeners.
+/// Standalone boot calls this explicitly; embeddings retain lazy first-use selection.
+/// Both paths use the same retained result, including a configuration refusal.
+pub fn prepare() -> Result<(), &'static str> {
+    admission().map(|_| ())
+}
+
 #[derive(Default)]
 struct ScopeState {
     closed: bool,

@@ -208,7 +208,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(GetLifecyclePolicyPreviewErrorModeled::ServerException(
@@ -255,13 +255,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .unwrap_or_else(|| crate::state::ANY_TAG_STATUS.to_string());
 
         let now = ::std::time::SystemTime::now();
-        let mut store = state.lock();
-        // The guard is mutable only so the clock-owed IN_PROGRESS -> COMPLETE transition
-        // can be written down; nothing else about the preview changes on a read.
-        let repo = store
-            .repository_mut(&input.repository_name)
-            .map_err(fault_error)?;
+        let storage_error = || GetLifecyclePolicyPreviewError::from(GetLifecyclePolicyPreviewErrorModeled::ServerException(ServerException {
+            message: Some("durable repository configuration unavailable".to_string()),
+        }));
+        let mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| storage_error())?;
+        let payload_store = crate::state::payloads::bound_store(&*self.engine).map_err(|_| storage_error())?;
+        if let Some(denied) = crate::state::authorization::denied_on_repository(&*self.engine, ctx, Self::NAME, &input.repository_name) { return Err(denied); }
+        let mut repo = { state.lock().repository(&input.repository_name).map_err(fault_error)?.clone() };
+        let prior_status = repo.lifecycle_preview.as_ref().map(|p| p.status.clone());
         repo.settle_lifecycle_preview(now);
+        if prior_status != repo.lifecycle_preview.as_ref().map(|p| p.status.clone()) {
+        let (change, retirement) = crate::state::catalog::repository_change(&payload_store, &repo).await.map_err(|_| storage_error())?;
+        if let Some(denied) = crate::state::authorization::denied_on_repository(&*self.engine, ctx, Self::NAME, &repo.name) { return Err(denied); }
+        let receipt = mutation.commit(&payload_store, service_common::payload_store::ReferenceTransaction {
+            id: payload_store.new_commit_id(), owner: crate::state::payloads::registry_owner().map_err(|_| storage_error())?,
+            changes: vec![change], retire: vec![retirement],
+        }).await.map_err(|_| storage_error())?;
+        repo.payload_revision = Some(receipt.revision);
+        state.lock().repositories.insert(repo.name.clone(), repo.clone());
+            // Settle the owed clock transition even if subsequent request
+            // validation refuses. Reconcile under this gate before a second group.
+            mutation.reconcile(&*self.engine).await.map_err(|_| storage_error())?;
+            repo = state.lock().repository(&repo.name).map_err(fault_error)?.clone();
+        }
 
         let Some(preview) = repo.lifecycle_preview.as_ref() else {
             return Err(

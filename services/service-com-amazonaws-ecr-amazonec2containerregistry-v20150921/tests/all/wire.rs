@@ -58,10 +58,68 @@ pub fn emulator() -> MultiServiceRouter {
 /// a case that has to arrange state no reasonable number of wire calls would.
 pub fn emulator_with_engine() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+    install_payload_store(&engine);
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
     router.register_service(EmulatedService::new(Arc::clone(&engine)));
     (router, engine)
+}
+
+pub fn install_payload_store(engine: &engine::InMemoryEngine) {
+    // This factory is deliberately synchronous for the shared wire suites.
+    // Join a finite, memory-only bootstrap instead of nesting block_on inside
+    // each #[tokio::test] runtime or manufacturing store/checkpoint objects.
+    let store = std::thread::Builder::new().name("ecr-fixture-bootstrap".into()).spawn(|| {
+        use service_common::payload_store::{PayloadStore, StoreConfig, StoreLimits};
+        let limits = StoreLimits {
+            max_storage_bytes:2*1024*1024*1024, max_catalog_bytes:64*1024*1024,
+            max_stage_bytes:128*1024*1024, max_chunk_bytes:64*1024, max_metadata_bytes:64*1024,
+            max_records_per_transaction:256, max_references_per_record:16_384,
+            max_page_records:32, max_page_bytes:128*1024, max_stages:8192,
+            max_records:16_384, max_commits:16_384, max_transaction_bytes:16*1024*1024,
+            max_inflight_operations:32, max_read_leases:16, max_data_files:32_768,
+        };
+        tokio::runtime::Builder::new_current_thread().enable_all().build().expect("fixture bootstrap runtime")
+            .block_on(PayloadStore::open_store(StoreConfig::memory("ecr-wire", "fixture-v1", limits).expect("finite fixture profile")))
+            .expect("real fixture payload store")
+    }).expect("fixture bootstrap thread").join().expect("joined fixture bootstrap");
+    engine.state::<service_common::payload_store::PayloadStoreBinding>().lock().store = Some(store);
+}
+
+pub fn payload_store(engine: &engine::InMemoryEngine) -> service_common::payload_store::PayloadStore {
+    engine.state::<service_common::payload_store::PayloadStoreBinding>().lock().store.clone().expect("fixture store installed before router")
+}
+
+/// Arrange bounded capacity cases through REAL stages, checkpoints and index
+/// groups. No opaque id/checkpoint is fabricated and RAM is restored only after
+/// the matching durable group. Batch only the fixture's setup, not an API call.
+pub async fn seed_empty_uploads(engine: &engine::InMemoryEngine, repository: &str, started_at: std::time::SystemTime, count: usize) {
+    use service_com_amazonaws_ecr_amazonec2containerregistry_v20150921::state::{self,payloads,payload_upload};
+    use service_common::payload_store::{StageSpec,RecordChange,RecordCondition,RecordData,ReferenceTransaction};
+    let store = payload_store(engine);
+    let mutation = payloads::mutation_guard(engine).await.expect("fixture publication admission");
+    for batch in (0..count).collect::<Vec<_>>().chunks(128) {
+        let scope = {
+            let state = state::service_state(engine).unwrap();
+            let state = state.lock();
+            payloads::repository_owner(state.repository(repository).unwrap()).unwrap()
+        };
+        let mut changes = vec![scope.assertion(&store).await.unwrap()];
+        for index in batch {
+            let client = format!("f0000000-0000-0000-0000-{index:012x}");
+            let protocol = payload_upload::UploadProtocol { principal:None,repository:scope.name.clone(),generation:scope.generation.clone(),
+                part_size:state::REPORTED_LAYER_PART_SIZE,started_at };
+            let mut stage = store.begin(StageSpec { owner:scope.owner.clone(),upload_key:None,expected_length:None,max_bytes:state::MAX_LAYER_UPLOAD_BYTES as u64 }).await.unwrap();
+            stage.checkpoint(protocol.encode().unwrap()).await.unwrap();
+            let id = stage.id().as_str().to_string();
+            drop(stage);
+            changes.push(RecordChange { key:payload_upload::index_key(&scope,&client).unwrap(),condition:RecordCondition::Absent,
+                value:Some(RecordData { schema_version:1,metadata:serde_json::json!({"kind":"ecr-upload","id":id,"repository":scope.name,"generation":scope.generation}),references:Vec::new() }) });
+        }
+        assert!(changes.len() <= 256);
+        mutation.commit(&store,ReferenceTransaction { id:store.new_commit_id(),owner:scope.owner,changes,retire:Vec::new() }).await.unwrap();
+        mutation.reconcile(engine).await.unwrap();
+    }
 }
 
 /// What the emulator answered: the HTTP status and the JSON body.

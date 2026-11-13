@@ -60,9 +60,9 @@ use super::*;
 ///
 /// A task this pass has run for is one the clock may then start
 /// ([`TaskRecord::launch_steps_taken`]).
-pub fn settle_task_launches<Eng: Send + Sync + 'static>(engine: &Eng) {
+pub async fn settle_task_launches<Eng: Send + Sync + 'static>(engine: &Eng) {
     evaluate_launch_role_assumptions(engine);
-    evaluate_image_pulls(engine);
+    evaluate_image_pulls(engine).await;
 }
 
 /// Materialise everything the clock owes, as of `now`, with the launch steps outstanding
@@ -95,18 +95,18 @@ pub fn settle_task_launches<Eng: Send + Sync + 'static>(engine: &Eng) {
 /// one-way: each pass takes this store's lock itself and releases it before the launch steps
 /// take another store's, so no two of them are ever held at once (see the module's LOCK ORDER
 /// note).
-pub fn advance_task_clock<Eng: Send + Sync + 'static>(engine: &Eng, now: SystemTime) {
+pub async fn advance_task_clock<Eng: Send + Sync + 'static>(engine: &Eng, now: SystemTime) {
     // The capacity the account's Amazon EC2 instances owe their clusters, which the clock
     // owes just as it owes a task's own moves: an instance launched into a cluster was
     // registered by its agent whether or not anybody called
     // ([`super::settle_ec2_capacity`]). Taken before the pass below, so the scheduler places
     // what the new capacity lets it place in this same pass.
     super::settle_ec2_capacity(engine, now);
-    settle_task_launches(engine);
+    settle_task_launches(engine).await;
     if let Some(state) = service_state(engine) {
         state.lock().advance_clock(now);
     }
-    settle_task_launches(engine);
+    settle_task_launches(engine).await;
 }
 
 /// Attempt the role assumes of every task that has just been launched, and record the stop a

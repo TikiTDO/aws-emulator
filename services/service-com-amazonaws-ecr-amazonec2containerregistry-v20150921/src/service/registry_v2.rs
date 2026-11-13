@@ -306,53 +306,8 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
         principal_arn: &str,
         now: ::std::time::SystemTime,
     ) -> RtResponse {
-        let identifier = addressed_image(reference);
-        let accepted = accepted_media_types(req);
-        let served = {
-            let store = state.lock();
-            let Ok(repo) = store.repository(repository_name) else {
-                return registry_error(404, "NAME_UNKNOWN", NAME_UNKNOWN_MESSAGE);
-            };
-            let Ok(image) = repo.lookup_image(&identifier) else {
-                return registry_error(404, "MANIFEST_UNKNOWN", MANIFEST_UNKNOWN_MESSAGE);
-            };
-            let (document, media_type) =
-                crate::state::negotiated_manifest(image, accepted.as_deref());
-            // The digest of the document SERVED, which is what the content digest header
-            // states: for the stored document that is the image's own digest, and for the
-            // same image re-spelled in another schema it is that document's digest. The
-            // image's identity in the repository is `image.digest` either way, which is
-            // what the pull below is recorded against.
-            let served_digest = if document == image.manifest {
-                image.digest.clone()
-            } else {
-                crate::state::manifest_digest(&document)
-            };
-            (document, media_type, image.digest.clone(), served_digest)
-        };
-        let (document, media_type, image_digest, served_digest) = served;
-
-        // A `GET` of a manifest IS the pull: it is what hands a client the document the
-        // rest of the image is fetched from, so it is what ECR records a pull time and a
-        // pull count for. A `HEAD` reports on the manifest without transferring it.
-        if req.method() == "GET" {
-            state
-                .lock()
-                .record_image_pull(repository_name, &image_digest, principal_arn, now);
-            // Published with no store lock held, into the CloudWatch store rather than
-            // this one.
-            crate::state::pull_metrics::count_repository_pull(&*self.engine, repository_name);
-        }
-
-        let content_type = media_type
-            .as_deref()
-            .map_or(REGISTRY_JSON_CONTENT_TYPE, honoured_media_type);
-        content_response(
-            document.as_bytes(),
-            content_type,
-            &served_digest,
-            req.method() == "GET",
-        )
+        let _ = (state, req, repository_name, reference, principal_arn, now);
+        registry_error(501, "UNSUPPORTED", "use the streaming HTTP connector for manifest reads")
     }
 }
 
@@ -379,12 +334,10 @@ fn serve_blob(
     let Some(blob) = repo.layer_blobs.get(digest) else {
         return registry_error(404, "BLOB_UNKNOWN", BLOB_UNKNOWN_MESSAGE);
     };
-    content_response(
-        &blob.content,
-        BLOB_CONTENT_TYPE,
-        &blob.digest,
-        req.method() == "GET",
-    )
+    // The legacy direct-dispatch entry is explicitly not a streaming transport.
+    // Never fabricate an empty layer or collect a handle into this RtResponse.
+    let _ = (blob, req);
+    registry_error(501, "UNSUPPORTED", "use the streaming HTTP connector for blob reads")
 }
 
 /// `media_type` when it is one this plane may state in a `Content-Type`, and the generic
@@ -397,7 +350,7 @@ fn serve_blob(
 /// one a header may carry. Checked here rather than at the push, because what the registry
 /// RECORDS is what the caller stated and what an API read reports is that record; it is
 /// only this plane that states it as a header.
-fn honoured_media_type(media_type: &str) -> &str {
+pub(super) fn honoured_media_type(media_type: &str) -> &str {
     let is_media_type = !media_type.is_empty()
         && media_type.len() <= MAX_MEDIA_TYPE_LENGTH
         && media_type
@@ -412,7 +365,7 @@ fn honoured_media_type(media_type: &str) -> &str {
 
 /// The image one manifest path segment addresses: a digest when the segment is written the
 /// way content is addressed, and a tag otherwise.
-fn addressed_image(reference: &str) -> crate::ops::types::ImageIdentifier {
+pub(super) fn addressed_image(reference: &str) -> crate::ops::types::ImageIdentifier {
     if crate::state::is_layer_digest(reference) {
         return crate::ops::types::ImageIdentifier {
             image_digest: Some(reference.to_string()),
@@ -433,7 +386,7 @@ fn addressed_image(reference: &str) -> crate::ops::types::ImageIdentifier {
 /// A client may send the list as one header or as several, and each entry may carry media
 /// type parameters (`;q=0.9`) which name no schema. A wildcard admits every schema, so a
 /// list carrying one is the same as naming none.
-fn accepted_media_types(req: &RtRequest) -> Option<Vec<String>> {
+pub(super) fn accepted_media_types(req: &RtRequest) -> Option<Vec<String>> {
     let mut accepted: Vec<String> = Vec::new();
     for header in req.headers().get_all("accept") {
         for entry in header.split(',') {
@@ -468,7 +421,7 @@ fn accepted_media_types(req: &RtRequest) -> Option<Vec<String>> {
 /// The decode is bounded ([`MAX_CREDENTIAL_HEADER_BYTES`]) and total: a header that is not
 /// base64, or whose bytes are not text, carries no credential rather than failing the
 /// request some other way.
-fn presented_password(req: &RtRequest) -> Option<String> {
+pub(super) fn presented_password(req: &RtRequest) -> Option<String> {
     let presented = req.headers().get(::http::header::AUTHORIZATION.as_str())?;
     if presented.len() > MAX_CREDENTIAL_HEADER_BYTES {
         return None;
@@ -504,7 +457,7 @@ fn version_check() -> RtResponse {
 /// `with_body` is false for a `HEAD`, which reports what a `GET` of the same address would
 /// answer — the same headers, including the length of the content — without transferring
 /// it.
-fn content_response(
+pub(super) fn content_response(
     content: &[u8],
     content_type: &str,
     digest: &str,
@@ -547,7 +500,7 @@ const UNSUPPORTED_MESSAGE: &str = "the operation is unsupported";
 /// The challenge a request presenting no honoured credential is refused with: a `401`
 /// naming the scheme and the realm a client fetches a credential from, which is how
 /// `docker login` discovers where to authenticate.
-fn unauthorized(req: &RtRequest) -> RtResponse {
+pub(super) fn unauthorized(req: &RtRequest) -> RtResponse {
     let mut response = registry_error(401, "UNAUTHORIZED", UNAUTHORIZED_MESSAGE);
     // The realm is the registry endpoint this request reached, because this emulator is
     // what serves it: a client that follows the challenge has to reach the registry it was

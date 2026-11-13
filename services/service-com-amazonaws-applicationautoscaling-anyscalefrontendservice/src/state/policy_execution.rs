@@ -211,7 +211,7 @@ struct FiringPolicy {
 /// Call it with NO store lock held: the pass reads this service's store, then CloudWatch's,
 /// then the store of the service that owns a scaled resource, each on its own, so no request
 /// holds two at once.
-pub fn settle_policy_executions<Eng: Send + Sync + 'static>(engine: &Eng, region: &str) {
+pub async fn settle_policy_executions<Eng: Send + Sync + 'static>(engine: &Eng, region: &str) {
     let Some(state) = service_state(engine) else {
         return;
     };
@@ -229,7 +229,7 @@ pub fn settle_policy_executions<Eng: Send + Sync + 'static>(engine: &Eng, region
     // Then the movements already delivered whose capacity the owning service has since made
     // take effect: the activity each of them recorded ends at the instant that happened,
     // which was owed by that service's clock and not by this call.
-    super::capacity_fulfilment::settle_activity_fulfilments(engine, region);
+    super::capacity_fulfilment::settle_activity_fulfilments(engine, region).await;
     // STEP 1, under this service's lock: which policies an alarm could be firing, and what
     // each of them has already been executed for.
     let candidates = { firing_candidates(&state.lock(), region) };
@@ -277,7 +277,8 @@ pub fn settle_policy_executions<Eng: Send + Sync + 'static>(engine: &Eng, region
 /// against a store: the capacity it is compared against has to be asked for, and the capacity
 /// it moves to has to be sent. Both are calls, so they happen here — on the scaling clock,
 /// which is the one caller of this service's own work that can await them — rather than in
-/// [`settle_policy_executions`], which several handlers call with a store lock in hand.
+/// [`settle_policy_executions`]. Both entry points require every store lock released;
+/// the latter also awaits the in-process ECS image-pull publication boundary.
 ///
 /// The order is the order of a decision: the capacity is read BEFORE the occurrences and
 /// breaches the pass materialises are decided, and the movements they queued are written
@@ -291,7 +292,7 @@ pub async fn settle_remote_resources<Eng: Send + Sync + 'static>(
         return;
     };
     refresh_remote_capacities(&state, region, callback).await;
-    settle_policy_executions(engine, region);
+    settle_policy_executions(engine, region).await;
     deliver_remote_capacity(&state, region, callback).await;
 }
 

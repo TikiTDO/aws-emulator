@@ -11,10 +11,10 @@
 //! names an upload this registry did not issue for the repository in the request,
 //! changes nothing.
 //!
-//! The wire harness is `crate::wire`'s. Nothing implemented yet reads a layer's bytes
-//! back out (`CompleteLayerUpload` and `GetDownloadUrlForLayer` are 501 stubs with
-//! issues of their own), so these cases read the persisted upload back from the store,
-//! through the engine handle `wire::emulator_with_engine` returns.
+//! The shared harness installs real finite B2 state. Intermediate ACK assertions
+//! read authoritative checkpoint offset/SHA; refusals also preserve physical
+//! retained-byte accounting. Completed cases seal and stream-read the actual
+//! bytes independently, not a fake Vec projection or checkpoint-only byte oracle.
 
 use std::sync::Arc;
 
@@ -25,14 +25,14 @@ use smithy_server_runtime::MultiServiceRouter;
 use crate::wire::{call, emulator_with_engine, ok, refused, REGISTRY_ID};
 
 /// The upload `upload_id`, as the store holds it.
-fn stored_upload(engine: &Arc<engine::InMemoryEngine>, upload_id: &str) -> state::LayerUpload {
-    state::service_state(&**engine)
-        .expect("the ecr store is reachable from the engine the router was built over")
-        .lock()
-        .uploads
-        .get(upload_id)
-        .cloned()
-        .unwrap_or_else(|| panic!("upload {upload_id:?} is not in the store"))
+async fn stored_upload(engine: &Arc<engine::InMemoryEngine>, upload_id: &str) -> state::LayerUpload {
+    let mutation = state::payloads::mutation_guard(&**engine).await.unwrap();
+    let mut projection = state::service_state(&**engine).unwrap().lock().uploads.get(upload_id).cloned()
+        .unwrap_or_else(|| panic!("upload {upload_id:?} is not in the current projection"));
+    projection.snapshot = crate::wire::payload_store(engine).lookup_upload(&state::payloads::registry_owner().unwrap(),projection.snapshot.id.as_str())
+        .await.unwrap().expect("authoritative upload checkpoint");
+    drop(mutation);
+    projection
 }
 
 /// `len` layer bytes that depend on `seed`: a deterministic spread over the whole byte
@@ -109,7 +109,7 @@ async fn consecutive_parts_concatenate_into_the_upload() {
     let (router, engine) = emulator_with_engine();
     for (case, repository_name, sizes) in cases {
         let upload_id = given_upload(&router, case, repository_name).await;
-        let part_size = stored_upload(&engine, &upload_id).part_size;
+        let part_size = stored_upload(&engine, &upload_id).await.part_size;
 
         let mut expected: Vec<u8> = Vec::new();
         for (index, size) in sizes.iter().copied().enumerate() {
@@ -152,12 +152,13 @@ async fn consecutive_parts_concatenate_into_the_upload() {
                 answer["uploadId"]
             );
 
-            let stored = stored_upload(&engine, &upload_id);
+            let stored = stored_upload(&engine, &upload_id).await;
+            assert_eq!(stored.snapshot.checkpoint.offset() as usize,expected.len());
             assert_eq!(
-                stored.received_bytes, expected,
+                stored.snapshot.checkpoint.sha256().to_string(), state::content_digest(&expected),
                 "case {case:?} part {index}: the upload holds the concatenation of its \
                  accepted parts, got {} bytes",
-                stored.received_bytes.len()
+                stored.snapshot.checkpoint.offset() as usize
             );
             assert_eq!(
                 stored.last_byte_received(),
@@ -168,7 +169,8 @@ async fn consecutive_parts_concatenate_into_the_upload() {
             );
         }
 
-        let stored = stored_upload(&engine, &upload_id);
+        verify_physical_prefix(&engine,&upload_id,&expected).await;
+        let stored = stored_upload(&engine, &upload_id).await;
         assert_eq!(
             stored.repository_name, repository_name,
             "case {case:?}: uploading parts does not move the upload to another \
@@ -216,6 +218,7 @@ async fn a_part_that_is_not_consecutive_is_refused() {
     ];
 
     for (case, first, last, size) in cases {
+        let held_before = crate::wire::payload_store(&engine).inventory().await.unwrap().retained_bytes;
         let body = refused(
             &router,
             case,
@@ -230,17 +233,20 @@ async fn a_part_that_is_not_consecutive_is_refused() {
             "case {case:?}: the refusal reports the last byte that is still valid, got {:?}",
             body["lastValidByteReceived"]
         );
-        let stored = stored_upload(&engine, &upload_id);
+        assert_eq!(crate::wire::payload_store(&engine).inventory().await.unwrap().retained_bytes,held_before,"refusal must not leave an unacknowledged tail");
+        let stored = stored_upload(&engine, &upload_id).await;
+        assert_eq!(stored.snapshot.checkpoint.offset() as usize,accepted.len());
         assert_eq!(
-            stored.received_bytes, accepted,
+            stored.snapshot.checkpoint.sha256().to_string(), state::content_digest(&accepted),
             "case {case:?}: a refused part changes nothing, got {} bytes",
-            stored.received_bytes.len()
+            stored.snapshot.checkpoint.offset() as usize
         );
     }
 
     // The same rule at the start of an upload: the first part must begin at byte 0, and
     // an upload that has received nothing has no last valid byte to report.
     let fresh = given_upload(&router, "first part offset", "firstpart").await;
+    let held_before = crate::wire::payload_store(&engine).inventory().await.unwrap().retained_bytes;
     let body = refused(
         &router,
         "the first part does not start at byte 0",
@@ -249,6 +255,7 @@ async fn a_part_that_is_not_consecutive_is_refused() {
         "InvalidLayerPartException",
     )
     .await;
+    assert_eq!(crate::wire::payload_store(&engine).inventory().await.unwrap().retained_bytes,held_before,"first-part refusal leaves no physical tail");
     assert_eq!(
         body["lastValidByteReceived"],
         Value::Null,
@@ -257,10 +264,12 @@ async fn a_part_that_is_not_consecutive_is_refused() {
         body["lastValidByteReceived"]
     );
     assert!(
-        stored_upload(&engine, &fresh).received_bytes.is_empty(),
+        stored_upload(&engine, &fresh).await.snapshot.checkpoint.offset() == 0,
         "case {:?}: a refused first part leaves the upload empty",
         "the first part does not start at byte 0"
     );
+    verify_physical_prefix(&engine,&upload_id,&accepted).await;
+    verify_physical_prefix(&engine,&fresh,&[]).await;
 }
 
 /// A part whose declared range does not describe the blob it carries is refused with the
@@ -284,6 +293,7 @@ async fn a_part_whose_range_does_not_describe_its_blob_is_refused() {
     ];
 
     for (case, first, last, size) in cases {
+        let held_before = crate::wire::payload_store(&engine).inventory().await.unwrap().retained_bytes;
         refused(
             &router,
             case,
@@ -292,11 +302,12 @@ async fn a_part_whose_range_does_not_describe_its_blob_is_refused() {
             "InvalidLayerPartException",
         )
         .await;
-        let stored = stored_upload(&engine, &upload_id);
+        assert_eq!(crate::wire::payload_store(&engine).inventory().await.unwrap().retained_bytes,held_before,"refusal must not leave an unacknowledged tail");
+        let stored = stored_upload(&engine, &upload_id).await;
         assert!(
-            stored.received_bytes.is_empty(),
+            stored.snapshot.checkpoint.offset() == 0,
             "case {case:?}: a refused part keeps no byte, got {} bytes",
-            stored.received_bytes.len()
+            stored.snapshot.checkpoint.offset() as usize
         );
     }
 
@@ -316,6 +327,7 @@ async fn a_part_whose_range_does_not_describe_its_blob_is_refused() {
         "the matching part",
         answer["lastByteReceived"]
     );
+    verify_physical_prefix(&engine,&upload_id,&layer_bytes(4,10)).await;
 }
 
 /// A part is only accepted for an upload this registry issued for the repository the
@@ -332,6 +344,7 @@ async fn a_part_is_accepted_only_for_an_upload_of_the_named_repository() {
     // A repository that was created and then deleted: its name resolves to nothing, like
     // one never created.
     let gone = given_upload(&router, "upload scoping", "goneupload").await;
+    let gone_projection = stored_upload(&engine,&gone).await;
     ok(
         &router,
         "upload scoping",
@@ -384,6 +397,7 @@ async fn a_part_is_accepted_only_for_an_upload_of_the_named_repository() {
     ];
 
     for (case, request, status, code) in cases {
+        let held_before = crate::wire::payload_store(&engine).inventory().await.unwrap().retained_bytes;
         let answer = call(&router, "UploadLayerPart", &request).await;
         assert_eq!(
             answer.status, status,
@@ -396,13 +410,14 @@ async fn a_part_is_accepted_only_for_an_upload_of_the_named_repository() {
             "case {case:?}: expected {code}, got {:?}",
             answer.body
         );
+        assert_eq!(crate::wire::payload_store(&engine).inventory().await.unwrap().retained_bytes,held_before,"scope refusal leaves no physical tail");
         for (name, upload_id) in [("mine", &mine), ("other", &other), ("gone", &gone)] {
-            let stored = stored_upload(&engine, upload_id);
+            let stored = if name == "gone" { gone_projection.clone() } else { stored_upload(&engine, upload_id).await };
             assert!(
-                stored.received_bytes.is_empty(),
+                stored.snapshot.checkpoint.offset() == 0,
                 "case {case:?}: a refused part keeps no byte in the {name:?} upload, got \
                  {} bytes",
-                stored.received_bytes.len()
+                stored.snapshot.checkpoint.offset() as usize
             );
         }
     }
@@ -424,11 +439,12 @@ async fn a_part_is_accepted_only_for_an_upload_of_the_named_repository() {
         answer["lastByteReceived"]
     );
     assert_eq!(
-        stored_upload(&engine, &mine).received_bytes,
-        bytes,
+        stored_upload(&engine, &mine).await.snapshot.checkpoint.sha256().to_string(),
+        state::content_digest(&bytes),
         "case {:?}: the accepted part's bytes are the ones stored",
         "the upload's own repository"
     );
+    verify_physical_prefix(&engine,&mine,&bytes).await;
 }
 
 /// One upload holds at most [`state::MAX_LAYER_UPLOAD_BYTES`] bytes: the part that fills
@@ -449,14 +465,19 @@ async fn the_part_past_the_upload_byte_cap_is_refused() {
     // capacity is reserved up front so appending the last byte reallocates nothing.
     let seeded = state::MAX_LAYER_UPLOAD_BYTES - 1;
     {
-        let store = state::service_state(&*engine).expect("the ecr store");
-        let mut store = store.lock();
-        let upload = store
-            .upload_mut(repository_name, &upload_id)
-            .expect("the upload just opened");
-        let mut received = Vec::with_capacity(state::MAX_LAYER_UPLOAD_BYTES);
-        received.resize(seeded, 0_u8);
-        upload.received_bytes = received;
+        let mutation = state::payloads::mutation_guard(&*engine).await.unwrap();
+        let payloads = crate::wire::payload_store(&engine);
+        let scope = { let state = state::service_state(&*engine).unwrap(); let state = state.lock(); state::payloads::repository_owner(state.repository(repository_name).unwrap()).unwrap() };
+        let bound = state::payload_upload::lookup(&payloads,&scope,&upload_id).await.unwrap().unwrap();
+        let mut stage = payloads.resume(&bound.snapshot.id,bound.snapshot.checkpoint.clone()).await.unwrap();
+        let zeros = bytes::Bytes::from(vec![0u8;64*1024]);
+        let mut offset = 0;
+        while offset < seeded as u64 {
+            let count = (seeded as u64-offset).min(zeros.len() as u64) as usize;
+            offset = stage.append(offset,zeros.slice(..count)).await.unwrap();
+        }
+        mutation.checkpoint(stage,bound.protocol.encode().unwrap()).await.unwrap();
+        mutation.reconcile(&*engine).await.unwrap();
     }
     let seeded = i64::try_from(seeded).expect("the cap fits in an i64");
 
@@ -474,17 +495,19 @@ async fn the_part_past_the_upload_byte_cap_is_refused() {
         last
     );
     assert_eq!(
-        stored_upload(&engine, &upload_id).received_bytes.len(),
+        stored_upload(&engine, &upload_id).await.snapshot.checkpoint.offset() as usize,
         state::MAX_LAYER_UPLOAD_BYTES,
         "the upload holds every byte accepted up to the cap"
     );
 
+    let held_before = crate::wire::payload_store(&engine).inventory().await.unwrap().retained_bytes;
     let over = call(
         &router,
         "UploadLayerPart",
         &part_request(repository_name, &upload_id, seeded + 1, seeded + 1, &[0xcd]),
     )
     .await;
+    assert_eq!(crate::wire::payload_store(&engine).inventory().await.unwrap().retained_bytes,held_before,"over-cap refusal leaves no physical tail");
     assert_eq!(
         over.status, 400,
         "the part past the cap is refused, got {} with {:?}",
@@ -498,8 +521,40 @@ async fn the_part_past_the_upload_byte_cap_is_refused() {
         over.body
     );
     assert_eq!(
-        stored_upload(&engine, &upload_id).received_bytes.len(),
+        stored_upload(&engine, &upload_id).await.snapshot.checkpoint.offset() as usize,
         state::MAX_LAYER_UPLOAD_BYTES,
         "a refused part keeps no byte, so the upload stays at the cap"
     );
+    let mut reader = sealed_prefix_reader(&engine,&upload_id).await;
+    let mut observed = 0usize;
+    while let Some(chunk) = reader.next_chunk().await.unwrap() {
+        for (index,byte) in chunk.iter().enumerate() {
+            let expected = if observed+index == state::MAX_LAYER_UPLOAD_BYTES-1 { 0xab } else { 0 };
+            assert_eq!(*byte,expected,"independent physical cap-prefix byte at {}",observed+index);
+        }
+        observed += chunk.len();
+    }
+    assert_eq!(observed,state::MAX_LAYER_UPLOAD_BYTES);
+}
+
+
+async fn sealed_prefix_reader(engine: &Arc<engine::InMemoryEngine>, id: &str) -> service_common::payload_store::PayloadReader {
+    let projection = stored_upload(engine,id).await;
+    let mutation = state::payloads::mutation_guard(&**engine).await.unwrap();
+    let store = crate::wire::payload_store(engine);
+    let stage = store.resume(&projection.snapshot.id,projection.snapshot.checkpoint.clone()).await.unwrap();
+    let handle = mutation.seal(stage,service_common::payload_store::IntegrityExpectation {
+        length:Some(projection.snapshot.checkpoint.offset()),sha256:Some(projection.snapshot.checkpoint.sha256()),
+    }).await.unwrap();
+    mutation.reconcile(&**engine).await.unwrap();
+    store.open(&handle,None).await.unwrap()
+}
+async fn verify_physical_prefix(engine: &Arc<engine::InMemoryEngine>, id: &str, expected: &[u8]) {
+    let mut reader = sealed_prefix_reader(engine,id).await;
+    let mut offset = 0;
+    while let Some(chunk) = reader.next_chunk().await.unwrap() {
+        assert_eq!(&chunk[..],&expected[offset..offset+chunk.len()],"physical sealed bytes, not merely cached checkpoint metadata");
+        offset += chunk.len();
+    }
+    assert_eq!(offset,expected.len());
 }

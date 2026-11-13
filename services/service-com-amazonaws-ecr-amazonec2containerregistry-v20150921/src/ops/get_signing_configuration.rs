@@ -151,6 +151,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
+        // Settle any cancelled/unknown catalog publication before policy or
+        // projection reads. An unresolved outcome refuses, never serves stale RAM.
+        let _mutation = crate::state::payloads::mutation_guard(&*self.engine).await
+            .map_err(|_| GetSigningConfigurationError::from(GetSigningConfigurationErrorModeled::ServerException(ServerException {
+                message: Some("durable ECR read admission unavailable".to_string()),
+            })))?;
 
         let store = state.lock();
         // "The specified signing configuration was not found. This occurs when attempting

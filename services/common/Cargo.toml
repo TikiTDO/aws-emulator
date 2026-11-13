@@ -106,7 +106,7 @@ uuid = { version = "1", features = ["v4"] }
 # `in_band_tls`: the async read/write traits a data-plane connection is read through
 # (`io-util`'s `AsyncReadExt` for the one sniffed byte, and the `AsyncRead`/`AsyncWrite`
 # the replaying stream implements), for a plane whose encryption is negotiated in band.
-tokio = { workspace = true, features = ["io-util", "net", "time"] }
+tokio = { workspace = true, features = ["io-util", "net", "time", "fs"] }
 # `host_runtime`: the HTTP/1.1 client a service speaks the container runtime's API with, over the
 # runtime's Unix socket — the same `hyper` client and adapters the load balancer's proxy uses.
 hyper = { version = "1", features = ["client", "http1"] }
@@ -181,5 +181,14 @@ brush-parser = { version = "0.4", default-features = false }
 # by the maintained encoder the URL parser itself uses.
 percent-encoding = "2"
 
+# One authoritative durable payload/reference catalog; already locked in this workspace.
+rusqlite = { version = "0.41.1", features = ["bundled", "fallible_uint"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["user"] }
+
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3"
