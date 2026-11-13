@@ -192,6 +192,7 @@ pub fn custom_db_engine_version_key(engine: &str, engine_version: &str) -> Strin
 
 /// A persisted custom DB engine version.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CustomDbEngineVersionRecord {
     /// `Engine`, folded to the lower case the published engine names are written in, and
     /// half this record's key.
@@ -227,6 +228,7 @@ pub struct CustomDbEngineVersionRecord {
     /// [`CUSTOM_ENGINE_VERSION_STATUS_CREATING`] a create owes it.
     pub pending_status: Option<PendingStatus>,
     /// `CreateTime`.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub create_time: ::aws_smithy_types::DateTime,
     /// `Tags`, reported as `TagList`.
     pub tags: Vec<Tag>,

@@ -147,6 +147,7 @@ impl ComAmazonawsRdsAmazonrdsv19State {
 
 /// One parameter value a caller set on a group.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ParameterSetting {
     /// `Parameter$ParameterValue`, as the caller set it.
     pub value: String,
@@ -161,6 +162,7 @@ pub struct ParameterSetting {
     /// against when the instance's engine last started
     /// ([`data_plane::pg_server::running_parameters`]). Without it a pending change would
     /// be indistinguishable from an applied one.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub set_at: ::aws_smithy_types::DateTime,
 }
 
@@ -170,6 +172,7 @@ pub struct ParameterSetting {
 /// `CreateDBClusterParameterGroupMessage$DBClusterParameterGroupName` states "This value is
 /// stored as a lowercase string."
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DbClusterParameterGroupRecord {
     /// The lowercased `DBClusterParameterGroupName`.
     pub name: String,
@@ -309,6 +312,7 @@ impl DbClusterParameterGroupRecord {
 /// `CreateDBParameterGroupMessage$DBParameterGroupName` states "This value is stored as a
 /// lowercase string."
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DbParameterGroupRecord {
     /// The lowercased `DBParameterGroupName`.
     pub name: String,

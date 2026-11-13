@@ -36,6 +36,7 @@ pub struct ClusterMembership {
 /// minted endpoint host, so none of them can be left naming an identifier the cluster no
 /// longer has. The cluster's members are not stored either — see [`ClusterMembership`].
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DbClusterRecord {
     /// `DBClusterIdentifier`, stored lowercased: "this parameter is stored as a lowercase
     /// string".
@@ -195,6 +196,7 @@ pub struct DbClusterRecord {
     /// asks for; false for a cluster that is reached inside its VPC.
     pub internet_access_gateway_enabled: bool,
     /// `ClusterCreateTime`.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub cluster_create_time: ::aws_smithy_types::DateTime,
     /// The member instance the cluster currently WRITES through — the one
     /// `DBClusterMembers` reports `IsClusterWriter` for.

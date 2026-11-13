@@ -12,6 +12,7 @@ use super::*;
 /// back into a cluster. The reading operations are implemented against these records rather
 /// than against a canned answer, so they report exactly what is stored.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DbClusterSnapshotRecord {
     /// `DBClusterSnapshotIdentifier`, lowercased, and this record's key within its
     /// region: the member documents "This value is stored as a lowercase string".
@@ -73,7 +74,9 @@ pub struct DbClusterSnapshotRecord {
     pub status: String,
     /// The status this record owes, and when; see [`PendingStatus`].
     pub pending_status: Option<PendingStatus>,
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub cluster_create_time: ::aws_smithy_types::DateTime,
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub snapshot_create_time: ::aws_smithy_types::DateTime,
     /// `SourceDBClusterSnapshotArn`: the snapshot this one was copied from, absent for a
     /// snapshot taken from a cluster.
@@ -96,6 +99,7 @@ pub struct DbClusterSnapshotRecord {
     /// service's data plane carries; the number of copies is bounded by
     /// [`DB_CLUSTER_SNAPSHOT_QUOTA_PER_REGION`] and [`MAX_REGIONS`], like every other record
     /// here. Deleting the snapshot drops it.
+    #[serde(skip)]
     pub storage: Option<::std::sync::Arc<data_plane::sql_engine::InstanceDatabase>>,
     /// The full size, in bytes, of the data [`Self::storage`] holds — what
     /// `FullSnapshotSizeInBytes` reports for a snapshot that has been taken.
@@ -505,6 +509,7 @@ pub fn db_cluster_snapshot_quota_message() -> String {
 /// A stored DB snapshot: the source instance's settings as they stood when the
 /// snapshot was taken, which is why they are copied rather than re-read later.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DbSnapshotRecord {
     pub snapshot_identifier: String,
     /// The region the snapshot lives in; the scope of its ARN.
@@ -545,7 +550,9 @@ pub struct DbSnapshotRecord {
     pub status: String,
     pub pending_status: Option<PendingStatus>,
     pub snapshot_type: String,
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub instance_create_time: ::aws_smithy_types::DateTime,
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub snapshot_create_time: ::aws_smithy_types::DateTime,
     /// A COPY of the data the source instance's storage held when the snapshot was taken,
     /// taken by the engine itself ([`data_plane::sql_engine::InstanceDatabase::capture`]):
@@ -558,7 +565,12 @@ pub struct DbSnapshotRecord {
     /// of this service's data plane carries; the number of copies is bounded by
     /// [`DB_SNAPSHOT_QUOTA_PER_REGION`] and [`MAX_REGIONS`], like every other record here.
     /// Deleting the snapshot drops it.
+    #[serde(skip)]
     pub storage: Option<::std::sync::Arc<data_plane::sql_engine::InstanceDatabase>>,
+    /// The named host volume retaining a real-engine snapshot's `PGDATA`, when taken from a
+    /// host-backed DB instance (`DeleteDBInstance` final snapshot or `CreateDBSnapshot`).
+    #[serde(default)]
+    pub real_volume: Option<String>,
     pub tags: Vec<Tag>,
 }
 
@@ -624,6 +636,7 @@ impl DbSnapshotRecord {
             instance_create_time: instance.instance_create_time,
             snapshot_create_time: now_as_wire_timestamp(),
             storage,
+            real_volume: None,
             tags,
         }
     }

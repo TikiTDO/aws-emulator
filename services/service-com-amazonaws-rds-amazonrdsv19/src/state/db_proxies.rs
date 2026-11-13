@@ -380,12 +380,15 @@ pub fn check_target_group_name(proxy_name: &str, requested: Option<&str>) -> Res
 /// stored is what a modification of the group changes: its connection pool settings, and
 /// when the group itself was created and last updated.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DbProxyTargetGroupRecord {
     /// `DBProxyTargetGroup$ConnectionPoolConfig`.
     pub connection_pool_config: ConnectionPoolConfigurationInfo,
     /// `DBProxyTargetGroup$CreatedDate`.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub created_date: ::aws_smithy_types::DateTime,
     /// `DBProxyTargetGroup$UpdatedDate`.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub updated_date: ::aws_smithy_types::DateTime,
 }
 
@@ -404,6 +407,7 @@ impl DbProxyTargetGroupRecord {
 
 /// One registration in a proxy's target group: which database was registered, and when.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DbProxyTargetRecord {
     /// The `DBInstanceIdentifier` or `DBClusterIdentifier` that was registered, stored
     /// lowercased like the record it names.
@@ -414,6 +418,7 @@ pub struct DbProxyTargetRecord {
     /// [`TARGET_STATE_AVAILABLE`] rather than [`TARGET_STATE_REGISTERING`]. Nothing
     /// sleeps and nothing writes it back: the health a target reports is read from this
     /// instant when the target is projected, so it is the clock alone that moves it.
+    #[serde(with = "crate::state::serde_instant_deadline")]
     pub healthy_at: Instant,
 }
 
@@ -438,6 +443,7 @@ impl DbProxyTargetRecord {
 
 /// A persisted RDS proxy.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DbProxyRecord {
     /// `DBProxyName`, which is half this record's key.
     pub name: String,
@@ -472,8 +478,10 @@ pub struct DbProxyRecord {
     /// The status change the clock owes this record, if any.
     pub pending_status: Option<PendingStatus>,
     /// `CreatedDate`.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub created_date: ::aws_smithy_types::DateTime,
     /// `UpdatedDate`.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub updated_date: ::aws_smithy_types::DateTime,
     /// The proxy's one target group, which it is created with.
     pub target_group: DbProxyTargetGroupRecord,

@@ -117,6 +117,7 @@ pub fn check_recommendation_locale(locale: &str) -> Result<(), String> {
 /// the operation and the identifier member its recommended action names, and the filter
 /// name that selects it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum RecommendationSubject {
     /// A DB instance: selected by the `dbi-resource-id` filter, fixed by
     /// `ModifyDBInstance`.
@@ -486,9 +487,33 @@ pub fn recommendation_key(resource_id: &str, type_id: &str) -> String {
     format!("{resource_id}/{type_id}")
 }
 
+mod serde_configuration_check {
+    use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::{ConfigurationCheck, CONFIGURATION_CHECKS};
+
+    pub fn serialize<S: Serializer>(
+        check: &&'static ConfigurationCheck,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        check.type_id.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<&'static ConfigurationCheck, D::Error> {
+        let type_id = String::deserialize(deserializer)?;
+        CONFIGURATION_CHECKS
+            .iter()
+            .find(|check| check.type_id == type_id)
+            .ok_or_else(|| D::Error::custom(format!("unknown recommendation check {type_id}")))
+    }
+}
+
 /// One recommendation this service raised: which resource it is about, which check raised
 /// it, what that check observed, and where it stands.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DbRecommendationRecord {
     /// `DBRecommendation$RecommendationId`: minted once, so the `recommendation-id` filter
     /// and `ModifyDBRecommendation` name a stable record.
@@ -497,6 +522,7 @@ pub struct DbRecommendationRecord {
     /// minted with the record.
     pub action_id: String,
     /// The row of [`CONFIGURATION_CHECKS`] that raised this record.
+    #[serde(with = "serde_configuration_check")]
     pub check: &'static ConfigurationCheck,
     /// Which family the resource belongs to.
     pub subject: RecommendationSubject,
@@ -512,9 +538,11 @@ pub struct DbRecommendationRecord {
     /// `DBRecommendation$Status`, one of [`RECOMMENDATION_STATUSES`].
     pub status: String,
     /// `DBRecommendation$CreatedTime`: when the analysis first raised this record.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub created_time: ::aws_smithy_types::DateTime,
     /// `DBRecommendation$UpdatedTime`: when it last changed — a re-raise, a resolution, or
     /// a new value observed for its setting.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub updated_time: ::aws_smithy_types::DateTime,
 }
 

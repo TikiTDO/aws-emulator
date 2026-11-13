@@ -37,6 +37,7 @@ pub fn mint_db_shard_group_resource_id(mint: u64) -> String {
 /// stored region, identifier and minted endpoint host, and [`Self::to_wire`] computes
 /// them — the same reason [`DbInstanceRecord`] computes its own.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DbShardGroupRecord {
     /// `DBShardGroupIdentifier`, in the case the create named it.
     pub identifier: String,

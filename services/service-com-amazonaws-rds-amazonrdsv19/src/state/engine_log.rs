@@ -25,8 +25,10 @@ pub const MAX_LOG_LINE_LEN: usize = 256;
 
 /// One line of a DB instance's log: when this service recorded it, and what it recorded.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LogEntry {
     /// When the event this line records happened.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub at: ::aws_smithy_types::DateTime,
     /// What happened, as the line reads after the timestamp.
     pub text: String,
@@ -35,6 +37,7 @@ pub struct LogEntry {
 /// A DB instance's log: the lifecycle lines this service has recorded for it, oldest
 /// first.
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceLog {
     /// The lines, oldest first, at most [`MAX_LOG_ENTRIES`] of them.
     pub entries: Vec<LogEntry>,

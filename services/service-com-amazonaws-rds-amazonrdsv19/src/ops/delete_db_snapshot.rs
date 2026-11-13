@@ -162,53 +162,70 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(crate::scaffolded::Scaffolded::not_implemented(Self::NAME));
         };
-        let mut store = state.lock();
-        store.settle_due_transitions(&region);
+        let (wire, unreferenced_real_volume) = {
+            let mut store = state.lock();
+            store.settle_due_transitions(&region);
 
-        // RDS is regional, and a DB snapshot's identifier is stored as the caller spelled
-        // it (`DBSnapshotIdentifier` states no case folding, unlike the instance and group
-        // names), so the snapshot is looked up under exactly the name it was taken as —
-        // the same key `DescribeDBSnapshots` reads. A name this region holds no snapshot
-        // under is the modelled 404, so a caller deleting a snapshot twice is told the
-        // second call found nothing rather than answered as though it had deleted it again.
-        let key = (region.clone(), requested.clone());
-        let Some(record) = store.db_snapshots.get(&key) else {
-            return Err(not_found(&requested));
+            // RDS is regional, and a DB snapshot's identifier is stored as the caller spelled
+            // it (`DBSnapshotIdentifier` states no case folding, unlike the instance and group
+            // names), so the snapshot is looked up under exactly the name it was taken as —
+            // the same key `DescribeDBSnapshots` reads. A name this region holds no snapshot
+            // under is the modelled 404, so a caller deleting a snapshot twice is told the
+            // second call found nothing rather than answered as though it had deleted it again.
+            let key = (region.clone(), requested.clone());
+            let Some(record) = store.db_snapshots.get(&key) else {
+                return Err(not_found(&requested));
+            };
+            // "The DB snapshot must be in the available state to be deleted": one still being
+            // taken is the modelled state fault, which is what a caller that deletes straight
+            // after asking for the snapshot sees.
+            if record.status != crate::state::SNAPSHOT_STATUS_AVAILABLE {
+                return Err(DeleteDBSnapshotErrorModeled::InvalidDBSnapshotStateFault(
+                    InvalidDBSnapshotStateFault {
+                        message: Some(format!(
+                            "DB snapshot {requested} is in {} state but must be {} to be deleted",
+                            record.status,
+                            crate::state::SNAPSHOT_STATUS_AVAILABLE
+                        )),
+                    },
+                )
+                .into());
+            }
+            // A key this store resolved and a removal under it can only disagree if the record
+            // is not where the lookup said it was, which answers the same modelled 404 as a
+            // snapshot that was never there: a disagreement is a "not found", never a panic.
+            let Some(removed) = store.db_snapshots.remove(&key) else {
+                return Err(not_found(&requested));
+            };
+            let unreferenced_real_volume = removed.real_volume.clone().filter(|volume| {
+                !store
+                    .db_snapshots
+                    .values()
+                    .any(|other| other.real_volume.as_deref() == Some(volume.as_str()))
+                    && !store
+                        .real_workloads
+                        .values()
+                        .any(|workload| workload.volume == *volume)
+            });
+            // The region's event log carries the deletion of a manual snapshot, as it carries
+            // the taking of one.
+            store.record_event(
+                &region,
+                crate::state::events::DB_SNAPSHOT_DELETED,
+                &removed.snapshot_identifier,
+                removed.arn(),
+            );
+            (removed.to_wire(), unreferenced_real_volume)
         };
-        // "The DB snapshot must be in the available state to be deleted": one still being
-        // taken is the modelled state fault, which is what a caller that deletes straight
-        // after asking for the snapshot sees.
-        if record.status != crate::state::SNAPSHOT_STATUS_AVAILABLE {
-            return Err(DeleteDBSnapshotErrorModeled::InvalidDBSnapshotStateFault(
-                InvalidDBSnapshotStateFault {
-                    message: Some(format!(
-                        "DB snapshot {requested} is in {} state but must be {} to be deleted",
-                        record.status,
-                        crate::state::SNAPSHOT_STATUS_AVAILABLE
-                    )),
-                },
-            )
-            .into());
+
+        if let Some(volume) = unreferenced_real_volume {
+            let _ = crate::state::data_plane::real_engine::remove_snapshot_volume(&volume).await;
         }
-        // A key this store resolved and a removal under it can only disagree if the record
-        // is not where the lookup said it was, which answers the same modelled 404 as a
-        // snapshot that was never there: a disagreement is a "not found", never a panic.
-        let Some(removed) = store.db_snapshots.remove(&key) else {
-            return Err(not_found(&requested));
-        };
-        // The region's event log carries the deletion of a manual snapshot, as it carries
-        // the taking of one.
-        store.record_event(
-            &region,
-            crate::state::events::DB_SNAPSHOT_DELETED,
-            &removed.snapshot_identifier,
-            removed.arn(),
-        );
 
         // The deleted snapshot is reported as it stood, which is what RDS answers: the
         // record is already gone from the store, so a following describe cannot find it.
         Ok(DeleteDBSnapshotOutput {
-            db_snapshot: Some(removed.to_wire()),
+            db_snapshot: Some(wire),
         })
     }
 }

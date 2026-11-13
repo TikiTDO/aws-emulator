@@ -109,6 +109,50 @@ impl ManagedMasterSecret {
     }
 }
 
+impl serde::Serialize for ManagedMasterSecret {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        struct Wire<'a> {
+            secret_arn: &'a str,
+            kms_key_id: &'a str,
+            transient_status: &'a str,
+            #[serde(with = "crate::state::serde_instant_deadline")]
+            settles_at: Instant,
+        }
+        Wire {
+            secret_arn: &self.secret_arn,
+            kms_key_id: &self.kms_key_id,
+            transient_status: self.transient_status,
+            settles_at: self.settles_at,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ManagedMasterSecret {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Wire {
+            secret_arn: String,
+            kms_key_id: String,
+            transient_status: String,
+            #[serde(with = "crate::state::serde_instant_deadline")]
+            settles_at: Instant,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let transient_status = match wire.transient_status.as_str() {
+            MASTER_USER_SECRET_STATUS_ROTATING => MASTER_USER_SECRET_STATUS_ROTATING,
+            _ => MASTER_USER_SECRET_STATUS_CREATING,
+        };
+        Ok(Self {
+            secret_arn: wire.secret_arn,
+            kms_key_id: wire.kms_key_id,
+            transient_status,
+            settles_at: wire.settles_at,
+        })
+    }
+}
+
 /// The prefix every secret RDS MANAGES is named under: the service's own id and the
 /// character AWS reserves for a secret an AWS service owns.
 ///

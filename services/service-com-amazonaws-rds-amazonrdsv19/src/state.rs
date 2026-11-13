@@ -302,26 +302,30 @@ pub use master_user_credentials::*;
 pub use data_plane::{
     captured_data_bytes, capture_cluster_storage, capture_instance_storage,
     cluster_endpoint::cluster_engine_wire,
-    engine_wire, open_engine_endpoint, wire_session::SessionTarget, DbEngineEndpoint, EndpointRole,
-    EngineEndpointPlan, EngineWire, ServedEndpoint,
+    engine_wire, open_engine_endpoint, open_relayed_endpoint_at, reconcile_restored_real_engines,
+    wire_session::SessionTarget, DbEngineEndpoint, EndpointRole, EngineEndpointPlan, EngineWire,
+    ServedEndpoint,
 };
 pub use ec2_subnets::{invalid_subnets_message, subnet_zones, SubnetZones};
 pub use default_subnet_group::{default_vpc_network, DefaultSubnetGroupNetwork};
 pub use ec2_security_groups::{invalid_security_group_message, unresolved_vpc_security_groups};
 
 /// Per-service state for com-amazonaws-rds-amazonrdsv19. A handler reaches it through [`service_state`].
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ComAmazonawsRdsAmazonrdsv19State {
     /// DB instances by `(region, DBInstanceIdentifier)` — the identifier always stored
     /// lowercased, as the model documents. Ordered, so `DescribeDBInstances` pages
     /// deterministically within a region.
+    #[serde(with = "serde_regional_map")]
     pub db_instances: BTreeMap<RegionalKey, DbInstanceRecord>,
     /// DB snapshots by `(region, DBSnapshotIdentifier)`. Ordered, for the same reason.
+    #[serde(with = "serde_regional_map")]
     pub db_snapshots: BTreeMap<RegionalKey, DbSnapshotRecord>,
     /// DB CLUSTER snapshots by `(region, DBClusterSnapshotIdentifier)` — the identifier
     /// always stored lowercased, as `DBClusterSnapshotIdentifier` documents ("This value
     /// is stored as a lowercase string"). Ordered, so `DescribeDBClusterSnapshots` pages
     /// deterministically within a region.
+    #[serde(with = "serde_regional_map")]
     pub db_cluster_snapshots: BTreeMap<RegionalKey, DbClusterSnapshotRecord>,
     /// DB clusters by `(region, DBClusterIdentifier)` — the identifier always stored
     /// lowercased, as the model documents. Ordered, so `DescribeDBClusters` pages
@@ -332,10 +336,12 @@ pub struct ComAmazonawsRdsAmazonrdsv19State {
     /// REFERENCES a cluster (`CreateDBInstance$DBClusterIdentifier`,
     /// `CreateGlobalCluster$SourceDBClusterIdentifier`) is resolved against, so a
     /// reference can only name a cluster some create really stored.
+    #[serde(with = "serde_regional_map")]
     pub db_clusters: BTreeMap<RegionalKey, DbClusterRecord>,
     /// Cluster parameter groups by `(region, DBClusterParameterGroupName)` — the name
     /// always stored lowercased, as the model documents. Ordered, so
     /// `DescribeDBClusterParameterGroups` pages deterministically within a region.
+    #[serde(with = "serde_regional_map")]
     pub db_cluster_parameter_groups: BTreeMap<RegionalKey, DbClusterParameterGroupRecord>,
     /// DB (instance) parameter groups by `(region, DBParameterGroupName)` — the name always
     /// stored lowercased, as `CreateDBParameterGroupMessage$DBParameterGroupName` documents
@@ -348,6 +354,7 @@ pub struct ComAmazonawsRdsAmazonrdsv19State {
     /// [`Self::db_cluster_parameter_groups`] because AWS keeps the two namespaces apart: a
     /// cluster parameter group and a DB parameter group of the same name are different
     /// resources with different ARNs.
+    #[serde(with = "serde_regional_map")]
     pub db_parameter_groups: BTreeMap<RegionalKey, DbParameterGroupRecord>,
     /// Event notification subscriptions by `(region, SubscriptionName)`. Ordered, so
     /// `DescribeEventSubscriptions` pages deterministically within a region.
@@ -355,6 +362,7 @@ pub struct ComAmazonawsRdsAmazonrdsv19State {
     /// `CreateEventSubscription` inserts here — bounded by
     /// [`EVENT_SUBSCRIPTION_QUOTA_PER_REGION`] per region, and by [`MAX_REGIONS`] regions
     /// — and `DescribeEventSubscriptions` reports what is here.
+    #[serde(with = "serde_regional_map")]
     pub event_subscriptions: BTreeMap<RegionalKey, EventSubscriptionRecord>,
     /// Aurora global database clusters by `GlobalClusterIdentifier`.
     ///
@@ -367,12 +375,14 @@ pub struct ComAmazonawsRdsAmazonrdsv19State {
     pub global_clusters: BTreeMap<String, GlobalClusterRecord>,
     /// Option groups by `(region, OptionGroupName)`. Ordered, so
     /// `DescribeOptionGroups` pages deterministically within a region.
+    #[serde(with = "serde_regional_map")]
     pub option_groups: BTreeMap<RegionalKey, OptionGroupRecord>,
     /// DB subnet groups by `(region, DBSubnetGroupName)` — the name always stored
     /// lowercased, as `CreateDBSubnetGroup` documents. These are what a request that
     /// NAMES a DB subnet group (`CreateDBInstance$DBSubnetGroupName`) is resolved
     /// against, so a name no group was created under is a not-found rather than a
     /// silently accepted reference.
+    #[serde(with = "serde_regional_map")]
     pub db_subnet_groups: BTreeMap<RegionalKey, DbSubnetGroupRecord>,
     /// What the owner of subnets answered about the DEFAULT VPC of a region, by region:
     /// the network the account's `default` DB subnet group covers
@@ -389,6 +399,7 @@ pub struct ComAmazonawsRdsAmazonrdsv19State {
     /// [`DB_SECURITY_GROUP_QUOTA_PER_REGION`] per region and by [`MAX_REGIONS`] regions,
     /// each group carrying at most [`MAX_AUTHORIZATIONS_PER_DB_SECURITY_GROUP`] ingress
     /// rules — and `DescribeDBSecurityGroups` reports what is here.
+    #[serde(with = "serde_regional_map")]
     pub db_security_groups: BTreeMap<RegionalKey, DbSecurityGroupRecord>,
     /// Blue/green deployments by `(region, BlueGreenDeploymentIdentifier)` — the
     /// identifier being the one this service MINTED, so a caller cannot choose a key.
@@ -397,12 +408,14 @@ pub struct ComAmazonawsRdsAmazonrdsv19State {
     /// `CreateBlueGreenDeployment` inserts here, bounded by
     /// [`BLUE_GREEN_DEPLOYMENT_QUOTA_PER_REGION`] per region and by [`MAX_REGIONS`]
     /// regions.
+    #[serde(with = "serde_regional_map")]
     pub blue_green_deployments: BTreeMap<RegionalKey, BlueGreenDeploymentRecord>,
     /// Zero-ETL integrations by `(region, IntegrationName)`. Ordered, so
     /// `DescribeIntegrations` pages deterministically within a region.
     ///
     /// `CreateIntegration` inserts here, bounded by [`INTEGRATION_QUOTA_PER_REGION`] per
     /// region and by [`MAX_REGIONS`] regions.
+    #[serde(with = "serde_regional_map")]
     pub integrations: BTreeMap<RegionalKey, IntegrationRecord>,
     /// Tenant databases by `(region, <DBInstanceIdentifier>/<TenantDBName>)` — see
     /// [`tenant_database_key`] for why the second half pairs the two. Ordered, so one
@@ -412,6 +425,7 @@ pub struct ComAmazonawsRdsAmazonrdsv19State {
     /// `CreateTenantDatabase` inserts here, bounded by
     /// [`TENANT_DATABASE_QUOTA_PER_INSTANCE`] per DB instance, which the per-region
     /// instance quota in turn bounds.
+    #[serde(with = "serde_regional_map")]
     pub tenant_databases: BTreeMap<RegionalKey, TenantDatabaseRecord>,
     /// RDS proxies by `(region, DBProxyName)`. Ordered, so `DescribeDBProxies` pages
     /// deterministically within a region.
@@ -420,6 +434,7 @@ pub struct ComAmazonawsRdsAmazonrdsv19State {
     /// and by [`MAX_REGIONS`] regions — and each proxy carries at most
     /// [`DB_PROXY_TARGET_QUOTA_PER_PROXY`] target registrations, which
     /// `RegisterDBProxyTargets` adds and `DeregisterDBProxyTargets` removes.
+    #[serde(with = "serde_regional_map")]
     pub db_proxies: BTreeMap<RegionalKey, DbProxyRecord>,
     /// Snapshot and cluster export tasks by `(region, ExportTaskIdentifier)`. Ordered, so
     /// `DescribeExportTasks` pages deterministically within a region.
@@ -428,6 +443,7 @@ pub struct ComAmazonawsRdsAmazonrdsv19State {
     /// crate (its own stub issue), so nothing creates a task yet; `DescribeExportTasks`
     /// reports what is here and `CancelExportTask` moves a task that is here, both against
     /// the stored record rather than a canned answer.
+    #[serde(with = "serde_regional_map")]
     pub export_tasks: BTreeMap<RegionalKey, ExportTaskRecord>,
     /// The account's CA certificate OVERRIDE, by region: the `CertificateIdentifier`
     /// `ModifyCertificates` pinned as the certificate new DB instances are created with,
@@ -451,6 +467,7 @@ pub struct ComAmazonawsRdsAmazonrdsv19State {
     /// `CreateDBShardGroup` inserts here — bounded by
     /// [`DB_SHARD_GROUP_QUOTA_PER_REGION`] per region and by [`MAX_REGIONS`] regions — and
     /// `DescribeDBShardGroups` reports what is here.
+    #[serde(with = "serde_regional_map")]
     pub db_shard_groups: BTreeMap<RegionalKey, DbShardGroupRecord>,
     /// Custom DB engine versions by `(region, custom_db_engine_version_key)` — the CEVs
     /// the account itself minted, as opposed to the engine versions this service
@@ -460,6 +477,7 @@ pub struct ComAmazonawsRdsAmazonrdsv19State {
     /// `CreateCustomDBEngineVersion` inserts here, bounded by
     /// [`CUSTOM_DB_ENGINE_VERSION_QUOTA_PER_REGION`] per region and by [`MAX_REGIONS`]
     /// regions.
+    #[serde(with = "serde_regional_map")]
     pub custom_db_engine_versions: BTreeMap<RegionalKey, CustomDbEngineVersionRecord>,
     /// The lifecycle events this service has recorded, by region — what `DescribeEvents`
     /// reports.
@@ -483,6 +501,7 @@ pub struct ComAmazonawsRdsAmazonrdsv19State {
     /// record only for a resource this store holds, so the map is bounded by the
     /// per-region instance and cluster quotas times [`CONFIGURATION_CHECKS`]`.len()`, over
     /// at most [`MAX_REGIONS`] regions.
+    #[serde(with = "serde_regional_map")]
     pub db_recommendations: BTreeMap<RegionalKey, DbRecommendationRecord>,
     /// The live engine endpoint of each DB instance that has one, by the same
     /// `(region, DBInstanceIdentifier)` key as [`Self::db_instances`].
@@ -493,6 +512,7 @@ pub struct ComAmazonawsRdsAmazonrdsv19State {
     /// exists only for an instance this store holds — `CreateDBInstance` inserts one for
     /// every engine whose wire this emulator speaks, and
     /// [`Self::settle_due_transitions`] drops it with the instance.
+    #[serde(skip)]
     pub db_engine_endpoints: BTreeMap<RegionalKey, DbEngineEndpoint>,
     /// The live engine endpoint of each DB CLUSTER that has one, by the same
     /// `(region, DBClusterIdentifier)` key as [`Self::db_clusters`].
@@ -504,10 +524,12 @@ pub struct ComAmazonawsRdsAmazonrdsv19State {
     /// cluster whose engine speaks a wire this emulator serves
     /// ([`data_plane::cluster_endpoint`]), and [`Self::settle_due_transitions`] drops it
     /// with the cluster.
+    #[serde(skip)]
     pub db_cluster_engine_endpoints: BTreeMap<RegionalKey, DbEngineEndpoint>,
-    /// Host-backed real database workloads (`EMULATOR_RDS_REAL_ENGINE`) keyed by
-    /// `(region, DBInstanceIdentifier)` so `DeleteDBInstance` releases the container and
-    /// volume and `CreateDBSnapshot` refuses unsupported live-container snapshots cleanly.
+    /// Host-backed real database workloads keyed by `(region, DBInstanceIdentifier)` so
+    /// `DeleteDBInstance`, `CreateDBSnapshot`, and restart reconciliation manage the
+    /// container and its persistent named volume.
+    #[serde(with = "serde_regional_map", default)]
     pub real_workloads: BTreeMap<RegionalKey, data_plane::real_engine::RealWorkload>,
 }
 
@@ -562,6 +584,7 @@ impl ComAmazonawsRdsAmazonrdsv19State {
             // The instance is gone from the service, so its engine endpoint goes with
             // it: dropping the record closes the port and severs every session on it.
             self.db_engine_endpoints.remove(&key);
+            self.real_workloads.remove(&key);
         }
         for (key, snapshot) in self
             .db_snapshots
@@ -1646,7 +1669,7 @@ fn range_in<'a, T>(map: &'a BTreeMap<RegionalKey, T>, region: &str) -> Vec<&'a T
 }
 
 /// What the clock owes a record once its due instant passes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum PendingChange {
     /// The resource reaches this status (`creating` -> `available`, say).
     Status(String),
@@ -1656,10 +1679,83 @@ pub enum PendingChange {
 }
 
 /// A change this service owes: what becomes of the resource, and when that is due.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PendingStatus {
     pub change: PendingChange,
+    #[serde(with = "serde_instant_deadline")]
     pub due_at: Instant,
+}
+
+impl ::service_common::persist::Persisted for ComAmazonawsRdsAmazonrdsv19State {
+    const SERVICE: &'static str = "rds";
+    const VERSION: u32 = 1;
+
+    fn snapshot(&self) -> ::serde_json::Value {
+        ::serde_json::to_value(self).expect("RDS state serializes to JSON")
+    }
+
+    fn restore(version: u32, snapshot: ::serde_json::Value) -> Result<Self, String> {
+        match version {
+            1 => ::serde_json::from_value(snapshot).map_err(|error| error.to_string()),
+            other => Err(format!("unsupported RDS snapshot version {other}")),
+        }
+    }
+}
+
+/// Serde for `BTreeMap<RegionalKey, V>`: JSON object keys must be strings, so tuple-keyed
+/// regional maps serialize as an ordered sequence of `[(region, key), value]` entries.
+pub(crate) mod serde_regional_map {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::RegionalKey;
+
+    pub fn serialize<S, V>(
+        map: &BTreeMap<RegionalKey, V>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        V: Serialize,
+    {
+        let entries: Vec<(&RegionalKey, &V)> = map.iter().collect();
+        entries.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D, V>(deserializer: D) -> Result<BTreeMap<RegionalKey, V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        V: Deserialize<'de>,
+    {
+        let entries = Vec::<(RegionalKey, V)>::deserialize(deserializer)?;
+        Ok(entries.into_iter().collect())
+    }
+}
+
+/// Serde for monotonic `Instant` transition deadlines: stores the remaining milliseconds at
+/// snapshot time (`0` once already due) and restores relative to `Instant::now()`.
+pub(crate) mod serde_instant_deadline {
+    use std::time::{Duration, Instant};
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(deadline: &Instant, serializer: S) -> Result<S::Ok, S::Error> {
+        let remaining_ms = u64::try_from(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX);
+        remaining_ms.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Instant, D::Error> {
+        let remaining_ms = u64::deserialize(deserializer)?;
+        Ok(Instant::now()
+            .checked_add(Duration::from_millis(remaining_ms))
+            .unwrap_or_else(Instant::now))
+    }
 }
 
 impl PendingStatus {
@@ -1976,6 +2072,7 @@ pub fn db_subnet_group_in_use_message(name: &str, holder_identifier: &str) -> St
 /// real service refuses rather than accepts. The ARN is computed from the stored region
 /// and name, like the other records', so it cannot drift from the record.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DbSubnetGroupRecord {
     pub name: String,
     /// The region the group was created in; the scope of its ARN.
@@ -2224,6 +2321,7 @@ pub const VPC_DB_SECURITY_GROUP_NOT_MODIFIABLE: &str =
 /// it. The ARN is computed from the stored region and name, like the other records', so it
 /// cannot drift from the record.
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DbSecurityGroupRecord {
     /// `DBSecurityGroupName`, folded to lowercase — the record's key within its region.
     pub name: String,
@@ -2325,6 +2423,7 @@ pub fn global_cluster_not_available_message(arn: &str, status: &str) -> String {
 /// Account-scoped rather than regional — see
 /// [`ComAmazonawsRdsAmazonrdsv19State::global_clusters`].
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct GlobalClusterRecord {
     /// The caller's `GlobalClusterIdentifier`, and this record's key.
     pub identifier: String,

@@ -134,6 +134,7 @@ pub fn green_identifier(source_identifier: &str, mint: u64, max_len: usize) -> S
 
 /// A persisted blue/green deployment.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct BlueGreenDeploymentRecord {
     /// The minted `BlueGreenDeploymentIdentifier`, which is half this record's key.
     pub identifier: String,
@@ -153,8 +154,10 @@ pub struct BlueGreenDeploymentRecord {
     /// The status change the clock owes this record, if any.
     pub pending_status: Option<PendingStatus>,
     /// `CreateTime`.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub create_time: ::aws_smithy_types::DateTime,
     /// `DeleteTime`, once a delete has been accepted.
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub delete_time: Option<::aws_smithy_types::DateTime>,
     /// `TagList`.
     pub tags: Vec<Tag>,

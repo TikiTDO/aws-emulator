@@ -250,6 +250,29 @@ impl HostRuntime {
         }
     }
 
+    /// Wait until container `id` stops and report its exit code.
+    pub async fn wait(&self, id: &str) -> Result<i64, RuntimeError> {
+        let (_, body) = self
+            .call(
+                "POST",
+                &format!("/containers/{id}/wait"),
+                None,
+                CALL_TIMEOUT,
+            )
+            .await?;
+        body["StatusCode"].as_i64().ok_or_else(|| {
+            unreachable("the runtime waited on a container and named no exit code")
+        })
+    }
+
+    /// Verify that named volume `name` exists and belongs to this namespace.
+    pub async fn inspect_volume(&self, name: &str) -> Result<(), RuntimeError> {
+        let (_, volume) = self
+            .call("GET", &format!("/volumes/{name}"), None, CALL_TIMEOUT)
+            .await?;
+        check_namespace(&volume, name, &self.namespace)
+    }
+
     /// Remove named volume `name`. A volume that does not exist is already removed; one that
     /// belongs to another namespace is refused.
     pub async fn remove_volume(&self, name: &str) -> Result<(), RuntimeError> {
@@ -348,7 +371,7 @@ impl HostRuntime {
     /// Make sure named volume `name` exists and is this namespace's. Docker would otherwise
     /// create it unlabelled on first mount, and an unlabelled volume cannot be told apart from
     /// another emulator's.
-    async fn ensure_volume(&self, name: &str) -> Result<(), RuntimeError> {
+    pub async fn ensure_volume(&self, name: &str) -> Result<(), RuntimeError> {
         let body = json!({
             "Name": name,
             "Labels": { MANAGED_LABEL: "true", NAMESPACE_LABEL: self.namespace },

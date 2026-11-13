@@ -51,6 +51,7 @@ pub const MYSQL_SYSTEM_DATABASES: [&str; 4] =
 /// for `mysql_native_password` and the only form the challenge-response handshake can be
 /// checked against.
 #[derive(Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MasterPasswordHash {
     /// `SHA256(username \0 password)`, which a password presented in the clear over the
     /// PostgreSQL wire is checked against. Salted with the user name so the same password

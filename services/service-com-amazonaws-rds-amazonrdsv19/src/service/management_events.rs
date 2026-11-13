@@ -106,6 +106,14 @@ impl<Eng: Send + Sync + 'static> AuditedService for RdsAudit<Eng> {
         call: ServedApiCall,
         answered_as: &str,
     ) -> Option<::service_common::api_call_events::DeliveredApiCall> {
+        if !call.read_only && call.error_code.is_none() {
+            if let Some(state) = crate::state::service_state(&*self.engine) {
+                let store = state.lock();
+                if let Err(error) = ::service_common::persist::save(&*store) {
+                    ::tracing::warn!(%error, "could not persist RDS state snapshot");
+                }
+            }
+        }
         let Some(log) = self.log() else {
             // Not silent: an unrecorded call leaves no trace in the log by definition, so
             // it leaves one here instead.

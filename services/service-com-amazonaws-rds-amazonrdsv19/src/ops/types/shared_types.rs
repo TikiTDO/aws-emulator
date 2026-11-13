@@ -70,6 +70,7 @@ pub struct SubscriptionNotFoundFault {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.rds#Tag")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Tag {
     pub key: Option<String>,
     pub value: Option<String>,
@@ -179,6 +180,7 @@ pub struct DBSecurityGroup {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.rds#EC2SecurityGroup")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct EC2SecurityGroup {
     pub status: Option<String>,
     pub ec2_security_group_name: Option<String>,
@@ -188,6 +190,7 @@ pub struct EC2SecurityGroup {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.rds#IPRange")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IPRange {
     pub status: Option<String>,
     pub cidrip: Option<String>,
@@ -898,6 +901,7 @@ pub struct DBClusterMember {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.rds#DBClusterRole")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DBClusterRole {
     pub role_arn: Option<String>,
     pub status: Option<String>,
@@ -936,6 +940,7 @@ pub struct CertificateDetails {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.rds#ScalingConfigurationInfo")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ScalingConfigurationInfo {
     pub min_capacity: Option<i32>,
     pub max_capacity: Option<i32>,
@@ -959,6 +964,7 @@ pub struct DomainMembership {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.rds#ServerlessV2ScalingConfigurationInfo")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ServerlessV2ScalingConfigurationInfo {
     pub min_capacity: Option<f64>,
     pub max_capacity: Option<f64>,
@@ -1273,6 +1279,7 @@ pub struct DBInstanceStatusInfo {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.rds#DBInstanceRole")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DBInstanceRole {
     pub role_arn: Option<String>,
     pub feature_name: Option<String>,
@@ -1371,6 +1378,7 @@ pub struct DBProxy {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.rds#UserAuthConfigInfo")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct UserAuthConfigInfo {
     pub description: Option<String>,
     pub user_name: Option<String>,
@@ -1803,6 +1811,7 @@ pub struct DBProxyTargetGroup {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.rds#ConnectionPoolConfigurationInfo")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ConnectionPoolConfigurationInfo {
     pub max_connections_percent: Option<i32>,
     pub max_idle_connections_percent: Option<i32>,

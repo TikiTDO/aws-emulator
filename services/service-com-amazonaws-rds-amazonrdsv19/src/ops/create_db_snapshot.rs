@@ -180,27 +180,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::state::capture_instance_storage(&state, &(region.clone(), source_identifier.clone()))
                 .await
                 .map_err(CreateDBSnapshotError::internal_failure)?;
-        let mut store = state.lock();
-        store.settle_due_transitions(&region);
-
-        // RDS is regional: only the region the request was signed for is in scope.
+        let source_key = (region.clone(), source_identifier.clone());
         let snapshot_key = (region.clone(), snapshot_identifier.clone());
-        if store.db_snapshots.contains_key(&snapshot_key) {
-            return Err(CreateDBSnapshotErrorModeled::DBSnapshotAlreadyExistsFault(
-                DBSnapshotAlreadyExistsFault {
-                    message: Some(format!(
-                        "DB snapshot already exists: {snapshot_identifier}"
-                    )),
-                },
-            )
-            .into());
-        }
-        // The source instance is resolved BEFORE the quota, so a snapshot of an
-        // instance that does not exist is a 404 rather than a quota refusal.
-        let source = store
-            .db_instances
-            .get(&(region.clone(), source_identifier.clone()))
-            .ok_or_else(|| {
+        let tags = input.tags.unwrap_or_default();
+
+        let validate = |store: &crate::state::ComAmazonawsRdsAmazonrdsv19State|
+         -> Result<(), CreateDBSnapshotError> {
+            // RDS is regional: only the region the request was signed for is in scope.
+            if store.db_snapshots.contains_key(&snapshot_key) {
+                return Err(CreateDBSnapshotErrorModeled::DBSnapshotAlreadyExistsFault(
+                    DBSnapshotAlreadyExistsFault {
+                        message: Some(format!(
+                            "DB snapshot already exists: {snapshot_identifier}"
+                        )),
+                    },
+                )
+                .into());
+            }
+            // The source instance is resolved BEFORE the quota, so a snapshot of an
+            // instance that does not exist is a 404 rather than a quota refusal.
+            let source = store.db_instances.get(&source_key).ok_or_else(|| {
                 CreateDBSnapshotError::from(CreateDBSnapshotErrorModeled::DBInstanceNotFoundFault(
                     DBInstanceNotFoundFault {
                         // The identifier the REQUEST carried, not the folded form the
@@ -213,75 +212,116 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     },
                 ))
             })?;
-        // A snapshot is a copy of the instance's storage, so the instance has to be
-        // up: RDS refuses while it is still `creating` or being modified.
-        if source.status != "available" {
-            return Err(CreateDBSnapshotErrorModeled::InvalidDBInstanceStateFault(
-                InvalidDBInstanceStateFault {
-                    message: Some(crate::state::create_db_snapshot_instance_state_message(
-                        &source_identifier,
-                    )),
-                },
-            )
-            .into());
+            // A snapshot is a copy of the instance's storage, so the instance has to be
+            // up: RDS refuses while it is still `creating` or being modified.
+            if source.status != "available" {
+                return Err(CreateDBSnapshotErrorModeled::InvalidDBInstanceStateFault(
+                    InvalidDBInstanceStateFault {
+                        message: Some(crate::state::create_db_snapshot_instance_state_message(
+                            &source_identifier,
+                        )),
+                    },
+                )
+                .into());
+            }
+            // The region's manual DB snapshot quota, and the number of regions this store
+            // keeps records for at all: the store cannot be grown without bound, and the
+            // modelled fault says exactly this.
+            if store.snapshots_in(&region).len() >= crate::state::DB_SNAPSHOT_QUOTA_PER_REGION
+                || !store.has_room_for_region(&region)
+            {
+                return Err(CreateDBSnapshotErrorModeled::SnapshotQuotaExceededFault(
+                    SnapshotQuotaExceededFault {
+                        message: Some(format!(
+                            "the request would exceed the allowed number of manual DB snapshots \
+                             ({} per region, in at most {} regions)",
+                            crate::state::DB_SNAPSHOT_QUOTA_PER_REGION,
+                            crate::state::MAX_REGIONS
+                        )),
+                    },
+                )
+                .into());
+            }
+            Ok(())
+        };
+
+        let real_source_volume = {
+            let mut store = state.lock();
+            store.settle_due_transitions(&region);
+            validate(&store)?;
+            if let Some(workload) = store.real_workloads.get(&source_key) {
+                Some(workload.volume.clone())
+            } else {
+                // Every setting the snapshot reports is COPIED from the source record, so a
+                // later change to the instance does not rewrite history, beside the copy of
+                // the instance's storage taken above.
+                let source = &store.db_instances[&source_key];
+                let snapshot = crate::state::DbSnapshotRecord::from_instance(
+                    source,
+                    &snapshot_identifier,
+                    tags,
+                    storage,
+                );
+                let db_snapshot = snapshot.to_wire();
+                let snapshot_arn = snapshot.arn();
+                let recorded_identifier = snapshot.snapshot_identifier.clone();
+                store.db_snapshots.insert(snapshot_key, snapshot);
+                store.record_event(
+                    &region,
+                    crate::state::events::DB_SNAPSHOT_CREATING,
+                    &recorded_identifier,
+                    snapshot_arn,
+                );
+                return Ok(CreateDBSnapshotOutput {
+                    db_snapshot: Some(db_snapshot),
+                });
+            }
+        };
+
+        let Some(from_volume) = real_source_volume else {
+            unreachable!("non-real snapshot returned under initial lock");
+        };
+        let to_volume =
+            crate::state::data_plane::real_engine::snapshot_volume_name(&snapshot_identifier);
+        crate::state::data_plane::real_engine::copy_volume(&from_volume, &to_volume)
+            .await
+            .map_err(CreateDBSnapshotError::internal_failure)?;
+
+        let outcome = {
+            let mut store = state.lock();
+            store.settle_due_transitions(&region);
+            validate(&store).map(|()| {
+                let source = &store.db_instances[&source_key];
+                let mut snapshot = crate::state::DbSnapshotRecord::from_instance(
+                    source,
+                    &snapshot_identifier,
+                    tags,
+                    storage,
+                );
+                snapshot.real_volume = Some(to_volume.clone());
+                let db_snapshot = snapshot.to_wire();
+                let snapshot_arn = snapshot.arn();
+                let recorded_identifier = snapshot.snapshot_identifier.clone();
+                store.db_snapshots.insert(snapshot_key, snapshot);
+                store.record_event(
+                    &region,
+                    crate::state::events::DB_SNAPSHOT_CREATING,
+                    &recorded_identifier,
+                    snapshot_arn,
+                );
+                db_snapshot
+            })
+        };
+
+        match outcome {
+            Ok(db_snapshot) => Ok(CreateDBSnapshotOutput {
+                db_snapshot: Some(db_snapshot),
+            }),
+            Err(error) => {
+                let _ =
+                    crate::state::data_plane::real_engine::remove_snapshot_volume(&to_volume).await;
+                Err(error)
+            }
         }
-        if store
-            .real_workloads
-            .contains_key(&(region.clone(), source_identifier.clone()))
-        {
-            return Err(CreateDBSnapshotErrorModeled::InvalidDBInstanceStateFault(
-                InvalidDBInstanceStateFault {
-                    message: Some(format!(
-                        "DB snapshots are not supported for host-backed DB instance {source_identifier}"
-                    )),
-                },
-            )
-            .into());
-        }
-
-        // Every setting the snapshot reports is COPIED from the source record, so a
-        // later change to the instance does not rewrite history, beside the copy of the
-        // instance's storage taken above.
-        let snapshot = crate::state::DbSnapshotRecord::from_instance(
-            source,
-            &snapshot_identifier,
-            input.tags.unwrap_or_default(),
-            storage,
-        );
-
-        // The region's manual DB snapshot quota, and the number of regions this store
-        // keeps records for at all: the store cannot be grown without bound, and the
-        // modelled fault says exactly this.
-        if store.snapshots_in(&region).len() >= crate::state::DB_SNAPSHOT_QUOTA_PER_REGION
-            || !store.has_room_for_region(&region)
-        {
-            return Err(CreateDBSnapshotErrorModeled::SnapshotQuotaExceededFault(
-                SnapshotQuotaExceededFault {
-                    message: Some(format!(
-                        "the request would exceed the allowed number of manual DB snapshots \
-                         ({} per region, in at most {} regions)",
-                        crate::state::DB_SNAPSHOT_QUOTA_PER_REGION,
-                        crate::state::MAX_REGIONS
-                    )),
-                },
-            )
-            .into());
-        }
-
-        let db_snapshot = snapshot.to_wire();
-        let snapshot_arn = snapshot.arn();
-        let snapshot_identifier = snapshot.snapshot_identifier.clone();
-        store.db_snapshots.insert(snapshot_key, snapshot);
-        // The snapshot is being taken, so the region's event log records it.
-        store.record_event(
-            &region,
-            crate::state::events::DB_SNAPSHOT_CREATING,
-            &snapshot_identifier,
-            snapshot_arn,
-        );
-
-        Ok(CreateDBSnapshotOutput {
-            db_snapshot: Some(db_snapshot),
-        })
     }
 }

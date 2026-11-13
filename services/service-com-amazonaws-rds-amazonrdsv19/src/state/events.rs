@@ -177,6 +177,7 @@ fn categories_are_published(rows: &[LifecycleEvent]) -> bool {
 /// One recorded event: which resource changed, what the change was, and when this service
 /// made it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct EventRecord {
     /// The position of this record in its region's log, which is also the `Marker` a page
     /// boundary at this record resumes from.
@@ -184,15 +185,16 @@ pub struct EventRecord {
     /// `Event$SourceIdentifier`: the identifier of the resource the event is about.
     pub source_identifier: String,
     /// `Event$SourceType`.
-    pub source_type: &'static str,
+    pub source_type: String,
     /// The one `Event$EventCategories` entry this record carries.
-    pub category: &'static str,
+    pub category: String,
     /// `Event$Message`.
     pub message: String,
     /// `Event$SourceArn`: the ARN of the resource the event is about, as the resource's
     /// own record computes it.
     pub source_arn: String,
     /// `Event$Date`: when this service recorded the change.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub date: ::aws_smithy_types::DateTime,
 }
 
@@ -225,6 +227,7 @@ impl EventRecord {
 /// One region's event log: the lifecycle records this service has written there, oldest
 /// first — the order `DescribeEvents` reports and pages them in.
 #[derive(Debug, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct EventLog {
     /// The records, oldest first, at most [`MAX_EVENTS_PER_REGION`] of them.
     pub entries: Vec<EventRecord>,
@@ -241,8 +244,8 @@ impl EventLog {
         self.entries.push(EventRecord {
             sequence: self.next_sequence,
             source_identifier: source_identifier.to_string(),
-            source_type: event.source_type,
-            category: event.category,
+            source_type: event.source_type.to_string(),
+            category: event.category.to_string(),
             message: event.message.to_string(),
             source_arn,
             date: super::now_as_wire_timestamp(),
