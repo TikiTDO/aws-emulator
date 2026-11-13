@@ -59,10 +59,13 @@
 //!   here, so the framework answers it as the unroutable request it is.
 //! - `override_refusal` is taken for a different reason: a boundary refusal of a
 //!   `@pattern`-constrained member quotes the expression the service publishes rather than
-//!   the anchored spelling the model wraps it in. Routing, status, codes, the envelope, the
-//!   member paths and every other requirement stay with the framework.
+//!   the anchored spelling the model wraps it in, and a numeric value outside its member's
+//!   declared range is stated with the member and the bound alone. Routing, status, codes,
+//!   the envelope, the member paths and every other requirement stay with the framework.
+//!   Both choices live in [`validation`].
 
 pub mod response_media_type;
+pub mod validation;
 
 use response_media_type::{
     fronted_by_the_dispatcher, produced_by_the_dispatcher, DISPATCHER_RESPONSE_MEDIA_TYPE,
@@ -143,18 +146,12 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
     fn override_refusal(&self, refusal: &Refusal) -> Option<Refused> {
         // The centralized walk calls this on a framework-level refusal (an absent
         // required member, or a value outside a declared bound) to let this
-        // service state it its own way. This service states it as the
-        // `ValidationException` envelope the framework already renders, except that a
-        // `@pattern` requirement is quoted as the expression a value has to satisfy,
-        // WITHOUT the `^` / `$` the model wraps it in to demand a whole-value match: the
-        // anchoring is how Smithy spells that match, not part of the expression the
-        // service publishes, so a client that lifts the expression out of the message and
-        // re-validates locally gets the one it advertises. The CHECK is unchanged — it
-        // still runs the model's pattern as written — and so are the code, the envelope,
-        // the member paths and every other requirement.
-        //
-        // That wording is shared by every service on a JSON protocol (this one answers
-        // awsJson), so it lives in `service-common` rather than being spelled here.
-        ::service_common::validation_message::aws_validation_refusal(refusal)
+        // service state it its own way. What this service states, and all it states, is
+        // in [`validation`]: the `ValidationException` envelope the framework already
+        // renders, with a `@pattern` requirement quoted as the expression a value has to
+        // satisfy and a numeric range stated without the number the request carried. The
+        // code, the envelope, the member paths and every other requirement stay the
+        // framework's, and the sentences stay in `service-common`.
+        validation::refused(refusal)
     }
 }

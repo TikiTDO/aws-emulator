@@ -51,6 +51,8 @@ mod listing_pagination;
 mod managed_dashboard_catalog;
 #[path = "all/name_pattern_enforcement.rs"]
 mod name_pattern_enforcement;
+#[path = "all/range_refusal_wording.rs"]
+mod range_refusal_wording;
 #[path = "all/reserved_tag_keys.rs"]
 mod reserved_tag_keys;
 #[path = "all/resource_not_found.rs"]
