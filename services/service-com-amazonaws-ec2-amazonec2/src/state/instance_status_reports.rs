@@ -38,6 +38,7 @@ use super::{ComAmazonawsEc2Amazonec2State, MAX_STORED_RECORDS_PER_STORE};
 /// memory and nowhere else: no operation puts it in a response, nothing writes it to disk,
 /// and no refusal of this operation quotes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceStatusReport {
     /// "The status of all instances listed" (`ReportInstanceStatusRequest$Status`), one of
     /// the modelled `ReportStatusType` catalog.

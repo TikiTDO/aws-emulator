@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! Resolve one payload/identity/persistence scope before serving any requests.
-//! No filesystem is touched by parsing. Durable namespace admission is owned by B5;
-//! until that integration supplies it, an explicit durable selection refuses to boot.
+//! No filesystem is touched by parsing. Durable namespace admission is owned by B5
+//! and occurs before opening the store. Snapshots receive this same frozen selection.
 
 use engine::InMemoryEngine;
 use service_common::host_runtime::{DEFAULT_NAMESPACE, NAMESPACE_VARIABLE};
 use service_common::payload_store::{
     PayloadStore, PayloadStoreBinding, StoreConfig, StoreError, StoreLimits,
 };
-use service_common::persist::STATE_DIR_VARIABLE;
+use service_common::persist::{PersistError, STATE_DIR_VARIABLE, StateDir};
 use std::ffi::OsString;
 use std::path::{Component, PathBuf};
 
@@ -21,20 +21,22 @@ const STORE_GENERATION: &str = "payload-v1";
 #[derive(Debug)]
 pub(crate) enum BootError {
     InvalidInput(&'static str),
-    NamespaceAdmissionPending,
     AlreadyInstalled,
     Store(StoreError),
+    State(PersistError),
+    Identity(emulator_server::boot_identity::IdentityError),
+    Network(emulator_server::ServeError),
 }
 
 impl std::fmt::Display for BootError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidInput(name) => write!(f, "invalid boot setting {name}"),
-            Self::NamespaceAdmissionPending => f.write_str(
-                "durable namespace admission is not integrated; refusing without opening a store",
-            ),
             Self::AlreadyInstalled => f.write_str("payload store binding already installed"),
             Self::Store(error) => write!(f, "{error}"),
+            Self::State(error) => write!(f, "state directory: {error}"),
+            Self::Identity(error) => write!(f, "{error}"),
+            Self::Network(error) => write!(f, "{error}"),
         }
     }
 }
@@ -47,10 +49,16 @@ impl From<StoreError> for BootError {
     }
 }
 
+impl From<PersistError> for BootError {
+    fn from(error: PersistError) -> Self {
+        Self::State(error)
+    }
+}
+
 pub(crate) struct BootProfile {
     // These exact resolved values will also feed B5 and boot_identity::prepare;
     // neither consumer may independently reinterpret the environment.
-    pub(crate) state_dir: Option<PathBuf>,
+    pub(crate) state_dir: Option<StateDir>,
     pub(crate) namespace: String,
     store_config: StoreConfig,
 }
@@ -58,6 +66,26 @@ pub(crate) struct BootProfile {
 impl BootProfile {
     pub(crate) fn from_environment() -> Result<Self, BootError> {
         Self::from_lookup(|name| std::env::var_os(name))
+    }
+
+    pub(crate) fn prepare_identity(
+        &self,
+    ) -> Result<emulator_server::boot_identity::IdentityInfo, BootError> {
+        use emulator_server::boot_identity::{IdentityConfig, RetainedIdentityAction};
+        let network = *emulator_server::runtime_profile::network().map_err(BootError::Network)?;
+        let config = match &self.state_dir {
+            Some(selected) => {
+                selected.admit()?;
+                IdentityConfig::Retained {
+                    state_dir: selected.root().to_path_buf(),
+                    namespace: selected.namespace().to_string(),
+                    network,
+                    action: RetainedIdentityAction::KeepOrCreate,
+                }
+            }
+            None => IdentityConfig::Ephemeral,
+        };
+        emulator_server::boot_identity::prepare(config).map_err(BootError::Identity)
     }
 
     fn from_lookup(
@@ -124,12 +152,19 @@ impl BootProfile {
             max_transaction_bytes: 16 * MIB as usize,
             max_inflight_operations: 16,
             max_read_leases: 64,
+            max_data_files: 100000,
         };
+        let state_dir = state_dir
+            .map(|root| StateDir::new(root, namespace.clone()))
+            .transpose()?;
         // Both constructors validate the complete quota relation without opening any files.
         let store_config = match &state_dir {
-            Some(root) => {
-                StoreConfig::volume(root.join(&namespace), &namespace, STORE_GENERATION, limits)?
-            }
+            Some(selected) => StoreConfig::volume(
+                selected.dir(),
+                selected.namespace(),
+                STORE_GENERATION,
+                limits,
+            )?,
             None => StoreConfig::memory(&namespace, STORE_GENERATION, limits)?,
         };
         Ok(Self {
@@ -143,14 +178,12 @@ impl BootProfile {
         &self,
         engine: &InMemoryEngine,
     ) -> Result<(), BootError> {
-        if self.state_dir.is_some() {
-            // Replace this named integration refusal only with B5's admitted namespace API.
-            // A path existing on disk is not ownership/adoption permission.
-            return Err(BootError::NamespaceAdmissionPending);
-        }
         let binding = engine.state::<PayloadStoreBinding>();
         if binding.lock().store.is_some() {
             return Err(BootError::AlreadyInstalled);
+        }
+        if let Some(selected) = &self.state_dir {
+            selected.admit()?;
         }
         let store = PayloadStore::open_store(self.store_config.clone()).await?;
         let mut binding = binding.lock();
@@ -217,7 +250,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(
-            selected.state_dir.as_deref(),
+            selected.state_dir.as_ref().map(StateDir::root),
             Some(std::path::Path::new("/selected-state"))
         );
         assert_eq!(selected.namespace, "test.v1_a-2");
@@ -245,13 +278,109 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_selection_never_falls_back_before_admission_join() {
+    async fn durable_selection_admits_one_scope_and_reopens_checkpoint() {
+        use service_common::payload_store::{Durability, OwnerKey, ProtocolMetadata, StageSpec};
+        let fixture = Fixture::new();
+        let profile = profile(&[
+            (STATE_DIR_VARIABLE, fixture.0.to_str().unwrap()),
+            (NAMESPACE_VARIABLE, "test"),
+        ])
+        .unwrap();
+        let selected = profile.state_dir.as_ref().unwrap();
+        assert_eq!(selected.namespace(), profile.namespace);
+        let owner = OwnerKey::new("test", "upload", "v1").unwrap();
+        let upload;
+        {
+            let engine = InMemoryEngine::new();
+            profile.install_payload_store(&engine).await.unwrap();
+            let store = engine
+                .state::<PayloadStoreBinding>()
+                .lock()
+                .store
+                .clone()
+                .unwrap();
+            assert_eq!(store.durability(), Durability::Durable);
+            assert!(selected.dir().is_dir());
+            let mut stage = store
+                .begin(StageSpec {
+                    owner: owner.clone(),
+                    upload_key: None,
+                    expected_length: Some(4),
+                    max_bytes: 4,
+                })
+                .await
+                .unwrap();
+            stage
+                .append(0, bytes::Bytes::from_static(b"data"))
+                .await
+                .unwrap();
+            stage
+                .checkpoint(
+                    ProtocolMetadata::new("fixture", 1, bytes::Bytes::from_static(b"{}")).unwrap(),
+                )
+                .await
+                .unwrap();
+            upload = stage.id().as_str().to_string();
+        }
         let engine = InMemoryEngine::new();
-        let profile = profile(&[(STATE_DIR_VARIABLE, "/not-opened")]).unwrap();
-        assert!(matches!(
-            profile.install_payload_store(&engine).await,
-            Err(BootError::NamespaceAdmissionPending)
-        ));
+        profile.install_payload_store(&engine).await.unwrap();
+        let store = engine
+            .state::<PayloadStoreBinding>()
+            .lock()
+            .store
+            .clone()
+            .unwrap();
+        assert!(
+            store
+                .lookup_upload(&owner, &upload)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(store.inventory().await.unwrap().stages, 1);
+    }
+
+    #[tokio::test]
+    async fn refused_namespace_does_not_install_a_memory_fallback() {
+        let fixture = Fixture::new();
+        std::fs::write(fixture.0.join("test"), b"not a directory").unwrap();
+        let profile = profile(&[
+            (STATE_DIR_VARIABLE, fixture.0.to_str().unwrap()),
+            (NAMESPACE_VARIABLE, "test"),
+        ])
+        .unwrap();
+        let engine = InMemoryEngine::new();
+        assert!(profile.install_payload_store(&engine).await.is_err());
         assert!(engine.state::<PayloadStoreBinding>().lock().store.is_none());
+        assert_eq!(
+            std::fs::read(fixture.0.join("test")).unwrap(),
+            b"not a directory"
+        );
+    }
+
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "emulator-boot-test-{}-{stamp}-{id}",
+                std::process::id()
+            ));
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            builder.create(&root).unwrap();
+            Self(root)
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 }

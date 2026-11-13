@@ -28,20 +28,25 @@ pub struct DescribeReservedInstancesModificationsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ReservedInstancesModification")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ReservedInstancesModification {
     pub client_token: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_date: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub effective_date: Option<::aws_smithy_types::DateTime>,
     pub modification_results: Option<Vec<ReservedInstancesModificationResult>>,
     pub reserved_instances_ids: Option<Vec<ReservedInstancesId>>,
     pub reserved_instances_modification_id: Option<String>,
     pub status: Option<String>,
     pub status_message: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub update_date: Option<::aws_smithy_types::DateTime>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ReservedInstancesModificationResult")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ReservedInstancesModificationResult {
     pub reserved_instances_id: Option<String>,
     pub target_configuration: Option<ReservedInstancesConfiguration>,
@@ -49,6 +54,7 @@ pub struct ReservedInstancesModificationResult {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ReservedInstancesId")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ReservedInstancesId {
     pub reserved_instances_id: Option<String>,
 }

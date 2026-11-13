@@ -142,6 +142,7 @@ pub const INSTANCE_BOOT_MODE_UEFI: &str = "uefi";
 /// none leaves the instance following its SUBNET's own on-launch options
 /// (`Subnet$PrivateDnsNameOptionsOnLaunch`) rather than a second copy of them.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceDetail {
     /// `InstanceMetadataOptionsResponse$HttpTokens`.
     pub http_tokens: &'static str,
@@ -159,6 +160,7 @@ pub struct InstanceDetail {
     /// (`InstanceMetadataOptionsResponse$State`), so a caller that reads straight after the
     /// call that set them still sees that transient state. The due instant is stored;
     /// nothing sleeps for it.
+    #[serde(with = "::service_common::persist::instant")]
     pub metadata_applied_at: Instant,
     /// `EnclaveOptions$Enabled`.
     pub enclave_enabled: bool,

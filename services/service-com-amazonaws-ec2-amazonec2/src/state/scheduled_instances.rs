@@ -166,6 +166,7 @@ const SCHEDULED_INSTANCE_PURCHASE_TOKEN_VERSION: &str = "ec2-sipt-1";
 /// window, so storing them would let one zone's record disagree with another's about
 /// arithmetic.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ScheduledInstanceCapacityRecord {
     /// The Availability Zone the capacity sits in, as
     /// [`availability_zones_in_region`] names one (`us-west-2a`). A record in a zone the
@@ -454,6 +455,7 @@ pub fn scheduled_instance_id_does_not_exist<E>(scheduled_instance_id: &str) -> S
 /// the service derives from them being left to
 /// [`ComAmazonawsEc2Amazonec2State::insert_scheduled_instance`].
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ScheduledInstanceSpec {
     /// The Availability Zone the capacity the purchase draws on sits in, as
     /// [`availability_zones_in_region`] names one. It is what says which REGION holds the
@@ -492,6 +494,7 @@ pub struct ScheduledInstanceSpec {
 /// [`scheduled_instance_slot_boundaries`] derives both from the recurrence at the instant of the
 /// read, which is what lets a report write nothing.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ScheduledInstanceRecord {
     /// The id this purchase is stored under, minted by
     /// [`ComAmazonawsEc2Amazonec2State::insert_scheduled_instance`].

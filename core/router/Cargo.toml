@@ -458,6 +458,8 @@ http = { workspace = true }
 bytes = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Restart persistence (src/persistence.rs): snapshot JSON.
+serde_json = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

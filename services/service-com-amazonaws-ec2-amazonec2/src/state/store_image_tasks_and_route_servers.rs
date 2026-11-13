@@ -92,6 +92,7 @@ pub fn store_image_task_limit_exceeded<E>(message: impl Into<String>) -> Scaffol
 /// progress the clock has made without writing anything, and two readers at the same
 /// instant report the same task.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StoreImageTaskRecord {
     /// "The ID of the AMI that is being stored" (`StoreImageTaskResult$AmiId`).
     pub ami_id: String,
@@ -107,13 +108,16 @@ pub struct StoreImageTaskRecord {
     /// The monotonic instant the upload started, which the progress estimate is measured
     /// from. Monotonic ([`Instant`]), because it is only ever compared against the clock,
     /// so a wall-clock adjustment cannot run a task's progress backwards.
+    #[serde(with = "::service_common::persist::instant")]
     pub started_at_monotonic: Instant,
     /// The instant from which this task's `InProgress` -> `Completed` move is due: the
     /// upload is work the clock owes the task rather than the create call completing.
+    #[serde(with = "::service_common::persist::instant")]
     pub completes_at: Instant,
     /// The instant from which this task is out of the account's view
     /// ([`STORE_IMAGE_TASK_VISIBILITY`] after it started), at which
     /// [`ComAmazonawsEc2Amazonec2State::materialize_due_transitions`] drops it.
+    #[serde(with = "::service_common::persist::instant")]
     pub leaves_view_at: Instant,
 }
 
@@ -483,6 +487,7 @@ pub const INGESTION_STATUS_COMPLETE: &str = "ingestion-complete";
 /// catalog can ever be stored here: the word comes from this module's own constants, never
 /// from a request.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CapacityManagerSettings {
     /// [`CAPACITY_MANAGER_ENABLED`] or [`CAPACITY_MANAGER_DISABLED`].
     pub(super) status: &'static str,
@@ -496,6 +501,7 @@ pub struct CapacityManagerSettings {
     /// The INSTANT rather than a word, because the move is owed to the clock: the status a
     /// reader sees is derived from it ([`Self::view_at`]), so reporting the settings never
     /// writes.
+    #[serde(with = "::service_common::persist::instant_opt")]
     pub(super) ingestion_complete_at: Option<Instant>,
 }
 
@@ -1216,11 +1222,13 @@ pub const ROUTE_SERVER_ASSOCIATION_STATE_ASSOCIATED: &str = "associated";
 /// only to the record count [`ComAmazonawsEc2Amazonec2State::has_route_server_association_capacity`]
 /// bounds.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RouteServerAssociationRecord {
     /// The instant from which this association's `associating` -> `associated` move is
     /// due. Monotonic ([`Instant`]) for the reason [`RouteServerRecord::available_at`] is:
     /// it is only ever compared against the clock, never reported, so a wall-clock
     /// adjustment cannot move an association back to `associating`.
+    #[serde(with = "::service_common::persist::instant")]
     pub associated_at: Instant,
 }
 

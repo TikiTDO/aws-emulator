@@ -30,6 +30,7 @@ pub struct DescribeSecondaryInterfacesOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SecondaryInterface")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SecondaryInterface {
     pub availability_zone: Option<String>,
     pub availability_zone_id: Option<String>,
@@ -50,8 +51,10 @@ pub struct SecondaryInterface {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SecondaryInterfaceAttachment")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SecondaryInterfaceAttachment {
     pub attachment_id: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub attach_time: Option<::aws_smithy_types::DateTime>,
     pub delete_on_termination: Option<bool>,
     pub device_index: Option<i32>,
@@ -63,6 +66,7 @@ pub struct SecondaryInterfaceAttachment {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SecondaryInterfaceIpv4Address")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SecondaryInterfaceIpv4Address {
     pub private_ip_address: Option<String>,
 }
