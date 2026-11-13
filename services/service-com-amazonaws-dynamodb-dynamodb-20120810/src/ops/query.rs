@@ -366,36 +366,46 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let state = crate::state::service_state(&*self.engine).ok_or_else(store_unavailable)?;
         let name = crate::state::resolve_table_name_in(&input.table_name, &region).map_err(lift)?;
 
-        // A request states its intent through the expression members or through the
-        // legacy ones they replaced, never through both: the whole of each side is
-        // named, and the check runs before either side is read. Each side is listed in
-        // the order THIS operation's input shape declares its members
-        // (`smithy_query(query="operation", operation="Query")`), which is the order the
-        // sentence states them in ([`crate::state::expression_conflict_between`]).
+        // A request states each of its asks ONCE: the expression language supersedes the
+        // legacy members that NARROW this read — its projection, its filter, the operator
+        // that combines the filter map's entries — so any expression member beside one of
+        // them is refused, while the key condition this reader cannot run without is
+        // resolved from whichever generation carries it and is held only against the member
+        // that replaced it ([`crate::state::check_expression_parameter_mix`]). The ask each
+        // legacy member states orders the refusal, in the order
+        // `smithy_query(query="operation", operation="Query")` declares the expression
+        // members that state those asks.
         crate::state::check_expression_parameter_mix(
             &[
-                (
+                crate::state::stated_legacy(
                     "AttributesToGet",
                     input
                         .attributes_to_get
                         .as_ref()
                         .is_some_and(|names| !names.is_empty()),
+                    PROJECTION_ASK,
                 ),
-                (
+                crate::state::stated_legacy_key(
                     "KeyConditions",
                     input
                         .key_conditions
                         .as_ref()
                         .is_some_and(|map| !map.is_empty()),
+                    KEY_CONDITION_ASK,
                 ),
-                (
+                crate::state::stated_legacy(
                     "QueryFilter",
                     input
                         .query_filter
                         .as_ref()
                         .is_some_and(|map| !map.is_empty()),
+                    FILTER_ASK,
                 ),
-                ("ConditionalOperator", input.conditional_operator.is_some()),
+                crate::state::stated_legacy(
+                    "ConditionalOperator",
+                    input.conditional_operator.is_some(),
+                    FILTER_ASK,
+                ),
             ],
             &[
                 (
@@ -834,6 +844,21 @@ fn lift(error: crate::state::RequestError) -> QueryError {
 /// The input member a projection travels in, which is what its refusals name.
 const PROJECTION_EXPRESSION: &str = "ProjectionExpression";
 
+// Which ASK each of this reader's legacy members states, as the position of the expression
+// member that replaced it in the list passed beside them
+// ([`crate::state::check_expression_parameter_mix`]) — the order
+// `smithy_query(query="operation", operation="Query")` declares those members in.
+
+/// The ask `ProjectionExpression` states, which the legacy `AttributesToGet` stated.
+const PROJECTION_ASK: usize = 0;
+
+/// The ask `FilterExpression` states, which the legacy `QueryFilter` — and the
+/// `ConditionalOperator` that combines its entries — stated.
+const FILTER_ASK: usize = 1;
+
+/// The ask `KeyConditionExpression` states, which the legacy `KeyConditions` stated.
+const KEY_CONDITION_ASK: usize = 2;
+
 /// How a `Query` whose `ExclusiveStartKey` names a key of the schema it walks but a
 /// PARTITION the `KeyConditionExpression` does not select is refused.
 ///
@@ -1204,10 +1229,9 @@ fn key_comparisons(input: &QueryInput) -> Result<Vec<Comparison>, crate::state::
         .as_ref()
         .filter(|conditions| !conditions.is_empty());
     match (input.key_condition_expression.as_deref(), legacy) {
-        // Both members at once is the two generations stated at once, which
-        // [`crate::state::check_expression_parameter_mix`] has already refused over the
-        // whole of each side — it names this pair among the request's members; the arm
-        // stays total rather than unreachable.
+        // The key condition stated in both generations is what
+        // [`crate::state::check_expression_parameter_mix`] has already refused, naming
+        // this pair; the arm stays total rather than unreachable.
         (Some(_), Some(_)) => Err(crate::state::expression_conflict(
             "KeyConditions",
             "KeyConditionExpression",

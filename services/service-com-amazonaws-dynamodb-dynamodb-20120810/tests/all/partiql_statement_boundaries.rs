@@ -99,7 +99,7 @@ async fn text_that_states_no_data_manipulation_and_a_bound_table_name_are_refuse
         ("a bare name and a word after it", format!("{TABLE} rows")),
         (
             "a statement of another dialect",
-            format!("DROP TABLE \"{TABLE}\""),
+            format!("TRUNCATE \"{TABLE}\""),
         ),
         (
             "a statement that reads a schema",

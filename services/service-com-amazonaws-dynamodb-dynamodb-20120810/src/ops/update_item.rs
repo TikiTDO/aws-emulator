@@ -330,21 +330,32 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         );
         // A request states its intent through the expression members or through the
         // legacy ones they replaced, never through both: the whole of each side is
-        // named, and the check runs before either side is read.
+        // named, and the check runs before either side is read. Each legacy member points
+        // at the expression member that REPLACED it — the update, or the condition the
+        // `ConditionalOperator` combines the `Expected` entries of — because the refusal
+        // names both sides by the ask they state, in the order this operation declares
+        // those expression members
+        // ([`crate::state::check_expression_parameter_mix`]).
         crate::state::check_expression_parameter_mix(
             &[
-                (
+                crate::state::stated_legacy(
                     "AttributeUpdates",
                     input
                         .attribute_updates
                         .as_ref()
                         .is_some_and(|map| !map.is_empty()),
+                    UPDATE_ASK,
                 ),
-                (
+                crate::state::stated_legacy(
                     "Expected",
                     input.expected.as_ref().is_some_and(|map| !map.is_empty()),
+                    CONDITION_ASK,
                 ),
-                ("ConditionalOperator", input.conditional_operator.is_some()),
+                crate::state::stated_legacy(
+                    "ConditionalOperator",
+                    input.conditional_operator.is_some(),
+                    CONDITION_ASK,
+                ),
             ],
             &[
                 ("UpdateExpression", input.update_expression.is_some()),
@@ -391,9 +402,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .as_ref()
             .filter(|updates| !updates.is_empty());
         let update = match (input.update_expression.as_deref(), legacy_updates) {
-            // Both generations at once has already been refused over the whole of each
-            // side ([`crate::state::check_expression_parameter_mix`]); the arm stays
-            // total rather than unreachable.
+            // One update stated in both generations has already been refused
+            // ([`crate::state::check_expression_parameter_mix`]); the arm stays total
+            // rather than unreachable.
             (Some(_), Some(_)) => {
                 return Err(lift(crate::state::expression_conflict(
                     "AttributeUpdates",
@@ -621,6 +632,18 @@ fn store_unavailable() -> UpdateItemError {
     })
     .into()
 }
+
+// Which ASK each of this writer's legacy members states, as the position of the expression
+// member that replaced it in the list passed beside them
+// ([`crate::state::check_expression_parameter_mix`]) — the order
+// `smithy_query(query="operation", operation="UpdateItem")` declares those members in.
+
+/// The ask `UpdateExpression` states, which the legacy `AttributeUpdates` map stated.
+const UPDATE_ASK: usize = 0;
+
+/// The ask `ConditionExpression` states, which the legacy `Expected` map — and the
+/// `ConditionalOperator` that combines its entries — stated.
+const CONDITION_ASK: usize = 1;
 
 /// Lift a store refusal into this operation's error channel.
 fn lift(error: crate::state::RequestError) -> UpdateItemError {

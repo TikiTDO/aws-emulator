@@ -379,26 +379,33 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // looked up, so a request that cannot hold together is refused as the client
         // error it is whatever the store holds and whichever members it carries.
         //
-        // A request states its intent through the expression members or through the
-        // legacy ones they replaced, never through both: the whole of each side is
-        // named, and the check runs before either side is read. Each side is listed in
-        // the order THIS operation's input shape declares its members
-        // (`smithy_query(query="operation", operation="Scan")`), which is the order the
-        // sentence states them in ([`crate::state::expression_conflict_between`]).
+        // A request states each of its asks ONCE: the expression language supersedes the
+        // legacy members that narrow this read — its projection, its filter, the operator
+        // that combines the filter map's entries — so any expression member beside one of
+        // them is refused, and the ask each legacy member states orders the refusal, in the
+        // order `smithy_query(query="operation", operation="Scan")` declares the expression
+        // members that state those asks
+        // ([`crate::state::check_expression_parameter_mix`]).
         crate::state::check_expression_parameter_mix(
             &[
-                (
+                crate::state::stated_legacy(
                     "AttributesToGet",
                     input
                         .attributes_to_get
                         .as_ref()
                         .is_some_and(|names| !names.is_empty()),
+                    PROJECTION_ASK,
                 ),
-                (
+                crate::state::stated_legacy(
                     "ScanFilter",
                     input.scan_filter.as_ref().is_some_and(|map| !map.is_empty()),
+                    FILTER_ASK,
                 ),
-                ("ConditionalOperator", input.conditional_operator.is_some()),
+                crate::state::stated_legacy(
+                    "ConditionalOperator",
+                    input.conditional_operator.is_some(),
+                    FILTER_ASK,
+                ),
             ],
             &[
                 (
@@ -728,6 +735,18 @@ fn lift(error: crate::state::RequestError) -> ScanError {
 /// matches this refusal matches one string whatever it sent.
 const SEGMENT_NOT_BELOW_TOTAL_SEGMENTS_MESSAGE: &str =
     "The Segment parameter is zero-based and must be less than parameter TotalSegments";
+
+// Which ASK each of this reader's legacy members states, as the position of the expression
+// member that replaced it in the list passed beside them
+// ([`crate::state::check_expression_parameter_mix`]) — the order
+// `smithy_query(query="operation", operation="Scan")` declares those members in.
+
+/// The ask `ProjectionExpression` states, which the legacy `AttributesToGet` stated.
+const PROJECTION_ASK: usize = 0;
+
+/// The ask `FilterExpression` states, which the legacy `ScanFilter` — and the
+/// `ConditionalOperator` that combines its entries — stated.
+const FILTER_ASK: usize = 1;
 
 /// Which share of the table one `Scan` request evaluates.
 ///

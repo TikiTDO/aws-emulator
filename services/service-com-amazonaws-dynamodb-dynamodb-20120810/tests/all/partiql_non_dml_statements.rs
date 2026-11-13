@@ -15,6 +15,10 @@
 //! the refusal is about the VERB and not a blanket answer: each of the four verbs, spelled
 //! correctly, is served against the same table.
 //!
+//! Text whose leading keywords name one of the statement language's OWN other operations —
+//! the schema statements — is a different fact and earns a different refusal, which
+//! `tests/all/partiql_unsupported_operations.rs` pins.
+//!
 //! The second test pins the other half of what a statement's SHAPE may be: how deeply it
 //! nests is the client's choice, so a statement past this surface's ceiling is refused as a
 //! bad request and the surface keeps serving.
@@ -87,11 +91,7 @@ async fn text_that_states_none_of_the_served_verbs_manipulates_no_data() {
         ),
         (
             "a statement of another dialect",
-            format!("DROP TABLE \"{TABLE}\""),
-        ),
-        (
-            "a statement that would create something",
-            format!("CREATE TABLE \"{TABLE}\" (pk VARCHAR)"),
+            format!("TRUNCATE \"{TABLE}\""),
         ),
         (
             "a statement that reads a schema",

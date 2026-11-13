@@ -60,9 +60,9 @@ impl<'a> ReadFilter<'a> {
     ) -> Result<Self, RequestError> {
         let legacy = legacy.filter(|map| !map.is_empty());
         match (expression, legacy) {
-            // Both generations at once has already been refused over the whole of each
-            // side ([`crate::state::check_expression_parameter_mix`]); the arm stays
-            // total rather than unreachable.
+            // One filter stated in both generations has already been refused
+            // ([`crate::state::check_expression_parameter_mix`]); the arm stays total
+            // rather than unreachable.
             (Some(_), Some(_)) => Err(expression_conflict(legacy_member, FILTER_EXPRESSION)),
             (Some(expression), None) => Ok(Self::Expression(ParsedCondition::parse(
                 FILTER_EXPRESSION,

@@ -222,14 +222,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let name = crate::state::resolve_table_name_in(&input.table_name, &region).map_err(lift)?;
 
         // A request states its intent through the expression members or through the
-        // legacy ones they replaced, never through both.
+        // legacy ones they replaced, never through both. The legacy member points at the
+        // expression member that REPLACED it — this read states one ask, its projection
+        // ([`crate::state::check_expression_parameter_mix`]).
         crate::state::check_expression_parameter_mix(
-            &[(
+            &[crate::state::stated_legacy(
                 "AttributesToGet",
                 input
                     .attributes_to_get
                     .as_ref()
                     .is_some_and(|names| !names.is_empty()),
+                PROJECTION_ASK,
             )],
             &[(
                 "ProjectionExpression",
@@ -369,6 +372,12 @@ fn store_unavailable() -> GetItemError {
     })
     .into()
 }
+
+/// The ask this read's legacy member states, as the position of the expression member that
+/// replaced it in the list passed beside it
+/// ([`crate::state::check_expression_parameter_mix`]): the projection
+/// `ProjectionExpression` states, which the legacy `AttributesToGet` stated.
+const PROJECTION_ASK: usize = 0;
 
 /// Lift a store refusal into this operation's error channel.
 fn lift(error: crate::state::RequestError) -> GetItemError {

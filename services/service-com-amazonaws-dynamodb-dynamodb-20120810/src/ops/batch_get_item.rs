@@ -268,13 +268,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // table the legacy way and another the expression way states its intent two ways
         // at once, exactly as one entry carrying both members does.
         crate::state::check_expression_parameter_mix(
-            &[(
+            &[crate::state::stated_legacy(
                 "AttributesToGet",
                 addressed.iter().any(|(_, keys)| {
                     keys.attributes_to_get
                         .as_ref()
                         .is_some_and(|names| !names.is_empty())
                 }),
+                PROJECTION_ASK,
             )],
             &[(
                 PROJECTION_EXPRESSION,
@@ -502,6 +503,12 @@ fn store_unavailable() -> BatchGetItemError {
     })
     .into()
 }
+
+/// The ask this read's legacy member states, as the position of the expression member that
+/// replaced it in the list passed beside it
+/// ([`crate::state::check_expression_parameter_mix`]): the projection
+/// `ProjectionExpression` states, which the legacy `AttributesToGet` stated.
+const PROJECTION_ASK: usize = 0;
 
 /// Lift a store refusal into this operation's error channel.
 fn lift(error: crate::state::RequestError) -> BatchGetItemError {

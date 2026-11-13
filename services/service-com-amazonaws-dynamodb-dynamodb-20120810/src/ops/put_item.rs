@@ -351,14 +351,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             input.expression_attribute_values.as_ref(),
         );
         // A request states its intent through the expression members or through the
-        // legacy ones they replaced, never through both.
+        // legacy ones they replaced, never through both. Each legacy member points at the
+        // expression member that REPLACED it — this writer states one ask, its condition,
+        // so both legacy members point at the one member beside them
+        // ([`crate::state::check_expression_parameter_mix`]).
         crate::state::check_expression_parameter_mix(
             &[
-                (
+                crate::state::stated_legacy(
                     "Expected",
                     input.expected.as_ref().is_some_and(|map| !map.is_empty()),
+                    CONDITION_ASK,
                 ),
-                ("ConditionalOperator", input.conditional_operator.is_some()),
+                crate::state::stated_legacy(
+                    "ConditionalOperator",
+                    input.conditional_operator.is_some(),
+                    CONDITION_ASK,
+                ),
             ],
             &[("ConditionExpression", input.condition_expression.is_some())],
         )
@@ -577,6 +585,13 @@ fn store_unavailable() -> PutItemError {
     })
     .into()
 }
+
+/// The ask this writer's legacy members state, as the position of the expression member
+/// that replaced them in the list passed beside them
+/// ([`crate::state::check_expression_parameter_mix`]): the condition
+/// `ConditionExpression` states, which the legacy `Expected` map — and the
+/// `ConditionalOperator` that combines its entries — stated.
+const CONDITION_ASK: usize = 0;
 
 /// Lift a store refusal into this operation's error channel.
 fn lift(error: crate::state::RequestError) -> PutItemError {

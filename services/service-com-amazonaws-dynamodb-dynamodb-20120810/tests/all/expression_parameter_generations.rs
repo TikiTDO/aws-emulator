@@ -10,18 +10,28 @@
 //! `ConditionExpression`), and the sentence it is refused with names the WHOLE of each
 //! side the request carried.
 //!
-//! What is held against a request is the two GENERATIONS, not a legacy member beside the
-//! one that replaced it: a projection stated the legacy way beside a FILTER stated the
-//! expression way is two different asks in two generations, and it is refused like a
-//! request that states one thing twice. The table below is therefore keyed on the CROSS
-//! combinations — every legacy member of an operation against every expression member it
-//! declares that did NOT replace it — which is where a pair-wise reading and the
-//! generation-wide one differ, plus the cross-ENTRY form of it on `BatchGetItem`, whose
-//! members live one level down in `RequestItems`.
+//! What is held against a request is the ASK it states twice, read over the two
+//! generations: the expression language supersedes the members that NARROW a request — a
+//! projection, a filter, the operator that combines a legacy map's entries — so any
+//! expression member beside one of them is refused, naming the whole of each side. The
+//! table below is therefore keyed on the CROSS combinations — every superseded legacy
+//! member of an operation against every expression member it declares that did NOT replace
+//! it — plus the cross-ENTRY form of it on `BatchGetItem`, whose members live one level
+//! down in `RequestItems`.
+//!
+//! The one legacy member that is NOT narrowing is the one a `Query` states its key
+//! condition through, which the operation cannot run without: it is resolved from whichever
+//! generation carries it and is held only against the member that replaced it, so a `Query`
+//! keying the legacy way and filtering or projecting the expression way is SERVED — the
+//! second table below drives those rows.
 //!
 //! The members each side lists, and the order they are listed in, are the ones
 //! `smithy_query(query="operation", operation="<Scan|Query|GetItem|PutItem|UpdateItem\
-//! |DeleteItem|BatchGetItem>")` declares for that operation's input shape.
+//! |DeleteItem|BatchGetItem>")` declares for that operation's input shape: the expression
+//! side names every expression member the request carried, and the legacy side names every
+//! superseded member, by the ask each states.
+//! `tests/all/query_mixed_parameter_order.rs` walks that ordering over every subset of both
+//! sides.
 //!
 //! The last table pins the other side of the rule: a request that stays inside one
 //! generation — either one — is served, so what the refusal is about is the MIXING and
@@ -196,23 +206,30 @@ async fn a_legacy_member_beside_any_expression_member_is_refused() {
                 "KeyConditions": {
                     "pk": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "k1"}]},
                 },
+                "KeyConditionExpression": "pk = :k",
                 "ProjectionExpression": "a",
+                "ExpressionAttributeValues": {":k": {"S": "k1"}},
             }),
+            // The key condition is the one legacy member a request may state beside an
+            // expression member of another ask, so this row states it in BOTH generations
+            // to be refused at all — the served form of it is in the table below.
             "KeyConditions",
-            "ProjectionExpression",
+            "ProjectionExpression, KeyConditionExpression",
         ),
         (
-            "a Query keying the legacy way and filtering the expression way",
+            "a Query keying both ways and filtering the expression way",
             "Query",
             json!({
                 "TableName": TABLE,
                 "KeyConditions": {
                     "pk": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "k1"}]},
                 },
+                "KeyConditionExpression": "pk = :k",
                 "FilterExpression": "attribute_exists(a)",
+                "ExpressionAttributeValues": {":k": {"S": "k1"}},
             }),
             "KeyConditions",
-            "FilterExpression",
+            "FilterExpression, KeyConditionExpression",
         ),
         (
             "a Query filtering the legacy way and keying the expression way",
@@ -350,6 +367,62 @@ async fn a_legacy_member_beside_any_expression_member_is_refused() {
             (status, error_code(&answered).as_str(), message(&answered)),
             (400, "ValidationException", expected.clone()),
             "case {case:?}: expected {expected:?}, got {status} with {answered}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_query_keying_the_legacy_way_may_state_another_ask_the_expression_way() {
+    let router = seeded().await;
+
+    // The key condition is the one legacy member a request may keep beside the expression
+    // language: a `Query` cannot run without one ("Either the KeyConditions or
+    // KeyConditionExpression parameter must be specified in the request"), so the reader
+    // takes it from whichever generation carries it and refuses it only beside the member
+    // that replaced it. The rows vary which OTHER ask is stated the expression way \u2014 the
+    // projection, the filter, both \u2014 and each answer shows that ask was honoured.
+    for (case, request, items) in [
+        (
+            "keying the legacy way and projecting the expression way",
+            json!({
+                "TableName": TABLE,
+                "KeyConditions": {
+                    "pk": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "k1"}]},
+                },
+                "ProjectionExpression": "a",
+            }),
+            json!([{"a": {"S": "x"}}]),
+        ),
+        (
+            "keying the legacy way and filtering the expression way",
+            json!({
+                "TableName": TABLE,
+                "KeyConditions": {
+                    "pk": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "k1"}]},
+                },
+                "FilterExpression": "attribute_not_exists(a)",
+            }),
+            json!([]),
+        ),
+        (
+            "keying the legacy way, filtering and projecting the expression way",
+            json!({
+                "TableName": TABLE,
+                "KeyConditions": {
+                    "pk": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "k1"}]},
+                },
+                "FilterExpression": "a = :v",
+                "ProjectionExpression": "b",
+                "ExpressionAttributeValues": {":v": {"S": "x"}},
+            }),
+            json!([{"b": {"S": "y"}}]),
+        ),
+    ] {
+        let served = ok(&router, "Query", request).await;
+        assert_eq!(
+            served["Items"], items,
+            "case {case:?}: the expression ask must be honoured beside the legacy key \
+             condition, got {served}"
         );
     }
 }

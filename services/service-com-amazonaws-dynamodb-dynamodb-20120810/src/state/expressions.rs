@@ -2922,21 +2922,25 @@ pub fn expression_conflict(legacy: &str, expression: &str) -> RequestError {
     expression_conflict_between(&[legacy], &[expression])
 }
 
-/// The same refusal over the WHOLE of each side: every non-expression member the request
-/// carried and every expression member it carried.
+/// The same refusal over every ask the request stated twice: the legacy members whose own
+/// replacement the request carried beside them, and every expression member it carried.
 ///
-/// The rule is about the two generations of parameters, not about one pair of them: "This
-/// is a legacy parameter. Use <the expression member> instead" is said of each legacy
-/// member, so a request that states one thing twice is refused naming both whole sets, as
-/// AWS does, so a caller sees every member it has to drop rather than one pair at a time.
+/// The rule is about the ASK, not about one pair of members: a request that states two of
+/// its asks in both generations is told both at once — "This is a legacy parameter. Use
+/// <the expression member> instead" is said of each legacy member — so a caller sees every
+/// member it has to drop rather than one pair at a time.
 ///
-/// Each side is listed in the order the CALLING OPERATION's input shape declares its
-/// members, which is the order a recorded refusal states them in: a `Scan`'s expression
-/// members are stated `ProjectionExpression, FilterExpression`, the order
-/// `smithy_query(query="operation", operation="Scan")` declares. So each handler lists
-/// its own members in its own declared order and this renderer keeps that order; neither
-/// side is sorted here, and the request's own order never reaches it, because what is
-/// walked is the handler's list.
+/// Each side is listed by the ASK its members state — a request's projection, its filter,
+/// its key condition, its update, its condition — walked in the order the calling
+/// operation declares the EXPRESSION members those asks are stated through
+/// (`smithy_query(query="operation", operation="<the operation>")`), with the members of
+/// one ask kept in the order that operation declares them. So a `Scan` that states its
+/// projection and its filter in both generations is refused naming
+/// `AttributesToGet, ScanFilter, ConditionalOperator` against
+/// `ProjectionExpression, FilterExpression`, and a `Query` that also states its key
+/// condition both ways names that ask last on each side. Each side is ordered by
+/// [`check_expression_parameter_mix`] before it reaches this renderer, and the order the
+/// request sent its members in never reaches either.
 ///
 /// The ENVELOPE follows the two sides' MEMBERS, the one rule this module states for every
 /// refusal about a request's two generations of parameters
@@ -2983,51 +2987,121 @@ fn states_write_intent(member: &str) -> bool {
     ENVELOPED_EXPRESSION_MEMBERS.contains(&member) || ENVELOPED_LEGACY_MEMBERS.contains(&member)
 }
 
-/// One member of a request, as a caller states it: its name and whether the request
-/// carried it. BOTH generations are stated this way, because the two sides are held
-/// against each other whole and neither side's entry needs to name the other's
-/// ([`check_expression_parameter_mix`]): "This is a legacy parameter. Use `<member>`
-/// instead" says which member supersedes a legacy one, not which member it may not be
-/// sent beside.
+/// One EXPRESSION member of a request, as a caller states it: its name and whether the
+/// request carried it. Its position in the list a caller passes is the ASK it states, which
+/// is what a legacy member points at ([`StatedLegacyParameter`]) and what orders both sides
+/// of the refusal ([`check_expression_parameter_mix`]): "This is a legacy parameter. Use
+/// `<member>` instead" says which member supersedes a legacy one, so neither side's entry
+/// needs to name the other's.
 pub type StatedParameter<'m> = (&'m str, bool);
 
-/// Hold a request's two generations of parameters apart: a request that carries ANY
-/// non-expression (legacy) member AND ANY expression member is refused before either side
-/// is read.
+/// One legacy member of a request, as a caller states it ([`stated_legacy`],
+/// [`stated_legacy_key`]): its name, whether the request carried it, which ASK it states,
+/// and whether what supersedes it is the expression language as a whole or that one ask.
+#[derive(Debug, Clone, Copy)]
+pub struct StatedLegacyParameter<'m> {
+    /// The member's name, which is what the refusal names.
+    member: &'m str,
+    /// Whether the request carried it.
+    sent: bool,
+    /// The ask it states: the position, in the expression list passed beside it, of the
+    /// member that states the same ask. This is what ORDERS the refusal
+    /// ([`check_expression_parameter_mix`]), and two legacy members may state one ask — a
+    /// legacy filter map and the operator that combines its entries both state the
+    /// request's filter.
+    ask: usize,
+    /// Whether only the expression member at `ask` supersedes this one, rather than any of
+    /// them ([`stated_legacy_key`]).
+    superseded_within_its_ask: bool,
+}
+
+/// One legacy member the EXPRESSION LANGUAGE supersedes: "This is a legacy parameter. Use
+/// `<member>` instead" is said of it, and what it states — a projection, a filter, how the
+/// entries of a legacy map combine — is optional narrowing of the request, so a request
+/// that states any of its asks in that language has superseded this member and is refused
+/// beside any expression member it carries. `ask` is the ask it states, which orders the
+/// refusal.
+pub fn stated_legacy(member: &str, sent: bool, ask: usize) -> StatedLegacyParameter<'_> {
+    StatedLegacyParameter {
+        member,
+        sent,
+        ask,
+        superseded_within_its_ask: false,
+    }
+}
+
+/// The legacy member a request states its KEY CONDITION through, which is not narrowing but
+/// the one thing the operation cannot run without — "Either the KeyConditions or
+/// KeyConditionExpression parameter must be specified in the request"
+/// ([`KEY_CONDITION_REQUIRED_MESSAGE`]).
 ///
-/// What COLLIDES is the two GENERATIONS, not a pair of members that say one thing: a
-/// request picks the expression members or the legacy ones they replaced and states its
-/// whole intent in that one generation. So a `Scan` carrying the legacy `AttributesToGet`
-/// beside a `FilterExpression` — a projection and a filter, two different asks, one in
-/// each generation — is refused exactly like a `Scan` that projects both ways, and the
-/// sentence it is refused with names the WHOLE of each side it carried
-/// ([`expression_conflict_between`]) rather than any one pair, which is what makes it a
-/// rule about the generations: a caller is told every member it has to drop.
-/// `tests/all/expression_parameter_generations.rs` pins the cross-member cases.
+/// The operation resolves that condition from whichever member carries it, so this member
+/// is held ONLY against the expression member that replaced it: a request that keys the
+/// legacy way and filters or projects the expression way has stated each of its asks once
+/// and is served.
+pub fn stated_legacy_key(member: &str, sent: bool, ask: usize) -> StatedLegacyParameter<'_> {
+    StatedLegacyParameter {
+        member,
+        sent,
+        ask,
+        superseded_within_its_ask: true,
+    }
+}
+
+/// Hold a request's ASKS to ONE generation each: a request that states an ask through a
+/// legacy (non-expression) member and states any ask in the EXPRESSION language has
+/// superseded that member, and is refused before either side is read.
 ///
-/// Each entry pairs a member's name with whether the request carried it, so the caller
-/// states the members its own operation declares — the legacy ones and the expression
-/// ones — IN THE ORDER THAT OPERATION'S INPUT SHAPE DECLARES THEM
-/// ([`expression_conflict_between`]), and this states the rule once for all of them.
+/// What a legacy member is held against is [`stated_legacy`]'s business: the expression
+/// language supersedes the members that NARROW a request — a projection, a filter, the
+/// operator that combines a legacy map's entries — so any expression member collides with
+/// them, while the member a request states its KEY CONDITION through is resolved from
+/// whichever generation carries it and collides only with the member that replaced it
+/// ([`stated_legacy_key`]). So a `Query` keying the legacy way and filtering the expression
+/// way is SERVED, each ask stated once, while a `Scan` projecting the legacy way and
+/// filtering the expression way is refused.
+/// `tests/all/expression_parameter_generations.rs` pins both halves of that.
+///
+/// A refused request is told what it may not have sent, by the ASK its members state — a
+/// request's projection, its filter, its key condition, its update, its condition — in the
+/// order the calling operation declares the EXPRESSION members those asks are stated
+/// through ([`StatedLegacyParameter`]): the expression side names every expression member
+/// the request carried, in that declared order, and the legacy side names every superseded
+/// member, ask by ask, keeping the operation's order inside one ask. So a `Query` that
+/// states its filter and its key condition in both generations names
+/// `QueryFilter, ConditionalOperator` and then `KeyConditions`, the order those asks are
+/// declared in.
 pub fn check_expression_parameter_mix(
-    legacy: &[StatedParameter<'_>],
+    legacy: &[StatedLegacyParameter<'_>],
     expression: &[StatedParameter<'_>],
 ) -> Result<(), RequestError> {
-    fn carried<'m>(side: &[StatedParameter<'m>]) -> Vec<&'m str> {
-        side.iter()
-            .filter(|(_, sent)| *sent)
-            .map(|(member, _)| *member)
-            .collect()
-    }
-    let carried_legacy = carried(legacy);
-    let carried_expression = carried(expression);
-    if carried_legacy.is_empty() || carried_expression.is_empty() {
+    let carried_expression: Vec<&str> = expression
+        .iter()
+        .filter(|(_, sent)| *sent)
+        .map(|(member, _)| *member)
+        .collect();
+    if carried_expression.is_empty() {
         return Ok(());
     }
-    Err(expression_conflict_between(
-        &carried_legacy,
-        &carried_expression,
-    ))
+    // The superseded members, walked ask by ask: the sort is stable, so two members of one
+    // ask keep the order the operation declares them in.
+    let mut superseded: Vec<(usize, &str)> = legacy
+        .iter()
+        .filter(|stated| {
+            stated.sent
+                && (!stated.superseded_within_its_ask
+                    || expression
+                        .get(stated.ask)
+                        .is_some_and(|(_, sent)| *sent))
+        })
+        .map(|stated| (stated.ask, stated.member))
+        .collect();
+    if superseded.is_empty() {
+        return Ok(());
+    }
+    superseded.sort_by_key(|(ask, _)| *ask);
+    let named: Vec<&str> = superseded.into_iter().map(|(_, member)| member).collect();
+    Err(expression_conflict_between(&named, &carried_expression))
 }
 
 /// How a `ConditionalOperator` sent with no map for it to combine is refused.

@@ -16,9 +16,9 @@
 //!   sentence a request earns follows how many entries that map holds: none, exactly
 //!   one, or enough to combine (which is served). The rows vary the operation, which map
 //!   the member would have combined, and the entry count;
-//! * the mixed-generation message lists each side in the order the operation's INPUT
-//!   SHAPE declares its members, which the rows vary by carrying different subsets of
-//!   both sides on both readers.
+//! * the mixed-generation message lists each side by the ASK its members state, in the
+//!   order the operation declares the expression members those asks are stated through,
+//!   which the rows vary by carrying different subsets of both sides on both readers.
 //!
 //! Which FORM a refusal takes follows the surface: a read states the sentence bare, and a
 //! write states it inside the `<N> validation error(s) detected: ` envelope. Everything
@@ -798,14 +798,15 @@ async fn a_batch_read_that_mixes_the_two_generations_across_its_entries_is_refus
 }
 
 #[tokio::test]
-async fn the_mixed_parameter_message_names_each_side_in_declared_order() {
+async fn the_mixed_parameter_message_names_each_side_in_the_operations_order() {
     let router = seeded().await;
 
-    // The order each side is listed in is the order the OPERATION'S INPUT SHAPE declares
-    // its members (`smithy_query(query="operation", operation="Scan")` /
-    // `…"Query"`), never the order the request sent them in. The rows vary the reader,
-    // which pair collides, how many members each side carries, and the ORDER THE REQUEST
-    // states them in, which the message is indifferent to.
+    // The order each side is listed in is the OPERATION'S own, never the order the request
+    // sent them in: each side is named by the ASK its members state — the projection, the
+    // filter, the key condition — walked in the order the operation declares the expression
+    // members those asks are stated through, with the members of one ask in declared order.
+    // The rows vary the reader, which pair collides, how many members each side carries,
+    // and the ORDER THE REQUEST states them in, which the message is indifferent to.
     // The last field is whether the refusal carries the `1 validation error detected: `
     // envelope: it follows the MEMBERS the two sides name, so a READ stating its
     // projection, its filter or its key condition in both generations is refused with the
@@ -842,12 +843,9 @@ async fn the_mixed_parameter_message_names_each_side_in_declared_order() {
             "ProjectionExpression, FilterExpression",
             false,
         ),
-        // This row pins the RULE applied uniformly — both sides in the order
-        // `smithy_query(query="operation", operation="Query")` declares them. For a
-        // request carrying ALL of both generations AWS is observed to state a different
-        // order inside the braces, which no rule reachable from the model or the docs
-        // explains; the resolved issue report records that divergence rather than fitting
-        // this row to it.
+        // The widest row: every member of both generations, so each side is listed whole
+        // and the key-condition ask — the last this reader declares — is seen to come last
+        // on both.
         (
             "a Query carrying every parameter of both generations",
             "Query",
@@ -864,7 +862,7 @@ async fn the_mixed_parameter_message_names_each_side_in_declared_order() {
                 },
                 "AttributesToGet": ["a"],
             }),
-            "AttributesToGet, KeyConditions, QueryFilter, ConditionalOperator",
+            "AttributesToGet, QueryFilter, ConditionalOperator, KeyConditions",
             "ProjectionExpression, FilterExpression, KeyConditionExpression",
             false,
         ),
@@ -956,21 +954,24 @@ async fn the_mixed_parameter_message_names_each_side_in_declared_order() {
             true,
         ),
         // A legacy member beside an expression member that states something ELSE is
-        // refused just the same: what the service holds against a request is the two
-        // GENERATIONS, not a legacy member beside the one that replaced it, so a
-        // projection in one generation and a filter in the other collide too.
+        // refused just the same: what the expression language supersedes is every legacy
+        // member that NARROWS the request, so a projection in one generation and a filter
+        // in the other collide too. The one exception is the key condition a `Query` cannot
+        // run without, which is why the row below states it in BOTH generations.
         (
-            "a Query stating its key condition the legacy way and its projection the new way",
+            "a Query stating its key condition both ways and its projection the new way",
             "Query",
             json!({
                 "TableName": TABLE,
                 "KeyConditions": {
                     "pk": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "k1"}]},
                 },
+                "KeyConditionExpression": "pk = :k",
+                "ExpressionAttributeValues": {":k": {"S": "k1"}},
                 "ProjectionExpression": "a",
             }),
             "KeyConditions",
-            "ProjectionExpression",
+            "ProjectionExpression, KeyConditionExpression",
             false,
         ),
         (
@@ -1034,8 +1035,9 @@ async fn the_mixed_parameter_message_names_each_side_in_declared_order() {
     }
 
     // A request that stays inside ONE generation is served, whichever generation it
-    // picked: the rule is about carrying members of BOTH, not about carrying a legacy
-    // member at all.
+    // picked: what the expression language supersedes is a legacy member sent BESIDE it,
+    // not a legacy member at all. The last row keeps the one legacy member that is not
+    // narrowing — the key condition — beside an expression ask of its own.
     for (case, operation, request) in [
         (
             "a Query stating both its key condition and its projection the legacy way",
@@ -1076,6 +1078,18 @@ async fn the_mixed_parameter_message_names_each_side_in_declared_order() {
                 "UpdateExpression": "SET c = :z",
                 "ConditionExpression": "attribute_exists(pk)",
                 "ExpressionAttributeValues": {":z": {"S": "z"}},
+            }),
+        ),
+        (
+            "a Query keying the legacy way and filtering the expression way",
+            "Query",
+            json!({
+                "TableName": TABLE,
+                "KeyConditions": {
+                    "pk": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "k1"}]},
+                },
+                "FilterExpression": "a = :v",
+                "ExpressionAttributeValues": {":v": {"S": "x"}},
             }),
         ),
     ] {

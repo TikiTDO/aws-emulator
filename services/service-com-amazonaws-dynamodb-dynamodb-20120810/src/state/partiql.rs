@@ -117,8 +117,10 @@ impl Position {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParseDefect {
     /// The text states none of the verbs that read or write items, so it manipulates no
-    /// data whatever else it spells — the defect every statement that opens with no such
-    /// verb carries.
+    /// data whatever else it spells — the defect text that opens with no such verb
+    /// carries, unless its leading keywords name one of the language's other operations,
+    /// which is reported as that operation instead
+    /// ([`unsupported_statement_operation`]).
     NotDataManipulation,
     /// A NAME was required there — a table, an index, an attribute or an alias — and
     /// what the statement spells is not one (a string literal, say).
@@ -188,6 +190,38 @@ fn statement_parse_error(defect: ParseDefect) -> RequestError {
         "Statement wasn't well formed, can't be processed: {}",
         defect.phrase()
     ))
+}
+
+/// The operations the statement language names that this surface does not run, each
+/// paired with the keywords that name it.
+///
+/// This surface runs "reads and singleton writes on data stored in DynamoDB, using
+/// PartiQL" (the `ExecuteStatement` doc) — the four data-manipulation verbs — while the
+/// language also spells SCHEMA operations, each as a verb and the kind of object it acts
+/// on. Text that opens with such a pair names an operation rather than failing to read as
+/// a statement, so it is refused as the operation this surface does not run
+/// ([`unsupported_statement_operation`]) and not as a parse defect.
+///
+/// Each entry is the verb, the kind of object, and the name of the operation the pair
+/// names — the two keywords written as one operation name, the way this service names its
+/// own operations.
+const NON_DML_STATEMENT_OPERATIONS: [(&str, &str, &str); 4] = [
+    ("create", "table", "CreateTable"),
+    ("create", "index", "CreateIndex"),
+    ("drop", "table", "DropTable"),
+    ("drop", "index", "DropIndex"),
+];
+
+/// How text naming an operation this surface does not run is refused: the fixed sentence,
+/// over the name of the operation the text's leading keywords name
+/// ([`NON_DML_STATEMENT_OPERATIONS`]).
+///
+/// A client can tell this from a statement that did not read as one at all
+/// ([`statement_parse_error`]): the text states an operation of the language and what it
+/// is told is that this surface does not run that operation, so retry and report logic
+/// reading the message is not handed a parse defect for a statement that has none.
+fn unsupported_statement_operation(operation: &str) -> RequestError {
+    RequestError::Validation(format!("Unsupported operation: {operation}"))
 }
 
 /// How a call to a function this dialect does not define is refused: the name the
@@ -1234,7 +1268,17 @@ impl StatementParser<'_> {
     /// and "select" are one keyword — and never a `"quoted"` identifier, which is how
     /// a name that collides with a keyword is spelled.
     fn peek_word(&self, keyword: &str) -> bool {
-        matches!(self.peek(), Some(Token::Word(word)) if word.eq_ignore_ascii_case(keyword))
+        self.peek_word_at(0, keyword)
+    }
+
+    /// The same question asked of the token `offset` tokens on, so a decision the grammar
+    /// takes on a PAIR of keywords — the verb and the kind of object a schema statement
+    /// names ([`NON_DML_STATEMENT_OPERATIONS`]) — reads both without consuming either.
+    fn peek_word_at(&self, offset: usize, keyword: &str) -> bool {
+        matches!(
+            self.tokens.get(self.at + offset),
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case(keyword)
+        )
     }
 
     fn accept_word(&mut self, keyword: &str) -> bool {
@@ -1390,10 +1434,26 @@ impl StatementParser<'_> {
         if self.accept_word("delete") {
             return self.delete().map(PartiqlStatement::Delete);
         }
-        // Text that opens with none of the four verbs this surface serves manipulates no
-        // data, whatever else it spells, and is refused as exactly that
-        // ([`ParseDefect::NotDataManipulation`]).
+        // Text whose leading keywords name one of the language's OTHER operations names
+        // an operation this surface does not run, which is what it is told — before the
+        // parse carries on into the clauses of a statement that would never run.
+        if let Some(operation) = self.non_dml_operation() {
+            return Err(unsupported_statement_operation(operation));
+        }
+        // Text that opens with none of the four verbs this surface serves, and names no
+        // operation of the language either, manipulates no data whatever else it spells,
+        // and is refused as exactly that ([`ParseDefect::NotDataManipulation`]).
         Err(statement_parse_error(ParseDefect::NotDataManipulation))
+    }
+
+    /// The operation the text's leading keywords name, when they name one of the
+    /// language's operations this surface does not run
+    /// ([`NON_DML_STATEMENT_OPERATIONS`]).
+    fn non_dml_operation(&self) -> Option<&'static str> {
+        NON_DML_STATEMENT_OPERATIONS
+            .iter()
+            .find(|(verb, object, _)| self.peek_word(verb) && self.peek_word_at(1, object))
+            .map(|(_, _, operation)| *operation)
     }
 
     /// `SELECT (* | attribute, …) FROM source [WHERE predicate] [ORDER BY attribute

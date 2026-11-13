@@ -153,12 +153,16 @@ mod partiql_statements;
 mod partiql_transaction_responses;
 #[path = "all/partiql_transactions.rs"]
 mod partiql_transactions;
+#[path = "all/partiql_unsupported_operations.rs"]
+mod partiql_unsupported_operations;
 #[path = "all/probe.rs"]
 mod probe;
 #[path = "all/provisioned_read_capacity.rs"]
 mod provisioned_read_capacity;
 #[path = "all/query_indexes_and_projections.rs"]
 mod query_indexes_and_projections;
+#[path = "all/query_mixed_parameter_order.rs"]
+mod query_mixed_parameter_order;
 #[path = "all/refusal_contracts_and_expression_pre_images.rs"]
 mod refusal_contracts_and_expression_pre_images;
 #[path = "all/required_member_refusals.rs"]
