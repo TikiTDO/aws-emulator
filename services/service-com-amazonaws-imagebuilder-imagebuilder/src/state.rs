@@ -103,6 +103,10 @@ pub use component_document_object::*;
 mod instance_profile;
 pub use instance_profile::*;
 
+/// How a workflow step that has paused for a caller to respond is FILED in this store.
+mod waiting_workflow_steps;
+pub use waiting_workflow_steps::*;
+
 use crate::ops::types::{
     AdditionalInstanceConfiguration, AmiDistributionConfiguration, Component,
     ComponentConfiguration, ComponentParameterDetail,
@@ -1288,11 +1292,12 @@ pub struct ComAmazonawsImagebuilderImagebuilderState {
     /// that have paused at a `WaitForAction` step, keyed by their own step execution id —
     /// what `ListWaitingWorkflowSteps` reports and `SendWorkflowStepAction` answers for.
     ///
-    /// Filed by whatever RUNS a workflow of an image build. Nothing in this service does:
-    /// no operation of it starts a workflow execution, and an image build's record holds
-    /// only what the build itself observed about the image
-    /// ([`ImageBuildVersionRecord`]) — so this index is empty, and a waiting-step listing
-    /// reports none rather than a step nothing ever paused at.
+    /// Filed by whatever RUNS a workflow of an image build, through the one bounded write
+    /// path this store has for it ([`Self::insert_waiting_workflow_step`]). No operation of
+    /// this service calls that path yet: none of them starts a workflow execution, and an
+    /// image build's record holds only what the build itself observed about the image
+    /// ([`ImageBuildVersionRecord`]) — so on a running emulator this index is empty, and a
+    /// waiting-step listing reports none rather than a step nothing ever paused at.
     pub waiting_workflow_steps: BTreeMap<String, WorkflowStepExecution>,
     /// The secret this store's page tokens are authenticated under, drawn from the system's
     /// randomness when the store is created ([`PageTokenKey`]) — which is what lets a
@@ -1670,8 +1675,9 @@ impl ComAmazonawsImagebuilderImagebuilderState {
     /// A step is reported only when the build version its run belongs to is one THIS Region
     /// holds ([`Self::image`]): a regional endpoint serves only its own Region's resources,
     /// and a paused step belongs to the build it paused in. The index whatever runs a
-    /// workflow files those steps in is the `waiting_workflow_steps` field, which nothing
-    /// in this service writes yet — see its documentation.
+    /// workflow files those steps in is the `waiting_workflow_steps` field, filed into
+    /// through [`Self::insert_waiting_workflow_step`], which no operation of this service
+    /// calls yet — see that field's documentation.
     #[must_use]
     pub fn paused_workflow_steps(&self, request_region: &str) -> Vec<&WorkflowStepExecution> {
         self.waiting_workflow_steps

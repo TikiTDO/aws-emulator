@@ -51,5 +51,7 @@ mod tag_resource_resource_kinds;
 mod untag_resource;
 #[path = "all/versioned_resource_responses.rs"]
 mod versioned_resource_responses;
+#[path = "all/waiting_workflow_step_pages.rs"]
+mod waiting_workflow_step_pages;
 #[path = "all/waiting_workflow_steps.rs"]
 mod waiting_workflow_steps;
