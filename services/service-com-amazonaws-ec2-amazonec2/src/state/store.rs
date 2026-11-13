@@ -1657,6 +1657,16 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// [`Self::local_gateways`]. A search of a Region that holds none is therefore answered
     /// with no schedules — see [`scheduled_instances`].
     pub scheduled_instance_capacity: BTreeMap<String, ScheduledInstanceCapacityRecord>,
+    /// Every Scheduled Instance the account has BOUGHT, by `ScheduledInstanceId`, as a
+    /// [`ScheduledInstanceRecord`]: the terms of the purchase, beside nothing a read derives
+    /// from them. Ordered by id, which is the order `DescribeScheduledInstances` reports and
+    /// pages over, so a pagination token can name the purchase the next page starts at.
+    ///
+    /// [`Self::insert_scheduled_instance`] is its one writer, called by
+    /// `PurchaseScheduledInstances` — a fresh account has bought nothing, so a describe of one
+    /// reports an empty set. Which REGION holds a purchase is said by the Availability Zone its
+    /// capacity sits in, exactly as it is for a block of [`Self::scheduled_instance_capacity`].
+    pub scheduled_instances: BTreeMap<String, ScheduledInstanceRecord>,
     /// Every Network Access Scope the account holds, by `NetworkInsightsAccessScopeId`, as
     /// the modelled [`NetworkInsightsAccessScope`] shape itself — see the module docs.
     /// Ordered by id, the stable order every reader of it reports in.
@@ -3388,6 +3398,9 @@ impl Default for ComAmazonawsEc2Amazonec2State {
             // A fresh account's Regions have no Scheduled Instance capacity set aside for
             // them, so a schedule search is answered with nothing to report.
             scheduled_instance_capacity: BTreeMap::new(),
+            // And has bought no schedule on it either, so a describe of its Scheduled
+            // Instances reports an empty set.
+            scheduled_instances: BTreeMap::new(),
             network_insights_access_scopes: BTreeMap::new(),
             network_insights_access_scope_contents: BTreeMap::new(),
             network_insights_access_scope_client_tokens: HashMap::new(),

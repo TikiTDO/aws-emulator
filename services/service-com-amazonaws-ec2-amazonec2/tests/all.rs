@@ -1189,6 +1189,12 @@ mod route_servers;
 // serialized squash merges to exactly that.
 #[path = "all/scheduled_instance_availability.rs"]
 mod scheduled_instance_availability;
+// What `DescribeScheduledInstances` reports: the Scheduled Instances the signed Region holds,
+// the ids, documented filters and slot-start window that narrow them, the schedule each report
+// derives from the stored recurrence, how it pages, and what it refuses. Declared in its SORTED
+// position, for the reason the suite above gives.
+#[path = "all/scheduled_instances.rs"]
+mod scheduled_instances;
 #[path = "all/search_local_gateway_routes.rs"]
 mod search_local_gateway_routes;
 #[path = "all/secondary_interfaces.rs"]

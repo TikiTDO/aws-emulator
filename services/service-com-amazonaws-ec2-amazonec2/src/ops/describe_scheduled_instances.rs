@@ -1,15 +1,34 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeScheduledInstances
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeScheduledInstances`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: answers the Scheduled Instances the account holds in the Region the request
+//! was signed for — all of them, or only those the request's ids, filters and slot-start
+//! window leave — paged by `MaxResults`/`NextToken`. This is the ONLY file to touch for this
+//! operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeScheduledInstances::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! ## What a report is answered from
+//!
+//! A purchased Scheduled Instance is a stored resource:
+//! [`crate::state::ComAmazonawsEc2Amazonec2State::scheduled_instances`] holds one record per
+//! purchase, keyed by the `ScheduledInstanceId`, and
+//! [`crate::state::scheduled_instance_view`] projects one onto the modelled shape. Which
+//! Region holds a purchase is said by the Availability Zone its capacity sits in, so a call
+//! signed for one Region never reports another's — the way
+//! `DescribeScheduledInstanceAvailability` answers only the capacity of the signed Region.
+//! Where the schedule has GOT TO is derived from the stored recurrence at the instant of the
+//! read ([`crate::state::scheduled_instance_slot_boundaries`]), so this operation writes
+//! nothing at all.
+//!
+//! Nothing a fresh account holds is a Scheduled Instance — `PurchaseScheduledInstances` is
+//! what buys one — so such an account is answered HTTP 200 with an EMPTY
+//! `scheduledInstanceSet` and no token, which is what the recorded response for this operation
+//! carries. That is a report of an empty inventory, not a refusal, and the same answer is
+//! given wherever the SELECTION itself leaves nothing: a filter value nothing holds, or a
+//! slot-start window no stored schedule starts its next slot in. What IS refused is a request
+//! that names something this account cannot answer for — an id of no such purchase, a value
+//! that is no Scheduled Instance id at all, a filter this operation does not document, a page
+//! size below the published minimum, a token this service did not mint — and `DryRun` is
+//! answered `DryRunOperation`.
 //!
 //! ## Shape of an operation
 //!
@@ -145,18 +164,305 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeScheduledInstances` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeScheduledInstancesErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeScheduledInstances"))
+        use crate::scaffolded::Scaffolded;
+        use crate::state;
+
+        // Narrowing cost is filters x values x value length x stored purchases, and the model
+        // bounds none of them (`FilterList` and `Filter$Values` carry no `@length`), so every
+        // request-controlled factor is capped HERE, before any work proportional to it is done
+        // and before the store is locked — the same ceilings every other filtered describe of
+        // this crate applies — and their PRODUCT is charged to one [`MatchBudget`] below.
+        let filters: &[Filter] = input.filters.as_deref().unwrap_or_default();
+        if filters.len() > state::MAX_FILTERS {
+            return Err(state::invalid_parameter_value(format!(
+                "The request carries {supplied} filters, above the maximum of {maximum}",
+                supplied = filters.len(),
+                maximum = state::MAX_FILTERS,
+            )));
+        }
+        // A filter name this operation does not document is refused whether or not any purchase
+        // would have matched it, so a misspelled filter can never read as "no Scheduled
+        // Instances". Each value is compiled into its pattern ONCE here, rather than recompiled
+        // per candidate.
+        let mut compiled: Vec<state::CompiledFilter> = Vec::with_capacity(filters.len());
+        for filter in filters {
+            let name = filter.name.as_deref().unwrap_or_default();
+            if !DOCUMENTED_FILTERS.contains(&name) {
+                return Err(state::invalid_parameter_value(format!(
+                    "The filter '{name}' is invalid"
+                )));
+            }
+            let values: &[String] = filter.values.as_deref().unwrap_or_default();
+            if values.len() > state::MAX_FILTER_VALUES {
+                return Err(state::invalid_parameter_value(format!(
+                    "The filter '{name}' carries {supplied} values, above the maximum of \
+                     {maximum}",
+                    supplied = values.len(),
+                    maximum = state::MAX_FILTER_VALUES,
+                )));
+            }
+            // A capped NUMBER of comparisons is not capped WORK: the matcher's cost is the
+            // product of the pattern's length and the value's, so each value's size is bounded
+            // too, before any matching runs under the lock.
+            if let Some(oversize) = values
+                .iter()
+                .find(|value| value.len() > state::MAX_FILTER_VALUE_BYTES)
+            {
+                return Err(state::invalid_parameter_value(format!(
+                    "A value of the filter '{name}' carries {supplied} bytes, above the maximum \
+                     of {maximum}",
+                    supplied = oversize.len(),
+                    maximum = state::MAX_FILTER_VALUE_BYTES,
+                )));
+            }
+            compiled.push(state::CompiledFilter::new(name.to_string(), values.to_vec()));
+        }
+
+        // "The Scheduled Instance IDs" (`$ScheduledInstanceIds`): the model bounds the list at
+        // nothing, and every entry is resolved against the store, so the number of ids one
+        // request may name is capped the way every other EC2 describe of this crate caps a
+        // resource-id list. A value of any other FORM names nothing and is refused before there
+        // is anything to look up, which is what lets a client tell "not an id of this kind" from
+        // "no such purchase".
+        let requested: &[String] = input.scheduled_instance_ids.as_deref().unwrap_or_default();
+        if requested.len() > state::MAX_RESOURCE_IDS {
+            return Err(state::invalid_parameter_value(format!(
+                "ScheduledInstanceIds carries {supplied} ids, above the maximum of {maximum}",
+                supplied = requested.len(),
+                maximum = state::MAX_RESOURCE_IDS,
+            )));
+        }
+        for scheduled_instance_id in requested {
+            if !state::scheduled_instance_id_is_well_formed(scheduled_instance_id) {
+                return Err(state::invalid_scheduled_instance_id_malformed(
+                    scheduled_instance_id,
+                ));
+            }
+        }
+
+        // "The maximum number of results to return in a single call. This value can be between
+        // 5 and 300" (`$MaxResults`): the member's target carries no modelled `@range`, so the
+        // published bounds are this handler's to enforce — and BOTH ends of one range are the
+        // range, so a page size outside it is refused rather than silently rewritten, in the
+        // wording every other paginated describe of this crate that enforces its own bound uses.
+        if input.max_results.is_some_and(|max_results| {
+            !(MIN_PAGE_SIZE..=MAX_REQUESTED_PAGE_SIZE).contains(&max_results)
+        }) {
+            return Err(state::invalid_parameter_value(format!(
+                "Invalid value '{max_results}' for MaxResults. It must be between \
+                 {MIN_PAGE_SIZE} and {MAX_REQUESTED_PAGE_SIZE}",
+                max_results = input.max_results.unwrap_or_default(),
+            )));
+        }
+
+        // "The token for the next set of results" — anything else is refused rather than read
+        // as a cursor, and it names the purchase the next page starts at.
+        let start_at = match input.next_token.as_deref() {
+            None => None,
+            Some(token) => Some(
+                state::decode_page_token(token)
+                    .ok_or_else(|| state::invalid_pagination_token_for(token))?,
+            ),
+        };
+
+        // "Checks whether you have the required permissions for the action, without actually
+        // making the request, and provides an error response. If you have the required
+        // permissions, the error response is DryRunOperation" (`$DryRun`): the flag asks about
+        // PERMISSION, so it is answered once the request's own form has been checked and before
+        // anything is resolved; every caller of this emulator is permitted.
+        if input.dry_run.unwrap_or(false) {
+            return Err(state::dry_run_operation());
+        }
+
+        // EC2 is a regional service reached through a regional endpoint: the Region the caller
+        // signed for is the Region whose purchases it is asking about.
+        let region = state::request_region(ctx.parts());
+        let zones = state::availability_zones_in_region(&region);
+
+        // "The time period for the first schedule to start" (`$SlotStartTimeRange`): the window
+        // selects the purchases whose next schedule starts inside it, and a bound the request
+        // leaves out bounds nothing.
+        let window = input.slot_start_time_range.as_ref();
+        let earliest = window.and_then(|range| range.earliest_time).map(|at| at.secs());
+        let latest = window.and_then(|range| range.latest_time).map(|at| at.secs());
+
+        let now_secs =
+            state::system_time_to_date_time(::std::time::SystemTime::now()).secs();
+
+        let state_handle = state::require_service_state(&*self.engine)?;
+        let store = state_handle.lock();
+
+        // An id that names no Scheduled Instance of this account IN THIS REGION is an error,
+        // not an absent row: a purchase belongs to the Region its capacity sits in, so one
+        // bought in another Region names nothing here. The whole list is resolved before
+        // anything is reported, so a request naming one id it cannot answer for reports nothing
+        // at all.
+        let in_region = |record: &state::ScheduledInstanceRecord| {
+            zones
+                .iter()
+                .any(|zone| zone.zone_name == record.spec.availability_zone)
+        };
+        for scheduled_instance_id in requested {
+            if !store
+                .scheduled_instances
+                .get(scheduled_instance_id.as_str())
+                .is_some_and(in_region)
+            {
+                return Err(state::scheduled_instance_id_does_not_exist(
+                    scheduled_instance_id,
+                ));
+            }
+        }
+        // Held as an ordered SET, so the per-purchase selection below costs one lookup rather
+        // than a walk of the asked-for list, and a repeated id cannot multiply the work either.
+        let named: ::std::collections::BTreeSet<&str> =
+            requested.iter().map(String::as_str).collect();
+
+        // The store is keyed by `ScheduledInstanceId`, so its own order IS the order a page is
+        // reported and resumed in: a cursor names the purchase the next page starts at, and the
+        // walk resumes there instead of re-reading the purchases already answered.
+        let lower = match &start_at {
+            Some(cursor) => ::std::ops::Bound::Included(cursor.clone()),
+            None => ::std::ops::Bound::Unbounded,
+        };
+        // "The maximum number of results to return in a single call … The default value is
+        // 100": a request that names no page size gets the documented default, and the rest
+        // follow through `NextToken`, so nothing is withheld.
+        let limit = input
+            .max_results
+            .and_then(|max_results| usize::try_from(max_results).ok())
+            .unwrap_or(DEFAULT_PAGE_SIZE)
+            .clamp(1, MAX_PAGE_SIZE);
+
+        let mut budget = state::MatchBudget::new(state::MAX_FILTER_MATCH_STEPS);
+        let mut reported: Vec<ScheduledInstance> = Vec::new();
+        let mut next_token: Option<String> = None;
+        // Whether the walk stopped with purchases left unexamined, which is the one case the
+        // answer is INCOMPLETE: a page this request filled is a complete answer to it, whatever
+        // the budget has left.
+        let mut unexamined = false;
+        for (scheduled_instance_id, record) in store
+            .scheduled_instances
+            .range((lower, ::std::ops::Bound::Unbounded))
+        {
+            if budget.exhausted() {
+                unexamined = true;
+                break;
+            }
+            // A purchase draws on capacity in an Availability Zone, so one in a zone this
+            // Region does not have is none of this request's business — read off the zone
+            // before any filter is matched, so a purchase of another Region costs no
+            // comparison.
+            if !in_region(record) {
+                continue;
+            }
+            // "Describes the specified Scheduled Instances or all your Scheduled Instances":
+            // the ids narrow the store, and every filter must then hold ("If you specify
+            // multiple filters, the filters are joined with an AND" — `Filter`). Both select on
+            // the STORED purchase, so a candidate they leave out costs no projection.
+            if !named.is_empty() && !named.contains(scheduled_instance_id.as_str()) {
+                continue;
+            }
+            if !state::matches_every_filter(&compiled, &mut budget, &|name| {
+                filter_values(record, name)
+            }) {
+                continue;
+            }
+            let reportable = crate::state::scheduled_instance_view(record, now_secs);
+            if !starts_inside(&reportable, earliest, latest) {
+                continue;
+            }
+            // "This value is null when there are no more results to return" (`$NextToken`): a
+            // token only when a further purchase follows this page, naming the one it starts
+            // at.
+            if reported.len() >= limit {
+                next_token = Some(state::encode_page_token(scheduled_instance_id));
+                break;
+            }
+            reported.push(reportable);
+        }
+        // A scan that ran out of budget with purchases left unexamined answers an INCOMPLETE
+        // set, which is not something to report as a result: the request asked for more
+        // filtering than one call will do, and is told so rather than given a silently
+        // truncated page.
+        if unexamined {
+            return Err(Scaffolded::request_limit_exceeded(format!(
+                "The request's filters would take more than {steps} comparisons to evaluate; \
+                 narrow them or page with MaxResults",
+                steps = state::MAX_FILTER_MATCH_STEPS,
+            )));
+        }
+
+        Ok(DescribeScheduledInstancesOutput {
+            scheduled_instance_set: Some(reported),
+            next_token,
+        })
+    }
+}
+
+/// Every filter name `DescribeScheduledInstancesRequest$Filters` documents, in the order the
+/// member lists them:
+///
+/// ```text
+/// smithy_query(query="doc",shape="DescribeScheduledInstancesRequest",member="Filters",model_path="services/service-com-amazonaws-ec2-amazonec2/smithy-model/com-amazonaws-ec2-amazonec2.json")
+/// ```
+///
+/// That doc publishes no `tag:` filter for this operation — a Scheduled Instance carries no
+/// tags — so the catalog is closed, and every entry must be answered by [`filter_values`].
+const DOCUMENTED_FILTERS: [&str; 3] = ["availability-zone", "instance-type", "platform"];
+
+/// The smallest page this operation serves: "This value can be between 5 and 300"
+/// (`DescribeScheduledInstancesRequest$MaxResults`). Typed as the member is, so the request's
+/// value is compared against it without a conversion.
+const MIN_PAGE_SIZE: i32 = 5;
+
+/// The largest page a request may ask for: the other end of that published range, which is also
+/// the largest this operation serves.
+const MAX_REQUESTED_PAGE_SIZE: i32 = 300;
+
+/// The same bound as the size of a page this operation builds.
+const MAX_PAGE_SIZE: usize = MAX_REQUESTED_PAGE_SIZE as usize;
+
+/// The page a request that names no size gets: "The default value is 100" (the same member).
+const DEFAULT_PAGE_SIZE: usize = 100;
+
+/// Does the schedule of `instance` start its next slot inside the window the request named?
+///
+/// "The time period for the first schedule to start"
+/// (`DescribeScheduledInstancesRequest$SlotStartTimeRange`): the window selects on when the
+/// schedule next comes round, and a bound the request left out bounds nothing. A purchase whose
+/// term holds no further slot starts none, so a request that named a window at all selects it
+/// no longer.
+fn starts_inside(instance: &ScheduledInstance, earliest: Option<i64>, latest: Option<i64>) -> bool {
+    if earliest.is_none() && latest.is_none() {
+        return true;
+    }
+    let Some(next_slot_start) = instance.next_slot_start_time.map(|at| at.secs()) else {
+        return false;
+    };
+    earliest.is_none_or(|earliest| next_slot_start >= earliest)
+        && latest.is_none_or(|latest| next_slot_start <= latest)
+}
+
+/// The values the EC2 filter `name` compares against this Scheduled Instance.
+///
+/// Read off the STORED purchase rather than off its projection, so narrowing costs no projection
+/// and a filter compares against the same value the report carries. `name` is one of
+/// [`DOCUMENTED_FILTERS`].
+fn filter_values<'a>(
+    record: &'a crate::state::ScheduledInstanceRecord,
+    name: &str,
+) -> Vec<::std::borrow::Cow<'a, str>> {
+    use ::std::borrow::Cow;
+
+    let text = |value: &'a str| -> Vec<Cow<'a, str>> { vec![Cow::Borrowed(value)] };
+    match name {
+        "availability-zone" => text(record.spec.availability_zone.as_str()),
+        "instance-type" => text(record.spec.instance_type.as_str()),
+        "platform" => text(record.spec.platform.as_str()),
+        // Unreachable: a name outside [`DOCUMENTED_FILTERS`] has already been refused. An
+        // attribute nothing is stored for compares against nothing, so it could never widen a
+        // result even if that check were bypassed.
+        _ => Vec::new(),
     }
 }
