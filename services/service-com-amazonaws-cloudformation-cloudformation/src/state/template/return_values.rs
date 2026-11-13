@@ -1562,6 +1562,20 @@ pub(super) fn return_values(
                 )
             );
             attributes.insert("Id".to_string(), id.clone());
+            for (index, tld) in ["com", "net", "org", "co.uk"].into_iter().enumerate() {
+                attributes.insert(
+                    list_attribute_element("NameServers", index),
+                    format!(
+                        "ns-{}.awsdns-00.{tld}",
+                        derived_digits(
+                            &format!("{HOSTED_ZONE_ID_SALT}:ns:{index}"),
+                            name,
+                            12,
+                            Alphabet::Lower,
+                        )
+                    ),
+                );
+            }
             (id, attributes)
         }
         // "Ref returns the health check ID"; Fn::GetAtt: HealthCheckId. Route 53 ASSIGNS
@@ -1619,6 +1633,20 @@ pub(super) fn return_values(
                 )
             );
             attributes.insert("Id".to_string(), id.clone());
+            for (index, tld) in ["com", "net", "org", "co.uk"].into_iter().enumerate() {
+                attributes.insert(
+                    list_attribute_element("NameServers", index),
+                    format!(
+                        "ns-{}.awsdns-00.{tld}",
+                        derived_digits(
+                            &format!("{DELEGATION_SET_ID_SALT}:ns:{index}"),
+                            name,
+                            12,
+                            Alphabet::Lower,
+                        )
+                    ),
+                );
+            }
             (delegation_set_arn(&id), attributes)
         }
         // "Ref returns the traffic policy ARN"; Fn::GetAtt: Id, Type, Version. Route 53
@@ -2066,9 +2094,21 @@ pub fn published_attribute_names(resource_type: &str) -> &'static [&'static str]
         APIGATEWAYV2_DOMAIN_NAME => &["DomainNameArn", "RegionalDomainName"],
         GUARDDUTY_DETECTOR | GUARDDUTY_IP_SET => &["Id"],
         ROUTE53_HEALTH_CHECK => &["HealthCheckId"],
-        ROUTE53_HOSTED_ZONE => &["Id"],
+        ROUTE53_HOSTED_ZONE => &[
+            "Id",
+            "NameServers.0",
+            "NameServers.1",
+            "NameServers.2",
+            "NameServers.3",
+        ],
         ROUTE53_CIDR_COLLECTION => &["Arn", "Id"],
-        ROUTE53_DELEGATION_SET => &["Id"],
+        ROUTE53_DELEGATION_SET => &[
+            "Id",
+            "NameServers.0",
+            "NameServers.1",
+            "NameServers.2",
+            "NameServers.3",
+        ],
         ROUTE53_TRAFFIC_POLICY => &["Id", "Type", "Version"],
         KMS_KEY => &["Arn", "KeyId"],
         MSK_CLUSTER | MSK_SERVERLESS_CLUSTER => &["Arn"],

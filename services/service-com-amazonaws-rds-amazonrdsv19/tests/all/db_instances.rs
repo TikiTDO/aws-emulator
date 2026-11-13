@@ -2417,3 +2417,25 @@ async fn delete_removes_the_instance_and_can_take_a_final_snapshot() {
         "DBInstanceNotFound",
     );
 }
+
+#[tokio::test]
+async fn postgres_18_4_instance_provisions_with_postgres18_parameter_group() {
+    let router = emulator();
+    expect_ok(
+        "postgres 18.4 create",
+        create_instance(
+            &router,
+            "emu-pg-18-4",
+            "postgres",
+            "db.t4g.large",
+            &params!["EngineVersion" => "18.4"],
+        )
+        .await,
+    );
+    let read_back = describe_one(&router, "postgres 18.4", "emu-pg-18-4").await;
+    assert_eq!(optional_text(&read_back, "EngineVersion").as_deref(), Some("18.4"));
+    assert_eq!(
+        optional_text(&read_back, "DBParameterGroupName").as_deref(),
+        Some("default.postgres18")
+    );
+}

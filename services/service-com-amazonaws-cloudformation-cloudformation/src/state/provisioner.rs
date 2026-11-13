@@ -2687,7 +2687,9 @@ impl Provisioner {
             // half of that pair is on the resource's own declaration.
             Self::CognitoUserPoolGroup => delete_group(ctx, region, resource).await,
             Self::AcmAcmeEndpoint => delete_acme_endpoint(ctx, region, physical_resource_id).await,
-            Self::AcmCertificate => delete_certificate(ctx, region, physical_resource_id).await,
+            Self::AcmCertificate => {
+                delete_certificate(ctx, region, physical_resource_id, resource).await
+            }
             Self::AcmPcaCertificateAuthority => {
                 delete_certificate_authority(ctx, region, physical_resource_id).await
             }
