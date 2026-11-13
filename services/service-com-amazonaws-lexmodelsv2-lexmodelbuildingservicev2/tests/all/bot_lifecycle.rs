@@ -55,11 +55,17 @@ const ECHOED_BY_DESCRIBE: [&str; 8] = [
 
 /// One emulator holding one Lex Models V2 service on the single shared engine.
 pub(crate) fn emulator() -> MultiServiceRouter {
+    emulator_with_engine().0
+}
+
+/// The same emulator, with the shared engine handed back, for a test that has to reach
+/// the store directly — to age a stored record the way the clock ages it, say.
+pub(crate) fn emulator_with_engine() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
-    router.register_service(EmulatedService::new(engine));
-    router
+    router.register_service(EmulatedService::new(Arc::clone(&engine)));
+    (router, engine)
 }
 
 /// Dispatch one request and return its status and parsed JSON body.

@@ -1,15 +1,22 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateExport
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateExport`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateExport::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Records an export job over a resource that already exists, in [`crate::state`]: the
+//! `resourceSpecification` names exactly one resource — a bot, one locale of a bot
+//! version, the custom vocabulary of such a locale, or a test set — and that resource is
+//! resolved against the store BEFORE anything is recorded. A specification naming one the
+//! store does not hold is refused and leaves no export behind, so a listing of it stays
+//! empty; a specification that resolves is recorded as a job that is `InProgress` from
+//! this call and reaches the terminal status the clock owes it
+//! ([`crate::state::EXPORT_SETTLES_AFTER`]), which is what `DescribeExport` and
+//! `ListExports` read back.
+//!
+//! What this records is the JOB, not the zip archive the job assembles: nothing in this
+//! emulator produces one, and no operation of this service hands one out, so the status a
+//! recorded job settles on is the modelled failure status carrying the reason that says
+//! so ([`crate::state::EXPORT_ARCHIVE_UNSUPPORTED_REASON`]) rather than the one that tells
+//! a caller an archive is ready to download.
 //!
 //! ## Shape of an operation
 //!
@@ -88,6 +95,9 @@
 //!   that is in the CREATING state. Try your request again.
 //! * `InternalServerException` (HTTP 500) — The service encountered an unexpected condition.
 //!   Try your request again.
+//! * `PreconditionFailedException` (HTTP 412) — widened in through `extra_errors` (see
+//!   below): a `resourceSpecification` naming a resource the store does not hold is refused
+//!   with the shape this SERVICE models for a request field that does not resolve.
 //! * `ResourceNotFoundException` (HTTP 404) — You asked to describe a resource that doesn't
 //!   exist. Check the resource that you are requesting and try again.
 //! * `ServiceQuotaExceededException` (HTTP 402) — You have reached a quota for your bot.
@@ -110,11 +120,26 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-lexmodelsv2-lexmodelbui
 // here — hence the `CreateExportError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
-#[smithy_macros::operation_error("com.amazonaws.lexmodelsv2#CreateExport")]
+//
+// `PreconditionFailedException` is widened in through `extra_errors`: a
+// `resourceSpecification` names a resource that has to be there to be exported, this
+// SERVICE models that shape for exactly that case
+// (`com.amazonaws.lexmodelsv2#PreconditionFailedException`, HTTP 412, "Your request
+// couldn't be completed because one or more request fields aren't valid", which
+// `BuildBotLocale` and the other operations of this crate answer for a parent that does
+// not resolve), and this operation's own `errors` list omits it. So a specification that
+// resolves to nothing is reported as the failed precondition it is — a client-side
+// refusal a caller fixes its arguments after — rather than as a request that was
+// understood.
+#[smithy_macros::operation_error(
+    "com.amazonaws.lexmodelsv2#CreateExport",
+    extra_errors = ["PreconditionFailedException"]
+)]
 #[derive(Debug)]
 pub enum CreateExportErrorModeled {
     ConflictException(ConflictException),
     InternalServerException(InternalServerException),
+    PreconditionFailedException(PreconditionFailedException),
     ResourceNotFoundException(ResourceNotFoundException),
     ServiceQuotaExceededException(ServiceQuotaExceededException),
     ThrottlingException(ThrottlingException),
@@ -172,18 +197,199 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateExport` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateExportErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        let _ = ctx;
+
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            CreateExportErrorModeled::InternalServerException(InternalServerException {
+                message: Some("the Lex Models V2 store is unavailable".to_string()),
+            })
+        })?;
+
+        // "You can only specify one type of resource to export": the modelled shape
+        // carries one optional member per kind, so which one is set is this handler's to
+        // check — the boundary validator cannot express "exactly one of".
+        let exported = exported(&input.resource_specification)?;
+
+        let mut store = state.lock();
+
+        // The resource the export is OF has to be there to be exported, so the
+        // specification is resolved against the store before any job is recorded: a
+        // refusal here is terminal and leaves nothing behind, which is why a listing
+        // scoped to what it named stays empty.
+        if let Some(missing) = unresolved(&store, &exported) {
+            return Err(CreateExportErrorModeled::PreconditionFailedException(
+                PreconditionFailedException {
+                    message: Some(missing),
+                },
+            )
+            .into());
+        }
+
+        // `filePassword` encrypts the archive the job assembles; nothing reports it back
+        // (`smithy_query(query="operation",operation="CreateExport")` carries no such
+        // output member), and it is a secret the caller supplied, so it is neither stored
+        // nor logged here.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateExport"))
+        // The exports the service no longer keeps go first, so the stored jobs are the
+        // ones still inside their retention window whatever else happens in this call.
+        store.drop_expired_exports();
+        let now = ::std::time::SystemTime::now();
+        let export_id = store.mint_export_id();
+        let export = crate::state::Export::created(
+            export_id.clone(),
+            input.resource_specification,
+            input.file_format,
+            now,
+        );
+        // The response is read back off the record that was just stored, so what this
+        // call reports is what a later read reports. The id was minted against the
+        // stored jobs, so nothing is there under it to replace.
+        let stored = store.exports.entry(export_id).or_insert(export);
+        Ok(CreateExportOutput {
+            export_id: Some(stored.export_id.clone()),
+            resource_specification: Some(stored.resource_specification.clone()),
+            file_format: Some(stored.file_format.clone()),
+            export_status: Some(stored.export_status.clone()),
+            creation_date_time: Some(crate::state::to_date_time(stored.creation_date_time)),
+        })
     }
+}
+
+/// The one resource an export is of, as the request specified it.
+///
+/// The modelled `ExportResourceSpecification` carries one optional member per kind of
+/// resource (`smithy_query(query="shape",shape="ExportResourceSpecification")`), and an
+/// export is of exactly one of them.
+enum Exported<'a> {
+    /// A whole bot, at one version of it.
+    Bot(&'a BotExportSpecification),
+    /// One locale of one bot version.
+    BotLocale(&'a BotLocaleExportSpecification),
+    /// The custom vocabulary of one locale of one bot version.
+    CustomVocabulary(&'a CustomVocabularyExportSpecification),
+    /// A test set.
+    TestSet(&'a TestSetExportSpecification),
+}
+
+/// Which resource `specification` names, or the refusal for one that names no single
+/// resource.
+///
+/// "You can specify the `botExportSpecification` or the `botLocaleExportSpecification`,
+/// but not both" — the rule holds for every member of the shape, so a specification
+/// carrying none of them and one carrying several are both refused, and neither records
+/// an export.
+fn exported(specification: &ExportResourceSpecification) -> Result<Exported<'_>, CreateExportError> {
+    let named: Vec<Exported<'_>> = [
+        specification
+            .bot_export_specification
+            .as_ref()
+            .map(Exported::Bot),
+        specification
+            .bot_locale_export_specification
+            .as_ref()
+            .map(Exported::BotLocale),
+        specification
+            .custom_vocabulary_export_specification
+            .as_ref()
+            .map(Exported::CustomVocabulary),
+        specification
+            .test_set_export_specification
+            .as_ref()
+            .map(Exported::TestSet),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let mut named = named.into_iter();
+    match (named.next(), named.next()) {
+        (Some(only), None) => Ok(only),
+        (None, _) => Err(invalid(format!(
+            "resourceSpecification must specify one resource to export, one of [{}]",
+            EXPORT_SPECIFICATION_MEMBERS.join(", ")
+        ))),
+        (Some(_), Some(_)) => Err(invalid(format!(
+            "resourceSpecification must specify only one resource to export; one of [{}]",
+            EXPORT_SPECIFICATION_MEMBERS.join(", ")
+        ))),
+    }
+}
+
+/// Every member of the modelled `ExportResourceSpecification`
+/// (`smithy_query(query="shape",shape="ExportResourceSpecification")`), which is what a
+/// refusal tells the caller it may name one of.
+const EXPORT_SPECIFICATION_MEMBERS: [&str; 4] = [
+    "botExportSpecification",
+    "botLocaleExportSpecification",
+    "customVocabularyExportSpecification",
+    "testSetExportSpecification",
+];
+
+/// What the refusal says when the resource `exported` names does not resolve against the
+/// store, or `None` when it does.
+///
+/// The parents are resolved OUTSIDE IN — the bot and the version of it first, then the
+/// locale inside that version, then the resource defined in that locale — so the
+/// identifier the message names is the first one that failed to resolve rather than the
+/// innermost one the request happened to carry.
+///
+/// Two of the four resources a specification may name are ones nothing in this service
+/// creates: no operation stores a test set, and none stores a custom vocabulary for a
+/// locale (the operations over both are still scaffolds), so an export of one resolves on
+/// nothing and is refused naming it. When this service starts holding either, the check
+/// becomes a lookup in that state, exactly as the bot, version and locale legs are.
+fn unresolved(
+    store: &crate::state::ComAmazonawsLexmodelsv2Lexmodelbuildingservicev2State,
+    exported: &Exported<'_>,
+) -> Option<String> {
+    let (bot_id, bot_version, locale_id) = match exported {
+        Exported::Bot(bot) => (&bot.bot_id, &bot.bot_version, None),
+        Exported::BotLocale(locale) => (
+            &locale.bot_id,
+            &locale.bot_version,
+            Some(&locale.locale_id),
+        ),
+        Exported::CustomVocabulary(vocabulary) => (
+            &vocabulary.bot_id,
+            &vocabulary.bot_version,
+            Some(&vocabulary.locale_id),
+        ),
+        Exported::TestSet(test_set) => {
+            return Some(crate::state::request_path_resource_missing(
+                crate::state::EXPORTED_TEST_SET_LABEL,
+                &[("id", &test_set.test_set_id)],
+            ));
+        }
+    };
+
+    if !store.bot_version_exists(bot_id, bot_version) {
+        return Some(crate::state::request_path_resource_missing(
+            crate::state::EXPORTED_BOT_LABEL,
+            &[("id", bot_id), ("version", bot_version)],
+        ));
+    }
+    let locale_id = locale_id?;
+    if !store.bot_locale_exists(bot_id, bot_version, locale_id) {
+        return Some(crate::state::request_path_resource_missing(
+            crate::state::EXPORTED_BOT_LOCALE_LABEL,
+            &[("id", locale_id)],
+        ));
+    }
+    // The locale is there; a custom vocabulary of it is not, because this service holds
+    // no custom vocabulary at all. The locale is what identifies one, since a custom
+    // vocabulary has no id of its own.
+    matches!(exported, Exported::CustomVocabulary(_)).then(|| {
+        crate::state::request_path_resource_missing(
+            crate::state::EXPORTED_CUSTOM_VOCABULARY_LABEL,
+            &[("locale id", locale_id)],
+        )
+    })
+}
+
+/// Refuse the request with the modelled `ValidationException` (HTTP 400).
+fn invalid(message: String) -> CreateExportError {
+    CreateExportErrorModeled::ValidationException(ValidationException {
+        message: Some(message),
+    })
+    .into()
 }

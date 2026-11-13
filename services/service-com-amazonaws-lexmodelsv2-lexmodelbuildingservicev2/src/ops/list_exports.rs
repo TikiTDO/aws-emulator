@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListExports
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListExports`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListExports::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Lists the export jobs [`crate::state`] holds, built from the stored records: scoped to
+//! the bot, bot version and locale the request names, filtered by the kind of resource an
+//! export is of, ordered by the one sortable attribute the model declares, and paged with
+//! an opaque `nextToken`.
+//!
+//! A bot nothing was ever exported for has no exports, and this operation models no error
+//! for a bot the store does not hold, so such a request is answered with the exports it
+//! has: none.
 //!
 //! ## Shape of an operation
 //!
@@ -173,18 +173,220 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListExports` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListExportsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListExports"))
+        let _ = ctx;
+
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            ListExportsErrorModeled::InternalServerException(InternalServerException {
+                message: Some("the Lex Models V2 store is unavailable".to_string()),
+            })
+        })?;
+
+        // The sort and filter members carry modelled enums, which the wire renders as
+        // plain strings: refuse a value outside the enum rather than silently ignoring
+        // it, the same way `ListSlotTypes` does. An absent `sortBy` orders by the one
+        // sortable attribute the model declares, ascending, as the sibling listings of
+        // this service do.
+        let mut descending = false;
+        if let Some(sort_by) = &input.sort_by {
+            if !crate::state::EXPORT_SORT_ATTRIBUTES.contains(&sort_by.attribute.as_str()) {
+                return Err(invalid(format!(
+                    "sortBy.attribute must be one of [{}]; received {}",
+                    crate::state::EXPORT_SORT_ATTRIBUTES.join(", "),
+                    sort_by.attribute
+                )));
+            }
+            if !crate::state::SORT_ORDERS.contains(&sort_by.order.as_str()) {
+                return Err(invalid(format!(
+                    "sortBy.order must be one of [{}]; received {}",
+                    crate::state::SORT_ORDERS.join(", "),
+                    sort_by.order
+                )));
+            }
+            descending = sort_by.order == "Descending";
+        }
+        let filters = input.filters.unwrap_or_default();
+        for filter in &filters {
+            if !crate::state::EXPORT_FILTER_NAMES.contains(&filter.name.as_str()) {
+                return Err(invalid(format!(
+                    "filters.name must be one of [{}]; received {}",
+                    crate::state::EXPORT_FILTER_NAMES.join(", "),
+                    filter.name
+                )));
+            }
+            if !crate::state::EXPORT_FILTER_OPERATORS.contains(&filter.operator.as_str()) {
+                return Err(invalid(format!(
+                    "filters.operator must be one of [{}]; received {}",
+                    crate::state::EXPORT_FILTER_OPERATORS.join(", "),
+                    filter.operator
+                )));
+            }
+        }
+
+        // `maxResults` carries the modelled range 1..1000. A value outside it is
+        // refused, not reinterpreted; a request that asks for no page size is served the
+        // modelled maximum, which keeps every response bounded.
+        let page_size = match input.max_results {
+            Some(max_results) => {
+                let requested = usize::try_from(max_results)
+                    .ok()
+                    .filter(|size| (1..=crate::state::MAX_LIST_PAGE).contains(size));
+                let Some(page_size) = requested else {
+                    return Err(invalid(format!(
+                        "maxResults must be between 1 and {}; received {max_results}",
+                        crate::state::MAX_LIST_PAGE
+                    )));
+                };
+                page_size
+            }
+            None => crate::state::MAX_LIST_PAGE,
+        };
+
+        let mut store = state.lock();
+        // The one thing this read materialises is the status transition the stored jobs
+        // were already owed, so a listing reports the status a per-export read reports.
+        store.settle_exports();
+
+        // The listing is scoped by the identifiers the request names: each one narrows it
+        // to the exports whose own resource specification carries that identifier, and an
+        // identifier the request leaves out narrows nothing.
+        let mut page: Vec<(String, String, ExportSummary)> = store
+            .exports
+            .values()
+            .filter(|export| {
+                in_scope(export.bot_id(), input.bot_id.as_deref())
+                    && in_scope(export.bot_version(), input.bot_version.as_deref())
+                    && in_scope(export.locale_id(), input.locale_id.as_deref())
+            })
+            .filter(|export| {
+                filters
+                    .iter()
+                    // `ExportResourceType` is the only modelled filter name.
+                    .all(|filter| matches_filter(export.resource_type(), filter))
+            })
+            .map(|export| (sort_key(export), export.export_id.clone(), export.summary()))
+            .collect();
+
+        // Ordered by the one sortable attribute, with the `exportId` as the tiebreak:
+        // that keeps the order total, which is what makes `nextToken` paging stable
+        // across calls.
+        page.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+        if descending {
+            page.reverse();
+        }
+
+        // The cursor `nextToken` carries is the sort key of the first entry of the page
+        // it opens, so the remainder is resolved against the same total order: an export
+        // deleted between pages does not strand the listing, which resumes at the first
+        // entry at or after the cursor.
+        if let Some(token) = input.next_token.as_deref() {
+            let Some(cursor) = parse_cursor(token) else {
+                return Err(invalid(format!(
+                    "nextToken {token} is not a token this operation issued; restart the listing"
+                )));
+            };
+            let resume_at = page
+                .iter()
+                .position(|entry| at_or_after(entry, &cursor, descending))
+                .unwrap_or(page.len());
+            page.drain(..resume_at);
+        }
+
+        // Whatever is left over is handed back as an opaque token, so the page itself is
+        // always within `page_size`.
+        let next_token = if page.len() > page_size {
+            let remainder = page.split_off(page_size);
+            remainder.first().map(render_cursor)
+        } else {
+            None
+        };
+
+        Ok(ListExportsOutput {
+            bot_id: input.bot_id,
+            bot_version: input.bot_version,
+            locale_id: input.locale_id,
+            export_summaries: Some(page.into_iter().map(|(_, _, summary)| summary).collect()),
+            next_token,
+        })
     }
+}
+
+/// Is an export in the scope a request member asks for?
+///
+/// `asked` is the identifier the request carried, or `None` when it carried none, which
+/// scopes the listing to nothing and admits every export. `carried` is what the export's
+/// own resource specification states for that identifier, which an export of a resource
+/// the identifier does not apply to — a test set has no bot — does not carry at all, so
+/// such an export is not in a listing scoped by it.
+fn in_scope(carried: Option<&str>, asked: Option<&str>) -> bool {
+    asked.is_none_or(|asked| carried == Some(asked))
+}
+
+/// An entry's place in the total order being returned: the value of the one attribute the
+/// model allows sorting by.
+///
+/// `LastUpdatedDateTime` is rendered as zero-padded nanoseconds since the epoch, so
+/// comparing the keys as text orders them the way comparing the instants does — the same
+/// rendering `ListSlotTypes` sorts that attribute with.
+fn sort_key(export: &crate::state::Export) -> String {
+    let since_epoch = export
+        .last_updated_date_time
+        .duration_since(::std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{:030}", since_epoch.as_nanos())
+}
+
+/// The opaque `nextToken` that resumes a listing at `entry`.
+///
+/// The cursor inside it is the entry's sort key; neither a padded instant nor an
+/// `exportId` can contain `/` (the modelled `Id` pattern allows only alphanumerics), so
+/// the pair is unambiguous, and [`crate::state::encode_page_token`] renders it opaque.
+fn render_cursor(entry: &(String, String, ExportSummary)) -> String {
+    crate::state::encode_page_token(&format!("{}/{}", entry.0, entry.1))
+}
+
+/// The sort key a `nextToken` carries, or `None` when it is not a token this operation
+/// issued.
+fn parse_cursor(token: &str) -> Option<(String, String)> {
+    let cursor = crate::state::decode_page_token(token)?;
+    let (key, id) = cursor.split_once('/')?;
+    (!id.is_empty()).then(|| (key.to_string(), id.to_string()))
+}
+
+/// Does this entry sort at or after `cursor` in the order being returned?
+fn at_or_after(
+    entry: &(String, String, ExportSummary),
+    cursor: &(String, String),
+    descending: bool,
+) -> bool {
+    let key = (entry.0.as_str(), entry.1.as_str());
+    let cursor = (cursor.0.as_str(), cursor.1.as_str());
+    if descending {
+        key <= cursor
+    } else {
+        key >= cursor
+    }
+}
+
+/// Does the kind of resource an export is of satisfy `filter`?
+///
+/// `EQ` is equality and `CO` containment
+/// (`smithy_query(query="shape",shape="ExportFilterOperator")`, which models no negated
+/// operator).
+fn matches_filter(resource_type: &str, filter: &ExportFilter) -> bool {
+    match filter.operator.as_str() {
+        "EQ" => filter.values.iter().any(|value| resource_type == value),
+        // "CO" — the only other modelled operator.
+        _ => filter
+            .values
+            .iter()
+            .any(|value| resource_type.contains(value.as_str())),
+    }
+}
+
+/// Refuse the request with the modelled `ValidationException` (HTTP 400).
+fn invalid(message: String) -> ListExportsError {
+    ListExportsErrorModeled::ValidationException(ValidationException {
+        message: Some(message),
+    })
+    .into()
 }

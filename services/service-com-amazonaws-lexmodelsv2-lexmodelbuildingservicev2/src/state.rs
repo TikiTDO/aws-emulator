@@ -39,9 +39,17 @@
 //! The alias slice (`ListBotAliases`) is served out of `bot_aliases`, keyed by the bot
 //! and the alias id: a bot is created with the alias Amazon Lex keeps for testing it, so
 //! a bot the store holds always has at least that one alias to report.
+//!
+//! The export slice (`CreateExport`, `DescribeExport`, `ListExports`) is served out of
+//! `exports`, keyed by the `exportId` the create minted: an export job is recorded only
+//! once the resource it names resolves against the bots, versions and locales above, so
+//! a job the store holds is a job over a resource that was there to export. A job is held
+//! for the window AWS documents exports are kept for, which is what bounds that map.
 
+mod exports;
 mod prompt_defaults;
 
+pub use exports::*;
 pub use prompt_defaults::{
     normalize_intent_confirmation_setting, normalize_slot_value_elicitation_setting,
     normalize_sub_slot_setting,
@@ -615,18 +623,60 @@ pub const DEFAULT_RESOLUTION_STRATEGY: &str = "OriginalValue";
 /// service answers a resource it cannot find with exactly this text.
 pub const RESOURCE_NOT_FOUND_MESSAGE: &str = "Failed to retrieve resource since it does not exist";
 
-/// What this control plane says when a request names a PARENT resource it does not hold:
-/// the bot, bot version, locale, intent or slot type the resource being created, built or
-/// updated has to hang off.
+/// What the operations that CREATE, BUILD or UPDATE a resource inside another say when a
+/// request names a PARENT resource this control plane does not hold: the bot, bot
+/// version, locale, intent or slot type the resource has to hang off.
 ///
 /// The modelled `PreconditionFailedException` documents the condition — "Your request
-/// couldn't be completed because one or more request fields aren't valid" — and the
-/// service states it with this one sentence, which, like
+/// couldn't be completed because one or more request fields aren't valid" — and
+/// `CreateBotVersion`, `BuildBotLocale`, `CreateSlotType`, `CreateSlot`, `CreateIntent`
+/// and `UpdateIntent` state it with this one sentence, which, like
 /// [`RESOURCE_NOT_FOUND_MESSAGE`], has no variable part: it names neither the kind of
-/// parent nor the identifier that failed to resolve, so every such refusal of this
-/// service carries exactly this text.
+/// parent nor the identifier that failed to resolve.
+///
+/// It is not the only wording this service gives that exception. Where a recorded
+/// response states the resource and the identifiers the request carried for it, that is
+/// what the operation answers instead — `CreateExport` does, through
+/// [`request_path_resource_missing`] — so the sentence an operation uses is the one its
+/// own recorded behaviour states, and this constant is what the operations above use.
 pub const PARENT_RESOURCE_NOT_FOUND_MESSAGE: &str =
     "Failed to retrieve parent resource since it does not exist";
+
+/// How Amazon Lex V2 names a bot in a sentence about a resource the request named that
+/// does not exist. See [`request_path_resource_missing`].
+pub const EXPORTED_BOT_LABEL: &str = "Bot";
+
+/// How it names one locale of a bot version there. See
+/// [`request_path_resource_missing`].
+pub const EXPORTED_BOT_LOCALE_LABEL: &str = "Bot locale";
+
+/// How it names the custom vocabulary of such a locale there. See
+/// [`request_path_resource_missing`].
+pub const EXPORTED_CUSTOM_VOCABULARY_LABEL: &str = "Custom vocabulary";
+
+/// How it names a test set there. See [`request_path_resource_missing`].
+pub const EXPORTED_TEST_SET_LABEL: &str = "Test set";
+
+/// What this control plane says when the resource a request names does not exist: the
+/// kind of resource, the identifiers the request carried for it, and the fixed tail the
+/// sentence ends with.
+///
+/// For a bot and the version of it a request named, the sentence is `Bot with id <botId>
+/// and version <botVersion> in the request path does not exist.` — `resource` is how the
+/// service names that kind of resource ([`EXPORTED_BOT_LABEL`] and the labels beside it),
+/// and `clauses` is each identifier as `(how the service names it, the value the request
+/// carried)`, in the order the sentence states them. Every value is copied from the
+/// request verbatim, so a caller reading the message sees which identifier it has to fix.
+pub fn request_path_resource_missing(resource: &str, clauses: &[(&str, &str)]) -> String {
+    let stated: Vec<String> = clauses
+        .iter()
+        .map(|(name, value)| format!("{name} {value}"))
+        .collect();
+    format!(
+        "{resource} with {} in the request path does not exist.",
+        stated.join(" and ")
+    )
+}
 
 /// The prefix the modelled `BuiltInOrCustomSlotTypeId` shape gives a reference to a slot
 /// type Amazon Lex supplies rather than one defined in the bot: its pattern
@@ -1018,6 +1068,12 @@ pub struct ComAmazonawsLexmodelsv2Lexmodelbuildingservicev2State {
     /// per stored bot and is bounded by [`BOTS_PER_ACCOUNT_QUOTA`]: a caller cannot grow
     /// it past that.
     pub bot_aliases: HashMap<BotAliasKey, BotAlias>,
+    /// Every export job this emulator holds, keyed by the `exportId` [`Self::mint_export_id`]
+    /// minted. A job is recorded by `CreateExport`, kept for the window AWS documents
+    /// ([`EXPORT_RETENTION`]) and removed once it is past it, so this map holds the jobs a
+    /// caller submitted inside one window and no more; what a job holds and how it settles
+    /// is in [`Export`].
+    pub exports: HashMap<String, Export>,
     /// The monotonic source the minted ids are derived from.
     id_seq: u64,
 }
@@ -1124,6 +1180,20 @@ impl ComAmazonawsLexmodelsv2Lexmodelbuildingservicev2State {
             .filter_map(|(_, version)| version.parse::<u32>().ok())
             .max()
             .map(|latest| latest.to_string())
+    }
+
+    /// Does the store hold the version of the bot this pair names? The `DRAFT` version of
+    /// a stored bot always resolves — it is the working copy every bot is created with —
+    /// and a numbered one has to have been created and not since deleted.
+    ///
+    /// This is EXISTENCE alone, so nothing is settled: a version still reaching its
+    /// terminal status is a version the store holds.
+    pub fn bot_version_exists(&self, bot_id: &str, bot_version: &str) -> bool {
+        self.bots.contains_key(bot_id)
+            && (bot_version == DRAFT_BOT_VERSION
+                || self
+                    .bot_versions
+                    .contains_key(&bot_version_key(bot_id, bot_version)))
     }
 
     /// The stored version the pair names, with any due status transition applied first —
