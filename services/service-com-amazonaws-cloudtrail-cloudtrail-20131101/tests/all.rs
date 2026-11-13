@@ -209,6 +209,11 @@ mod selector_value_refusal_wording;
 // log file each recorded call lands in, under the documented key layout.
 #[path = "all/trail_log_file_delivery.rs"]
 mod trail_log_file_delivery;
+// `trail_log_file_delivery_of_data_events` pins the delivery of a DATA event: a call on the
+// CONTENTS of a resource reaches the bucket of every trail whose advanced selector admits
+// the event's category and resource type, and reaches event history never.
+#[path = "all/trail_log_file_delivery_of_data_events.rs"]
+mod trail_log_file_delivery_of_data_events;
 // `trail_log_file_delivery_of_other_services` pins the same delivery for the calls of the
 // account's OTHER services: whichever service served a management call, its record lands
 // under the trail's own key prefix, named by the id the caller was answered under.

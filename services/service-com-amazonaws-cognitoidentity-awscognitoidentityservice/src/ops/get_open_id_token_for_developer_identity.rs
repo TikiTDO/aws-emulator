@@ -220,11 +220,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The call AWS audits is this one, whatever it answers: the record is written from
-        // the outcome, so a refused call is recorded with the error code its caller was
-        // answered with. The token the served call answers is a credential
-        // (`OIDCToken` is `@sensitive`), so the record names the identity and not the
-        // token.
+        // The call AWS audits is this one, whatever it answers: the record is built from the
+        // outcome, so a refused call is recorded with the error code its caller was answered
+        // with. It is a DATA event of the pool it acts on, not a management event
+        // ([`crate::state::data_events`]) — the call exchanges a developer login for an
+        // identity in the pool's contents — so it reaches the bucket of every trail whose
+        // selectors admit identity-pool data events and never event history. The token the
+        // served call answers is a credential (`OIDCToken` is `@sensitive`), so the record
+        // names the identity and not the token.
         let request_parameters = ::service_common::management_events::recorded_members([
             (
                 "identityPoolId",
@@ -233,7 +236,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ("identityId", ::serde_json::json!(input.identity_id)),
             (
                 "logins",
-                ::serde_json::json!(crate::state::recorded_login_providers(Some(&input.logins))),
+                ::serde_json::json!(crate::state::data_events::recorded_login_values(Some(
+                    &input.logins
+                ))),
             ),
             ("principalTags", ::serde_json::json!(input.principal_tags)),
             ("tokenDuration", ::serde_json::json!(input.token_duration)),
@@ -241,10 +246,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx.parts());
         let identity_pool_id = Some(input.identity_pool_id.clone());
         let outcome = self.exchange(input, ctx).await;
-        crate::state::record_served_call(
+        crate::state::data_events::hold_data_event(
             &*self.engine,
             ctx.parts(),
-            &crate::state::ServedCall {
+            &crate::state::data_events::ServedDataCall {
                 operation: Self::NAME,
                 region: &region,
                 read_only: false,

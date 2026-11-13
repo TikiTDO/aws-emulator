@@ -90,6 +90,7 @@ pub mod validation;
 mod modeled_error_status;
 
 use error_type_header::ErrorTypeHeaderDefinition;
+use service_common::data_events::DeliveringDataEvents;
 use service_common::query_error_envelope::RequestIdEnvelopeDefinition;
 use smithy_server_runtime::{
     http, ErasedOperation, ErasedServiceDefinition, OperationRoutingTable, Refusal, Refused,
@@ -97,6 +98,8 @@ use smithy_server_runtime::{
 };
 use std::sync::Arc;
 use validation::QuotingSubmittedValues;
+
+use crate::state::data_events::IdentityPoolDataEvents;
 
 /// Wire one `crate::ops::<module>::<Operation>` per line into `table`, each wrapped in
 /// [`QuotingSubmittedValues`] and keyed by its operation shape name — the routing key
@@ -108,6 +111,28 @@ macro_rules! wrap_operations {
                 stringify!($operation),
                 ::std::boxed::Box::new(QuotingSubmittedValues::new(
                     crate::ops::$module::$operation::new(::std::sync::Arc::clone(&$engine)),
+                )) as ::std::boxed::Box<dyn ErasedOperation>,
+            );
+        )+
+    };
+}
+
+/// Wire one operation of the identity DATA PLANE into `table`: wrapped exactly as the line
+/// above wraps every operation, and served behind the wrapper that DELIVERS the data event
+/// its handler holds ([`service_common::data_events::DeliveringDataEvents`]).
+///
+/// The delivery is outermost, because the record names the request the CALLER was answered
+/// under and that id exists only once every layer that reports it has rendered the response.
+macro_rules! wrap_data_plane_operations {
+    ($table:expr, $engine:expr, $deliverer:expr, $($module:ident :: $operation:ident),+ $(,)?) => {
+        $(
+            $table.add_operation(
+                stringify!($operation),
+                ::std::boxed::Box::new(DeliveringDataEvents::new(
+                    QuotingSubmittedValues::new(
+                        crate::ops::$module::$operation::new(::std::sync::Arc::clone(&$engine)),
+                    ),
+                    ::std::sync::Arc::clone($deliverer),
                 )) as ::std::boxed::Box<dyn ErasedOperation>,
             );
         )+
@@ -148,11 +173,7 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
             delete_identity_pool::DeleteIdentityPool,
             describe_identity::DescribeIdentity,
             describe_identity_pool::DescribeIdentityPool,
-            get_credentials_for_identity::GetCredentialsForIdentity,
-            get_id::GetId,
             get_identity_pool_roles::GetIdentityPoolRoles,
-            get_open_id_token::GetOpenIdToken,
-            get_open_id_token_for_developer_identity::GetOpenIdTokenForDeveloperIdentity,
             get_principal_tag_attribute_map::GetPrincipalTagAttributeMap,
             list_identities::ListIdentities,
             list_identity_pools::ListIdentityPools,
@@ -163,9 +184,21 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
             set_principal_tag_attribute_map::SetPrincipalTagAttributeMap,
             tag_resource::TagResource,
             unlink_developer_identity::UnlinkDeveloperIdentity,
-            unlink_identity::UnlinkIdentity,
             untag_resource::UntagResource,
             update_identity_pool::UpdateIdentityPool,
+        );
+        // The identity DATA PLANE: the five operations CloudTrail delivers as DATA events of
+        // the identity pool they act on, each served behind the delivery of that event.
+        let data_events = Arc::new(IdentityPoolDataEvents::new(Arc::clone(&engine)));
+        wrap_data_plane_operations!(
+            quoting_submitted_values,
+            engine,
+            &data_events,
+            get_credentials_for_identity::GetCredentialsForIdentity,
+            get_id::GetId,
+            get_open_id_token::GetOpenIdToken,
+            get_open_id_token_for_developer_identity::GetOpenIdTokenForDeveloperIdentity,
+            unlink_identity::UnlinkIdentity,
         );
         Self {
             entry: ErrorTypeHeaderDefinition::new(RequestIdEnvelopeDefinition::header_only(

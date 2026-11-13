@@ -97,6 +97,10 @@ flate2 = "1"
 # a logging trail delivers the records of every service's management calls and not only of
 # CloudTrail's own (`tests/all/trail_log_file_delivery_of_other_services.rs`).
 service-com-amazonaws-sfn-awsstepfunctions = { workspace = true }
+# Serves the identity DATA PLANE beside this one, so a suite can assert what a trail whose
+# advanced selector names the `Data` category delivers for a call on the CONTENTS of a
+# resource (`tests/all/trail_log_file_delivery_of_data_events.rs`).
+service-com-amazonaws-cognitoidentity-awscognitoidentityservice = { workspace = true }
 
 [lints]
 workspace = true

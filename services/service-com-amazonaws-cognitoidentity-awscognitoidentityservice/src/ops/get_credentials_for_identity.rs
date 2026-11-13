@@ -232,10 +232,61 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     ) -> Result<Self::Output, Self::Error> {
         // This call writes NO management event of this service
         // ([`crate::state::record_served_call`]): it is one of the identity data-plane
-        // operations, which CloudTrail does not deliver management events for. The assume
-        // the served vend makes IS a management event — STS's own — and is recorded where it
-        // happens.
-        self.vend(&input, ctx).await
+        // operations, which CloudTrail delivers as a DATA event of the pool it acts on
+        // instead ([`crate::state::data_events`]). The assume the served vend makes IS a
+        // management event — STS's own — and is recorded where it happens.
+        //
+        // The session the served call answers is a credential, so the record names the
+        // credential — its access key id, its session token and its expiry, which is what
+        // lets a reader tell which session acted later in the trail — and withholds the one
+        // member no record carries, the SECRET KEY
+        // ([`crate::state::data_events::recorded_credentials`]).
+        let region = crate::state::request_region(ctx.parts());
+        let request_parameters = ::service_common::management_events::recorded_members([
+            ("identityId", ::serde_json::json!(input.identity_id)),
+            (
+                "logins",
+                ::serde_json::json!(crate::state::data_events::recorded_login_values(
+                    input.logins.as_ref()
+                )),
+            ),
+            ("customRoleArn", ::serde_json::json!(input.custom_role_arn)),
+        ]);
+        let outcome = self.vend(&input, ctx).await;
+        crate::state::data_events::hold_data_event(
+            &*self.engine,
+            ctx.parts(),
+            &crate::state::data_events::ServedDataCall {
+                operation: Self::NAME,
+                region: &region,
+                // The call MINTS a session for the identity, which is not a report of state.
+                read_only: false,
+                identity_pool_id: crate::state::identity_pool_of(
+                    &*self.engine,
+                    &input.identity_id,
+                ),
+                request_parameters,
+                response_elements: outcome.as_ref().ok().map(|output| {
+                    ::service_common::management_events::recorded_members([
+                        ("identityId", ::serde_json::json!(output.identity_id)),
+                        (
+                            "credentials",
+                            ::serde_json::json!(crate::state::data_events::recorded_credentials(
+                                output.credentials.as_ref().map(|credentials| {
+                                    crate::state::data_events::VendedCredential {
+                                        access_key_id: credentials.access_key_id.as_deref(),
+                                        session_token: credentials.session_token.as_deref(),
+                                        expiration: credentials.expiration.as_ref(),
+                                    }
+                                })
+                            )),
+                        ),
+                    ])
+                }),
+            },
+            &outcome,
+        );
+        outcome
     }
 }
 

@@ -10660,6 +10660,7 @@ dependencies = [
  "pkcs1",
  "serde_json",
  "service-com-amazonaws-cloudwatchlogs-logs-20140328",
+ "service-com-amazonaws-cognitoidentity-awscognitoidentityservice",
  "service-com-amazonaws-kms-trentservice",
  "service-com-amazonaws-s3-amazons3",
  "service-com-amazonaws-sfn-awsstepfunctions",

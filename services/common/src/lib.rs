@@ -491,6 +491,10 @@ pub mod eventbridge_client;
 /// EventBridge bus — CloudTrail's `AWS API Call via CloudTrail` fan-out — so the channel is
 /// stated once for every service whose calls that log records rather than per service.
 pub mod api_call_events;
+/// The ONE delivery of a DATA event — a call on the CONTENTS of a resource — into the
+/// bucket of every trail whose event selectors admit it, with the match against those
+/// selectors, so both are stated once rather than per service.
+pub mod data_events;
 /// The ONE construction of the in-process Amazon S3 client a service writing an object
 /// drives, so no two services configure that hop differently.
 pub mod s3_client;

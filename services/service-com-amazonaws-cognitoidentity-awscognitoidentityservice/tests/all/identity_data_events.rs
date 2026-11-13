@@ -4,12 +4,14 @@
 //!
 //! RULE: CloudTrail delivers a management event for this service's ADMINISTRATION of
 //! identity pools — the calls a client makes with AWS developer credentials — and none for
-//! the identity DATA PLANE: the operations the model marks `@optionalAuth` (`GetId`,
-//! `GetOpenIdToken`, `GetCredentialsForIdentity`, `UnlinkIdentity`, from
-//! `smithy_query(query="digest")`), which an end user calls holding no AWS credential at
-//! all. A data-plane call is therefore absent from the log whatever it answered, while the
+//! the identity DATA PLANE: the five calls that mint or exchange an identity in a pool's
+//! CONTENTS (`GetId`, `GetOpenIdToken`, `GetCredentialsForIdentity`, `UnlinkIdentity` and
+//! `GetOpenIdTokenForDeveloperIdentity`), which CloudTrail reports as DATA events instead.
+//! A data-plane call is therefore absent from the log whatever it answered, while the
 //! `sts:AssumeRoleWithWebIdentity` a served vend makes IS a management event — STS's own —
-//! and is recorded as that.
+//! and is recorded as that. Where those data events DO go — the bucket of each trail whose
+//! advanced event selectors admit them — is asserted end to end by the cross-service suite
+//! `services/service-com-amazonaws-cloudtrail-cloudtrail-20131101/tests/all/trail_log_file_delivery_of_data_events.rs`.
 //!
 //! Each case asserts the rule over a TABLE spanning the class, its rows differing along
 //! what the rule generalises over: which operation was called, whether it was served or
@@ -26,6 +28,10 @@ use crate::identity_pool_flow::{Emulator, ABSENT_POOL_ID};
 /// The public login provider the fixture pool is fronted by, so a federated identity can be
 /// minted for it.
 const LOGIN_PROVIDER: &str = "graph.facebook.com";
+
+/// The developer provider name the fixture pool declares, so the developer-identity exchange
+/// has one to present a login under.
+const DEVELOPER_PROVIDER: &str = "data-events-provider";
 
 /// Every `eventName` the log holds, oldest first.
 fn recorded_names(emulator: &Emulator) -> Vec<String> {
@@ -44,16 +50,29 @@ fn recorded_names(emulator: &Emulator) -> Vec<String> {
 #[tokio::test]
 async fn an_identity_data_plane_call_reaches_the_management_event_log_never() {
     let emulator = Emulator::new();
+    // The pool declares both the public provider a federated identity is minted for and the
+    // developer provider the backend exchange presents a login under.
     let pool_id = emulator
-        .pool_with_providers("data-events", true, &[LOGIN_PROVIDER])
-        .await;
+        .ok(
+            "CreateIdentityPool",
+            &json!({
+                "IdentityPoolName": "data-events",
+                "AllowUnauthenticatedIdentities": true,
+                "DeveloperProviderName": DEVELOPER_PROVIDER,
+                "SupportedLoginProviders": {LOGIN_PROVIDER: "declared-app-id"},
+            }),
+        )
+        .await["IdentityPoolId"]
+        .as_str()
+        .expect("CreateIdentityPool answers an IdentityPoolId")
+        .to_string();
     let guest = emulator.identity(&pool_id, None).await;
     let federated = emulator
         .identity(&pool_id, Some(json!({LOGIN_PROVIDER: "a.login.token"})))
         .await;
 
-    // The operations the model marks `@optionalAuth`, each in a served and in a refused
-    // shape: neither is recorded, so the rule does not depend on the outcome.
+    // The five data-plane operations, each in a served and in a refused shape: neither is
+    // recorded, so the rule does not depend on the outcome.
     let rows: Vec<(&str, &str, Value)> = vec![
         (
             "a served GetId",
@@ -96,6 +115,22 @@ async fn an_identity_data_plane_call_reaches_the_management_event_log_never() {
                 "IdentityId": &guest,
                 "Logins": {LOGIN_PROVIDER: "a.login.token"},
                 "LoginsToRemove": [LOGIN_PROVIDER],
+            }),
+        ),
+        (
+            "a served developer-identity exchange",
+            "GetOpenIdTokenForDeveloperIdentity",
+            json!({
+                "IdentityPoolId": &pool_id,
+                "Logins": {DEVELOPER_PROVIDER: "developer-user-0"},
+            }),
+        ),
+        (
+            "a refused developer-identity exchange",
+            "GetOpenIdTokenForDeveloperIdentity",
+            json!({
+                "IdentityPoolId": ABSENT_POOL_ID,
+                "Logins": {DEVELOPER_PROVIDER: "developer-user-0"},
             }),
         ),
     ];
@@ -152,6 +187,7 @@ async fn pool_administration_is_recorded_beside_it() {
         "GetOpenIdToken",
         "GetCredentialsForIdentity",
         "UnlinkIdentity",
+        "GetOpenIdTokenForDeveloperIdentity",
     ] {
         assert!(
             !names.iter().any(|name| name == absent),

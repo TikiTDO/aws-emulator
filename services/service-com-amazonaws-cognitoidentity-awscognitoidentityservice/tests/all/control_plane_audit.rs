@@ -11,8 +11,8 @@
 //! `requestParameters` echoing the members the request carried, and, for a refused call,
 //! the error code and message its caller was answered with. A `Logins` token and a minted
 //! OpenID token are secrets (`IdentityProviderToken` and `OIDCToken` are `@sensitive`) and
-//! reach no record. The identity DATA PLANE — the `@optionalAuth` operations an end user
-//! holding no AWS credential calls — is recorded nowhere, which its own suite
+//! reach no record. The identity DATA PLANE — the five calls that mint or exchange an
+//! identity in a pool's CONTENTS — is recorded nowhere, which its own suite
 //! (`identity_data_events`) asserts.
 //!
 //! Each case asserts that rule over a TABLE spanning the class, its rows differing along
@@ -300,22 +300,6 @@ async fn every_served_call_is_recorded_with_its_name_source_and_parameters() {
             vec![
                 ("identityPoolId", json!(&pool_id)),
                 ("identityId", json!(&developer_identity)),
-            ],
-        ),
-        (
-            "a developer token",
-            "GetOpenIdTokenForDeveloperIdentity",
-            json!({
-                "IdentityPoolId": &pool_id,
-                "Logins": {DEVELOPER_PROVIDER: "developer-user-1"},
-                "TokenDuration": 600,
-            }),
-            false,
-            vec![
-                ("identityPoolId", json!(&pool_id)),
-                // The provider NAMES only: a `Logins` value is a secret by the model.
-                ("logins", json!([DEVELOPER_PROVIDER])),
-                ("tokenDuration", json!(600)),
             ],
         ),
         (

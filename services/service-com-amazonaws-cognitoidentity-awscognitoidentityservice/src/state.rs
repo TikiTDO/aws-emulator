@@ -14,6 +14,10 @@
 /// writes anything.
 pub mod authorization;
 
+/// The DATA events of this service's identity data plane: what a record of one carries, and
+/// where the account's trails deliver it.
+pub mod data_events;
+
 use crate::ops::types::{CognitoIdentityProvider, MappingRule, RoleMapping};
 use emulator_server::CredentialStore;
 /// What an integrated Amazon Cognito user pool says about a token presented as the login of
@@ -3461,12 +3465,14 @@ pub struct ServedCall<'a> {
 /// its caller was answered with when it was refused.
 ///
 /// What is recorded is this service's ADMINISTRATION of identity pools: the calls a client
-/// makes with AWS developer credentials. The IDENTITY DATA PLANE — the operations the model
-/// marks `@optionalAuth` (`GetId`, `GetOpenIdToken`, `GetCredentialsForIdentity`,
-/// `UnlinkIdentity`), served to an end user holding no AWS credential at all — is not: those
-/// calls are data events, and CloudTrail delivers no management event for one, so their
-/// handlers call nothing here. The `sts:AssumeRoleWithWebIdentity` a served vend makes IS a
-/// management event of STS and is recorded as that ([`record_vended_assume`]).
+/// makes with AWS developer credentials. The IDENTITY DATA PLANE — `GetId`,
+/// `GetOpenIdToken`, `GetCredentialsForIdentity`, `UnlinkIdentity` and
+/// `GetOpenIdTokenForDeveloperIdentity`, the five calls that mint or exchange an identity in
+/// a pool's CONTENTS — is not: those calls are data events, which CloudTrail delivers to a
+/// trail's bucket and never to event history, so their handlers record through
+/// [`data_events::hold_data_event`] instead. The `sts:AssumeRoleWithWebIdentity` a served
+/// vend makes IS a management event of STS and is recorded as that
+/// ([`record_vended_assume`]).
 ///
 /// Of the calls that ARE recorded, every one is, a reporting one included, because the log
 /// is the account's record of the API calls that were MADE and not a projection of this
@@ -3583,21 +3589,6 @@ pub fn identity_pool_of<Eng: Send + Sync + 'static>(
             .get(identity_id)
             .map(|identity| identity.identity_pool_id.clone())
     })
-}
-
-/// The `Logins` provider NAMES a request presented, in the order the map holds them —
-/// what a record of a call carrying `Logins` reports as its `logins`, and `None` for a
-/// request that carried none.
-///
-/// The VALUES are left out because the model marks them secret: `LoginsMap`'s value
-/// targets `IdentityProviderToken`, which is `@sensitive`
-/// (`smithy_query(query="shape",shape="LoginsMap")`), so no record carries one.
-pub fn recorded_login_providers(
-    logins: Option<&::std::collections::HashMap<String, String>>,
-) -> Option<Vec<String>> {
-    let mut providers: Vec<String> = logins?.keys().cloned().collect();
-    providers.sort();
-    (!providers.is_empty()).then_some(providers)
 }
 
 /// What a request carrying a whole identity-pool configuration sent, for its audit

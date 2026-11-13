@@ -176,8 +176,43 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     ) -> Result<Self::Output, Self::Error> {
         // This call writes NO management event
         // ([`crate::state::record_served_call`]): it is one of the identity data-plane
-        // operations, which CloudTrail does not deliver management events for.
-        self.unlink(input, ctx).await
+        // operations, which CloudTrail delivers as a DATA event of the pool it acts on
+        // instead ([`crate::state::data_events`]).
+        let region = crate::state::request_region(ctx.parts());
+        let identity_id = input.identity_id.clone();
+        let request_parameters = ::service_common::management_events::recorded_members([
+            ("identityId", ::serde_json::json!(input.identity_id)),
+            (
+                "logins",
+                ::serde_json::json!(crate::state::data_events::recorded_login_values(Some(
+                    &input.logins
+                ))),
+            ),
+            (
+                "loginsToRemove",
+                ::serde_json::json!(input.logins_to_remove),
+            ),
+        ]);
+        let outcome = self.unlink(input, ctx).await;
+        crate::state::data_events::hold_data_event(
+            &*self.engine,
+            ctx.parts(),
+            &crate::state::data_events::ServedDataCall {
+                operation: Self::NAME,
+                region: &region,
+                // The call REMOVES the logins linked to an identity, which is a change to
+                // the pool's contents.
+                read_only: false,
+                // The pool the identity belongs to: a call that names an identity this
+                // service does not hold acted on no pool.
+                identity_pool_id: crate::state::identity_pool_of(&*self.engine, &identity_id),
+                request_parameters,
+                // The operation answers nothing: its output has no member at all.
+                response_elements: None,
+            },
+            &outcome,
+        );
+        outcome
     }
 }
 

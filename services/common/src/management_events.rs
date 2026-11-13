@@ -57,6 +57,14 @@ pub const MAX_RECORDED_EVENTS: usize = 20_000;
 /// the category `LookupEvents` serves when the request names no `EventCategory`.
 pub const EVENT_CATEGORY_MANAGEMENT: &str = "Management";
 
+/// The `eventCategory` of a DATA event: a call on the CONTENTS of a resource (an object
+/// read, a token exchanged against an identity pool) rather than on the account's
+/// configuration. A data event is never event history — `LookupEvents` serves management
+/// and Insights events — so it is not recorded in this log: what it reaches is the bucket
+/// of each trail whose selectors admit it
+/// ([`ManagementEventLog::data_event_log_files`]).
+pub const EVENT_CATEGORY_DATA: &str = "Data";
+
 /// The `eventCategory` of a CloudTrail Insights event. Insights events are DERIVED by
 /// CloudTrail from a trail's unusual call volume rather than recorded per call, so
 /// nothing in this emulator writes one; the constant is here because a reader filtering
@@ -779,6 +787,10 @@ impl AuditedResource {
     }
 }
 
+/// What every Amazon Resource Name starts with, which is how a recorded resource name is
+/// told from an ARN.
+const ARN_PREFIX: &str = "arn:";
+
 // ---------------------------------------------------------------------------
 // The session a temporary credential belongs to
 // ---------------------------------------------------------------------------
@@ -1022,10 +1034,18 @@ impl ManagementEvent {
             "type".to_string(),
             serde_json::Value::String(call.principal_type.clone()),
         );
-        identity.insert(
-            "accountId".to_string(),
-            serde_json::Value::String(call.account_id.clone()),
-        );
+        // WHOSE account the principal belongs to, for a principal this emulator can place
+        // in one. A request that carried no credential at all names no principal, and
+        // CloudTrail reports exactly that for it — a `userIdentity` of the unknown type and
+        // nothing else — so the field is left out rather than filled with the account that
+        // happened to serve the call: the caller of an anonymous data-plane operation is not
+        // an identity of this account.
+        if call.principal_type != PRINCIPAL_TYPE_UNKNOWN {
+            identity.insert(
+                "accountId".to_string(),
+                serde_json::Value::String(call.account_id.clone()),
+            );
+        }
         // The IAM entity the call's principal IS, for the one principal this emulator can
         // resolve: a long-term credential speaks for the account's single IAM user, whose
         // ARN and unique id are stated once by [`crate::caller_principal`] — the same two
@@ -1166,6 +1186,26 @@ impl ManagementEvent {
             "requestParameters".to_string(),
             call.request_parameters.clone(),
         );
+        // The resources the call acted on. CloudTrail identifies each one by its ARN beside
+        // the type, which is what a reader of a data event joins the record to the resource
+        // by, so a resource recorded by a bare NAME contributes no entry here rather than an
+        // "ARN" that is not one — such a resource is still reported through the event's own
+        // `Resources` (`LookupEvents`), which is where a name belongs.
+        let resources: Vec<serde_json::Value> = call
+            .resources
+            .iter()
+            .filter(|resource| resource.resource_name.starts_with(ARN_PREFIX))
+            .map(|resource| {
+                serde_json::json!({
+                    "accountId": call.account_id,
+                    "type": resource.resource_type,
+                    "ARN": resource.resource_name,
+                })
+            })
+            .collect();
+        if !resources.is_empty() {
+            event.insert("resources".to_string(), resources.into());
+        }
         event.insert(
             "responseElements".to_string(),
             call.response_elements
@@ -1294,6 +1334,17 @@ pub struct DeliveringTrail {
     pub management_events: bool,
     /// Which class of management events it logs.
     pub event_class: ManagementEventClass,
+    /// The trail's selectors for DATA events, one per selector that admits the `Data`
+    /// category — empty for a trail that logs no data event, which is what a trail logs
+    /// until a selector says otherwise (`EventSelector`: "trails created without specific
+    /// event selectors will be configured to log all read and write management events, and
+    /// no data events").
+    ///
+    /// A data event is admitted by MATCHING the record against a selector's own field
+    /// selectors ([`crate::data_events::DataEventSelector`]) rather than by a flag, because
+    /// which data events a trail logs is stated per resource type (and per event name, per
+    /// resource ARN) in those fields.
+    pub data_event_selectors: Vec<crate::data_events::DataEventSelector>,
 }
 
 /// The Region a partition's GLOBAL services record their management events in — the
@@ -1308,17 +1359,39 @@ impl DeliveringTrail {
     /// Whether this trail logs a management call served in `region` of the given
     /// read/write kind.
     ///
-    /// Three ways a trail covers a Region: it applies to all of them, it is homed in this
-    /// one, or it logs global-service events and this is the Region the partition's global
-    /// services record in ([`PARTITION_LEADER_REGION`]). The last is read off the Region
-    /// alone, which is as far as a projection of the trail can tell: a call of a REGIONAL
-    /// service served in the leader Region is admitted by it too.
+    /// Which Regions it covers is [`covers`](Self::covers); what this adds is the class of
+    /// management events its selectors admit.
     #[must_use]
     pub fn logs(&self, region: &str, read_only: bool) -> bool {
-        let covers_region = self.multi_region
+        self.management_events && self.event_class.covers(read_only) && self.covers(region)
+    }
+
+    /// Whether this trail logs the DATA event `record` — a rendered CloudTrail event
+    /// document ([`ManagementEvent::to_cloudtrail_event_json`]) — served in `region`.
+    ///
+    /// The Region test is the one above; what decides the rest is the trail's own selectors,
+    /// each of which admits the record or does not ([`crate::data_events::DataEventSelector`]).
+    /// A trail with no data-event selector logs no data event at all.
+    #[must_use]
+    pub fn logs_data_event(&self, region: &str, record: &serde_json::Value) -> bool {
+        self.covers(region)
+            && self
+                .data_event_selectors
+                .iter()
+                .any(|selector| selector.admits(record))
+    }
+
+    /// Whether this trail covers the calls served in `region`.
+    ///
+    /// Three ways it does: it applies to every Region, it is homed in this one, or it logs
+    /// global-service events and this is the Region the partition's global services record
+    /// in ([`PARTITION_LEADER_REGION`]). The last is read off the Region alone, which is as
+    /// far as a projection of the trail can tell: a call of a REGIONAL service served in the
+    /// leader Region is admitted by it too.
+    fn covers(&self, region: &str) -> bool {
+        self.multi_region
             || self.home_region == region
-            || (self.global_service_events && region == PARTITION_LEADER_REGION);
-        self.management_events && self.event_class.covers(read_only) && covers_region
+            || (self.global_service_events && region == PARTITION_LEADER_REGION)
     }
 }
 
@@ -1447,6 +1520,61 @@ impl ManagementEventLog {
             detail: record,
             log_files,
         })
+    }
+
+    /// The log files the account's trails deliver the DATA event `call` as — one per trail
+    /// whose selectors admit it, into the bucket that trail was created with — or an empty
+    /// list when no trail of the account logs it.
+    ///
+    /// Nothing is RECORDED: a data event is not event history ("Data events are not logged
+    /// by default when you create a trail"; `LookupEvents` serves management and Insights
+    /// events), so the log is left exactly as it was and the record reaches the bucket alone.
+    /// It is not published onto the default event bus either: the `AWS API Call via
+    /// CloudTrail` fan-out ([`crate::api_call_events`]) carries management events.
+    ///
+    /// `request_id` is the id the CALLER was answered under, which the record carries as its
+    /// `requestID` — so a client holding a response finds the log file of that very call.
+    /// `at` is when the call was served, which is the instant the file is named for.
+    #[must_use]
+    pub fn data_event_log_files(
+        &self,
+        mut call: ServedApiCall,
+        at: SystemTime,
+        request_id: &str,
+    ) -> Vec<crate::trail_log_files::DeliveredLogFile> {
+        let region = call.aws_region.clone();
+        let account_id = call.account_id.clone();
+        call.request_parameters = within_record_limit(call.request_parameters);
+        call.response_elements = call.response_elements.map(within_record_limit);
+        let record = ManagementEvent {
+            // The ordinal and the log's bounds belong to event history, which this record
+            // does not enter: what names it is its own event id, as every record's does.
+            seq: 0,
+            event_id: mint_uuid(),
+            request_id: request_id.to_string(),
+            event_time: at,
+            event_category: EVENT_CATEGORY_DATA.to_string(),
+            call,
+        }
+        .to_cloudtrail_event_json();
+        self.delivering_trails
+            .iter()
+            .filter(|trail| {
+                !trail.s3_bucket_name.is_empty() && trail.logs_data_event(&region, &record)
+            })
+            .map(|trail| crate::trail_log_files::DeliveredLogFile {
+                bucket: trail.s3_bucket_name.clone(),
+                key: crate::trail_log_files::log_file_key(
+                    trail.s3_key_prefix.as_deref(),
+                    &account_id,
+                    &region,
+                    at,
+                    &crate::trail_log_files::unique_field(),
+                ),
+                region: region.clone(),
+                records: vec![record.clone()],
+            })
+            .collect()
     }
 
     /// Replace the account's logging trails with `trails` — CloudTrail's own write, made

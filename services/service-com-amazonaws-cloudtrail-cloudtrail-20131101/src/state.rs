@@ -49,6 +49,7 @@ use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::time::{Duration, SystemTime};
 
+use service_common::data_events::{DataEventFieldSelector, DataEventSelector};
 use service_common::management_events::{
     DeliveringTrail, ManagementEventClass, ManagementEventLog, RecordedSession,
     SessionAuditDirectory,
@@ -3982,7 +3983,46 @@ fn delivering_trail(trail: &TrailRecord) -> DeliveringTrail {
         global_service_events: trail.include_global_service_events,
         management_events,
         event_class,
+        data_event_selectors: logged_data_event_selectors(trail),
     }
+}
+
+/// The selectors of `trail` a DATA event is matched against: one per ADVANCED event selector
+/// the trail carries.
+///
+/// Data events are logged only where a selector says so — "trails created without specific
+/// event selectors will be configured to log all read and write management events, and no
+/// data events" (`EventSelector`) — and a data-event class is named by the
+/// `resources.type` field of an ADVANCED selector, which is why a trail carrying none, or
+/// carrying BASIC selectors (whose `DataResources` name the three legacy resource types,
+/// served by the data planes that own them), contributes nothing here.
+///
+/// Every field selector is carried through as the client wrote it, so the match is made
+/// against the record ([`service_common::data_events::DataEventSelector`]) rather than
+/// against a projection that might admit an event the selector excludes.
+fn logged_data_event_selectors(trail: &TrailRecord) -> Vec<DataEventSelector> {
+    let Some(EventSelectorConfig::Advanced(selectors)) = &trail.event_selectors else {
+        return Vec::new();
+    };
+    selectors
+        .iter()
+        .filter(|selector| !selects_management_category(selector))
+        .map(|selector| DataEventSelector {
+            field_selectors: selector
+                .field_selectors
+                .iter()
+                .map(|field| DataEventFieldSelector {
+                    field: field.field.clone(),
+                    equals: field.equals.clone().unwrap_or_default(),
+                    starts_with: field.starts_with.clone().unwrap_or_default(),
+                    ends_with: field.ends_with.clone().unwrap_or_default(),
+                    not_equals: field.not_equals.clone().unwrap_or_default(),
+                    not_starts_with: field.not_starts_with.clone().unwrap_or_default(),
+                    not_ends_with: field.not_ends_with.clone().unwrap_or_default(),
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// Whether `trail`'s selectors log management events at all, and which read/write class of
