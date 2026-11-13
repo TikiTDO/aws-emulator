@@ -39,7 +39,7 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use crate::stack_lifecycle::{
     acknowledging_iam, call, create_stack, describe_stack, member, router, wait_for_the_transition,
-    xml_text, ACCOUNT_ID, REGION,
+    xml_text, xml_texts, ACCOUNT_ID, REGION,
 };
 use service_com_amazonaws_cloudformation_cloudformation::state::{
     failed_action, resource_failure_summary, status,
@@ -464,4 +464,57 @@ async fn a_revision_the_owning_service_refuses_leaves_the_grant_in_force() {
         "case {case:?}: expected the grant in force to be left on the function, got {held:?} \
          (the api is {api_id:?})"
     );
+}
+
+
+#[tokio::test]
+async fn a_long_generated_statement_id_is_the_same_ref_update_and_removal_key() {
+    let case = "bounded-permission-lifecycle";
+    let router = router();
+    let stack = "SyntheticPermissionStack".repeat(5);
+    let extra = r#","SentinelPermission":{"Type":"AWS::Lambda::Permission","Properties":{
+        "FunctionName":{"Fn::GetAtt":["Handler","Arn"]},
+        "Action":"lambda:InvokeFunction","Principal":"sns.amazonaws.com"}}"#;
+    let with_reference = |grant: &str| {
+        let mut document: Value = serde_json::from_str(&template(grant, extra))
+            .expect("the synthetic permission template");
+        document["Outputs"]["StatementId"] = serde_json::json!({"Value":{"Ref":"InvokePermission"}});
+        document.to_string()
+    };
+    let initial = with_reference(r#""Action":"lambda:InvokeFunction","Principal":"s3.amazonaws.com""#);
+    given_stack(case, &router, &stack, &initial).await;
+    let before = held_statements(case, &router).await;
+    assert_eq!(before.len(), 2);
+    let statement_id = before.iter().find(|s| s.principal == "s3.amazonaws.com")
+        .expect("the primary grant").sid.clone();
+    let sentinel_id = before.iter().find(|s| s.principal == "sns.amazonaws.com")
+        .expect("the independent grant").sid.clone();
+    assert!(statement_id.len() <= 100);
+    assert_ne!(statement_id, sentinel_id);
+    let (_, described) = describe_stack(&router, &stack).await;
+    let reference = xml_texts(&described, "OutputKey").into_iter()
+        .zip(xml_texts(&described, "OutputValue"))
+        .find(|(key, _)| key == "StatementId")
+        .map(|(_, value)| value).expect("the permission Ref output");
+    assert_eq!(reference, statement_id, "Ref must not publish an unfitted statement id");
+
+    let revised = with_reference(r#""Action":"lambda:InvokeFunction","Principal":"events.amazonaws.com""#);
+    let (reported, reason) = deployed_revision(case, &router, &stack, &revised).await;
+    assert_eq!(reported, status::UPDATE_COMPLETE, "{reason}");
+    let changed = held_statements(case, &router).await;
+    assert_eq!(changed.len(), 2);
+    assert_eq!(changed.iter().find(|s| s.principal == "events.amazonaws.com")
+        .expect("the updated grant").sid, statement_id);
+
+    // Remove only this grant, retaining the function and an independent statement. A
+    // deleted function therefore cannot make a wrong RemovePermission key look correct.
+    let mut retained: Value = serde_json::from_str(&revised).expect("the revised template");
+    retained["Resources"].as_object_mut().expect("resources").remove("InvokePermission");
+    retained["Outputs"].as_object_mut().expect("outputs").remove("StatementId");
+    let (reported, reason) = deployed_revision(case, &router, &stack, &retained.to_string()).await;
+    assert_eq!(reported, status::UPDATE_COMPLETE, "{reason}");
+    let remaining = held_statements(case, &router).await;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].sid, sentinel_id);
+    assert_eq!(remaining[0].principal, "sns.amazonaws.com");
 }
