@@ -18,9 +18,11 @@
 //!   marks the record cancelled without removing it — so the cancel is idempotent and the
 //!   later reads observe one evolving record.
 //!
-//! The Gremlin EXECUTION endpoints are deliberately still 501 (this emulator has no
-//! in-process TinkerPop engine), which [`execute_gremlin_query_is_refused_and_stores_nothing`]
-//! pins: a query record for a traversal nothing ran would be a fabrication.
+//! The Gremlin endpoints that EVALUATE a traversal are deliberately still 501 (this
+//! emulator has no in-process TinkerPop engine), which
+//! [`execute_gremlin_query_is_refused_and_stores_nothing`]
+//! pins: a result for a traversal nothing ran would be a fabrication. Explaining a query
+//! needs no evaluation, and `tests/all/gremlin_explain.rs` covers that endpoint.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};

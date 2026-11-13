@@ -18,13 +18,13 @@
 //! * [`LoaderJobRecord`] — one per bulk-load job the engine has admitted, keyed by load
 //!   id. `ListLoaderJobs` reports the load ids of the active ones.
 //!
-//! Nothing in this crate admits a query record yet: the Gremlin execution endpoints
-//! (`ExecuteGremlinQuery`, `ExecuteGremlinExplainQuery`, `ExecuteGremlinProfileQuery`)
-//! still answer HTTP 501, because this emulator has no in-process engine that can
-//! evaluate a TinkerPop traversal — and a query record, an evaluation time or a result
-//! for a traversal nothing ran would be a fabrication. The registry is therefore
-//! honestly empty until a real Gremlin engine is wired in, and the status family above
-//! reports exactly what it holds.
+//! `ExecuteGremlinExplainQuery` is what admits a query record: it reads the submitted
+//! traversal and plans it (see [`gremlin_plan`]), which is work the engine really did, so
+//! the query it finished is recorded like any other and the status family above reports
+//! it. The Gremlin endpoints that EVALUATE a traversal (`ExecuteGremlinQuery`,
+//! `ExecuteGremlinProfileQuery`) still answer HTTP 501, because this emulator has no
+//! in-process engine that can evaluate a TinkerPop traversal — and a result, or an
+//! evaluation time, for a traversal nothing ran would be a fabrication.
 //!
 //! The loader registry is in the same position: `StartLoaderJob` still answers HTTP 501,
 //! because a bulk load reads data files and writes them into a graph, and this emulator
@@ -42,6 +42,10 @@ use crate::ops::types::{
     InternalFailureException, InvalidParameterException, MissingParameterException, QueryEvalStats,
     ServerShutdownException,
 };
+
+mod gremlin_plan;
+
+pub use gremlin_plan::*;
 
 /// `GetEngineStatusOutput$status` for an instance that is not experiencing problems:
 /// the member's own documentation says "Set to `healthy` if the instance is not
@@ -84,6 +88,12 @@ pub const CLUSTER_QUERY_TIMEOUT_SETTING: &str = "clusterQueryTimeoutInMs";
 /// `CancelGremlinQueryOutput$status` for a cancellation the engine accepted. It reports
 /// the status of the cancellation request itself, not of the query.
 pub const CANCELLATION_ACCEPTED: &str = "200 OK";
+
+/// How many FINISHED queries the registry keeps. A query the engine has finished is kept
+/// so the status family can still report the id its submitter was given, but only the
+/// most recent ones: the registry serves the queries in flight, and a stream of finished
+/// ones must not grow it without end.
+pub const FINISHED_QUERY_HISTORY: usize = 128;
 
 /// `ListLoaderJobsOutput$status` for a job-list request the loader endpoint served — the
 /// member "returns the status of the job list request", and the loader endpoint states
@@ -213,8 +223,8 @@ pub struct GremlinQueryRecord {
     /// The query exactly as it was submitted.
     pub query_string: String,
     /// The `serializer` (the submitting request's `accept` header), if it named one. Set
-    /// by whatever admits the query — `ExecuteGremlinQuery`, which is still a 501 — so no
-    /// path in this crate writes it yet.
+    /// by whatever admits the query WITH one; the Gremlin explain endpoint takes no
+    /// serializer, so a query it admits leaves this unset.
     pub serializer: Option<String>,
     /// When the engine accepted the query.
     pub accepted_at: SystemTime,
@@ -246,6 +256,23 @@ impl GremlinQueryRecord {
             state: QueryState::Waiting,
             cancelled: false,
             subqueries: 0,
+        }
+    }
+
+    /// A record for a query the engine accepted at `accepted_at`, evaluated, and finished
+    /// at `finished_at` — which is every query answered within the call that submitted
+    /// it, as an explain is.
+    pub fn finished(
+        query_id: impl Into<String>,
+        query_string: impl Into<String>,
+        accepted_at: SystemTime,
+        finished_at: SystemTime,
+    ) -> Self {
+        Self {
+            started_at: Some(accepted_at),
+            finished_at: Some(finished_at),
+            state: QueryState::Done,
+            ..Self::accepted(query_id, query_string, accepted_at)
         }
     }
 
@@ -497,6 +524,54 @@ impl ComAmazonawsNeptunedataAmazonneptunedataplaneState {
             .collect()
     }
 
+    /// Record a query this engine accepted, answered and finished within the call that
+    /// submitted it, and report the record it stored.
+    ///
+    /// The finished record is KEPT, so the status family can still report the query the
+    /// caller submitted — bounded by [`FINISHED_QUERY_HISTORY`], so a stream of queries
+    /// cannot grow the registry without end.
+    pub fn record_finished_query(
+        &mut self,
+        query_id: impl Into<String>,
+        query_string: impl Into<String>,
+        accepted_at: SystemTime,
+        finished_at: SystemTime,
+    ) {
+        let record =
+            GremlinQueryRecord::finished(query_id, query_string, accepted_at, finished_at);
+        self.gremlin_queries.insert(record.query_id.clone(), record);
+        self.forget_oldest_finished_queries();
+    }
+
+    /// Drop the finished queries past [`FINISHED_QUERY_HISTORY`], oldest first.
+    ///
+    /// Only FINISHED queries are forgotten: a query the engine still owes an answer is
+    /// one the status family and a cancel have to go on reaching, however long the
+    /// registry grows.
+    fn forget_oldest_finished_queries(&mut self) {
+        let mut finished: Vec<(SystemTime, String)> = self
+            .gremlin_queries
+            .values()
+            .filter(|query| query.state.is_terminal())
+            .map(|query| {
+                (
+                    query.finished_at.unwrap_or(query.accepted_at),
+                    query.query_id.clone(),
+                )
+            })
+            .collect();
+        if finished.len() <= FINISHED_QUERY_HISTORY {
+            return;
+        }
+        // Oldest first, ties broken by query id, so the same records are forgotten
+        // whatever order the registry is walked in.
+        finished.sort();
+        let surplus = finished.len() - FINISHED_QUERY_HISTORY;
+        for (_, query_id) in finished.iter().take(surplus) {
+            self.gremlin_queries.remove(query_id);
+        }
+    }
+
     /// Perform the fast reset `token` authorises, and report whether it did.
     ///
     /// `false` means `token` is not the outstanding one — nothing was reset, so a wrong
@@ -563,6 +638,15 @@ pub fn new_request_id() -> String {
 /// is what authorises emptying the database, so a caller must not be able to guess the
 /// token of a reset somebody else initiated.
 pub fn new_fast_reset_token() -> String {
+    ::uuid::Uuid::new_v4().to_string()
+}
+
+/// A fresh query id: the `queryId` the Gremlin status API reports for a query this
+/// engine has accepted, and the label a cancel names it by.
+///
+/// Version 4, so the id is derived from nothing the caller sent and no caller can guess
+/// the id of somebody else's query, which is what a cancel takes.
+pub fn new_gremlin_query_id() -> String {
     ::uuid::Uuid::new_v4().to_string()
 }
 

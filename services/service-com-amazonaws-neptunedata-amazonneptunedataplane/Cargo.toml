@@ -21,6 +21,9 @@ bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# The lexer the Gremlin explain endpoint reads a submitted traversal with: its token
+# definitions live beside the recursive descent in `src/state/gremlin_plan.rs`.
+logos = "0.16"
 # The UUID the fast-reset token is: `ExecuteFastReset`'s initiate step hands back a v4 UUID.
 uuid = { version = "1", features = ["v4"] }
 
