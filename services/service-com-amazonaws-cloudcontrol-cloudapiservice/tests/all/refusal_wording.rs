@@ -40,8 +40,17 @@ const TOPIC: &str = "AWS::SNS::Topic";
 /// An alarm type, whose handler states CloudWatch's own sentence.
 const ALARM: &str = "AWS::CloudWatch::Alarm";
 
-/// A bucket type, for a row that needs a second type with a caller-supplied identifier.
+/// A bucket type, whose own service's sentence for a bucket it holds none of names no
+/// resource at all — the third shape a handler diagnostic takes.
 const BUCKET: &str = "AWS::S3::Bucket";
+
+/// A stream type, for a row that needs a second type whose handler states Cloud Control's
+/// generic sentence.
+const STREAM: &str = "AWS::Kinesis::Stream";
+
+/// A table type, whose own service's sentence for a resource it holds none of NAMES that
+/// resource.
+const DYNAMODB_TABLE: &str = "AWS::DynamoDB::Table";
 
 /// A patch that changes nothing, for the rows that are about something other than the
 /// patch.
@@ -159,10 +168,11 @@ pub(crate) fn generic_already_exists(type_name: &str, identifier: &str) -> Strin
 async fn a_not_found_refusal_carries_the_owning_handlers_whole_verdict() {
     let emulator = Emulator::new();
     // The rows differ along the OWNING SERVICE's wording: a type whose handler states
-    // Cloud Control's generic sentence, one whose service has a sentence of its own, and
-    // one whose handler carries its client's rendering of that service's exception
-    // (which names a request id the service mints per call).
-    let rows: [(&str, &str, &str, Detail); 4] = [
+    // Cloud Control's generic sentence, one whose service has a sentence of its own, one
+    // whose sentence NAMES the resource the request asked about, one whose sentence names
+    // nothing, and one whose handler carries its client's rendering of that service's
+    // exception (which names a request id the service mints per call).
+    let rows: [(&str, &str, &str, Detail); 6] = [
         (
             "a type whose handler states the generic sentence",
             PARAMETER,
@@ -171,15 +181,27 @@ async fn a_not_found_refusal_carries_the_owning_handlers_whole_verdict() {
         ),
         (
             "a second such type, so the sentence is built from the request",
-            BUCKET,
-            "absent-bucket",
-            Detail::Exact(generic_not_found(BUCKET, "absent-bucket")),
+            STREAM,
+            "absent-stream",
+            Detail::Exact(generic_not_found(STREAM, "absent-stream")),
         ),
         (
             "a type whose own service has a sentence for it",
             ALARM,
             "absent-alarm",
             Detail::Exact("Alarm does not exist".to_string()),
+        ),
+        (
+            "a type whose service's sentence names the resource",
+            DYNAMODB_TABLE,
+            "absent-table",
+            Detail::Exact("Table: absent-table does not exist.".to_string()),
+        ),
+        (
+            "a type whose service's sentence names nothing",
+            BUCKET,
+            "absent-bucket",
+            Detail::Exact("Bucket not found".to_string()),
         ),
         (
             "a type whose handler carries its client's rendering",

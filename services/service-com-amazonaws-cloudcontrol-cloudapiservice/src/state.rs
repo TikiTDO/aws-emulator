@@ -73,6 +73,34 @@ pub const STATUS_SUCCESS: &str = "SUCCESS";
 /// message for more information."
 pub const STATUS_FAILED: &str = "FAILED";
 
+/// "`CANCEL_IN_PROGRESS`: The resource operation is in the process of being canceled" —
+/// the status a canceled request is answered in, because the cancellation it starts is
+/// still running when the call returns.
+pub const STATUS_CANCEL_IN_PROGRESS: &str = "CANCEL_IN_PROGRESS";
+
+/// "`CANCEL_COMPLETE`: The resource operation has been canceled" — the status a canceled
+/// request reaches once the cancellation has run.
+pub const STATUS_CANCEL_COMPLETE: &str = "CANCEL_COMPLETE";
+
+/// "`PENDING`: The resource operation hasn't yet started" — a status of the model's own
+/// `OperationStatus` enum, and with [`STATUS_IN_PROGRESS`] one of the two a request can be
+/// canceled in ([`CANCELABLE_STATUSES`]).
+pub const STATUS_PENDING: &str = "PENDING";
+
+/// The statuses a resource operation request can be CANCELED in.
+///
+/// "Only resource operations requests with a status of PENDING or IN_PROGRESS can be
+/// canceled" (`CancelResourceRequest`): the cancelable set is those two and no other, which
+/// is narrower than "not over" — a request already being canceled is still running and is
+/// not cancelable again, which is what keeps this `@idempotent` operation from moving the
+/// instant that cancellation completes.
+pub const CANCELABLE_STATUSES: [&str; 2] = [STATUS_PENDING, STATUS_IN_PROGRESS];
+
+/// Whether a request in `status` can be canceled — see [`CANCELABLE_STATUSES`].
+pub fn is_cancelable_status(status: &str) -> bool {
+    CANCELABLE_STATUSES.contains(&status)
+}
+
 /// How long after the call that starts it a resource operation completes.
 ///
 /// A resource operation request is returned in a non-terminal status, so the clock owes
@@ -239,8 +267,9 @@ pub enum ResourceEffect {
 struct PendingWork {
     /// When the work becomes due. Stored, never waited for.
     due: SystemTime,
-    /// What is applied then.
-    effect: ResourceEffect,
+    /// What is applied then — `None` for a request a cancel abandoned the work of, which
+    /// has nothing left to apply and only its status to reach.
+    effect: Option<ResourceEffect>,
 }
 
 /// One resource operation request, as `ProgressEvent` reports it.
@@ -297,7 +326,10 @@ impl RequestRecord {
             status_message: None,
             error_code: None,
             retry_after: Some(due),
-            pending: Some(PendingWork { due, effect }),
+            pending: Some(PendingWork {
+                due,
+                effect: Some(effect),
+            }),
         }
     }
 
@@ -337,6 +369,21 @@ pub enum ClientTokenVerdict {
 #[derive(Debug)]
 pub struct RequestStoreFull;
 
+/// What a cancel found when it resolved the `RequestToken` it was handed.
+#[derive(Debug)]
+pub enum CancelVerdict {
+    /// This store holds no request under that token.
+    NotFound,
+    /// The request is in a status no cancel acts on — one outside
+    /// [`CANCELABLE_STATUSES`]: carries that status, so the refusal can state it.
+    NotCancelable(String),
+    /// The request was canceled: the work it owed is abandoned and it is now
+    /// [`STATUS_CANCEL_IN_PROGRESS`]. Carries the record as it stands, which is the
+    /// `ProgressEvent` the cancel answers with — boxed, so the verdict stays the size of
+    /// its smallest variant.
+    Canceling(Box<RequestRecord>),
+}
+
 /// Why a request's owed work could not be applied when it fell due.
 ///
 /// A request is accepted against the store as it was at the call and its work applied
@@ -366,7 +413,9 @@ impl From<NativeRefusal> for EffectFailure {
         match &refusal {
             NativeRefusal::NotFound => Self::ResourceGone,
             NativeRefusal::AlreadyExists => Self::ResourceExists,
-            NativeRefusal::AtCapacity(detail) | NativeRefusal::Invalid(detail) => Self::Owning {
+            NativeRefusal::AtCapacity(detail)
+            | NativeRefusal::Invalid(detail)
+            | NativeRefusal::Rejected(detail) => Self::Owning {
                 code: refusal.handler_error_code(),
                 detail: detail.clone(),
             },
@@ -443,10 +492,12 @@ impl ComAmazonawsCloudcontrolCloudapiserviceState {
     /// Apply everything the CLOCK already owes this store at `now`.
     ///
     /// Two clock-driven changes, neither of which depends on which call arrives first:
-    /// every accepted request whose work has fallen due is applied and its status moves
-    /// to `SUCCESS`, and every `ClientToken` past [`CLIENT_TOKEN_LIFETIME`] is forgotten.
-    /// Both were owed at `now` whether or not anybody called, which is why a reporting
-    /// operation may make them.
+    /// every request whose work has fallen due settles — the work is applied and the
+    /// status moves to `SUCCESS`, or the owning handler would not do it and the status
+    /// moves to `FAILED` carrying that verdict, or a cancel had abandoned the work and the
+    /// status moves to `CANCEL_COMPLETE` — and every `ClientToken` past
+    /// [`CLIENT_TOKEN_LIFETIME`] is forgotten. Both were owed at `now` whether or not
+    /// anybody called, which is why a reporting operation may make them.
     ///
     /// Every operation of this service calls this before it reads anything, so no two of
     /// them can disagree about which requests have completed or which resources exist.
@@ -469,21 +520,25 @@ impl ComAmazonawsCloudcontrolCloudapiserviceState {
                 continue;
             };
             if let Some(pending) = record.pending.take() {
-                match self.apply(&record, pending.effect, now, native) {
-                    Ok(resource_model) => {
-                        record.resource_model = resource_model;
-                        record.operation_status = STATUS_SUCCESS.to_string();
-                    }
-                    Err(failure) => {
-                        // The work could not be applied, so the record reports what
-                        // actually happened rather than a success nothing performed.
-                        record.operation_status = STATUS_FAILED.to_string();
-                        record.error_code = Some(failure.error_code().to_string());
-                        record.status_message = Some(failure.status_message(&record));
-                    }
+                match pending.effect {
+                    Some(effect) => match self.apply(&record, effect, now, native) {
+                        Ok(resource_model) => {
+                            record.resource_model = resource_model;
+                            record.operation_status = STATUS_SUCCESS.to_string();
+                        }
+                        Err(failure) => {
+                            // The work could not be applied, so the record reports what
+                            // actually happened rather than a success nothing performed.
+                            record.operation_status = STATUS_FAILED.to_string();
+                            record.error_code = Some(failure.error_code().to_string());
+                            record.status_message = Some(failure.status_message(&record));
+                        }
+                    },
+                    // A cancel abandoned the work this request owed, so there is nothing
+                    // to apply and nothing to report a resource model of: what falls due
+                    // is the cancellation itself, which is now complete.
+                    None => record.operation_status = STATUS_CANCEL_COMPLETE.to_string(),
                 }
-            } else {
-                record.operation_status = STATUS_SUCCESS.to_string();
             }
             // Nothing is left to poll for.
             record.retry_after = None;
@@ -717,6 +772,40 @@ impl ComAmazonawsCloudcontrolCloudapiserviceState {
         self.requests.get(request_token)
     }
 
+    /// Cancel the request `request_token` names, as of `now`.
+    ///
+    /// "Only resource operations requests with a status of PENDING or IN_PROGRESS can be
+    /// canceled" (`CancelResourceRequest`), so a request in any other status — one already
+    /// over, and one already being canceled — is reported back in that status rather than
+    /// moved, and a token this store holds no request under is reported as holding none.
+    /// That is what makes a repeated cancel leave the request exactly where the first one
+    /// put it, as an `@idempotent` operation must.
+    ///
+    /// A canceled request ABANDONS the work it owed — the resource it was to provision,
+    /// patch or remove is left exactly as it is — and is answered while the cancellation
+    /// is still running, so it reaches [`STATUS_CANCEL_COMPLETE`] one
+    /// [`RESOURCE_OPERATION_SPAN`] later, the way every other resource operation reaches
+    /// its own terminal status.
+    ///
+    /// Call [`Self::materialise_due`] first: a request whose work has fallen due is over,
+    /// and a cancel must see the status it has actually reached.
+    pub fn cancel_request(&mut self, request_token: &str, now: SystemTime) -> CancelVerdict {
+        let Some(record) = self.requests.get_mut(request_token) else {
+            return CancelVerdict::NotFound;
+        };
+        if !is_cancelable_status(&record.operation_status) {
+            return CancelVerdict::NotCancelable(record.operation_status.clone());
+        }
+        let due = now + RESOURCE_OPERATION_SPAN;
+        record.operation_status = STATUS_CANCEL_IN_PROGRESS.to_string();
+        // The work is dropped rather than applied: nothing the request was accepted for
+        // happens, which is what cancelling it means. What is still owed is the
+        // cancellation reaching its own terminal status.
+        record.pending = Some(PendingWork { due, effect: None });
+        record.retry_after = Some(due);
+        CancelVerdict::Canceling(Box::new(record.clone()))
+    }
+
     /// A `RequestToken` this store holds no request under.
     ///
     /// Answers `None` when [`TOKEN_ALLOCATION_ATTEMPTS`] candidates were all taken, so
@@ -905,6 +994,10 @@ pub const OUTCOME_ACCEPTED: &str = "accepted";
 /// The outcome a record carries for a call whose `ClientToken` replayed a request this
 /// service had already started, so the call changed nothing.
 pub const OUTCOME_REPLAYED: &str = "replayed";
+
+/// The outcome a record carries for a call that canceled a resource operation request,
+/// abandoning the work that request owed.
+pub const OUTCOME_CANCELED: &str = "canceled";
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -1606,30 +1699,58 @@ pub const HANDLER_ERROR_NOT_FOUND: &str = "NotFound";
 /// The `HandlerErrorCode` for a resource the owning handler found already there.
 pub const HANDLER_ERROR_ALREADY_EXISTS: &str = "AlreadyExists";
 
-/// One resource type's own not-found diagnostic, for the types whose owning service
-/// states it in its own terms rather than in Cloud Control API's generic sentence.
+/// One resource type's own not-found diagnostic, for the types whose handler states one
+/// of its own rather than Cloud Control API's generic sentence.
 struct HandlerDiagnostic {
-    /// The sentence the owning service's own API states.
+    /// The sentence that handler states, carrying [`IDENTIFIER_PLACEHOLDER`] wherever the
+    /// sentence names the resource itself — which is a value taken from the request rather
+    /// than part of the fixed text.
     sentence: &'static str,
     /// The `Service` the owning handler's client is for, where that handler carries its
     /// client's rendering of the service's exception rather than the bare sentence.
     sdk_service: Option<&'static str>,
 }
 
+/// Where a [`HandlerDiagnostic::sentence`] names the resource the refusal is about.
+const IDENTIFIER_PLACEHOLDER: &str = "{Identifier}";
+
 /// What the owning resource type's handler states for a resource it cannot find, keyed
 /// by `TypeName` — the registry's own key.
 ///
 /// Cloud Control API is a facade over the type's handler, so the diagnostic inside a
-/// not-found refusal is the OWNING service's, not Cloud Control's: CloudWatch says an
-/// alarm does not exist, SNS says a topic does not exist. A type absent from here is
+/// not-found refusal is that HANDLER's, not Cloud Control's: CloudWatch's handler says an
+/// alarm does not exist, SNS's says a topic does not exist. A type absent from here is
 /// reported in Cloud Control's own generic sentence
 /// ([`resource_not_found_message`]), which is what a handler built on the generic
 /// resource-provider base class states.
+///
+/// Each sentence is the one RECORDED for that type's handler through this API, which is
+/// not always how the owning service words the same absence on its own wire: the
+/// `AWS::S3::Bucket` handler states "Bucket not found" where `s3:HeadBucket` answers
+/// `NoSuchBucket` "The specified bucket does not exist", and the `AWS::DynamoDB::Table`
+/// handler states "Table: <name> does not exist." where `dynamodb:DescribeTable` answers
+/// "Requested resource not found". The handler's own sentence is what a Cloud Control API
+/// client reads, so it is what this catalog holds; only the resource's name inside it
+/// comes from the request ([`IDENTIFIER_PLACEHOLDER`]).
 const HANDLER_NOT_FOUND_DIAGNOSTICS: &[(&str, HandlerDiagnostic)] = &[
     (
         "AWS::CloudWatch::Alarm",
         HandlerDiagnostic {
             sentence: "Alarm does not exist",
+            sdk_service: None,
+        },
+    ),
+    (
+        "AWS::DynamoDB::Table",
+        HandlerDiagnostic {
+            sentence: "Table: {Identifier} does not exist.",
+            sdk_service: None,
+        },
+    ),
+    (
+        "AWS::S3::Bucket",
+        HandlerDiagnostic {
+            sentence: "Bucket not found",
             sdk_service: None,
         },
     ),
@@ -1672,29 +1793,34 @@ pub fn resource_not_found_message(type_name: &str, identifier: &str) -> String {
 /// The diagnostic the handler that owns `type_name` states for a resource it cannot
 /// find.
 pub fn handler_not_found_detail(type_name: &str, identifier: &str) -> String {
-    owning_not_found_detail(type_name)
+    owning_not_found_detail(type_name, identifier)
         .unwrap_or_else(|| resource_not_found_message(type_name, identifier))
 }
 
-/// The OWNING SERVICE's own diagnostic for a resource it cannot find, or `None` for a type
-/// whose handler reports a not-found in Cloud Control API's own terms
+/// The diagnostic the HANDLER that owns `type_name` states for a resource it cannot find,
+/// or `None` for a type whose handler reports a not-found in Cloud Control API's own terms
 /// ([`resource_not_found_message`]) — which is what a handler built on the generic
 /// resource-provider base class states, because the not-found exception that base class
 /// throws names nothing but the type and the identifier.
-fn owning_not_found_detail(type_name: &str) -> Option<String> {
+fn owning_not_found_detail(type_name: &str, identifier: &str) -> Option<String> {
     let (_, diagnostic) = HANDLER_NOT_FOUND_DIAGNOSTICS
         .iter()
         .find(|(name, _)| *name == type_name)?;
+    // The sentence names the resource wherever the owning service's wording does, with the
+    // identifier the request carried.
+    let sentence = diagnostic
+        .sentence
+        .replace(IDENTIFIER_PLACEHOLDER, identifier);
     Some(match diagnostic.sdk_service {
         // The handler carries its client's rendering of the owning service's own
         // exception, which names the service, the status it answered and the request the
         // handler made of it.
         Some(service) => format!(
-            "{} (Service: {service}, Status Code: {HANDLER_NOT_FOUND_STATUS}, Request ID: {})",
-            diagnostic.sentence,
+            "{sentence} (Service: {service}, Status Code: {HANDLER_NOT_FOUND_STATUS}, \
+             Request ID: {})",
             mint_token()
         ),
-        None => diagnostic.sentence.to_string(),
+        None => sentence,
     })
 }
 
@@ -1909,6 +2035,13 @@ pub fn request_token_not_found_message(request_token: &str) -> String {
     format!("Request with token {request_token} was not found")
 }
 
+/// How a cancel words a request it will not cancel: the token the caller named and the
+/// status that request has already reached, because "only resource operations requests
+/// with a status of PENDING or IN_PROGRESS can be canceled".
+pub fn request_already_in_status_message(request_token: &str, operation_status: &str) -> String {
+    format!("Request {request_token} is already in status {operation_status}")
+}
+
 /// How an operation that names a `TypeName` words one the registry does not hold.
 pub fn type_not_found_message(type_name: &str) -> String {
     format!("The type '{type_name}' cannot be found.")
@@ -2026,7 +2159,14 @@ mod tests {
                 "operation {operation:?}: not a value the model's Operation enum declares"
             );
         }
-        for status in [STATUS_IN_PROGRESS, STATUS_SUCCESS, STATUS_FAILED] {
+        for status in [
+            STATUS_PENDING,
+            STATUS_IN_PROGRESS,
+            STATUS_SUCCESS,
+            STATUS_FAILED,
+            STATUS_CANCEL_IN_PROGRESS,
+            STATUS_CANCEL_COMPLETE,
+        ] {
             assert!(
                 crate::ops::types::OPERATION_STATUS_VALUES.contains(&status),
                 "status {status:?}: not a value the model's OperationStatus enum declares"

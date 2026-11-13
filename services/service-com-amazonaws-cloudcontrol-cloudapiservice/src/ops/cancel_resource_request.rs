@@ -1,16 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CancelResourceRequest
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CancelResourceRequest`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CancelResourceRequest::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
-//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -144,18 +134,64 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CancelResourceRequest` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CancelResourceRequestErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CancelResourceRequest"))
+        // The one refusal this operation models for a token that names nothing: "a
+        // resource operation with the specified request token can't be found". A store
+        // that is not mounted holds no request at all, so that is the same answer rather
+        // than a different one, and the message names the token the caller sent because
+        // that is all a client cancelling several requests gets back.
+        let not_found = || {
+            CancelResourceRequestErrorModeled::RequestTokenNotFoundException(
+                RequestTokenNotFoundException {
+                    message: Some(crate::state::request_token_not_found_message(
+                        &input.request_token,
+                    )),
+                },
+            )
+            .into()
+        };
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(not_found());
+        };
+
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+        // What the clock already owes the store, so a request whose work has fallen due is
+        // seen in the status it has REACHED: the cancel window closes when the request
+        // becomes terminal, whether or not anybody polled it.
+        let native = crate::state::native::NativeResources::for_engine(&*self.engine);
+        store.materialise_due(now, &native);
+
+        match store.cancel_request(&input.request_token, now) {
+            crate::state::CancelVerdict::NotFound => Err(not_found()),
+            // "Only resource operations requests with a status of PENDING or IN_PROGRESS
+            // can be canceled": a request in any other status — one already over, and one
+            // already being canceled — is not cancelable, which is a fault in the request
+            // this operation models no error for, so it is refused as an invalid request
+            // naming the token and the status it is already in.
+            crate::state::CancelVerdict::NotCancelable(operation_status) => {
+                Err(crate::scaffolded::Scaffolded::validation(
+                    crate::state::request_already_in_status_message(
+                        &input.request_token,
+                        &operation_status,
+                    ),
+                ))
+            }
+            crate::state::CancelVerdict::Canceling(record) => {
+                let progress_event = crate::state::progress_event(&record);
+                crate::state::audit(
+                    ctx.parts(),
+                    Self::NAME,
+                    &crate::state::resource_label(
+                        &record.type_name,
+                        record.identifier.as_deref().unwrap_or_default(),
+                    ),
+                    &record.request_token,
+                    crate::state::OUTCOME_CANCELED,
+                );
+                Ok(CancelResourceRequestOutput {
+                    progress_event: Some(progress_event),
+                })
+            }
+        }
     }
 }

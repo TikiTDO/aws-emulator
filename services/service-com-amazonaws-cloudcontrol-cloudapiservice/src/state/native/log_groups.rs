@@ -220,10 +220,10 @@ impl NativeResourceProvider for LogGroupProvider {
             .get(identifier)
             .ok_or(NativeRefusal::NotFound)?;
         // Deletion protection "blocks all deletion operations until it is explicitly
-        // disabled", so the owning service refuses this delete — in its own words — and
-        // the resource stays.
+        // disabled", so the owning service raises its own error about the group as it is —
+        // a verdict the handler maps to none of its own — and the resource stays.
         if group.deletion_protection_enabled {
-            return Err(NativeRefusal::Invalid(
+            return Err(NativeRefusal::Rejected(
                 logs::log_group_delete_protected_message(),
             ));
         }

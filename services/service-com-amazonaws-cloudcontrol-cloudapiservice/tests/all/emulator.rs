@@ -37,6 +37,14 @@ pub(crate) const LOGS_TARGET_PREFIX: &str = "Logs_20140328";
 /// `AWS::SQS::Queue` names.
 pub(crate) const SQS_SIGNING_NAME: &str = "sqs";
 
+/// The sigv4 signing name of the Amazon S3 service, whose own store holds the buckets
+/// `AWS::S3::Bucket` names.
+pub(crate) const S3_SIGNING_NAME: &str = "s3";
+
+/// The endpoint host a request to that service is addressed to: the REGIONAL one, which
+/// carries no bucket label, so every request below is path-style.
+pub(crate) const S3_ENDPOINT_HOST: &str = "s3.us-east-1.amazonaws.com";
+
 /// The `X-Amz-Target` prefix a client writes for that service: the local name of its
 /// Smithy service shape.
 pub(crate) const SQS_TARGET_PREFIX: &str = "AmazonSQS";
@@ -61,6 +69,12 @@ pub(crate) const STATUS_SUCCESS: &str = "SUCCESS";
 /// "`FAILED`: The resource operation has failed. Refer to the error code and status
 /// message for more information."
 pub(crate) const STATUS_FAILED: &str = "FAILED";
+
+/// "`CANCEL_IN_PROGRESS`: The resource operation is in the process of being canceled."
+pub(crate) const STATUS_CANCEL_IN_PROGRESS: &str = "CANCEL_IN_PROGRESS";
+
+/// "`CANCEL_COMPLETE`: The resource operation has been canceled."
+pub(crate) const STATUS_CANCEL_COMPLETE: &str = "CANCEL_COMPLETE";
 
 /// One emulator: a router with this service mounted over one shared engine.
 pub(crate) struct Emulator {
@@ -110,6 +124,13 @@ impl Emulator {
         Self::mounted(|router, engine| {
             router
                 .register_service(service_com_amazonaws_sqs_amazonsqs::EmulatedService::new(engine));
+        })
+    }
+
+    /// One emulator with the service that OWNS `AWS::S3::Bucket` mounted beside this one.
+    pub(crate) fn with_s3() -> Self {
+        Self::mounted(|router, engine| {
+            router.register_service(service_com_amazonaws_s3_amazons3::EmulatedService::new(engine));
         })
     }
 
@@ -166,6 +187,46 @@ impl Emulator {
             "{operation}: expected HTTP 200, got {status} with body {decoded:?}"
         );
         decoded
+    }
+
+    /// One request to the Amazon S3 service's own API — the OWNING service's own API, the
+    /// one a client uses when it is not going through Cloud Control API.
+    ///
+    /// S3 speaks restXml over a REST surface rather than a JSON RPC one, so a call is a
+    /// method, a path (`/<bucket>` for a bucket, `/<bucket>/<key>` for an object) and a
+    /// media type, and the answer is a status and a body of bytes.
+    pub(crate) async fn s3(
+        &self,
+        method: &str,
+        path: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> (u16, Vec<u8>) {
+        let authorization = format!(
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/{SIGNING_REGION}/\
+             {S3_SIGNING_NAME}/aws4_request, SignedHeaders=host, Signature=00"
+        );
+        let request = http::Request::builder()
+            .method(method)
+            .uri(format!("https://{S3_ENDPOINT_HOST}{path}"))
+            .header("host", S3_ENDPOINT_HOST)
+            .header("content-type", content_type)
+            .header("authorization", authorization)
+            .body(Bytes::copy_from_slice(body))
+            .expect("a well-formed request");
+        let response = self.router.dispatch(request).await;
+        (
+            response.status().as_u16(),
+            response.body().as_ref().to_vec(),
+        )
+    }
+
+    /// One request to that service about a BUCKET or one of its subresources, as a
+    /// `(status, body as text)` pair — which is how an XML document and an error document
+    /// alike are read.
+    pub(crate) async fn s3_bucket_call(&self, method: &str, path: &str) -> (u16, String) {
+        let (status, answered) = self.s3(method, path, "application/xml", b"").await;
+        (status, String::from_utf8_lossy(&answered).to_string())
     }
 
     /// One signed `POST /` through the router, as a `(status, body)` pair.
@@ -284,6 +345,20 @@ impl Emulator {
     /// answering the `ProgressEvent` it reports then — whichever status that is, so a
     /// case can assert on a request the owning handler failed.
     pub(crate) async fn terminal(&self, request_token: &str) -> Value {
+        self.reaching(request_token, &[
+            STATUS_SUCCESS,
+            STATUS_FAILED,
+            STATUS_CANCEL_COMPLETE,
+        ])
+        .await
+    }
+
+    /// Wait until the request `request_token` names reports one of `wanted`, answering the
+    /// `ProgressEvent` it reports then.
+    ///
+    /// The wait is for the STATUS and never for a span: it re-reads until the condition
+    /// holds or the generous deadline above passes.
+    pub(crate) async fn reaching(&self, request_token: &str, wanted: &[&str]) -> Value {
         let started = Instant::now();
         loop {
             let (status, body) = self.status(request_token).await;
@@ -294,16 +369,25 @@ impl Emulator {
             );
             let event = progress(&body);
             let reached = text(&event, "OperationStatus");
-            if reached == STATUS_SUCCESS || reached == STATUS_FAILED {
+            if wanted.contains(&reached.as_str()) {
                 return event;
             }
             assert!(
                 started.elapsed() < SETTLED_BUDGET,
-                "request {request_token:?}: expected the operation to reach a terminal \
-                 status within {SETTLED_BUDGET:?}, it is still {reached:?}"
+                "request {request_token:?}: expected the operation to report one of \
+                 {wanted:?} within {SETTLED_BUDGET:?}, it is still {reached:?}"
             );
             tokio::time::sleep(SETTLED_INTERVAL).await;
         }
+    }
+
+    /// `CancelResourceRequest`, as a `(status, body)` pair.
+    pub(crate) async fn cancel(&self, request_token: &str) -> (u16, Value) {
+        self.cc(
+            "CancelResourceRequest",
+            json!({ "RequestToken": request_token }),
+        )
+        .await
     }
 
     /// Create one resource and wait until it is provisioned, answering its primary

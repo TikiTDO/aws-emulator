@@ -13,6 +13,8 @@
 // points it into `tests/all/`.
 #[path = "all/audit_records.rs"]
 mod audit_records;
+#[path = "all/cancel_resource_request.rs"]
+mod cancel_resource_request;
 #[path = "all/emulator.rs"]
 mod emulator;
 #[path = "all/native_resource_resolution.rs"]
@@ -27,6 +29,8 @@ mod request_listing;
 mod resource_lifecycle;
 #[path = "all/resource_listing.rs"]
 mod resource_listing;
+#[path = "all/s3_bucket_provisioning.rs"]
+mod s3_bucket_provisioning;
 #[path = "all/sqs_queue_read_through.rs"]
 mod sqs_queue_read_through;
 #[path = "all/state_roundtrip.rs"]

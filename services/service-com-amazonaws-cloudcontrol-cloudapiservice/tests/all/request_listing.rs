@@ -27,8 +27,9 @@ const OPERATION_CREATE: &str = "CREATE";
 const OPERATION_UPDATE: &str = "UPDATE";
 const OPERATION_DELETE: &str = "DELETE";
 
-/// An `OperationStatus` the model declares that no request of this emulator reaches, so a
-/// filter naming it admits nothing (`smithy_query(query="shape",shape="OperationStatus")`).
+/// An `OperationStatus` the model declares that no request of THIS suite reaches, because
+/// none of them is canceled, so a filter naming it admits nothing
+/// (`smithy_query(query="shape",shape="OperationStatus")`).
 const STATUS_CANCEL_COMPLETE: &str = "CANCEL_COMPLETE";
 
 /// The `OperationStatus` values the model declares
@@ -289,7 +290,7 @@ async fn a_listing_reports_the_requests_the_filter_criteria_admit() {
         ),
         ("a status none reached", vec![], vec![STATUS_IN_PROGRESS], vec![]),
         (
-            "a status the model declares and none reaches",
+            "a status no request of this suite reaches",
             vec![],
             vec![STATUS_CANCEL_COMPLETE],
             vec![],

@@ -488,7 +488,9 @@ async fn a_delete_the_owning_service_refuses_leaves_the_resource_where_it_is() {
 
     // The rules the resource is under are the OWNING service's: deletion protection
     // "blocks all deletion operations until it is explicitly disabled", so the delete
-    // terminates FAILED carrying that service's own diagnostic and the group stays.
+    // terminates FAILED carrying that service's own diagnostic — under the handler error
+    // code for an error the downstream service raised that maps to no other verdict — and
+    // the group stays.
     let accepted = emulator.delete(LOG_GROUP, name).await;
     assert_eq!(
         accepted.0, 200,
@@ -504,7 +506,7 @@ async fn a_delete_the_owning_service_refuses_leaves_the_resource_where_it_is() {
     );
     assert_eq!(
         text(&settled, "ErrorCode"),
-        "InvalidRequest",
+        "GeneralServiceException",
         "unexpected handler error code, got {settled:?}"
     );
     assert_eq!(

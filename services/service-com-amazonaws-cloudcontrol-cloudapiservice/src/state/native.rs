@@ -33,6 +33,7 @@
 //! the request record and the resource it owes are settled together. Never the other way
 //! round: nothing in an owning service reaches back into this one.
 
+mod buckets;
 mod destinations;
 mod log_groups;
 mod queues;
@@ -57,10 +58,14 @@ pub enum NativeRefusal {
     /// The owning service holds as many resources of this type as it may, and states
     /// the quota in its own terms.
     AtCapacity(String),
-    /// The model names something this type's resource cannot carry, or the resource
-    /// cannot be acted on in the state it is in. Carries the owning service's own
+    /// The model names something this type's resource cannot carry — a fault in the
+    /// resource model, which the handler itself judges. Carries the owning service's own
     /// diagnostic.
     Invalid(String),
+    /// The owning service would not carry out the operation on the resource AS IT IS: the
+    /// request is a well-formed one that service raised an error of its own about, and the
+    /// handler maps it to no other verdict. Carries that service's own diagnostic.
+    Rejected(String),
 }
 
 impl NativeRefusal {
@@ -72,6 +77,7 @@ impl NativeRefusal {
             Self::AlreadyExists => crate::state::HANDLER_ERROR_ALREADY_EXISTS,
             Self::AtCapacity(_) => HANDLER_ERROR_SERVICE_LIMIT_EXCEEDED,
             Self::Invalid(_) => HANDLER_ERROR_INVALID_REQUEST,
+            Self::Rejected(_) => HANDLER_ERROR_GENERAL_SERVICE_EXCEPTION,
         }
     }
 }
@@ -81,6 +87,11 @@ pub const HANDLER_ERROR_SERVICE_LIMIT_EXCEEDED: &str = "ServiceLimitExceeded";
 
 /// The `HandlerErrorCode` for a model the owning service will not take.
 pub const HANDLER_ERROR_INVALID_REQUEST: &str = "InvalidRequest";
+
+/// The `HandlerErrorCode` for an error the OWNING SERVICE raised that the resource type's
+/// handler maps to none of the others — which is what this code is for: the downstream
+/// service generated an error, and the handler has no verdict of its own for it.
+pub const HANDLER_ERROR_GENERAL_SERVICE_EXCEPTION: &str = "GeneralServiceException";
 
 /// What one resource type's owning service answers about its resources.
 ///
@@ -181,6 +192,9 @@ impl NativeResources {
         if let Some(provider) = queues::QueueProvider::for_engine(engine) {
             providers.push(Box::new(provider));
         }
+        if let Some(provider) = buckets::BucketProvider::for_engine(engine) {
+            providers.push(Box::new(provider));
+        }
         Self { providers }
     }
 
@@ -213,6 +227,11 @@ pub type LogsState =
 /// OWN state struct, reached through the shared engine, so a queue this emulator holds is
 /// the queue Cloud Control API acts on whichever API created it.
 pub type SqsState = ::service_com_amazonaws_sqs_amazonsqs::state::ComAmazonawsSqsAmazonsqsState;
+
+/// The Amazon S3 store the resources of the `AWS::S3::Bucket` type live in — that service's
+/// OWN state struct, reached through the shared engine, so a bucket Cloud Control API
+/// provisions is the bucket that service then serves objects in.
+pub type S3State = ::service_com_amazonaws_s3_amazons3::state::ComAmazonawsS3Amazons3State;
 
 /// The window `(after, limit)` names of an owning store keyed by its resources' own
 /// identifiers: the entries whose key sorts AFTER `after`, in key order, at most `limit`
@@ -284,6 +303,7 @@ mod tests {
             NativeRefusal::AlreadyExists,
             NativeRefusal::AtCapacity("at the quota".to_string()),
             NativeRefusal::Invalid("not a property of the type".to_string()),
+            NativeRefusal::Rejected("the resource is not in a state for this".to_string()),
         ] {
             let code = refusal.handler_error_code();
             assert!(
@@ -312,7 +332,11 @@ mod tests {
             native.provider("AWS::SQS::Queue").is_some(),
             "expected the queue provider, got {native:?}"
         );
-        for unbacked in ["AWS::S3::Bucket", "AWS::Kinesis::Stream", "AWS::Logs"] {
+        assert!(
+            native.provider("AWS::S3::Bucket").is_some(),
+            "expected the bucket provider, got {native:?}"
+        );
+        for unbacked in ["AWS::Kinesis::Stream", "AWS::DynamoDB::Table", "AWS::Logs"] {
             assert!(
                 native.provider(unbacked).is_none(),
                 "type {unbacked:?}: expected no provider, got one"

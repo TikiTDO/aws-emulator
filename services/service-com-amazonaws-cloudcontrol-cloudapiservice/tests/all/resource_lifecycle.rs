@@ -15,8 +15,10 @@ use super::emulator::{
 };
 use super::refusal_wording::{assert_handler_not_found, generic_already_exists};
 
-/// A resource type whose primary identifier the caller supplies.
-const BUCKET: &str = "AWS::S3::Bucket";
+/// A resource type whose primary identifier the caller supplies and whose resources live
+/// in THIS service's own store, so every row here is about the operation rather than about
+/// one owning service.
+const TABLE: &str = "AWS::DynamoDB::Table";
 
 /// A second resource type, so a case can tell one type's resources from another's. Its
 /// resources live in the OWNING service's store (`AWS::Logs::LogGroup` is a CloudWatch
@@ -44,18 +46,25 @@ fn inert_patch() -> Value {
     json!([{ "op": "add", "path": "/Tags", "value": [] }])
 }
 
+/// The not-found diagnostic the service that OWNS this type states for one of its
+/// resources, which every refusal about an absent one of them carries: Amazon DynamoDB
+/// names the table it holds none of.
+fn table_not_found(identifier: &str) -> String {
+    format!("Table: {identifier} does not exist.")
+}
+
 #[tokio::test]
 async fn the_six_operations_run_end_to_end() {
     let emulator = Emulator::new();
     let desired = json!({
-        "BucketName": "demo-bucket",
-        "VersioningConfiguration": { "Status": "Suspended" },
+        "TableName": "demo-table",
+        "StreamSpecification": { "StreamViewType": "KEYS_ONLY" },
     });
 
     // CreateResource answers the request it started, not the resource: the operation is
     // still running when the call returns.
     let accepted = emulator
-        .create_ok(BUCKET, &desired, Some("tok-create"))
+        .create_ok(TABLE, &desired, Some("tok-create"))
         .await;
     let request_token = text(&accepted, "RequestToken");
     assert!(
@@ -64,12 +73,12 @@ async fn the_six_operations_run_end_to_end() {
     );
     assert_eq!(
         text(&accepted, "TypeName"),
-        BUCKET,
+        TABLE,
         "the create must report the type it acted on, got {accepted:?}"
     );
     assert_eq!(
         text(&accepted, "Identifier"),
-        "demo-bucket",
+        "demo-table",
         "the create must report the primary identifier the desired state names, got {accepted:?}"
     );
     assert_eq!(
@@ -102,7 +111,7 @@ async fn the_six_operations_run_end_to_end() {
     );
     assert_eq!(
         text(&settled, "Identifier"),
-        "demo-bucket",
+        "demo-table",
         "the status call must report the resource the request acted on, got {settled:?}"
     );
     assert_eq!(
@@ -113,7 +122,7 @@ async fn the_six_operations_run_end_to_end() {
     );
 
     // GetResource reports the model that was stored, not the request's blob echoed back.
-    let stored = emulator.properties(BUCKET, "demo-bucket").await;
+    let stored = emulator.properties(TABLE, "demo-table").await;
     assert_eq!(
         stored, desired,
         "GetResource must report the stored resource model, expected {desired:?}, got {stored:?}"
@@ -122,7 +131,7 @@ async fn the_six_operations_run_end_to_end() {
     // A second create of the same resource is the OWNING handler's verdict: the request
     // is accepted and then fails with that handler's error code and its own wording.
     let (status, body) = emulator
-        .create(BUCKET, &desired, Some("tok-create-again"))
+        .create(TABLE, &desired, Some("tok-create-again"))
         .await;
     assert_eq!(
         status, 200,
@@ -143,10 +152,10 @@ async fn the_six_operations_run_end_to_end() {
     );
     assert_eq!(
         text(&duplicate, "StatusMessage"),
-        generic_already_exists(BUCKET, "demo-bucket"),
+        generic_already_exists(TABLE, "demo-table"),
         "a second create of the same resource: unexpected wording"
     );
-    let stored = emulator.properties(BUCKET, "demo-bucket").await;
+    let stored = emulator.properties(TABLE, "demo-table").await;
     assert_eq!(
         stored, desired,
         "the failed create must leave the resource as it was, got {stored:?}"
@@ -154,10 +163,10 @@ async fn the_six_operations_run_end_to_end() {
 
     // UpdateResource applies the patch to the stored model, and a later read shows it.
     let patch = json!([
-        { "op": "replace", "path": "/VersioningConfiguration/Status", "value": "Enabled" },
+        { "op": "replace", "path": "/StreamSpecification/StreamViewType", "value": "NEW_IMAGE" },
         { "op": "add", "path": "/Tags", "value": [{ "Key": "team", "Value": "web" }] },
     ]);
-    let updated = emulator.update_and_settle(BUCKET, "demo-bucket", &patch).await;
+    let updated = emulator.update_and_settle(TABLE, "demo-table", &patch).await;
     assert_eq!(
         text(&updated, "Operation"),
         "UPDATE",
@@ -168,10 +177,10 @@ async fn the_six_operations_run_end_to_end() {
         STATUS_SUCCESS,
         "the update must reach SUCCESS, got {updated:?}"
     );
-    let patched = emulator.properties(BUCKET, "demo-bucket").await;
+    let patched = emulator.properties(TABLE, "demo-table").await;
     let expected = json!({
-        "BucketName": "demo-bucket",
-        "VersioningConfiguration": { "Status": "Enabled" },
+        "TableName": "demo-table",
+        "StreamSpecification": { "StreamViewType": "NEW_IMAGE" },
         "Tags": [{ "Key": "team", "Value": "web" }],
     });
     assert_eq!(
@@ -187,15 +196,15 @@ async fn the_six_operations_run_end_to_end() {
     );
 
     // ListResources reports the resource that is actually persisted.
-    let walked = emulator.walk(BUCKET, None).await;
+    let walked = emulator.walk(TABLE, None).await;
     assert_eq!(
         walked,
-        vec!["demo-bucket".to_string()],
+        vec!["demo-table".to_string()],
         "the listing must report the stored resource, got {walked:?}"
     );
 
     // DeleteResource removes it, and the reads agree.
-    let deleted = emulator.delete_and_settle(BUCKET, "demo-bucket").await;
+    let deleted = emulator.delete_and_settle(TABLE, "demo-table").await;
     assert_eq!(
         text(&deleted, "Operation"),
         "DELETE",
@@ -206,7 +215,7 @@ async fn the_six_operations_run_end_to_end() {
         STATUS_SUCCESS,
         "the delete must reach SUCCESS, got {deleted:?}"
     );
-    let (status, body) = emulator.get(BUCKET, "demo-bucket").await;
+    let (status, body) = emulator.get(TABLE, "demo-table").await;
     assert_eq!(
         status, 404,
         "GetResource after the delete: expected HTTP 404, got {status} with body {body:?}"
@@ -218,11 +227,11 @@ async fn the_six_operations_run_end_to_end() {
     );
     assert_handler_not_found(
         &message(&body),
-        BUCKET,
-        &super::refusal_wording::generic_not_found(BUCKET, "demo-bucket"),
+        TABLE,
+        &table_not_found("demo-table"),
         "GetResource after the delete",
     );
-    let walked = emulator.walk(BUCKET, None).await;
+    let walked = emulator.walk(TABLE, None).await;
     assert!(
         walked.is_empty(),
         "the listing after the delete must report nothing, got {walked:?}"
@@ -324,11 +333,11 @@ async fn a_resource_operation_is_in_progress_before_it_completes() {
 #[tokio::test]
 async fn a_client_token_replays_its_request_and_refuses_a_different_one() {
     let emulator = Emulator::new();
-    let desired = json!({ "BucketName": "token-bucket" });
+    let desired = json!({ "TableName": "token-table" });
 
-    let first = emulator.create_ok(BUCKET, &desired, Some("tok-1")).await;
+    let first = emulator.create_ok(TABLE, &desired, Some("tok-1")).await;
     let request_token = text(&first, "RequestToken");
-    let replay = emulator.create_ok(BUCKET, &desired, Some("tok-1")).await;
+    let replay = emulator.create_ok(TABLE, &desired, Some("tok-1")).await;
     assert_eq!(
         text(&replay, "RequestToken"),
         request_token,
@@ -336,15 +345,15 @@ async fn a_client_token_replays_its_request_and_refuses_a_different_one() {
     );
 
     emulator.settled(&request_token).await;
-    let walked = emulator.walk(BUCKET, None).await;
+    let walked = emulator.walk(TABLE, None).await;
     assert_eq!(
         walked,
-        vec!["token-bucket".to_string()],
+        vec!["token-table".to_string()],
         "a replayed client token must not mint a second resource, got {walked:?}"
     );
 
     // Replaying after the request completed reports the status it has reached.
-    let late_replay = emulator.create_ok(BUCKET, &desired, Some("tok-1")).await;
+    let late_replay = emulator.create_ok(TABLE, &desired, Some("tok-1")).await;
     assert_eq!(
         text(&late_replay, "RequestToken"),
         request_token,
@@ -362,7 +371,7 @@ async fn a_client_token_replays_its_request_and_refuses_a_different_one() {
         (
             "a create with another desired state",
             emulator
-                .create(BUCKET, &json!({ "BucketName": "other-bucket" }), Some("tok-1"))
+                .create(TABLE, &json!({ "TableName": "other-table" }), Some("tok-1"))
                 .await,
         ),
         (
@@ -394,7 +403,7 @@ async fn a_client_token_replays_its_request_and_refuses_a_different_one() {
 
     // An update's token obeys the same rule.
     let (status, body) = emulator
-        .update(BUCKET, "token-bucket", &inert_patch(), Some("tok-2"))
+        .update(TABLE, "token-table", &inert_patch(), Some("tok-2"))
         .await;
     assert_eq!(
         status, 200,
@@ -402,7 +411,7 @@ async fn a_client_token_replays_its_request_and_refuses_a_different_one() {
     );
     let update_token = text(&progress(&body), "RequestToken");
     let (status, body) = emulator
-        .update(BUCKET, "token-bucket", &inert_patch(), Some("tok-2"))
+        .update(TABLE, "token-table", &inert_patch(), Some("tok-2"))
         .await;
     assert_eq!(
         status, 200,
@@ -415,8 +424,8 @@ async fn a_client_token_replays_its_request_and_refuses_a_different_one() {
     );
     let (status, body) = emulator
         .update(
-            BUCKET,
-            "token-bucket",
+            TABLE,
+            "token-table",
             &json!([{ "op": "add", "path": "/Tags", "value": [{ "Key": "a", "Value": "b" }] }]),
             Some("tok-2"),
         )
@@ -436,7 +445,7 @@ async fn a_client_token_replays_its_request_and_refuses_a_different_one() {
 
     // And a delete's token does too.
     let (status, body) = emulator
-        .delete_with_token(BUCKET, "token-bucket", Some("tok-3"))
+        .delete_with_token(TABLE, "token-table", Some("tok-3"))
         .await;
     assert_eq!(
         status, 200,
@@ -444,7 +453,7 @@ async fn a_client_token_replays_its_request_and_refuses_a_different_one() {
     );
     let delete_token = text(&progress(&body), "RequestToken");
     let (status, body) = emulator
-        .delete_with_token(BUCKET, "token-bucket", Some("tok-3"))
+        .delete_with_token(TABLE, "token-table", Some("tok-3"))
         .await;
     assert_eq!(
         status, 200,
@@ -463,16 +472,16 @@ async fn unknown_identifiers_and_tokens_are_the_modelled_refusals() {
 
     // Nothing has been created, so every operation that names a resource refuses.
     let rows = [
-        ("GetResource", emulator.get(BUCKET, "absent-bucket").await),
+        ("GetResource", emulator.get(TABLE, "absent-table").await),
         (
             "UpdateResource",
             emulator
-                .update(BUCKET, "absent-bucket", &inert_patch(), None)
+                .update(TABLE, "absent-table", &inert_patch(), None)
                 .await,
         ),
         (
             "DeleteResource",
-            emulator.delete(BUCKET, "absent-bucket").await,
+            emulator.delete(TABLE, "absent-table").await,
         ),
     ];
     for (case, (status, body)) in rows {
@@ -487,8 +496,8 @@ async fn unknown_identifiers_and_tokens_are_the_modelled_refusals() {
         );
         assert_handler_not_found(
             &message(&body),
-            BUCKET,
-            &super::refusal_wording::generic_not_found(BUCKET, "absent-bucket"),
+            TABLE,
+            &table_not_found("absent-table"),
             case,
         );
     }
@@ -535,7 +544,7 @@ async fn a_desired_state_that_is_not_a_resource_model_is_refused() {
         ("not JSON at all", "not json", "DesiredState is not valid JSON"),
         (
             "a truncated object",
-            "{\"BucketName\":",
+            "{\"TableName\":",
             "DesiredState is not valid JSON",
         ),
         (
@@ -545,7 +554,7 @@ async fn a_desired_state_that_is_not_a_resource_model_is_refused() {
         ),
         (
             "a bare string",
-            "\"demo-bucket\"",
+            "\"demo-table\"",
             "DesiredState must be a JSON object of resource properties",
         ),
         (
@@ -560,14 +569,14 @@ async fn a_desired_state_that_is_not_a_resource_model_is_refused() {
         ),
         (
             "an identifier property holding an object",
-            "{\"BucketName\":{}}",
-            "BucketName must be a non-empty scalar of at most 1024 characters to identify the \
+            "{\"TableName\":{}}",
+            "TableName must be a non-empty scalar of at most 1024 characters to identify the \
              resource",
         ),
         (
             "an identifier property holding the empty string",
-            "{\"BucketName\":\"\"}",
-            "BucketName must be a non-empty scalar of at most 1024 characters to identify the \
+            "{\"TableName\":\"\"}",
+            "TableName must be a non-empty scalar of at most 1024 characters to identify the \
              resource",
         ),
     ];
@@ -575,7 +584,7 @@ async fn a_desired_state_that_is_not_a_resource_model_is_refused() {
         let (status, body) = emulator
             .cc(
                 "CreateResource",
-                json!({ "TypeName": BUCKET, "DesiredState": desired_state }),
+                json!({ "TypeName": TABLE, "DesiredState": desired_state }),
             )
             .await;
         assert_eq!(
@@ -593,7 +602,7 @@ async fn a_desired_state_that_is_not_a_resource_model_is_refused() {
             "case {case:?}: unexpected wording"
         );
     }
-    let walked = emulator.walk(BUCKET, None).await;
+    let walked = emulator.walk(TABLE, None).await;
     assert!(
         walked.is_empty(),
         "a refused create must store nothing, got {walked:?}"
@@ -605,11 +614,11 @@ async fn an_update_applies_the_patch_and_refuses_one_that_cannot_be() {
     let emulator = Emulator::new();
     let identifier = emulator
         .provision(
-            BUCKET,
+            TABLE,
             &json!({
-                "BucketName": "patch-bucket",
+                "TableName": "patch-table",
                 "Tags": [],
-                "PublicAccessBlockConfiguration": { "BlockPublicAcls": true },
+                "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
             }),
         )
         .await;
@@ -619,14 +628,14 @@ async fn an_update_applies_the_patch_and_refuses_one_that_cannot_be() {
     let rows: [(&str, Value, Value, &[&str]); 7] = [
         (
             "add a new property",
-            json!([{ "op": "add", "path": "/VersioningConfiguration", "value": { "Status": "Enabled" } }]),
-            json!({ "VersioningConfiguration": { "Status": "Enabled" } }),
+            json!([{ "op": "add", "path": "/StreamSpecification", "value": { "StreamViewType": "NEW_IMAGE" } }]),
+            json!({ "StreamSpecification": { "StreamViewType": "NEW_IMAGE" } }),
             &[],
         ),
         (
             "replace a nested value",
-            json!([{ "op": "replace", "path": "/PublicAccessBlockConfiguration/BlockPublicAcls", "value": false }]),
-            json!({ "PublicAccessBlockConfiguration": { "BlockPublicAcls": false } }),
+            json!([{ "op": "replace", "path": "/PointInTimeRecoverySpecification/PointInTimeRecoveryEnabled", "value": false }]),
+            json!({ "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": false } }),
             &[],
         ),
         (
@@ -637,14 +646,14 @@ async fn an_update_applies_the_patch_and_refuses_one_that_cannot_be() {
         ),
         (
             "copy a value",
-            json!([{ "op": "copy", "from": "/BucketName", "path": "/Alias" }]),
-            json!({ "Alias": "patch-bucket" }),
+            json!([{ "op": "copy", "from": "/TableName", "path": "/Alias" }]),
+            json!({ "Alias": "patch-table" }),
             &[],
         ),
         (
             "move a value",
             json!([{ "op": "move", "from": "/Alias", "path": "/Nickname" }]),
-            json!({ "Nickname": "patch-bucket" }),
+            json!({ "Nickname": "patch-table" }),
             &["Alias"],
         ),
         (
@@ -656,12 +665,12 @@ async fn an_update_applies_the_patch_and_refuses_one_that_cannot_be() {
         (
             "a document carrying several operations",
             json!([
-                { "op": "test", "path": "/BucketName", "value": "patch-bucket" },
-                { "op": "add", "path": "/LoggingConfiguration", "value": { "LogFilePrefix": "logs/" } },
+                { "op": "test", "path": "/TableName", "value": "patch-table" },
+                { "op": "add", "path": "/SSESpecification", "value": { "SSEEnabled": true } },
                 { "op": "add", "path": "/Tags/-", "value": { "Key": "owner", "Value": "platform" } },
             ]),
             json!({
-                "LoggingConfiguration": { "LogFilePrefix": "logs/" },
+                "SSESpecification": { "SSEEnabled": true },
                 "Tags": [
                     { "Key": "team", "Value": "web" },
                     { "Key": "owner", "Value": "platform" },
@@ -671,8 +680,8 @@ async fn an_update_applies_the_patch_and_refuses_one_that_cannot_be() {
         ),
     ];
     for (case, patch, present, absent) in rows {
-        emulator.update_and_settle(BUCKET, &identifier, &patch).await;
-        let stored = emulator.properties(BUCKET, &identifier).await;
+        emulator.update_and_settle(TABLE, &identifier, &patch).await;
+        let stored = emulator.properties(TABLE, &identifier).await;
         for (property, wanted) in present.as_object().cloned().unwrap_or_default() {
             assert_eq!(
                 stored.get(&property),
@@ -688,8 +697,8 @@ async fn an_update_applies_the_patch_and_refuses_one_that_cannot_be() {
             );
         }
         assert_eq!(
-            stored.get("BucketName"),
-            Some(&json!("patch-bucket")),
+            stored.get("TableName"),
+            Some(&json!("patch-table")),
             "case {case:?}: the primary identifier must survive every patch, got {stored:?}"
         );
     }
@@ -698,7 +707,7 @@ async fn an_update_applies_the_patch_and_refuses_one_that_cannot_be() {
     // is part of the row: a document the FRONT DOOR will not read, or one naming a path
     // the resource model does not have, never reaches a handler, while a verdict on the
     // model the handler would have been asked to store is the handler's own.
-    let before = emulator.properties(BUCKET, &identifier).await;
+    let before = emulator.properties(TABLE, &identifier).await;
     let refusals: [(&str, &str, &str, String); 7] = [
         (
             "a patch document that is not JSON",
@@ -742,9 +751,9 @@ async fn an_update_applies_the_patch_and_refuses_one_that_cannot_be() {
         ),
         (
             "a test operation that does not hold",
-            "[{\"op\":\"test\",\"path\":\"/BucketName\",\"value\":\"other\"}]",
+            "[{\"op\":\"test\",\"path\":\"/TableName\",\"value\":\"other\"}]",
             "ValidationException",
-            "Invalid PatchDocument: the test operation at path '/BucketName' could not be \
+            "Invalid PatchDocument: the test operation at path '/TableName' could not be \
              applied to the resource model"
                 .to_string(),
         ),
@@ -762,7 +771,7 @@ async fn an_update_applies_the_patch_and_refuses_one_that_cannot_be() {
             .cc(
                 "UpdateResource",
                 json!({
-                    "TypeName": BUCKET,
+                    "TypeName": TABLE,
                     "Identifier": identifier,
                     "PatchDocument": patch_document,
                 }),
@@ -782,7 +791,7 @@ async fn an_update_applies_the_patch_and_refuses_one_that_cannot_be() {
             expected_message,
             "case {case:?}: unexpected wording"
         );
-        let after = emulator.properties(BUCKET, &identifier).await;
+        let after = emulator.properties(TABLE, &identifier).await;
         assert_eq!(
             after, before,
             "case {case:?}: a refused update must change nothing, expected {before:?}, got \
@@ -883,7 +892,7 @@ async fn a_patch_cannot_grow_the_resource_model_without_bound() {
 async fn a_patch_cannot_change_the_primary_identifier() {
     let emulator = Emulator::new();
     let identifier = emulator
-        .provision(BUCKET, &json!({ "BucketName": "create-only-bucket" }))
+        .provision(TABLE, &json!({ "TableName": "create-only-table" }))
         .await;
 
     // The primary identifier is what every operation addresses the resource by, so it is
@@ -891,19 +900,19 @@ async fn a_patch_cannot_change_the_primary_identifier() {
     let rows = [
         (
             "replacing it",
-            json!([{ "op": "replace", "path": "/BucketName", "value": "renamed-bucket" }]),
+            json!([{ "op": "replace", "path": "/TableName", "value": "renamed-table" }]),
         ),
         (
             "removing it",
-            json!([{ "op": "remove", "path": "/BucketName" }]),
+            json!([{ "op": "remove", "path": "/TableName" }]),
         ),
         (
             "replacing it with a value that cannot be an identifier",
-            json!([{ "op": "replace", "path": "/BucketName", "value": { "Nested": true } }]),
+            json!([{ "op": "replace", "path": "/TableName", "value": { "Nested": true } }]),
         ),
     ];
     for (case, patch) in rows {
-        let (status, body) = emulator.update(BUCKET, &identifier, &patch, None).await;
+        let (status, body) = emulator.update(TABLE, &identifier, &patch, None).await;
         assert_eq!(
             status, 400,
             "case {case:?}: expected HTTP 400, got {status} with body {body:?}"
@@ -915,14 +924,14 @@ async fn a_patch_cannot_change_the_primary_identifier() {
         );
         assert_eq!(
             message(&body),
-            "Invalid patch update: createOnlyProperties [/properties/BucketName] cannot be \
+            "Invalid patch update: createOnlyProperties [/properties/TableName] cannot be \
              updated",
             "case {case:?}: unexpected wording"
         );
-        let stored = emulator.properties(BUCKET, &identifier).await;
+        let stored = emulator.properties(TABLE, &identifier).await;
         assert_eq!(
             stored,
-            json!({ "BucketName": "create-only-bucket" }),
+            json!({ "TableName": "create-only-table" }),
             "case {case:?}: a refused update must change nothing, got {stored:?}"
         );
     }

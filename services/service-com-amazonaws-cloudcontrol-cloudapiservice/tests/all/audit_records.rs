@@ -14,8 +14,9 @@ use serde_json::json;
 
 use super::emulator::{progress, text, Emulator};
 
-/// A resource type whose primary identifier the caller supplies.
-const BUCKET: &str = "AWS::S3::Bucket";
+/// A resource type whose primary identifier the caller supplies and whose resources live
+/// in this service's own store.
+const TABLE: &str = "AWS::DynamoDB::Table";
 
 /// One captured `tracing` event: its target and its fields as text.
 #[derive(Clone, Debug)]
@@ -121,11 +122,11 @@ async fn every_state_changing_call_leaves_one_record_and_no_resource_model() {
     // A property a caller could have put a secret in, so the assertions below can check
     // it reaches no record.
     let secret = "s3cret-value-not-for-a-log";
-    let desired = json!({ "BucketName": "audited-bucket", "Secret": secret });
+    let desired = json!({ "TableName": "audited-table", "Secret": secret });
 
-    let created = emulator.create_ok(BUCKET, &desired, Some("audit-tok")).await;
+    let created = emulator.create_ok(TABLE, &desired, Some("audit-tok")).await;
     let create_token = text(&created, "RequestToken");
-    let replayed = emulator.create_ok(BUCKET, &desired, Some("audit-tok")).await;
+    let replayed = emulator.create_ok(TABLE, &desired, Some("audit-tok")).await;
     assert_eq!(
         text(&replayed, "RequestToken"),
         create_token,
@@ -135,7 +136,7 @@ async fn every_state_changing_call_leaves_one_record_and_no_resource_model() {
 
     let patch = json!([{ "op": "replace", "path": "/Secret", "value": "another-secret" }]);
     let (status, body) = emulator
-        .update(BUCKET, "audited-bucket", &patch, None)
+        .update(TABLE, "audited-table", &patch, None)
         .await;
     assert_eq!(
         status, 200,
@@ -144,7 +145,7 @@ async fn every_state_changing_call_leaves_one_record_and_no_resource_model() {
     let update_token = text(&progress(&body), "RequestToken");
     emulator.settled(&update_token).await;
 
-    let (status, body) = emulator.delete(BUCKET, "audited-bucket").await;
+    let (status, body) = emulator.delete(TABLE, "audited-table").await;
     assert_eq!(
         status, 200,
         "the delete: expected HTTP 200, got {status} with body {body:?}"
@@ -152,7 +153,7 @@ async fn every_state_changing_call_leaves_one_record_and_no_resource_model() {
     let delete_token = text(&progress(&body), "RequestToken");
 
     // A reporting call changes nothing, so it leaves no record of a change.
-    emulator.list(BUCKET, None, None).await;
+    emulator.list(TABLE, None, None).await;
 
     let records = audit_records();
     let rows = [
@@ -184,7 +185,7 @@ async fn every_state_changing_call_leaves_one_record_and_no_resource_model() {
         for record in matching {
             assert_eq!(
                 record.field("resource"),
-                "AWS::S3::Bucket/audited-bucket",
+                "AWS::DynamoDB::Table/audited-table",
                 "case {case:?}: the record must name the resource the call acted on, got \
                  {record:?}"
             );
@@ -231,18 +232,18 @@ async fn a_refused_call_leaves_no_record() {
     let emulator = Emulator::new();
 
     // Nothing is created, so each of these is refused before it changes anything.
-    let (status, _) = emulator.get(BUCKET, "refused-bucket").await;
+    let (status, _) = emulator.get(TABLE, "refused-table").await;
     assert_eq!(status, 404, "the read of an absent resource must refuse");
-    let (status, _) = emulator.delete(BUCKET, "refused-bucket").await;
+    let (status, _) = emulator.delete(TABLE, "refused-table").await;
     assert_eq!(status, 404, "the delete of an absent resource must refuse");
     let (status, _) = emulator
-        .create(BUCKET, &json!({ "BucketName": {} }), None)
+        .create(TABLE, &json!({ "TableName": {} }), None)
         .await;
     assert_eq!(status, 400, "a desired state that names no identifier must refuse");
 
     let refused: Vec<CapturedEvent> = audit_records()
         .into_iter()
-        .filter(|record| record.field("resource").ends_with("/refused-bucket"))
+        .filter(|record| record.field("resource").ends_with("/refused-table"))
         .collect();
     assert!(
         refused.is_empty(),

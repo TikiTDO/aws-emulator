@@ -17,6 +17,9 @@ service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
 # The same rule for `AWS::SQS::Queue`: a queue lives in the Amazon SQS service's store,
 # whichever API created it, so this crate reads and writes it THERE.
 service-com-amazonaws-sqs-amazonsqs = { workspace = true }
+# And for `AWS::S3::Bucket`: a bucket lives in the Amazon S3 service's store, so a bucket
+# provisioned through this service is one that service's own API then serves objects in.
+service-com-amazonaws-s3-amazons3 = { workspace = true }
 engine = { workspace = true }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }

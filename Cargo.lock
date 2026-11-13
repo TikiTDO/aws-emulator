@@ -10367,6 +10367,7 @@ dependencies = [
  "json-patch",
  "serde_json",
  "service-com-amazonaws-cloudwatchlogs-logs-20140328",
+ "service-com-amazonaws-s3-amazons3",
  "service-com-amazonaws-sqs-amazonsqs",
  "service-common",
  "sha2 0.10.9",

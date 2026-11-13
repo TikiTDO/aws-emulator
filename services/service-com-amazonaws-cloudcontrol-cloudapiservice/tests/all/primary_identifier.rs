@@ -45,7 +45,7 @@ async fn the_primary_identifier_is_the_value_of_the_types_own_identifier_propert
         Case {
             name: "the type's own name property",
             type_name: "AWS::S3::Bucket",
-            desired: json!({ "BucketName": "demo-bucket", "Tags": [] }),
+            desired: json!({ "BucketName": "demo-bucket" }),
             expected: Some("demo-bucket"),
         },
         Case {
@@ -95,8 +95,8 @@ async fn the_primary_identifier_is_the_value_of_the_types_own_identifier_propert
         },
         Case {
             name: "the most specific property wins over the fallbacks",
-            type_name: "AWS::S3::Bucket",
-            desired: json!({ "BucketName": "primary", "Name": "secondary", "Id": "tertiary" }),
+            type_name: "AWS::DynamoDB::Table",
+            desired: json!({ "TableName": "primary", "Name": "secondary", "Id": "tertiary" }),
             expected: Some("primary"),
         },
         Case {
@@ -197,16 +197,16 @@ async fn two_creates_naming_no_identifier_are_two_resources() {
 #[tokio::test]
 async fn the_same_identifier_under_two_types_is_two_resources() {
     let emulator = Emulator::new();
-    const BUCKET: &str = "AWS::S3::Bucket";
+    const TABLE: &str = "AWS::DynamoDB::Table";
     const LOG_GROUP: &str = "AWS::Logs::LogGroup";
-    let bucket = json!({ "BucketName": "shared", "Tags": [] });
+    let table = json!({ "TableName": "shared", "Tags": [] });
     let log_group = json!({ "LogGroupName": "shared", "RetentionInDays": 7 });
 
-    assert_eq!(emulator.provision(BUCKET, &bucket).await, "shared");
+    assert_eq!(emulator.provision(TABLE, &table).await, "shared");
     assert_eq!(emulator.provision(LOG_GROUP, &log_group).await, "shared");
     assert_eq!(
-        emulator.properties(BUCKET, "shared").await,
-        bucket,
+        emulator.properties(TABLE, "shared").await,
+        table,
         "each type must report its own resource model"
     );
     // A log group lives in the CloudWatch Logs store, so its model is the one that
@@ -225,8 +225,8 @@ async fn the_same_identifier_under_two_types_is_two_resources() {
     );
 
     // Deleting one leaves the other, which is what makes them two resources.
-    emulator.delete_and_settle(BUCKET, "shared").await;
-    let (status, body) = emulator.get(BUCKET, "shared").await;
+    emulator.delete_and_settle(TABLE, "shared").await;
+    let (status, body) = emulator.get(TABLE, "shared").await;
     assert_eq!(
         status, 404,
         "the deleted resource: expected HTTP 404, got {status} with body {body:?}"
