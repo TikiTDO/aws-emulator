@@ -18,8 +18,7 @@
 //!   its name, and addressing it by a partial ARN still reports the complete
 //!   one;
 //! * the attached document belongs to the secret, not to one of its versions or
-//!   to its tags, so a mutation of the secret's other state leaves it byte for
-//!   byte as it was.
+//!   to its tags, so a mutation of the secret's other state leaves it as it was.
 //!
 //! `tests/all/secret_resource_policy.rs` covers the document's own class (its
 //! shape, size, charset and the `BlockPublicPolicy` decision); these tables span
@@ -105,6 +104,14 @@ async fn create(router: &MultiServiceRouter, name: &str, case: &str) -> String {
 /// the secret carries no document.
 fn policy_of(response: &Value) -> Option<&str> {
     response.get("ResourcePolicy").and_then(Value::as_str)
+}
+
+/// A policy document as this service REPORTS it: an attached policy is rendered into the
+/// canonical layout every emulated service that attaches an IAM policy document reports,
+/// rather than echoed back as the caller's bytes (the layout itself is pinned in
+/// `tests/all/secret_resource_policy_reported_form.rs`).
+fn reported_policy(submitted: &str) -> String {
+    ::service_common::iam_policy::canonical_document(submitted)
 }
 
 /// A policy document whose `Sid` records which write produced it, so a document
@@ -198,11 +205,11 @@ async fn a_put_writes_only_the_secret_its_secret_id_resolves() {
                 case,
             )
             .await;
+            let expected = expected[name].as_deref().map(reported_policy);
             assert_eq!(
                 policy_of(&read),
-                expected[name].as_deref(),
-                "case {case:?}: expected secret {name:?} to carry {:?}, got {:?}",
-                expected[name],
+                expected.as_deref(),
+                "case {case:?}: expected secret {name:?} to carry {expected:?}, got {:?}",
                 policy_of(&read)
             );
         }
@@ -210,7 +217,7 @@ async fn a_put_writes_only_the_secret_its_secret_id_resolves() {
 }
 
 /// The attached document belongs to the secret itself, so a mutation of the
-/// secret's other state leaves it byte for byte as it was — and the policy is
+/// secret's other state leaves it as it was — and the policy is
 /// still reported after the secret's current version has been replaced.
 #[tokio::test]
 async fn a_policy_survives_mutations_of_the_secret_s_other_state() {
@@ -260,7 +267,7 @@ async fn a_policy_survives_mutations_of_the_secret_s_other_state() {
         .await;
         assert_eq!(
             policy_of(&read),
-            Some(document.as_str()),
+            Some(reported_policy(&document).as_str()),
             "case {case:?}: {operation} must leave the attached document unchanged, got {:?}",
             policy_of(&read)
         );

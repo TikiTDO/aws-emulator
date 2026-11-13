@@ -298,7 +298,10 @@ async fn block_public_policy_admits_a_wildcard_a_condition_binds() {
                 "case {case:?}: expected the bound wildcard to be attached, got {status} with \
                  {parsed} for {document}"
             );
-            // Attached means attached: the document reads back as it was sent.
+            // Attached means attached: the document reads back in the layout this
+            // service reports a policy in — the canonical rendering of the document
+            // it parsed rather than the caller's bytes
+            // (`tests/all/secret_resource_policy_reported_form.rs` pins that layout).
             let (read_status, read) = call(
                 &router,
                 "GetResourcePolicy",
@@ -309,9 +312,10 @@ async fn block_public_policy_admits_a_wildcard_a_condition_binds() {
                 read_status, 200,
                 "case {case:?}: expected the policy to read back, got {read_status} with {read}"
             );
+            let expected = ::service_common::iam_policy::canonical_document(&document);
             assert_eq!(
                 read["ResourcePolicy"].as_str(),
-                Some(document.as_str()),
+                Some(expected.as_str()),
                 "case {case:?}: expected the attached document back, got {read}"
             );
         } else {

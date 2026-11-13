@@ -6,9 +6,10 @@
 //!
 //! The rules under test:
 //!
-//! * a secret carries at most one resource policy document, stored exactly as
-//!   it was attached: `GetResourcePolicy` reports the attached document byte for
-//!   byte, a second `PutResourcePolicy` replaces it, `DeleteResourcePolicy`
+//! * a secret carries at most one resource policy document: `GetResourcePolicy`
+//!   reports the attached document, in the form this service reports a policy in
+//!   (`tests/all/secret_resource_policy_reported_form.rs` pins that form), a
+//!   second `PutResourcePolicy` replaces it, `DeleteResourcePolicy`
 //!   removes it, and a secret carrying none reports no document rather than an
 //!   error;
 //! * every one of the three resolves a `SecretId` the same way — by name, by
@@ -156,6 +157,15 @@ fn policy_of(response: &Value) -> Option<&str> {
     response.get("ResourcePolicy").and_then(Value::as_str)
 }
 
+/// A policy document as this service REPORTS it: an attached policy is rendered into the
+/// canonical layout every emulated service that attaches an IAM policy document reports,
+/// rather than echoed back as the caller's bytes. WHAT that layout is is pinned against
+/// text written out by hand in `tests/all/secret_resource_policy_reported_form.rs`; here
+/// it is only the reference point a round trip is measured from.
+fn reported_policy(submitted: &str) -> String {
+    ::service_common::iam_policy::canonical_document(submitted)
+}
+
 /// A policy document granting one concrete principal one action, rendered
 /// through `serde_json` so it is a document the service has to parse rather
 /// than one it can match on.
@@ -194,10 +204,10 @@ fn large_policy() -> String {
     rendered
 }
 
-/// A document attached to a secret comes back from `GetResourcePolicy` byte for
-/// byte, whatever its shape, size or charset — and a second attach replaces it.
+/// A document attached to a secret comes back from `GetResourcePolicy`
+/// whatever its shape, size or charset — and a second attach replaces it.
 #[tokio::test]
-async fn attached_policy_round_trips_byte_for_byte() {
+async fn attached_policy_round_trips() {
     // The rows differ along the document's form (one statement object vs a
     // list), its size (a single statement vs one filling the documented bound),
     // its charset (non-ASCII in a `Sid`), its effect, and the insignificant
@@ -285,8 +295,8 @@ async fn attached_policy_round_trips_byte_for_byte() {
         .await;
         assert_eq!(
             policy_of(&read),
-            Some(document.as_str()),
-            "case {case:?}: expected the attached document back unchanged, got {:?}",
+            Some(reported_policy(&document).as_str()),
+            "case {case:?}: expected the attached document back, got {:?}",
             policy_of(&read)
         );
         assert_eq!(
@@ -313,7 +323,7 @@ async fn attached_policy_round_trips_byte_for_byte() {
         .await;
         assert_eq!(
             policy_of(&reread),
-            Some(replacement.as_str()),
+            Some(reported_policy(&replacement).as_str()),
             "case {case:?}: expected the replacement document, got {:?}",
             policy_of(&reread)
         );
@@ -359,7 +369,7 @@ async fn secret_id_forms_all_resolve_the_same_secret() {
             .await;
             assert_eq!(
                 policy_of(&read),
-                Some(document.as_str()),
+                Some(reported_policy(&document).as_str()),
                 "case {case:?} (read {attempt}): expected the attached document, got {:?}",
                 policy_of(&read)
             );
@@ -561,7 +571,7 @@ async fn a_document_that_is_not_a_policy_is_refused() {
         .await;
         assert_eq!(
             policy_of(&read),
-            Some(good.as_str()),
+            Some(reported_policy(&good).as_str()),
             "case {case:?}: a refused document must leave the attached one in place, got {:?}",
             policy_of(&read)
         );
@@ -745,7 +755,7 @@ async fn block_public_policy_refuses_only_a_wildcard_allow() {
             .await;
             assert_eq!(
                 policy_of(&read),
-                Some(document.as_str()),
+                Some(reported_policy(&document).as_str()),
                 "case {blocked_case:?}: a policy granting no broad access must attach, got {:?}",
                 policy_of(&read)
             );
@@ -777,7 +787,7 @@ async fn block_public_policy_refuses_only_a_wildcard_allow() {
             .await;
             assert_eq!(
                 policy_of(&read),
-                Some(document.as_str()),
+                Some(reported_policy(&document).as_str()),
                 "case {flag_case:?}: expected the document to attach, got {:?}",
                 policy_of(&read)
             );

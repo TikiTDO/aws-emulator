@@ -57,6 +57,8 @@ mod secret_refused_write_staging_report;
 mod secret_regional_replication;
 #[path = "all/secret_resource_policy.rs"]
 mod secret_resource_policy;
+#[path = "all/secret_resource_policy_reported_form.rs"]
+mod secret_resource_policy_reported_form;
 #[path = "all/secret_resource_policy_targeting.rs"]
 mod secret_resource_policy_targeting;
 #[path = "all/secret_restore.rs"]

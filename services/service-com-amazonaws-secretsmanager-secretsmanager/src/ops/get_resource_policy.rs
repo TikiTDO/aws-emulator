@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetResourcePolicy
-//! Reports the resource-based policy document attached to a secret: whatever
-//! `PutResourcePolicy` stored on it, omitted while the secret carries none. This is a
-//! pure read of this service's store.
+//! Reports the resource-based policy document attached to a secret: the policy
+//! `PutResourcePolicy` stored on it, in the layout this service reports a policy in, and
+//! omitted while the secret carries none. This is a pure read of this service's store.
 //!
 //! ## Shape of an operation
 //!
@@ -200,12 +200,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         Ok(GetResourcePolicyOutput {
             arn: Some(secret.arn.clone()),
             name: Some(secret.name.clone()),
-            // The document the secret carries, byte for byte as it was
-            // attached — the policy of the secret this Region answers for, which
-            // for a replica is the primary's, since that is the secret the policy
-            // is attached to. A secret no policy is attached to is not an error:
-            // the member is simply absent, `NonEmptyResourcePolicyType` being
-            // modelled with a minimum length of 1 and there being no document.
+            // The document the secret carries, in the layout this service reports a
+            // policy in — the canonical rendering of the document it parsed, not the
+            // bytes the attaching caller's renderer produced (see
+            // `crate::state::attached_resource_policy`). The policy reported is the
+            // one of the secret this Region answers for, which for a replica is the
+            // primary's, since that is the secret the policy is attached to. A
+            // secret no policy is attached to is not an error: the member is simply
+            // absent, `NonEmptyResourcePolicyType` being modelled with a minimum
+            // length of 1 and there being no document.
             resource_policy: view.content.resource_policy.clone(),
         })
     }

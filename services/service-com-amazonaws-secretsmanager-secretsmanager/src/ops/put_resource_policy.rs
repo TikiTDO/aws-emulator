@@ -2,8 +2,10 @@
 
 //! @op PutResourcePolicy
 //! Attaches a resource-based permission policy document to a secret, replacing whatever
-//! policy it carried. The document is stored verbatim, so `GetResourcePolicy` reports it
-//! byte for byte.
+//! policy it carried. What is attached is the document this service parsed, rendered in
+//! the layout it reports a policy in (`crate::state::attached_resource_policy`), so
+//! `GetResourcePolicy` reports that rendering rather than the bytes the caller's renderer
+//! produced.
 //!
 //! ## Shape of an operation
 //!
@@ -251,9 +253,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        // Stored as it arrived, not re-serialized from the parse above, so the
-        // document `GetResourcePolicy` reports is the one the caller attached.
-        secret.attach_resource_policy(input.resource_policy.clone(), now);
+        // What is attached is the document this service parsed, rendered in the
+        // layout it reports a policy in: a later read answers that rendering, not
+        // the text the caller's renderer produced, so the same policy sent compact
+        // by one caller and indented by another reads back identically.
+        secret.attach_resource_policy(
+            crate::state::attached_resource_policy(&input.resource_policy),
+            now,
+        );
         Ok(PutResourcePolicyOutput {
             arn: Some(secret.arn.clone()),
             name: Some(secret.name.clone()),

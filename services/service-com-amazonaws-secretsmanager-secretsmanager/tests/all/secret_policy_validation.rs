@@ -666,8 +666,8 @@ async fn the_secret_id_is_optional_and_resolved_like_every_other() {
 }
 
 /// Validating reports on a document and changes nothing: whatever is validated,
-/// the policy the secret carries is the one that was attached, byte for byte,
-/// and a secret carrying none still carries none.
+/// the policy the secret carries is the one that was attached, and a secret
+/// carrying none still carries none.
 ///
 /// The rows span the kind of document validated: one that passes, one that fails
 /// each reported check, and one that is refused outright.
@@ -721,8 +721,13 @@ async fn validating_a_document_attaches_nothing() {
             .get("ResourcePolicy")
             .and_then(Value::as_str)
             .unwrap_or_else(|| panic!("case {case:?}: no ResourcePolicy in {read}"));
+        // Compared against the layout this service reports a policy in: an attached
+        // document is rendered into the canonical layout every emulated service that
+        // attaches an IAM policy document reports, rather than echoed back as the
+        // caller's bytes (`tests/all/secret_resource_policy_reported_form.rs` pins it).
+        let expected = ::service_common::iam_policy::canonical_document(&attached);
         assert_eq!(
-            reported, attached,
+            reported, expected,
             "case {case:?}: the attached document must survive validating, got {reported:?}"
         );
     }

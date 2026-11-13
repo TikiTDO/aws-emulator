@@ -56,6 +56,9 @@ emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
 sha2 = { workspace = true }
+# Renders a policy document through `serde_json` with one indent after another, which is
+# how the reported-form suite states the whitespacings a caller's renderer produces.
+serde = { workspace = true }
 # The seeded generator the version-id invariant suite draws its write sequences
 # from, so the rule is checked over generated input rather than one table of rows.
 rand = "0.9"

@@ -10,7 +10,7 @@
 //!   (`NonEmptyResourcePolicyType`) it attaches is the CALLER's document: the
 //!   identities its statements name are not this service's to resolve, so a
 //!   statement naming a principal in another account is attached like any other
-//!   one, `GetResourcePolicy` reports it byte for byte, and the `ARN`
+//!   one, `GetResourcePolicy` reports it, and the `ARN`
 //!   (`SecretARNType`) and `Name` (`NameType`) both calls report are the
 //!   resolved secret's own rather than anything read out of the document;
 //! * the document belongs to the one secret its `SecretId` resolved to, so a
@@ -144,6 +144,18 @@ fn policy_of(response: &Value) -> Option<&str> {
     response.get("ResourcePolicy").and_then(Value::as_str)
 }
 
+/// The text `GetResourcePolicy` reports for the document `submitted`: this service
+/// renders an attached policy into the canonical layout every emulated service that
+/// attaches an IAM policy document reports, rather than echoing the caller's bytes, so a
+/// suite that attaches a document and reads it back compares against this. WHAT that
+/// layout is — the two-space indentation, the ` : ` separator, the inline lists — is pinned
+/// against text written out by hand in
+/// `tests/all/secret_resource_policy_reported_form.rs`; here it is only the reference
+/// point a round trip is measured from.
+fn reported_policy(submitted: &str) -> String {
+    ::service_common::iam_policy::canonical_document(submitted)
+}
+
 /// A one-statement policy document with this `Effect`, `Principal` and
 /// `Action`, rendered through `serde_json` so it is a document the service has
 /// to parse rather than one it can match on.
@@ -269,7 +281,7 @@ fn cross_account_rows() -> Vec<(&'static str, String)> {
 }
 
 /// A document whose statements name principals in another account attaches like
-/// any other, is reported back byte for byte, and is reported alongside the
+/// any other, is reported back, and is reported alongside the
 /// resolved secret's own `ARN` and `Name`.
 #[tokio::test]
 async fn a_policy_naming_a_principal_in_another_account_attaches_and_round_trips() {
@@ -319,8 +331,8 @@ async fn a_policy_naming_a_principal_in_another_account_attaches_and_round_trips
         let read = read_policy(&router, arn, arn, name, case).await;
         assert_eq!(
             read.as_deref(),
-            Some(document.as_str()),
-            "case {case:?}: expected the attached document back byte for byte, got {read:?}"
+            Some(reported_policy(document).as_str()),
+            "case {case:?}: expected the attached document back, got {read:?}"
         );
     }
 
@@ -347,12 +359,12 @@ async fn a_policy_naming_a_principal_in_another_account_attaches_and_round_trips
         let expected = if case == detached_case {
             None
         } else {
-            Some(document.as_str())
+            Some(reported_policy(document))
         };
         let read = read_policy(&router, name, arn, name, case).await;
         assert_eq!(
             read.as_deref(),
-            expected,
+            expected.as_deref(),
             "case {case:?}: after detaching {detached_case:?} expected {expected:?}, got {read:?}"
         );
     }
@@ -415,7 +427,7 @@ async fn an_attached_policy_survives_a_scheduled_deletion_and_its_restore() {
         let read = read_policy(&router, &name, &arn, &name, case).await;
         assert_eq!(
             read.as_deref(),
-            Some(document.as_str()),
+            Some(reported_policy(&document).as_str()),
             "case {case:?}: expected the restored secret to carry the document it was attached, \
              got {read:?}"
         );
@@ -437,7 +449,7 @@ async fn an_attached_policy_survives_a_scheduled_deletion_and_its_restore() {
         let read = read_policy(&router, &name, &arn, &name, case).await;
         assert_eq!(
             read.as_deref(),
-            Some(replacement.as_str()),
+            Some(reported_policy(&replacement).as_str()),
             "case {case:?}: expected the replacement document after the restore, got {read:?}"
         );
     }

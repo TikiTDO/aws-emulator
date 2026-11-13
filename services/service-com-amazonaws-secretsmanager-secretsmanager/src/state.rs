@@ -54,6 +54,11 @@ pub mod rotation;
 pub mod replication;
 pub use replication::*;
 
+/// The layout this service reports an attached resource policy document in, which is
+/// the shared rendering every emulated service that attaches an IAM policy reports.
+pub mod policy_rendering;
+pub use policy_rendering::*;
+
 /// The secrets ANOTHER Amazon Web Services service creates and manages for one of its own
 /// resources: the reserved name they carry, the owning service they report, and how a
 /// request of that service is told apart from a caller's.
@@ -767,8 +772,7 @@ const PRINCIPAL_ELEMENTS: &[&str] = &["Principal", "NotPrincipal"];
 /// object, its `Statement` element is one statement or a non-empty list of
 /// them, and every statement is an object carrying an `Effect` of `Allow` or
 /// `Deny`. Everything else a statement may carry is passed through untouched,
-/// so a document this emulator does not interpret still round-trips byte for
-/// byte.
+/// so a document this emulator does not interpret is still reported whole.
 pub fn parse_resource_policy(document: &str) -> Result<Value, String> {
     let parsed: Value =
         ::serde_json::from_str(document).map_err(|_| MALFORMED_POLICY_MESSAGE.to_string())?;
@@ -1587,12 +1591,13 @@ pub struct Secret {
     /// from one, were sealed for the primary's ARN, which is the encryption
     /// context they can only be opened under (see [`envelope::ValueContext`]).
     pub sealed_under: Option<String>,
-    /// The resource-based permission policy document attached to this secret,
-    /// exactly as the caller supplied it; `None` for a secret no policy is
-    /// attached to. `GetResourcePolicy` "retrieves the JSON text of the
-    /// resource-based policy document attached to the secret" (this service's
-    /// Smithy model), so the document is stored verbatim rather than
-    /// re-serialized.
+    /// The resource-based permission policy document attached to this secret, in
+    /// the layout this service reports a policy in (see
+    /// [`attached_resource_policy`]); `None` for a secret no policy is attached
+    /// to. `GetResourcePolicy` "retrieves the JSON text of the resource-based
+    /// policy document attached to the secret" (this service's Smithy model), and
+    /// the JSON text it retrieves is the rendering of the document this service
+    /// parsed rather than the caller's bytes.
     pub resource_policy: Option<String>,
     /// Versions in the order they were created.
     pub versions: Vec<SecretVersion>,

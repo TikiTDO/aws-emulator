@@ -9,7 +9,7 @@
 //! statement whose `Condition` confines the request to a caller the account names reaches
 //! only those callers, so it is not broad access. Such a document is ATTACHED: HTTP 200
 //! carrying the secret's own ARN and name (`PutResourcePolicyResponse` = `ARN` + `Name`), and
-//! `GetResourcePolicy` reports it byte for byte with its `Condition` intact. Only an `Allow`
+//! `GetResourcePolicy` reports it with its `Condition` intact. Only an `Allow`
 //! whose wildcard nothing confines is refused, with `PublicPolicyException` on HTTP 400 and
 //! the one sentence this service says about a public policy — and the very same document
 //! attaches when the request does not ask for the check.
@@ -293,7 +293,7 @@ async fn blocking_public_policies_attaches_a_confined_wildcard() {
     }
 }
 
-/// RULE: an attached document reads back byte for byte, so every `Condition` the accepted
+/// RULE: an attached document reads back whole, so every `Condition` the accepted
 /// statements carried survives the attach; a refused one leaves the secret carrying none.
 #[tokio::test]
 async fn an_attached_document_reads_back_with_its_conditions() {
@@ -324,7 +324,7 @@ async fn an_attached_document_reads_back_with_its_conditions() {
         }
         assert_eq!(
             read["ResourcePolicy"].as_str(),
-            Some(policy.as_str()),
+            Some(reported_policy(&policy).as_str()),
             "case {case:?}: expected the attached document back, got {read}"
         );
         let stored: Value = serde_json::from_str(
@@ -381,8 +381,18 @@ async fn without_the_flag_every_document_attaches() {
         );
         assert_eq!(
             read["ResourcePolicy"].as_str(),
-            Some(policy.as_str()),
+            Some(reported_policy(&policy).as_str()),
             "case {case:?}: expected the attached document back, got {read}"
         );
     }
+}
+
+/// The text `GetResourcePolicy` reports for the document `submitted`: this service
+/// renders an attached policy into the canonical layout every emulated service that
+/// attaches an IAM policy document reports, rather than echoing the caller's bytes, so a
+/// suite that attaches a document and reads it back compares against this. WHAT that
+/// layout is is pinned against text written out by hand in
+/// `tests/all/secret_resource_policy_reported_form.rs`.
+fn reported_policy(submitted: &str) -> String {
+    ::service_common::iam_policy::canonical_document(submitted)
 }
