@@ -106,7 +106,13 @@ uuid = { version = "1", features = ["v4"] }
 # `in_band_tls`: the async read/write traits a data-plane connection is read through
 # (`io-util`'s `AsyncReadExt` for the one sniffed byte, and the `AsyncRead`/`AsyncWrite`
 # the replaying stream implements), for a plane whose encryption is negotiated in band.
-tokio = { workspace = true, features = ["io-util"] }
+tokio = { workspace = true, features = ["io-util", "net", "time"] }
+# `host_runtime`: the HTTP/1.1 client a service speaks the container runtime's API with, over the
+# runtime's Unix socket — the same `hyper` client and adapters the load balancer's proxy uses.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = { workspace = true }
 # `iam_authorization`: the reading of an IP address or a range in CIDR notation that the
 # IAM `IpAddress`/`NotIpAddress` condition operators compare an address against, taken from
 # the maintained crate rather than by splitting the notation by hand.
