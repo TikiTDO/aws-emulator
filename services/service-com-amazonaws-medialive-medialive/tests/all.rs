@@ -404,6 +404,9 @@ mod schedule_channel_references;
 #[path = "all/sdi_source_lifecycle.rs"]
 mod sdi_source_lifecycle;
 
+#[path = "all/sdi_source_mapping_precondition.rs"]
+mod sdi_source_mapping_precondition;
+
 #[path = "all/sdi_source_name_uniqueness.rs"]
 mod sdi_source_name_uniqueness;
 

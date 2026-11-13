@@ -862,6 +862,37 @@ impl ComAmazonawsMedialiveMedialiveState {
         })
     }
 
+    /// The ids of the nodes whose `SdiSourceMappings` name the SdiSource `id` —
+    /// the half of `DeleteSdiSource`'s documented precondition that reads the
+    /// NODE store ("The SdiSource must not be part of any SidSourceMapping"),
+    /// beside the half that reads the input store
+    /// ([`Self::inputs_using_sdi_source`]).
+    ///
+    /// Derived from the stored nodes on every call, in node-id order (the store
+    /// is ordered by id), so it tracks every later `UpdateNode` rather than
+    /// being recorded on the source: a mapping is created and replaced by
+    /// updating a node, so the node's current list is the only place the
+    /// reference lives.
+    ///
+    /// A node whose deregistration has been accepted is left out — the one cut
+    /// point every derived "currently using" list of this store applies
+    /// ([`Self::inputs_using_sdi_source`],
+    /// [`Self::channel_placement_groups_with_node`]): such a node is on its way
+    /// out of the cluster, and [`Self::apply_node_changes`] refuses it, so
+    /// nothing can send its mappings back in.
+    pub(super) fn nodes_mapping_sdi_source(&self, id: &str) -> Vec<String> {
+        self.nodes
+            .values()
+            .filter(|node| !node.is_delete_accepted())
+            .filter(|node| {
+                node.sdi_source_mappings
+                    .iter()
+                    .any(|mapping| mapping.sdi_source.as_deref() == Some(id))
+            })
+            .map(|node| node.id.clone())
+            .collect()
+    }
+
     /// One `SdiSourceMappings` request list, checked against what the model
     /// documents of it and projected onto the response shape — or refused.
     ///

@@ -52,6 +52,38 @@ impl SdiSourceRecord {
     }
 }
 
+/// Which half of `DeleteSdiSource`'s documented precondition a source fails —
+/// "The SdiSource must not be part of any SidSourceMapping and must not be
+/// attached to any input" — so the refusal can say which of the two it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SdiSourceInUse {
+    /// At least one input of this account ingests from the source.
+    AttachedToInput,
+    /// At least one node of this account maps a card port to the source
+    /// through its `SdiSourceMappings`.
+    PartOfSdiSourceMapping,
+}
+
+/// The message `DeleteSdiSource` refuses a source still in use with.
+///
+/// It names the `SdiSourceId` the CALLER supplied and which half of the
+/// documented precondition the source fails, and nothing else: the inputs
+/// attached to it and the nodes mapping it are state the caller did not name
+/// (they are what the source's own `Inputs` and the nodes' own
+/// `SdiSourceMappings` report), so they are not interpolated, for the same
+/// reason [`super::busy_input_message`] leaves the attaching channels out of an
+/// input's refusal.
+pub fn sdi_source_in_use_message(sdi_source_id: &str, reason: SdiSourceInUse) -> String {
+    match reason {
+        SdiSourceInUse::AttachedToInput => {
+            format!("SdiSource {sdi_source_id} is attached to an input and cannot be deleted")
+        }
+        SdiSourceInUse::PartOfSdiSourceMapping => {
+            format!("SdiSource {sdi_source_id} is part of an SdiSourceMapping and cannot be deleted")
+        }
+    }
+}
+
 impl ComAmazonawsMedialiveMedialiveState {
     /// Whether the SdiSource store is full, so `CreateSdiSource` must refuse
     /// rather than mint another source.
@@ -142,11 +174,37 @@ impl ComAmazonawsMedialiveMedialiveState {
             .collect()
     }
 
-    /// Whether an input is attached to the SdiSource `id`, which is what
-    /// `DeleteSdiSource` refuses on ("The SdiSource must ... not be attached to
-    /// any input").
-    pub fn sdi_source_is_in_use(&self, id: &str) -> bool {
-        !self.inputs_using_sdi_source(id).is_empty()
+    /// Which half of `DeleteSdiSource`'s documented precondition the SdiSource
+    /// `id` fails, or `None` when it fails neither and the delete may go ahead.
+    ///
+    /// "The SdiSource must not be part of any SidSourceMapping and must not be
+    /// attached to any input" is ONE precondition over TWO stores, so both are
+    /// walked here: the inputs that ingest from the source
+    /// ([`Self::inputs_using_sdi_source`]) and the nodes whose
+    /// `SdiSourceMappings` connect a card port to it
+    /// ([`Self::nodes_mapping_sdi_source`]). Either referrer makes the delete
+    /// the modelled conflict, because deleting the source would leave that
+    /// referrer naming a source the account no longer holds — a configuration
+    /// this service's own writers refuse to create.
+    ///
+    /// A source already in the terminal `DELETED` state fails neither half:
+    /// nothing live can reference it any more, which is what keeps a repeated
+    /// delete idempotent rather than turning it into a conflict.
+    pub fn sdi_source_in_use(&self, id: &str) -> Option<SdiSourceInUse> {
+        if self
+            .sdi_sources
+            .get(id)
+            .is_some_and(SdiSourceRecord::is_deleted)
+        {
+            return None;
+        }
+        if !self.inputs_using_sdi_source(id).is_empty() {
+            return Some(SdiSourceInUse::AttachedToInput);
+        }
+        if !self.nodes_mapping_sdi_source(id).is_empty() {
+            return Some(SdiSourceInUse::PartOfSdiSourceMapping);
+        }
+        None
     }
 
     /// The full `SdiSource` description of one stored source, or `None` when no

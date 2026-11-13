@@ -86,7 +86,10 @@ async fn updated(
 /// One `sdiSourceMappings` entry, as the request shape carries it: all three of
 /// the members `SdiSourceMappingUpdateRequest` documents as mandatory ("You must
 /// specify all three parameters in this object").
-fn sdi_mapping(card_number: i64, channel_number: i64, sdi_source: &str) -> Value {
+///
+/// Shared with the suite that pins `DeleteSdiSource`'s mapping precondition, so
+/// both suites write a mapping the same way.
+pub(crate) fn sdi_mapping(card_number: i64, channel_number: i64, sdi_source: &str) -> Value {
     json!({
         "cardNumber": card_number,
         "channelNumber": channel_number,

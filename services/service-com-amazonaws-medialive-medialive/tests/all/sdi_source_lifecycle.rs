@@ -47,7 +47,11 @@ pub(crate) async fn created(router: &MultiServiceRouter, case: &str, body: Value
     source
 }
 
-async fn describe_source(router: &MultiServiceRouter, id: &str) -> (u16, Value) {
+/// `DescribeSdiSource` on one source, answering its status and the source body
+/// (or the refusal). Shared with the suite that pins `DeleteSdiSource`'s
+/// mapping precondition, which reads the source back to show a refused delete
+/// wrote nothing.
+pub(crate) async fn describe_source(router: &MultiServiceRouter, id: &str) -> (u16, Value) {
     let (status, response) = call(router, "GET", &format!("{SDI_SOURCES}/{id}"), None).await;
     if status == 200 {
         (status, response["sdiSource"].clone())

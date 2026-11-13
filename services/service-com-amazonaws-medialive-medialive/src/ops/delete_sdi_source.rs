@@ -178,13 +178,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // "The SdiSource must not be part of any SdiSourceMapping and must not be
-        // attached to any input": a source an input is using is a conflict, not a
-        // deletion.
-        if state.sdi_source_is_in_use(&input.sdi_source_id) {
+        // attached to any input": a source something in the account still
+        // references — an input it is attached to, or a node whose
+        // `SdiSourceMappings` maps a card port to it — is a conflict, not a
+        // deletion. Both halves of that one precondition are resolved in the
+        // state slice, so the handler cannot enforce one of them and write past
+        // the other.
+        if let Some(reason) = state.sdi_source_in_use(&input.sdi_source_id) {
             return Err(DeleteSdiSourceErrorModeled::ConflictException(ConflictException {
-                message: Some(format!(
-                    "SdiSource {} is attached to an input and cannot be deleted",
-                    input.sdi_source_id
+                message: Some(crate::state::sdi_source_in_use_message(
+                    &input.sdi_source_id,
+                    reason,
                 )),
             })
             .into());
