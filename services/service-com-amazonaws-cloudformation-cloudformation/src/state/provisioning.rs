@@ -1585,11 +1585,15 @@ pub async fn settle_expired_wait_failures<Eng: Send + Sync + 'static>(
 /// resource another deployment created from being forgotten, so the stack's deletion still
 /// deletes it.
 ///
-/// Every dynamic reference the declarations carry is resolved FIRST, by CloudFormation
-/// itself ([`super::dynamic_references::resolve_declared`]): one it cannot honour refuses
+/// Every dynamic reference the declarations carry whose store stands OUTSIDE the deployment
+/// is resolved FIRST, by CloudFormation itself
+/// ([`super::dynamic_references::resolve_declared`]): one it cannot honour refuses
 /// the whole deployment before any owning service is asked anything, so nothing is created
 /// and [`Materialised::failure`] is the resolver's own diagnostic rather than a summary of
-/// resources that failed.
+/// resources that failed. A reference whose store can hold a value the same deployment
+/// creates is resolved as the resource carrying it is deployed
+/// ([`super::dynamic_references::resolve_as_deployed`]), so it fails that resource rather
+/// than the deployment as a whole.
 ///
 /// `refused` is a refusal CLOUDFORMATION itself reached before this walk — the deployment's
 /// template imports an export nothing publishes
@@ -1671,14 +1675,18 @@ pub async fn reconcile(
     // stack-level reason names the whole set rather than the first of it.
     let mut failed: Vec<(String, &'static str)> = Vec::new();
     let mut declared = declared.into_iter();
-    // Every `{{resolve:...}}` DYNAMIC REFERENCE the declarations carry is resolved by
-    // CLOUDFORMATION ITSELF, here, before anything is asked of any owning service: a
-    // reference no store can satisfy has no value, so there is nothing to ask any service
-    // for. Such a reference is therefore CloudFormation's OWN refusal of the deployment —
-    // no provider is called for ANY of the resources, and the reason the stack reports is
-    // the resolver's diagnostic (which reference could not be honoured, and why) rather
-    // than a summary of resources that tried and failed
+    // Every `{{resolve:...}}` DYNAMIC REFERENCE the declarations carry whose store stands
+    // OUTSIDE the deployment is resolved by CLOUDFORMATION ITSELF, here, before anything is
+    // asked of any owning service: a reference no store can satisfy has no value, so there
+    // is nothing to ask any service for. Such a reference is therefore CloudFormation's OWN
+    // refusal of the deployment — no provider is called for ANY of the resources, and the
+    // reason the stack reports is the resolver's diagnostic (which reference could not be
+    // honoured, and why) rather than a summary of resources that tried and failed
     // ([`super::resource_failure_summary`]).
+    //
+    // A reference whose store can hold a value THIS deployment creates — a secret declared
+    // beside the resource configured with it — is resolved further down instead, as the
+    // resource carrying it is deployed.
     //
     // A deployment already refused above is not resolved against any store at all: that
     // refusal stands, and nothing is read for a deployment nothing will deploy.
@@ -1843,6 +1851,41 @@ pub async fn reconcile(
                             continue;
                         }
                     }
+                }
+                // The dynamic references resolved as the resource is DEPLOYED, resolved
+                // here: the document the owning service is asked to change the resource
+                // with carries the value the store holds now, while the record the stack
+                // keeps of it still carries the reference
+                // ([`super::dynamic_references::resolve_as_deployed`]). A reference that
+                // cannot be honoured leaves nothing to ask that service for, so the change
+                // fails carrying the resolver's own diagnostic. After the custom-resource
+                // arm above, and so never applied to one, for the reason the create's own
+                // call records.
+                if let Err(reason) = super::dynamic_references::resolve_as_deployed(
+                    ctx,
+                    region,
+                    &resource.resource_type,
+                    &mut deployed_properties,
+                )
+                .await
+                {
+                    failed.push((resource.logical_id.clone(), super::failed_action::UPDATE));
+                    outcome.transitions.push(ResourceTransition::finished(
+                        &resource,
+                        super::resource_status::UPDATE_FAILED,
+                        Some(reason),
+                    ));
+                    Box::pin(roll_back_failed_resource(
+                        ctx,
+                        region,
+                        stack,
+                        &mut resource,
+                        existing,
+                        &mut outcome,
+                    ))
+                    .await;
+                    outcome.resources.push(resource);
+                    continue;
                 }
                 let applied = match owner_for(&resource.resource_type) {
                     Some(provisioner) => {
@@ -2254,6 +2297,40 @@ pub async fn reconcile(
                     continue;
                 }
             }
+        }
+        // The dynamic references resolved as the resource is DEPLOYED, resolved here: a
+        // `{{resolve:secretsmanager:…}}` reference can name a secret THIS deployment
+        // created, which exists — under the ARN Secrets Manager minted for it — only now
+        // that the resource it depends on has been created
+        // ([`super::dynamic_references::resolve_as_deployed`]). The resolved value reaches
+        // only the document the owning service is asked for the resource with; the record
+        // the stack keeps of it carries the reference the template wrote. A reference that
+        // cannot be honoured has no value, so there is nothing to ask that service for and
+        // THIS resource fails carrying the resolver's own diagnostic.
+        //
+        // After the custom-resource arm above, and so never applied to one: a reference of
+        // this form is "not currently supported in custom resources", whose provider is
+        // therefore sent the reference exactly as the template wrote it rather than a
+        // secret CloudFormation resolved for it.
+        if let Err(reason) = super::dynamic_references::resolve_as_deployed(
+            ctx,
+            region,
+            &resource.resource_type,
+            &mut deployed_properties,
+        )
+        .await
+        {
+            failed.push((
+                resource.logical_id.clone(),
+                super::create_action(stack.express),
+            ));
+            outcome.transitions.push(ResourceTransition::failed(
+                &resource,
+                super::resource_status::CREATE_FAILED,
+                reason,
+            ));
+            outcome.resources.push(resource);
+            continue;
         }
         // Which service owns the type, resolved ONCE here: the create below and the
         // readiness read that follows it are two questions for the same provisioner, and

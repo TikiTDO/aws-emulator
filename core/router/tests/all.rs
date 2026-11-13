@@ -17,6 +17,19 @@
 // else appends to.
 #[path = "all/cloudformation_fifo_resource_generated_names.rs"]
 mod cloudformation_fifo_resource_generated_names;
+// Declared here, in this same head region, for the reason the entry above records: what a
+// stack deploys for a property written as a `{{resolve:secretsmanager:…}}` dynamic reference
+// spans CloudFormation (which resolves it), AWS Secrets Manager (which holds the secret) and
+// the service that owns the configured resource at once, so no single crate's test target can
+// ask it.
+#[path = "all/cloudformation_secretsmanager_dynamic_references.rs"]
+mod cloudformation_secretsmanager_dynamic_references;
+// Declared here, in this same head region, for the reason the entry above records: the
+// reference RabbitMQ-consumer estate deployed from scratch in one stack spans CloudFormation,
+// AWS Secrets Manager, Amazon MQ, IAM and AWS Lambda at once, so no single service crate's
+// test target can deploy it.
+#[path = "all/scratch_estate.rs"]
+mod scratch_estate;
 // Declared here, in this same head region, for the reason the entry above records: the
 // identifiers a stack publishes for the Amazon Cognito user pool, app client, resource server
 // and identity provider it declares are the ones that service minted or is addressed by, which
