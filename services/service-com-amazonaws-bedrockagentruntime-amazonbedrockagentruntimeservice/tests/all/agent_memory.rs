@@ -128,6 +128,17 @@ impl Emulator {
                 Arc::clone(&engine),
             ),
         );
+        // The build-time plane's agent surface is closed to an account with no prior
+        // usage of it, so these suites drive the EXISTING-customer path: the account's
+        // prior usage is recorded in that plane's own store, the producer its API does
+        // not model, before any `CreateAgent` below.
+        service_com_amazonaws_bedrockagent_amazonbedrockagentbuildtimelambda::state::service_state(
+            &*engine,
+        )
+        .expect("the bedrock-agent store is reachable through the shared engine")
+        .lock()
+        .agents_classic_usage
+        .record(engine::EMULATOR_ACCOUNT_ID);
         router.register_service(
             service_com_amazonaws_bedrockruntime_amazonbedrockfrontendservice::EmulatedService::new(
                 Arc::clone(&engine),

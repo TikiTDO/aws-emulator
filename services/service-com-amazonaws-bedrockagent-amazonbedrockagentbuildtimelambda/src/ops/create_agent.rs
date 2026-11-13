@@ -6,6 +6,13 @@
 //! from the stored record, so a following `GetAgent` / `ListAgents` reports the
 //! same agent.
 //!
+//! Minting one at all depends on the CALLER'S ACCOUNT: this agent surface is no
+//! longer open to new customers (the sentence the model carries below), so an
+//! account with no prior usage of it recorded in
+//! [`crate::state::agents_classic`] is refused the modelled
+//! `AccessDeniedException` (403) and nothing is read or written for it, while an
+//! account that has such usage is served as it always was.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -222,6 +229,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let now = ::std::time::SystemTime::now();
         let mut state = state.lock();
         state.materialise_due_transitions(now);
+
+        // This agent surface is closed to new customers, so whether a new agent
+        // may be minted is the caller's ACCOUNT and not its request: an account
+        // with no prior usage of the surface is refused here, BEFORE a token is
+        // replayed, a name is claimed or an id is minted, so a refused create
+        // leaves the store exactly as it was. Every other operation of this
+        // plane, this account's `ListAgents` included, is indifferent to it.
+        let account_id = crate::state::agents_classic::request_account_id();
+        if !state.agents_classic_usage.holds(account_id) {
+            return Err(CreateAgentErrorModeled::AccessDeniedException(
+                AccessDeniedException {
+                    message: Some(
+                        crate::state::agents_classic::MAINTENANCE_MODE_MESSAGE.to_string(),
+                    ),
+                },
+            )
+            .into());
+        }
 
         // `clientToken` is an @idempotencyToken: a repeat of the same request
         // returns the agent it already created rather than minting a second one.

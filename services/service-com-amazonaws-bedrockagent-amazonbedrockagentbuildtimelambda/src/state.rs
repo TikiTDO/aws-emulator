@@ -121,6 +121,14 @@
 //! [`FlowAliasRecord::to_get_output`] / [`FlowAliasRecord::to_summary`]) and the
 //! one rule that resolves an alias's routing target against the versions its
 //! flow holds.
+//!
+//! Whether a NEW agent may be minted at all is the one thing about the agent
+//! surface that is not a property of a record in the
+//! [`agents`](ComAmazonawsBedrockagentAmazonbedrockagentbuildtimelambdaState::agents)
+//! map but of the ACCOUNT making the call: that surface is closed to accounts
+//! with no prior usage of it, which the
+//! [`agents_classic_usage`](ComAmazonawsBedrockagentAmazonbedrockagentbuildtimelambdaState::agents_classic_usage)
+//! record holds and the `agents_classic` module beside this one states.
 
 /// The flow-alias slice of this state: its records, their projections, and the
 /// resolution of an alias identifier and of an alias's routing target.
@@ -141,6 +149,10 @@ pub use vector_store::*;
 /// What an ingestion records in the bound vector index beside the vector: the published
 /// knowledge-base metadata fields a retrieval reads a chunk back from.
 pub mod ingestion_index;
+
+/// Which accounts may mint a NEW agent on this plane — the surface is closed to accounts
+/// with no prior usage of it — and the refusal an account outside them gets.
+pub mod agents_classic;
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -2504,6 +2516,10 @@ pub struct ComAmazonawsBedrockagentAmazonbedrockagentbuildtimelambdaState {
     /// `clientToken` -> `agentId`, so a retried `CreateAgent` carrying the same
     /// `@idempotencyToken` returns the agent it already created.
     pub client_tokens: HashMap<String, String>,
+    /// The accounts that used this plane's agent surface before it closed to new
+    /// customers, which is what decides whether a `CreateAgent` from an account
+    /// is served at all. Empty by default: see [`agents_classic`].
+    pub agents_classic_usage: agents_classic::AgentsClassicUsage,
     /// Every flow that exists, keyed by its 10-character `flowId`.
     pub flows: HashMap<String, FlowRecord>,
     /// `clientToken` -> `flowId`, so a retried `CreateFlow` carrying the same

@@ -13,6 +13,8 @@
 // points it into `tests/all/`.
 #[path = "all/agent_lifecycle.rs"]
 mod agent_lifecycle;
+#[path = "all/agents_classic_maintenance_mode.rs"]
+mod agents_classic_maintenance_mode;
 #[path = "all/client_error_fidelity.rs"]
 mod client_error_fidelity;
 #[path = "all/data_source_lifecycle.rs"]

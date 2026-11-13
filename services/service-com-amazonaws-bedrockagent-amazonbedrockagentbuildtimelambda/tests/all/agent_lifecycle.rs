@@ -13,7 +13,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use serde_json::{json, Value};
 use service_com_amazonaws_bedrockagent_amazonbedrockagentbuildtimelambda::state::{
-    AGENT_QUOTA, DEFAULT_IDLE_SESSION_TTL_SECONDS, MAX_AGENTS_PER_PAGE, PREPARE_SPAN,
+    service_state, AGENT_QUOTA, DEFAULT_IDLE_SESSION_TTL_SECONDS, MAX_AGENTS_PER_PAGE, PREPARE_SPAN,
 };
 use service_com_amazonaws_bedrockagent_amazonbedrockagentbuildtimelambda::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
@@ -29,20 +29,20 @@ const AUTHORIZATION: &str = "AWS4-HMAC-SHA256 \
 const REGION: &str = "eu-west-1";
 
 /// The account id every emulated ARN carries (`engine::EMULATOR_ACCOUNT_ID`).
-const ACCOUNT: &str = "000000000000";
+pub(crate) const ACCOUNT: &str = "000000000000";
 
 /// One HTTP answer from the emulator, parsed.
 #[derive(Debug)]
-struct Answer {
-    status: u16,
+pub(crate) struct Answer {
+    pub(crate) status: u16,
     /// The restJson1 error shape name, from `x-amzn-errortype` or the body's
     /// `__type`; `None` on a success.
-    error_type: Option<String>,
-    body: Value,
+    pub(crate) error_type: Option<String>,
+    pub(crate) body: Value,
 }
 
 impl Answer {
-    fn member(&self, path: &[&str]) -> &Value {
+    pub(crate) fn member(&self, path: &[&str]) -> &Value {
         let mut at = &self.body;
         for key in path {
             at = &at[*key];
@@ -50,7 +50,7 @@ impl Answer {
         at
     }
 
-    fn string(&self, path: &[&str]) -> String {
+    pub(crate) fn string(&self, path: &[&str]) -> String {
         self.member(path)
             .as_str()
             .unwrap_or_else(|| panic!("{path:?} is not a string in {:?}", self.body))
@@ -60,20 +60,46 @@ impl Answer {
 
 /// The emulator under test: one router over one shared engine, exactly as the
 /// production router mounts this service.
-struct Emulator {
+pub(crate) struct Emulator {
     router: MultiServiceRouter,
+    /// The SAME engine the mounted service reads and writes, so a suite can record
+    /// what no modelled operation writes — see [`Emulator::record_prior_agent_usage`].
+    engine: Arc<engine::InMemoryEngine>,
 }
 
 impl Emulator {
-    fn new() -> Self {
+    /// The emulator as an EXISTING customer's account sees it: the account's prior
+    /// usage of the agent surface is recorded, because that surface is closed to an
+    /// account with none and every suite here drives agents that exist.
+    pub(crate) fn new() -> Self {
+        let emulator = Self::without_prior_agent_usage();
+        emulator.record_prior_agent_usage();
+        emulator
+    }
+
+    /// The emulator as a NEW customer's account sees it: nothing has recorded any
+    /// prior usage of the agent surface, which is what `CreateAgent` refuses on —
+    /// `tests/all/agents_classic_maintenance_mode.rs` is that rule's suite.
+    pub(crate) fn without_prior_agent_usage() -> Self {
         let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
         let mut router = MultiServiceRouter::new();
         router.set_request_authentication(false);
-        router.register_service(EmulatedService::new(engine));
-        Self { router }
+        router.register_service(EmulatedService::new(Arc::clone(&engine)));
+        Self { router, engine }
     }
 
-    async fn call(&self, method: &str, uri: &str, body: Option<Value>) -> Answer {
+    /// Record this account's prior usage of the agent surface in the plane's own
+    /// store. This is the producer the API does not model; it is NOT an AWS
+    /// operation.
+    pub(crate) fn record_prior_agent_usage(&self) {
+        service_state(&*self.engine)
+            .expect("the bedrock-agent store is reachable through the shared engine")
+            .lock()
+            .agents_classic_usage
+            .record(ACCOUNT);
+    }
+
+    pub(crate) async fn call(&self, method: &str, uri: &str, body: Option<Value>) -> Answer {
         let bytes = body
             .map(|value| Bytes::from(serde_json::to_vec(&value).expect("serialize request body")))
             .unwrap_or_default();
@@ -116,15 +142,15 @@ impl Emulator {
         }
     }
 
-    async fn create_agent(&self, request: Value) -> Answer {
+    pub(crate) async fn create_agent(&self, request: Value) -> Answer {
         self.call("PUT", "/agents/", Some(request)).await
     }
 
-    async fn get_agent(&self, agent_id: &str) -> Answer {
+    pub(crate) async fn get_agent(&self, agent_id: &str) -> Answer {
         self.call("GET", &format!("/agents/{agent_id}/"), None).await
     }
 
-    async fn list_agents(&self, request: Value) -> Answer {
+    pub(crate) async fn list_agents(&self, request: Value) -> Answer {
         self.call("POST", "/agents/", Some(request)).await
     }
 
@@ -140,7 +166,7 @@ impl Emulator {
 }
 
 /// An `instruction` long enough for the member's modelled `length 40..4000`.
-fn instruction(flavour: &str) -> String {
+pub(crate) fn instruction(flavour: &str) -> String {
     format!("You are a {flavour} assistant. Answer the customer precisely and cite your sources.")
 }
 
