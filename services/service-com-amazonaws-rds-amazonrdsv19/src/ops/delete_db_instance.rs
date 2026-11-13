@@ -234,7 +234,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // block, and the lock is released at the end of it: retiring the managed master
         // user secret below is Secrets Manager's work, reached asynchronously, and a state
         // guard cannot be held across an await.
-        let (db_instance, managed_secret) = {
+        let (db_instance, managed_secret, real_workload) = {
         let mut store = state.lock();
         store.settle_due_transitions(&region);
 
@@ -346,6 +346,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
         if let Some(snapshot_identifier) = &input.final_db_snapshot_identifier {
+            if store.real_workloads.contains_key(&key) {
+                return Err(DeleteDBInstanceErrorModeled::InvalidDBInstanceStateFault(
+                    InvalidDBInstanceStateFault {
+                        message: Some(format!(
+                            "Final DB snapshots are not supported for host-backed DB instance {identifier}; delete with SkipFinalSnapshot enabled"
+                        )),
+                    },
+                )
+                .into());
+            }
             let snapshot_key = (region.clone(), snapshot_identifier.clone());
             if store.db_snapshots.contains_key(&snapshot_key) {
                 return Err(DeleteDBInstanceErrorModeled::DBSnapshotAlreadyExistsFault(
@@ -442,6 +452,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // itself closes when the record leaves the store
         // (`ComAmazonawsRdsAmazonrdsv19State::settle_due_transitions`).
         store.sever_engine_sessions(&key);
+        let real_workload = store.real_workloads.remove(&key);
         // The delete "can't be canceled or reverted after it begins", so the region's
         // event log records the deletion of the instance here, where it was accepted.
         store.record_event(
@@ -457,7 +468,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             directory.lock().forget(&dbi_resource_id);
         }
 
-        (db_instance, managed_secret)
+        (db_instance, managed_secret, real_workload)
         };
         // The delete is accepted, so the Secrets Manager secret RDS manages for the
         // instance's master user password is deleted with it: that secret exists for this
@@ -477,6 +488,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 &secret_arn,
             )
             .await;
+        }
+        if let Some(workload) = real_workload {
+            let _ = crate::state::data_plane::real_engine::release(&workload, false).await;
         }
 
         Ok(DeleteDBInstanceOutput {

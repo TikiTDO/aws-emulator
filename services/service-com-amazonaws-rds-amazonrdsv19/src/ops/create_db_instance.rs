@@ -887,6 +887,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the store's guard released — minting is a call to another service of this
         // emulator — and after every refusal above has been answered, so a create that was
         // going to fail mints no secret.
+        // The master password in the clear, held only for a REAL ENGINE instance, whose server
+        // is created with it ([`crate::state::data_plane::real_engine`]).
+        let mut master_password = input.master_user_password.clone();
         if manage_master_user_password {
             let minted = crate::state::mint_master_user_secret(
                 &*self.engine,
@@ -916,6 +919,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     &minted.password,
                 )
             });
+            master_password = Some(minted.password.clone());
             record.master_user_secret = Some(minted.secret);
         }
         // The instance's own ENGINE ENDPOINT, opened with the state lock released:
@@ -963,7 +967,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 }
             }),
         };
+        let real = record.db_cluster_identifier.is_none()
+            && crate::state::data_plane::real_engine::applies(&record.engine);
+        let mut real_workload = None;
         let endpoint = match plan {
+            // A REAL ENGINE instance: its server is a container, and its endpoint relays to it.
+            Some(_) if real => {
+                let (upstream, workload) = crate::state::data_plane::real_engine::start(
+                    &crate::state::data_plane::real_engine::RealInstance {
+                        dbi_resource_id: record.dbi_resource_id.clone(),
+                        engine_version: record.engine_version.clone(),
+                        master_username: record.master_username.clone().unwrap_or_default(),
+                        master_password: master_password.clone().unwrap_or_default(),
+                        db_name: record.db_name.clone(),
+                    },
+                )
+                .await
+                .map_err(CreateDBInstanceError::internal_failure)?;
+                real_workload = Some(workload);
+                Some(
+                    crate::state::data_plane::open_relayed_endpoint(&*self.engine, upstream)
+                        .await
+                        .map_err(CreateDBInstanceError::internal_failure)?,
+                )
+            }
             Some(plan) => Some(
                 crate::state::open_engine_endpoint(&*self.engine, &state, plan)
                     .await
@@ -987,6 +1014,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             store.db_instances.contains_key(&key)
         };
         if taken {
+            if let Some(workload) = &real_workload {
+                let _ = crate::state::data_plane::real_engine::release(workload, false).await;
+            }
             if let Some(secret) = &record.master_user_secret {
                 crate::state::release_orphaned_master_user_secret(
                     &*self.engine,
@@ -1034,7 +1064,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The listener is the instance's: the store holds it, so it stays open for as
         // long as the instance does and closes with it.
         if let Some(endpoint) = endpoint {
-            store.db_engine_endpoints.insert(key, endpoint);
+            store.db_engine_endpoints.insert(key.clone(), endpoint);
+        }
+        if let Some(workload) = real_workload {
+            store.real_workloads.insert(key, workload);
         }
         // The create happened, so the region's event log records it: that entry is what
         // `DescribeEvents` reports for this instance from now on.
