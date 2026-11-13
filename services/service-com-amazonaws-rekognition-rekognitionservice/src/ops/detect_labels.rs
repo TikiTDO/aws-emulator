@@ -231,15 +231,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // Stateless: the whole answer is measured off the image the request submitted, so
-        // there is no stored resource to read or write and the engine this operation was
-        // constructed with goes unused. `ctx` is what the S3-sourced read of the image goes
-        // through.
-        let _ = &self.engine;
         let requested = requested_analyses(&input);
-        let analysis = label_detection::analysed_submitted_image(ctx, &input.image, requested)
-            .await
-            .map_err(unreadable_error)?;
+        let (analysis, label_model_version) = if let Some(provider) =
+            crate::state::vision_provider::configured_endpoint(&*self.engine)
+                .map_err(unreadable_error)?
+        {
+            let bytes = crate::state::image_source::image_bytes(ctx, &input.image)
+                .await
+                .map_err(unreadable_error)?;
+            provider
+                .detect_labels(&bytes, requested)
+                .await
+                .map_err(unreadable_error)?
+        } else {
+            let analysis = label_detection::analysed_submitted_image(ctx, &input.image, requested)
+                .await
+                .map_err(unreadable_error)?;
+            let version = requested
+                .general_labels
+                .then(|| label_detection::LABEL_MODEL_VERSION.to_string());
+            (analysis, version)
+        };
         Ok(DetectLabelsOutput {
             // The labels measured, narrowed the way the request asked for them — an empty
             // list where nothing was measured or nothing survived the narrowing.
@@ -255,9 +267,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // "The value of OrientationCorrection is always null."
             orientation_correction: None,
             // The model that detected the labels, where label detection is what ran.
-            label_model_version: requested
-                .general_labels
-                .then(|| label_detection::LABEL_MODEL_VERSION.to_string()),
+            label_model_version,
             image_properties: analysis.image_properties,
         })
     }

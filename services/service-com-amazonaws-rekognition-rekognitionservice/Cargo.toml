@@ -16,9 +16,13 @@ emulator-server = { workspace = true }
 emulator-telemetry = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }
 aws-smithy-types = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net", "time"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 bytes = { workspace = true }
 http = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 # The digest that tells whether two indexed faces came from the same image, and the
@@ -43,6 +47,7 @@ emulator-core-build-support = { workspace = true }
 # The Amazon S3 service, mounted beside rekognition on one engine so an image staged with
 # `PutObject` is the one an `Image.S3Object` resolves to.
 service-com-amazonaws-s3-amazons3 = { workspace = true }
+hyper = { version = "1", features = ["server", "http1"] }
 
 [lints]
 workspace = true
