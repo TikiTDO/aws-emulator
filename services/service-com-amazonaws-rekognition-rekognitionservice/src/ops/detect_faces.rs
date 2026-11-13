@@ -186,14 +186,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // Stateless: "the operation does not persist any data", and the whole answer is
-        // measured off the image the request submitted, so there is no stored resource to
-        // read or write and the engine this operation was constructed with goes unused.
-        // `ctx` is what the S3-sourced read of the image goes through.
-        let _ = &self.engine;
-        let faces = crate::state::face_detection::faces_in_submitted_image(ctx, &input.image)
-            .await
-            .map_err(unreadable_error)?;
+        let faces = if let Some(provider) =
+            crate::state::vision_provider::configured_endpoint(&*self.engine)
+                .map_err(unreadable_error)?
+        {
+            let bytes = crate::state::image_source::image_bytes(ctx, &input.image)
+                .await
+                .map_err(unreadable_error)?;
+            provider
+                .detect_faces(&bytes, input.attributes.as_deref())
+                .await
+                .map_err(unreadable_error)?
+        } else {
+            crate::state::face_detection::faces_in_submitted_image(ctx, &input.image)
+                .await
+                .map_err(unreadable_error)?
+        };
         Ok(DetectFacesOutput {
             // The faces that were found, which is an empty list for an image carrying
             // none — the answer AWS gives for an image with no face in it.

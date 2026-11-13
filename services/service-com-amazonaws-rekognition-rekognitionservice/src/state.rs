@@ -66,6 +66,7 @@ pub mod idempotency;
 pub mod image_source;
 pub mod label_detection;
 pub mod modeled_error;
+pub mod vision_provider;
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -420,6 +421,11 @@ pub struct ComAmazonawsRekognitionRekognitionserviceState {
     /// refused. Service-wide rather than per collection: a token names a REQUEST, and
     /// the request's own collection is one of the parameters compared.
     pub client_request_tokens: idempotency::TokenLedger,
+    /// Optional per-engine override for the external vision provider endpoint
+    /// (`unix:///path/to/rekognition.sock` or `http://host:port`). When `None`,
+    /// image operations consult `EMULATOR_VISION_ENDPOINT` and fall back to the
+    /// built-in pixel detector when unset.
+    pub vision_endpoint: Option<String>,
 }
 
 impl ComAmazonawsRekognitionRekognitionserviceState {

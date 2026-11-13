@@ -253,12 +253,36 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // Stateless: "this is a stateless API operation. That is, data returned by this
-        // operation doesn't persist", and the whole answer is measured off the two images
-        // the request submitted, so there is no stored resource to read or write and the
-        // engine this operation was constructed with goes unused. `ctx` is what an
-        // S3-sourced read of either image goes through.
-        let _ = &self.engine;
+        let threshold = input
+            .similarity_threshold
+            .unwrap_or(crate::state::DEFAULT_SIMILARITY_THRESHOLD);
+
+        if let Some(provider) = crate::state::vision_provider::configured_endpoint(&*self.engine)
+            .map_err(unreadable_error)?
+        {
+            let source_bytes = crate::state::image_source::image_bytes(ctx, &input.source_image)
+                .await
+                .map_err(unreadable_error)?;
+            let target_bytes = crate::state::image_source::image_bytes(ctx, &input.target_image)
+                .await
+                .map_err(unreadable_error)?;
+            let out = provider
+                .compare_faces(
+                    &source_bytes,
+                    &target_bytes,
+                    threshold,
+                    input.quality_filter.as_deref(),
+                )
+                .await
+                .map_err(unreadable_error)?;
+            return Ok(CompareFacesOutput {
+                source_image_face: Some(out.source_image_face),
+                face_matches: Some(out.face_matches),
+                unmatched_faces: Some(out.unmatched_faces),
+                source_image_orientation_correction: None,
+                target_image_orientation_correction: None,
+            });
+        }
 
         // "Filtered faces aren't compared": the bar applies to both images, since the
         // source face is one side of every comparison.
@@ -276,9 +300,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(no_face_in_image());
         }
 
-        let threshold = input
-            .similarity_threshold
-            .unwrap_or(crate::state::DEFAULT_SIMILARITY_THRESHOLD);
         let mut matches: Vec<CompareFacesMatch> = Vec::new();
         let mut unmatched: Vec<ComparedFace> = Vec::new();
         for face in &target {
