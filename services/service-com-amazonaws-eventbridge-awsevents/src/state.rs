@@ -3503,8 +3503,11 @@ pub mod authorization;
 /// Whether the policies in force let the calling principal CHANGE a rule: a rule
 /// mutator is the action `events:<OperationName>` on the rule's own ARN, decided
 /// against the caller's identity-based policies with the TARGET rule's tags
-/// published as `aws:ResourceTag/<key>`
-/// ([`rule_authorization::rule_mutation_denial`]).
+/// published as `aws:ResourceTag/<key>` and the request keys the CALL itself
+/// carries beside them — the ARN of each target a target-attaching call attaches,
+/// as `events:TargetArn`
+/// ([`rule_authorization::rule_mutation_denial`],
+/// [`rule_authorization::target_attachment_denial`]).
 pub mod rule_authorization;
 
 /// Every spelling of the identity a publication is made as that a resource

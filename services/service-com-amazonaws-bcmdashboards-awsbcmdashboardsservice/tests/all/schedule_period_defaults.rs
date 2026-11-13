@@ -46,6 +46,14 @@ const THREE_YEARS_MAX_DAYS: f64 = 1096.0;
 /// compares one such number against another.
 const INSTANT_TOLERANCE_SECONDS: f64 = 0.001;
 
+/// The same tolerance, in days, for the SPAN between two instants: a span is the difference
+/// of two large epoch seconds divided by a day, so its last bits are the float arithmetic's
+/// rather than the service's — a span landing exactly on a day bound reads a few hundred
+/// nanoseconds past it. The day bounds below are compared with this slack so the check is
+/// about the instant the service chose and not about the representation of the number
+/// carrying it.
+const SPAN_TOLERANCE_DAYS: f64 = INSTANT_TOLERANCE_SECONDS / DAY;
+
 /// Epoch seconds now, the form `SchedulePeriod`'s bounds take on the wire.
 fn epoch_now() -> f64 {
     std::time::SystemTime::now()
@@ -174,8 +182,10 @@ fn assert_period(label: &str, record: &Value, case: &PeriodCase, requested_at: f
             ),
             Bound::DefaultsToThreeYearsOn => {
                 let days = (actual - requested_at) / DAY;
+                let window = (THREE_YEARS_MIN_DAYS - SPAN_TOLERANCE_DAYS)
+                    ..=(THREE_YEARS_MAX_DAYS + SPAN_TOLERANCE_DAYS);
                 assert!(
-                    (THREE_YEARS_MIN_DAYS..=THREE_YEARS_MAX_DAYS).contains(&days),
+                    window.contains(&days),
                     "case {label}: schedulePeriod.{member} must default to 3 years from the \
                      request ({THREE_YEARS_MIN_DAYS}..={THREE_YEARS_MAX_DAYS} days on from \
                      {requested_at}), got {actual}, which is {days} days on"
