@@ -20,9 +20,10 @@
 //!   request's resolved route key against this service's signing name. Edit it
 //!   for anything the model does not express: a signing name shared by several
 //!   services, or routing that keys on the access-key id.
-//! - `override_operation` — serve a request the model's routing key cannot name
-//!   correctly. The default returns `None`, so every request resolves through the
-//!   generated routing table. Return `Some(op)` to route one yourself.
+//! - `override_operation` — EDITED HERE: the key and the handler stay the generated
+//!   table's, but every operation whose model declares `AccessDeniedException` is served
+//!   behind [`authorization::Gated`], so IAM's decision about the action the request names
+//!   is taken before that operation runs.
 //! - `override_refusal` — how this service words a request the framework refused
 //!   before any handler ran. The default returns `None`, keeping the framework's
 //!   wording. See the inline note on that method for how to reword.
@@ -40,9 +41,15 @@
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
 
+/// Whether IAM lets a request perform the action it names — the decision taken in front
+/// of every operation whose model declares `AccessDeniedException`, through the
+/// [`authorization::Gated`] wrapper `override_operation` below resolves.
+pub mod authorization;
+
 use smithy_server_runtime::{
-    http, ErasedOperation, Refusal, Refused, Service,
+    http, ErasedOperation, Operation, Refusal, Refused, Service,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// The `com-amazonaws-timestreaminfluxdb-amazontimestreaminfluxdb` emulated service: the generated [`ServiceDefinition`] plus
@@ -52,6 +59,13 @@ use std::sync::Arc;
 /// router builds one shared engine and hands it to `new`.
 pub struct EmulatedService<Eng: Send + Sync + 'static> {
     entry: crate::ServiceDefinition<Eng>,
+    /// One [`authorization::Gated`] per operation whose model declares
+    /// `AccessDeniedException`, keyed by the routing key the model names that operation
+    /// by ([`Operation::NAME`], the same key the generated routing table uses). Built once
+    /// here, never per request; each entry carries the operation's TYPE and a handle on
+    /// the one shared engine, so this is a table of names rather than a second set of
+    /// operations.
+    gated: HashMap<&'static str, Box<dyn ErasedOperation>>,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -60,9 +74,62 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// operation's behaviour lives in that operation's own `impl Operation`.
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
+            gated: gated_table::<Eng>(&engine),
             entry: crate::ServiceDefinition::new(engine),
         }
     }
+}
+
+/// The [`authorization::Gated`] wrapper for every operation whose model declares
+/// `AccessDeniedException` ([`authorization::JUDGED_RESOURCES`]).
+///
+/// Authorization is a property of the request's identity, the action it names and the
+/// resource it addresses rather than of what a handler goes on to do, so it is taken here
+/// for all of them at once — implemented or still scaffolded. A stub answers 501 for a
+/// request whose caller IAM permits and the refusal otherwise, which is the order the real
+/// service evaluates them in; leaving a modelled operation out would serve an unauthorized
+/// caller, the very divergence this removes.
+fn gated_table<Eng: Send + Sync + 'static>(
+    engine: &Arc<Eng>,
+) -> HashMap<&'static str, Box<dyn ErasedOperation>> {
+    let mut wrappers: HashMap<&'static str, Box<dyn ErasedOperation>> = HashMap::new();
+    macro_rules! register {
+        ($($module:ident :: $operation:ident),+ $(,)?) => {
+            $(
+                wrappers.insert(
+                    <crate::ops::$module::$operation<Eng> as Operation>::NAME,
+                    Box::new(authorization::Gated::<
+                        crate::ops::$module::$operation<Eng>,
+                        Eng,
+                    >::new(Arc::clone(engine))) as Box<dyn ErasedOperation>,
+                );
+            )+
+        };
+    }
+    register!(
+        create_db_backup::CreateDbBackup,
+        create_db_cluster::CreateDbCluster,
+        create_db_instance::CreateDbInstance,
+        create_db_parameter_group::CreateDbParameterGroup,
+        delete_db_backup::DeleteDbBackup,
+        delete_db_cluster::DeleteDbCluster,
+        delete_db_instance::DeleteDbInstance,
+        get_db_backup::GetDbBackup,
+        get_db_cluster::GetDbCluster,
+        get_db_instance::GetDbInstance,
+        get_db_parameter_group::GetDbParameterGroup,
+        list_db_backups::ListDbBackups,
+        list_db_clusters::ListDbClusters,
+        list_db_instances::ListDbInstances,
+        list_db_instances_for_cluster::ListDbInstancesForCluster,
+        list_db_parameter_groups::ListDbParameterGroups,
+        reboot_db_cluster::RebootDbCluster,
+        reboot_db_instance::RebootDbInstance,
+        restore_from_db_backup::RestoreFromDbBackup,
+        update_db_cluster::UpdateDbCluster,
+        update_db_instance::UpdateDbInstance,
+    );
+    wrappers
 }
 
 impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
@@ -87,12 +154,16 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         &self,
         req: &aws_smithy_runtime_api::http::Request,
     ) -> Option<&dyn ErasedOperation> {
-        // Return `Some(op)` to serve a request the model's routing key cannot name
-        // correctly; `None` (the default) lets the generated routing table resolve
-        // it. `req` is the whole request, so a decision that depends on the body —
-        // the `Action` form field on a query protocol, say — is reachable here.
-        let _ = req;
-        None
+        // NOT a re-route: the key is the one the generated table's own protocol resolves,
+        // and the operation it names is the one served — wrapped in
+        // [`authorization::Gated`] so IAM's decision about the action is taken BEFORE the
+        // handler runs, as AWS takes it. Only the operations whose model declares
+        // `AccessDeniedException` are in that table
+        // ([`authorization::JUDGED_RESOURCES`]); every other key resolves to `None` here
+        // exactly as it did before, so the generated table serves it unchanged and the
+        // router's routing-error path is untouched.
+        let key = self.entry.protocol().routing_key(req).ok()?;
+        self.gated.get(key).map(::std::convert::AsRef::as_ref)
     }
 
     fn override_refusal(&self, refusal: &Refusal) -> Option<Refused> {
@@ -135,5 +206,32 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // consume it on `None`.
         let _ = error;
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RULE: the operations REGISTERED behind the authorization gate are exactly the ones
+    /// [`authorization::JUDGED_RESOURCES`] names — which that module's own test holds to
+    /// the set the model declares `AccessDeniedException` for.
+    ///
+    /// Without this, the `register!` list above could drop an operation while the model
+    /// and the table still said it was judged, and that operation would serve an
+    /// unauthorized caller. The table is built over a stand-in engine type carrying no
+    /// state: this asserts which KEYS are registered, and no request is served.
+    #[test]
+    fn every_judged_operation_is_registered_behind_the_authorization_gate() {
+        let registered = gated_table::<()>(&Arc::new(()));
+        let mut keys: Vec<&str> = registered.keys().copied().collect();
+        keys.sort_unstable();
+        let mut judged = authorization::judged_operations();
+        judged.sort_unstable();
+        assert_eq!(
+            keys, judged,
+            "case \"the registered table\": expected exactly the judged operations, got \
+             {keys:?} against {judged:?}"
+        );
     }
 }

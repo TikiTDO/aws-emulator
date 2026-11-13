@@ -197,14 +197,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the modeled contract above), so a second create under a taken name in the same
         // region conflicts, while the same name in another region is a new group. A
         // service-managed group's name is taken in every region, because that catalog
-        // exists in every region without anyone creating it.
+        // exists in every region without anyone creating it. The refusal is this
+        // service's already-exists sentence, naming the group that HOLDS the name
+        // ([`st::name_already_exists`]).
         if let Some(existing_id) = state.db_parameter_group_id_for_name(&region, &input.name) {
+            let existing_id = existing_id.clone();
             return Err(CreateDbParameterGroupErrorModeled::ConflictException(
-                ConflictException {
-                    message: format!("DB parameter group {} already exists", input.name),
-                    resource_id: existing_id.clone(),
-                    resource_type: st::RESOURCE_TYPE_DB_PARAMETER_GROUP.to_string(),
-                },
+                st::name_already_exists(
+                    st::NAMED_DB_PARAMETER_GROUP,
+                    &existing_id,
+                    &input.name,
+                ),
             )
             .into());
         }

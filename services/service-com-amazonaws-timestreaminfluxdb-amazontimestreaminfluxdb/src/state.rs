@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use crate::ops::types::{
-    DbBackupConfiguration, DbBackupConfigurationOutput, DbInstanceSummary,
+    ConflictException, DbBackupConfiguration, DbBackupConfigurationOutput, DbInstanceSummary,
     DbParameterGroupSummary, InfluxDBv2Parameters, InfluxDBv3CoreParameters,
     InfluxDBv3EnterpriseParameters, LogDeliveryConfiguration, MaintenanceSchedule, Parameters,
 };
@@ -61,6 +61,65 @@ pub const RESOURCE_TYPE_DB_INSTANCE: &str = "DB_INSTANCE";
 /// parameter-group resource type is reportable even though the enum lists only the two
 /// compute resources.
 pub const RESOURCE_TYPE_DB_PARAMETER_GROUP: &str = "DB_PARAMETER_GROUP";
+
+/// A resource family this service holds a unique-name index on, in the two spellings a
+/// refusal about its name needs.
+#[derive(Debug, Clone, Copy)]
+pub struct NamedResource {
+    /// The `resourceType` the refusal reports.
+    pub resource_type: &'static str,
+    /// How the refusal's sentence NAMES the resource: the shape name this model gives it
+    /// (`smithy_query(query="digest")` — `DbInstance`, `DbCluster`, `DbParameterGroup`),
+    /// which is how this service spells the resource in prose.
+    pub spelling: &'static str,
+}
+
+/// See [`NamedResource`]: the DB instance family.
+pub const NAMED_DB_INSTANCE: NamedResource = NamedResource {
+    resource_type: RESOURCE_TYPE_DB_INSTANCE,
+    spelling: "DbInstance",
+};
+
+/// See [`NamedResource`]: the DB parameter group family.
+pub const NAMED_DB_PARAMETER_GROUP: NamedResource = NamedResource {
+    resource_type: RESOURCE_TYPE_DB_PARAMETER_GROUP,
+    spelling: "DbParameterGroup",
+};
+
+/// See [`NamedResource`]: the DB cluster family. Its `resourceType` is declared beside the
+/// cluster records themselves (`clusters::RESOURCE_TYPE_DB_CLUSTER`), and is reached here
+/// through this module's re-export of them, so all three named families read in one place.
+pub const NAMED_DB_CLUSTER: NamedResource = NamedResource {
+    resource_type: RESOURCE_TYPE_DB_CLUSTER,
+    spelling: "DbCluster",
+};
+
+/// The refusal a create gets when the name it asks for is already taken: this service's
+/// already-exists sentence, naming the resource, the id of the record that HOLDS the name,
+/// the name the request asked for and the customer the records belong to — beside the
+/// `resourceId` and `resourceType` the model marks required on `ConflictException`.
+///
+/// A client reconciling create-if-absent logic reads the existing record's id out of this
+/// refusal to adopt that record instead of failing, so the id is part of the sentence and
+/// not only of the `resourceId` member. Every value in it comes from the request and from
+/// this emulator's state.
+#[must_use]
+pub fn name_already_exists(
+    resource: NamedResource,
+    existing_id: &str,
+    requested_name: &str,
+) -> ConflictException {
+    ConflictException {
+        message: format!(
+            "The {} with id [{existing_id}], name [{requested_name}], customer [{}] \
+             already exists",
+            resource.spelling,
+            ::engine::emulator_account_id(),
+        ),
+        resource_id: existing_id.to_string(),
+        resource_type: resource.resource_type.to_string(),
+    }
+}
 
 /// The `deploymentType` that places a standby in a second Availability Zone, from the
 /// modelled `DeploymentType` enum (`crate::ops::types::DEPLOYMENT_TYPE_VALUES`).
@@ -725,9 +784,26 @@ pub fn request_region(parts: &::http::request::Parts) -> String {
         .unwrap_or_else(|| DEFAULT_REGION.to_string())
 }
 
+/// The four resource segments the modelled `Arn` pattern allows
+/// (`smithy_query(query="shape", shape="Arn")`): every ARN this service spells names one
+/// of these families.
+pub const ARN_SEGMENT_DB_INSTANCE: &str = "db-instance";
+/// See [`ARN_SEGMENT_DB_INSTANCE`].
+pub const ARN_SEGMENT_DB_CLUSTER: &str = "db-cluster";
+/// See [`ARN_SEGMENT_DB_INSTANCE`].
+pub const ARN_SEGMENT_DB_PARAMETER_GROUP: &str = "db-parameter-group";
+/// See [`ARN_SEGMENT_DB_INSTANCE`].
+pub const ARN_SEGMENT_DB_BACKUP: &str = "db-backup";
+
+/// The ARN of one resource of `segment`'s family in `region` — the ONE place this service
+/// spells an ARN of its own, so every family's ARN has the same shape.
+pub fn family_arn(segment: &str, region: &str, id: &str) -> String {
+    ::engine::emulator_arn(ARN_NAMESPACE, region, &format!("{segment}/{id}"))
+}
+
 /// The ARN of a DB instance: `arn:aws:timestream-influxdb:<region>:<account>:db-instance/<id>`.
 pub fn db_instance_arn(region: &str, id: &str) -> String {
-    ::engine::emulator_arn(ARN_NAMESPACE, region, &format!("db-instance/{id}"))
+    family_arn(ARN_SEGMENT_DB_INSTANCE, region, id)
 }
 
 /// The engine parameter family a DB parameter group configures when its create request
@@ -747,7 +823,7 @@ pub fn default_db_parameter_group_parameters() -> Parameters {
 /// `arn:aws:timestream-influxdb:<region>:<account>:db-parameter-group/<id>`, one of the
 /// four resource segments the modelled `Arn` pattern allows.
 pub fn db_parameter_group_arn(region: &str, id: &str) -> String {
-    ::engine::emulator_arn(ARN_NAMESPACE, region, &format!("db-parameter-group/{id}"))
+    family_arn(ARN_SEGMENT_DB_PARAMETER_GROUP, region, id)
 }
 
 /// The endpoint a client connects to InfluxDB on.

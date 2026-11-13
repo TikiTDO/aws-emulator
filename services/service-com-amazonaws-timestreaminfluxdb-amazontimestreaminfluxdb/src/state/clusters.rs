@@ -444,7 +444,7 @@ pub fn default_port(engine_type: &str) -> i32 {
 /// `arn:aws:timestream-influxdb:<region>:<account>:db-cluster/<id>`, one of the four
 /// resource segments the modelled `Arn` pattern allows.
 pub fn db_cluster_arn(region: &str, id: &str) -> String {
-    ::engine::emulator_arn(ARN_NAMESPACE, region, &format!("db-cluster/{id}"))
+    super::family_arn(super::ARN_SEGMENT_DB_CLUSTER, region, id)
 }
 
 /// The two endpoints a cluster is reached on: the one that serves writes and reads, and

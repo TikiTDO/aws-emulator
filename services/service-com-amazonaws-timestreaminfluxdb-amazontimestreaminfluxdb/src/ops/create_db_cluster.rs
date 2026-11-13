@@ -276,11 +276,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // modeled contract above), so a second create under a live name in the same
         // region conflicts, while the same name in another region is a new cluster.
         if let Some(existing_id) = state.db_cluster_id_for_name(&region, &input.name) {
-            return Err(CreateDbClusterErrorModeled::ConflictException(ConflictException {
-                message: format!("DB cluster {} already exists", input.name),
-                resource_id: existing_id.clone(),
-                resource_type: st::RESOURCE_TYPE_DB_CLUSTER.to_string(),
-            })
+            let existing_id = existing_id.clone();
+            return Err(CreateDbClusterErrorModeled::ConflictException(
+                st::name_already_exists(st::NAMED_DB_CLUSTER, &existing_id, &input.name),
+            )
             .into());
         }
 
@@ -338,11 +337,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // refused create persists neither the cluster nor part of its node set.
         for node in &nodes {
             if let Some(existing_id) = state.db_instance_id_for_name(&region, &node.name) {
-                return Err(CreateDbClusterErrorModeled::ConflictException(ConflictException {
-                    message: format!("DB instance {} already exists", node.name),
-                    resource_id: existing_id.clone(),
-                    resource_type: st::RESOURCE_TYPE_DB_INSTANCE.to_string(),
-                })
+                let existing_id = existing_id.clone();
+                return Err(CreateDbClusterErrorModeled::ConflictException(
+                    st::name_already_exists(st::NAMED_DB_INSTANCE, &existing_id, &node.name),
+                )
                 .into());
             }
         }
