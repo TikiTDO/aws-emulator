@@ -53,6 +53,14 @@ const DESCRIBE_SECURITY_GROUPS: &str = "DescribeSecurityGroups";
 /// what a read that resolved WITHOUT reporting one of the requested ids ran into.
 const INVALID_SUBNET_ID_NOT_FOUND: &str = "InvalidSubnetID.NotFound";
 
+/// The EC2 error codes a security group reference earns, as EC2's error catalogue spells
+/// them: `InvalidGroup.NotFound` for an identifier the account holds no security group for,
+/// and `InvalidGroupId.Malformed` for a value that is not a group id at all. Unlike the
+/// subnet codes, which share one prefix, EC2 words these two under different ones — and both
+/// say the same thing about the request: the value names no security group to place an
+/// interface in.
+const GROUP_REFUSAL_PREFIXES: &[&str] = &["InvalidGroup.", "InvalidGroupId."];
+
 /// The EC2 error code for an identifier the account holds no security group for.
 const INVALID_GROUP_NOT_FOUND: &str = "InvalidGroup.NotFound";
 
@@ -77,23 +85,20 @@ fn downstream_ec2_failure(
     code: &str,
     message: &str,
 ) -> InvalidParameterValueException {
-    InvalidParameterValueException {
-        // `Type` is "the exception type", a value no documented rule gives, so it is left
-        // unset rather than invented.
-        r#type: None,
-        message: Some(format!(
-            "Error occurred while {call}. EC2 Error Code: {code}. EC2 Error Message: {message}"
-        )),
-    }
+    crate::state::invalid_parameter(format!(
+        "Error occurred while {call}. EC2 Error Code: {code}. EC2 Error Message: {message}"
+    ))
 }
 
 /// The refusal the EC2 resources `configuration` names earn, or `None` when EC2 resolved
 /// every one of them — and also when there is no EC2 to ask, because a refusal has to be
 /// grounded in what EC2 reported rather than assumed from silence.
 ///
-/// A connector's interfaces are provisioned in the subnets the configuration names and
-/// carry the security groups it names, so both are resolved before any state is written:
-/// an identifier the account holds no such resource for names nothing to provision in.
+/// A connector's interfaces carry the security groups the configuration names and are
+/// provisioned in the subnets it names, so both are resolved before any state is written:
+/// an identifier the account holds no such resource for names nothing to provision in. The
+/// SECURITY GROUPS are resolved first, which is the one the service reports when neither
+/// set resolves.
 pub async fn unresolved_reference(
     ctx: &::smithy_server_runtime::OperationContext<'_>,
     region: &str,
@@ -103,10 +108,10 @@ pub async fn unresolved_reference(
         configuration;
     let subnet_ids = vpc_egress.subnet_ids.as_deref().unwrap_or_default();
     let security_group_ids = vpc_egress.security_group_ids.as_deref().unwrap_or_default();
-    if let Some(refusal) = unresolved_subnets(ctx, region, subnet_ids).await {
+    if let Some(refusal) = unresolved_security_groups(ctx, region, security_group_ids).await {
         return Some(refusal);
     }
-    unresolved_security_groups(ctx, region, security_group_ids).await
+    unresolved_subnets(ctx, region, subnet_ids).await
 }
 
 /// The refusal the subnet identifiers `subnet_ids` earn, by the rule
@@ -210,7 +215,10 @@ async fn unresolved_security_groups(
         .and_then(ProvideErrorMetadata::code)
         .unwrap_or_default()
         .to_string();
-    if !code.starts_with("InvalidGroup.") {
+    if !GROUP_REFUSAL_PREFIXES
+        .iter()
+        .any(|prefix| code.starts_with(prefix))
+    {
         ::tracing::debug!(
             error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
             "the security groups a request named could not be resolved against EC2"
@@ -230,28 +238,22 @@ async fn unresolved_security_groups(
 /// assume the role it was handed, and points the caller at the trust policy, which is the
 /// one thing that decides it.
 fn unassumable_operator_role() -> InvalidParameterValueException {
-    InvalidParameterValueException {
-        r#type: None,
-        message: Some(
-            "The service is unable to assume the provided NetworkConnectorOperatorRole. \
-             Please verify the trust policy on the role."
-                .to_string(),
-        ),
-    }
+    crate::state::invalid_parameter(
+        "The service is unable to assume the provided NetworkConnectorOperatorRole. \
+         Please verify the trust policy on the role."
+            .to_string(),
+    )
 }
 
 /// What a role Lambda can assume but that grants none of the interface permissions is
 /// refused with: the call Lambda would make on the caller's behalf is the EC2 one, so the
 /// refusal states that the EC2 call was unauthorized and names the member at fault.
 fn unauthorized_operator_role() -> InvalidParameterValueException {
-    InvalidParameterValueException {
-        r#type: None,
-        message: Some(
-            "Encountered unauthorized operation while calling EC2 due to invalid \
-             ConnectorOperatorRole permissions"
-                .to_string(),
-        ),
-    }
+    crate::state::invalid_parameter(
+        "Encountered unauthorized operation while calling EC2 due to invalid \
+         ConnectorOperatorRole permissions"
+            .to_string(),
+    )
 }
 
 /// The refusal the `OperatorRole` a request carries earns, or `None` when IAM proved it

@@ -52,7 +52,7 @@ use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
 use super::network_connector_lifecycle::{
-    call, create, emulator, minimal_configuration, text, update, vpc_egress, Answer, PREFIX,
+    call, create, emulator, list, minimal_configuration, text, update, vpc_egress, Answer, PREFIX,
 };
 
 /// `NetworkConnectorName`'s `@pattern` as the MODEL spells it
@@ -87,9 +87,18 @@ const SECURITY_GROUP_PATTERN_MODELLED: &str = r"^sg-[0-9a-zA-Z]*$";
 /// The same expression as a refusal quotes it.
 const SECURITY_GROUP_PATTERN_QUOTED: &str = r"sg-[0-9a-zA-Z]*";
 
-/// `ComputeResourceType`'s value set, in the order the model declares it
-/// (`smithy_query(query="shape",shape="ComputeResourceType")`).
-const COMPUTE_TYPE_SET: &str = "MicroVm, WebFunction";
+/// `ComputeResourceType`'s value set as a refusal PUBLISHES it: the list the service
+/// advertises for the enum, which is wider than the two values the on-disk model declares
+/// (`smithy_query(query="shape",shape="ComputeResourceType")`) and is ordered as the service
+/// orders it rather than as the model declares it. The CHECK still runs the model's set, so
+/// an advertised value the model does not declare is still refused — only the advertised
+/// list is the service's.
+const COMPUTE_TYPE_SET: &str = "WebFunction, MicroVm, AppSync";
+
+/// `NetworkConnectorState`'s value set as a refusal publishes it, for the same reason: the
+/// same six values the model declares
+/// (`smithy_query(query="shape",shape="NetworkConnectorState")`), in the service's order.
+const CONNECTOR_STATE_SET: &str = "ACTIVE, DELETING, INACTIVE, DELETE_FAILED, PENDING, FAILED";
 
 /// `NetworkProtocol`'s value set, in the order the model declares it
 /// (`smithy_query(query="shape",shape="NetworkProtocol")`).
@@ -399,9 +408,10 @@ async fn a_value_the_modelled_expression_admits_is_still_accepted() {
 }
 
 /// A requirement as it reads when what broke it is an ELEMENT of a collection: nested
-/// inside the clause that names the collection member.
+/// inside the clause that names the collection member, beside the requirement every element
+/// of a collection the model does not mark `@sparse` carries — that it is not null.
 fn element_requirement(requirement: &str) -> String {
-    format!("Member must satisfy constraint: [{requirement}]")
+    format!("Member must satisfy constraint: [{requirement}, Member must not be null]")
 }
 
 /// `elements` as a list-valued member's echo renders: the elements in order,
@@ -542,6 +552,132 @@ async fn a_constraint_broken_by_a_list_element_is_stated_at_the_list() {
             "case {:?}: however many elements failed, the member is named once, got \
              {message:?}",
             row.case
+        );
+    }
+}
+
+/// A `VpcEgressConfiguration` whose `AssociatedComputeResourceTypes` is exactly `types`, so
+/// a row can vary how many compute types it names and where the offending one sits.
+fn with_compute_types(subnets: &[&str], types: &[&str]) -> Value {
+    json!({
+        "VpcEgressConfiguration": {
+            "SubnetIds": subnets,
+            "AssociatedComputeResourceTypes": types,
+        }
+    })
+}
+
+/// RULE: an enum clause advertises the value set the SERVICE publishes for that enum, in the
+/// order it publishes it — the same list wherever that enum is reached: through a list
+/// member of a create, of an update, and through a query parameter.
+///
+/// The rows span both enums this service publishes a list of its own for and both ways a
+/// request can break one (an element of a list, a scalar bound to the query string), with
+/// the offending value in varying positions and of varying shape, so no row's shape can be
+/// special-cased.
+#[tokio::test]
+async fn an_enum_refusal_advertises_the_published_value_set() {
+    let router = emulator();
+    let host = create(&router, create_body(UPDATE_HOST)).await;
+    assert_eq!(
+        host.status, 202,
+        "expected HTTP 202 from CreateNetworkConnector, got {} with {:?}",
+        host.status, host.body
+    );
+
+    let compute_requirement =
+        element_requirement(&format!("Member must satisfy enum value set: [{COMPUTE_TYPE_SET}]"));
+    let rows = [
+        // One compute type outside the set, alone.
+        Row {
+            case: "one compute type outside the published set",
+            method: "POST",
+            body: json!({
+                "Name": "lnc-published-one",
+                "Configuration": with_compute_types(
+                    &["subnet-0123456789abcdef0"],
+                    &["Sim2RealProbe"],
+                ),
+            }),
+            member: "configuration.vpcEgressConfiguration.associatedComputeResourceTypes",
+            value: rendered_list(&["Sim2RealProbe"]),
+            requirement: compute_requirement.clone(),
+            withheld: None,
+        },
+        // A value differing from an accepted one only in CASE: the enum's values are
+        // case-sensitive, and the clause advertises the same published list.
+        // `AssociatedComputeResourceTypes` is `@length(max: 1)`
+        // (`smithy_query(query="shape",shape="NetworkConnectorVpcEgressConfiguration")`), so
+        // each row names exactly one type and the enum clause is the only one.
+        Row {
+            case: "a compute type spelled in the wrong case",
+            method: "POST",
+            body: json!({
+                "Name": "lnc-published-two",
+                "Configuration": with_compute_types(
+                    &["subnet-0123456789abcdef0"],
+                    &["microvm"],
+                ),
+            }),
+            member: "configuration.vpcEgressConfiguration.associatedComputeResourceTypes",
+            value: rendered_list(&["microvm"]),
+            requirement: compute_requirement.clone(),
+            withheld: None,
+        },
+        // The SAME enum through UPDATE: the published list belongs to the enum, not to one
+        // operation.
+        Row {
+            case: "a compute type outside the set, on update",
+            method: "PUT",
+            body: json!({
+                "Configuration": with_compute_types(
+                    &["subnet-0123456789abcdef0"],
+                    &["Lambda"],
+                ),
+            }),
+            member: "configuration.vpcEgressConfiguration.associatedComputeResourceTypes",
+            value: rendered_list(&["Lambda"]),
+            requirement: compute_requirement.clone(),
+            withheld: None,
+        },
+    ];
+    for row in &rows {
+        let answer = send(&router, row).await;
+        assert_refused(row, &answer);
+        let message = text(&answer.body, "/message");
+        assert!(
+            !message.contains("[MicroVm, WebFunction]"),
+            "case {:?}: the model's declaration order must not reach the wire, got \
+             {message:?}",
+            row.case
+        );
+    }
+
+    // A SECOND enum, reached through the query string rather than a body member, and so
+    // stated unnested: `ListNetworkConnectors$State` binds `NetworkConnectorState` to the
+    // query parameter `State`.
+    let states = [
+        ("an upper-cased value no state spells", "SIM2REALPROBE"),
+        ("a state spelled in the wrong case", "active"),
+        ("a value that is no state at all", "Carrier%20Pigeon"),
+    ];
+    for (case, submitted) in states {
+        let answer = list(&router, &format!("?State={submitted}")).await;
+        assert_eq!(
+            answer.status, 400,
+            "case {case:?}: a State outside the value set is refused with HTTP 400, got {} \
+             with {:?}",
+            answer.status, answer.body
+        );
+        let message = text(&answer.body, "/message");
+        let expected = format!(
+            "1 validation error detected: Value '{}' at 'state' failed to satisfy constraint: \
+             Member must satisfy enum value set: [{CONNECTOR_STATE_SET}]",
+            submitted.replace("%20", " ")
+        );
+        assert_eq!(
+            message, expected,
+            "case {case:?}: expected the message {expected:?}, got {message:?}"
         );
     }
 }

@@ -341,6 +341,17 @@ async fn a_create_naming_an_ec2_resource_the_account_does_not_hold_is_refused() 
                 &format!("The security group '{absent_group}' does not exist"),
             )),
         ),
+        (
+            // Neither set resolves: the security groups are the ones the service resolves
+            // first, so theirs is the failure it reports.
+            "an absent subnet AND an absent security group",
+            vpc_egress(&[absent_subnet], &[absent_group], None, None),
+            Some(ec2_failure(
+                "DescribeSecurityGroups",
+                "InvalidGroup.NotFound",
+                &format!("The security group '{absent_group}' does not exist"),
+            )),
+        ),
     ];
 
     for (index, (case, configuration, refusal)) in rows.iter().enumerate() {

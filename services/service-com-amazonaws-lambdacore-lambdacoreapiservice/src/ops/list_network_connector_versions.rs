@@ -163,20 +163,35 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
+        // The same identifier rule every operation addressed by one applies
+        // ([`crate::state::identifier`]), settled before the store is read.
+        if let Some(unusable) = crate::state::identifier::unusable(&input.identifier) {
+            return Err(match unusable {
+                crate::state::identifier::UnusableIdentifier::NotAConnectorArn => {
+                    ListNetworkConnectorVersionsErrorModeled::InvalidParameterValueException(
+                        crate::state::identifier::invalid_connector_arn(&input.identifier),
+                    )
+                    .into()
+                }
+                crate::state::identifier::UnusableIdentifier::AnotherAccount => {
+                    crate::scaffolded::Scaffolded::access_denied(
+                        crate::state::identifier::CROSS_ACCOUNT_DENIED,
+                    )
+                }
+            });
+        }
+
         // "Specify an unqualified identifier — this operation lists ALL
         // versions of the connector, not a specific version."
         let parsed = crate::state::parse_identifier(&input.identifier);
         if parsed.version.is_some() {
             return Err(
                 ListNetworkConnectorVersionsErrorModeled::InvalidParameterValueException(
-                    InvalidParameterValueException {
-                        r#type: None,
-                        message: Some(format!(
-                            "Identifier {} is version-qualified; specify an unqualified \
-                             identifier to list every version of a connector",
-                            input.identifier
-                        )),
-                    },
+                    crate::state::invalid_parameter(format!(
+                        "Identifier {} is version-qualified; specify an unqualified \
+                         identifier to list every version of a connector",
+                        input.identifier
+                    )),
                 )
                 .into(),
             );
@@ -191,13 +206,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 _ => {
                     return Err(
                         ListNetworkConnectorVersionsErrorModeled::InvalidParameterValueException(
-                            InvalidParameterValueException {
-                                r#type: None,
-                                message: Some(format!(
-                                    "Marker {marker} is not a token returned by \
-                                     ListNetworkConnectorVersions"
-                                )),
-                            },
+                            crate::state::invalid_parameter(format!(
+                                "Marker {marker} is not a token returned by \
+                                 ListNetworkConnectorVersions"
+                            )),
                         )
                         .into(),
                     );

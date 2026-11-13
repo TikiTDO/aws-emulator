@@ -1087,29 +1087,23 @@ async fn deleting_removes_the_connector_and_its_versions() {
         "a deleted connector is absent from ListNetworkConnectors, got {:?}",
         listed.body
     );
-    // "This operation is idempotent — calling delete on a connector that is already
-    // deleting or has been deleted succeeds without error", so the repeat reports the
-    // deletion that already completed. The identity it answers from is the stored one.
+    // The idempotent success covers a connector this account still HAS, whatever state its
+    // own deletion left it in; once the deletion has COMPLETED the resource is gone, so the
+    // identifier names no connector of this account and Region and the service answers what
+    // `ResourceNotFoundException` is documented for — "the specified network connector does
+    // not exist".
     let again = delete(&router, "doomed").await;
-    assert_eq!(
-        again.status, 202,
-        "a second delete of a connector whose deletion completed succeeds, got {} with {:?}",
-        again.status, again.body
+    assert!(
+        again.is_error(404, "ResourceNotFoundException"),
+        "a delete of a connector whose deletion completed names nothing, got {} with {:?}",
+        again.status,
+        again.body
     );
-    for (member, expected) in [("/Arn", json!(arn)), ("/Name", json!("doomed")), ("/Id", json!(id))]
-    {
-        assert_eq!(
-            at(&again.body, member),
-            expected,
-            "the repeated delete reports the deleted connector's {member}, got {:?}",
-            at(&again.body, member)
-        );
-    }
     assert_eq!(
-        at(&again.body, "/State"),
-        json!("DELETING"),
-        "\"the State field is typically DELETING after this call\", got {:?}",
-        at(&again.body, "/State")
+        at(&again.body, "/Message"),
+        json!("Network connector not found: doomed"),
+        "the refusal echoes the identifier the request carried, got {:?}",
+        at(&again.body, "/Message")
     );
 
     // And the name is free again, with a fresh identity.

@@ -184,42 +184,34 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let now = ::std::time::SystemTime::now();
+        // The same identifier rule every operation addressed by one applies
+        // ([`crate::state::identifier`]), settled before the store is read.
+        if let Some(unusable) = crate::state::identifier::unusable(&input.identifier) {
+            return Err(match unusable {
+                crate::state::identifier::UnusableIdentifier::NotAConnectorArn => {
+                    DeleteNetworkConnectorErrorModeled::InvalidParameterValueException(
+                        crate::state::identifier::invalid_connector_arn(&input.identifier),
+                    )
+                    .into()
+                }
+                crate::state::identifier::UnusableIdentifier::AnotherAccount => {
+                    crate::scaffolded::Scaffolded::access_denied(
+                        crate::state::identifier::CROSS_ACCOUNT_DENIED,
+                    )
+                }
+            });
+        }
         let mut store = state.lock();
         // Resolving the identifier materialises a deletion that has fallen due,
         // so everything below sees the connector as it stands at `now`.
-        if store.settled_mut(&input.identifier, now).is_none() {
-            // "This operation is idempotent — calling delete on a connector
-            // that is already deleting or has been deleted succeeds without
-            // error", so the deletion this account already completed is
-            // reported as done, from the identity that deletion left behind.
-            // `ResourceNotFoundException` is for "the specified network
-            // connector does not exist" — an identifier that named no connector
-            // in this account and Region.
-            let Some((deleted, qualified)) = store.completed_deletion(&input.identifier) else {
-                return Err(DeleteNetworkConnectorErrorModeled::ResourceNotFoundException(
-                    crate::state::connector_not_found(&input.identifier),
-                )
-                .into());
-            };
-            return Ok(DeleteNetworkConnectorOutput {
-                arn: deleted.arn.clone(),
-                name: deleted.name,
-                id: deleted.id,
-                // The answer reports the version the request addressed, and an
-                // unqualified request addressed the connector itself.
-                version_arn: qualified.map(|version| format!("{}:{version}", deleted.arn)),
-                version: qualified,
-                // The deletion removed the configuration along with the
-                // versions holding it, so there is none left to report.
-                configuration: None,
-                operator_role: None,
-                // The state the record carried when its deletion completed:
-                // "the State field is typically DELETING after this call".
-                state: Some(deleted.state),
-            });
-        }
-        // The same resolution, under the same lock and the same instant, now as
-        // the record this call deletes from.
+        //
+        // "This operation is idempotent — calling delete on a connector that is
+        // already deleting or has been deleted succeeds without error": that
+        // holds for a connector this account still HAS, whichever state its own
+        // deletion left it in. Once the deletion has COMPLETED the resource is
+        // gone, so the identifier names no connector of this account and Region
+        // and the service answers what `ResourceNotFoundException` is for —
+        // "the specified network connector does not exist".
         let Some((connector, qualified)) = store.settled_mut(&input.identifier, now) else {
             return Err(DeleteNetworkConnectorErrorModeled::ResourceNotFoundException(
                 crate::state::connector_not_found(&input.identifier),

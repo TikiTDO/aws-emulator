@@ -1,24 +1,26 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! `DeleteNetworkConnector` is idempotent, and a transition the clock owes is reported by
-//! the first read taken once it falls due.
+//! `DeleteNetworkConnector` is idempotent while the connector exists, and a transition the
+//! clock owes is reported by the first read taken once it falls due.
 //!
 //! THE RULES, each asserted over a SET of inputs rather than over one recorded call:
 //!
-//! 1. A delete whose work this account and Region already completed is reported as DONE —
-//!    `HTTP 202` with the deleted resource's identity (`Arn`, `Name`, `Id` are
-//!    `@required`) and the state it carried — not refused. `DeleteNetworkConnector` is
-//!    modelled `idempotent: true` with success code 202
-//!    (`smithy_query(query="operation",operation="DeleteNetworkConnector")`) and
-//!    documented "this operation is idempotent — calling delete on a connector that is
-//!    already deleting or has been deleted succeeds without error", while
-//!    `ResourceNotFoundException` means "the specified network connector does not exist".
-//!    So the 404 is for an identifier that never named anything here, and the rows below
-//!    span what the rule generalises over: which identifier FORM repeats the delete (name,
-//!    connector id, unqualified ARN, version-qualified ARN), how many versions the
-//!    connector held, whether the repeat follows the delete immediately (still `DELETING`)
-//!    or after the deletion completed (the record gone), and the delete of a single
-//!    historical version repeated on its own.
+//! 1. A delete of a connector this account and Region still HAS is accepted — `HTTP 202`
+//!    with the resource's identity (`Arn`, `Name`, `Id` are `@required`) and the state it
+//!    carries — however often it is asked for and whichever identifier FORM asks:
+//!    `DeleteNetworkConnector` is modelled `idempotent: true` with success code 202
+//!    (`smithy_query(query="operation",operation="DeleteNetworkConnector")`) and documented
+//!    "this operation is idempotent — calling delete on a connector that is already deleting
+//!    or has been deleted succeeds without error", so a connector already `DELETING` is
+//!    deleted again without error. Once the deletion has COMPLETED the resource is gone, so
+//!    the identifier names no connector of this account and Region and the call is refused
+//!    with the modelled `ResourceNotFoundException` — "the specified network connector does
+//!    not exist" — exactly as an identifier that never named one is. The rows below span
+//!    what the rule generalises over: which identifier form repeats the delete (name,
+//!    connector id, unqualified ARN, version-qualified ARN), how many versions the connector
+//!    held, whether the repeat follows the delete while the record is still there or after
+//!    the deletion completed, and the delete of a single historical version repeated on its
+//!    own.
 //!
 //! 2. Every operation reports the state the resource has REACHED: a transition the clock
 //!    owes is materialised by the first call taken at or after the instant it falls due,
@@ -137,11 +139,12 @@ fn assert_not_found(case: &str, answer: &Answer, identifier: &str) {
     );
 }
 
-/// RULE 1: repeating a delete succeeds, whichever identifier form repeats it, whether the
-/// deletion is still in flight or has completed, and however many versions the connector
-/// held.
+/// RULE 1: repeating a delete of a connector that is still there succeeds, whichever
+/// identifier form repeats it and however many versions the connector held — and once the
+/// deletion has completed the same call is refused, because the identifier now names
+/// nothing.
 #[tokio::test]
-async fn a_repeated_delete_of_a_deleted_connector_is_accepted() {
+async fn a_repeated_delete_is_accepted_until_the_deletion_completes() {
     // Rows differ along: which form the repeat addresses the connector by, how many
     // versions it held, and whether the repeat comes before or after the deletion
     // completes.
@@ -149,8 +152,8 @@ async fn a_repeated_delete_of_a_deleted_connector_is_accepted() {
         ("by name, one version, still deleting", 0, false),
         ("by name, one version, deletion completed", 0, true),
         ("by id, one version, deletion completed", 0, true),
-        ("by unqualified ARN, one version, deletion completed", 0, true),
-        ("by version-qualified ARN, deletion completed", 2, true),
+        ("by unqualified ARN, one version, still deleting", 0, false),
+        ("by version-qualified ARN, still deleting", 2, false),
         ("by id, three versions, still deleting", 2, false),
         ("by id, three versions, deletion completed", 2, true),
         ("by name, four versions, deletion completed", 3, true),
@@ -183,20 +186,29 @@ async fn a_repeated_delete_of_a_deleted_connector_is_accepted() {
             _ => name.clone(),
         };
         let repeated = delete(&router, &identifier).await;
-        assert_accepted(&format!("{case}: the repeat"), &repeated, &arn, &name, &id);
-        if identifier.ends_with(":1") {
-            assert_eq!(
-                at(&repeated.body, "/Version"),
-                json!(1),
-                "case {case:?}: the answer reports the version the request addressed, got {:?}",
-                at(&repeated.body, "/Version")
-            );
+        if *completed {
+            assert_not_found(&format!("{case}: the repeat"), &repeated, &identifier);
+        } else {
+            assert_accepted(&format!("{case}: the repeat"), &repeated, &arn, &name, &id);
+            if identifier.ends_with(":1") {
+                assert_eq!(
+                    at(&repeated.body, "/Version"),
+                    json!(1),
+                    "case {case:?}: the answer reports the version the request addressed, \
+                     got {:?}",
+                    at(&repeated.body, "/Version")
+                );
+            }
         }
 
-        // A third delete answers the same way: the rule is about the state of the work,
-        // not about how many times it was asked for.
+        // A third delete answers the same way: the rule is about whether the connector is
+        // still there, not about how many times it was asked for.
         let third = delete(&router, &identifier).await;
-        assert_accepted(&format!("{case}: the third delete"), &third, &arn, &name, &id);
+        if *completed {
+            assert_not_found(&format!("{case}: the third delete"), &third, &identifier);
+        } else {
+            assert_accepted(&format!("{case}: the third delete"), &third, &arn, &name, &id);
+        }
 
         // And the connector is still gone from every reporting operation.
         if *completed {
@@ -218,11 +230,12 @@ async fn a_repeated_delete_of_a_deleted_connector_is_accepted() {
     }
 }
 
-/// RULE 1, the other side of it: an identifier that never named a connector in this account
-/// and Region is still refused with the modelled 404 — including a version number above the
-/// last version the deleted connector ever held.
+/// RULE 1, the other side of it: an identifier that names no connector of this account and
+/// Region is refused with the modelled 404 — one that never named anything, one whose
+/// connector's deletion has completed, and a version number above the last version that
+/// connector ever held.
 #[tokio::test]
-async fn an_identifier_that_never_named_a_connector_is_still_refused() {
+async fn an_identifier_that_names_no_connector_is_refused() {
     let router = emulator();
     let name = "short-lived";
     let id = active_connector(&router, name, &["subnet-0123456789abcdef0"]).await;
@@ -233,9 +246,10 @@ async fn an_identifier_that_never_named_a_connector_is_still_refused() {
     assert_accepted("the delete under test", &accepted, &arn, name, &id);
     wait_for_the_clock();
 
-    // Each row is an identifier no connector of this account ever answered to: a name, an
-    // id and an ARN that were never minted, a version one past the deleted connector's
-    // last one, and a far higher version.
+    // Each row is an identifier that names no connector of this account: a name, an id and
+    // an ARN that were never minted, a version one past the deleted connector's last one, a
+    // far higher version, and — the deletion having completed — every form that DID name the
+    // connector, including the versions it held.
     let absent = [
         ("a name that never existed", "never-created".to_string()),
         (
@@ -248,23 +262,18 @@ async fn an_identifier_that_never_named_a_connector_is_still_refused() {
         ),
         ("the version one past the last", format!("{arn}:3")),
         ("a far higher version", format!("{arn}:4096")),
+        ("the deleted connector's name", name.to_string()),
+        ("the deleted connector's id", id.clone()),
+        ("the deleted connector's ARN", arn.clone()),
+        ("a version the deleted connector held", format!("{arn}:1")),
+        (
+            "its latest version, after the deletion",
+            format!("{arn}:2"),
+        ),
     ];
     for (case, identifier) in &absent {
         let answer = delete(&router, identifier).await;
         assert_not_found(case, &answer, identifier);
-    }
-
-    // While the versions it DID hold are each reported as already deleted.
-    for version in [1, 2] {
-        let identifier = format!("{arn}:{version}");
-        let answer = delete(&router, &identifier).await;
-        assert_accepted(
-            &format!("a version the deleted connector held ({version})"),
-            &answer,
-            &arn,
-            name,
-            &id,
-        );
     }
 }
 
@@ -352,9 +361,9 @@ async fn a_repeated_delete_of_a_historical_version_is_accepted() {
 
 /// RULE 1 and the name-release contract together: a completed deletion frees the `Name`, a
 /// re-create on it mints a NEW id, reads by name rebind to the new connector, and the old id
-/// still answers a repeated delete with the identity of the connector that was deleted.
+/// names nothing through any operation.
 #[tokio::test]
-async fn a_freed_name_rebinds_while_the_old_id_answers_a_repeat_delete() {
+async fn a_freed_name_rebinds_while_the_old_id_names_nothing() {
     let router = emulator();
     let name = "reused";
     let first_id = active_connector(&router, name, &["subnet-0123456789abcdef0"]).await;
@@ -404,10 +413,10 @@ async fn a_freed_name_rebinds_while_the_old_id_answers_a_repeat_delete() {
     .await;
     assert_not_found("the dead id through Update", &dead_update, &first_id);
 
-    // … and still answers a repeated delete with the identity of the connector that was
-    // deleted, not the live one that took its name.
+    // … and the delete too: the connector that id named is gone, so the identifier names
+    // no connector of this account — not the live one that took its name either.
     let repeated = delete(&router, &first_id).await;
-    assert_accepted("the dead id through Delete", &repeated, &arn, name, &first_id);
+    assert_not_found("the dead id through Delete", &repeated, &first_id);
 
     // Deleting by NAME now addresses the live connector, which is the one that goes — and
     // it answers under its OWN ARN, whose resource segment is its own Id.

@@ -30,9 +30,16 @@
 //! 4. a constraint broken by an ELEMENT of a list is stated at the LIST MEMBER — no element
 //!    index and no `member` step — with the element's requirement nested inside
 //!    `Member must satisfy constraint: [ … ]` and the value the list member HELD as the
-//!    echo. A constraint broken by the list ITSELF (its own `@length`, its `@uniqueItems`)
-//!    is not nested, and neither is one broken by a member INSIDE a structure element,
-//!    which keeps its own full path.
+//!    echo. The nested set states every requirement that element had to satisfy: the
+//!    constraint it broke, and — because none of this model's lists is `@sparse`, so no
+//!    element of one may be null — that a member must not be null. A constraint broken by
+//!    the list ITSELF (its own `@length`, its `@uniqueItems`) is not nested, and neither is
+//!    one broken by a member INSIDE a structure element, which keeps its own full path;
+//! 5. an enum requirement states the value set the SERVICE publishes for that enum, in the
+//!    order it publishes it ([`PUBLISHED_VALUE_SETS`]), which is not the order the on-disk
+//!    model happens to declare its members in and, for an enum the service has since
+//!    widened, is not the same set either. The CHECK still runs the model's value set as
+//!    written, so only the advertised list is the service's.
 //!
 //! Rule 4 needs two things no [`Violation`] carries — the collection a failing element
 //! belongs to, and the whole value that collection held — and both come from
@@ -66,6 +73,39 @@ const CLAUSE_MARKER: &str = "failed to satisfy constraint: ";
 
 /// What a clause states around the requirement of a collection's ELEMENT (rule 4).
 const ELEMENT_SET_OPEN: &str = "Member must satisfy constraint: [";
+
+/// What separates the requirements inside one element's nested set (rule 4).
+const ELEMENT_SET_JOIN: &str = ", ";
+
+/// The value set this service PUBLISHES for one of its enums, paired with the set the
+/// on-disk model declares for it (rule 5).
+///
+/// A clause advertises the accepted values to the caller, so the list it states is the
+/// service's own — both its membership and its order. Where the model's declaration says
+/// something else, the published list is recorded here, keyed by the model's set so EVERY
+/// member targeting that enum states one list, in create, in update and in a query
+/// parameter alike; an enum absent from here is stated exactly as the model declares it.
+///
+/// The keys are the model's sets
+/// (`smithy_query(query="shape",shape="ComputeResourceType,NetworkConnectorState")`), the
+/// values the lists the service publishes for them. Only the ADVERTISED list is the
+/// service's: what a member ACCEPTS stays the model's set as codegen captured it, which is
+/// what the framework's constraint walk runs, so a value named only by the published list is
+/// still refused here even though the message lists it.
+const PUBLISHED_VALUE_SETS: &[(&[&str], &[&str])] = &[
+    // `ComputeResourceType`: the model declares two values, while the service accepts and
+    // advertises a third.
+    (
+        &["MicroVm", "WebFunction"],
+        &["WebFunction", "MicroVm", "AppSync"],
+    ),
+    // `NetworkConnectorState`: the same six values, in the service's order rather than the
+    // model's lifecycle-ordered declaration.
+    (
+        &["PENDING", "ACTIVE", "INACTIVE", "FAILED", "DELETING", "DELETE_FAILED"],
+        &["ACTIVE", "DELETING", "INACTIVE", "DELETE_FAILED", "PENDING", "FAILED"],
+    ),
+];
 
 /// The deepest collection nesting one clause walks out of.
 ///
@@ -137,7 +177,7 @@ fn message(violations: &[Violation], lists: &HashMap<String, String>) -> Option<
         // requirement at all; the framework's whole message stands instead.
         let mut requirement = requirement_of(&violation.kind)?;
         for _ in 0..depth {
-            requirement = format!("{ELEMENT_SET_OPEN}{requirement}]");
+            requirement = nested_requirement(&requirement)?;
         }
         if !stated.insert((path.clone(), requirement.clone())) {
             continue;
@@ -199,12 +239,47 @@ fn requirement_of(kind: &ViolationKind) -> Option<String> {
 }
 
 /// A violated constraint as this service reports it: a `@pattern` without its whole-value
-/// anchors, every other class exactly as the framework describes it.
+/// anchors (rule 3), an enum's value set as the service publishes it (rule 5), every other
+/// class exactly as the framework describes it.
 fn as_reported(kind: &ViolationKind) -> ViolationKind {
     match kind {
         ViolationKind::Pattern(pattern) => ViolationKind::Pattern(unanchored(pattern)),
+        ViolationKind::EnumValue(values) => ViolationKind::EnumValue(published(values)),
         other => other.clone(),
     }
+}
+
+/// The value set a clause advertises for the enum whose modelled set is `declared`
+/// (rule 5): the list this service publishes for it, or `declared` itself for an enum whose
+/// published list is the model's.
+///
+/// Matched on the set rather than on its order, so a model that reorders an enum's members
+/// still resolves to the same published list.
+fn published(declared: &[String]) -> Vec<String> {
+    let mut sorted: Vec<&str> = declared.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    for (modelled, service) in PUBLISHED_VALUE_SETS {
+        let mut key: Vec<&str> = modelled.to_vec();
+        key.sort_unstable();
+        if key == sorted {
+            return service.iter().map(|value| (*value).to_string()).collect();
+        }
+    }
+    declared.to_vec()
+}
+
+/// `requirement` as it reads when what broke it was an ELEMENT of a collection (rule 4):
+/// nested inside the clause that names the collection member, beside the requirement every
+/// element of a non-`@sparse` collection carries — that it is not null, in the framework's
+/// own wording for that requirement rather than a second spelling of it.
+///
+/// `None` when the framework has no wording for a null member, which leaves the framework's
+/// whole message standing, as [`framework_requirement`] does.
+fn nested_requirement(requirement: &str) -> Option<String> {
+    let not_null = framework_requirement(&ViolationKind::MissingRequiredMember)?;
+    Some(format!(
+        "{ELEMENT_SET_OPEN}{requirement}{ELEMENT_SET_JOIN}{not_null}]"
+    ))
 }
 
 /// The framework's own sentence for `kind`, recovered from a violation with NO value and an
@@ -334,7 +409,7 @@ mod tests {
                 "1 validation error detected: Value '[not-a-subnet]' at \
                  'configuration.vpcEgressConfiguration.subnetIds' failed to satisfy \
                  constraint: Member must satisfy constraint: [Member must satisfy regular \
-                 expression pattern: subnet-[0-9a-z]*]",
+                 expression pattern: subnet-[0-9a-z]*, Member must not be null]",
             ),
             (
                 "a list element outside its enum value set",
@@ -349,7 +424,8 @@ mod tests {
                 "1 validation error detected: Value '[Sim2RealProbe]' at \
                  'configuration.vpcEgressConfiguration.associatedComputeResourceTypes' \
                  failed to satisfy constraint: Member must satisfy constraint: [Member must \
-                 satisfy enum value set: [MicroVm, WebFunction]]",
+                 satisfy enum value set: [WebFunction, MicroVm, AppSync], Member must not \
+                 be null]",
             ),
             (
                 // The LIST's own constraint, not an element's: stated at the same path, and
@@ -443,6 +519,67 @@ mod tests {
             "case the violations alone: the clause states the refused elements, got {:?}",
             without.message
         );
+    }
+
+    /// RULE 5: an enum clause advertises the value set the SERVICE publishes, in the order
+    /// it publishes it, whatever order the model declares and whether or not the model's set
+    /// is the whole of it — and an enum with no published list of its own keeps the model's.
+    #[test]
+    fn an_enum_clause_states_the_published_value_set() {
+        // Each row: the set a violation carries (the model's, in any order) and the list the
+        // clause has to advertise.
+        let rows = [
+            (
+                "the compute resource types, as the model declares them",
+                vec!["MicroVm", "WebFunction"],
+                "[WebFunction, MicroVm, AppSync]",
+            ),
+            (
+                "the same set in another order",
+                vec!["WebFunction", "MicroVm"],
+                "[WebFunction, MicroVm, AppSync]",
+            ),
+            (
+                "the connector states, as the model declares them",
+                vec![
+                    "PENDING",
+                    "ACTIVE",
+                    "INACTIVE",
+                    "FAILED",
+                    "DELETING",
+                    "DELETE_FAILED",
+                ],
+                "[ACTIVE, DELETING, INACTIVE, DELETE_FAILED, PENDING, FAILED]",
+            ),
+            (
+                // An enum this service publishes no list of its own for: the model's.
+                "an enum with no published list of its own",
+                vec!["IPv4", "DualStack"],
+                "[IPv4, DualStack]",
+            ),
+        ];
+
+        for (case, declared, expected) in rows {
+            let values: Vec<String> = declared.iter().map(|value| (*value).to_string()).collect();
+            let stated = refusal(
+                &[violation(
+                    "someMember",
+                    ViolationKind::EnumValue(values),
+                    Some("nope"),
+                )],
+                HashMap::new,
+            )
+            .unwrap_or_else(|| panic!("case {case:?}: a constraint refusal is stated"));
+            let expected = format!(
+                "1 validation error detected: Value 'nope' at 'someMember' failed to satisfy \
+                 constraint: Member must satisfy enum value set: {expected}"
+            );
+            assert_eq!(
+                stated.message, expected,
+                "case {case:?}: expected the message {expected:?}, got {:?}",
+                stated.message
+            );
+        }
     }
 
     /// RULE 4, bounded: a path that keeps looking like an element step nests at most

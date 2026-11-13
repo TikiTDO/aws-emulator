@@ -20,6 +20,9 @@ mod create_request_rules;
 #[path = "all/delete_idempotence.rs"]
 mod delete_idempotence;
 
+#[path = "all/identifier_refusals.rs"]
+mod identifier_refusals;
+
 #[path = "all/network_connector_lifecycle.rs"]
 mod network_connector_lifecycle;
 

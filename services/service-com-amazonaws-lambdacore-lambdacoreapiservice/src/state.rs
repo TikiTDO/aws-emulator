@@ -11,9 +11,10 @@
 //! handlers reads and writes, plus the two projections the model asks for
 //! (`NetworkConnectorSummary` and `NetworkConnectorVersionSummary`).
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, SystemTime};
 
+pub mod identifier;
 pub mod network;
 
 use crate::ops::types::{
@@ -126,19 +127,6 @@ pub const MAX_VERSIONS_PER_CONNECTOR: usize = 100;
 /// value is the emulator's own choice, set well above the retry depth any
 /// workflow needs.
 pub const MAX_IDEMPOTENCY_TOKENS: usize = 1_000;
-
-/// How many completed deletions the store still remembers the identity of, so a
-/// repeated `DeleteNetworkConnector` can report the deletion it already
-/// performed instead of refusing it.
-///
-/// Like the client-token map, this is a record kept after the resource itself is
-/// gone, so it needs a bound of its own: past this count the oldest remembered
-/// deletion is dropped (see
-/// [`ComAmazonawsLambdacoreLambdacoreapiserviceState::forget`]), and an
-/// identifier whose deletion is no longer remembered is answered the way an
-/// identifier that never named a connector is. The value is the emulator's own
-/// choice, set well above the number of create/delete cycles any workflow runs.
-pub const MAX_DELETED_CONNECTORS: usize = 1_000;
 
 /// How long the asynchronous work a call started is still in flight before the
 /// clock owes its outcome: provisioning a new connector (`PENDING` -> `ACTIVE`),
@@ -327,29 +315,6 @@ impl NetworkConnector {
     }
 }
 
-/// What a completed deletion left behind: the identity of a connector this
-/// account and Region deleted, which is what an idempotent repeat of
-/// `DeleteNetworkConnector` reports.
-///
-/// It holds only what that answer needs — the identity the model requires
-/// (`Arn`, `Name`, `Id`), the state the connector carried when its deletion
-/// completed, and the last version number it ever minted, which is what decides
-/// whether a version-qualified identifier named a version of it. The
-/// configuration and the versions themselves are gone, because the deletion
-/// removed them.
-#[derive(Debug, Clone)]
-pub struct DeletedConnector {
-    pub name: String,
-    pub id: String,
-    pub arn: String,
-    /// The `State` the record carried when the deletion completed (`DELETING`).
-    pub state: String,
-    /// The highest version number the connector ever held: versions are minted
-    /// in order and the latest one is never removed on its own, so every number
-    /// from 1 up to this one named a version of this connector.
-    pub latest_version: i64,
-}
-
 /// What an `Identifier` names: the connector key (its name or id, or the name
 /// carried by an ARN) and the version an ARN qualified, if any.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -445,13 +410,6 @@ pub struct ComAmazonawsLambdacoreLambdacoreapiserviceState {
     /// The counter that orders remembered client tokens, so the oldest can be
     /// identified for eviction.
     pub token_seq: u64,
-    /// The identity of every connector whose deletion completed, oldest first,
-    /// so a repeat `DeleteNetworkConnector` reports the deletion this account
-    /// already performed rather than refusing an identifier it does know.
-    ///
-    /// BOUNDED: at most [`MAX_DELETED_CONNECTORS`] entries, the oldest dropped
-    /// first.
-    pub deleted: VecDeque<DeletedConnector>,
 }
 
 /// What an already-seen `ClientToken` produced: the connector it named and the
@@ -496,16 +454,11 @@ impl ComAmazonawsLambdacoreLambdacoreapiserviceState {
     /// carries no pattern, so the shape is the emulator's: `nc-` and 16 hex
     /// digits. Sixteen hex digits hold the whole counter, and the loop skips an
     /// id already taken.
-    /// A remembered deletion still answers for the id it names, so an id in
-    /// [`ComAmazonawsLambdacoreLambdacoreapiserviceState::deleted`] is taken
-    /// too: reusing one would make a single id name two connectors.
     pub fn mint_connector_id(&mut self) -> String {
         loop {
             self.connector_id_seq = self.connector_id_seq.wrapping_add(1);
             let id = format!("nc-{:016x}", self.connector_id_seq);
-            if self.connectors.values().all(|c| c.id != id)
-                && self.deleted.iter().all(|deleted| deleted.id != id)
-            {
+            if self.connectors.values().all(|c| c.id != id) {
                 return id;
             }
         }
@@ -530,10 +483,9 @@ impl ComAmazonawsLambdacoreLambdacoreapiserviceState {
     /// already materialised, plus the version the identifier qualified.
     ///
     /// Answers `None` when the store holds no live connector for it, which
-    /// includes one whose deletion completed before this call: a reporting
-    /// operation answers `ResourceNotFoundException` for that, while the
-    /// idempotent delete asks [`ComAmazonawsLambdacoreLambdacoreapiserviceState::completed_deletion`]
-    /// next.
+    /// includes one whose deletion completed before this call: the identifier
+    /// names no connector of this account and Region from then on, which every
+    /// operation answers `ResourceNotFoundException` for.
     pub fn settled_mut(
         &mut self,
         identifier: &str,
@@ -610,50 +562,13 @@ impl ComAmazonawsLambdacoreLambdacoreapiserviceState {
 
     /// Complete a connector's deletion: the record and every client token that
     /// named it go, so the token map can never outlive the resources it points
-    /// at, and the connector's identity is remembered as a deletion this
-    /// account performed.
+    /// at.
     ///
-    /// The name is free for a new connector from here on; what stays behind
-    /// answers nothing but a repeated delete.
+    /// The name is free for a new connector from here on, and the identifiers
+    /// that named this one name nothing.
     pub fn forget(&mut self, name: &str) {
-        if let Some(connector) = self.connectors.remove(name) {
-            while self.deleted.len() >= MAX_DELETED_CONNECTORS {
-                self.deleted.pop_front();
-            }
-            self.deleted.push_back(DeletedConnector {
-                name: connector.name,
-                id: connector.id,
-                arn: connector.arn,
-                state: connector.state,
-                latest_version: connector.latest_version,
-            });
-        }
-        self.idempotency
-            .retain(|_, outcome| outcome.name != *name);
-    }
-
-    /// The deletion this account already completed for `identifier`, with the
-    /// version that identifier qualified — a snapshot, because the record it
-    /// describes is gone.
-    ///
-    /// Answers `None` when no deletion this store remembers matches, which is
-    /// the identifier that never named a connector here. A name a later
-    /// connector took is NOT resolved here: the live record owns it, and only a
-    /// caller that found no live record asks this. Where one name was deleted
-    /// more than once, the most recent deletion is the one a repeat refers to.
-    pub fn completed_deletion(&self, identifier: &str) -> Option<(DeletedConnector, Option<i64>)> {
-        let parsed = parse_identifier(identifier);
-        let deleted = self
-            .deleted
-            .iter()
-            .rev()
-            .find(|deleted| deleted.name == parsed.key || deleted.id == parsed.key)?;
-        match parsed.version {
-            // A number above the last version the connector ever minted named
-            // no version of it, so it is not a deletion this account performed.
-            Some(version) if version > deleted.latest_version => None,
-            version => Some((deleted.clone(), version)),
-        }
+        self.connectors.remove(name);
+        self.idempotency.retain(|_, outcome| outcome.name != *name);
     }
 }
 
@@ -806,18 +721,33 @@ pub fn token_parameter_mismatch() -> ResourceConflictException {
     connector_conflict(TOKEN_PARAMETER_MISMATCH.to_string())
 }
 
+/// The `Type` every `InvalidParameterValueException` this service answers carries.
+///
+/// `Type` is "the exception type", and the recorded refusals of this class report the fault
+/// as the CALLER's: a parameter the request carried is the thing at fault, so the value is
+/// the same for every refusal of the class and is set in one place
+/// ([`invalid_parameter`]). The other error classes this service answers report none, which
+/// is what their recordings show, so nothing else sets it.
+pub const EXCEPTION_TYPE_USER: &str = "User";
+
+/// The `InvalidParameterValueException` payload for a parameter the service will not accept:
+/// the sentence, and the `Type` the class carries ([`EXCEPTION_TYPE_USER`]).
+pub fn invalid_parameter(message: String) -> InvalidParameterValueException {
+    InvalidParameterValueException {
+        r#type: Some(EXCEPTION_TYPE_USER.to_string()),
+        message: Some(message),
+    }
+}
+
 /// What a request that omits the `OperatorRole` its connector type needs is
 /// refused with: the role is "the IAM role that Lambda assumes to manage elastic
 /// network interfaces in your VPC", so a connector of a type that provisions
 /// them cannot be created without one. `connector_type` is the
 /// `NetworkConnectorType` the request's `Configuration` selects.
 pub fn operator_role_required(connector_type: &str) -> InvalidParameterValueException {
-    InvalidParameterValueException {
-        r#type: None,
-        message: Some(format!(
-            "NetworkConnectorOperatorRole is required for {connector_type} connector type"
-        )),
-    }
+    invalid_parameter(format!(
+        "NetworkConnectorOperatorRole is required for {connector_type} connector type"
+    ))
 }
 
 /// The `ServiceException` payload for a store this emulator could not reach.

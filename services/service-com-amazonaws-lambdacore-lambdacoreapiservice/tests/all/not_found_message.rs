@@ -89,14 +89,14 @@ impl Addressed {
             .collect()
     }
 
-    /// The operations of [`Addressed::reaching`] that REPORT on a connector, so they refuse
-    /// an identifier whose record is gone. `DeleteNetworkConnector` is left out because the
-    /// model marks it `idempotent: true`: a deletion already completed succeeds.
+    /// The operations of [`Addressed::reaching`] that answer for a connector whose record is
+    /// gone — all of them, including `DeleteNetworkConnector`: the model marks that one
+    /// `idempotent: true`, which makes a delete of a connector this account still HAS
+    /// succeed whatever state its own deletion left it in, while a deletion that has
+    /// COMPLETED leaves an identifier that names no connector of this account and Region at
+    /// all, which is what `ResourceNotFoundException` is documented for.
     fn reporting(identifier: &str) -> Vec<Self> {
         Self::reaching(identifier)
-            .into_iter()
-            .filter(|operation| !matches!(operation, Self::Delete))
-            .collect()
     }
 }
 
@@ -284,22 +284,6 @@ async fn a_deleted_connector_is_refused_naming_the_identifier_that_was_asked_for
                  connector id {id:?} the caller never used, got {message:?}"
             );
         }
-
-        // The other half of the rule: the one operation the model marks
-        // `idempotent: true` reports the completed deletion instead of refusing it.
-        let repeated = send(&router, Addressed::Delete, identifier).await;
-        assert_eq!(
-            repeated.status, 202,
-            "case {case:?}: a repeated DeleteNetworkConnector of a deleted connector \
-             succeeds, got {} with {:?}",
-            repeated.status, repeated.body
-        );
-        assert_eq!(
-            text(&repeated.body, "/Id"),
-            id,
-            "case {case:?}: the repeated delete reports the deleted connector's id, got {:?}",
-            repeated.body["Id"]
-        );
     }
 }
 

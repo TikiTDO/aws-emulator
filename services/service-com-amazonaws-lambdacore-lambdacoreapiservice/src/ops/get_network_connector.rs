@@ -212,6 +212,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The Region this request was signed for, which a connector's ARN — and so
         // the refusal that names one — is built for.
         let region = crate::state::request_region(ctx.parts());
+        // An `Identifier` spelled as an ARN has to be a network-connector ARN of
+        // this account before it can name anything
+        // ([`crate::state::identifier`]): the ARN that is not one is a bad
+        // parameter, and one of another account is an access refusal. Both are
+        // settled before the store is read, so neither answer says anything about
+        // what this account holds.
+        if let Some(unusable) = crate::state::identifier::unusable(&input.identifier) {
+            return Err(match unusable {
+                crate::state::identifier::UnusableIdentifier::NotAConnectorArn => {
+                    GetNetworkConnectorErrorModeled::InvalidParameterValueException(
+                        crate::state::identifier::invalid_connector_arn(&input.identifier),
+                    )
+                    .into()
+                }
+                crate::state::identifier::UnusableIdentifier::AnotherAccount => {
+                    crate::scaffolded::Scaffolded::access_denied(
+                        crate::state::identifier::CROSS_ACCOUNT_DENIED,
+                    )
+                }
+            });
+        }
         let now = ::std::time::SystemTime::now();
         let mut store = state.lock();
         // Reporting the connector as of now materialises the changes the clock

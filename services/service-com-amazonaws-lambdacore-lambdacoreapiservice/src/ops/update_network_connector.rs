@@ -198,20 +198,37 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
+        // An `Identifier` spelled as an ARN has to be a network-connector ARN of
+        // this account before it can name anything
+        // ([`crate::state::identifier`]), which is settled before the store is
+        // read at all.
+        if let Some(unusable) = crate::state::identifier::unusable(&input.identifier) {
+            return Err(match unusable {
+                crate::state::identifier::UnusableIdentifier::NotAConnectorArn => {
+                    UpdateNetworkConnectorErrorModeled::InvalidParameterValueException(
+                        crate::state::identifier::invalid_connector_arn(&input.identifier),
+                    )
+                    .into()
+                }
+                crate::state::identifier::UnusableIdentifier::AnotherAccount => {
+                    crate::scaffolded::Scaffolded::access_denied(
+                        crate::state::identifier::CROSS_ACCOUNT_DENIED,
+                    )
+                }
+            });
+        }
+
         // "You can specify the connector ID, name, or full ARN": an update
         // names the connector, never one of its versions, which are immutable.
         let parsed = crate::state::parse_identifier(&input.identifier);
         if parsed.version.is_some() {
             return Err(
                 UpdateNetworkConnectorErrorModeled::InvalidParameterValueException(
-                    InvalidParameterValueException {
-                        r#type: None,
-                        message: Some(format!(
-                            "Identifier {} names a connector version, and a version is \
-                             immutable: update the connector itself",
-                            input.identifier
-                        )),
-                    },
+                    crate::state::invalid_parameter(format!(
+                        "Identifier {} names a connector version, and a version is \
+                         immutable: update the connector itself",
+                        input.identifier
+                    )),
                 )
                 .into(),
             );
