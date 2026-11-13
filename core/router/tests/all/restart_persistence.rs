@@ -140,6 +140,8 @@ async fn a_change_that_cannot_be_written_is_not_answered_as_success() {
     let engine = Arc::new(engine::InMemoryEngine::new());
     let persistence = Arc::new(Persistence::all(Arc::clone(&engine), state_dir.clone()).unwrap());
     persistence.restore().unwrap();
+    // The empty starting state is written once, so only what the request changes is pending.
+    assert_eq!(persistence.save_changed().await.unwrap(), vec!["kms", "iam", "ec2"]);
     let router = PersistingRouter::new(router_over(&engine), Arc::clone(&persistence));
 
     // The namespace directory stops accepting files: the next write fails.
