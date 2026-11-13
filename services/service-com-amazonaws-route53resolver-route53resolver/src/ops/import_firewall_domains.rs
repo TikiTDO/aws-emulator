@@ -5,7 +5,9 @@
 //! Imports the domains listed in a file into a DNS Firewall domain list of this
 //! account: `REPLACE` makes the list exactly match the list in the file. The
 //! file is an object of the account's own Amazon S3 inventory, read through
-//! that service's own store ([`crate::state::firewall_domain_file_at`]); a URL
+//! that service's own store ([`crate::state::firewall_domain_file_at`]); a
+//! value that is not an Amazon S3 address at all is refused and starts no
+//! import ([`crate::state::invalid_domain_file_url`]), while an S3 URL
 //! addressing no file DNS Firewall can download starts an import that
 //! terminates in `COMPLETE_IMPORT_FAILED`, stating why, with the list's domains
 //! untouched.
@@ -208,6 +210,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let region = crate::state::request_region(&ctx.parts().headers);
 
+        // "The fully qualified URL or URI of the file stored in Amazon Simple
+        // Storage Service (Amazon S3)": a value that is not an S3 address is
+        // not a file DNS Firewall can be asked to import at all, so it is
+        // refused and NO import is started — the list keeps its domains and the
+        // settled step it stood in. A value that IS an S3 address is accepted
+        // here even when nothing is stored at it; that import runs and
+        // terminates in the failure below.
+        if !crate::state::is_s3_object_url(&input.domain_file_url) {
+            return Err(ImportFirewallDomainsErrorModeled::ValidationException(
+                crate::state::invalid_domain_file_url(),
+            )
+            .into());
+        }
+
         // The file is read out of the account's own object store BEFORE this
         // service's store is locked, so no guard of one store is held while the
         // other is taken (see `crate::state::firewall_domain_file_at`).
@@ -251,10 +267,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `ConflictException` is "the requested state transition isn't valid.
         // For example ... you can't import domains into a domain list that is
         // in the process of being deleted": a list with a change still in
-        // flight takes no import, and the record is left exactly as it is.
-        if !crate::state::firewall_domain_list_status_is_settled(record.status_at(now)) {
+        // flight takes no import, and the record is left exactly as it is. The
+        // refusal states the step that change stands in and names the list the
+        // request addressed
+        // (`crate::state::firewall_domain_list_in_progress_conflict`).
+        let in_flight = record.status_at(now);
+        if !crate::state::firewall_domain_list_status_is_settled(in_flight) {
             return Err(ImportFirewallDomainsErrorModeled::ConflictException(
-                crate::state::state_transition_conflict(),
+                crate::state::firewall_domain_list_in_progress_conflict(
+                    &input.firewall_domain_list_id,
+                    in_flight,
+                ),
             )
             .into());
         }

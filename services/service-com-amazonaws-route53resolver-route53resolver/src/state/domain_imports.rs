@@ -111,6 +111,49 @@ fn domains_of(text: &str) -> FirewallDomainFile {
     FirewallDomainFile::Domains(domains)
 }
 
+/// Whether `url` addresses an object of Amazon S3 at all: one of the
+/// addressing forms [`s3_object_address`] reads.
+///
+/// This is the FORM of the value, decided without looking at the account's
+/// inventory, and it is what tells the two outcomes of an import apart: a value
+/// that is not an S3 address is a request DNS Firewall will not start an import
+/// for at all ([`invalid_domain_file_url`]), while an S3 address is accepted and
+/// the import then either reads the object or terminates in the failure a file
+/// it could not download leaves on the list
+/// ([`firewall_domain_list_import_download_failed`]).
+pub fn is_s3_object_url(url: &str) -> bool {
+    s3_object_address(url).is_some()
+}
+
+/// The Route 53 Resolver service error code reported when `DomainFileUrl` is
+/// not an Amazon S3 address.
+///
+/// Carried for the same reason as [`RSLVR_CODE_RESOURCE_NOT_FOUND`]: the HTTP
+/// status (400) and the exception shape name together do not say which Resolver
+/// fault occurred, and the model states no message text, so this code comes
+/// from the recorded refusal of an import whose URL was not an S3 one. See
+/// [`invalid_domain_file_url`].
+pub const RSLVR_CODE_INVALID_DOMAIN_FILE_URL: &str = "RSLVR-02038";
+
+/// The `ValidationException` an import is refused with when the URL it names is
+/// not an Amazon S3 address.
+///
+/// `ImportFirewallDomains$DomainFileUrl` is "the fully qualified URL or URI of
+/// the file stored in Amazon Simple Storage Service (Amazon S3)", so a value
+/// addressing anything else is a value the operation cannot act on: it is
+/// refused before the import starts, and the sentence states what the request
+/// has to carry instead. The whole sentence is fixed text — it quotes nothing
+/// from the request, because the fault is the FORM of the value and not which
+/// object it names.
+pub fn invalid_domain_file_url() -> ValidationException {
+    ValidationException {
+        message: Some(rslvr_message(
+            RSLVR_CODE_INVALID_DOMAIN_FILE_URL,
+            "A valid S3 URL or S3 URI is required",
+        )),
+    }
+}
+
 /// The bucket and key an Amazon S3 URL addresses, or `None` when it addresses
 /// no object.
 ///

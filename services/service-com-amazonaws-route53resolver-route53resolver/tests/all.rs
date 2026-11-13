@@ -29,6 +29,8 @@ mod firewall_association_error_bodies;
 mod firewall_config_listing;
 #[path = "all/firewall_configs.rs"]
 mod firewall_configs;
+#[path = "all/firewall_domain_import_refusals.rs"]
+mod firewall_domain_import_refusals;
 #[path = "all/firewall_domain_import_steps.rs"]
 mod firewall_domain_import_steps;
 #[path = "all/firewall_domain_imports.rs"]

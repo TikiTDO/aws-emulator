@@ -356,11 +356,12 @@ struct FailedImportCase {
 /// as they were and terminates the list in `COMPLETE_IMPORT_FAILED`, stating
 /// the download failure for the Region of the request.
 ///
-/// The rows span the ways a URL addresses no file: a bucket the account does
-/// not hold, a key nothing was stored at, a URL that is not an S3 address at
-/// all, one that addresses a bucket rather than an object, an object that is
+/// The rows span the ways an S3 address resolves to no readable file: a bucket
+/// the account does not hold, a key nothing was stored at, an object that is
 /// not text, and a file listing more domains than a list can hold ("please try
-/// with a smaller file").
+/// with a smaller file"). A value that is not an S3 address at all starts no
+/// import to fail — it is refused outright, which
+/// [`super::firewall_domain_import_refusals`] pins.
 #[tokio::test]
 async fn an_import_of_a_file_that_cannot_be_downloaded_fails_with_the_download_message() {
     let (router, engine) = emulator_with_object_storage();
@@ -379,14 +380,6 @@ async fn an_import_of_a_file_that_cannot_be_downloaded_fails_with_the_download_m
         FailedImportCase {
             case: "a key nothing was stored at",
             url: format!("s3://{BUCKET}/never-written.txt"),
-        },
-        FailedImportCase {
-            case: "a URL that addresses no S3 object",
-            url: "https://example.com/domains.txt".to_string(),
-        },
-        FailedImportCase {
-            case: "a URL that addresses the bucket and no object",
-            url: format!("s3://{BUCKET}/"),
         },
         FailedImportCase {
             case: "an object that is not a text file",

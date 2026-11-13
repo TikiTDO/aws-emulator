@@ -167,12 +167,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // `ConflictException` is "the requested state transition isn't valid":
         // a list whose last change has not settled yet still has one in flight,
-        // so the delete is refused with the sentence the model states for that
-        // class (`crate::state::state_transition_conflict`, shared with the
-        // rule-group delete) and the record is left exactly as it is. Once the
-        // clock has made the settled status due, the same call is served — and
-        // a list that settled in the step a FAILED import leaves it in has no
-        // transition in flight either, so its delete is served too
+        // so the delete is refused with the sentence that states the step the
+        // list stands in and names the list the request addressed
+        // (`crate::state::firewall_domain_list_in_progress_conflict`), and the
+        // record is left exactly as it is. Once the clock has made the settled
+        // status due, the same call is served — and a list that settled in the
+        // step a FAILED import leaves it in has no transition in flight either,
+        // so its delete is served too
         // (`crate::state::firewall_domain_list_status_is_settled`). The status
         // is read out as an owned value, so the record is no longer borrowed
         // when it is taken out of the store below.
@@ -181,9 +182,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .get(&input.firewall_domain_list_id)
             .map(|record| record.status_at(now).to_string())
             .filter(|status| !crate::state::firewall_domain_list_status_is_settled(status));
-        if in_flight.is_some() {
+        if let Some(status) = &in_flight {
             return Err(DeleteFirewallDomainListErrorModeled::ConflictException(
-                crate::state::state_transition_conflict(),
+                crate::state::firewall_domain_list_in_progress_conflict(
+                    &input.firewall_domain_list_id,
+                    status,
+                ),
             )
             .into());
         }

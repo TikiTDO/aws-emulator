@@ -598,6 +598,10 @@ pub const FIREWALL_DOMAIN_LIST_STATUS_DELETING: &str = "DELETING";
 /// which is in flight until the clock makes the outcome due.
 pub const FIREWALL_DOMAIN_LIST_STATUS_IMPORTING: &str = "IMPORTING";
 
+/// The `FirewallDomainListStatus` a domain list reports while a write of its
+/// domains is still under way, the model's `UPDATING`.
+pub const FIREWALL_DOMAIN_LIST_STATUS_UPDATING: &str = "UPDATING";
+
 /// The `FirewallDomainListStatus` a domain list terminates in when an import
 /// into it did not go through, the model's `COMPLETE_IMPORT_FAILED`.
 ///
@@ -730,13 +734,15 @@ pub const MAX_DOMAINS_PER_UPDATE: usize = 1_000;
 
 /// The most domains one stored domain list holds.
 ///
-/// Not a published AWS quota — the same reasoning as [`MAX_SECURITY_GROUP_IDS`]:
-/// one call adds at most [`MAX_DOMAINS_PER_UPDATE`] domains and may be repeated
-/// without limit, so without this bound a caller looping updates would grow one
-/// emulator process without limit. An update that would carry a list past it is
+/// DNS Firewall's own quota for a domain list is 100,000 domains, so a list may
+/// hold up to that many however they reached it — one
+/// [`MAX_DOMAINS_PER_UPDATE`] update at a time, or one imported file. That also
+/// bounds what one emulator process holds per list, for the same reason as
+/// [`MAX_SECURITY_GROUP_IDS`]: an update that would carry a list past it is
 /// refused with the `LimitExceededException` the operation models, and the
-/// stored list is left exactly as it was.
-pub const MAX_DOMAINS_PER_LIST: usize = 10_000;
+/// stored list is left exactly as it was, while a FILE listing more domains
+/// than one list holds is a file the import cannot take.
+pub const MAX_DOMAINS_PER_LIST: usize = 100_000;
 
 /// `ResourceNotFoundException$ResourceType` for a firewall domain list: the
 /// modelled shape name of the resource, as for
@@ -2325,6 +2331,59 @@ pub fn firewall_domain_list_not_found(
 pub fn state_transition_conflict() -> ConflictException {
     ConflictException {
         message: Some("The requested state transition isn't valid.".to_string()),
+    }
+}
+
+/// The Route 53 Resolver service error code reported when a call that would
+/// change a DNS Firewall domain list arrives while the list's last change is
+/// still running.
+///
+/// Carried for the same reason as [`RSLVR_CODE_ENDPOINT_NOT_FOUND`]: the HTTP
+/// status (400) and the exception shape name together do not say which Resolver
+/// fault occurred, and the model states no message text, so this code comes
+/// from the recorded refusal of a domain-list write issued while an earlier one
+/// was still in flight. See [`firewall_domain_list_in_progress_conflict`].
+pub const RSLVR_CODE_FIREWALL_DOMAIN_LIST_IN_PROGRESS: &str = "RSLVR-02305";
+
+/// The `ConflictException` a DNS Firewall domain-list operation answers for a
+/// list whose last change has not settled yet, built here so every operation
+/// that refuses one reports the same body.
+///
+/// The refusal states the step the list stands in rather than the call that was
+/// refused: `status` is the list's own `FirewallDomainListStatus` as of now, so
+/// the sentence names the work the caller has to wait out and quotes the list
+/// the request named, under the RSLVR code the service states for this fault
+/// ([`RSLVR_CODE_FIREWALL_DOMAIN_LIST_IN_PROGRESS`]). The variable parts are the
+/// list's step and the id from the request; everything else is fixed text.
+///
+/// A status a list has REACHED carries no work to wait out
+/// ([`firewall_domain_list_status_is_settled`]), and no caller builds this for
+/// one, so such a status falls back to the sentence the model states for the
+/// error class ([`state_transition_conflict`]).
+pub fn firewall_domain_list_in_progress_conflict(
+    firewall_domain_list_id: &str,
+    status: &str,
+) -> ConflictException {
+    // The work each in-flight step of a domain list is carrying out, named as
+    // the sentence's remediation clause names it.
+    let work = match status {
+        FIREWALL_DOMAIN_LIST_STATUS_IMPORTING => "import",
+        FIREWALL_DOMAIN_LIST_STATUS_UPDATING => "update",
+        FIREWALL_DOMAIN_LIST_STATUS_DELETING => "delete",
+        _ => return state_transition_conflict(),
+    };
+    let step = status.to_ascii_lowercase();
+    ConflictException {
+        message: Some(rslvr_message_sentences(
+            RSLVR_CODE_FIREWALL_DOMAIN_LIST_IN_PROGRESS,
+            &[
+                &format!(
+                    "The DNS Firewall domain list is in {step} status: \
+                     \"{firewall_domain_list_id}\""
+                ),
+                &format!("Try again after the {work} completes"),
+            ],
+        )),
     }
 }
 
