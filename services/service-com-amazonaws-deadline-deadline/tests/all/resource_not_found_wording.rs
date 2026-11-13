@@ -30,7 +30,10 @@ use crate::queue_fleet_association::association_id;
 
 /// The sentence this service words a missing resource with, as the responses recorded from
 /// AWS show it.
-fn not_found_message(resource_type: &str, resource_id: &str) -> String {
+///
+/// `pub(crate)` so every suite in this test target expects the one sentence from the one
+/// place rather than spelling it out again.
+pub(crate) fn not_found_message(resource_type: &str, resource_id: &str) -> String {
     format!("Resource of type {resource_type} with id {resource_id} does not exist.")
 }
 
