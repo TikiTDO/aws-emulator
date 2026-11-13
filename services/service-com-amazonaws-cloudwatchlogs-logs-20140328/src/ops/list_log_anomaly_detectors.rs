@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListLogAnomalyDetectors
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListLogAnomalyDetectors`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Implemented: enumerates the log anomaly detectors the account holds — optionally only
+//! those watching one log group — a page at a time, each reported as the model's
+//! `AnomalyDetector` shape in the status the CLOCK has made due. This is the ONLY file to
+//! touch for this operation.
 //!
 //! A 501 from this operation means "nobody has written it yet", never "the emulator is
 //! broken". Replace the `Err(..)` in [`ListLogAnomalyDetectors::handle`] with real behaviour and
@@ -114,6 +115,60 @@ impl From<ListLogAnomalyDetectorsErrorModeled> for ListLogAnomalyDetectorsError 
     }
 }
 
+/// The kind tag this operation's pagination cursor carries, so a token minted by another
+/// paginated operation is refused rather than misread.
+const CURSOR_KIND: &str = "ListLogAnomalyDetectors";
+
+/// How many detectors one page carries when the request names no `limit`: "The maximum
+/// number of items to return. If you don't specify a value, the default maximum value of 50
+/// items is used." (`ListLogAnomalyDetectorsInput$limit`)
+const DEFAULT_LIMIT: i32 = 50;
+
+/// Where the next page resumes: the ARN of the last detector this page reported, plus the
+/// filter of the enumeration it belongs to. A continuation that changes the filter is
+/// refused, because the token is only a position within ONE filtered enumeration.
+#[derive(Debug, Clone)]
+struct Cursor {
+    filter_log_group: Option<String>,
+    after_detector: String,
+}
+
+impl Cursor {
+    fn encode(&self) -> String {
+        crate::state::encode_token(&::serde_json::json!({
+            "kind": CURSOR_KIND,
+            "filterLogGroup": self.filter_log_group,
+            "afterDetector": self.after_detector,
+        }))
+    }
+
+    fn decode(token: &str) -> Option<Self> {
+        let value = crate::state::decode_token(token)?;
+        if value.get("kind")?.as_str()? != CURSOR_KIND {
+            return None;
+        }
+        let filter_log_group = match value.get("filterLogGroup") {
+            None | Some(::serde_json::Value::Null) => None,
+            Some(text) => Some(text.as_str()?.to_string()),
+        };
+        Some(Self {
+            filter_log_group,
+            after_detector: value.get("afterDetector")?.as_str()?.to_string(),
+        })
+    }
+}
+
+/// The log group the request's `filterLogGroupArn` narrows the enumeration to, as the
+/// position-bearing filter the page token records: the NAME the store keys the group by, so
+/// the filter selects on the log group the ARN NAMES rather than on the ARN text, and a
+/// detector whose stored watch list spells that group's ARN differently still matches.
+fn filter_log_group_of(input: &ListLogAnomalyDetectorsInput) -> Option<&str> {
+    input
+        .filter_log_group_arn
+        .as_deref()
+        .map(crate::state::log_group_name_from_identifier)
+}
+
 /// The `ListLogAnomalyDetectors` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -150,18 +205,140 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListLogAnomalyDetectors` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListLogAnomalyDetectorsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListLogAnomalyDetectors"))
+        // `ctx` carries only request metadata; this operation reports on the detectors the
+        // store holds and needs none of it.
+        let _ = ctx;
+
+        let invalid = |message: String| {
+            ListLogAnomalyDetectorsError::from(
+                ListLogAnomalyDetectorsErrorModeled::InvalidParameterException(
+                    InvalidParameterException {
+                        message: Some(message),
+                    },
+                ),
+            )
+        };
+
+        // A member this operation parses as an ARN and was handed something that is not one
+        // is refused before anything is looked up, with the service's validation-error
+        // message naming the member and the value it could not parse.
+        if let Some(arn) = input.filter_log_group_arn.as_deref() {
+            if let Some(message) = crate::state::unparsable_arn_message("filterLogGroupArn", arn) {
+                return Err(invalid(message));
+            }
+            // A detector watches log groups, so a well-formed ARN of any other kind names
+            // nothing it could be associated with.
+            if !crate::state::is_log_group_arn(arn) {
+                return Err(invalid(format!(
+                    "filterLogGroupArn must be a log group ARN, got '{arn}'"
+                )));
+            }
+        }
+
+        let cursor = match input.next_token.as_deref() {
+            Some(token) => {
+                let Some(cursor) = Cursor::decode(token) else {
+                    return Err(invalid(crate::state::INVALID_NEXT_TOKEN_MESSAGE.to_string()));
+                };
+                if cursor.filter_log_group.as_deref() != filter_log_group_of(&input) {
+                    return Err(invalid(crate::state::INVALID_NEXT_TOKEN_MESSAGE.to_string()));
+                }
+                Some(cursor)
+            }
+            None => None,
+        };
+
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            ListLogAnomalyDetectorsError::from(
+                ListLogAnomalyDetectorsErrorModeled::ServiceUnavailableException(
+                    ServiceUnavailableException {
+                        message: Some("the log store is unavailable".to_string()),
+                    },
+                ),
+            )
+        })?;
+        let mut store = state.lock();
+
+        // A detector initializes and trains on its own, so the status each row reports is
+        // the one the clock has ALREADY made due — materialised here rather than moved on
+        // because something looked.
+        store.materialize_due_anomaly_detector_transitions(crate::state::now_ms());
+
+        // "Use this to optionally filter the results to only include anomaly detectors that
+        // are associated with the specified log group": the log group is the only resource
+        // the request names, so one the account does not hold is a missing RESOURCE — which
+        // this operation models — rather than an empty page that could not be told from a
+        // group no detector watches.
+        let wanted_group = match filter_log_group_of(&input) {
+            Some(name) => {
+                if !store.log_groups.contains_key(name) {
+                    return Err(
+                        ListLogAnomalyDetectorsErrorModeled::ResourceNotFoundException(
+                            ResourceNotFoundException {
+                                message: Some(crate::state::resource_not_found_message(
+                                    "log group",
+                                )),
+                            },
+                        )
+                        .into(),
+                    );
+                }
+                Some(name)
+            }
+            None => None,
+        };
+
+        // The store is an ordered map keyed by detector ARN, so one pass is already in the
+        // total order a page boundary is a position in. A detector is selected by the log
+        // GROUP its watch list names rather than by the ARN string, so either ARN form of
+        // that group selects it.
+        let matching: Vec<&crate::state::AnomalyDetectorRecord> = store
+            .anomaly_detectors
+            .values()
+            .filter(|detector| {
+                wanted_group.is_none_or(|name| {
+                    detector
+                        .log_group_arn_list
+                        .iter()
+                        .any(|arn| crate::state::log_group_name_from_identifier(arn) == name)
+                })
+            })
+            .collect();
+
+        let first = match &cursor {
+            Some(cursor) => {
+                matching.partition_point(|detector| detector.arn <= cursor.after_detector)
+            }
+            None => 0,
+        };
+        // `limit` is modelled `range 1..50`, so the boundary validator has already refused a
+        // value outside it; `max(1)` only keeps the page bounds sane.
+        let limit = usize::try_from(input.limit.unwrap_or(DEFAULT_LIMIT))
+            .unwrap_or(0)
+            .max(1);
+        let last = first.saturating_add(limit).min(matching.len());
+        let page = &matching[first..last];
+
+        // "The token for the next set of items to return": there is a next set only while
+        // detectors remain beyond this page.
+        let next_token = page.last().filter(|_| last < matching.len()).map(|detector| {
+            Cursor {
+                filter_log_group: wanted_group.map(ToString::to_string),
+                after_detector: detector.arn.clone(),
+            }
+            .encode()
+        });
+
+        // Every member is read off the stored record, through the one projection every
+        // reader of a detector shares, so this reports the detectors as they were created
+        // and last updated and nothing the request carried.
+        Ok(ListLogAnomalyDetectorsOutput {
+            anomaly_detectors: Some(
+                page.iter()
+                    .map(|detector| detector.reported())
+                    .collect::<Vec<AnomalyDetector>>(),
+            ),
+            next_token,
+        })
     }
 }

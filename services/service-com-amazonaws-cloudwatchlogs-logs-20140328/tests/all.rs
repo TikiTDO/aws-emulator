@@ -143,6 +143,8 @@ mod json_filter_pattern_value_types;
 mod list_anomalies;
 #[path = "all/live_tail_sessions.rs"]
 mod live_tail_sessions;
+#[path = "all/log_anomaly_detector_enumeration.rs"]
+mod log_anomaly_detector_enumeration;
 #[path = "all/log_anomaly_detector_removal.rs"]
 mod log_anomaly_detector_removal;
 #[path = "all/log_anomaly_detector_updates.rs"]
