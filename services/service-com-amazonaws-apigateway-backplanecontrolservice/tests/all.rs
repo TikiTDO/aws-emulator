@@ -533,3 +533,8 @@ mod test_invoke_authorizer_cognito_claims;
 // the data plane then admits against it.
 #[path = "all/usage_plan_quota_extension.rs"]
 mod usage_plan_quota_extension;
+// Appended for the reason the note above gives: the whole ACCOUNT-role sequence a client
+// scripts around a stage's execution logging, driven over the `AWS_PROXY` data plane — every
+// call of it answers inside the request, and each outcome it drives is observable.
+#[path = "all/stage_logging_role_sequence.rs"]
+mod stage_logging_role_sequence;

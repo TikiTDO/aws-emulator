@@ -157,6 +157,23 @@ pub(crate) fn gateway_with_iam_and_logs() -> Gateway {
     gateway
 }
 
+/// One emulator with this service, AWS IAM, Amazon CloudWatch Logs AND AWS Lambda mounted on
+/// ONE shared engine.
+///
+/// The whole account-role sequence a client scripts around a stage's execution logging spans
+/// all four: the role is resolved against IAM inside the `UpdateAccount` request, the method
+/// the deployed stage serves is an `AWS_PROXY` integration Lambda runs, and what the stage
+/// then logs lands in CloudWatch Logs' own store. Built on [`gateway_with_iam_and_logs`], so
+/// there is still one place each of those services is mounted.
+pub(crate) fn gateway_with_iam_logs_and_lambda() -> Gateway {
+    let mut gateway = gateway_with_iam_and_logs();
+    let engine = Arc::clone(&gateway.engine);
+    gateway.router.register_service(
+        service_com_amazonaws_lambda_awsgirapiservice::EmulatedService::new(engine),
+    );
+    gateway
+}
+
 /// One emulator with this service AND Amazon EC2 mounted on ONE shared engine.
 ///
 /// A domain name access association's `accessAssociationSource` is resolved against the VPC
