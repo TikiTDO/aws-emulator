@@ -847,6 +847,12 @@ impl ComAmazonawsEc2Amazonec2State {
                 record.pending = None;
             }
         }
+        // An endpoint a `DeleteVerifiedAccessEndpoint` left `deleting` was GONE at the instant
+        // that call recorded for it, whether or not anybody called again — the Verified Access
+        // family's clock-owed REMOVAL, for the reason
+        // [`Self::begin_verified_access_endpoint_deletion`] gives: a deleted endpoint is one
+        // `DescribeVerifiedAccessEndpoints` stops carrying.
+        self.materialize_due_verified_access_endpoint_deletions(now);
         // A VPC BPA exclusion `CreateVpcBlockPublicAccessExclusion` answered as
         // `create-in-progress` reaches `create-complete` once its due instant has passed,
         // whether or not anybody called — the same contract as a `pending` VPC's move

@@ -202,6 +202,11 @@ impl ComAmazonawsEc2Amazonec2State {
                 .iter()
                 .filter(|(_, record)| {
                     record.view.verified_access_instance_id.as_deref() == Some(instance_id)
+                        // An endpoint whose own delete has already been asked for is on its way
+                        // out ([`verified_access_endpoint_is_deleting`]) and holds the instance
+                        // no longer, exactly as a `deleting` NAT gateway holds its subnet no
+                        // longer ([`Self::subnet_dependencies`]).
+                        && !verified_access_endpoint_is_deleting(&record.view)
                 })
                 .map(|(endpoint_id, _)| endpoint_id.clone()),
         );

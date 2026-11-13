@@ -1582,6 +1582,12 @@ mod describe_reserved_instances;
 // `ClientToken` bounds it to one delete.
 #[path = "all/delete_verified_access_instance.rs"]
 mod delete_verified_access_instance;
+// file is where every new ec2 suite inserts its lines. What `DeleteVerifiedAccessEndpoint`
+// leaves behind — the endpoint the request names in the non-terminal `deleting` status with its
+// removal owed to the clock — what it answers, what it refuses for an id that names no
+// endpoint, and how one `ClientToken` bounds it to one delete.
+#[path = "all/delete_verified_access_endpoint.rs"]
+mod delete_verified_access_endpoint;
 // file is where every new ec2 suite inserts its lines. The accepting half of the Elastic IP
 // address transfer handshake: what `AcceptAddressTransfer` takes out of a standing offer, what
 // it refuses for an address nothing has on offer, and where the tags it carries land.

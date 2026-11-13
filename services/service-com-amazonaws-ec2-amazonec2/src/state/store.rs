@@ -1922,6 +1922,22 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// repeat of the same request answers with that endpoint instead of creating a second
     /// one.
     pub verified_access_endpoint_client_tokens: HashMap<String, String>,
+    /// When a `deleting` Verified Access endpoint's own REMOVAL falls due, by
+    /// `VerifiedAccessEndpointId` — the counterpart of the `pending` -> `active` move a create
+    /// leaves on the record itself ([`VerifiedAccessEndpointRecord::pending`]) for the other end
+    /// of an endpoint's life, on the same monotonic clock and the same [`TRANSITION_DELAY`], and
+    /// applied by the same [`Self::materialize_due_transitions`].
+    ///
+    /// A removal rather than a further stored status, for the reason
+    /// [`Self::begin_verified_access_endpoint_deletion`] gives: a deleted endpoint is one
+    /// `DescribeVerifiedAccessEndpoints` stops carrying.
+    pub verified_access_endpoint_delete_at: BTreeMap<String, Instant>,
+    /// A `DeleteVerifiedAccessEndpoint` `ClientToken` and the endpoint that call answered,
+    /// newest LAST, so a retry of the same delete answers what the first one answered instead of
+    /// an id the removal has since taken away. The arrangement
+    /// [`Self::verified_access_group_deletions`] holds for that resource, bounded the same way by
+    /// [`MAX_REMEMBERED_VERIFIED_ACCESS_ENDPOINT_DELETIONS`].
+    pub verified_access_endpoint_deletions: VecDeque<(String, VerifiedAccessEndpointRecord)>,
     /// Every AMI the account can see, by `ImageId`, as the modelled [`Image`] shape itself
     /// — the Amazon-published catalog a fresh account already has (see the module docs)
     /// plus any image a writer stores later. Ordered by id, which is the order the
@@ -3359,6 +3375,8 @@ impl Default for ComAmazonawsEc2Amazonec2State {
             verified_access_group_deletions: VecDeque::new(),
             verified_access_endpoints: BTreeMap::new(),
             verified_access_endpoint_client_tokens: HashMap::new(),
+            verified_access_endpoint_delete_at: BTreeMap::new(),
+            verified_access_endpoint_deletions: VecDeque::new(),
             local_gateway_route_table_virtual_interface_group_associations: BTreeMap::new(),
             local_gateway_route_table_vpc_associations: BTreeMap::new(),
             // A local gateway route table lives on an Outpost, which no EC2 call creates.

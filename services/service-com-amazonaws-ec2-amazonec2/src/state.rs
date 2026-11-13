@@ -462,6 +462,18 @@
 //! which `GetVerifiedAccessEndpointPolicy` reports and which the endpoint shape itself does
 //! not carry.
 //!
+//! An endpoint LEAVES that store the way a transit gateway does rather than the way a group
+//! does: `DeleteVerifiedAccessEndpoint` leaves it in the non-terminal `deleting` status the
+//! `VerifiedAccessEndpointStatusCode` catalog carries
+//! ([`ComAmazonawsEc2Amazonec2State::begin_verified_access_endpoint_deletion`]) and the clock
+//! owes it the REMOVAL one [`TRANSITION_DELAY`] later
+//! ([`ComAmazonawsEc2Amazonec2State::verified_access_endpoint_delete_at`]), at which point
+//! [`ComAmazonawsEc2Amazonec2State::remove_verified_access_endpoint`] gives the record's
+//! caller-chosen bytes and its create token back; a delete that named an idempotency token
+//! keeps the record it answered under it
+//! ([`ComAmazonawsEc2Amazonec2State::verified_access_endpoint_deletion`]) so a retried delete
+//! answers what the first one answered even after that removal.
+//!
 //! ## Secondary networks
 //!
 //! [`ComAmazonawsEc2Amazonec2State::secondary_networks`] holds the account's secondary
@@ -2583,6 +2595,7 @@ mod export_image_tasks;
 /// is re-exported below, so a handler reaches it as
 /// `crate::state::verified_access_trust_provider_condensed` like any helper of this module.
 mod verified_access_trust_provider_attachments;
+mod verified_access_endpoint_deletion;
 mod volumes;
 mod local_gateways_and_filter_patterns;
 pub mod outpost_lags;
@@ -2623,6 +2636,7 @@ pub use volumes::*;
 pub use import_image_tasks_and_verified_access::*;
 pub use export_image_tasks::*;
 pub use verified_access_trust_provider_attachments::*;
+pub use verified_access_endpoint_deletion::*;
 pub use images_and_zone_facts::*;
 pub use security_group_rules_and_page_tokens::*;
 pub use resource_dependencies_and_conversion_tasks::*;

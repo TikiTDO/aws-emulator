@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteVerifiedAccessEndpoint
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteVerifiedAccessEndpoint`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteVerifiedAccessEndpoint::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Implemented: starts deleting the Verified Access endpoint the request names — the stored
+//! endpoint is left in the non-terminal `deleting` status and the clock owes it the removal one
+//! transition later — and answers the record as this call leaves it; this is the ONLY file to
+//! touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -138,18 +133,107 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteVerifiedAccessEndpoint` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteVerifiedAccessEndpointErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteVerifiedAccessEndpoint"))
+        use crate::state;
+
+        // An endpoint is named by id and every member the answer reports is already on the
+        // stored record, so nothing here reads the request's metadata; the store is reached
+        // through the engine held on `self`.
+        let _ = ctx;
+
+        // "A unique, case-sensitive token that you provide to ensure idempotency of your
+        // modification request" (`$ClientToken`): the token is retained for the process's
+        // lifetime, so its length is held to the bound every client token in this crate is.
+        if input
+            .client_token
+            .as_ref()
+            .is_some_and(|token| token.chars().count() > state::MAX_CLIENT_TOKEN_CHARS)
+        {
+            return Err(state::invalid_parameter_value(format!(
+                "clientToken accepts at most {} characters",
+                state::MAX_CLIENT_TOKEN_CHARS
+            )));
+        }
+
+        let handle = state::require_service_state(&*self.engine)?;
+        let mut store = handle.lock();
+
+        // Materialise what the clock already owed before reading the store, so this call decides
+        // about the endpoint the state a caller would have seen anyway holds — an endpoint whose
+        // own removal has fallen due is already gone.
+        store.materialize_due_transitions();
+
+        // Idempotency first: a retry carrying the token of a delete this store still remembers
+        // is answered with the endpoint that delete answered, so the retry neither refuses an id
+        // its own call took away nor starts a second deletion.
+        let replayed = input
+            .client_token
+            .as_deref()
+            .and_then(|token| store.verified_access_endpoint_deletion(token))
+            // A token names the ONE endpoint its call deleted, so a retry naming another id is a
+            // different request wearing a spent token, not a replay, and is answered on its own
+            // terms.
+            .filter(|deleted| {
+                deleted.verified_access_endpoint_id.as_deref()
+                    == Some(input.verified_access_endpoint_id.as_str())
+            })
+            .cloned();
+
+        // "Delete an Amazon Web Services Verified Access endpoint": an id this account holds no
+        // endpoint for is a refusal, not a no-op — a caller that deletes twice has to be able to
+        // tell the deletion it performed from one it did not. An endpoint whose deletion has
+        // ALREADY been asked for is on its way out and is no longer one a delete acts on, so a
+        // second delete of it is refused the same way, and a replay is the one id that is
+        // allowed to be in either state, because this very token is what deleted it.
+        if replayed.is_none()
+            && !store
+                .verified_access_endpoints
+                .get(&input.verified_access_endpoint_id)
+                .is_some_and(|record| {
+                    !state::verified_access_endpoint_is_deleting(&record.view)
+                })
+        {
+            return Err(state::invalid_verified_access_endpoint_id_not_found(
+                &input.verified_access_endpoint_id,
+            ));
+        }
+
+        // Whichever of the two it is, the request is one that WOULD have succeeded, so a dry run
+        // stops HERE and never with a success status: "If you have the required permissions, the
+        // error response is DryRunOperation" (`$DryRun`). Nothing has been written yet, and
+        // nothing is.
+        if input.dry_run == Some(true) {
+            return Err(state::dry_run_operation());
+        }
+
+        if let Some(deleted) = replayed {
+            return Ok(DeleteVerifiedAccessEndpointOutput {
+                verified_access_endpoint: Some(deleted),
+            });
+        }
+
+        // `begin_verified_access_endpoint_deletion` is what leaves the endpoint in the
+        // non-terminal `deleting` status of the modelled `VerifiedAccessEndpointStatusCode`
+        // catalog, supersedes the move its create still owed it, schedules the REMOVAL the clock
+        // owes one transition later, and keeps the record it answered under THIS delete's token
+        // so a retry can be answered with it once the endpoint is gone.
+        let deleting = store
+            .begin_verified_access_endpoint_deletion(
+                &input.verified_access_endpoint_id,
+                input.client_token.as_deref(),
+            )
+            .ok_or_else(|| {
+                state::internal_error(
+                    "the Verified Access endpoint checked a moment ago could not be deleted",
+                )
+            })?;
+
+        // "Details about the Verified Access endpoint"
+        // (`DeleteVerifiedAccessEndpointResult$VerifiedAccessEndpoint`): the record as this call
+        // leaves it, written and read back through the store's own writer rather than rebuilt
+        // here, so this answer and the describe that follows it report the same endpoint.
+        Ok(DeleteVerifiedAccessEndpointOutput {
+            verified_access_endpoint: Some(deleting),
+        })
     }
 }
+
