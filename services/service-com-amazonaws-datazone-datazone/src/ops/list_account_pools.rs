@@ -189,6 +189,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // steps the clock already owed at this instant.
         store.settle_clock(now_ms());
 
+        // Authorization comes FIRST, before this handler inspects anything else the
+        // request carries: a DataZone permission is held on a domain, so a caller holds
+        // none on an identifier this store serves no domain for, and the listing is
+        // denied before any pagination token is decoded or any resource looked up,
+        // rather than reported as a miss or as invalid input.
+        if !store.authorizes_domain(&input.domain_identifier) {
+            return Err(ListAccountPoolsErrorModeled::AccessDeniedException(
+                AccessDeniedException {
+                    message: crate::state::not_permitted_message(Self::NAME),
+                },
+            )
+            .into());
+        }
+
+        // A token this service never issued satisfies `PaginationToken`'s modelled
+        // length, so it is refused HERE — by the handler, after authorization — and not
+        // by the validation stage.
         let resume_after = match input.next_token.as_deref() {
             Some(token) => Some(decode_page_token(token).ok_or_else(|| {
                 ListAccountPoolsErrorModeled::ValidationException(ValidationException {
@@ -207,17 +224,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the order the store keys the pools under, their id.
         let by_name = input.sort_by.as_deref() == Some(SORT_FIELD_NAME);
 
-        // Authorization comes FIRST: a DataZone permission is held on a domain, so a
-        // caller holds none on an identifier this store serves no domain for, and the
-        // listing is denied before any resource lookup rather than reported as a miss.
-        if !store.authorizes_domain(&input.domain_identifier) {
-            return Err(ListAccountPoolsErrorModeled::AccessDeniedException(
-                AccessDeniedException {
-                    message: crate::state::not_permitted_message(Self::NAME),
-                },
-            )
-            .into());
-        }
         // What is left for the lookup is a domain on its way out. This operation models
         // no `ResourceNotFoundException`, so that one is refused as invalid input naming
         // the member to fix, rather than answered as a domain with no pools. The

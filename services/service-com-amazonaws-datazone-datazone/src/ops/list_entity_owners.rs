@@ -194,6 +194,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // steps the clock already owed at this instant.
         store.settle_clock(now_ms());
 
+        // Authorization comes FIRST, before this handler inspects anything else the
+        // request carries: a DataZone permission is held on a domain, so a caller holds
+        // none on an identifier this store serves no domain for, and the listing is
+        // denied before any pagination token is decoded or any resource looked up,
+        // rather than reported as a miss or as bad input. A domain that is still being
+        // deleted is reached past this check deliberately: it still holds its units and
+        // `GetDomainUnit` still reports their owners, so this listing agrees with that
+        // reader until the clock removes the domain.
+        if !store.authorizes_domain(&input.domain_identifier) {
+            return Err(ListEntityOwnersErrorModeled::AccessDeniedException(
+                AccessDeniedException {
+                    message: crate::state::not_permitted_message(Self::NAME),
+                },
+            )
+            .into());
+        }
+
+        // A token this service never issued satisfies `PaginationToken`'s modelled
+        // length, so it is refused HERE — by the handler, after authorization — and not
+        // by the validation stage.
         let resume_after = match input.next_token.as_deref() {
             Some(token) => Some(decode_page_token(token).ok_or_else(|| {
                 ListEntityOwnersErrorModeled::ValidationException(ValidationException {
@@ -208,21 +228,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .unwrap_or(MAX_MAX_RESULTS)
             .clamp(MIN_MAX_RESULTS, MAX_MAX_RESULTS);
 
-        // Authorization comes FIRST: a DataZone permission is held on a domain, so a
-        // caller holds none on an identifier this store serves no domain for, and the
-        // listing is denied before any resource lookup rather than reported as a miss or
-        // as bad input. A domain that is still being deleted is reached past this check
-        // deliberately: it still holds its units and `GetDomainUnit` still reports their
-        // owners, so this listing agrees with that reader until the clock removes the
-        // domain.
-        if !store.authorizes_domain(&input.domain_identifier) {
-            return Err(ListEntityOwnersErrorModeled::AccessDeniedException(
-                AccessDeniedException {
-                    message: crate::state::not_permitted_message(Self::NAME),
-                },
-            )
-            .into());
-        }
         // The entity inside the domain is a different question: this operation models no
         // `ResourceNotFoundException`, so an entity the served domain does not hold is
         // refused as invalid input naming the member to fix.

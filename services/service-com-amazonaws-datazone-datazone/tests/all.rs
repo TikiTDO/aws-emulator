@@ -37,6 +37,8 @@ mod domain_name_conflict_and_not_found;
 mod domain_project_lifecycle;
 #[path = "all/domain_scope_error_class.rs"]
 mod domain_scope_error_class;
+#[path = "all/domain_scoped_listing_authorization_order.rs"]
+mod domain_scoped_listing_authorization_order;
 #[path = "all/domain_scoped_read_authorization.rs"]
 mod domain_scoped_read_authorization;
 #[path = "all/domain_scoped_write_authorization.rs"]
