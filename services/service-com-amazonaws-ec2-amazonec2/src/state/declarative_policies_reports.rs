@@ -175,6 +175,7 @@ pub struct DeclarativePoliciesReportSpec {
 /// One stored report: the modelled shape every reader of it answers from, beside the instant
 /// the clock owes it its completion.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DeclarativePoliciesReportRecord {
     /// The report as `DescribeDeclarativePoliciesReports` reports it. Its `Status` holds the
     /// word the last WRITER left — a move the clock owes is applied by
@@ -182,6 +183,7 @@ pub struct DeclarativePoliciesReportRecord {
     pub report: DeclarativePoliciesReport,
     /// When this report's `running` -> `complete` move falls due, and `None` once it has
     /// reached a terminal state (a cancelled report is owed nothing).
+    #[serde(with = "::service_common::persist::instant_opt")]
     pub completes_at: Option<Instant>,
     /// The wall-clock instant the completion this record is owed happened at, which is what
     /// `EndTime` reports once it is due.

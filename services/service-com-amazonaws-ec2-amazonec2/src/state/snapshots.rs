@@ -163,6 +163,7 @@ pub fn snapshot_in_use<E>(snapshot_id: &str, image_id: &str) -> crate::scaffolde
 /// The view holds no `State`, `Progress` or `CompletionTime`: all three are facts of the
 /// snapshot's age, so [`SnapshotRecord::view_at`] derives them — see the module docs.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SnapshotRecord {
     /// The snapshot as the model shapes it, with the three age-derived members left for
     /// [`SnapshotRecord::view_at`] to fill.
@@ -170,6 +171,7 @@ pub struct SnapshotRecord {
     /// The instant from which this snapshot's `pending` -> `completed` move is due.
     /// Monotonic ([`Instant`]), because it is only ever compared against the clock and
     /// never reported, so a wall-clock adjustment cannot move a snapshot back to `pending`.
+    #[serde(with = "::service_common::persist::instant")]
     pub completed_at: Instant,
     /// The wall-clock instant that move falls due at, which is what a completed snapshot
     /// reports as its `CompletionTime` ("The time stamp when the snapshot was completed",

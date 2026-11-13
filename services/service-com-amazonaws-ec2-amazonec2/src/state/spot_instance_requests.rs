@@ -221,8 +221,10 @@ pub fn due_system_time(base: SystemTime, delay: Duration) -> SystemTime {
 /// the wall-clock instant the move fell due, which the request reports as its status
 /// `UpdateTime` once the move has been applied.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SpotTransition {
     /// The instant from which the move is due.
+    #[serde(with = "::service_common::persist::instant")]
     pub due_at: Instant,
     /// The wall-clock instant the move falls due.
     pub at: SystemTime,
@@ -322,6 +324,7 @@ impl ComAmazonawsEc2Amazonec2State {
 /// ([`ComAmazonawsEc2Amazonec2State::materialize_due_spot_instance_requests`]), because a
 /// fulfillment MINTS an instance that has to be the same in every later read.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SpotInstanceRequestRecord {
     /// The request as the model shapes it, carrying the state reached so far.
     pub view: SpotInstanceRequest,
@@ -331,6 +334,7 @@ pub struct SpotInstanceRequestRecord {
     /// The instant this request stops being valid, on the monotonic clock: the
     /// `ValidUntil` the view reports, which is compared against the clock here and never
     /// reported from here, so a wall-clock adjustment cannot un-expire a request.
+    #[serde(with = "::service_common::persist::instant")]
     pub valid_until_at: Instant,
     /// The Region the request was made in, which the instance a fulfillment launches
     /// needs for its private DNS name. Not a member of any modelled Spot shape.

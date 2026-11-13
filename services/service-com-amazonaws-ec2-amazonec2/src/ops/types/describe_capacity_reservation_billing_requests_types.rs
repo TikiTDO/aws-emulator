@@ -31,10 +31,12 @@ pub struct DescribeCapacityReservationBillingRequestsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CapacityReservationBillingRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CapacityReservationBillingRequest {
     pub capacity_reservation_id: Option<String>,
     pub requested_by: Option<String>,
     pub unused_reservation_billing_owner_id: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub last_update_time: Option<::aws_smithy_types::DateTime>,
     pub status: Option<String>,
     pub status_message: Option<String>,
@@ -43,6 +45,7 @@ pub struct CapacityReservationBillingRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CapacityReservationInfo")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CapacityReservationInfo {
     pub instance_type: Option<String>,
     pub availability_zone: Option<String>,

@@ -87,6 +87,7 @@ const QR_CODE_LIGHT_SAMPLE: u8 = 0xFF;
 /// print the seed ([`Self::base32_string_seed`]); it shows which device the record is and
 /// that a seed is held, the same shape [`PasswordVerifier`] takes for the same reason.
 #[derive(Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VirtualMfaDeviceRecord {
     /// "The name of the virtual MFA device" (`CreateVirtualMFADevice$VirtualMFADeviceName`)
     /// in the case the creator chose, which is also the last segment of the serial number
@@ -113,6 +114,7 @@ pub struct VirtualMfaDeviceRecord {
     pub user_key: Option<String>,
     /// "The date and time on which the virtual MFA device was enabled"
     /// (`VirtualMFADevice$EnableDate`), or `None` while no user holds it.
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub enable_date: Option<::aws_smithy_types::DateTime>,
     /// "A list of tags that are attached to the virtual MFA device"
     /// (`VirtualMFADevice$Tags`), as the create attached them, or `None` when it attached

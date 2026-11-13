@@ -29,10 +29,12 @@ pub struct DescribeHostReservationsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#HostReservation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct HostReservation {
     pub count: Option<i32>,
     pub currency_code: Option<String>,
     pub duration: Option<i32>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub end: Option<::aws_smithy_types::DateTime>,
     pub host_id_set: Option<Vec<String>>,
     pub host_reservation_id: Option<String>,
@@ -40,6 +42,7 @@ pub struct HostReservation {
     pub instance_family: Option<String>,
     pub offering_id: Option<String>,
     pub payment_option: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub start: Option<::aws_smithy_types::DateTime>,
     pub state: Option<String>,
     pub upfront_price: Option<String>,

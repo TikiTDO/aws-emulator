@@ -2339,6 +2339,7 @@ pub struct SecurityGroupRevoke {
 /// group stores keep theirs — so every member a writer sets round-trips through
 /// `DescribeSecurityGroupRules` without a field-by-field copy that can silently drop one.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SecurityGroupRuleRecord {
     /// The rule as `DescribeSecurityGroupRules` reports it.
     pub rule: SecurityGroupRule,
@@ -2693,6 +2694,7 @@ pub fn security_group_rule_payload_bytes(record: &SecurityGroupRuleRecord) -> us
 /// keep theirs — so every member a writer sets round-trips through every reader without a
 /// field-by-field copy that can silently drop one.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateRecord {
     /// The template as `CreateLaunchTemplate` and `DeleteLaunchTemplate` report it.
     pub template: LaunchTemplate,
@@ -2736,6 +2738,7 @@ impl LaunchTemplateRecord {
 /// One version of a stored launch template: the launch parameters the caller gave for it,
 /// kept verbatim, beside what the service recorded about the version itself.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateVersionRecord {
     /// This version's number; the first version is [`FIRST_LAUNCH_TEMPLATE_VERSION`].
     pub version_number: i64,

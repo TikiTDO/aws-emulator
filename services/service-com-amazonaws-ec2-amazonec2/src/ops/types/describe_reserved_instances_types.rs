@@ -29,6 +29,7 @@ pub struct DescribeReservedInstancesOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ReservedInstances")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ReservedInstances {
     pub currency_code: Option<String>,
     pub instance_tenancy: Option<String>,
@@ -41,7 +42,9 @@ pub struct ReservedInstances {
     pub reserved_instances_id: Option<String>,
     pub instance_type: Option<String>,
     pub availability_zone: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub start: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub end: Option<::aws_smithy_types::DateTime>,
     pub duration: Option<i64>,
     pub usage_price: Option<f32>,

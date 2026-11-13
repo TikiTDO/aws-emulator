@@ -136,15 +136,18 @@ pub const INVALID_CONVERSION_TASK_ID: &str = "InvalidConversionTaskId";
 /// ([`Self::view_at`]): it is a fact of elapsed time, so no stored value could be right
 /// twice.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ImportImageTaskRecord {
     /// The task as the model shapes it, with `Progress` left for [`Self::view_at`] to fill
     /// while the task is active.
     pub view: ImportImageTask,
     /// When the import started, which progress is measured from.
+    #[serde(with = "::service_common::persist::instant")]
     pub started_at: Instant,
     /// The instant from which this task's `active` -> `completed` move is due. Monotonic
     /// ([`Instant`]), because it is only ever compared against the clock and never
     /// reported, so a wall-clock adjustment cannot move a task back to `active`.
+    #[serde(with = "::service_common::persist::instant")]
     pub completed_at: Instant,
 }
 
@@ -712,19 +715,23 @@ pub const VOLUME_MODIFICATION_PROGRESS_COMPLETE: i64 = 100;
 /// than letting two writers store two different answers — the arrangement
 /// [`VolumeRecord`] uses for a volume's own `State`.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VolumeModificationRecord {
     /// The modification as the model shapes it: the volume it belongs to, its original
     /// values, its target values and its `StartTime`. `ModificationState`, `Progress` and
     /// `EndTime` are left for [`Self::view_at`] to fill.
     pub view: VolumeModification,
     /// The instant the modification started, which [`Self::progress_at`] measures from.
+    #[serde(with = "::service_common::persist::instant")]
     pub started_at: Instant,
     /// The instant from which this modification's `modifying` -> `optimizing` move is
     /// due. Monotonic ([`Instant`]), because it is only ever compared against the clock
     /// and never reported, so a wall-clock adjustment cannot move a finished
     /// modification back to `modifying`.
+    #[serde(with = "::service_common::persist::instant")]
     pub optimizing_at: Instant,
     /// The instant from which its `optimizing` -> `completed` move is due.
+    #[serde(with = "::service_common::persist::instant")]
     pub completed_at: Instant,
     /// The wall-clock instant the modification finishes on, which it reports as its
     /// `EndTime` once it has: the modification ended when that move fell due, not when
@@ -918,6 +925,7 @@ pub const INVALID_SECONDARY_NETWORK_ID_MALFORMED: &str = "InvalidSecondaryNetwor
 /// associations: both are facts of the network's age, so [`SecondaryNetworkRecord::view_at`]
 /// derives them rather than letting two writers store two different words for one network.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SecondaryNetworkRecord {
     /// The network as the model shapes it, with the `State` members left for
     /// [`SecondaryNetworkRecord::view_at`] to fill.
@@ -926,11 +934,13 @@ pub struct SecondaryNetworkRecord {
     /// move is due. Monotonic ([`Instant`]), because it is only ever compared against the
     /// clock and never reported, so a wall-clock adjustment cannot move a network back to
     /// `create-in-progress`.
+    #[serde(with = "::service_common::persist::instant")]
     pub create_complete_at: Instant,
     /// The instant from which this network's `delete-in-progress` -> `delete-complete`
     /// move is due, and `None` for a network nobody has asked to delete. Set once, by the
     /// delete that asked for it ([`ComAmazonawsEc2Amazonec2State::begin_secondary_network_deletion`]),
     /// and monotonic for the same reason as [`Self::create_complete_at`].
+    #[serde(with = "::service_common::persist::instant_opt")]
     pub delete_complete_at: Option<Instant>,
 }
 
@@ -1763,6 +1773,8 @@ pub fn verified_access_endpoint_domain(
 /// One stored Verified Access endpoint: the modelled shape every operation that reports one
 /// answers with, plus the two facts that shape carries no member for.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "'de: 'static"))]
 pub struct VerifiedAccessEndpointRecord {
     /// The endpoint as `CreateVerifiedAccessEndpoint` answered it and
     /// `DescribeVerifiedAccessEndpoints` reports it.
@@ -1782,6 +1794,7 @@ pub struct VerifiedAccessEndpointRecord {
 /// One stored Verified Access group: the modelled shape every operation that reports one
 /// answers with, plus the one fact that shape carries no member for.
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessGroupRecord {
     /// The group as `CreateVerifiedAccessGroup` answered it and a describe of the groups
     /// reports it.
@@ -1865,6 +1878,7 @@ pub fn verified_access_instance_payload_bytes(
 /// modification. Telling those two apart needs the REQUEST, which is why a recorded
 /// modification carries the members it set and not just the instance it named.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessInstanceModification {
     /// The instance the request named.
     pub verified_access_instance_id: String,
@@ -1974,6 +1988,7 @@ pub fn default_verified_access_logs() -> crate::ops::types::VerifiedAccessLogs {
 /// [`VerifiedAccessInstanceModification`] is: telling a REPLAY of one request from the SAME
 /// token carrying a DIFFERENT one ([`idempotent_parameter_mismatch`]) needs the request.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessInstanceLoggingConfigurationUpdate {
     /// The instance the request named.
     pub verified_access_instance_id: String,

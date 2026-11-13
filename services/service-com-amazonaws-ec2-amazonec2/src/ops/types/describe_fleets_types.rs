@@ -30,8 +30,10 @@ pub struct DescribeFleetsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#FleetData")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FleetData {
     pub activity_status: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_time: Option<::aws_smithy_types::DateTime>,
     pub fleet_id: Option<String>,
     pub fleet_state: Option<String>,
@@ -43,7 +45,9 @@ pub struct FleetData {
     pub target_capacity_specification: Option<TargetCapacitySpecification>,
     pub terminate_instances_with_expiration: Option<bool>,
     pub r#type: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub valid_from: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub valid_until: Option<::aws_smithy_types::DateTime>,
     pub replace_unhealthy_instances: Option<bool>,
     pub spot_options: Option<SpotOptions>,
@@ -57,6 +61,7 @@ pub struct FleetData {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#FleetLaunchTemplateConfig")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FleetLaunchTemplateConfig {
     pub launch_template_specification: Option<FleetLaunchTemplateSpecification>,
     pub overrides: Option<Vec<FleetLaunchTemplateOverrides>>,
@@ -64,6 +69,7 @@ pub struct FleetLaunchTemplateConfig {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TargetCapacitySpecification")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TargetCapacitySpecification {
     pub total_target_capacity: Option<i32>,
     pub on_demand_target_capacity: Option<i32>,
@@ -74,6 +80,7 @@ pub struct TargetCapacitySpecification {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SpotOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SpotOptions {
     pub allocation_strategy: Option<String>,
     pub maintenance_strategies: Option<FleetSpotMaintenanceStrategies>,
@@ -87,12 +94,14 @@ pub struct SpotOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#FleetSpotMaintenanceStrategies")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FleetSpotMaintenanceStrategies {
     pub capacity_rebalance: Option<FleetSpotCapacityRebalance>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#FleetSpotCapacityRebalance")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FleetSpotCapacityRebalance {
     pub replacement_strategy: Option<String>,
     pub termination_delay: Option<i32>,
@@ -100,6 +109,7 @@ pub struct FleetSpotCapacityRebalance {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#OnDemandOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct OnDemandOptions {
     pub allocation_strategy: Option<String>,
     pub capacity_reservation_options: Option<CapacityReservationOptions>,
@@ -111,12 +121,14 @@ pub struct OnDemandOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CapacityReservationOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CapacityReservationOptions {
     pub usage_strategy: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ReservedCapacityOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ReservedCapacityOptions {
     pub allocation_strategy: Option<String>,
     pub reservation_types: Option<Vec<String>>,
@@ -125,12 +137,14 @@ pub struct ReservedCapacityOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ReservedCapacityFallbackOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ReservedCapacityFallbackOptions {
     pub market_types: Option<Vec<String>>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#DescribeFleetError")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DescribeFleetError {
     pub launch_template_and_overrides: Option<LaunchTemplateAndOverridesResponse>,
     pub lifecycle: Option<String>,
@@ -140,6 +154,7 @@ pub struct DescribeFleetError {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#DescribeFleetsInstances")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DescribeFleetsInstances {
     pub launch_template_and_overrides: Option<LaunchTemplateAndOverridesResponse>,
     pub lifecycle: Option<String>,

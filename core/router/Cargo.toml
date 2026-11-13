@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 engine = { workspace = true }
+service-common = { path = "../../services/common" }
 service-com-amazonaws-accessanalyzer-accessanalyzer = { workspace = true }
 service-com-amazonaws-account-account = { workspace = true }
 service-com-amazonaws-accountaccess-awsaccountaccess = { workspace = true }
@@ -457,6 +458,8 @@ http = { workspace = true }
 bytes = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Restart persistence (src/persistence.rs): snapshot JSON.
+serde_json = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

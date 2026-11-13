@@ -31,6 +31,7 @@ pub struct DescribeSecurityGroupsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SecurityGroup")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SecurityGroup {
     pub group_id: Option<String>,
     pub ip_permissions_egress: Option<Vec<IpPermission>>,

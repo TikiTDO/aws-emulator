@@ -65,15 +65,18 @@ pub const INVALID_ROUTE_SERVER_ID_NOT_ASSOCIATED: &str = "InvalidRouteServerId.N
 /// record count [`ComAmazonawsEc2Amazonec2State::has_route_server_propagation_capacity`]
 /// bounds, exactly like [`RouteServerAssociationRecord`] beside it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RouteServerPropagationRecord {
     /// The instant from which this propagation's `pending` -> `available` move is due.
     /// Monotonic ([`Instant`]) for the reason [`RouteServerRecord::available_at`] is: it is
     /// only ever compared against the clock, never reported, so a wall-clock adjustment
     /// cannot move a propagation back to `pending`.
+    #[serde(with = "::service_common::persist::instant")]
     pub available_at: Instant,
     /// The instant from which a disable that has been asked for has been carried out, after
     /// which the pair does not propagate at all. `None` for a propagation nobody has asked
     /// to disable.
+    #[serde(with = "::service_common::persist::instant_opt")]
     pub removed_at: Option<Instant>,
 }
 
