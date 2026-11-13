@@ -208,12 +208,34 @@ pub const MAX_MEMBERS: usize = 10_000;
 /// sent for it yet. An entry of the modelled `RelationshipStatus` enum.
 pub const MEMBER_CREATED_RELATIONSHIP_STATUS: &str = "Created";
 
-/// The `RelationshipStatus` values under which an account is no longer a
-/// current member of its administrator account — the administrator ended the
-/// relationship (`Removed`) or the account itself did (`Resigned`). Entries of
-/// the modelled `RelationshipStatus` enum, and what a `ListMembers` that does
-/// not ask for all accounts leaves out.
-pub const ENDED_RELATIONSHIP_STATUSES: [&str; 2] = ["Removed", "Resigned"];
+/// The `RelationshipStatus` values under which an account IS a current member
+/// of its administrator account — the membership has been established and is
+/// still live — which is what a read reporting "only current member accounts"
+/// reports. Entries of the modelled `RelationshipStatus` enum:
+///
+/// * `Enabled` — the membership is in force;
+/// * `Paused` — in force, with Macie suspended for the account;
+/// * `Invited` — the membership invitation is outstanding, so the
+///   establishment of the membership is under way.
+///
+/// Every other entry of that enum is an account this administrator has a
+/// record of but no live membership with: the association exists and nothing
+/// has been sent to the account yet
+/// ([`MEMBER_CREATED_RELATIONSHIP_STATUS`]), the invitation never reached it
+/// (`EmailVerificationInProgress`, `EmailVerificationFailed`), the membership
+/// ended because the administrator removed the account (`Removed`) or the
+/// account itself resigned (`Resigned`), or the account cannot be administered
+/// here at all (`RegionDisabled`, `AccountSuspended`). Membership is stated
+/// POSITIVELY so that a status this list does not name is never taken for a
+/// live membership.
+///
+/// The model names the ten statuses but does not settle which of them count as
+/// current, so only `Created` is pinned by what `CreateMember` and
+/// `ListMembers` document between them; the rest of the partition — `Invited`
+/// above all — is read off the member-plane lifecycle and is worth revisiting
+/// when the operations that move an account between these statuses are
+/// implemented.
+pub const CURRENT_MEMBER_RELATIONSHIP_STATUSES: [&str; 3] = ["Enabled", "Paused", "Invited"];
 
 /// How many regions one emulator process keeps Macie state for. The region a
 /// request addresses comes off the wire, so the NUMBER of per-region records is
@@ -402,10 +424,13 @@ pub struct Member {
 }
 
 impl Member {
-    /// Whether this account is a CURRENT member of its administrator account,
-    /// which is what a `ListMembers` reports unless it asks for all accounts.
+    /// Whether this account is a CURRENT member of its administrator account —
+    /// its membership is established and still live — which is what a
+    /// `ListMembers` reports unless it asks for all accounts. See
+    /// [`CURRENT_MEMBER_RELATIONSHIP_STATUSES`] for the statuses that is true
+    /// under.
     pub fn is_current_association(&self) -> bool {
-        !ENDED_RELATIONSHIP_STATUSES.contains(&self.relationship_status.as_str())
+        CURRENT_MEMBER_RELATIONSHIP_STATUSES.contains(&self.relationship_status.as_str())
     }
 
     /// This member's `tags`, as a read reports them: the modelled `TagMap` is a

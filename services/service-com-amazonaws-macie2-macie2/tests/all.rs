@@ -19,6 +19,8 @@ mod custom_data_identifier_patterns;
 mod findings_publication_configuration;
 #[path = "all/macie_session_and_custom_data_identifiers.rs"]
 mod macie_session_and_custom_data_identifiers;
+#[path = "all/member_relationship_status_filter.rs"]
+mod member_relationship_status_filter;
 #[path = "all/members.rs"]
 mod members;
 #[path = "all/state_roundtrip.rs"]

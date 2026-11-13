@@ -215,11 +215,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .as_deref()
             .is_none_or(|requested| !requested.eq_ignore_ascii_case("false"));
 
+        // A current member account is one whose membership is established and
+        // still live; an account this administrator merely has a record of —
+        // an association nothing has been sent for, or a membership that
+        // ended or cannot be administered here — is reported only to a
+        // request that asks for all accounts.
         let accounts: Vec<&str> = state
             .members_of(&region)
             .filter(|member| !only_associated || member.is_current_association())
             .map(|member| member.account_id.as_str())
             .collect();
+        // `members_of` yields the region's associations in account-id order,
+        // so this page key is ascending and a cursor names one position in it:
+        // the next page starts just past the account the last one ended on.
         let start = match resume_after.as_deref() {
             Some(cursor) => accounts.partition_point(|account| *account <= cursor),
             None => 0,

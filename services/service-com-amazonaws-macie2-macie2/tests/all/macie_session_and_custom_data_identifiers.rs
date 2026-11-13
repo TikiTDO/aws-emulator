@@ -47,13 +47,21 @@ const REGION: &str = "us-west-2";
 /// `pub(crate)` so a sibling suite in this test target drives the SAME harness
 /// rather than a second copy of it.
 pub(crate) fn emulator() -> MultiServiceRouter {
+    emulator_with_engine().0
+}
+
+/// The same emulator, with the shared engine kept: a suite that has to seed a
+/// record no implemented operation reaches yet needs the engine the service is
+/// mounted on. Every case builds its emulator here, so the two forms cannot
+/// drift apart on how the service is mounted.
+pub(crate) fn emulator_with_engine() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     // Signatures are the emulator core's business, not this service's; off here
     // so a case asserts the service's behaviour rather than its signing.
     router.set_request_authentication(false);
-    router.register_service(macie2::EmulatedService::new(engine));
-    router
+    router.register_service(macie2::EmulatedService::new(Arc::clone(&engine)));
+    (router, engine)
 }
 
 /// A buffered `restJson1` request whose SigV4 credential scope names `region`

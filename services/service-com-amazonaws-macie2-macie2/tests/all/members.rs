@@ -24,8 +24,10 @@
 //!   for, whatever the id looks like;
 //! * an association belongs to the region the create was signed for, and both
 //!   operations need a Macie session in that region;
-//! * `ListMembers` enumerates exactly the associations a region holds, paging by
-//!   `maxResults` and resuming from its own `nextToken`;
+//! * `ListMembers` asked for all accounts enumerates exactly the associations a
+//!   region holds, paging by `maxResults` and resuming from its own
+//!   `nextToken`, while its default view reports only current member accounts
+//!   (which is `member_relationship_status_filter`'s rule);
 //! * associating an account that is already a member states that one
 //!   association again rather than doubling it.
 
@@ -505,11 +507,14 @@ async fn associating_the_same_account_again_restates_the_one_association() {
     );
 }
 
-/// `ListMembers` enumerates exactly the associations the region holds, paging by
-/// `maxResults` and resuming from its own `nextToken`, and reports each one with
-/// the same values the id-addressed read does. The rows are the page sizes the
-/// enumeration is walked with, so what is pinned is the whole enumeration rather
-/// than one page.
+/// `ListMembers` asked for all accounts enumerates exactly the associations the
+/// region holds, paging by `maxResults` and resuming from its own `nextToken`,
+/// and reports each one with the same values the id-addressed read does. The
+/// rows are the page sizes the enumeration is walked with, so what is pinned is
+/// the whole enumeration rather than one page.
+///
+/// Every association here was just created, so no membership invitation has
+/// been sent for it and only the view that asks for all accounts reaches it.
 #[tokio::test]
 async fn the_listing_enumerates_exactly_the_associations_a_region_holds() {
     let router = emulator();
@@ -559,7 +564,9 @@ async fn the_listing_enumerates_exactly_the_associations_a_region_holds() {
         // failure rather than a hang.
         for _ in 0..=expected.len() {
             let mut uri = MEMBERS_URI.to_string();
-            let mut query: Vec<String> = Vec::new();
+            // Asked for ALL accounts, which is what makes this the whole
+            // enumeration of what the region holds.
+            let mut query: Vec<String> = vec!["onlyAssociated=false".to_string()];
             if let Some(size) = page_size {
                 query.push(format!("maxResults={size}"));
             }
@@ -630,9 +637,14 @@ async fn the_listing_enumerates_exactly_the_associations_a_region_holds() {
         );
     }
 
-    // `onlyAssociated` selects which accounts are reported; every association
-    // this store holds is a current one, so both values report them all.
-    for only_associated in ["true", "false", "FALSE"] {
+    // `onlyAssociated` selects which accounts are reported: no association
+    // here has a live membership yet, so only the view that asks for all
+    // accounts reports them.
+    for (only_associated, want) in [
+        ("true", Vec::new()),
+        ("false", expected.clone()),
+        ("FALSE", expected.clone()),
+    ] {
         let (status, page) = call_in(
             &router,
             REGION,
@@ -656,14 +668,20 @@ async fn the_listing_enumerates_exactly_the_associations_a_region_holds() {
             .unwrap_or_default();
         seen.sort();
         assert_eq!(
-            seen, expected,
-            "case {only_associated:?}: every association this region holds is a current \
-             one, got {seen:?}"
+            seen, want,
+            "case {only_associated:?}: expected {want:?}, got {seen:?}"
         );
     }
 
     // The other region enumerates only its own.
-    let (status, page) = call_in(&router, OTHER_REGION, "GET", MEMBERS_URI, "").await;
+    let (status, page) = call_in(
+        &router,
+        OTHER_REGION,
+        "GET",
+        &format!("{MEMBERS_URI}?onlyAssociated=false"),
+        "",
+    )
+    .await;
     assert_eq!(
         status, 200,
         "case \"another region\": ListMembers must answer 200, got {status} with {page:?}"
