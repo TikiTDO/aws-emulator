@@ -409,6 +409,8 @@ mod ssm_association_resources;
 mod ssm_typed_parameters;
 #[path = "all/stack_configuration_and_provider_limits.rs"]
 mod stack_configuration_and_provider_limits;
+#[path = "all/stack_declared_function_identity.rs"]
+mod stack_declared_function_identity;
 #[path = "all/stack_delete_failure_reason.rs"]
 mod stack_delete_failure_reason;
 #[path = "all/stack_event_timeline.rs"]
