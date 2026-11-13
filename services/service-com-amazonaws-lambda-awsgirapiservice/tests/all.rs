@@ -305,6 +305,8 @@ mod invocation_outcome_series;
 mod invocation_refusal_diagnostics;
 #[path = "all/invocation_remaining_time_countdown.rs"]
 mod invocation_remaining_time_countdown;
+#[path = "all/invocation_reserved_concurrency_burst.rs"]
+mod invocation_reserved_concurrency_burst;
 #[path = "all/invocation_run_capacity.rs"]
 mod invocation_run_capacity;
 #[path = "all/invoke_addressed_function.rs"]
