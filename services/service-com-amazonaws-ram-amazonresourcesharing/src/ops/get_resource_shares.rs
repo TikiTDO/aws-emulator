@@ -300,7 +300,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             if input
                 .permission_arn
                 .as_deref()
-                .is_some_and(|wanted| !share.permission_arns.iter().any(|arn| arn == wanted))
+                .is_some_and(|wanted| !share.attaches_permission(wanted))
             {
                 continue;
             }

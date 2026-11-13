@@ -29,8 +29,8 @@ use serde_json::{json, Value};
 use service_com_amazonaws_ram_amazonresourcesharing::state::{
     aws_managed_permission_arn, default_aws_managed_permission, resource_type_matches,
     AWS_MANAGED_PERMISSIONS, FIRST_PERMISSION_VERSION, PERMISSION_FEATURE_SET_STANDARD,
-    PERMISSION_STATUS_ATTACHABLE, PERMISSION_TYPE_AWS_MANAGED, PERMISSION_TYPE_CUSTOMER_MANAGED,
-    RESOURCE_TYPES,
+    PERMISSION_TYPE_AWS_MANAGED, PERMISSION_TYPE_CUSTOMER_MANAGED, RESOURCE_TYPES,
+    SHARE_PERMISSION_STATUS_ASSOCIATED,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -373,10 +373,14 @@ async fn a_reported_permission_is_the_catalog_entry_at_its_default_version() {
         PERMISSION_FEATURE_SET_STANDARD,
         "case {case:?}: expected the STANDARD feature set, got {permission:?}"
     );
+    // Read through a SHARE, `status` reports where this permission's attachment to that
+    // share has got to, not the version's own `PermissionStatus` — which is what a read
+    // of the permission in its own right (`GetPermission`) reports.
     assert_eq!(
         field(case, permission, "status"),
-        PERMISSION_STATUS_ATTACHABLE,
-        "case {case:?}: a catalog entry can be attached to a share, got {permission:?}"
+        SHARE_PERMISSION_STATUS_ASSOCIATED,
+        "case {case:?}: a permission attached to the share reports its attachment, got \
+         {permission:?}"
     );
     assert_eq!(
         field(case, permission, "version"),

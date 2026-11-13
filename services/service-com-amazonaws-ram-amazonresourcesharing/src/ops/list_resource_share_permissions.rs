@@ -4,9 +4,14 @@
 //! Reports the managed permissions [`crate::state`] holds as attached to one resource
 //! share, one `@paginated` page at a time.
 //!
-//! A share's permissions are the ones it was created with plus the default managed
-//! permission of every resource type it shares that none of those applies to
+//! A share's permissions are the ones attached to it by name — those the create request
+//! named plus those `AssociateResourceSharePermission` attached — each at the version
+//! that attachment carries, plus the default managed permission of every resource type
+//! it shares that none of those applies to
 //! ([`crate::state::ComAmazonawsRamAmazonresourcesharingState::share_permissions`]).
+//! Read through the share, each one's `status` reports where its attachment to that
+//! share has got to ([`crate::state::SHARE_PERMISSION_STATUS_ASSOCIATED`]) rather than
+//! the version's own attachability.
 //!
 //! A pure read: it reports what the store holds and writes nothing at all.
 //!
@@ -234,22 +239,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut next_token = None;
         // The attached permissions are in ARN order, so a token naming an ARN starts
         // this page at the first permission at or after it.
-        for permission in attached.into_iter().skip_while(|permission| {
-            start
-                .as_deref()
-                .is_some_and(|from| permission.arn.as_str() < from)
+        for holder in attached.into_iter().skip_while(|holder| {
+            start.as_deref().is_some_and(|from| holder.arn() < from)
         }) {
             // The first permission that does not fit becomes the next page's start,
             // and only then is a `nextToken` emitted — the last page carries none.
             if permissions.len() == page_size {
-                next_token = Some(crate::state::encode_arn_cursor(&permission.arn));
+                next_token = Some(crate::state::encode_arn_cursor(holder.arn()));
                 break;
             }
-            // A read that names no version reports the permission's default version,
-            // which every stored permission carries.
-            if let Some(version) = permission.version(None) {
-                permissions.push(permission.summary(version));
-            }
+            permissions.push(holder.summary());
         }
 
         Ok(ListResourceSharePermissionsOutput {

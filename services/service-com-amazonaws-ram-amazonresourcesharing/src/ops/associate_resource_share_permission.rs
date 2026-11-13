@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op AssociateResourceSharePermission
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `AssociateResourceSharePermission`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Attaches a managed permission to a resource share held in [`crate::state`], or
+//! replaces the one the share already has for that permission's resource type.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`AssociateResourceSharePermission::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! The attachment is the share's own state: it is recorded against the share at the
+//! permission's current default version, so every later read of the share's permissions
+//! reports it ([`crate::state::ComAmazonawsRamAmazonresourcesharingState::share_permissions`]).
+//! A share can carry only one permission per resource type, so an attach that would be
+//! the second for a type is refused unless the request replaces the first.
 //!
 //! ## Shape of an operation
 //!
@@ -189,18 +188,227 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `AssociateResourceSharePermission` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(AssociateResourceSharePermissionErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("AssociateResourceSharePermission"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            AssociateResourceSharePermissionErrorModeled::ServerInternalException(
+                ServerInternalException {
+                    message: "the resource share store is unavailable".to_string(),
+                },
+            )
+        })?;
+
+        // The model constrains none of these members, so every rule below is applied
+        // here, each rendered as the modelled error RAM words that refusal with.
+        if let Some(why) =
+            crate::state::share_arn_rejection("resourceShareArn", &input.resource_share_arn)
+                .or_else(|| {
+                    crate::state::permission_arn_rejection("permissionArn", &input.permission_arn)
+                })
+        {
+            return Err(
+                AssociateResourceSharePermissionErrorModeled::MalformedArnException(
+                    MalformedArnException { message: why },
+                )
+                .into(),
+            );
+        }
+        // Versions are numbered upward from the first one, so a number below it names
+        // no version any permission could carry.
+        if input
+            .permission_version
+            .is_some_and(|version| version < crate::state::FIRST_PERMISSION_VERSION)
+        {
+            return Err(
+                AssociateResourceSharePermissionErrorModeled::InvalidParameterException(
+                    InvalidParameterException {
+                        message: format!(
+                            "permissionVersion must be {} or greater",
+                            crate::state::FIRST_PERMISSION_VERSION
+                        ),
+                    },
+                )
+                .into(),
+            );
+        }
+        if let Some(why) = input
+            .client_token
+            .as_deref()
+            .and_then(crate::state::client_token_rejection)
+        {
+            return Err(
+                AssociateResourceSharePermissionErrorModeled::InvalidClientTokenException(
+                    InvalidClientTokenException { message: why },
+                )
+                .into(),
+            );
+        }
+
+        // "Use true to replace the current permissions. Use false to add the permission
+        // to a resource share that currently doesn't have a permission. The default
+        // value is false" (`replace`'s own documentation).
+        let replace = input.replace.unwrap_or(false);
+
+        let mut store = state.lock();
+        let now = store.tick();
+        store.settle_due_associations(now);
+
+        // Every parameter other than the token itself, so a retry of this request is
+        // told apart from a different request that reuses the token.
+        let fingerprint = crate::state::fingerprint(&[
+            &input.resource_share_arn,
+            &input.permission_arn,
+            if replace { "true" } else { "false" },
+            &input
+                .permission_version
+                .map(|version| version.to_string())
+                .unwrap_or_default(),
+        ]);
+
+        if let Some(token) = input.client_token.clone() {
+            if let Some(record) = store.client_token_record(Self::NAME, &token) {
+                if record.fingerprint != fingerprint {
+                    // This operation models no `IdempotentParameterMismatchException`
+                    // (`smithy_query(query="operation",operation="AssociateResourceSharePermission")`),
+                    // so a token reused for another request is refused as the invalid
+                    // client token it is, with the sentence RAM words that clash with.
+                    return Err(
+                        AssociateResourceSharePermissionErrorModeled::InvalidClientTokenException(
+                            InvalidClientTokenException {
+                                message: crate::state::IDEMPOTENT_PARAMETER_MISMATCH_MESSAGE
+                                    .to_string(),
+                            },
+                        )
+                        .into(),
+                    );
+                }
+                // A repeat attaches nothing further: the attachment the first call made
+                // is the answer — but only while that attachment can still exist. A
+                // share or permission deleted since the first call is reported as the
+                // unknown resource it now is by the checks below, so a token cannot
+                // answer for a resource that is gone.
+                if store.live_share(&input.resource_share_arn).is_some()
+                    && store.permission(&input.permission_arn).is_some()
+                {
+                    return Ok(AssociateResourceSharePermissionOutput {
+                        return_value: Some(true),
+                        client_token: Some(token),
+                    });
+                }
+            }
+        }
+
+        if store.live_share(&input.resource_share_arn).is_none() {
+            return Err(
+                AssociateResourceSharePermissionErrorModeled::UnknownResourceException(
+                    UnknownResourceException {
+                        message: crate::state::unknown_share_message(&input.resource_share_arn),
+                    },
+                )
+                .into(),
+            );
+        }
+        let permission = store
+            .permission(&input.permission_arn)
+            .cloned()
+            .ok_or_else(|| {
+                AssociateResourceSharePermissionErrorModeled::UnknownResourceException(
+                    UnknownResourceException {
+                        message: crate::state::unknown_permission_message(&input.permission_arn),
+                    },
+                )
+            })?;
+        // A version the permission never carried names nothing to attach, whatever else
+        // the request asks for.
+        if let Some(requested) = input.permission_version {
+            if permission.version(Some(requested)).is_none() {
+                return Err(
+                    AssociateResourceSharePermissionErrorModeled::UnknownResourceException(
+                        UnknownResourceException {
+                            message: crate::state::unknown_permission_version_message(
+                                &input.permission_arn,
+                                requested,
+                            ),
+                        },
+                    )
+                    .into(),
+                );
+            }
+            // "You can specify only the version that is currently set as the default
+            // version for the permission. If you also set the replace pararameter to
+            // true, then this operation updates an outdated version of the permission to
+            // the current default version" — so naming an older version is refused
+            // unless the call replaces the attachment, and the version attached is the
+            // permission's default either way.
+            if requested != permission.default_version && !replace {
+                return Err(
+                    AssociateResourceSharePermissionErrorModeled::InvalidParameterException(
+                        InvalidParameterException {
+                            message: crate::state::not_default_permission_version_message(
+                                &input.permission_arn,
+                                requested,
+                                permission.default_version,
+                            ),
+                        },
+                    )
+                    .into(),
+                );
+            }
+        }
+
+        // "A resource share can have only one permission per resource type": the
+        // attachments this one collides with are the share's other attachments for the
+        // same resource type, which only a replacing call may detach.
+        let replaced =
+            store.colliding_permissions(&input.resource_share_arn, &input.permission_arn);
+        if let Some(attached) = replaced.first().filter(|_| !replace) {
+            return Err(
+                AssociateResourceSharePermissionErrorModeled::InvalidParameterException(
+                    InvalidParameterException {
+                        message: crate::state::permission_already_attached_message(
+                            &input.resource_share_arn,
+                            &permission.resource_type,
+                            attached,
+                        ),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        let attached = store.attach_share_permission(
+            &input.resource_share_arn,
+            &input.permission_arn,
+            &replaced,
+        );
+        if !attached {
+            return Err(
+                AssociateResourceSharePermissionErrorModeled::UnknownResourceException(
+                    UnknownResourceException {
+                        message: crate::state::unknown_share_message(&input.resource_share_arn),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // RAM generates a token when the request omits one and reports it either way, so
+        // a caller can repeat the call idempotently.
+        let client_token = match input.client_token {
+            Some(token) => token,
+            None => store.fresh_uuid(),
+        };
+        store.remember_client_token(
+            Self::NAME,
+            &client_token,
+            fingerprint,
+            input.resource_share_arn.clone(),
+        );
+
+        Ok(AssociateResourceSharePermissionOutput {
+            // "A return value of true indicates that the request succeeded": the
+            // permission is attached to the share.
+            return_value: Some(true),
+            client_token: Some(client_token),
+        })
     }
 }

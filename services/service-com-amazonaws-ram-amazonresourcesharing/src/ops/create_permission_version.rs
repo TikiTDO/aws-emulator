@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreatePermissionVersion
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreatePermissionVersion`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Writes a new version of a customer managed permission held in [`crate::state`] and
+//! reports the version it stored.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreatePermissionVersion::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! The new version is numbered above every version the permission carries and becomes
+//! the permission's default version, so a later read that names none reports it. The
+//! versions already written are untouched, which is what lets a resource share stay
+//! attached to the version it attached
+//! ([`crate::state::ComAmazonawsRamAmazonresourcesharingState::add_permission_version`]).
 //!
 //! ## Shape of an operation
 //!
@@ -195,18 +194,190 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreatePermissionVersion` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreatePermissionVersionErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreatePermissionVersion"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            CreatePermissionVersionErrorModeled::ServerInternalException(ServerInternalException {
+                message: "the resource share store is unavailable".to_string(),
+            })
+        })?;
+
+        // The model constrains neither member, so the rules below are applied here,
+        // each rendered as the modelled error RAM words that refusal with.
+        if let Some(why) =
+            crate::state::permission_arn_rejection("permissionArn", &input.permission_arn)
+        {
+            return Err(CreatePermissionVersionErrorModeled::MalformedArnException(
+                MalformedArnException { message: why },
+            )
+            .into());
+        }
+        if let Some(why) = input
+            .client_token
+            .as_deref()
+            .and_then(crate::state::client_token_rejection)
+        {
+            return Err(
+                CreatePermissionVersionErrorModeled::InvalidClientTokenException(
+                    InvalidClientTokenException { message: why },
+                )
+                .into(),
+            );
+        }
+
+        // Every parameter other than the token itself, so a retry of this request is
+        // told apart from a different request that reuses the token.
+        let fingerprint = crate::state::fingerprint(&[
+            &input.permission_arn,
+            &input.policy_template,
+        ]);
+
+        let mut store = state.lock();
+        let now = store.tick();
+
+        if let Some(token) = input.client_token.clone() {
+            if let Some(record) = store.client_token_record(Self::NAME, &token) {
+                if record.fingerprint != fingerprint {
+                    return Err(
+                        CreatePermissionVersionErrorModeled::IdempotentParameterMismatchException(
+                            IdempotentParameterMismatchException {
+                                message: crate::state::IDEMPOTENT_PARAMETER_MISMATCH_MESSAGE
+                                    .to_string(),
+                            },
+                        )
+                        .into(),
+                    );
+                }
+                // A repeat writes no further version: the one the first call wrote is
+                // the permission's default version, and that is the answer.
+                let arn = record.resource_arn.clone();
+                if let Some(detail) = store.permission(&arn).and_then(|permission| {
+                    permission
+                        .version(None)
+                        .map(|version| permission.detail(version))
+                }) {
+                    return Ok(CreatePermissionVersionOutput {
+                        permission: Some(detail),
+                        client_token: Some(token),
+                    });
+                }
+            }
+        }
+
+        let permission = store
+            .permission(&input.permission_arn)
+            .cloned()
+            .ok_or_else(|| {
+                CreatePermissionVersionErrorModeled::UnknownResourceException(
+                    UnknownResourceException {
+                        message: crate::state::unknown_permission_message(&input.permission_arn),
+                    },
+                )
+            })?;
+        // This operation "creates a new version of the specified CUSTOMER MANAGED
+        // permission", and an AWS managed one is a permission "Amazon Web Services
+        // created and manages" that "you can't modify"
+        // (`ResourceSharePermissionSummary$permissionType`), so there is no version of
+        // one for a caller to write. The operation models no error for an operation
+        // that is not permitted, so the parameter naming that permission is what is
+        // refused.
+        if permission.permission_type != crate::state::PERMISSION_TYPE_CUSTOMER_MANAGED {
+            return Err(
+                CreatePermissionVersionErrorModeled::InvalidParameterException(
+                    InvalidParameterException {
+                        message: format!(
+                            "permissionArn '{}' names a permission that Amazon Web Services \
+                             manages, so no new version of it can be created",
+                            input.permission_arn
+                        ),
+                    },
+                )
+                .into(),
+            );
+        }
+        // The template is held to the same rule a create's is, against the resource
+        // type the permission applies to: a version of a permission is a policy for
+        // that permission's resource type.
+        match crate::state::policy_template_rejection(
+            &permission.resource_type,
+            &input.policy_template,
+        ) {
+            None => {}
+            Some(crate::state::PolicyTemplateRejection::Malformed(why)) => {
+                return Err(
+                    CreatePermissionVersionErrorModeled::MalformedPolicyTemplateException(
+                        MalformedPolicyTemplateException { message: why },
+                    )
+                    .into(),
+                )
+            }
+            Some(crate::state::PolicyTemplateRejection::InvalidPolicy(why)) => {
+                return Err(CreatePermissionVersionErrorModeled::InvalidPolicyException(
+                    InvalidPolicyException { message: why },
+                )
+                .into())
+            }
+        }
+        // "If the specified customer managed permission already has the maximum of 5
+        // versions, then you must delete one of the existing versions before you can
+        // create a new one."
+        if permission.versions.len() >= crate::state::MAX_PERMISSION_VERSIONS {
+            return Err(
+                CreatePermissionVersionErrorModeled::PermissionVersionsLimitExceededException(
+                    PermissionVersionsLimitExceededException {
+                        message: format!(
+                            "Permission {} already has the maximum of {} versions. Delete one of \
+                             the existing versions before creating a new one.",
+                            input.permission_arn,
+                            crate::state::MAX_PERMISSION_VERSIONS
+                        ),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        let written = store
+            .add_permission_version(&input.permission_arn, input.policy_template, now)
+            .ok_or_else(|| {
+                CreatePermissionVersionErrorModeled::UnknownResourceException(
+                    UnknownResourceException {
+                        message: crate::state::unknown_permission_message(&input.permission_arn),
+                    },
+                )
+            })?;
+
+        // RAM generates a token when the request omits one and reports it either way,
+        // so a caller can repeat the call idempotently.
+        let client_token = match input.client_token {
+            Some(token) => token,
+            None => store.fresh_uuid(),
+        };
+        store.remember_client_token(
+            Self::NAME,
+            &client_token,
+            fingerprint,
+            input.permission_arn.clone(),
+        );
+
+        let detail = store
+            .permission(&input.permission_arn)
+            .and_then(|permission| {
+                permission
+                    .version(Some(written.version))
+                    .map(|version| permission.detail(version))
+            })
+            .ok_or_else(|| {
+                CreatePermissionVersionErrorModeled::ServerInternalException(
+                    ServerInternalException {
+                        message: "the managed permission version could not be read back after \
+                                  creation"
+                            .to_string(),
+                    },
+                )
+            })?;
+        Ok(CreatePermissionVersionOutput {
+            permission: Some(detail),
+            client_token: Some(client_token),
+        })
     }
 }

@@ -24,8 +24,10 @@
 //! Amazon Web Services maintains are read back through the same lookup.
 
 mod aws_managed_permissions;
+mod permission_attachments;
 
 pub use aws_managed_permissions::*;
+pub use permission_attachments::*;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -330,6 +332,14 @@ pub const PERMISSION_FEATURE_SET_STANDARD: &str = "STANDARD";
 /// (`ResourceSharePermissionDetail$status`).
 pub const PERMISSION_STATUS_ATTACHABLE: &str = "ATTACHABLE";
 
+/// The most versions one managed permission may carry.
+///
+/// From `CreatePermissionVersion`'s own documentation: "If the specified customer
+/// managed permission already has the maximum of 5 versions, then you must delete one
+/// of the existing versions before you can create a new one." A create past it is
+/// refused with the modelled `PermissionVersionsLimitExceededException`.
+pub const MAX_PERMISSION_VERSIONS: usize = 5;
+
 /// The version number a permission's first version carries, which is also its
 /// default version: versions are numbered from one upward
 /// (`GetPermission$permissionVersion`, `ListPermissionVersions`).
@@ -465,8 +475,8 @@ const FIELD_SEPARATOR: char = '\u{1}';
 /// this key is the association's identity as well as its page order.
 pub type AssociationKey = (String, String, String);
 
-/// One stored resource share: every member `ResourceShare` reports, plus the
-/// permission ARNs the create request named.
+/// One stored resource share: every member `ResourceShare` reports, plus the managed
+/// permissions attached to it.
 #[derive(Debug, Clone, Default)]
 pub struct ShareRecord {
     /// The share's ARN: this record's store key.
@@ -483,9 +493,14 @@ pub struct ShareRecord {
     pub creation_time: i64,
     pub last_updated_time: i64,
     pub feature_set: String,
-    /// The managed-permission ARNs the create request named, which
-    /// `GetResourceShares`' `permissionArn` filter reads.
-    pub permission_arns: Vec<String>,
+    /// The managed permissions attached to this share BY NAME, keyed by permission
+    /// ARN: the ones the create request named plus the ones
+    /// `AssociateResourceSharePermission` attached afterwards, less the ones an attach
+    /// replaced. `GetResourceShares`' `permissionArn` filter reads these, and
+    /// [`ComAmazonawsRamAmazonresourcesharingState::share_permissions`] projects them
+    /// beside the default permission of every resource type the share shares that none
+    /// of them applies to.
+    pub attached_permissions: BTreeMap<String, SharePermissionRecord>,
     /// The share's configuration, always stored: a create that names none stores
     /// the service defaults, so every read reports the structure.
     pub resource_share_configuration: ResourceShareConfiguration,
@@ -953,43 +968,43 @@ impl ComAmazonawsRamAmazonresourcesharingState {
             .insert(permission.arn.clone(), permission);
     }
 
-    /// Every managed permission attached to the share `arn` names, in permission ARN
-    /// order — the order a paginated read of them pages in — and each of them once.
-    /// Empty for a share this store does not hold.
+    /// Write a new version of the managed permission `arn` carrying `policy_template`,
+    /// and answer it — or `None` when this store holds no permission under that ARN.
     ///
-    /// A share's permissions are the ones the share was created with, plus the DEFAULT
-    /// managed permission of every resource type it shares that none of those applies
-    /// to: a managed permission flagged `isResourceTypeDefault` is "the default managed
-    /// permission for all resources of this resource type"
-    /// (`ResourceSharePermissionSummary$isResourceTypeDefault`), the one RAM attaches
-    /// when the share names none for the type, so a share created with a resource and no
-    /// permission at all is still governed by one. A permission ARN no permission in this
-    /// store answers to names nothing to report.
-    pub fn share_permissions(&self, arn: &str) -> Vec<&PermissionRecord> {
-        let Some(share) = self.share(arn) else {
-            return Vec::new();
+    /// The new version is numbered one above the highest the permission carries, and it
+    /// "is automatically set as the default version of the customer managed permission"
+    /// (`CreatePermissionVersion`'s own documentation), so from here on a read that
+    /// names no version reports it and a share created naming the permission attaches
+    /// it. The versions already written are left exactly as they are — "existing
+    /// resource shares continue to use their original permission versions" — so a share
+    /// attached to an earlier one keeps reporting that one.
+    pub fn add_permission_version(
+        &mut self,
+        arn: &str,
+        policy_template: String,
+        now: i64,
+    ) -> Option<PermissionVersionRecord> {
+        let permission = self.permissions.get_mut(arn)?;
+        // One above the highest version ever written for this permission, so a number
+        // is never reused even when a version in the middle was deleted.
+        let version = permission
+            .versions
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(FIRST_PERMISSION_VERSION - 1)
+            + 1;
+        let record = PermissionVersionRecord {
+            version,
+            policy_template,
+            status: PERMISSION_STATUS_ATTACHABLE.to_string(),
+            creation_time: now,
+            last_updated_time: now,
         };
-        let mut attached: Vec<&PermissionRecord> = share
-            .permission_arns
-            .iter()
-            .filter_map(|permission_arn| self.permissions.get(permission_arn))
-            .collect();
-        for resource_type in self.shared_resource_types(arn) {
-            if attached
-                .iter()
-                .any(|permission| resource_type_matches(&permission.resource_type, &resource_type))
-            {
-                continue;
-            }
-            if let Some(default) = default_aws_managed_permission(&resource_type)
-                .and_then(|entry| self.permissions.get(&entry.arn()))
-            {
-                attached.push(default);
-            }
-        }
-        attached.sort_unstable_by(|left, right| left.arn.cmp(&right.arn));
-        attached.dedup_by(|left, right| left.arn == right.arn);
-        attached
+        permission.versions.insert(version, record.clone());
+        permission.default_version = version;
+        permission.last_updated_time = now;
+        Some(record)
     }
 
     /// Every resource type the share `arn` names shares, each of them once.

@@ -258,6 +258,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if let Some(why) = crate::state::entity_count_rejection("resourceArns", resource_arns.len())
             .or_else(|| crate::state::entity_count_rejection("principals", principals.len()))
             .or_else(|| crate::state::entity_count_rejection("sources", sources.len()))
+            // Every permission ARN the request names becomes an attachment on the stored
+            // share, so the list is bounded like the others rather than growing the
+            // record by as much as one call asks for.
+            .or_else(|| {
+                crate::state::entity_count_rejection("permissionArns", permission_arns.len())
+            })
         {
             return Err(
                 CreateResourceShareErrorModeled::ResourceShareLimitExceededException(
@@ -377,6 +383,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let arn = store.fresh_share_arn(&region);
+        // The permissions the create request named are attached to the share at each
+        // permission's current default version, which is the version RAM attaches when
+        // a request names none.
+        let attached_permissions = permission_arns
+            .iter()
+            .map(|permission_arn| {
+                (
+                    permission_arn.clone(),
+                    store.permission_attachment(permission_arn),
+                )
+            })
+            .collect();
         let share = crate::state::ShareRecord {
             arn: arn.clone(),
             name: input.name,
@@ -388,7 +406,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             creation_time: now,
             last_updated_time: now,
             feature_set: crate::state::FEATURE_SET_STANDARD.to_string(),
-            permission_arns,
+            attached_permissions,
             resource_share_configuration: configuration,
         };
         store.insert_share(share.clone());
