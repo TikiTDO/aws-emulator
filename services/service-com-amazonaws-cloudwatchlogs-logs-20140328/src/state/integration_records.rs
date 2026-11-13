@@ -108,6 +108,7 @@ pub const MAX_SCHEDULED_QUERIES: usize = 1_000;
 /// as it is stored. Every member of `GetScheduledQuery`'s response is reported from this
 /// record, so that reader answers from state alone.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ScheduledQueryRecord {
     /// `name` — "The name of the scheduled query". Also the key the store is keyed by, because
     /// the name "must be unique within your account and region".
@@ -260,6 +261,7 @@ impl ScheduledQueryRecord {
 /// `resourceConfig`; the only thing that moves afterwards is [`Self::status`], which the
 /// CLOCK owes ([`Self::status_due_ms`]).
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IntegrationRecord {
     /// `IntegrationSummary$integrationName` — "A name for the integration", which is also
     /// the key the store is keyed by: `GetIntegration` and `DeleteIntegration` identify an
@@ -501,6 +503,7 @@ impl IntegrationRecord {
 /// association is therefore stored against that ARN as the request gave it, and the
 /// family's reader lists the associations whose ARN matches.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct S3TableIntegrationSourceRecord {
     /// `S3TableIntegrationSource$identifier` — "The unique identifier for this data source
     /// association", minted by the associate

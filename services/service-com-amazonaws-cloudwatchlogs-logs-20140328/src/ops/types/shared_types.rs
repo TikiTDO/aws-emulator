@@ -80,6 +80,7 @@ pub struct ImportStatistics {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#S3DeliveryConfiguration")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct S3DeliveryConfiguration {
     pub suffix_path: Option<String>,
     pub enable_hive_compatible_path: Option<bool>,
@@ -132,6 +133,7 @@ pub struct ImportFilter {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#DestinationConfiguration")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DestinationConfiguration {
     pub s3_configuration: Option<S3Configuration>,
     pub lookup_table_configuration: Option<LookupTableConfiguration>,
@@ -139,6 +141,7 @@ pub struct DestinationConfiguration {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#S3Configuration")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct S3Configuration {
     pub destination_identifier: String,
     pub role_arn: String,
@@ -148,6 +151,7 @@ pub struct S3Configuration {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#LookupTableConfiguration")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LookupTableConfiguration {
     pub table_name: String,
     pub role_arn: String,
@@ -234,6 +238,7 @@ pub struct MetricTransformation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#QueryParameter")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct QueryParameter {
     pub name: String,
     pub default_value: Option<String>,
@@ -259,6 +264,7 @@ pub struct Policy {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#Processor")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Processor {
     pub add_keys: Option<AddKeys>,
     pub copy_value: Option<CopyValue>,
@@ -287,12 +293,14 @@ pub struct Processor {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#AddKeys")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AddKeys {
     pub entries: Vec<AddKeyEntry>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#AddKeyEntry")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AddKeyEntry {
     pub key: String,
     pub value: String,
@@ -301,12 +309,14 @@ pub struct AddKeyEntry {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#CopyValue")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CopyValue {
     pub entries: Vec<CopyValueEntry>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#CopyValueEntry")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CopyValueEntry {
     pub source: String,
     pub target: String,
@@ -315,6 +325,7 @@ pub struct CopyValueEntry {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#CSV")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CSV {
     pub quote_character: Option<String>,
     pub delimiter: Option<String>,
@@ -325,6 +336,7 @@ pub struct CSV {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#DateTimeConverter")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DateTimeConverter {
     pub source: String,
     pub target: String,
@@ -337,12 +349,14 @@ pub struct DateTimeConverter {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#DeleteKeys")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DeleteKeys {
     pub with_keys: Vec<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#Grok")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Grok {
     pub source: Option<String>,
     pub r#match: String,
@@ -350,6 +364,7 @@ pub struct Grok {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#ListToMap")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ListToMap {
     pub source: String,
     pub key: String,
@@ -361,18 +376,21 @@ pub struct ListToMap {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#LowerCaseString")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LowerCaseString {
     pub with_keys: Vec<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#MoveKeys")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MoveKeys {
     pub entries: Vec<MoveKeyEntry>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#MoveKeyEntry")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MoveKeyEntry {
     pub source: String,
     pub target: String,
@@ -381,12 +399,14 @@ pub struct MoveKeyEntry {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#ParseCloudfront")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ParseCloudfront {
     pub source: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#ParseJSON")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ParseJSON {
     pub source: Option<String>,
     pub destination: Option<String>,
@@ -394,6 +414,7 @@ pub struct ParseJSON {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#ParseKeyValue")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ParseKeyValue {
     pub source: Option<String>,
     pub destination: Option<String>,
@@ -406,12 +427,14 @@ pub struct ParseKeyValue {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#ParseRoute53")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ParseRoute53 {
     pub source: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#ParseToOCSF")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ParseToOCSF {
     pub source: Option<String>,
     pub event_source: String,
@@ -421,30 +444,35 @@ pub struct ParseToOCSF {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#ParsePostgres")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ParsePostgres {
     pub source: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#ParseVPC")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ParseVPC {
     pub source: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#ParseWAF")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ParseWAF {
     pub source: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#RenameKeys")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RenameKeys {
     pub entries: Vec<RenameKeyEntry>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#RenameKeyEntry")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RenameKeyEntry {
     pub key: String,
     pub rename_to: String,
@@ -453,12 +481,14 @@ pub struct RenameKeyEntry {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#SplitString")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SplitString {
     pub entries: Vec<SplitStringEntry>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#SplitStringEntry")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SplitStringEntry {
     pub source: String,
     pub delimiter: String,
@@ -466,12 +496,14 @@ pub struct SplitStringEntry {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#SubstituteString")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SubstituteString {
     pub entries: Vec<SubstituteStringEntry>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#SubstituteStringEntry")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SubstituteStringEntry {
     pub source: String,
     pub from: String,
@@ -480,18 +512,21 @@ pub struct SubstituteStringEntry {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#TrimString")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TrimString {
     pub with_keys: Vec<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#TypeConverter")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TypeConverter {
     pub entries: Vec<TypeConverterEntry>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#TypeConverterEntry")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TypeConverterEntry {
     pub key: String,
     pub r#type: String,
@@ -499,6 +534,7 @@ pub struct TypeConverterEntry {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#UpperCaseString")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct UpperCaseString {
     pub with_keys: Vec<String>,
 }

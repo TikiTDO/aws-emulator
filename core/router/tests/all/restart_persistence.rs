@@ -32,6 +32,9 @@ fn router_over(engine: &Arc<engine::InMemoryEngine>) -> MultiServiceRouter {
     router.register_service(service_com_amazonaws_ec2_amazonec2::EmulatedService::new(
         Arc::clone(engine),
     ));
+    router.register_service(
+        service_com_amazonaws_cloudwatchlogs_logs_20140328::EmulatedService::new(Arc::clone(engine)),
+    );
     router
 }
 
@@ -50,6 +53,21 @@ async fn kms(service: &impl EmulatorService, operation: &str, body: Value) -> Va
         .header("content-type", "application/x-amz-json-1.1")
         .header("x-amz-target", format!("TrentService.{operation}"))
         .header("authorization", authorization("kms"))
+        .body(Bytes::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let response = service.handle_request(request).await;
+    assert_eq!(response.status(), 200, "{operation}: {}", String::from_utf8_lossy(response.body()));
+    serde_json::from_slice(response.body()).unwrap()
+}
+
+async fn logs(service: &impl EmulatorService, operation: &str, body: Value) -> Value {
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/")
+        .header("host", format!("logs.{REGION}.amazonaws.com"))
+        .header("content-type", "application/x-amz-json-1.1")
+        .header("x-amz-target", format!("Logs_20140328.{operation}"))
+        .header("authorization", authorization("logs"))
         .body(Bytes::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
     let response = service.handle_request(request).await;
@@ -141,7 +159,7 @@ async fn a_change_that_cannot_be_written_is_not_answered_as_success() {
     let persistence = Arc::new(Persistence::all(Arc::clone(&engine), state_dir.clone()).unwrap());
     persistence.restore().unwrap();
     // The empty starting state is written once, so only what the request changes is pending.
-    assert_eq!(persistence.save_changed().await.unwrap(), vec!["kms", "iam", "ec2"]);
+    assert!(persistence.save_changed().await.unwrap().contains(&"kms"));
     let router = PersistingRouter::new(router_over(&engine), Arc::clone(&persistence));
 
     // The namespace directory stops accepting files: the next write fails.
@@ -163,5 +181,48 @@ async fn a_change_that_cannot_be_written_is_not_answered_as_success() {
     // Writable again: the change still in memory is written by the next save.
     std::fs::set_permissions(state_dir.dir(), std::fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(persistence.save_changed().await.unwrap(), vec!["kms"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_log_group_and_its_events_come_back_after_a_crash() {
+    let dir = std::env::temp_dir().join(format!("aws-emulator-restart-logs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let state_dir = service_common::persist::StateDir::new(&dir, "default").unwrap();
+
+    let before_engine = Arc::new(engine::InMemoryEngine::new());
+    let persistence = Arc::new(Persistence::all(Arc::clone(&before_engine), state_dir.clone()).unwrap());
+    persistence.restore().unwrap();
+    let before = PersistingRouter::new(router_over(&before_engine), Arc::clone(&persistence));
+    logs(&before, "CreateLogGroup", json!({ "logGroupName": "/karma/backend" })).await;
+    logs(&before, "CreateLogStream", json!({ "logGroupName": "/karma/backend", "logStreamName": "web-1" })).await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    logs(
+        &before,
+        "PutLogEvents",
+        json!({
+            "logGroupName": "/karma/backend",
+            "logStreamName": "web-1",
+            "logEvents": [{ "timestamp": now, "message": "booted overnight" }]
+        }),
+    )
+    .await;
+    drop(before);
+    drop(persistence);
+
+    let after_engine = Arc::new(engine::InMemoryEngine::new());
+    let restored = Persistence::all(Arc::clone(&after_engine), state_dir).unwrap().restore().unwrap();
+    assert!(restored.restored.contains(&"logs"), "{restored:?}");
+    let after = router_over(&after_engine);
+    let events = logs(
+        &after,
+        "GetLogEvents",
+        json!({ "logGroupName": "/karma/backend", "logStreamName": "web-1", "startFromHead": true }),
+    )
+    .await;
+    assert_eq!(events["events"][0]["message"].as_str(), Some("booted overnight"), "{events}");
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -953,6 +953,7 @@ pub(super) fn selection_clause_selects_log_group(clause: &SelectionClause, group
 /// back through `GetDataProtectionPolicy` unchanged, so re-serializing the parsed JSON
 /// (which would reorder members and drop whitespace) would not be the same document.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DataProtectionPolicyRecord {
     /// `policyDocument`, byte-for-byte as the put carried it.
     pub policy_document: String,
@@ -970,6 +971,7 @@ pub struct DataProtectionPolicyRecord {
 /// carried, the way [`DataProtectionPolicyRecord::policy_document`] is: the service reports
 /// a stored policy document back unchanged.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IndexPolicyRecord {
     /// `policyDocument`, byte-for-byte as the put carried it.
     pub policy_document: String,
@@ -981,6 +983,7 @@ pub struct IndexPolicyRecord {
 /// `GetStorageTierPolicy` reports — as it is stored. One per account: the policy is named
 /// by nothing, so a later put replaces this record rather than adding another.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StorageTierPolicyRecord {
     /// `storageTier`, one of [`crate::ops::types::STORAGE_TIER_VALUES`].
     pub storage_tier: String,

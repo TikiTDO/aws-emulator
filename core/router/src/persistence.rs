@@ -97,6 +97,7 @@ impl Persistence {
                 Entry::of::<service_com_amazonaws_kms_trentservice::state::ComAmazonawsKmsTrentserviceState>(),
                 Entry::of::<service_com_amazonaws_iam_awsidentitymanagementv20100508::state::ComAmazonawsIamAwsidentitymanagementv20100508State>(),
                 Entry::of::<service_com_amazonaws_ec2_amazonec2::state::ComAmazonawsEc2Amazonec2State>(),
+                Entry::of::<service_com_amazonaws_cloudwatchlogs_logs_20140328::state::ComAmazonawsCloudwatchlogsLogs20140328State>(),
             ],
             written: tokio::sync::Mutex::new(HashMap::new()),
         })

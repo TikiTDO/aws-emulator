@@ -29,6 +29,7 @@ pub struct ListAnomaliesOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#Anomaly")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Anomaly {
     pub anomaly_id: String,
     pub pattern_id: String,
@@ -53,6 +54,7 @@ pub struct Anomaly {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#LogEvent")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LogEvent {
     pub timestamp: Option<i64>,
     pub message: Option<String>,
@@ -60,6 +62,7 @@ pub struct LogEvent {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.cloudwatchlogs#PatternToken")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PatternToken {
     pub dynamic_token_position: i32,
     pub is_dynamic: Option<bool>,

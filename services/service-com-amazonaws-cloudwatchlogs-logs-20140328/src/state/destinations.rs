@@ -16,6 +16,7 @@ pub const MAX_DESTINATIONS: usize = 500;
 /// as it is stored. Every member of the model's `Destination` shape is reported from this
 /// record, so `DescribeDestinations` answers from state alone.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DestinationRecord {
     /// `Destination$destinationName` — "The name of the destination." Also the key the
     /// store holds this destination under: it is the only thing `DeleteDestination` and

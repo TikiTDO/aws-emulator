@@ -14,6 +14,7 @@ use super::*;
 /// Region comes first in the ordering, so one Region's resources enumerate in name order and a
 /// reporting operation's page token stays a position in that order.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RegionalKey {
     /// The Region the resource was created in — the one the creating request's credential
     /// scope named ([`request_region`]).
@@ -37,6 +38,7 @@ impl RegionalKey {
 /// destination" — as it is stored. Every member of the model's `Delivery` shape is
 /// reported from this record, so `DescribeDeliveries` answers from state alone.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DeliveryRecord {
     /// `Delivery$id` — "The unique ID that identifies this delivery in your account."
     /// Also the name half of the key the store holds this delivery under ([`RegionalKey`]).
@@ -373,6 +375,7 @@ pub fn check_destination_resource_arn(arn: &str) -> Result<&'static str, String>
 /// member of the model's `DeliveryDestination` shape is reported from this record, so
 /// `GetDeliveryDestination` answers from state alone.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DeliveryDestinationRecord {
     /// `DeliveryDestination$name` — "The name of this delivery destination." Also the name
     /// half of the key the store holds it under ([`RegionalKey`]), because the name "must be
@@ -491,6 +494,7 @@ pub const MAX_DELIVERY_SOURCES: usize = 1_000;
 /// sending the logs" — as it is stored. Every member of the model's `DeliverySource` shape is
 /// reported from this record, so `GetDeliverySource` answers from state alone.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DeliverySourceRecord {
     /// `DeliverySource$name` — "The unique name of the delivery source." Also the name half
     /// of the key the store holds it under ([`RegionalKey`]), because the name "must be unique

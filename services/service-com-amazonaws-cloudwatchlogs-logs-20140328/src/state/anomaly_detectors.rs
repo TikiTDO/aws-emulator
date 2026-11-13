@@ -9,6 +9,7 @@ use super::*;
 /// Every member of the model's `AnomalyDetector` shape is reported from this record, so
 /// `GetLogAnomalyDetector` and `ListLogAnomalyDetectors` answer from state alone.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AnomalyDetectorRecord {
     /// `AnomalyDetector$anomalyDetectorArn` — "The ARN of the anomaly detector", as
     /// [`anomaly_detector_arn`] builds it. Also the key the store is keyed by.
@@ -86,6 +87,7 @@ pub struct AnomalyDetectorRecord {
 /// One suppression `UpdateAnomaly` placed on a finding of a detector: "Use this operation to
 /// suppress anomaly detection for a specified anomaly or pattern."
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FindingSuppression {
     /// The `SuppressionType` the call named — `INFINITE` or `LIMITED` — or `None` when it
     /// named none and the suppression lasts until a later call ends it.
@@ -610,6 +612,7 @@ pub(super) fn table_body_message(error: &csv::Error) -> String {
 /// shape is derived from this record, so `GetLookupTable` and `DescribeLookupTables` answer
 /// from state alone.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LookupTableRecord {
     /// `LookupTable$lookupTableName` — "The name of the lookup table". Also the key the
     /// store is keyed by.

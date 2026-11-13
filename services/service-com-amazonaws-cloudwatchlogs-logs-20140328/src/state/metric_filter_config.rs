@@ -14,6 +14,7 @@ use super::*;
 /// (`MetricFilter`) — as it is stored. It lives on the log group `PutMetricFilter`
 /// "associates" it with, so deleting that group removes its metric filters with it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MetricFilterRecord {
     pub filter_name: String,
     pub filter_pattern: String,
@@ -63,6 +64,7 @@ impl MetricFilterRecord {
 /// not stable; a stored transformation keeps them in a `BTreeMap` so everything derived
 /// from them (a refusal, a reader's output) is the same on every run.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MetricTransformationRecord {
     pub metric_name: String,
     pub metric_namespace: String,

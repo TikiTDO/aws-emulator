@@ -10833,6 +10833,7 @@ dependencies = [
  "hex",
  "http",
  "regex",
+ "serde",
  "serde_json",
  "service-com-amazonaws-cloudtrail-cloudtrail-20131101",
  "service-com-amazonaws-cloudwatch-graniteserviceversion20100801",

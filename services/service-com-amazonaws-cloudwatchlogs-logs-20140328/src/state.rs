@@ -262,8 +262,24 @@ pub mod parameter_pairs;
 /// model declares `AccessDeniedException` asks to perform.
 pub mod identity_authorization;
 
+impl ::service_common::persist::Persisted for ComAmazonawsCloudwatchlogsLogs20140328State {
+    const SERVICE: &'static str = "logs";
+    const VERSION: u32 = 1;
+
+    fn snapshot(&self) -> serde_json::Value {
+        // Every field is plain data (groups, streams, stored events, policies, counters); a
+        // failure here is a bug, and an empty snapshot would silently lose every log group.
+        serde_json::to_value(self).expect("Logs state serializes")
+    }
+
+    fn restore(_version: u32, snapshot: serde_json::Value) -> Result<Self, String> {
+        serde_json::from_value(snapshot).map_err(|error| error.to_string())
+    }
+}
+
 /// Per-service state for com-amazonaws-cloudwatchlogs-logs-20140328. A handler reaches it through [`service_state`].
 #[derive(Debug, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ComAmazonawsCloudwatchlogsLogs20140328State {
     /// Every created log group, keyed by `logGroupName`. A `BTreeMap` so
     /// `DescribeLogGroups` enumerates in log-group-name order without re-sorting.
@@ -1023,6 +1039,7 @@ impl ComAmazonawsCloudwatchlogsLogs20140328State {
 /// One resource policy — "a policy enabling one or more entities to put logs to a log
 /// group in this account" — as it is stored.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ResourcePolicyRecord {
     /// `ResourcePolicy$policyName` — "The name of the resource policy." The name is the
     /// whole identity of an account-scoped policy, so one always carries it; a
@@ -1059,6 +1076,7 @@ impl ResourcePolicyRecord {
 /// reason as [`DataProtectionPolicyRecord::policy_document`]: AWS reports it back through
 /// `DescribeAccountPolicies` unchanged.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AccountPolicyRecord {
     /// `AccountPolicy$policyName` — "The name of the account policy."
     pub policy_name: String,
@@ -1101,6 +1119,7 @@ impl AccountPolicyRecord {
 /// CloudWatch" — as it is stored. Every member of the model's `Import` shape is reported
 /// from this record, so `DescribeImportTasks` answers from state alone.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ImportTaskRecord {
     /// `Import$importId` — "The unique identifier of the import task."
     pub import_id: String,
@@ -1219,6 +1238,7 @@ impl ImportTaskRecord {
 /// reports — as it is stored. Every member of the model's `QueryInfo` shape is reported from
 /// this record, so `DescribeQueries` answers from state alone.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct QueryRecord {
     /// `QueryInfo$queryId` — "The unique ID number of this query." Also the key the store
     /// enumerates by.
@@ -1418,6 +1438,7 @@ pub const MAX_QUERIES_PER_PAGE: i32 = 1_000;
 /// group to an Amazon S3 bucket" — as it is stored. Every member of the model's `ExportTask`
 /// shape is reported from this record, so `DescribeExportTasks` answers from state alone.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ExportTaskRecord {
     /// `ExportTask$taskId` — "The ID of the export task." Also the key the store enumerates
     /// by.
@@ -1896,6 +1917,7 @@ pub fn unsupported_log_type_region_message(
 
 /// One created log group and everything stored under it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LogGroupRecord {
     pub name: String,
     /// The ARN version that carries a trailing `:*` (the `LogGroup$arn` member).
@@ -2056,6 +2078,7 @@ pub const VPC_ENDPOINT_ID_REQUIRED: &str = "vpcEndpointId is required";
 /// One syslog configuration stored on a log group: the model's `SyslogConfiguration`
 /// minus the `logGroupArn` the owning group already carries.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SyslogConfigurationRecord {
     /// `SyslogConfiguration$vpcEndpointId` — "The ID of the VPC endpoint used for syslog
     /// ingestion", which is also the key the owning group stores this configuration under
@@ -2086,6 +2109,7 @@ pub struct SyslogConfigurationRecord {
 /// refusal — and both readers go through this field, so they report whatever a later
 /// operation stores in it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DataSourceRecord {
     /// `DataSource$name` — "The name of the data source."
     pub name: String,
@@ -2256,6 +2280,7 @@ pub fn log_group_name_matches_pattern(name: &str, pattern: &str) -> bool {
 /// applies one type of transformation to the log events ingested into this log group" —
 /// as it is stored, on the single log group it transforms for.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransformerRecord {
     /// The processors, in the order the put listed them: "The processors work one after
     /// another, in the order that you list them, like a pipeline", so the order is part
@@ -2409,6 +2434,7 @@ pub fn transformer_leading_only_message(named: &str) -> String {
 /// are changed to the values that you specify in your update operation. No current values
 /// are retained from the current query definition."
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct QueryDefinitionRecord {
     /// The id CloudWatch generated for this definition, kept on the record as well as in
     /// the map key so a report built by enumerating the map carries it.
@@ -2441,6 +2467,7 @@ pub struct QueryDefinitionRecord {
 /// PutLogEvents" delivered to one destination — as it is stored. It lives on the log
 /// group it is "associated with", so deleting that group removes its filters with it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SubscriptionFilterRecord {
     pub filter_name: String,
     pub filter_pattern: String,
@@ -2465,6 +2492,7 @@ pub struct SubscriptionFilterRecord {
 
 /// One created log stream and its events.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LogStreamRecord {
     pub name: String,
     pub arn: String,
@@ -2536,6 +2564,7 @@ impl LogStreamRecord {
 
 /// One ingested log event.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StoredEvent {
     pub timestamp: i64,
     /// The message as it was INGESTED, byte for byte: what a read with `unmask` reveals.
