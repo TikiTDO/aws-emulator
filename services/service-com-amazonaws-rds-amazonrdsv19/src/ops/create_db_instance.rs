@@ -969,10 +969,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         let real = record.db_cluster_identifier.is_none()
             && crate::state::data_plane::real_engine::applies(&record.engine);
+        let mut real_workload = None;
         let endpoint = match plan {
             // A REAL ENGINE instance: its server is a container, and its endpoint relays to it.
             Some(_) if real => {
-                let upstream = crate::state::data_plane::real_engine::start(
+                let (upstream, workload) = crate::state::data_plane::real_engine::start(
                     &crate::state::data_plane::real_engine::RealInstance {
                         dbi_resource_id: record.dbi_resource_id.clone(),
                         engine_version: record.engine_version.clone(),
@@ -983,6 +984,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
                 .await
                 .map_err(CreateDBInstanceError::internal_failure)?;
+                real_workload = Some(workload);
                 Some(
                     crate::state::data_plane::open_relayed_endpoint(&*self.engine, upstream)
                         .await
@@ -1012,6 +1014,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             store.db_instances.contains_key(&key)
         };
         if taken {
+            if let Some(workload) = &real_workload {
+                let _ = crate::state::data_plane::real_engine::release(workload, false).await;
+            }
             if let Some(secret) = &record.master_user_secret {
                 crate::state::release_orphaned_master_user_secret(
                     &*self.engine,
@@ -1059,7 +1064,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The listener is the instance's: the store holds it, so it stays open for as
         // long as the instance does and closes with it.
         if let Some(endpoint) = endpoint {
-            store.db_engine_endpoints.insert(key, endpoint);
+            store.db_engine_endpoints.insert(key.clone(), endpoint);
+        }
+        if let Some(workload) = real_workload {
+            store.real_workloads.insert(key, workload);
         }
         // The create happened, so the region's event log records it: that entry is what
         // `DescribeEvents` reports for this instance from now on.
