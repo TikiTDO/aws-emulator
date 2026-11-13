@@ -175,10 +175,22 @@ pub fn export_role_missing_permissions_message(role_arn: &str, bucket: &str) -> 
 }
 
 /// What a `KMSKeyNotAccessibleFault` carries where a CREATE names a `KmsKeyId` KMS will not
-/// encrypt the resource under.
+/// encrypt the resource under: the key the request SPECIFIED, named in the spelling the
+/// request carried, followed by the three reasons the one fault covers.
 pub fn kms_key_not_accessible_message(key_id: &str) -> String {
     format!(
         "The specified KMS key [{key_id}] does not exist, is not enabled or you do not have \
+         permissions to access it."
+    )
+}
+
+/// The same fault on a COPY, where the key the request names is the key the COPY is
+/// encrypted under rather than the only key in the request: a copy also has the source's
+/// key, so Amazon RDS words this one about the TARGET key, and otherwise identically to
+/// [`kms_key_not_accessible_message`].
+pub fn target_kms_key_not_accessible_message(key_id: &str) -> String {
+    format!(
+        "The target KMS key [{key_id}] does not exist, is not enabled or you do not have \
          permissions to access it."
     )
 }

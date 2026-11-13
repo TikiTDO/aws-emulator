@@ -274,6 +274,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into());
             }
         }
+        // And the key the request names has to be one KMS will encrypt the copy under: a
+        // value of the right FORM still names no usable key when this account holds no such
+        // key or holds it disabled, which is the other half of what the fault reports. KMS
+        // owns that answer, so it is asked over the in-process callback — before the store's
+        // guard is taken, since a guard cannot be held across an await
+        // ([`crate::state::kms_key_is_inaccessible`]).
+        if let Some(key_id) = input.kms_key_id.as_deref() {
+            if crate::state::kms_key_is_inaccessible(ctx, &region, key_id).await {
+                return Err(CopyDBSnapshotErrorModeled::KMSKeyNotAccessibleFault(
+                    KMSKeyNotAccessibleFault {
+                        message: Some(crate::state::target_kms_key_not_accessible_message(
+                            key_id,
+                        )),
+                    },
+                )
+                .into());
+            }
+        }
 
         // No store means this service was mounted on an engine it has no state in, so it
         // cannot serve the operation at all. Unreachable with the engine the router builds;

@@ -470,6 +470,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             input.engine_version.as_deref(),
         );
 
+        // `KmsKeyId`: "the Amazon Web Services KMS key identifier for an encrypted DB
+        // instance", so an instance is encrypted only under a key KMS ANSWERS for. The key
+        // is resolved against this emulator's own KMS, over the in-process callback, which
+        // cannot be done under the store's guard — so it is asked here, with nothing stored
+        // yet, and a key KMS will not encrypt under is the modelled
+        // `KMSKeyNotAccessibleFault` (the same check and the same sentence its DB CLUSTER
+        // sibling answers, [`crate::state::kms_key_is_inaccessible`]).
+        if let Some(key_id) = input.kms_key_id.as_deref() {
+            if crate::state::kms_key_is_inaccessible(ctx, &region, key_id).await {
+                return Err(CreateDBInstanceErrorModeled::KMSKeyNotAccessibleFault(
+                    KMSKeyNotAccessibleFault {
+                        message: Some(crate::state::kms_key_not_accessible_message(key_id)),
+                    },
+                )
+                .into());
+            }
+        }
+
         // No store means this service was mounted on an engine it has no state in,
         // so it cannot serve the operation at all. Unreachable with the engine the
         // router builds; 501 is the honest answer, never a fabricated success.
