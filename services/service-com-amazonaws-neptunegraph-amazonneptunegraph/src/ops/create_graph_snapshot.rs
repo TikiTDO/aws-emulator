@@ -283,15 +283,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // every snapshot of a graph's data in this service applies
         // (`crate::state::GraphStatus::is_at_rest`), which is what `DeleteGraph` gates
         // its final snapshot on too, so the artefact one of them produces is never one
-        // the other refuses. The wording is the service's one precondition refusal
-        // (`crate::state::graph_status_precondition_conflict`), which fronts no
-        // identifier: the graph was addressed by one the caller sent.
+        // the other refuses. The refusal itself is a statement about the REQUEST — the
+        // caller has to wait for the graph and send it again, and nothing of the
+        // snapshot it asked for is minted — so it is the modelled `ValidationException`
+        // (400) naming the graph it would have been taken from
+        // (`crate::state::graph_not_available_for_snapshot`), not the retryable
+        // `ConflictException` a transition of the snapshot itself would get.
         if !source_graph_status.is_at_rest() {
-            return Err(CreateGraphSnapshotErrorModeled::ConflictException(
-                crate::state::graph_status_precondition_conflict(
-                    "create the graph snapshot",
-                    source_graph_status,
-                ),
+            return Err(CreateGraphSnapshotErrorModeled::ValidationException(
+                crate::state::graph_not_available_for_snapshot(&source_graph_id),
             )
             .into());
         }

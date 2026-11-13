@@ -22,15 +22,15 @@
 //! from — rather than re-running one recorded request.
 //!
 //! The data is seeded through the store's own writers (`crate::state::GraphData`),
-//! which is where the data plane writes: the operation that writes a graph's data over
-//! the wire (`ExecuteQuery`) is still scaffolded and has its own issue, and a reset
+//! which is where a bulk load and a restore write it: the openCypher engine behind
+//! `ExecuteQuery` evaluates read-only queries, so a query cannot write the data, and a
+//! reset
 //! must empty the data the store holds however it got there. `ListGraphSnapshots` is a
 //! scaffold stub too, so the id of a snapshot the reset minted is read out of the store
 //! (which is also what proves the reset minted exactly one); every assertion about that
 //! snapshot then goes over the wire.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde_json::{json, Value};
 use service_com_amazonaws_neptunegraph_amazonneptunegraph::state::{
@@ -46,10 +46,6 @@ const REGION: &str = "us-east-1";
 /// The smallest `provisionedMemory` the model allows (`range 16..24576`), which is all
 /// these tests need from a graph.
 const MIN_PROVISIONED_MEMORY: i64 = 16;
-
-/// Room for the emulator's own scheduling on top of a span the clock owes, so a wait
-/// for a due transition is not a race.
-const SETTLE_MARGIN: Duration = Duration::from_millis(150);
 
 /// A KMS key ARN matching the modelled `KmsKeyArn` pattern
 /// `^arn:aws[^:]*:kms:[a-zA-Z0-9-]*:[0-9]{12}:key/[a-zA-Z0-9-]{36}$`.
@@ -139,11 +135,6 @@ async fn reset_graph(
         Some(json!({"skipSnapshot": skip_snapshot})),
     )
     .await
-}
-
-/// `GET /graphs/{id}`.
-async fn get_graph(router: &MultiServiceRouter, id: &str) -> (u16, Value) {
-    call(router, "GET", &format!("/graphs/{id}"), &[], None).await
 }
 
 /// `GET /summary` for one graph, which names the graph in the `graphIdentifier` HEADER.
@@ -706,22 +697,22 @@ async fn deletion_protection_holds_back_a_delete_but_not_a_reset() {
     )
     .await;
     assert_eq!(
-        delete_status, 409,
-        "case protected: expected 409 from DeleteGraph, got {delete_status}: {refused}"
+        delete_status, 400,
+        "case protected: expected 400 from DeleteGraph, got {delete_status}: {refused}"
     );
     assert_eq!(
         error_code(&refused),
-        "ConflictException",
+        "ValidationException",
         "case protected: unexpected error code in {refused}"
     );
 
-    // The graph is still there, and the margin proves the reset's transition is not
-    // still outstanding: nothing else fell due behind it.
-    tokio::time::sleep(PROVISIONING_SPAN + SETTLE_MARGIN).await;
-    let (get_status, still_there) = get_graph(&router, &id).await;
+    // The graph is still there, resting in the status the reset's own transition settles
+    // into — which is the condition that proves nothing else fell due behind it.
+    let still_there = wait_for_status(&router, "protected", &format!("/graphs/{id}"), "AVAILABLE").await;
     assert_eq!(
-        get_status, 200,
-        "case protected: expected the graph to survive, got {get_status}: {still_there}"
+        still_there["id"],
+        json!(id),
+        "case protected: expected the graph to survive, got {still_there}"
     );
     assert_eq!(
         still_there["status"],

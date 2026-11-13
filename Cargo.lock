@@ -3236,6 +3236,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cypher-parser"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ada60f869dbe5818d0ee40b06ad988627cc0d692d1ed42d692353bf0af8ddb6"
+
+[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -16163,6 +16169,7 @@ dependencies = [
  "aws-smithy-types",
  "bytes",
  "csv",
+ "cypher-parser",
  "hex",
  "http",
  "oxrdf",

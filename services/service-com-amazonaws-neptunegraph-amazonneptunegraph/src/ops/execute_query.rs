@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ExecuteQuery
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ExecuteQuery`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: runs the caller's openCypher query against the graph's STORED nodes and
+//! edges and answers the result set, after the three decisions AWS takes ahead of it —
+//! whether the caller's IAM policies allow a query at all, whether the graph's own data
+//! plane is serving, and whether the query text parses.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ExecuteQuery::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! The query is lexed, parsed and evaluated by the `cypher-parser` crate, which reads
+//! the graph only through the trait `crate::state::StoredGraph` implements over the
+//! stored data: nothing here interprets the query text itself, and nothing is
+//! synthesised to look computed. The engine's own subset is read-only openCypher, so a
+//! query it cannot read is refused with the position it could not read it at.
 //!
 //! ## Shape of an operation
 //!
@@ -85,6 +86,10 @@
 //!   authorization failure.
 //! * `ConflictException` (HTTP 409) — Raised when a conflict is encountered.
 //! * `InternalServerException` (HTTP 500) — A failure occurred on the server.
+//! * `ResourceNotFoundException` (HTTP 404) — widened in through `extra_errors` (see
+//!   below): the request is addressed to the GRAPH's own endpoint, which exists only
+//!   while that graph is serving, so a `graphIdentifier` naming no serving graph reaches
+//!   nothing to query.
 //! * `ThrottlingException` (HTTP 429) — The exception was interrupted by throttling.
 //! * `UnprocessableException` (HTTP 422) — Request cannot be processed due to known reasons.
 //!   Eg. partition full.
@@ -104,12 +109,23 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-neptunegraph-amazonnept
 // here — hence the `ExecuteQueryError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
-#[smithy_macros::operation_error("com.amazonaws.neptunegraph#ExecuteQuery")]
+//
+// `ResourceNotFoundException` is widened in through `extra_errors`: this SERVICE models
+// the shape (every control-plane read of a graph declares it), and the request this
+// operation serves is addressed to the host prefix `{graphIdentifier}.` — the GRAPH's
+// own data plane, which exists only while that graph is serving — so a `graphIdentifier`
+// that names no serving graph of this Region reaches no endpoint at all, which is the
+// missing resource that shape reports and not a conflict with anything.
+#[smithy_macros::operation_error(
+    "com.amazonaws.neptunegraph#ExecuteQuery",
+    extra_errors = ["ResourceNotFoundException"]
+)]
 #[derive(Debug)]
 pub enum ExecuteQueryErrorModeled {
     AccessDeniedException(AccessDeniedException),
     ConflictException(ConflictException),
     InternalServerException(InternalServerException),
+    ResourceNotFoundException(ResourceNotFoundException),
     ThrottlingException(ThrottlingException),
     UnprocessableException(UnprocessableException),
     ValidationException(ValidationException),
@@ -166,18 +182,270 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ExecuteQuery` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ExecuteQueryErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(ExecuteQueryErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: "the neptune-graph store is not mounted on this engine".to_string(),
+                },
+            )
+            .into());
+        };
+
+        // A graph lives in exactly one Region, so the Region this request was signed for
+        // names the graph the query is authorized against and is part of the lookup.
+        let region = crate::state::request_region(ctx);
+        let graph_arn = crate::state::graph_resource(&region, &input.graph_identifier);
+
+        // Whether the caller may run a query AT ALL is a decision about the caller and
+        // the graph it named, so it is taken FIRST, from the request alone and with no
+        // store of this service held: an unauthorized caller learns nothing about what
+        // the account holds, and the data plane never reads the graph for it. The
+        // decision and its sentence live in `crate::state::query_denial`.
+        if let Some(denied) = crate::state::query_denial(&*self.engine, ctx, &graph_arn) {
+            return Err(ExecuteQueryErrorModeled::AccessDeniedException(denied).into());
+        }
+
+        // `explainMode` asks for "a query explain instead of the actual query results" —
+        // the planning decisions, the time spent in each operator and the solutions
+        // flowing through it (`smithy_query(query="operation",operation="ExecuteQuery")`
+        // -> input.explainMode). Those are facts about an execution plan this data plane
+        // does not build, and a plan nothing produced is not a plan, so the request is
+        // refused as the one thing this endpoint cannot do for it rather than answered
+        // with results it did not ask for. The modelled reason for an operation the
+        // service does not perform is `UNSUPPORTED_OPERATION`
+        // (`crate::ops::types::VALIDATION_EXCEPTION_REASON_VALUES`).
+        if let Some(mode) = input.explain_mode.as_deref() {
+            return Err(ExecuteQueryErrorModeled::ValidationException(
+                ValidationException {
+                    message: format!(
+                        "explainMode [{mode}] is not supported by this endpoint: it serves \
+                         query results only"
+                    ),
+                    reason: Some(UNSUPPORTED_OPERATION_REASON.to_string()),
+                },
+            )
+            .into());
+        }
+
+        // The query runs on the graph's OWN data endpoint — this operation is bound to
+        // the host prefix `{graphIdentifier}.`
+        // (`smithy_query(query="operation",operation="ExecuteQuery")` -> endpoint) — and
+        // that endpoint is registered only while the graph is serving
+        // (`crate::state::GraphStatus::is_serving`). So a graph this Region does not
+        // hold and a graph that is not serving yet (or no longer) are the same fact for
+        // a query: there is no data plane at that address, which is the missing resource
+        // the 404 reports. The sole write the lookup makes is materialising the status
+        // transition the clock had already made due, which was owed whether or not
+        // anybody queried.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ExecuteQuery"))
+        // The query is then evaluated over a SNAPSHOT of the graph's data, taken here and
+        // read with the store's guard already GIVEN UP — the guard is released at the end
+        // of this block: an evaluation walks every node and edge the pattern reaches, and
+        // no other caller of this service waits on it.
+        let data = {
+            let (mut store, now) = crate::state::locked_store_now(&state);
+            let serving = store
+                .settled_graph(&input.graph_identifier, &region, now)
+                .filter(|graph| graph.status.is_serving());
+            let Some(graph) = serving else {
+                return Err(ExecuteQueryErrorModeled::ResourceNotFoundException(
+                    crate::state::graph_not_found(&input.graph_identifier),
+                )
+                .into());
+            };
+            graph.data.clone()
+        };
+
+        // The evaluation is CPU-bound work whose cost the caller's own query chooses, so
+        // four things hold it: a PERMIT, so the queries this service evaluates at once
+        // are bounded and a request past that bound is shed as the throttle it is; a
+        // THREAD of its own, with a stack sized for the depth the engine's parser may
+        // descend, so the work neither blocks the runtime nor overflows the stack it was
+        // given; a DEADLINE the evaluation itself stops at — the span the request asked
+        // for, clamped to the one a graph's queries run under
+        // (`crate::state::query_run_timeout`) — so a query whose cost diverges stops
+        // ASKING rather than running on; and the same span again on the WAIT, so the
+        // caller is answered at its deadline whatever the evaluation is doing. Nothing
+        // here reads the query text: it is parsed and evaluated by the engine
+        // (`crate::state::run_query`), under the bounds that module states on what one
+        // request may read, nest, be handed and answer with.
+        let Ok(permit) = crate::state::QUERY_SLOTS.try_acquire() else {
+            return Err(ExecuteQueryErrorModeled::ThrottlingException(ThrottlingException {
+                message: format!(
+                    "this emulator evaluates at most {} queries at once",
+                    crate::state::MAX_CONCURRENT_QUERIES
+                ),
+            })
+            .into());
+        };
+        let timeout = crate::state::query_run_timeout(input.query_timeout_milliseconds);
+        let started = ::std::time::Instant::now();
+        let deadline = started.checked_add(timeout).unwrap_or(started);
+        let text = input.query_string.clone();
+        let (answered, evaluating) = ::tokio::sync::oneshot::channel();
+        let worker = ::std::thread::Builder::new()
+            .stack_size(crate::state::QUERY_STACK_BYTES)
+            .spawn(move || {
+                let run = crate::state::run_query(&data, &text, deadline);
+                // The permit is held for the whole run and released with this thread, so
+                // the bound counts the evaluations that are actually running.
+                drop(permit);
+                // Nobody is listening when the caller's connection has gone; the result
+                // is then simply dropped with this thread.
+                let _ = answered.send(run);
+            });
+        if worker.is_err() {
+            return Err(ExecuteQueryErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: "the query could not be evaluated".to_string(),
+                },
+            )
+            .into());
+        }
+        let payload = match ::tokio::time::timeout(timeout, evaluating).await {
+            Ok(Ok(Ok(payload))) => payload,
+            Ok(Ok(Err(refused))) => {
+                return Err(query_refusal(&input.query_string, refused).into());
+            }
+            // The evaluation answered nothing at all: a panic inside it is a failure of
+            // this service rather than of the request.
+            Ok(Err(_lost)) => {
+                return Err(ExecuteQueryErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: "the query could not be evaluated".to_string(),
+                    },
+                )
+                .into());
+            }
+            // The wait reached the deadline before the evaluation reported stopping at
+            // it: the caller is answered the timeout it was promised either way.
+            Err(_elapsed) => {
+                return Err(ExecuteQueryErrorModeled::UnprocessableException(
+                    UnprocessableException {
+                        message: "the query did not complete within the time it was given"
+                            .to_string(),
+                        reason: QUERY_TIMEOUT_REASON.to_string(),
+                    },
+                )
+                .into());
+            }
+        };
+
+        // The payload is the result set as this service spells one, computed from the data
+        // the graph holds — so a query's answer and a later summary of the same graph
+        // cannot disagree.
+        Ok(ExecuteQueryOutput { payload })
+    }
+}
+
+/// The modelled reason for a request naming something this endpoint does not do.
+const UNSUPPORTED_OPERATION_REASON: &str = "UNSUPPORTED_OPERATION";
+
+/// The modelled reason for a query text that does not parse.
+const MALFORMED_QUERY_REASON: &str = "MALFORMED_QUERY";
+
+/// The modelled reason for a query that parses but asks for something it cannot be
+/// evaluated with — an unknown function, an argument of the wrong type.
+const ILLEGAL_ARGUMENT_REASON: &str = "ILLEGAL_ARGUMENT";
+
+/// The modelled reason for a query text past the length this service reads.
+const QUERY_TOO_LARGE_REASON: &str = "QUERY_TOO_LARGE";
+
+/// The modelled `UnprocessableException` reason for a query the service stopped at its
+/// timeout.
+const QUERY_TIMEOUT_REASON: &str = "QUERY_TIMEOUT";
+
+/// The modelled `UnprocessableException` reason for a request this emulator's own
+/// ceiling, rather than the request itself, could not carry
+/// (`crate::ops::types::UNPROCESSABLE_EXCEPTION_REASON_VALUES`).
+const INTERNAL_LIMIT_REASON: &str = "INTERNAL_LIMIT_EXCEEDED";
+
+/// The modelled failure a query the engine could not answer is reported through.
+///
+/// Each kind is a different fact about the request, so each carries the error and the
+/// modelled reason that states it:
+///
+/// * a text that does not PARSE is refused before anything is evaluated, stating where
+///   the text could not be read ([`crate::state::syntax_refusal`]), and one that parses
+///   and cannot be EVALUATED is refused for the argument it names — both statements
+///   about the request, which is why neither is a conflict and nothing is persisted;
+/// * a text longer or more deeply nested than this service reads is refused as the
+///   oversized query it is, before it is parsed, and one naming a CLAUSE this engine has
+///   no grammar for is refused as the unsupported operation it is rather than as a text
+///   that does not parse — a well-formed query this endpoint does not run is not a
+///   malformed one;
+/// * a query the evaluation could not finish is NOT about the request's form: the
+///   request was served and what it asked for did not fit the span or the work one query
+///   is given, which is the condition the model's `UnprocessableException` (422)
+///   describes — the span under its own `QUERY_TIMEOUT` reason, the work and a result
+///   past the rows this service answers with under the one that names an internal limit.
+///   Each is reported rather than truncated, so no caller reads a short result as a
+///   complete one.
+fn query_refusal(query: &str, refused: crate::state::QueryFailure) -> ExecuteQueryErrorModeled {
+    match refused {
+        crate::state::QueryFailure::Refused(::cypher_parser::CypherError::Syntax {
+            message,
+            position,
+        }) => ExecuteQueryErrorModeled::ValidationException(ValidationException {
+            message: crate::state::syntax_refusal(query, &message, position),
+            reason: Some(MALFORMED_QUERY_REASON.to_string()),
+        }),
+        crate::state::QueryFailure::Refused(::cypher_parser::CypherError::Execution {
+            message,
+        }) => ExecuteQueryErrorModeled::ValidationException(ValidationException {
+            message,
+            reason: Some(ILLEGAL_ARGUMENT_REASON.to_string()),
+        }),
+        crate::state::QueryFailure::TooLong {
+            characters,
+            ceiling,
+        } => ExecuteQueryErrorModeled::ValidationException(ValidationException {
+            message: format!(
+                "queryString may carry at most {ceiling} characters, got {characters}"
+            ),
+            reason: Some(QUERY_TOO_LARGE_REASON.to_string()),
+        }),
+        crate::state::QueryFailure::TooDeep { depth, ceiling } => {
+            ExecuteQueryErrorModeled::ValidationException(ValidationException {
+                message: format!(
+                    "queryString may nest at most {ceiling} levels deep, got {depth}"
+                ),
+                reason: Some(QUERY_TOO_LARGE_REASON.to_string()),
+            })
+        }
+        crate::state::QueryFailure::Unsupported { clause } => {
+            ExecuteQueryErrorModeled::ValidationException(ValidationException {
+                message: format!(
+                    "the {clause} clause is not supported by this endpoint: it runs \
+                     read-only openCypher"
+                ),
+                reason: Some(UNSUPPORTED_OPERATION_REASON.to_string()),
+            })
+        }
+        crate::state::QueryFailure::TooLarge { rows, ceiling } => {
+            ExecuteQueryErrorModeled::UnprocessableException(UnprocessableException {
+                message: format!(
+                    "the query answers {rows} rows and this emulator answers at most {ceiling}"
+                ),
+                reason: INTERNAL_LIMIT_REASON.to_string(),
+            })
+        }
+        crate::state::QueryFailure::Stopped(crate::state::Stopped::TimedOut) => {
+            ExecuteQueryErrorModeled::UnprocessableException(UnprocessableException {
+                message: "the query did not complete within the time it was given"
+                    .to_string(),
+                reason: QUERY_TIMEOUT_REASON.to_string(),
+            })
+        }
+        crate::state::QueryFailure::Stopped(crate::state::Stopped::Exhausted) => {
+            ExecuteQueryErrorModeled::UnprocessableException(UnprocessableException {
+                message: format!(
+                    "the query asks for more of the graph than this emulator reads for \
+                     one query, which is at most {} elements",
+                    crate::state::MAX_QUERY_WORK_UNITS
+                ),
+                reason: INTERNAL_LIMIT_REASON.to_string(),
+            })
+        }
     }
 }

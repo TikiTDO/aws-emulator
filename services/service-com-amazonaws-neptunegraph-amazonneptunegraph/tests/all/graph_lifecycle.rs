@@ -124,6 +124,21 @@ async fn create_available(router: &MultiServiceRouter, body: Value) -> String {
     id
 }
 
+/// Read the graph until `GetGraph` no longer finds it, which is the condition an
+/// accepted deletion reaches on its own. It waits for THAT rather than for a span, with
+/// a deadline generous beside the one the deletion is owed on.
+async fn wait_until_gone(router: &MultiServiceRouter, id: &str) {
+    for _ in 0..40 {
+        let (status, _) = get(router, id).await;
+        if status == 404 {
+            return;
+        }
+        tokio::time::sleep(DELETION_SPAN / 4).await;
+    }
+    let (status, body) = get(router, id).await;
+    panic!("case {id}: the graph never went away, last read {status}: {body}");
+}
+
 #[tokio::test]
 async fn create_graph_persists_every_supplied_member_and_defaults_the_rest() {
     let router = emulator();
@@ -731,14 +746,23 @@ async fn delete_graph_removes_the_graph_unless_deletion_protection_holds_it() {
     )
     .await;
 
-    // "Graphs cannot be deleted if delete-protection is enabled."
+    // "Graphs cannot be deleted if delete-protection is enabled." The flag is a setting
+    // of the addressed graph the caller clears, so the refusal is the 400 a permanent
+    // input/configuration problem gets and it names the graph that stays.
     let (status, body) =
         call(&router, "DELETE", &format!("/graphs/{id}?skipSnapshot=true"), None).await;
-    assert_eq!(status, 409, "case protected graph: expected 409, got {status}: {body}");
+    assert_eq!(status, 400, "case protected graph: expected 400, got {status}: {body}");
     assert_eq!(
         error_code(&body),
-        "ConflictException",
+        "ValidationException",
         "case protected graph: unexpected error code in {body}"
+    );
+    assert_eq!(
+        body["message"],
+        json!(format!(
+            "Graph [{id}] cannot be deleted because deletion protection is enabled."
+        )),
+        "case protected graph: unexpected message in {body}"
     );
     let (get_status, _) = get(&router, &id).await;
     assert_eq!(get_status, 200, "case protected graph: it must still exist, got {get_status}");
@@ -818,7 +842,7 @@ async fn delete_graph_removes_the_graph_unless_deletion_protection_holds_it() {
 
     // Once the deletion falls due it is gone: GetGraph 404s, ListGraphs omits it, and a
     // delete of it 404s.
-    tokio::time::sleep(DELETION_SPAN + Duration::from_millis(150)).await;
+    wait_until_gone(&router, &id).await;
     let (get_status, get_body) = get(&router, &id).await;
     assert_eq!(get_status, 404, "case deleted graph: expected 404, got {get_status}: {get_body}");
     let (_, listed) = call(&router, "GET", "/graphs", None).await;

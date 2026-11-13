@@ -20,11 +20,14 @@
 //! a SERVING graph reports and `tests/all/query_listing.rs` what a listing of one
 //! reports; this suite pins the gate in front of both.
 //!
-//! The operation that ADMITS a query (`ExecuteQuery`) is on the same endpoint and is
-//! still a scaffold stub answering 501, with its own issue
-//! (`issues/things-that-do-not-work/20261023T175427Z-neptune-graph-executequery-stub.md`),
-//! so the queries under test are admitted through the same state constructor that
-//! operation will call; everything the assertions look at afterwards goes over the wire.
+//! The operation that RUNS a query (`ExecuteQuery`) is on the same endpoint and applies
+//! the same precondition, but AWS answers it with the modelled
+//! `ResourceNotFoundException` (404) rather than this refusal — the request is addressed
+//! to the per-graph endpoint as its HOST, and an endpoint that is not registered is a
+//! resource that is missing — so it is driven by `tests/all/execute_query_data_plane.rs`
+//! instead. The queries under test here are admitted through the state constructors a
+//! query that is still in flight is held in; everything the assertions look at goes over
+//! the wire.
 
 use serde_json::{json, Value};
 
@@ -67,8 +70,8 @@ const STATUSES: &[(&str, bool)] = &[
 ///
 /// Source: the operations' HTTP bindings and `endpoint` traits
 /// (`smithy_query(query="operation",operation="GetGraphSummary,ListQueries,GetQuery,CancelQuery")`).
-/// `ExecuteQuery` is bound to the same prefix and is still a scaffold stub (501), so it
-/// is not driven here.
+/// `ExecuteQuery` is bound to the same prefix and answers a graph that is not serving
+/// with the modelled 404 (see the module docs), so it is not driven here.
 const DATA_PLANE_OPERATIONS: &[(&str, &str, &str, &str)] = &[
     ("GetGraphSummary", "summarise", "GET", "/summary?mode=BASIC"),
     (

@@ -6,7 +6,7 @@
 //! The rule every assertion here is about: a snapshot is a copy of the graph's STORED
 //! data, so every call that captures a graph is served for a graph AT REST — whether it
 //! rests serving (`AVAILABLE`) or stopped (`STOPPED`), since a stopped graph keeps its
-//! data and its configuration — and refused `ConflictException` (409) only while a
+//! data and its configuration — and refused `ValidationException` (400) only while a
 //! transition of that graph is still in flight and its data is in motion. A capture does
 //! not start or stop the graph, so the source graph goes through the modelled
 //! `SNAPSHOTTING` status and settles back into the status the call found it resting in.
@@ -20,10 +20,8 @@
 //! between the refusal and the acceptance.
 //!
 //! The data is seeded through the store's own writers (`crate::state::GraphData`), which
-//! is where the data plane writes: the operation that writes a graph's data over the wire
-//! (`ExecuteQuery`) is still scaffolded and has its own issue. What a snapshot captured
-//! is then read back over the wire through `RestoreGraphFromSnapshot` and the restored
-//! graph's own summary.
+//! is where the data plane writes. What a snapshot captured is then read back over the
+//! wire through `RestoreGraphFromSnapshot` and the restored graph's own summary.
 
 use std::sync::Arc;
 
@@ -612,17 +610,20 @@ async fn a_capture_is_refused_only_while_the_graphs_transition_is_in_flight() {
     );
     let (refused_status, refused) = create_snapshot(&router, &graph_id, "boundary-snap").await;
     assert_eq!(
-        refused_status, 409,
-        "case {case:?} while STOPPING: expected 409, got {refused_status}: {refused}"
+        refused_status, 400,
+        "case {case:?} while STOPPING: expected 400, got {refused_status}: {refused}"
     );
     assert_eq!(
         error_code(&refused),
-        "ConflictException",
+        "ValidationException",
         "case {case:?} while STOPPING: unexpected error code in {refused}"
     );
     assert_eq!(
         refused["message"],
-        json!("Unable to create the graph snapshot because the graph is in the STOPPING state."),
+        json!(format!(
+            "Graph [{graph_id}] is not available for snapshot. You can only create a \
+             snapshot for an AVAILABLE Graph."
+        )),
         "case {case:?} while STOPPING: unexpected message in {refused}"
     );
 

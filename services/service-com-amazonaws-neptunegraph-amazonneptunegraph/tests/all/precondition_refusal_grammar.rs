@@ -20,11 +20,17 @@
 //!
 //! So the tables below span what that rule generalises over rather than re-running one
 //! recorded request: every status this service puts a graph into that holds a call back,
-//! crossed with every operation whose precondition is the graph's status; both halves of
-//! the one documented sentence `StartImportTask` states, which must read as one sentence;
-//! a precondition that is a stored SETTING rather than a status; and the three other
-//! record kinds whose own status refuses a call (import task, export task, private graph
+//! crossed with every operation whose precondition is the graph's status and whose
+//! refusal is that `ConflictException`; both halves of the one documented sentence
+//! `StartImportTask` states, which must read as one sentence; and the three other record
+//! kinds whose own status refuses a call (import task, export task, private graph
 //! endpoint), each in every status that refuses it.
+//!
+//! Two refusals of this service are deliberately NOT this grammar, because AWS words
+//! them itself and the recorded response is what each carries: a delete held back by the
+//! graph's stored `deletionProtection`, and a snapshot of a graph whose data is in
+//! motion, are both `ValidationException` (400) sentences naming the graph
+//! (`tests/all/refusal_shape_per_decision.rs`).
 
 use std::sync::Arc;
 
@@ -274,12 +280,13 @@ async fn an_operation_held_back_by_the_graphs_status_words_its_action_and_that_s
     let (router, _engine) = emulator();
 
     // (the operation, the action its refusal words) — every operation of this service
-    // whose precondition is the status of a graph it was handed the identifier of, as
-    // opposed to the five that ask for a transition OF the graph (covered by
-    // `graph_state_gate_messages`).
+    // whose precondition is the status of a graph it was handed the identifier of AND
+    // whose refusal is this grammar's `ConflictException`, as opposed to the five that
+    // ask for a transition OF the graph (covered by `graph_state_gate_messages`).
+    // `CreateGraphSnapshot` is not among them: AWS words that refusal itself, as a 400
+    // naming the graph (`tests/all/refusal_shape_per_decision.rs`).
     let actions: &[(&str, &str)] = &[
         ("StartImportTask", "start the import task"),
-        ("CreateGraphSnapshot", "create the graph snapshot"),
         ("StartExportTask", "start the export task"),
         (
             "CreatePrivateGraphEndpoint",
@@ -293,12 +300,9 @@ async fn an_operation_held_back_by_the_graphs_status_words_its_action_and_that_s
         "StartExportTask",
         "CreatePrivateGraphEndpoint",
     ];
-    // All four, which is what any status with a transition still in flight holds back:
-    // `CreateGraphSnapshot` captures the graph's stored data, so it is held back only
-    // while that data is in motion.
+    // All three, which is what any status with a transition still in flight holds back.
     let every_operation: &[&str] = &[
         "StartImportTask",
-        "CreateGraphSnapshot",
         "StartExportTask",
         "CreatePrivateGraphEndpoint",
     ];
@@ -314,9 +318,9 @@ async fn an_operation_held_back_by_the_graphs_status_words_its_action_and_that_s
         ("SNAPSHOTTING", every_operation),
         ("IMPORTING", every_operation),
         ("STOPPING", every_operation),
-        // A stopped graph RESTS: its data is settled, so a snapshot of it is served
-        // (see `snapshot_of_a_graph_at_rest`) and only the three calls that need the
-        // serving data plane are held back.
+        // A stopped graph RESTS, and the three calls here need the serving data plane, so
+        // it holds all three back for that reason rather than for a transition in
+        // flight.
         ("STOPPED", needs_serving),
         ("STARTING", every_operation),
         ("RESETTING", every_operation),
@@ -448,13 +452,14 @@ async fn the_two_halves_of_the_import_precondition_read_as_one_sentence() {
 }
 
 #[tokio::test]
-async fn a_precondition_that_is_not_a_status_words_the_same_grammar() {
+async fn a_precondition_aws_words_itself_is_not_this_grammar() {
     let (router, _engine) = emulator();
 
     // A graph at rest whose stored `deletionProtection` is set: the delete is held back
-    // by a setting rather than by a status, and the refusal words it the same way —
-    // "Graphs cannot be deleted if delete-protection is enabled."
-    // (`smithy_query(query="doc",shape="DeleteGraph")`).
+    // by a setting rather than by a status — "Graphs cannot be deleted if
+    // delete-protection is enabled." (`smithy_query(query="doc",shape="DeleteGraph")`) —
+    // and AWS words that refusal itself, as a 400 naming the graph that stays, so it is
+    // NOT the conflict grammar the rest of this file is about.
     let protected = graph_in_service(&router, "a protected graph", "precondition-protected").await;
     let (patched_code, patched) = call(
         &router,
@@ -476,12 +481,27 @@ async fn a_precondition_that_is_not_a_status_words_the_same_grammar() {
         None,
     )
     .await;
-    assert_refusal(
-        "deleting a graph that deletion protection holds",
-        code,
-        &answered,
-        &expected_message("delete the graph", "deletion protection", "is enabled"),
-        &[&protected],
+    assert_eq!(
+        code, 400,
+        "case deleting a graph that deletion protection holds: expected 400, got {code}: \
+         {answered}"
+    );
+    assert_eq!(
+        error_code(&answered),
+        "ValidationException",
+        "case deleting a graph that deletion protection holds: unexpected error code in \
+         {answered}"
+    );
+    let actual = message(&answered);
+    assert_eq!(
+        actual,
+        format!("Graph [{protected}] cannot be deleted because deletion protection is enabled."),
+        "case deleting a graph that deletion protection holds: unexpected message {actual:?}"
+    );
+    assert!(
+        !actual.starts_with("Unable to "),
+        "case deleting a graph that deletion protection holds: the refusal AWS words \
+         itself must not be reworded into this file's conflict grammar, got {actual:?}"
     );
 
     // Turning the setting off is what lets the same request through, so the refusal was

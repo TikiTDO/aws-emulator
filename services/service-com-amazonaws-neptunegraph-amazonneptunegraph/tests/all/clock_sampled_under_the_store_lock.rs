@@ -659,7 +659,7 @@ async fn the_query_operations_read_a_store_whose_owed_terminations_were_reaped_f
             .as_str()
             .unwrap_or_else(|| panic!("case {case:?}: a created graph has an ARN"))
             .to_string();
-        // Admitted the way the still-scaffolded `ExecuteQuery` will, so its timeout
+        // Admitted as a query still in flight, so its timeout
         // starts now and falls due while the request under test waits for the store.
         admit_query_with_timeout(&engine, &graph, query_id, "MATCH (n) RETURN n", true, timeout);
 

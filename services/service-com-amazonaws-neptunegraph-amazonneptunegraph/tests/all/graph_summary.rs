@@ -12,8 +12,8 @@
 //! as `DETAILED`-only, and a graph whose data plane is not serving is refused.
 //!
 //! The data is seeded through the store's own writers (`crate::state::GraphData`),
-//! which is where the data plane writes: the operation that writes a graph's data
-//! over the wire (`ExecuteQuery`) is still scaffolded and has its own issue, and a
+//! which is where a bulk load and a restore write it: the openCypher engine behind
+//! `ExecuteQuery` evaluates read-only queries, so a query cannot write it, and a
 //! summary must report the data the store holds however it got there.
 
 use std::sync::Arc;

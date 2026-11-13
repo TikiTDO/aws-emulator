@@ -303,12 +303,27 @@ fn message(body: &Value) -> String {
     body["message"].as_str().unwrap_or_default().to_string()
 }
 
-/// The whole message the source record's status gate words, written out here rather than
-/// reached from the service's own builder so the test states the expectation
-/// independently of the code under test: what the call could not do, and the condition
-/// that held it back.
-fn gate_message(op: Minting, source: Source) -> String {
-    match source {
+/// The whole refusal the source record's status gate answers — its HTTP status, its
+/// modelled error and its message — written out here rather than reached from the
+/// service's own builders so the test states the expectation independently of the code
+/// under test.
+///
+/// Every operation here but one answers the service's precondition conflict: what the
+/// call could not do, and the condition that held it back. `CreateGraphSnapshot`'s is
+/// the refusal AWS words itself, a 400 naming the graph the snapshot would have been
+/// taken from.
+fn gate_refusal(op: Minting, source: Source, graph_id: &str) -> (u16, &'static str, String) {
+    if op == Minting::CreateGraphSnapshot {
+        return (
+            400,
+            "ValidationException",
+            format!(
+                "Graph [{graph_id}] is not available for snapshot. You can only create a \
+                 snapshot for an AVAILABLE Graph."
+            ),
+        );
+    }
+    let message = match source {
         // A call on another resource whose precondition is the graph's status names the
         // graph as the subject of the condition.
         Source::GraphIn(status) => format!(
@@ -323,7 +338,8 @@ fn gate_message(op: Minting, source: Source) -> String {
         Source::ParkedSnapshot => {
             format!("Unable to {} because it is in the CREATING state.", op.action())
         }
-    }
+    };
+    (409, "ConflictException", message)
 }
 
 /// How many records each of the five stores holds.
@@ -606,21 +622,22 @@ async fn source_record(
 
 /// Assert the CONTROL answer: the source record's status gate, which is the refusal this
 /// request meets while the store still has room.
-fn assert_gate(case: &str, operation: &str, code: u16, body: &Value, expected: &str) {
+fn assert_gate(case: &str, operation: &str, code: u16, body: &Value, expected: (u16, &str, &str)) {
+    let (status, error, refusal) = expected;
     assert_eq!(
-        code, 409,
-        "case {case:?}: expected 409 from {operation} against the source record's state, \
-         got {code}: {body}"
+        code, status,
+        "case {case:?}: expected {status} from {operation} against the source record's \
+         state, got {code}: {body}"
     );
     assert_eq!(
         error_code(body),
-        "ConflictException",
-        "case {case:?}: expected a ConflictException from {operation}, got {body}"
+        error,
+        "case {case:?}: expected a {error} from {operation}, got {body}"
     );
     let actual = message(body);
     assert_eq!(
-        actual, expected,
-        "case {case:?}: expected {operation} to answer {expected:?}, got {actual:?}"
+        actual, refusal,
+        "case {case:?}: expected {operation} to answer {refusal:?}, got {actual:?}"
     );
 }
 
@@ -715,7 +732,14 @@ async fn a_full_store_outranks_the_state_of_the_record_a_minting_call_reads() {
         // CONTROL: the store still has room, so the one condition this request breaks is
         // the source record's state — and that gate is what answers it.
         let (gate_code, gated) = call(&router, "POST", &path, Some(request.clone())).await;
-        assert_gate(case, operation, gate_code, &gated, &gate_message(op, source));
+        let (gate_status, gate_error, gate_message) = gate_refusal(op, source, &graph_id);
+        assert_gate(
+            case,
+            operation,
+            gate_code,
+            &gated,
+            (gate_status, gate_error, &gate_message),
+        );
 
         // Now the store this call grows is filled right up to its ceiling, so the
         // IDENTICAL request breaks both conditions at once.
@@ -865,7 +889,14 @@ async fn a_taken_identity_outranks_the_state_of_the_record_a_minting_call_reads(
             Some(op.request(&graph_id, free)),
         )
         .await;
-        assert_gate(case, operation, gate_code, &gated, &gate_message(op, source));
+        let (gate_status, gate_error, gate_message) = gate_refusal(op, source, &graph_id);
+        assert_gate(
+            case,
+            operation,
+            gate_code,
+            &gated,
+            (gate_status, gate_error, &gate_message),
+        );
 
         // The same request with the TAKEN identity breaks both conditions at once, and
         // the store-level refusal is what reports it.

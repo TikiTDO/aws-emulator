@@ -24,11 +24,10 @@
 //! (`WAITING`, `RUNNING`), query texts of different shapes, and every way a request can
 //! name a query the store does not hold — rather than re-running one recorded request.
 //!
-//! The operation that ADMITS a query (`ExecuteQuery`) is still a scaffold stub, with its
-//! own issue
-//! (`issues/things-that-do-not-work/20261023T175427Z-neptune-graph-executequery-stub.md`),
-//! so the queries under test are admitted through the same state constructor that
-//! operation will call (`state::Query::running` / `state::Query::waiting`); everything
+//! `ExecuteQuery` evaluates a query to completion within the call it arrived on, so it
+//! leaves no query IN FLIGHT for these operations to find: the queries under test are
+//! admitted through the state constructors a query that is still waiting or running is
+//! held in (`state::Query::running` / `state::Query::waiting`); everything
 //! the assertions look at afterwards goes over the wire.
 
 use std::sync::Arc;
@@ -50,7 +49,7 @@ pub(crate) const REGION: &str = "us-east-1";
 const SETTLE_MARGIN: Duration = Duration::from_millis(150);
 
 /// An emulator holding only this service, with the engine it was built on, so the suite
-/// can admit a query the way the still-scaffolded `ExecuteQuery` will.
+/// can admit a query that is still in flight.
 pub(crate) fn emulator() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
@@ -175,7 +174,7 @@ pub(crate) async fn graph_in_service(router: &MultiServiceRouter, name: &str) ->
     panic!("case {name:?}: the graph never reached AVAILABLE");
 }
 
-/// Admit a query on `graph_id` the way `ExecuteQuery` will, in the state the case asks
+/// Admit a query on `graph_id` as one still in flight, in the state the case asks
 /// for — under the timeout a request that names none runs under.
 pub(crate) fn admit_query(
     engine: &Arc<engine::InMemoryEngine>,

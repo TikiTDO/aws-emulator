@@ -672,9 +672,9 @@ async fn snapshots_and_tagging_are_scoped_to_the_region_too() {
 async fn a_query_is_reachable_only_from_the_region_of_its_graph() {
     let (router, engine) = emulator_with_engine();
 
-    // The query id is a value `ExecuteQuery` (still scaffolded) will mint, so the
-    // queries under test are admitted through the same store constructor that
-    // operation will use — this suite is about WHICH REGION reaches them.
+    // A query `ExecuteQuery` runs is over within the call it arrived on, so the queries
+    // under test are admitted through the store constructor a query still in flight is
+    // held in — this suite is about WHICH REGION reaches them.
     let query_id = "6f3a1b2c-4d5e-4f60-8a91-b2c3d4e5f607";
     let mut placed: Vec<(&str, String)> = Vec::new();
     for region in REGIONS {

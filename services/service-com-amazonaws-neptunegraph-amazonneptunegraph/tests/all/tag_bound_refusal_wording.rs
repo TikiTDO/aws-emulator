@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 use service_com_amazonaws_neptunegraph_amazonneptunegraph::state::{
-    MAX_TAGS, MAX_TAG_KEY_CHARS, MAX_TAG_VALUE_CHARS,
+    MAX_TAGS, MAX_TAG_KEY_CHARS, MAX_TAG_VALUE_CHARS, PROVISIONING_SPAN,
 };
 use service_com_amazonaws_neptunegraph_amazonneptunegraph::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
@@ -190,6 +190,29 @@ async fn create_graph(
         .to_string()
 }
 
+/// Read the graph at `path` until it reports `AVAILABLE`, which is the status a call
+/// that reads the graph beside the tags it stores needs it in. It waits for the
+/// CONDITION rather than for a span, with a deadline generous beside the one the
+/// transition is owed on.
+async fn wait_until_available(router: &MultiServiceRouter, path: &str) {
+    for _ in 0..40 {
+        let (status, body) = call(router, "GET", path, None).await;
+        assert_eq!(
+            status, 200,
+            "case {path}: expected 200 from the read, got {status}: {body}"
+        );
+        if body["status"] == json!("AVAILABLE") {
+            return;
+        }
+        tokio::time::sleep(PROVISIONING_SPAN / 4).await;
+    }
+    let (_, body) = call(router, "GET", path, None).await;
+    panic!(
+        "case {path}: never became AVAILABLE, last status {}",
+        body["status"]
+    );
+}
+
 /// `POST /tags/{resourceArn}` with a `tags` map.
 async fn tag(
     router: &MultiServiceRouter,
@@ -294,6 +317,13 @@ async fn the_tag_entry_bound_reads_the_same_whichever_side_of_the_boundary_caugh
 async fn an_oversized_tag_key_is_refused_the_same_way_by_every_operation_that_stores_tags() {
     let router = emulator();
     let host = create_graph(&router, "key-bound-host", &BTreeMap::new()).await;
+    // One row below snapshots this graph, which is served only once the graph is settled,
+    // so the rows measure the tag bound and not the source graph's status.
+    wait_until_available(
+        &router,
+        &format!("/graphs/{}", host.rsplit('/').next().unwrap_or_default()),
+    )
+    .await;
 
     // Keys past the published bound: one character past it, far past it, and one whose
     // characters are multi-byte, because the bound counts characters rather than bytes.

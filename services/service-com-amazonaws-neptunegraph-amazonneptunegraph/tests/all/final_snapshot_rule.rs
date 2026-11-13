@@ -20,8 +20,9 @@
 //! re-running one request.
 //!
 //! The data is seeded through the store's own writers (`crate::state::GraphData`), which
-//! is where the data plane writes: the operation that writes a graph's data over the wire
-//! (`ExecuteQuery`) is still scaffolded and has its own issue. The id of a snapshot a
+//! is where a bulk load and a restore write it: the openCypher engine behind
+//! `ExecuteQuery` evaluates read-only queries, so a query cannot write it. The id of a
+//! snapshot a
 //! call minted is read out of the store, which is what proves exactly one was minted;
 //! every assertion about that snapshot then goes over the wire through
 //! `GetGraphSnapshot`, and what it captured of the graph is read back through

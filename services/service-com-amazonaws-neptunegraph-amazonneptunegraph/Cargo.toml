@@ -16,7 +16,7 @@ emulator-server = { workspace = true }
 emulator-telemetry = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }
 aws-smithy-types = { workspace = true }
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["time", "sync"] }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
@@ -31,6 +31,11 @@ service-common = { path = "../common" }
 # `sts:GetCallerIdentity` reports for the same credentials, so this service reads STS's
 # OWN resolution rather than keeping a second answer to that question.
 service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+# The data plane decides whether the caller's own IAM policies allow a query, so it reads
+# the documents in force on the calling principal through the IAM service's OWN
+# accessors (`src/state/query_authorization.rs`): a policy `iam:PutUserPolicy` wrote
+# takes effect on the next query.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 # An accepted import task reads the data its `source` names out of this emulator's own
 # Amazon S3 (`src/state/import_load.rs`), over the in-process callback into this same
 # emulator: no network client feature is enabled, because the transport is the
@@ -46,6 +51,19 @@ parquet = { version = "60", default-features = false, features = ["snap"] }
 # and typed literals) a triple carries.
 oxttl = "0.2"
 oxrdf = "0.3"
+# `cypher-parser`: the openCypher query `ExecuteQuery` takes is LEXED, PARSED and
+# EXECUTED with it against this service's stored graph, so a malformed query is refused
+# by a real Cypher parser and a well-formed one is answered by a real evaluator. Taken
+# with NO features: the crate declares none and depends on nothing (its Cargo.lock entry
+# carries no dependency list), so what it can do is its own documented surface — a
+# read-only Cypher subset (MATCH / OPTIONAL MATCH / UNWIND / WITH / WHERE / RETURN, the
+# scalar functions and aggregates its docs list) with "write clauses (CREATE, MERGE,
+# SET, DELETE, …) intentionally not supported", no file-loading or procedure clause, no
+# extension or dynamic-import mechanism and no FFI, reading the graph only through the
+# `GraphProvider` trait this crate implements (`src/state/open_cypher.rs`). Every bound
+# on what one query may read, nest, be handed and answer with is stated on this side of
+# it, and `tests/all/execute_query_data_plane.rs` pins that surface over the wire.
+cypher-parser = { version = "0.8", default-features = false }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -60,8 +78,8 @@ hex = { workspace = true }
 service-com-amazonaws-s3-amazons3 = { workspace = true }
 # The pass-role denial test asks `sts:GetCallerIdentity` itself what principal a
 # credential speaks for, so STS is mounted beside this service, and the IAM store holds
-# the users whose long-term keys the rows present.
-service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+# the users whose long-term keys the rows present (the IAM crate itself is a regular
+# dependency: the data plane reads its policies).
 
 [lints]
 workspace = true

@@ -20,8 +20,9 @@
 //! captured it), and what emptying it again does.
 //!
 //! The data is seeded through the store's own writers (`crate::state::GraphData`), which
-//! is where the data plane writes: the operation that writes a graph's data over the wire
-//! (`ExecuteQuery`) is still scaffolded and has its own issue, and the precondition must
+//! is where a bulk load and a restore write it: the openCypher engine behind
+//! `ExecuteQuery` evaluates read-only queries, so a query cannot write it, and the
+//! precondition must
 //! hold for the data the store holds however it got there. Every other step — the
 //! create, the snapshot, the restore, the reset, the import, the summary and the task
 //! listing — goes over the wire.

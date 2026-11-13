@@ -556,8 +556,8 @@ async fn a_refused_delete_takes_no_snapshot_and_leaves_the_graph_alone() {
         (
             "deletion protection holds the graph",
             protected.as_str(),
-            409,
-            "ConflictException",
+            400,
+            "ValidationException",
         ),
         (
             "a transition is still in flight",

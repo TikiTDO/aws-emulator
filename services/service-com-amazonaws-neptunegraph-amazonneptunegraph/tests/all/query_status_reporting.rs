@@ -16,11 +16,10 @@
 //! newlines, a long text, whitespace), and the spans of clock a caller lets pass before
 //! reading.
 //!
-//! The operation that ADMITS a query (`ExecuteQuery`) is still a scaffold stub, with its
-//! own issue
-//! (`issues/things-that-do-not-work/20261023T175427Z-neptune-graph-executequery-stub.md`),
-//! so the queries under test are admitted through the same state constructors that
-//! operation will call (`state::Query::running` / `state::Query::waiting`); everything
+//! `ExecuteQuery` evaluates a query to completion within the call it arrived on, so it
+//! leaves no query IN FLIGHT for these operations to find: the queries under test are
+//! admitted through the state constructors a query that is still waiting or running is
+//! held in (`state::Query::running` / `state::Query::waiting`); everything
 //! the assertions look at afterwards goes over the wire.
 
 use std::sync::Arc;

@@ -3879,18 +3879,51 @@ pub fn graph_not_empty_conflict() -> ConflictException {
     precondition_conflict("start the import task", "the graph", "is not empty")
 }
 
-/// The modelled `ConflictException` for a `DeleteGraph` call on a graph whose stored
-/// `deletionProtection` flag is set — "Graphs cannot be deleted if delete-protection is
-/// enabled." (`smithy_query(query="doc",shape="DeleteGraph")`).
+/// The modelled `reason` a well-formed request the stored state leaves nothing to do is
+/// reported under: none of the other modelled values names something wrong with the
+/// INPUT's form (`crate::ops::types::VALIDATION_EXCEPTION_REASON_VALUES` — malformed,
+/// illegal, oversized, a cancelled query), so a request this service can read and still
+/// cannot serve is the bad request it is.
+const BAD_REQUEST_REASON: &str = "BAD_REQUEST";
+
+/// The modelled `ValidationException` (HTTP 400) for a `DeleteGraph` call on a graph
+/// whose stored `deletionProtection` flag is set — "Graphs cannot be deleted if
+/// delete-protection is enabled." (`smithy_query(query="doc",shape="DeleteGraph")`).
 ///
-/// Worded by the one template [`precondition_conflict`] this service refuses a
-/// precondition with, so a delete held back by the flag and one held back by the graph's
-/// status ([`graph_state_conflict`]) read as the one refusal grammar: what the call could
-/// not do, and the condition that held it back. The graph was addressed by an identifier
-/// the caller sent, so the refusal does not front it, and the flag is a setting the
-/// caller can turn off, which is the fact the refusal does carry.
-pub fn graph_deletion_protected_conflict() -> ConflictException {
-    precondition_conflict("delete the graph", "deletion protection", "is enabled")
+/// Deletion protection is a SETTING of the addressed graph that the caller clears with
+/// `UpdateGraph`, not a transition in flight, so the refusal is the permanent
+/// input/configuration failure the service answers it as rather than the retryable
+/// `ConflictException` (409) a state still settling gets ([`graph_state_conflict`]) —
+/// which is what lets a client tell "fix the configuration and retry" from "wait and
+/// retry". The sentence names the graph that was not deleted, so a caller deleting
+/// several graphs learns which one is protected.
+pub fn graph_deletion_protected_validation(graph_id: &str) -> ValidationException {
+    ValidationException {
+        message: format!(
+            "Graph [{graph_id}] cannot be deleted because deletion protection is enabled."
+        ),
+        reason: Some(BAD_REQUEST_REASON.to_string()),
+    }
+}
+
+/// The modelled `ValidationException` (HTTP 400) for a `CreateGraphSnapshot` call whose
+/// source graph is not in a status a snapshot can be taken from.
+///
+/// A snapshot is asked for on ANOTHER resource than the graph — the snapshot being
+/// minted — so the graph's status is a precondition on the request rather than a
+/// transition of the graph the call competes with, and the service reports it as the
+/// permanent input failure it is: the caller has to wait for the graph and send the
+/// request again. The sentence names the graph the snapshot would have been taken from,
+/// which is the fact a caller snapshotting several graphs does not already hold, and
+/// states the status a snapshot IS served from.
+pub fn graph_not_available_for_snapshot(graph_id: &str) -> ValidationException {
+    ValidationException {
+        message: format!(
+            "Graph [{graph_id}] is not available for snapshot. You can only create a \
+             snapshot for an AVAILABLE Graph."
+        ),
+        reason: Some(BAD_REQUEST_REASON.to_string()),
+    }
 }
 
 /// The modelled `ConflictException` for a call on a GRAPH SNAPSHOT (`DeleteGraphSnapshot`,
@@ -4570,6 +4603,10 @@ mod tests;
 
 mod import_formats;
 mod import_load;
+mod open_cypher;
+mod query_authorization;
 
 pub use import_formats::*;
 pub use import_load::*;
+pub use open_cypher::*;
+pub use query_authorization::*;

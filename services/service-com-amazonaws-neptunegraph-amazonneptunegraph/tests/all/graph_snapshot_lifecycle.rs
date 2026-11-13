@@ -13,7 +13,8 @@
 //!   status the clock settles to `AVAILABLE`.
 //! * A snapshot name is unique within the account, so a second snapshot by a stored
 //!   name is refused `ConflictException` (409) whichever graph it is taken from.
-//! * A graph whose transition is still in flight cannot be snapshotted (409), and
+//! * A graph whose transition is still in flight cannot be snapshotted
+//!   (`ValidationException`, 400, naming the graph), and
 //!   taking a snapshot takes the source graph through the modelled `SNAPSHOTTING`
 //!   status (a graph AT REST, serving or stopped, is snapshottable — covered by
 //!   `snapshot_of_a_graph_at_rest`).
@@ -609,13 +610,13 @@ async fn a_graph_whose_transition_is_in_flight_cannot_be_snapshotted() {
     )
     .await;
     assert_eq!(
-        refused_status, 409,
-        "case a graph still provisioning: expected 409, got {refused_status}: {refused}"
+        refused_status, 400,
+        "case a graph still provisioning: expected 400, got {refused_status}: {refused}"
     );
     let code = error_code(&refused);
     assert_eq!(
-        code, "ConflictException",
-        "case a graph still provisioning: expected ConflictException, got {code:?}: \
+        code, "ValidationException",
+        "case a graph still provisioning: expected ValidationException, got {code:?}: \
          {refused}"
     );
     // Once the graph is serving, the SAME call succeeds and the name it asked for is

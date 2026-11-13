@@ -27,6 +27,8 @@ mod duplicate_name_conflicts;
 mod duplicate_private_graph_endpoint_conflict;
 #[path = "all/error_message_rendering.rs"]
 mod error_message_rendering;
+#[path = "all/execute_query_data_plane.rs"]
+mod execute_query_data_plane;
 #[path = "all/export_task_cancellation.rs"]
 mod export_task_cancellation;
 #[path = "all/export_task_lifecycle.rs"]
@@ -109,6 +111,8 @@ mod query_projection_parity;
 mod query_status_reporting;
 #[path = "all/records_outlive_their_graph.rs"]
 mod records_outlive_their_graph;
+#[path = "all/refusal_shape_per_decision.rs"]
+mod refusal_shape_per_decision;
 #[path = "all/region_scoping.rs"]
 mod region_scoping;
 #[path = "all/resource_tagging.rs"]
