@@ -324,32 +324,45 @@ pub const REDRIVE_PERMISSIONS: &[&str] = &[
 pub const MAX_SOURCE_QUEUE_ARNS: usize = 10;
 
 /// The reason a refusal gives for a `redrivePermission` that is not one of the permission
-/// types the member publishes, stating the three it has ([`REDRIVE_PERMISSIONS`]) — the value
-/// set the caller has to pick from.
+/// types the member publishes ([`REDRIVE_PERMISSIONS`]).
+///
+/// A value outside that set names no permission type the attribute has, so the document as a
+/// whole is not one this attribute can be read in: Amazon SQS answers that with its own
+/// sentence about the document's FORM, and that sentence — not a paraphrase of the member's
+/// value set — is what a caller branching on the `Reason` clause matches. The comma and the
+/// contraction belong to the sentence as the service words it.
 pub const REDRIVE_PERMISSION_REASON: &str =
-    "Amazon SQS can't create the redrive allow policy. Valid values for redrivePermission are \
-     allowAll, denyAll and byQueue.";
+    "Amazon SQS can't create the redrive allow policy, as it\u{2019}s in an unsupported format.";
 
 /// The reason a refusal gives for a `sourceQueueArns` supplied beside a permission that takes
 /// no list: "You can specify this parameter only when the redrivePermission parameter is set
 /// to byQueue" (the member's own documentation). The two members are coupled, so a document
 /// that lists source queues under `allowAll` or `denyAll` says two different things about
 /// which queues are admitted.
+///
+/// Amazon SQS words that coupling from the end the caller has to change — the permission type
+/// the document must name for the list it supplied — and that sentence is what the refusal
+/// carries on the wire.
 pub const SOURCE_QUEUE_ARNS_PERMISSION_REASON: &str =
-    "Amazon SQS can't create the redrive allow policy. You can specify the sourceQueueArns \
-     parameter only when the redrivePermission parameter is set to byQueue.";
+    "Amazon SQS can't create the redrive allow policy. To specify one or more source queue \
+     ARNs, you must set redrivePermission to byQueue.";
 
 /// The reason a refusal gives for a `byQueue` permission that names no source queue at all.
 ///
 /// The rule is the `redrivePermission` member's own: "byQueue – Only queues specified by the
 /// sourceQueueArns parameter can specify this queue as the dead-letter queue", so under that
 /// permission the list is a parameter the document has to carry — the other half of the
-/// coupling [`SOURCE_QUEUE_ARNS_PERMISSION_REASON`] states. The documentation states the rule
-/// and no sentence for it, so the clause states the rule, in the voice of the two sentences
-/// this service answers the attribute's other document rules in.
+/// coupling [`SOURCE_QUEUE_ARNS_PERMISSION_REASON`] states.
+///
+/// What the refusal carries on the wire is the one sentence Amazon SQS answers THIS rule with,
+/// which is what a caller telling this refusal apart from the limit
+/// ([`source_queue_arns_limit_reason`]) and the coupling
+/// ([`SOURCE_QUEUE_ARNS_PERMISSION_REASON`]) matches — all three share the code and the
+/// `Reason` prefix, so the clause is the only thing that distinguishes them. It is the
+/// service's wording and not a restatement of the rule in the emulator's own words.
 pub const SOURCE_QUEUE_ARNS_REQUIRED_REASON: &str =
-    "Amazon SQS can't create the redrive allow policy. The sourceQueueArns parameter is required \
-     when the redrivePermission parameter is set to byQueue.";
+    "Amazon SQS can't create the redrive allow policy. When you specify the byQueue permission \
+     type, you must also specify one or more sourceQueueArns values.";
 
 /// The reason a refusal gives for a `sourceQueueArns` listing more source queues than the
 /// member admits, stating the published ceiling ([`MAX_SOURCE_QUEUE_ARNS`]) the list has to

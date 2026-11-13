@@ -105,6 +105,8 @@ mod recreate_and_tag_rules;
 mod redrive_allow_policy;
 #[path = "all/redrive_allow_policy_document_rules.rs"]
 mod redrive_allow_policy_document_rules;
+#[path = "all/redrive_allow_policy_reason_wording.rs"]
+mod redrive_allow_policy_reason_wording;
 #[path = "all/redrive_dlq_type_reason.rs"]
 mod redrive_dlq_type_reason;
 #[path = "all/redrive_policy_document.rs"]
