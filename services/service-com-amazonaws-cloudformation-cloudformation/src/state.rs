@@ -911,7 +911,7 @@ pub fn missing_auto_expand_capability(
 /// service's reader will not read at all, which is a template-FORM question the submitting
 /// operation answers on its own terms.
 pub fn validate_template_quotas(template_body: &str) -> Result<(), String> {
-    validate_template_quotas_within(template_body, TEMPLATE_BODY_MAX_BYTES)
+    validate_template_quotas_within(template_body, TEMPLATE_MAX_BYTES)
 }
 
 /// [`validate_template_quotas`] under the caller's OWN ceiling on the body
@@ -3578,7 +3578,7 @@ pub fn output_views(outputs: &[StoredOutput]) -> Option<Vec<crate::ops::types::O
 /// `None` for a body this service will not read at all; `Some([])` for one that declares no
 /// resources — which `CreateChangeSet` refuses, since a change set is a plan over resources.
 pub fn declared_template(template_body: &str) -> Option<template::Template> {
-    declared_template_within(template_body, TEMPLATE_BODY_MAX_BYTES)
+    declared_template_within(template_body, TEMPLATE_MAX_BYTES)
 }
 
 /// [`declared_template`] under the caller's OWN ceiling on the body
