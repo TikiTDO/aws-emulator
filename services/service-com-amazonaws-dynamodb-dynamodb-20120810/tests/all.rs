@@ -233,6 +233,8 @@ mod stream_specification_presence;
 mod stream_specification_with_other_members;
 #[path = "all/table_control_plane.rs"]
 mod table_control_plane;
+#[path = "all/table_declaration_admission_rules.rs"]
+mod table_declaration_admission_rules;
 #[path = "all/table_description_members.rs"]
 mod table_description_members;
 #[path = "all/table_description_shape.rs"]

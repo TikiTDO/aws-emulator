@@ -27,6 +27,14 @@
 //! ceiling named for a table created PROVISIONED is the `ValidationException` the two
 //! capacity models make it rather than a report that nothing implements the member.
 //!
+//! What the DECLARATION has to satisfy before any of it is stored: a secondary-index list
+//! the request CARRIES has to name an index (an empty one declares a list of no indexes);
+//! every capacity figure it states has to be one the service can hold
+//! ([`crate::state::check_capacity_bounds`]); a local secondary index's key schema is the
+//! table's own partition key followed by one sort key of its own, while a global one may
+//! carry several of each ([`IndexKeyShape`]); and a `VectorIndexes` entry needs a table in
+//! the on-demand capacity mode ([`crate::state::check_vector_index_capacity_mode`]).
+//!
 //! The table is stored under the REGION the request's endpoint names
 //! ([`crate::state::request_region`], which reads it from the credential scope or from
 //! the endpoint host, whichever the request carries), because that is the scope a table
@@ -288,6 +296,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // work that follows is bounded by constants rather than by the request body.
         let declared = DeclaredTable::of(&input);
         declared.clamped().map_err(lift)?;
+        // A secondary-index list the request CARRIES has to name an index: an empty one
+        // declares a list of no indexes, which is not the same request as leaving the
+        // member out ([`crate::state::check_lists_not_empty`]).
+        crate::state::check_lists_not_empty(declared_index_lists(&input)).map_err(lift)?;
+        // Every capacity figure the request states, held to what the service can hold before
+        // it is measured against the table's capacity mode or its quotas: a figure outside it
+        // is refused as it is READ ([`crate::state::check_capacity_bounds`]). The index list
+        // it walks is the clamped one above.
+        crate::state::check_capacity_bounds(requested_capacities(&input)).map_err(lift)?;
 
         // The tag set the table starts life with, refused by exactly the rules the
         // tagging operations apply to a later edit: at most
@@ -373,6 +390,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         .map_err(lift)?;
         let vector_indexes = validated_vector_indexes(
             &declared,
+            &billing_mode,
             &global_secondary_indexes,
             &local_secondary_indexes,
             &region,
@@ -717,6 +735,37 @@ fn requested_on_demand_ceilings(
                 .map(|index| index.on_demand_throughput.as_ref()),
         )
         .flatten()
+}
+
+/// Every capacity pair this request states: the table's own, and the one each global
+/// secondary index carries — the bound is on the figure, so the same rule holds for all of
+/// them ([`crate::state::check_capacity_bounds`]).
+fn requested_capacities(input: &CreateTableInput) -> impl Iterator<Item = &ProvisionedThroughput> {
+    ::std::iter::once(input.provisioned_throughput.as_ref())
+        .chain(
+            input
+                .global_secondary_indexes
+                .iter()
+                .flatten()
+                .map(|index| index.provisioned_throughput.as_ref()),
+        )
+        .flatten()
+}
+
+/// Every secondary-index list this request carries, with the number of indexes it states
+/// for each — the pairs [`crate::state::check_lists_not_empty`] holds to a list that names
+/// at least one index, in the order this handler reads them.
+fn declared_index_lists(input: &CreateTableInput) -> [(&'static str, Option<usize>); 2] {
+    [
+        (
+            "GlobalSecondaryIndexes",
+            input.global_secondary_indexes.as_ref().map(Vec::len),
+        ),
+        (
+            "LocalSecondaryIndexes",
+            input.local_secondary_indexes.as_ref().map(Vec::len),
+        ),
+    ]
 }
 
 /// The first input member present that this slice does not store, if any.
@@ -1167,7 +1216,12 @@ pub(crate) fn validated_indexes(
                 index.index_name
             )));
         }
-        validated_index_key_schema(&index.index_name, &index.key_schema, &definitions)?;
+        validated_index_key_schema(
+            &index.index_name,
+            &index.key_schema,
+            &definitions,
+            &IndexKeyShape::GLOBAL,
+        )?;
         validated_projection(&index.index_name, &index.projection)?;
         let throughput = validated_index_throughput(
             &index.index_name,
@@ -1241,7 +1295,12 @@ fn validated_local_indexes(
                 index.index_name
             )));
         }
-        validated_index_key_schema(&index.index_name, &index.key_schema, &definitions)?;
+        validated_index_key_schema(
+            &index.index_name,
+            &index.key_schema,
+            &definitions,
+            &IndexKeyShape::LOCAL,
+        )?;
         validated_projection(&index.index_name, &index.projection)?;
         let hash_key = index
             .key_schema
@@ -1277,6 +1336,10 @@ fn validated_local_indexes(
 /// A vector index created with the table is reported `CREATING` and becomes `ACTIVE` on
 /// the same clock-owed transition as the table.
 ///
+/// A vector index exists only on an ON-DEMAND table, whichever member declared it
+/// ([`crate::state::check_vector_index_capacity_mode`]), so the table's capacity mode is
+/// settled before any of them is built.
+///
 /// The attributes its `SearchSchema` names are the table's own attributes, declared in
 /// `AttributeDefinitions` like any other indexed attribute — which is what
 /// [`validated_key_schema`] counts them as used by, and which this refuses an index for
@@ -1287,6 +1350,7 @@ fn validated_local_indexes(
 /// vector itself — but one the request does declare for it counts as used all the same.
 pub(crate) fn validated_vector_indexes(
     declared: &DeclaredTable<'_>,
+    billing_mode: &str,
     global_secondary_indexes: &[crate::state::GlobalSecondaryIndex],
     local_secondary_indexes: &[crate::state::LocalSecondaryIndex],
     region: &str,
@@ -1294,6 +1358,7 @@ pub(crate) fn validated_vector_indexes(
     now: ::std::time::SystemTime,
 ) -> Result<Vec<crate::state::VectorIndex>, crate::state::RequestError> {
     let requested = declared.vector_indexes.to_vec();
+    crate::state::check_vector_index_capacity_mode(billing_mode, requested.len())?;
     let definitions = declared.attribute_definitions.to_vec();
     let mut indexes: Vec<crate::state::VectorIndex> = Vec::new();
     for index in &requested {
@@ -1390,17 +1455,63 @@ impl DeclaredVectorIndex<'_> {
     }
 }
 
-/// One index's key schema: at least one `HASH` element, within the documented key
-/// counts, with every attribute declared in `AttributeDefinitions` as a scalar type.
+/// The shape ONE KIND of secondary index's key schema may take: how many partition keys
+/// lead it, how many sort keys may follow, and whether one of those sort keys is
+/// REQUIRED.
 ///
-/// An index key is validated by position like a table's: "Each global secondary index
-/// supports up to 4 partition keys and up to 4 sort keys"
-/// (`CreateTable$GlobalSecondaryIndexes`), so the leading positions hold the partition
-/// keys and the sort keys follow, and an element out of place is named by its ordinal.
+/// The two kinds of secondary index key on different things, so one of them admits a key
+/// schema the other does not — which is why the counts are a property of the KIND rather
+/// than of "an index" ([`IndexKeyShape::GLOBAL`] and [`IndexKeyShape::LOCAL`] state each
+/// kind's, with the doc sentence it comes from).
+pub(crate) struct IndexKeyShape {
+    /// The most `HASH` elements the schema may lead with.
+    partition_keys: usize,
+    /// The most `RANGE` elements that may follow them.
+    sort_keys: usize,
+    /// Whether the schema is incomplete without one of those sort keys.
+    sort_key_required: bool,
+}
+
+impl IndexKeyShape {
+    /// A GLOBAL secondary index: "Each global secondary index supports up to 4 partition
+    /// keys and up to 4 sort keys" (`CreateTable$GlobalSecondaryIndexes`). A global index
+    /// keys on attributes of its own choosing, so one over a partition key alone is a
+    /// complete index and its sort key is optional.
+    pub(crate) const GLOBAL: Self = Self {
+        partition_keys: crate::state::MAX_INDEX_PARTITION_KEYS,
+        sort_keys: crate::state::MAX_INDEX_SORT_KEYS,
+        sort_key_required: false,
+    };
+
+    /// A LOCAL secondary index: "an index that has the same partition key as the table,
+    /// but a different sort key" (the `LocalSecondaryIndex` doc), whose "key schema must
+    /// begin with the same partition key as the table"
+    /// (`CreateTable$LocalSecondaryIndexes`).
+    ///
+    /// So it keys on the table's ONE partition key ([`crate::state::MAX_TABLE_PARTITION_KEYS`])
+    /// and on the one sort key of its own ([`crate::state::MAX_TABLE_SORT_KEYS`]) that makes
+    /// it a different index from the table: that sort key is what the index IS, so a local
+    /// index without one is not a local index at all. The several partition keys a global
+    /// index may carry are documented for that kind alone.
+    pub(crate) const LOCAL: Self = Self {
+        partition_keys: crate::state::MAX_TABLE_PARTITION_KEYS,
+        sort_keys: crate::state::MAX_TABLE_SORT_KEYS,
+        sort_key_required: true,
+    };
+}
+
+/// One index's key schema: at least one `HASH` element, within the key counts its KIND
+/// admits ([`IndexKeyShape`]), with every attribute declared in `AttributeDefinitions` as
+/// a scalar type.
+///
+/// An index key is validated by position like a table's — the leading positions hold the
+/// partition keys and the sort keys follow — so an element out of place is named by its
+/// ordinal.
 pub(crate) fn validated_index_key_schema(
     index_name: &str,
     key_schema: &[KeySchemaElement],
     definitions: &[AttributeDefinition],
+    shape: &IndexKeyShape,
 ) -> Result<(), crate::state::RequestError> {
     if key_schema.is_empty() {
         return Err(crate::state::RequestError::Validation(format!(
@@ -1408,20 +1519,25 @@ pub(crate) fn validated_index_key_schema(
              attribute"
         )));
     }
-    validated_key_type_order(
-        Some(index_name),
-        key_schema,
-        crate::state::MAX_INDEX_PARTITION_KEYS,
-    )?;
+    validated_key_type_order(Some(index_name), key_schema, shape.partition_keys)?;
     let range_keys = key_schema
         .iter()
         .filter(|element| element.key_type == "RANGE")
         .count();
-    if range_keys > crate::state::MAX_INDEX_SORT_KEYS {
+    if range_keys > shape.sort_keys {
         return Err(crate::state::RequestError::Validation(format!(
             "Invalid KeySchema for index {index_name}: an index key may declare at most {} RANGE \
              attribute(s), got {range_keys}",
-            crate::state::MAX_INDEX_SORT_KEYS
+            shape.sort_keys
+        )));
+    }
+    // A kind of index whose sort key is what distinguishes it needs one: the schema is
+    // incomplete rather than out of order, so AWS states the fact about the schema and
+    // names the index it belongs to.
+    if shape.sort_key_required && range_keys == 0 {
+        return Err(crate::state::RequestError::Validation(format!(
+            "One or more parameter values were invalid: Index KeySchema does not have a range key \
+             for index: {index_name}"
         )));
     }
     for element in key_schema {

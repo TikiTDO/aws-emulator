@@ -212,6 +212,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Every list the declaration carries is clamped BEFORE anything walks it, so the
         // work that follows is bounded by constants rather than by the request body.
         declared.clamped().map_err(bad_request)?;
+        // A secondary-index list the declaration CARRIES has to name an index, by the rule
+        // every table declaration is held to ([`crate::state::check_lists_not_empty`]).
+        // `TableCreationParameters` declares no local index, so the global list is the only
+        // one it can state empty.
+        crate::state::check_lists_not_empty([(
+            "GlobalSecondaryIndexes",
+            parameters.global_secondary_indexes.as_ref().map(Vec::len),
+        )])
+        .map_err(bad_request)?;
+        // Every capacity figure the declaration states, held to what the service can hold,
+        // by the rule every capacity figure is held to
+        // ([`crate::state::check_capacity_bounds`]); the index list it walks is the clamped
+        // one above.
+        crate::state::check_capacity_bounds(
+            parameters
+                .provisioned_throughput
+                .iter()
+                .chain(
+                    declared
+                        .global_secondary_indexes
+                        .iter()
+                        .filter_map(|index| index.provisioned_throughput.as_ref()),
+                ),
+        )
+        .map_err(bad_request)?;
         let key_schema =
             super::create_table::validated_key_schema(&declared).map_err(bad_request)?;
         let (billing_mode, provisioned_throughput) =
@@ -236,6 +261,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .map_err(bad_request)?;
         let vector_indexes = super::create_table::validated_vector_indexes(
             &declared,
+            &billing_mode,
             &global_secondary_indexes,
             &[],
             &region,

@@ -31,6 +31,78 @@ pub fn requested_throughput_mode<'m>(
     billing_mode.or(throughput_mode)
 }
 
+/// The largest provisioned-capacity figure the service accepts for either dimension of a
+/// read/write pair.
+///
+/// `ProvisionedThroughput$ReadCapacityUnits` and `$WriteCapacityUnits` target
+/// `PositiveLongObject` — a long with a `@range` minimum of 1 and no maximum
+/// (`smithy_query(query="shape", shape="com.amazonaws.dynamodb#ProvisionedThroughput")`)
+/// — so the MODEL admits every positive long, while the service holds a capacity figure in
+/// a 32-bit signed integer: a value that does not fit it is refused as out of bounds while
+/// it is still being read, rather than as a quota the account could have raised
+/// ([`capacity_out_of_bounds_message`] is that refusal, and it is not a quota sentence).
+/// The ceiling is therefore that integer's own maximum.
+pub const MAX_PROVISIONED_CAPACITY_UNITS: i64 = i32::MAX as i64;
+
+/// AWS's fixed text for a capacity figure the service cannot hold: the sentence states the
+/// value the request supplied and the member it supplied it for, and nothing of the table,
+/// the index or the bound — the fact is about the value as it was read.
+pub fn capacity_out_of_bounds_message(member: &str, value: i64) -> String {
+    format!("Given value {value} for {member} is out of bounds")
+}
+
+/// Hold every capacity figure `requested` states to [`MAX_PROVISIONED_CAPACITY_UNITS`],
+/// naming the first member that is past it.
+///
+/// Every `ProvisionedThroughput` a request carries is held to it — the table's own and each
+/// index's alike — because the bound is on the FIGURE rather than on the resource it was
+/// stated for. Both dimensions are read in the order the model declares them, so a request
+/// that states two unusable figures is told about the first.
+pub fn check_capacity_bounds<'t>(
+    requested: impl IntoIterator<Item = &'t crate::ops::types::ProvisionedThroughput>,
+) -> Result<(), super::RequestError> {
+    for throughput in requested {
+        for (member, value) in [
+            ("ReadCapacityUnits", throughput.read_capacity_units),
+            ("WriteCapacityUnits", throughput.write_capacity_units),
+        ] {
+            if value > MAX_PROVISIONED_CAPACITY_UNITS {
+                return Err(super::RequestError::Validation(
+                    capacity_out_of_bounds_message(member, value),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// AWS's fixed text for a VECTOR index asked for on a table that is not in the on-demand
+/// capacity mode: the sentence states the capacity mode a vector index needs and nothing of
+/// the table or of the index that asked for one.
+pub const VECTOR_INDEX_REQUIRES_ON_DEMAND_MESSAGE: &str =
+    "One or more parameter values were invalid: Vector indexes are only supported for \
+     PAY_PER_REQUEST tables";
+
+/// Refuse `requested` vector indexes on a table whose capacity mode is `billing_mode`
+/// unless that mode is the on-demand one.
+///
+/// A vector index serves searches whose cost is not a provisioned figure, so it exists only
+/// on an on-demand table — and the mode is the TABLE's, so the rule holds wherever a vector
+/// index is declared: with the table, in a declaration an import creates one from, or
+/// through an update's own `Create`. A request that declares none is no defect whatever the
+/// mode.
+pub fn check_vector_index_capacity_mode(
+    billing_mode: &str,
+    requested: usize,
+) -> Result<(), super::RequestError> {
+    if requested > 0 && billing_mode != "PAY_PER_REQUEST" {
+        return Err(super::RequestError::Validation(
+            VECTOR_INDEX_REQUIRES_ON_DEMAND_MESSAGE.to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// The rule for one INDEX of a provisioned table: "an index's capacity mode is the
 /// table's", so every secondary index of a `PROVISIONED` table carries its own capacity.
 ///

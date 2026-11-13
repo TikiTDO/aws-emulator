@@ -26,7 +26,10 @@
 //! an on-demand capacity ceiling named for a table the update leaves in the PROVISIONED
 //! capacity mode — the two capacity models have no setting in common, so that
 //! contradiction is refused ahead of the scaffold refusal below, and the stored table is
-//! left as it was.
+//! left as it was. Every capacity figure the request states is held to what the service can
+//! hold ([`crate::state::check_capacity_bounds`]) before the table is even looked up, so a
+//! figure past it leaves the table settled at the capacity it had rather than `UPDATING`
+//! towards one AWS cannot report.
 //!
 //! A `StreamSpecification` enables or disables the table's DynamoDB Streams stream,
 //! which lives in the streams service's own store: enabling registers a stream and
@@ -41,7 +44,9 @@
 //! answer for "the operation tried to access a nonexistent table or index" — before
 //! anything is written, which leaves every stored index where it was; a name it does
 //! carry is removed, its siblings keep serving `SearchVectors`. A `Create` adds the index
-//! it describes, held to the same rules as one declared with the table, and it becomes
+//! it describes, held to the same rules as one declared with the table — the capacity mode
+//! the update leaves the table in included
+//! ([`crate::state::check_vector_index_capacity_mode`]) — and it becomes
 //! searchable when it reaches `ACTIVE`. Either way the change is index lifecycle work, so
 //! the table is left `UPDATING` for the span below like any other — and a call asking for
 //! more than one create or one delete of a vector index exceeds what one `UpdateTable`
@@ -326,6 +331,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         }
         let index_updates = validated_index_updates(&input).map_err(lift)?;
+        // Every capacity figure the request states, held to what the service can hold — the
+        // same check the create applies, for the same reason
+        // ([`crate::state::check_capacity_bounds`]). It runs before the table is looked up,
+        // so a figure the service cannot hold leaves the table untouched whatever state it
+        // is in, and the index list it walks is the clamped one above.
+        crate::state::check_capacity_bounds(requested_capacities(&input)).map_err(lift)?;
         let vector_index_updates = validated_vector_index_updates(&input).map_err(lift)?;
         // "You can create or delete only one global secondary index per UpdateTable
         // operation" (`UpdateTable$GlobalSecondaryIndexUpdates`). That is a LIMIT on
@@ -508,9 +519,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // cannot take, refuse the whole update here, before anything is written. The
         // definitions it is given are the MERGED ones, so a create may name a search-schema
         // attribute this same request declares.
-        let vector_indexes =
-            resolve_vector_indexes(table, &vector_index_updates, &declared, &region, now)
-                .map_err(lift)?;
+        let vector_indexes = resolve_vector_indexes(
+            table,
+            &billing_mode,
+            &vector_index_updates,
+            &declared,
+            &region,
+            now,
+        )
+        .map_err(lift)?;
         let indexes = resolve_indexes(
             table,
             &billing_mode,
@@ -970,6 +987,32 @@ fn requested_on_demand_ceilings(
                             .update
                             .as_ref()
                             .and_then(|change| change.on_demand_throughput.as_ref()),
+                    ]
+                }),
+        )
+        .flatten()
+}
+
+/// Every capacity pair this request states: the table's own, and the one each index
+/// create or index update carries — the bound is on the figure, so the same rule holds for
+/// all of them ([`crate::state::check_capacity_bounds`]).
+fn requested_capacities(input: &UpdateTableInput) -> impl Iterator<Item = &ProvisionedThroughput> {
+    ::std::iter::once(input.provisioned_throughput.as_ref())
+        .chain(
+            input
+                .global_secondary_index_updates
+                .iter()
+                .flatten()
+                .flat_map(|update| {
+                    [
+                        update
+                            .create
+                            .as_ref()
+                            .and_then(|create| create.provisioned_throughput.as_ref()),
+                        update
+                            .update
+                            .as_ref()
+                            .and_then(|change| change.provisioned_throughput.as_ref()),
                     ]
                 }),
         )
@@ -1477,6 +1520,10 @@ fn resolve_indexes(
                 &create.index_name,
                 &create.key_schema,
                 definitions,
+                // `GlobalSecondaryIndexUpdates` creates a GLOBAL secondary index — a local
+                // index can only be defined with the table — so its key schema is held to
+                // that kind's shape.
+                &super::create_table::IndexKeyShape::GLOBAL,
             )?;
             super::create_table::validated_projection(&create.index_name, &create.projection)?;
             let throughput = super::create_table::validated_index_throughput(
@@ -1629,21 +1676,32 @@ fn resolve_indexes(
 /// again.
 ///
 /// A `Create` is held to what the table can carry, exactly as `CreateTable` holds a vector
-/// index declared WITH the table: a name no other index of the table already has, a
-/// `Projection` that holds together, a search-schema attribute the table has an
-/// `AttributeDefinition` for (its type is what the index partitions and filters by), and
+/// index declared WITH the table: the table's capacity mode is the on-demand one
+/// ([`crate::state::check_vector_index_capacity_mode`]), a name no other index of the table
+/// already has, a `Projection` that holds together, a search-schema attribute the table has
+/// an `AttributeDefinition` for (its type is what the index partitions and filters by), and
 /// the per-table index count. One call carries ONE index action
 /// ([`vector_index_actions_over_limit`]), so the two loops below never both do work for the
 /// same request; the deletes are walked first all the same, which is the order the table
 /// would be left in if the limit ever let both through.
 fn resolve_vector_indexes(
     table: &crate::state::Table,
+    billing_mode: &str,
     updates: &[VectorIndexUpdate],
     definitions: &[AttributeDefinition],
     region: &str,
     now: ::std::time::SystemTime,
 ) -> Result<Vec<crate::state::VectorIndex>, crate::state::RequestError> {
     let mut indexes = table.vector_indexes.clone();
+    // The mode the table is left in by this very update is what a created index has to hold
+    // on: an update that switches the table to the provisioned mode cannot add one either.
+    crate::state::check_vector_index_capacity_mode(
+        billing_mode,
+        updates
+            .iter()
+            .filter(|update| update.create.is_some())
+            .count(),
+    )?;
     for delete in updates.iter().filter_map(|update| update.delete.as_ref()) {
         let before = indexes.len();
         indexes.retain(|index| index.name != delete.index_name);

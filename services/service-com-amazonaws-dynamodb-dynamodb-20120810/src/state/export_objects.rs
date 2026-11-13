@@ -219,7 +219,7 @@ fn manifest_summary_document(export: &Export, items: usize, files_key: &str) -> 
 /// One instant as the manifest carries it: the date-time form an AWS timestamp takes in a
 /// document (`2020-11-04T07:28:34.028Z`).
 fn rendered_instant(instant: SystemTime) -> String {
-    ::aws_smithy_types::DateTime::from(instant)
+    super::reported_date(instant)
         .fmt(::aws_smithy_types::date_time::Format::DateTime)
         .unwrap_or_default()
 }

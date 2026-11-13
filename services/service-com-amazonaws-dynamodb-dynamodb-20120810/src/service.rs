@@ -276,6 +276,31 @@ fn states_service_checked_clause_bare(operation: &str) -> bool {
     BARE_CLAUSE_OPERATIONS.binary_search(&operation).is_ok()
 }
 
+/// The operations whose refusal of an ABSENT member this service's own request code
+/// requires is the validating WALK's clause rather than this service's
+/// parameter-required sentence ([`crate::state::missing_parameter_message`]).
+///
+/// The table-name member is the one such member ([`SERVICE_REQUIRED_MEMBERS`]), and the
+/// same absence of the same member is observed to be stated BOTH ways: the operations
+/// below answer `1 validation error detected: Value null at 'tableName' failed to satisfy
+/// constraint: Member must not be null` — the walk's clause inside the counting envelope —
+/// while every other operation answers the reader's own sentence. Nothing about the model
+/// distinguishes the two groups, so this list is the only place the difference is recorded,
+/// and an operation later found to state the clause needs its own entry here.
+/// `tests/all/required_member_refusals.rs` pins both groups side by side so the difference
+/// is visible rather than silent.
+///
+/// Sorted, which [`states_absent_member_as_clause`] relies on for `binary_search` and
+/// `validator_null_clause_operations_are_sorted` pins.
+const VALIDATOR_NULL_CLAUSE_OPERATIONS: &[&str] = &["DeleteTable"];
+
+/// Whether `operation` states an absent such member as the walk's clause.
+fn states_absent_member_as_clause(operation: &str) -> bool {
+    VALIDATOR_NULL_CLAUSE_OPERATIONS
+        .binary_search(&operation)
+        .is_ok()
+}
+
 /// The enum value sets this service STATES in an order of its own, each written in the
 /// order it states them.
 ///
@@ -359,8 +384,7 @@ fn stated_enum_order(allowed: &[String]) -> Vec<String> {
 // required member that is absent are both found while READING the request, and
 // both keep the reader's own rendering whichever operation was served (`Value
 // 'NOPE' at 'returnConsumedCapacity' …` on `GetItem`, `Value null at
-// 'streamArn' …`) — except for the required members this service checks itself,
-// which are not reported as a clause at all ([`SERVICE_REQUIRED_MEMBERS`]).
+// 'streamArn' …`).
 // =============================================================================
 
 /// The operations whose refusal of a value outside a bound the model declares is
@@ -456,6 +480,11 @@ tokio::task_local! {
     /// Whether that operation states a clause about a member the service checks itself
     /// BARE ([`BARE_CLAUSE_OPERATIONS`]), set and read back the same way.
     static SERVED_BARE_CLAUSE: bool;
+
+    /// Whether that operation states an ABSENT member this service's own request code
+    /// requires as the walk's clause ([`VALIDATOR_NULL_CLAUSE_OPERATIONS`]), set and read
+    /// back the same way.
+    static SERVED_NULL_CLAUSE: bool;
 }
 
 /// The form the operation this task is serving states its clauses in.
@@ -474,6 +503,14 @@ fn served_clause_form() -> ClauseForm {
 /// envelope every other refusal of this service carries.
 fn served_states_clause_bare() -> bool {
     SERVED_BARE_CLAUSE.try_with(|bare| *bare).unwrap_or(false)
+}
+
+/// Whether the operation this task is serving states an absent member this service's own
+/// request code requires as the walk's clause. Absent altogether is a refusal raised
+/// outside an operation's run, which keeps this service's parameter-required sentence — the
+/// answer every operation this list does not name gives.
+fn served_states_absent_member_as_clause() -> bool {
+    SERVED_NULL_CLAUSE.try_with(|clause| *clause).unwrap_or(false)
 }
 
 /// Serves a request as the operation the generated routing table names, with that
@@ -520,7 +557,10 @@ impl<Eng: Send + Sync + 'static> ErasedOperation for OperationScopedClauseForm<E
                     clause_form(operation),
                     SERVED_BARE_CLAUSE.scope(
                         states_service_checked_clause_bare(operation),
-                        op.run(svc, req, ctx),
+                        SERVED_NULL_CLAUSE.scope(
+                            states_absent_member_as_clause(operation),
+                            op.run(svc, req, ctx),
+                        ),
                     ),
                 )
                 .await;
@@ -573,9 +613,7 @@ impl<Eng: Send + Sync + 'static> ErasedOperation for OperationScopedClauseForm<E
 /// * an absent member states the `null` it was, which is a fact of the request's
 ///   shape — the framework's rendering again, over the member path the validating
 ///   walk reports it under (`Value null at 'streamArn' …`), which is the path the
-///   recorded refusals of this service state. An absent member this service's OWN
-///   request code requires is not reported as a clause at all
-///   ([`SERVICE_REQUIRED_MEMBERS`]);
+///   recorded refusals of this service state, whichever member it is;
 ///
 /// A COLLECTION member past its cap is a clause like any other: in the item-request
 /// form the member and the bound, with nothing echoed. Some recorded AWS refusals of a
@@ -682,13 +720,17 @@ fn masking_violation(violations: &[Violation]) -> Option<&Violation> {
 /// `crate::state::validation_message` builds for the bounds this service checks
 /// itself, over one clause per violated member.
 ///
-/// A member [`SERVICE_REQUIRED_MEMBERS`] names takes precedence over every clause,
-/// because the check that finds it absent is not the validating walk.
+/// A member [`SERVICE_REQUIRED_MEMBERS`] names takes precedence over every clause on the
+/// operations that state it as their own sentence, because the check that finds it absent
+/// is not the validating walk; on the operations that state the walk's clause for it
+/// ([`VALIDATOR_NULL_CLAUSE_OPERATIONS`]) it is a clause like any other.
 ///
 /// `None` declines the whole refusal — see [`requirement`].
 fn validation_envelope(violations: &[Violation]) -> Option<String> {
     if let Some(absent) = missing_service_required_member(violations) {
-        return Some(crate::state::missing_parameter_message(&absent));
+        if !served_states_absent_member_as_clause() {
+            return Some(crate::state::missing_parameter_message(&absent));
+        }
     }
     let form = served_clause_form();
     // A violated idempotency token is stated alone ([`MASKING_MEMBERS`]).
@@ -734,6 +776,14 @@ const STATED_MEMBER_ORDERS: &[&[&str]] = &[
     // `Limit` (`smithy_query(query="shape",
     // shape="com.amazonaws.dynamodb#ListTablesInput")`).
     &["limit", "exclusiveStartTableName"],
+    // The capacity pair a table declaration or an update carries, which the model declares
+    // as `ReadCapacityUnits` then `WriteCapacityUnits` (`smithy_query(query="shape",
+    // shape="com.amazonaws.dynamodb#ProvisionedThroughput")`): the service states the
+    // WRITE dimension's clause first.
+    &[
+        "provisionedThroughput.writeCapacityUnits",
+        "provisionedThroughput.readCapacityUnits",
+    ],
 ];
 
 /// `violations` in the order their clauses are stated: the order
@@ -768,15 +818,16 @@ fn in_stated_member_order(violations: &[Violation]) -> Vec<&Violation> {
 /// itself (the table-name member is checked against the 3..=255 `[a-zA-Z0-9_.-]+` form
 /// the public model does not carry — `crate::state::resolve_table_name`), so a request
 /// that carries no value for it is refused by that check, with the service's own
-/// parameter-required sentence instead of the walk's `Member must not be null` clause.
-/// Every other required member keeps the walk's clause, because the walk is what finds
-/// it absent (`Value null at 'streamArn' …` for an absent
-/// `EnableKinesisStreamingDestination$StreamArn`).
+/// parameter-required sentence instead of the walk's `Member must not be null` clause —
+/// except on the operations that are observed to state that clause for it anyway
+/// ([`VALIDATOR_NULL_CLAUSE_OPERATIONS`]). Every other required member keeps the walk's
+/// clause, because the walk is what finds it absent (`Value null at 'streamArn' …` for an
+/// absent `EnableKinesisStreamingDestination$StreamArn`).
 ///
-/// Nothing about the model distinguishes the two groups — both members are `@required`
-/// — so this list is the only place the difference is recorded, and a member later found
-/// to be refused the same way needs its own entry here.
-/// `tests/all/required_member_refusals.rs` pins both groups side by side so the
+/// Nothing about the model distinguishes the groups — every member is `@required` — so this
+/// list is the only place the difference is recorded, and a member later found to be
+/// refused the same way needs its own entry here.
+/// `tests/all/required_member_refusals.rs` pins the groups side by side so the
 /// difference is visible rather than silent.
 const SERVICE_REQUIRED_MEMBERS: &[&str] = &[crate::state::TABLE_NAME_MEMBER_PATH];
 
@@ -949,8 +1000,9 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
 #[cfg(test)]
 mod tests {
     use super::{
-        clause_form, stated_enum_order, states_service_checked_clause_bare, ClauseForm,
-        BARE_CLAUSE_OPERATIONS, ITEM_REQUEST_FORM_OPERATIONS, PUBLISHED_ENUM_ORDERS,
+        clause_form, stated_enum_order, states_absent_member_as_clause,
+        states_service_checked_clause_bare, ClauseForm, BARE_CLAUSE_OPERATIONS,
+        ITEM_REQUEST_FORM_OPERATIONS, PUBLISHED_ENUM_ORDERS, VALIDATOR_NULL_CLAUSE_OPERATIONS,
         VALIDATOR_PATH_FORM_OPERATIONS,
     };
 
@@ -1036,6 +1088,24 @@ mod tests {
             assert!(
                 !states_service_checked_clause_bare(operation),
                 "case {operation:?}: expected the envelope, got the bare form"
+            );
+        }
+    }
+
+    #[test]
+    fn validator_null_clause_operations_are_sorted() {
+        let mut sorted = VALIDATOR_NULL_CLAUSE_OPERATIONS.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(
+            VALIDATOR_NULL_CLAUSE_OPERATIONS,
+            sorted.as_slice(),
+            "case the null-clause list: expected it sorted for `binary_search`, got \
+             {VALIDATOR_NULL_CLAUSE_OPERATIONS:?}"
+        );
+        for operation in VALIDATOR_NULL_CLAUSE_OPERATIONS {
+            assert!(
+                states_absent_member_as_clause(operation),
+                "case {operation:?}: expected the walk's clause, got the service's sentence"
             );
         }
     }

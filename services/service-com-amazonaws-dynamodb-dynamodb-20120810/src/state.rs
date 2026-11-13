@@ -735,20 +735,6 @@ pub fn invalid_member(path: &str, echoed: Option<&str>, requirement: &str) -> Re
     refused(constraint_clause(path, echoed, requirement))
 }
 
-/// How this service states that a parameter its OWN request code requires is not in
-/// the request at all.
-///
-/// Not a clause and not inside the `<N> validation error(s) detected: ` envelope: the
-/// absence is found by the service's own request code before any constraint is walked,
-/// so the whole message is this one sentence, with the member named as the model spells
-/// it on the wire and nothing of the operation that was called. A required member the
-/// generic request walk finds absent keeps that walk's clause instead
-/// ([`constraint_clause`] over `Member must not be null`), which is a different
-/// sentence for a different check.
-pub fn missing_parameter_message(member: &str) -> String {
-    format!("The parameter '{member}' is required but was not present in the request")
-}
-
 /// The refusal a single clause makes: the envelope over that clause, as the 400
 /// `ValidationException` every caller renders.
 fn refused(clause: String) -> RequestError {
@@ -1677,8 +1663,8 @@ impl ThroughputHistory {
             // day's count, and a client polling it to decide whether a decrease has
             // landed needs the member to be there before the first one.
             Some(self.decreases_today(now)),
-            self.last_increase.map(::aws_smithy_types::DateTime::from),
-            self.last_decrease.map(::aws_smithy_types::DateTime::from),
+            self.last_increase.map(reported_date),
+            self.last_decrease.map(reported_date),
         )
     }
 }
@@ -4992,6 +4978,17 @@ pub use auto_scaling::*;
 /// caller still names them `crate::state::…`.
 mod global_tables;
 pub use global_tables::*;
+
+/// Three facts about one REQUEST or one RESPONSE rather than about what the store holds,
+/// each in its own file: a LIST member a request carries with no entries, an absent
+/// PARAMETER this service's own request code requires, and what one INSTANT looks like in a
+/// `Date` member. Re-exported below, so every caller still names them `crate::state::…`.
+mod dates;
+mod list_members;
+mod request_members;
+pub use dates::*;
+pub use list_members::*;
+pub use request_members::*;
 
 /// What an `N` attribute value's order-preserving encoding does, in its own file: it is
 /// about ONE value's numeric domain rather than about what the store holds.

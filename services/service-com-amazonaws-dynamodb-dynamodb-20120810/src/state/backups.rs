@@ -406,8 +406,8 @@ impl Backup {
             backup_size_bytes: Some(self.size_bytes),
             backup_status: status.to_string(),
             backup_type: self.backup_type.clone(),
-            backup_creation_date_time: ::aws_smithy_types::DateTime::from(self.created_at),
-            backup_expiry_date_time: self.expires_at.map(::aws_smithy_types::DateTime::from),
+            backup_creation_date_time: super::reported_date(self.created_at),
+            backup_expiry_date_time: self.expires_at.map(super::reported_date),
         }
     }
 
@@ -420,8 +420,8 @@ impl Backup {
             table_arn: Some(self.table_arn.clone()),
             backup_arn: Some(self.arn.clone()),
             backup_name: Some(self.name.clone()),
-            backup_creation_date_time: Some(::aws_smithy_types::DateTime::from(self.created_at)),
-            backup_expiry_date_time: self.expires_at.map(::aws_smithy_types::DateTime::from),
+            backup_creation_date_time: Some(super::reported_date(self.created_at)),
+            backup_expiry_date_time: self.expires_at.map(super::reported_date),
             backup_status: Some(self.status(now).to_string()),
             backup_type: Some(self.backup_type.clone()),
             backup_size_bytes: Some(self.size_bytes),
@@ -440,7 +440,7 @@ impl Backup {
                 table_arn: Some(self.table_arn.clone()),
                 table_size_bytes: Some(self.source.table_size_bytes),
                 key_schema: self.source.key_schema.clone(),
-                table_creation_date_time: ::aws_smithy_types::DateTime::from(
+                table_creation_date_time: super::reported_date(
                     self.source.table_creation_date_time,
                 ),
                 provisioned_throughput: self.source.provisioned_throughput.clone(),

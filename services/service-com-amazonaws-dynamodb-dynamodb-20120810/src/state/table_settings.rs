@@ -123,8 +123,8 @@ impl PointInTimeRecovery {
             Some((earliest, latest)) => PointInTimeRecoveryDescription {
                 point_in_time_recovery_status: Some(POINT_IN_TIME_RECOVERY_ENABLED.to_string()),
                 recovery_period_in_days: Some(self.recovery_period_in_days),
-                earliest_restorable_date_time: Some(::aws_smithy_types::DateTime::from(earliest)),
-                latest_restorable_date_time: Some(::aws_smithy_types::DateTime::from(latest)),
+                earliest_restorable_date_time: Some(super::reported_date(earliest)),
+                latest_restorable_date_time: Some(super::reported_date(latest)),
             },
             None => PointInTimeRecoveryDescription {
                 point_in_time_recovery_status: Some(POINT_IN_TIME_RECOVERY_DISABLED.to_string()),

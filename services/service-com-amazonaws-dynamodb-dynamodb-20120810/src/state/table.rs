@@ -1813,7 +1813,7 @@ impl Table {
     /// instant, and a description taken while the switch is still settling reports the
     /// instant the switch was asked for rather than nothing.
     fn pay_per_request_set_at(&self) -> Option<::aws_smithy_types::DateTime> {
-        self.pay_per_request_at.map(::aws_smithy_types::DateTime::from)
+        self.pay_per_request_at.map(super::reported_date)
     }
 
     /// The `BillingModeSummary` a description carries, or `None` for a table whose
@@ -1855,7 +1855,7 @@ impl Table {
             key_schema: Some(self.key_schema.clone()),
             attribute_definitions: Some(described_definitions(&self.attribute_definitions)),
             table_status: Some(self.status(now).as_str().to_string()),
-            creation_date_time: Some(::aws_smithy_types::DateTime::from(self.creation_date_time)),
+            creation_date_time: Some(super::reported_date(self.creation_date_time)),
             item_count: Some(self.reported_counters.item_count),
             table_size_bytes: Some(self.reported_counters.size_bytes),
             billing_mode_summary: self.billing_mode_summary(),
@@ -1907,7 +1907,7 @@ impl Table {
                 // never updated.
                 last_update_date_time: self
                     .table_class_updated_at
-                    .map(::aws_smithy_types::DateTime::from),
+                    .map(super::reported_date),
             }),
             // Every table has a warm throughput, so every description carries one: the
             // pair in force — the one a request named, or the capacity the table keeps
@@ -1935,7 +1935,7 @@ impl Table {
             restore_summary: self.restore.as_ref().map(|restore| RestoreSummary {
                 source_backup_arn: restore.source_backup_arn.clone(),
                 source_table_arn: restore.source_table_arn.clone(),
-                restore_date_time: ::aws_smithy_types::DateTime::from(restore.restore_date_time),
+                restore_date_time: super::reported_date(restore.restore_date_time),
                 restore_in_progress: self.status(now) == TableStatus::Creating,
             }),
             // "Represents replicas of the table", and the version of global tables they

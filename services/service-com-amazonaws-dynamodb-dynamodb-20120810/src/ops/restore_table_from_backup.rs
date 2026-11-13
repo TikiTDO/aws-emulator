@@ -216,6 +216,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Every caller-sized list this request carries is clamped BEFORE anything walks
         // it, so the work below is bounded by constants rather than by the request body.
         clamped_overrides(&input).map_err(lift)?;
+        // Every capacity figure the request states, held to what the service can hold, by
+        // the rule every capacity figure is held to
+        // ([`crate::state::check_capacity_bounds`]); the override list it walks is the
+        // clamped one above.
+        crate::state::check_capacity_bounds(
+            input
+                .provisioned_throughput_override
+                .iter()
+                .chain(
+                    input
+                        .global_secondary_index_override
+                        .iter()
+                        .flatten()
+                        .filter_map(|index| index.provisioned_throughput.as_ref()),
+                ),
+        )
+        .map_err(lift)?;
 
         let mut store = state.lock();
         store.apply_due_transitions(now);

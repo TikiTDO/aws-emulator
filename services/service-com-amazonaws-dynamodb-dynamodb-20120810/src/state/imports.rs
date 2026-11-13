@@ -244,8 +244,8 @@ impl Import {
             s3_bucket_source: Some(self.s3_bucket_source.clone()),
             cloud_watch_log_group_arn: self.cloud_watch_log_group_arn.clone(),
             input_format: Some(self.input_format.clone()),
-            start_time: Some(::aws_smithy_types::DateTime::from(self.started_at)),
-            end_time: self.ended_at(now).map(::aws_smithy_types::DateTime::from),
+            start_time: Some(super::reported_date(self.started_at)),
+            end_time: self.ended_at(now).map(super::reported_date),
         }
     }
 
@@ -275,8 +275,8 @@ impl Import {
             input_format_options: self.details.input_format_options.clone(),
             input_compression_type: self.details.input_compression_type.clone(),
             table_creation_parameters: self.details.table_creation_parameters.clone(),
-            start_time: Some(::aws_smithy_types::DateTime::from(self.started_at)),
-            end_time: self.ended_at(now).map(::aws_smithy_types::DateTime::from),
+            start_time: Some(super::reported_date(self.started_at)),
+            end_time: self.ended_at(now).map(super::reported_date),
             processed_size_bytes: if finished {
                 self.details.processed_size_bytes
             } else {

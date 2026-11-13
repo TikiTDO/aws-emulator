@@ -209,7 +209,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // is then that index's rather than the table's.
             index_name: index_name.map(str::to_string),
             contributor_insights_status: Some(status),
-            last_update_date_time: last_update.map(::aws_smithy_types::DateTime::from),
+            last_update_date_time: last_update.map(crate::state::reported_date),
             contributor_insights_mode: mode,
             contributor_insights_rule_list: Some(rule_list).filter(|list| !list.is_empty()),
             // A setting that cannot fail has no failure to report.
