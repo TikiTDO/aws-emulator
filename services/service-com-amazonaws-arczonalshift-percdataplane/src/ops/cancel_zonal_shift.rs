@@ -189,8 +189,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // The caller's authorization on the named target is decided BEFORE the
         // target is resolved: a zonalShiftId ARC holds no shift for is refused 403
-        // AccessDeniedException, disclosing nothing about what exists. One helper
-        // takes this branch for every operation that acts on a target.
+        // AccessDeniedException, disclosing nothing about what exists — and stating
+        // no reason, a shift id being no resource the denial could speak about. One
+        // helper takes this branch for every operation that acts on a target.
         let shift = store
             .authorized_shift_mut(&input.zonal_shift_id)
             .map_err(CancelZonalShiftErrorModeled::AccessDeniedException)?;

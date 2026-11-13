@@ -11,6 +11,13 @@
 //! error of `PercDataPlane` — and the refusal discloses nothing about whether the
 //! identifier names anything (never `ResourceNotFoundException`, 404).
 //!
+//! What such a refusal STATES depends on what the call named: a denial taken on a
+//! `resourceIdentifier` states ARC's reason about that resource, and a denial taken on a
+//! `zonalShiftId` — which is not a resource an IAM policy grants an action on, so there
+//! is no resolved target to report about — states no reason at all, the model's
+//! `AccessDeniedException$message` being optional. That rule is the subject of
+//! `refusal_disclosure.rs`; here it is one assertion per row.
+//!
 //! The rows differ in the FORM and the SIZE of the identifier (ARN and non-ARN,
 //! other account, other Region, each end of the modelled length range, letters,
 //! digits and hyphens) and in the request payload carried with it, so what is
@@ -114,8 +121,16 @@ const UPDATE_PAYLOADS: &[&str] = &[
 
 /// Every refusal of an unauthorized target looks the same: 403, the
 /// `AccessDeniedException` code an SDK dispatches on, and a body that discloses
-/// nothing about the target it was asked about.
-fn assert_refused(case: &str, target: &str, status: u16, body: &serde_json::Value) {
+/// nothing about the target it was asked about. `reason` is what ARC states about it:
+/// the resource message for a call that named a resource, nothing at all for one that
+/// named a shift id.
+fn assert_refused(
+    case: &str,
+    target: &str,
+    reason: Option<&str>,
+    status: u16,
+    body: &serde_json::Value,
+) {
     assert_eq!(
         status, 403,
         "case {case:?}: an unauthorized target is refused 403, got {status} {body}"
@@ -130,11 +145,18 @@ fn assert_refused(case: &str, target: &str, status: u16, body: &serde_json::Valu
         !rendered.contains(target),
         "case {case:?}: the refusal must not disclose the target {target:?}, got {rendered}"
     );
-    assert_eq!(
-        body["message"].as_str(),
-        Some(TARGET_UNAVAILABLE_MESSAGE),
-        "case {case:?}: expected the non-disclosing refusal message, got {body}"
-    );
+    match reason {
+        Some(expected) => assert_eq!(
+            body["message"].as_str(),
+            Some(expected),
+            "case {case:?}: expected the non-disclosing refusal message {expected:?}, \
+             got {body}"
+        ),
+        None => assert!(
+            body["message"].is_null() || body["message"].as_str() == Some(""),
+            "case {case:?}: a denial on a shift id states no reason, got {body}"
+        ),
+    }
 }
 
 #[tokio::test]
@@ -169,7 +191,7 @@ async fn starting_a_shift_for_a_target_arc_holds_nothing_for_is_refused_403() {
             &start_body(target, away_from, expires_in, "shifting an unheld target"),
         )
         .await;
-        assert_refused(&case, target, status, &body);
+        assert_refused(&case, target, Some(TARGET_UNAVAILABLE_MESSAGE), status, &body);
     }
 }
 
@@ -178,13 +200,20 @@ async fn cancelling_or_updating_an_id_arc_holds_nothing_for_is_refused_403() {
     let (router, _engine) = emulator();
     for (row, (id, class)) in UNKNOWN_ZONAL_SHIFT_IDS.iter().enumerate() {
         let (status, body) = call(&router, "DELETE", &format!("/zonalshifts/{id}"), "").await;
-        assert_refused(&format!("CancelZonalShift/{class}"), id, status, &body);
+        assert_refused(
+            &format!("CancelZonalShift/{class}"),
+            id,
+            None,
+            status,
+            &body,
+        );
 
         let payload = UPDATE_PAYLOADS[row % UPDATE_PAYLOADS.len()];
         let (status, body) = call(&router, "PATCH", &format!("/zonalshifts/{id}"), payload).await;
         assert_refused(
             &format!("UpdateZonalShift/{class}/payload={payload}"),
             id,
+            None,
             status,
             &body,
         );
@@ -222,7 +251,7 @@ async fn an_id_the_store_held_and_dropped_is_refused_the_same_way() {
         let body_text = if method == "PATCH" { "{}" } else { "" };
         let (status, body) =
             call(&router, method, &format!("/zonalshifts/{id}"), body_text).await;
-        assert_refused(&format!("{method} a dropped id"), &id, status, &body);
+        assert_refused(&format!("{method} a dropped id"), &id, None, status, &body);
     }
 }
 

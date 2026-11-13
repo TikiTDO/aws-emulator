@@ -8,11 +8,14 @@
 //! recorded request:
 //!
 //! * the envelope, the clause and the requirement are the framework's — `N validation
-//!   error(s) detected: Value '<submitted>' at '<member path>' failed to satisfy
-//!   constraint: <requirement>`;
-//! * the clause QUOTES THE SUBMITTED VALUE BACK, taken from the request — the query
-//!   string, a URI label or the body, whichever carried the member — and only an ABSENT
-//!   member states `Value null at '<member>'`, having no value to quote;
+//!   error(s) detected: <subject> at '<member path>' failed to satisfy constraint:
+//!   <requirement>`;
+//! * the SUBJECT follows the refused member's POSITION in the input: a member of the
+//!   operation's own input shape — a URI label, a query parameter or a top-level body
+//!   member — is stated by position alone (`Value at '<member>'`), and a member reached
+//!   through another shape (an element of a collection) states the value that element
+//!   held (`Value '<submitted>' at '<path>'`); a member the request OMITTED has no value
+//!   at all and states `Value null at '<member>'`;
 //! * a `@pattern` is reported as the expression a value must satisfy, WITHOUT the
 //!   `^`/`$` anchors the model writes to make the match total;
 //! * an enum's admissible set is the set the service names — the model's values in the
@@ -98,12 +101,26 @@ impl Row {
         }
     }
 
-    /// The whole message this row must be answered with.
+    /// The whole message this row must be answered with: the subject the member's
+    /// position earns, then the position and the requirement.
     fn expected(&self) -> String {
         format!(
-            "1 validation error detected: Value '{}' at '{}' failed to satisfy constraint: {}",
-            self.submitted, self.member, self.requirement
+            "1 validation error detected: {} at '{}' failed to satisfy constraint: {}",
+            self.subject(),
+            self.member,
+            self.requirement
         )
+    }
+
+    /// The clause's subject: the value this row submitted, quoted, for a member reached
+    /// through another shape (a dotted path), and `Value` alone for a member of the
+    /// operation's own input shape.
+    fn subject(&self) -> String {
+        if self.member.contains('.') {
+            format!("Value '{}'", self.submitted)
+        } else {
+            "Value".to_string()
+        }
     }
 }
 
@@ -355,7 +372,7 @@ async fn refusal_message(row: &Row) -> String {
 }
 
 #[tokio::test]
-async fn a_refused_value_is_quoted_back_in_the_clause() {
+async fn a_clause_states_the_subject_the_refused_members_position_earns() {
     for row in rows() {
         let message = refusal_message(&row).await;
         assert_eq!(
@@ -365,11 +382,27 @@ async fn a_refused_value_is_quoted_back_in_the_clause() {
             row.case,
             row.expected()
         );
-        assert!(
-            message.contains(&format!("Value '{}' at '{}'", row.submitted, row.member)),
-            "case {:?}: the clause quotes the submitted value back, got {message:?}",
-            row.case
-        );
+        if row.member.contains('.') {
+            assert!(
+                message.contains(&format!("Value '{}' at '{}'", row.submitted, row.member)),
+                "case {:?}: a member reached through a collection states the element's \
+                 value, got {message:?}",
+                row.case
+            );
+        } else {
+            assert!(
+                message.starts_with(&format!("1 validation error detected: Value at '{}'", row.member)),
+                "case {:?}: a member of the input shape is stated by position alone, \
+                 got {message:?}",
+                row.case
+            );
+            assert!(
+                !message.contains(&format!("'{}'", row.submitted)),
+                "case {:?}: the clause must not echo the submitted value {:?}, got {message:?}",
+                row.case,
+                row.submitted
+            );
+        }
     }
 }
 
@@ -401,9 +434,10 @@ async fn a_pattern_is_reported_without_the_anchors_the_model_spells_it_with() {
 }
 
 #[tokio::test]
-async fn an_absent_required_member_keeps_the_only_clause_with_no_value_to_state() {
-    // The boundary of the quoting rule: an absent member HAS no submitted value, so its
-    // clause stays the framework's `Value null at '<member>' …`.
+async fn an_absent_required_member_keeps_the_clause_that_states_an_absence() {
+    // The boundary of the subject rule: an absent member HELD no value, which is neither
+    // a value to state nor a position stated alone, so its clause stays the framework's
+    // `Value null at '<member>' …`.
     let (router, _engine) = emulator();
     let (status, body) = call(&router, "POST", "/zonalshifts", "{}").await;
     assert_eq!(
@@ -431,8 +465,7 @@ async fn an_absent_required_member_keeps_the_only_clause_with_no_value_to_state(
 #[tokio::test]
 async fn several_violations_are_counted_and_joined_in_one_envelope() {
     // Two members outside their constraints in one request: the count is the framework's
-    // plural envelope, and EVERY clause quotes its own submitted value — not just the
-    // first.
+    // plural envelope, and EVERY clause states its own subject — not just the first.
     let (router, _engine) = emulator();
     let (status, body) = call(
         &router,
@@ -453,9 +486,9 @@ async fn several_violations_are_counted_and_joined_in_one_envelope() {
         "the envelope counts both violations, got {message:?}"
     );
     for clause in [
-        "Value 'PENDING' at 'status' failed to satisfy constraint: Member must satisfy enum \
+        "Value at 'status' failed to satisfy constraint: Member must satisfy enum \
          value set: [EXPIRED, ACTIVE, CANCELED]",
-        "Value '0' at 'maxResults' failed to satisfy constraint: Member must have value \
+        "Value at 'maxResults' failed to satisfy constraint: Member must have value \
          greater than or equal to 1",
     ] {
         assert!(

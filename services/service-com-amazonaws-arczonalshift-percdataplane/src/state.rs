@@ -81,8 +81,12 @@ pub const MAX_COMPLETED_SHIFTS_RETAINED: usize = 1_000;
 /// what does or does not exist.
 pub const TARGET_UNAVAILABLE_MESSAGE: &str = "Requested resource is not available.";
 
-/// The ONE refusal every resource-scoped zonal-shift mutation answers when the
-/// target it names is not a target this account's ARC holds for the caller.
+/// The ONE refusal every zonal-shift mutation keyed by a `resourceIdentifier` answers
+/// when the resource it names is not one this account's ARC holds for the caller.
+///
+/// A mutation keyed by a `zonalShiftId` states no reason at all
+/// ([`identifier_not_attributable`]): this message is about the RESOURCE a call named, so
+/// it is answered only where a call named one.
 ///
 /// ARC decides the caller's authorization ON THE TARGET before the target is
 /// resolved, so an identifier it cannot attribute to the caller is answered
@@ -112,20 +116,22 @@ pub fn names_a_resource_arn(identifier: &str) -> bool {
     identifier.starts_with(RESOURCE_ARN_PREFIX)
 }
 
-/// The refusal a resource-scoped operation answers for a `resourceIdentifier`
-/// authorization cannot evaluate at all: one that is not shaped like a resource ARN
-/// ([`names_a_resource_arn`]).
+/// The refusal a zonal-shift operation answers for a target it cannot attribute to the
+/// caller at all: a `resourceIdentifier` that is not shaped like a resource ARN
+/// ([`names_a_resource_arn`]), and a `zonalShiftId` naming no shift ARC holds for this
+/// account ([`ComAmazonawsArczonalshiftPercdataplaneState::authorized_shift_mut`]).
 ///
 /// An IAM policy grants an ARC action on RESOURCE ARNS, and the caller's authorization
-/// on the named target is decided before the service resolves it, so an identifier that
-/// cannot be an ARN matches no granted pattern and the call is denied — 403
-/// `AccessDeniedException` — rather than looked up and reported missing. It carries NO
-/// message: `AccessDeniedException$message` is optional in the model, and a denial taken
-/// before the target was resolved has nothing to report about it (a refusal recorded
-/// from ARC for a non-ARN identifier carries an empty message). An identifier that IS
-/// ARN-shaped is attributable, so it is resolved: one ARC holds no record of is that
-/// operation's own `ResourceNotFoundException` (404) or, for a mutation,
-/// [`target_unavailable`].
+/// on the named target is decided before the service resolves it, so a target that names
+/// no resource such a policy could have granted the action on is denied — 403
+/// `AccessDeniedException` — rather than looked up and reported missing. It states NO
+/// REASON: `AccessDeniedException$message` is optional in the model, and a denial taken
+/// on an identifier before any target was resolved has nothing to report about it (ARC's
+/// recorded denials on both kinds of identifier carry an empty message). The denial that
+/// does state a reason is the one taken on a RESOURCE the caller named, which is the
+/// subject the refusal can speak about ([`target_unavailable`]); an ARN-shaped
+/// identifier a reporting operation resolves and ARC holds no record of is that
+/// operation's own `ResourceNotFoundException` (404).
 #[must_use]
 pub fn identifier_not_attributable() -> AccessDeniedException {
     AccessDeniedException { message: None }
@@ -456,13 +462,17 @@ impl ComAmazonawsArczonalshiftPercdataplaneState {
     /// The stored zonal shift a mutation keyed by `zonalShiftId` may act on, or
     /// the refusal it answers instead — the same ordering as
     /// [`Self::authorized_resource`], for the operations whose target is a shift.
+    ///
+    /// The refusal states no reason ([`identifier_not_attributable`]): a shift id is not
+    /// a resource an IAM policy grants an action on, so the denial is taken on the
+    /// identifier itself, with no resolved target to report anything about.
     pub fn authorized_shift_mut(
         &mut self,
         zonal_shift_id: &str,
     ) -> Result<&mut ZonalShift, AccessDeniedException> {
         self.zonal_shifts
             .get_mut(zonal_shift_id)
-            .ok_or_else(target_unavailable)
+            .ok_or_else(identifier_not_attributable)
     }
 
     /// Bound the store: drop the oldest completed shifts once it holds more than

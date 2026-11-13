@@ -19,6 +19,8 @@ mod autoshift_observer_notification;
 mod practice_run_configuration;
 #[path = "all/practice_run_configuration_update.rs"]
 mod practice_run_configuration_update;
+#[path = "all/refusal_disclosure.rs"]
+mod refusal_disclosure;
 #[path = "all/refusal_message_rules.rs"]
 mod refusal_message_rules;
 #[path = "all/registered_managed_resources.rs"]
