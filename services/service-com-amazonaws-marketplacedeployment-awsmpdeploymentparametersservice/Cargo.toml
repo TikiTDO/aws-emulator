@@ -24,6 +24,10 @@ bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# The maintained regex engine, so each character class this service enforces is
+# matched from the single constant that states it rather than from a second,
+# hand-written statement of the same class.
+regex = "1.13"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

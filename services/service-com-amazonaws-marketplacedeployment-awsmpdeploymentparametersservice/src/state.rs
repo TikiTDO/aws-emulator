@@ -39,7 +39,10 @@
 //! [`seed_agreements`] records further targets for a fixture that wants its own.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::OnceLock;
 use std::time::SystemTime;
+
+use regex::Regex;
 
 use crate::ops::types::{
     ConflictException, InternalServerException, ResourceNotFoundException,
@@ -128,6 +131,11 @@ pub const RESOURCE_ARN_MAX_LEN: usize = 2048;
 /// modelled `ResourceArn` `@pattern` states, WITHOUT the `^` / `$` the model spells
 /// it with — for the reason [`TAG_CHARACTER_CLASS`] gives. The model's own form is
 /// `^[a-zA-Z0-9:*/-]+$`.
+///
+/// This is also the expression that ENFORCES the class (the module's
+/// `matches_resource_arn_character_class` matches it), so the set of characters a
+/// resource ARN may carry is stated here ONCE: what the refusal quotes and what the
+/// check admits cannot come to differ.
 pub const RESOURCE_ARN_CHARACTER_CLASS: &str = "[a-zA-Z0-9:*/-]+";
 
 /// The number of tags one deployment parameter holds.
@@ -181,6 +189,11 @@ pub const TAG_VALUE_MAX_LEN: usize = 256;
 /// targets the shape that carries it ([`TagConstraints::TagsMap`]), and a member
 /// targeting a map the model leaves unconstrained admits any UTF-8 text inside the
 /// length bounds above.
+///
+/// As with [`RESOURCE_ARN_CHARACTER_CLASS`], this is also the expression that
+/// ENFORCES the class (the module's `matches_tag_character_class` matches it), so the
+/// class is
+/// stated here once and the refusal quotes exactly what the check admits.
 pub const TAG_CHARACTER_CLASS: &str = "[a-zA-Z0-9/_+=.:@-]+";
 
 /// What the map a tagging member TARGETS constrains about the keys and values that
@@ -771,18 +784,34 @@ pub fn request_region(parts: &::http::request::Parts) -> String {
         .unwrap_or_else(|| DEFAULT_REGION.to_string())
 }
 
-/// Whether `byte` is one of the characters [`TAG_CHARACTER_CLASS`] admits.
-fn is_tag_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric()
-        || matches!(byte, b'/' | b'_' | b'+' | b'=' | b'.' | b':' | b'@' | b'-')
+/// The matcher that admits a value exactly when the WHOLE of it is inside
+/// `character_class`.
+///
+/// Each class this service enforces is stated by ONE constant, as the expression a
+/// refusal quotes — the model's `@pattern` without the `^` / `$` the model makes its
+/// match total with ([`TAG_CHARACTER_CLASS`] gives the reason) — and this is what
+/// turns that one statement into the check, so the class is never written a second
+/// time as code that could come to admit a different set. The total match the dropped
+/// anchors stood for is restored around the class itself, which is what deciding every
+/// character of the value means.
+///
+/// The expression compiled here comes from a constant of this module and never from a
+/// request, so whether it compiles is decided by this file alone and is the same on
+/// every call. Each caller compiles its class once and reuses the matcher.
+fn whole_value_matcher(character_class: &str) -> Regex {
+    Regex::new(&format!(r"\A(?:{character_class})\z"))
+        .expect("a character class this module states compiles")
 }
 
 /// Whether `candidate` holds only characters [`TAG_CHARACTER_CLASS`] admits.
 ///
-/// A byte test is enough to decide it: every character the class admits is ASCII,
-/// so any multi-byte UTF-8 character fails on its first byte.
+/// Decided by matching [`TAG_CHARACTER_CLASS`] itself ([`whole_value_matcher`]), so
+/// the class enforced here is the class the refusal quotes.
 fn matches_tag_character_class(candidate: &str) -> bool {
-    candidate.bytes().all(is_tag_byte)
+    static COMPILED: OnceLock<Regex> = OnceLock::new();
+    COMPILED
+        .get_or_init(|| whole_value_matcher(TAG_CHARACTER_CLASS))
+        .is_match(candidate)
 }
 
 /// The length of `candidate` the way a tag-length limit counts it: in CHARACTERS,
@@ -1026,9 +1055,16 @@ pub fn merge_tags(
     Ok(merged)
 }
 
-/// Whether `byte` is one of the characters [`RESOURCE_ARN_CHARACTER_CLASS`] admits.
-fn is_resource_arn_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'*' | b'/' | b'-')
+/// Whether `candidate` holds only characters [`RESOURCE_ARN_CHARACTER_CLASS`] admits.
+///
+/// Decided by matching [`RESOURCE_ARN_CHARACTER_CLASS`] itself
+/// ([`whole_value_matcher`]), so the class enforced here is the class the refusal
+/// quotes.
+fn matches_resource_arn_character_class(candidate: &str) -> bool {
+    static COMPILED: OnceLock<Regex> = OnceLock::new();
+    COMPILED
+        .get_or_init(|| whole_value_matcher(RESOURCE_ARN_CHARACTER_CLASS))
+        .is_match(candidate)
 }
 
 /// Read `candidate` as a resource ARN of THIS service, or say why it is not one.
@@ -1070,7 +1106,7 @@ fn is_resource_arn_byte(byte: u8) -> bool {
 /// ([`parameter_not_found`]).
 pub fn validate_resource_arn(candidate: &str) -> Result<(), crate::scaffolded::BadRequest> {
     if !(1..=RESOURCE_ARN_MAX_LEN).contains(&candidate.len())
-        || !candidate.bytes().all(is_resource_arn_byte)
+        || !matches_resource_arn_character_class(candidate)
     {
         return Err(crate::scaffolded::BadRequest::new(format!(
             "Invalid input resource arn: {RESOURCE_ARN_MEMBER} must be \
