@@ -849,6 +849,7 @@ dependencies = [
  "service-com-amazonaws-workspacesthinclient-thinclient",
  "service-com-amazonaws-workspacesweb-awserminecontrolplaneservice",
  "service-com-amazonaws-xray-awsxray",
+ "service-common",
  "sha2 0.10.9",
  "tokio",
  "tracing",

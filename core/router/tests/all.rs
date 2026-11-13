@@ -27,6 +27,8 @@ mod cloudformation_provisions_cognito_user_pools;
 // object a WorkMail Message Flow update installs has to be written through Amazon S3's own
 // API and read back through WorkMail Message Flow's, so neither crate's own test target can
 // mount both sides of it.
+#[path = "all/restart_persistence.rs"]
+mod restart_persistence;
 #[path = "all/workmailmessageflow_resolves_an_s3_object.rs"]
 mod workmailmessageflow_resolves_an_s3_object;
 // Declared here, in this same head region, for the reason the entry above records: what a

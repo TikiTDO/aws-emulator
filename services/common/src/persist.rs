@@ -8,9 +8,11 @@
 //! listeners — and rebuilds itself from that view ([`Persisted::restore`]).
 //!
 //! Nothing is written unless [`STATE_DIR_VARIABLE`] names a directory: an emulator embedded in
-//! a test, or started without it, stays exactly as ephemeral as before. With it set, each
-//! service's snapshot is one file, `<dir>/<namespace>/<service>.json`, where the namespace is
-//! the emulator instance's ([`super::host_runtime::NAMESPACE_VARIABLE`]). Every write is atomic
+//! a test, or started without it, stays exactly as ephemeral as before. With it set, boot builds
+//! one [`StateDir`] and every save and load goes through it: each service's snapshot is one
+//! file, `<dir>/<namespace>/<service>.json`, where the namespace is the emulator instance's
+//! ([`super::host_runtime::NAMESPACE_VARIABLE`]). The directory is private to the emulator's
+//! user and each file is written `0600`, because KMS's snapshot holds key material. Every write is atomic
 //! (a temporary file in the same directory, flushed to disk, then renamed over the old one), so a
 //! crash mid-write leaves the previous snapshot, never half of a new one.
 //!
@@ -60,6 +62,8 @@ pub enum PersistError {
     },
     /// The service refused its own snapshot.
     Restore { path: PathBuf, detail: String },
+    /// The emulator namespace is not a plain name, so it cannot name a directory.
+    Namespace(String),
 }
 
 impl std::fmt::Display for PersistError {
@@ -81,65 +85,183 @@ impl std::fmt::Display for PersistError {
             Self::Restore { path, detail } => {
                 write!(f, "{} could not be restored: {detail}", path.display())
             }
+            Self::Namespace(namespace) => write!(
+                f,
+                "namespace {namespace:?} is not a plain name (letters, digits, '.', '_', '-')"
+            ),
         }
     }
 }
 
 impl std::error::Error for PersistError {}
 
-/// Where snapshots are kept for this emulator instance, or `None` when persistence is off.
-pub fn namespace_dir() -> Option<PathBuf> {
-    let root = std::env::var_os(STATE_DIR_VARIABLE).filter(|dir| !dir.is_empty())?;
-    Some(PathBuf::from(root).join(namespace()))
+/// Where this emulator instance keeps its snapshots: the state root and the instance's
+/// namespace, validated once and then fixed for the life of the process. Boot builds it once
+/// ([`StateDir::from_env`]) and hands the same value to everything that persists, so no save
+/// or load re-reads the environment and no two writers can disagree about where state lives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StateDir {
+    root: PathBuf,
+    namespace: String,
 }
 
-fn namespace() -> String {
-    std::env::var(super::host_runtime::NAMESPACE_VARIABLE)
-        .unwrap_or_else(|_| super::host_runtime::DEFAULT_NAMESPACE.to_string())
+impl StateDir {
+    /// A state directory under `root` for `namespace`. A namespace that is not a plain name
+    /// (`..`, a `/`, an empty string) is refused rather than joined: it would put one
+    /// instance's state outside the root or in another instance's directory.
+    pub fn new(root: impl Into<PathBuf>, namespace: impl Into<String>) -> Result<Self, PersistError> {
+        let namespace = namespace.into();
+        if !is_plain_name(&namespace) {
+            return Err(PersistError::Namespace(namespace));
+        }
+        Ok(Self {
+            root: root.into(),
+            namespace,
+        })
+    }
+
+    /// The selection the environment makes ([`STATE_DIR_VARIABLE`] and the host runtime's
+    /// namespace), or `None` when persistence is off. Read once, at boot.
+    pub fn from_env() -> Result<Option<Self>, PersistError> {
+        let Some(root) = std::env::var_os(STATE_DIR_VARIABLE).filter(|dir| !dir.is_empty()) else {
+            return Ok(None);
+        };
+        let namespace = std::env::var(super::host_runtime::NAMESPACE_VARIABLE)
+            .unwrap_or_else(|_| super::host_runtime::DEFAULT_NAMESPACE.to_string());
+        Self::new(PathBuf::from(root), namespace).map(Some)
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    /// This namespace's directory: `<root>/<namespace>`.
+    pub fn dir(&self) -> PathBuf {
+        self.root.join(&self.namespace)
+    }
+
+    /// Create this namespace's directory if it is missing, readable by this user only (it holds
+    /// KMS key material), and check that what is there is a real directory, not a link to
+    /// somewhere else. Boot calls this once, before any snapshot is read or written.
+    pub fn admit(&self) -> Result<PathBuf, PersistError> {
+        let dir = self.dir();
+        let io = |error| PersistError::Io {
+            path: dir.clone(),
+            error,
+        };
+        private_dirs(&dir).map_err(io)?;
+        let kind = std::fs::symlink_metadata(&dir).map_err(io)?.file_type();
+        if !kind.is_dir() {
+            return Err(io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the namespace's state path is not a plain directory",
+            )));
+        }
+        Ok(dir)
+    }
+
+    /// Write `state`'s snapshot. Returns the file written.
+    pub fn save<T: Persisted>(&self, state: &T) -> Result<PathBuf, PersistError> {
+        self.save_snapshot(T::SERVICE, T::VERSION, &state.snapshot())
+    }
+
+    /// Write a snapshot already taken (by [`Persisted::snapshot`]) for `service` at `version`:
+    /// for a caller that takes the snapshot under the state's lock and writes it after
+    /// releasing it. Returns the file written.
+    pub fn save_snapshot(
+        &self,
+        service: &str,
+        version: u32,
+        snapshot: &Value,
+    ) -> Result<PathBuf, PersistError> {
+        write_in(&self.dir(), &self.namespace, service, version, snapshot)
+    }
+
+    /// Restore the service from its snapshot, when one exists.
+    pub fn load<T: Persisted>(&self) -> Result<Option<T>, PersistError> {
+        load_in(&self.dir(), &self.namespace)
+    }
 }
 
-/// Write `state`'s snapshot, when persistence is on. Returns the file written.
-pub fn save<T: Persisted>(state: &T) -> Result<Option<PathBuf>, PersistError> {
-    let Some(dir) = namespace_dir() else {
-        return Ok(None);
-    };
-    save_in(&dir, &namespace(), state).map(Some)
+/// Create `dir` and any missing parents; the ones created here are private to this user.
+fn private_dirs(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
 }
 
-/// Restore the service from its snapshot, when persistence is on and one exists.
-pub fn load<T: Persisted>() -> Result<Option<T>, PersistError> {
-    let Some(dir) = namespace_dir() else {
-        return Ok(None);
-    };
-    load_in(&dir, &namespace())
+/// One path component of ASCII letters, digits, `.`, `_` and `-`, at most 64 long, and never
+/// `.` or `..`.
+fn is_plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn file_for<T: Persisted>(dir: &Path) -> PathBuf {
     dir.join(format!("{}.json", T::SERVICE))
 }
 
+#[cfg(test)]
 fn save_in<T: Persisted>(dir: &Path, namespace: &str, state: &T) -> Result<PathBuf, PersistError> {
-    let path = file_for::<T>(dir);
+    write_in(dir, namespace, T::SERVICE, T::VERSION, &state.snapshot())
+}
+
+fn write_in(
+    dir: &Path,
+    namespace: &str,
+    service: &str,
+    version: u32,
+    snapshot: &Value,
+) -> Result<PathBuf, PersistError> {
+    let path = dir.join(format!("{service}.json"));
     let io = |error| PersistError::Io {
         path: path.clone(),
         error,
     };
-    std::fs::create_dir_all(dir).map_err(io)?;
+    private_dirs(dir).map_err(io)?;
     let envelope = json!({
         "format": FORMAT,
-        "service": T::SERVICE,
+        "service": service,
         "namespace": namespace,
-        "version": T::VERSION,
+        "version": version,
         "written_at": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_secs())
             .unwrap_or_default(),
-        "state": state.snapshot(),
+        "state": snapshot,
     });
     let bytes = serde_json::to_vec(&envelope).map_err(|error| io(error.into()))?;
-    let temporary = dir.join(format!(".{}.json.{}.tmp", T::SERVICE, std::process::id()));
+    // A name no other save uses (process, a per-process count, the clock), opened only if it
+    // does not exist yet: never truncating a file or following a link already at that path,
+    // and never shared by two concurrent saves.
+    static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let temporary = dir.join(format!(
+        ".{service}.json.{}.{}.{}.tmp",
+        std::process::id(),
+        SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default()
+    ));
     let written = (|| {
-        let mut file = std::fs::File::create(&temporary)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Snapshots hold key material (KMS): readable by this user only.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&temporary)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
         std::fs::rename(&temporary, &path)?;
@@ -480,5 +602,40 @@ mod tests {
         let ahead = back.due[&key].saturating_duration_since(Instant::now());
         assert!(ahead > Duration::from_secs(28) && ahead <= Duration::from_secs(30), "{ahead:?}");
         assert!(back.started <= Instant::now());
+    }
+
+    #[test]
+    fn only_a_plain_name_can_be_a_namespace() {
+        for name in ["default", "karma-local", "ns_1.v2"] {
+            assert!(is_plain_name(name), "{name}");
+        }
+        for name in ["", ".", "..", "../x", "a/b", "a\\b", "x y"] {
+            assert!(!is_plain_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_state_dir_is_admitted_private_and_never_through_a_link() {
+        let root = scratch("admit");
+        let state_dir = StateDir::new(&root, "ns").unwrap();
+        let dir = state_dir.admit().unwrap();
+        assert_eq!(dir, root.join("ns"));
+        let path = state_dir.save(&Counter(5)).unwrap();
+        assert_eq!(state_dir.load::<Counter>().unwrap(), Some(Counter(5)));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&dir), 0o700);
+            assert_eq!(mode(&path), 0o600);
+
+            let elsewhere = scratch("admit-elsewhere");
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, root.join("linked")).unwrap();
+            assert!(matches!(
+                StateDir::new(&root, "linked").unwrap().admit(),
+                Err(PersistError::Io { .. })
+            ));
+        }
     }
 }
