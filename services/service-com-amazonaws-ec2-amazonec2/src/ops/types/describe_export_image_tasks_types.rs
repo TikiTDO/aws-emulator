@@ -30,6 +30,7 @@ pub struct DescribeExportImageTasksOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ExportImageTask")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ExportImageTask {
     pub description: Option<String>,
     pub export_image_task_id: Option<String>,

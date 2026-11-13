@@ -30,6 +30,7 @@ pub struct DescribeOutpostLagsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#OutpostLag")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct OutpostLag {
     pub outpost_arn: Option<String>,
     pub owner_id: Option<String>,

@@ -1753,6 +1753,7 @@ pub const MAX_EVENT_NOTIFICATION_REGIONS: usize = MAX_STORED_RECORDS_PER_STORE;
 /// The set is a [`BTreeSet`], so a key a request names twice is registered once and the
 /// order it is reported in is stable across reads.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceEventTagRegistration {
     /// Whether every tag key of the Region is registered.
     pub include_all_tags_of_instance: bool,

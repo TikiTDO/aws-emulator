@@ -30,6 +30,7 @@ pub struct GetManagedPrefixListEntriesOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PrefixListEntry")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PrefixListEntry {
     pub cidr: Option<String>,
     pub description: Option<String>,

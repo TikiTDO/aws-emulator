@@ -1350,6 +1350,7 @@ pub fn local_gateway_route_table_arn(region: &str, route_table_id: &str) -> Stri
 /// field-by-field copy that can silently drop one. The pending move lives beside it because
 /// the shape carries no member for when the association's next state falls due.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LocalGatewayRouteTableVirtualInterfaceGroupAssociationRecord {
     /// The association as the model shapes it, carrying the state reached so far.
     pub view: crate::ops::types::LocalGatewayRouteTableVirtualInterfaceGroupAssociation,
@@ -2345,6 +2346,7 @@ pub fn require_known_local_gateway_route_target<E>(
 /// specified local gateway route table", `DeleteLocalGatewayRoute`), so the table is the
 /// only thing that can key them.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LocalGatewayRouteTableRecord {
     /// The table as every reader of it reports it.
     pub view: crate::ops::types::LocalGatewayRouteTable,
@@ -2367,6 +2369,7 @@ pub struct LocalGatewayRouteTableRecord {
 /// it because `LocalGatewayRoute` carries no member for when the route's next state falls
 /// due.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LocalGatewayRouteRecord {
     /// The route as the model shapes it, carrying the state reached so far.
     pub view: crate::ops::types::LocalGatewayRoute,
@@ -2466,6 +2469,7 @@ pub const LOCAL_GATEWAY_ASSOCIATION_STATE_ASSOCIATED: &str = "associated";
 /// silently drop one. The pending move lives beside it because the shape carries no member
 /// for when the association's next state falls due.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LocalGatewayRouteTableVpcAssociationRecord {
     /// The association as the model shapes it, carrying the state reached so far.
     pub view: crate::ops::types::LocalGatewayRouteTableVpcAssociation,

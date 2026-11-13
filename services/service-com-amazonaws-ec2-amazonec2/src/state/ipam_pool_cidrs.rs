@@ -55,6 +55,7 @@ pub const IPAM_POOL_CIDR_STATE_DEPROVISIONED: &str = "deprovisioned";
 /// The pool id and the move are held beside the view rather than on it for the reason the
 /// module docs give: the modelled shape carries neither.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamPoolCidrRecord {
     /// The `IpamPoolId` of the pool this CIDR is provisioned to.
     pub ipam_pool_id: String,

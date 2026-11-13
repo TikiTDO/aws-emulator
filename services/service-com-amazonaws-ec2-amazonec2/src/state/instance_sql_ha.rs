@@ -99,6 +99,7 @@ pub const SQL_SERVER_LICENSE_USAGE_WAIVED: &str = "waived";
 /// becomes the instance's status, and the projection compares that instant with the clock
 /// rather than a reader writing the move back.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SqlHaDetermination {
     /// When this determination becomes the instance's reported `HaStatus`. Before it, the
     /// instance reads [`HA_STATUS_PROCESSING`].
@@ -120,6 +121,7 @@ pub struct SqlHaDetermination {
 /// license usage and the instant the status was reached follow from the determination below,
 /// and the tags belong to the instance.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SqlHaRegistrationRecord {
     /// When the instance was registered for monitoring: the instant its first status — and
     /// so its `LastUpdatedTime` while no determination has fallen due — dates from.

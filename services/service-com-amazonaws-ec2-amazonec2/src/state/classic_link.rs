@@ -68,6 +68,7 @@ use super::*;
 /// and a security group's name belong to the instance and the group, and are read off them
 /// when the link is projected.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ClassicLinkRecord {
     /// "The ID of the ClassicLink-enabled VPC" the instance is linked to
     /// (`AttachClassicLinkVpcRequest$VpcId`), reported as `ClassicLinkInstance$VpcId`.

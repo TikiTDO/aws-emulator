@@ -471,6 +471,7 @@ pub fn byoip_cidr_state_is_releasable(state: &str) -> bool {
 /// one state however it is read; only the release, which no member of [`ByoipCidr`]
 /// carries, is stored next to it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ByoipCidrRecord {
     /// The range as the model shapes it.
     pub byoip_cidr: ByoipCidr,
@@ -484,6 +485,7 @@ pub struct ByoipCidrRecord {
     /// the due instant, in
     /// [`ComAmazonawsEc2Amazonec2State::materialize_due_transitions`], from the addresses
     /// the account holds out of the range then.
+    #[serde(with = "::service_common::persist::instant_opt")]
     pub released_at: Option<Instant>,
     /// The state move the clock owes the range for the work a request has STARTED on it: a
     /// range `ProvisionByoipCidr` left in `pending-provision`, or one `AdvertiseByoipCidr`
@@ -885,6 +887,7 @@ pub fn require_well_formed_byoasn<E>(member: &str, value: &str) -> Result<(), Sc
 /// here holds one: a member a writer sets round-trips through `DescribeIpamByoasn` without a
 /// field-by-field copy that can silently drop one.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ByoasnRecord {
     /// The ASN as the model shapes it, carrying the state reached so far.
     pub byoasn: Byoasn,
@@ -1271,6 +1274,7 @@ pub fn canonical_public_ipv4_pool_cidr(value: &str) -> Result<String, CidrProble
 /// truth, and [`ComAmazonawsEc2Amazonec2State::public_ipv4_pool_view`] derives the rest on
 /// read.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PublicIpv4PoolRecord {
     /// The pool's own id (`ipv4pool-ec2-…`), minted by the store.
     pub pool_id: String,
@@ -1554,6 +1558,7 @@ pub fn capacity_block_payload_bytes(block: &CapacityBlock) -> usize {
 /// [`PendingTransition`] is due on, because these two instants are themselves reported to
 /// the caller.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CapacityBlockRecord {
     /// The block as the model shapes it, with `State` left for [`Self::view_at`] to fill.
     pub block: CapacityBlock,
@@ -1817,6 +1822,7 @@ pub const INSTANCE_CONNECT_ENDPOINT_FIPS_DNS_LABEL: &str = "ec2-instance-connect
 /// [`InstanceConnectEndpointRecord::view_at`] derives it rather than letting two writers
 /// store two different words for it — exactly how [`VolumeRecord`] holds a volume.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceConnectEndpointRecord {
     /// The endpoint as the model shapes it, with `State` left for `view_at` to fill.
     pub view: crate::ops::types::Ec2InstanceConnectEndpoint,
@@ -1824,12 +1830,14 @@ pub struct InstanceConnectEndpointRecord {
     /// move is due. Monotonic ([`Instant`]), because it is only ever compared against the
     /// clock and never reported, so a wall-clock adjustment cannot move an endpoint back to
     /// `create-in-progress`.
+    #[serde(with = "::service_common::persist::instant")]
     pub create_complete_at: Instant,
     /// The instant from which this endpoint's `delete-in-progress` -> `delete-complete`
     /// move is due, and `None` for an endpoint nobody has asked to delete. Set once, by the
     /// delete that asked for it
     /// ([`ComAmazonawsEc2Amazonec2State::begin_instance_connect_endpoint_deletion`]), and
     /// monotonic for the same reason as [`Self::create_complete_at`].
+    #[serde(with = "::service_common::persist::instant_opt")]
     pub delete_complete_at: Option<Instant>,
 }
 
@@ -2237,6 +2245,7 @@ pub fn capacity_reservation_payload_bytes(reservation: &CapacityReservation) -> 
 
 /// What the clock owes one stored Capacity Reservation next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum CapacityReservationMove {
     /// `pending` -> `active`: the capacity the reservation was minted for is provisioned.
     Active,
@@ -2265,6 +2274,8 @@ pub type CapacityReservationTransition = ClockTransition<CapacityReservationMove
 /// writer sets round-trips through a reader without a field-by-field copy that can silently
 /// drop one — the same arrangement [`CapacityBlockRecord`] and the VPC store use.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "'de: 'static"))]
 pub struct CapacityReservationRecord {
     /// The reservation as the model shapes it.
     pub view: CapacityReservation,

@@ -30,7 +30,9 @@ pub struct DescribeFlowLogsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#FlowLog")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FlowLog {
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub creation_time: Option<::aws_smithy_types::DateTime>,
     pub deliver_logs_error_message: Option<String>,
     pub deliver_logs_permission_arn: Option<String>,
@@ -52,6 +54,7 @@ pub struct FlowLog {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#DestinationOptionsResponse")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DestinationOptionsResponse {
     pub file_format: Option<String>,
     pub hive_compatible_partitions: Option<bool>,
@@ -60,6 +63,7 @@ pub struct DestinationOptionsResponse {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TagFieldSpecificationResponse")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TagFieldSpecificationResponse {
     pub resource_type: Option<String>,
     pub tag_keys: Option<Vec<String>>,

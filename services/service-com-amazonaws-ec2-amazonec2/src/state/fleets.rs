@@ -82,6 +82,7 @@ pub const INSTANCE_HEALTH_HEALTHY: &str = "healthy";
 /// request it was placed through — so the type and the state a fleet reports for an
 /// instance are always the ones the instance store holds.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FleetInstanceRecord {
     /// The `InstanceId`, a key of [`ComAmazonawsEc2Amazonec2State::instances`].
     pub instance_id: String,
@@ -100,6 +101,8 @@ pub struct FleetInstanceRecord {
 /// One stored EC2 Fleet: the modelled [`FleetData`](crate::ops::types::FleetData) every
 /// operation that reports a fleet answers with, plus the instances it has launched.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "'de: 'static"))]
 pub struct FleetRecord {
     /// The fleet as `DescribeFleets` reports it.
     pub fleet: crate::ops::types::FleetData,
@@ -770,6 +773,7 @@ pub const MAX_ALLOWED_IMAGES_SETTINGS_REGIONS: usize = MAX_STORED_RECORDS_PER_ST
 /// reports, so a replace converts and validates the request shapes once rather than at
 /// every read.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AllowedImagesSettings {
     /// "The current state of the Allowed AMIs setting at the account level in the specified
     /// Amazon Web Services Region" (`GetAllowedImagesSettingsResult$State`): one of
@@ -1416,6 +1420,7 @@ pub const INVALID_REPLACE_ROOT_VOLUME_TASK_ID_NOT_FOUND: &str =
 /// and [`Self::view_at`] derives the state from it. `TaskState` is therefore NOT stored on
 /// the view: a reader that observed one state could otherwise disagree with the clock.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ReplaceRootVolumeTaskRecord {
     /// The task as the model shapes it, with `TaskState` and `CompleteTime` left for
     /// [`Self::view_at`] to fill.
@@ -1423,8 +1428,10 @@ pub struct ReplaceRootVolumeTaskRecord {
     /// The instant from which this task's `pending` -> `in-progress` move is due.
     /// Monotonic ([`Instant`]), because it is only ever compared against the clock and
     /// never reported, so a wall-clock adjustment cannot move a task backwards.
+    #[serde(with = "::service_common::persist::instant")]
     pub in_progress_at: Instant,
     /// The instant from which this task's `in-progress` -> `succeeded` move is due.
+    #[serde(with = "::service_common::persist::instant")]
     pub succeeded_at: Instant,
     /// "The time the task completed" (`ReplaceRootVolumeTask$CompleteTime`), rendered from
     /// the wall clock at the instant [`Self::succeeded_at`] falls due — reported only once
@@ -1621,14 +1628,17 @@ pub const INVALID_MAC_MODIFICATION_TASK_ID_NOT_FOUND: &str = "InvalidMacModifica
 /// from it. `TaskState` is therefore NOT stored on the view: a reader that observed one
 /// state could otherwise disagree with the clock.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MacModificationTaskRecord {
     /// The task as the model shapes it, with `TaskState` left for [`Self::view_at`] to fill.
     pub view: MacModificationTask,
     /// The instant from which this task's `pending` -> `in-progress` move is due.
     /// Monotonic ([`Instant`]), because it is only ever compared against the clock and never
     /// reported, so a wall-clock adjustment cannot move a task backwards.
+    #[serde(with = "::service_common::persist::instant")]
     pub in_progress_at: Instant,
     /// The instant from which this task's `in-progress` -> `successful` move is due.
+    #[serde(with = "::service_common::persist::instant")]
     pub successful_at: Instant,
 }
 
@@ -2245,6 +2255,7 @@ pub fn ipam_routing_policy_registration_not_found<E>(
 /// `GetIpamRoutingPolicyRegistrations` without a field-by-field copy that can silently drop
 /// one.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamRoutingPolicyRegistrationRecord {
     /// The registration as the model shapes it, carrying the state reached so far.
     pub view: IpamRoutingPolicyRegistration,
@@ -2289,6 +2300,7 @@ impl IpamRoutingPolicyRegistrationRecord {
 /// carry no id of their own for it. The key order is the stable order a report of them pages
 /// over.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamInternetRegistryAssociationRecord {
     /// The association itself, as the modelled shape its own operations report.
     pub view: IpamInternetRegistryAssociation,
@@ -2359,6 +2371,7 @@ pub fn ipam_internet_registry_association_payload_bytes(
 /// registration it belongs to is named on it so a report of the deltas of one registration
 /// needs no scan of the registrations.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamRoutingPolicyRegistrationDeltaRecord {
     /// The delta as the model shapes it, carrying the state reached so far.
     pub view: IpamRoutingPolicyRegistrationDelta,

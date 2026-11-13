@@ -232,6 +232,131 @@ pub mod smithy_time_opt {
     }
 }
 
+/// Serde for a monotonic [`std::time::Instant`], which means nothing to another process: stored
+/// as the wall-clock time it corresponds to, and rebuilt against the restoring process's clock.
+/// A deadline already past stays past (due at once), one still ahead keeps its remaining span.
+/// Use as `#[serde(with = "::service_common::persist::instant")]`.
+pub mod instant {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    pub(super) fn to_wall(instant: Instant) -> (u64, u32) {
+        let (now, wall) = (Instant::now(), SystemTime::now());
+        let at = if instant >= now {
+            wall + (instant - now)
+        } else {
+            wall - (now - instant)
+        };
+        let since = at.duration_since(UNIX_EPOCH).unwrap_or_default();
+        (since.as_secs(), since.subsec_nanos())
+    }
+
+    pub(super) fn from_wall((secs, nanos): (u64, u32)) -> Instant {
+        let at = UNIX_EPOCH + Duration::new(secs, nanos);
+        let (now, wall) = (Instant::now(), SystemTime::now());
+        match at.duration_since(wall) {
+            Ok(ahead) => now + ahead,
+            Err(behind) => now.checked_sub(behind.duration()).unwrap_or(now),
+        }
+    }
+
+    pub fn serialize<S: Serializer>(instant: &Instant, serializer: S) -> Result<S::Ok, S::Error> {
+        to_wall(*instant).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Instant, D::Error> {
+        Ok(from_wall(<(u64, u32)>::deserialize(deserializer)?))
+    }
+}
+
+/// [`instant`] for an optional deadline.
+pub mod instant_opt {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::time::Instant;
+
+    pub fn serialize<S: Serializer>(
+        instant: &Option<Instant>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        instant.map(super::instant::to_wall).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Instant>, D::Error> {
+        Ok(Option::<(u64, u32)>::deserialize(deserializer)?.map(super::instant::from_wall))
+    }
+}
+
+/// A map whose keys JSON cannot hold (a tuple, a struct), stored as a list of `[key, value]`
+/// pairs. JSON object keys must be strings, and `serde_json` only finds out when the map is
+/// non-empty, so an untagged one passes every test with an empty account and fails the first
+/// real snapshot. Use as `#[serde(with = "::service_common::persist::entries")]` on a
+/// `BTreeMap` or `HashMap`.
+pub mod entries {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<'a, M, K, V, S>(map: &'a M, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        &'a M: IntoIterator<Item = (&'a K, &'a V)>,
+        K: Serialize + 'a,
+        V: Serialize + 'a,
+        S: Serializer,
+    {
+        serializer.collect_seq(map)
+    }
+
+    pub fn deserialize<'de, M, K, V, D>(deserializer: D) -> Result<M, D::Error>
+    where
+        M: FromIterator<(K, V)>,
+        K: Deserialize<'de>,
+        V: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        Ok(Vec::<(K, V)>::deserialize(deserializer)?.into_iter().collect())
+    }
+}
+
+/// A map of deadlines ([`instant`]) under any key, stored as `[key, wall-clock]` pairs.
+pub mod instant_map {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::time::Instant;
+
+    pub fn serialize<'a, M, K, S>(map: &'a M, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        &'a M: IntoIterator<Item = (&'a K, &'a Instant)>,
+        K: Serialize + 'a,
+        S: Serializer,
+    {
+        serializer.collect_seq(
+            map.into_iter()
+                .map(|(key, instant)| (key, super::instant::to_wall(*instant))),
+        )
+    }
+
+    pub fn deserialize<'de, M, K, D>(deserializer: D) -> Result<M, D::Error>
+    where
+        M: FromIterator<(K, Instant)>,
+        K: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        Ok(Vec::<(K, (u64, u32))>::deserialize(deserializer)?
+            .into_iter()
+            .map(|(key, wall)| (key, super::instant::from_wall(wall)))
+            .collect())
+    }
+}
+
+/// Restore a state whose records keep catalog words as `&'static str` (`"available"`,
+/// `"pending"`): such a type deserializes only from data that lives forever, so the snapshot is
+/// kept for the life of the process and the words borrow from it. That is one copy of the
+/// snapshot per restore, which happens once, at boot. Derive the record types with
+/// `#[serde(bound(deserialize = "'de: 'static"))]`.
+pub fn restore_static<T: serde::Deserialize<'static>>(snapshot: Value) -> Result<T, String> {
+    let snapshot: &'static Value = Box::leak(Box::new(snapshot));
+    T::deserialize(snapshot).map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,5 +445,40 @@ mod tests {
             Err(PersistError::Foreign { .. })
         ));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A direct `&'static str` field is borrowed by serde on its own; a word nested inside
+    // another type needs `#[serde(bound(deserialize = "'de: 'static"))]` on the record.
+    #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct Record {
+        state: &'static str,
+        #[serde(with = "entries")]
+        by_pair: std::collections::BTreeMap<(String, String), u32>,
+        #[serde(with = "instant_map")]
+        due: std::collections::BTreeMap<(String, String), std::time::Instant>,
+        #[serde(with = "instant")]
+        started: std::time::Instant,
+    }
+
+    #[test]
+    fn tuple_keys_deadlines_and_catalog_words_survive_json_text() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let key = ("vol-1".to_string(), "i-1".to_string());
+        let record = Record {
+            state: "attaching",
+            by_pair: [(key.clone(), 7)].into(),
+            due: [(key.clone(), now + Duration::from_secs(30))].into(),
+            started: now,
+        };
+        // A plain JSON map would refuse the tuple key here.
+        let text = serde_json::to_string(&record).unwrap();
+        let back: Record = restore_static(serde_json::from_str(&text).unwrap()).unwrap();
+        assert_eq!(back.state, "attaching");
+        assert_eq!(back.by_pair, record.by_pair);
+        // A deadline keeps its remaining span, to within the time this test takes.
+        let ahead = back.due[&key].saturating_duration_since(Instant::now());
+        assert!(ahead > Duration::from_secs(28) && ahead <= Duration::from_secs(30), "{ahead:?}");
+        assert!(back.started <= Instant::now());
     }
 }

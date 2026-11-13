@@ -233,6 +233,7 @@ pub fn key_pair_selector<'a, E>(
 /// the reported view rather than inside it: a read that did not ask for it cannot report it
 /// by accident, and [`Self::view`] is the one place the choice is made.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct KeyPairRecord {
     /// Everything `DescribeKeyPairs` reports about this key pair except its public key
     /// material: its id, name, type, fingerprint, creation time and tags.

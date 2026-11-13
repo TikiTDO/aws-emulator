@@ -30,16 +30,19 @@ pub struct DescribeCapacityManagerDataExportsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CapacityManagerDataExportResponse")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CapacityManagerDataExportResponse {
     pub capacity_manager_data_export_id: Option<String>,
     pub s3_bucket_name: Option<String>,
     pub s3_bucket_prefix: Option<String>,
     pub schedule: Option<String>,
     pub output_format: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_time: Option<::aws_smithy_types::DateTime>,
     pub latest_delivery_status: Option<String>,
     pub latest_delivery_status_message: Option<String>,
     pub latest_delivery_s3_location_uri: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub latest_delivery_time: Option<::aws_smithy_types::DateTime>,
     pub tags: Option<Vec<Tag>>,
 }

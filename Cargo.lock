@@ -12449,6 +12449,7 @@ dependencies = [
  "pkcs1",
  "pkcs8 0.10.2",
  "roxmltree",
+ "serde",
  "serde_json",
  "service-com-amazonaws-ebs-ebs",
  "service-com-amazonaws-iam-awsidentitymanagementv20100508",

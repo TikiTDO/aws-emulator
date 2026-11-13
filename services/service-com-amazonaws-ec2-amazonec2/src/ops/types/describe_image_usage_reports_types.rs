@@ -31,6 +31,7 @@ pub struct DescribeImageUsageReportsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ImageUsageReport")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ImageUsageReport {
     pub image_id: Option<String>,
     pub report_id: Option<String>,
@@ -38,13 +39,16 @@ pub struct ImageUsageReport {
     pub account_ids: Option<Vec<String>>,
     pub state: Option<String>,
     pub state_reason: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub creation_time: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub expiration_time: Option<::aws_smithy_types::DateTime>,
     pub tags: Option<Vec<Tag>>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ImageUsageResourceType")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ImageUsageResourceType {
     pub resource_type: Option<String>,
     pub resource_type_options: Option<Vec<ImageUsageResourceTypeOption>>,
@@ -52,6 +56,7 @@ pub struct ImageUsageResourceType {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ImageUsageResourceTypeOption")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ImageUsageResourceTypeOption {
     pub option_name: Option<String>,
     pub option_values: Option<Vec<String>>,

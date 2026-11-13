@@ -30,6 +30,7 @@ pub struct GetIpamRoutingPolicyRegistrationsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpamRoutingPolicyRegistration")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamRoutingPolicyRegistration {
     pub cidr: Option<String>,
     pub asns: Option<Vec<String>>,
