@@ -1988,3 +1988,9 @@ mod delete_local_gateway_route_table;
 // — declared at the tail of this file, which is where every new ec2 suite lands.
 #[path = "all/capacity_manager_monitored_tag_keys.rs"]
 mod capacity_manager_monitored_tag_keys;
+// The endpoint-type rule `CreateVpcEndpoint` holds a request to: the `VpcEndpointType` asked
+// for has to be one of the types the endpoint service it names is available through, whichever
+// source that service came from — declared at the tail of this file, which is where every new
+// ec2 suite lands.
+#[path = "all/vpc_endpoint_type_matches_service.rs"]
+mod vpc_endpoint_type_matches_service;

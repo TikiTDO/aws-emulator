@@ -19,7 +19,10 @@
 //! reports from ([`crate::state::endpoint_service_name_is_offered`]): the services Amazon
 //! Web Services publishes in the Region the name carries and the account's own
 //! configurations, so a name neither offers is refused with `InvalidServiceName` instead of
-//! yielding an endpoint to a service that does not exist. An endpoint to one of the
+//! yielding an endpoint to a service that does not exist. The resolved service also decides
+//! which endpoint TYPES it can be reached through, so a type that service does not offer is
+//! refused with `InvalidParameter` naming the requested type and the service's own
+//! ([`crate::state::endpoint_type_mismatch`]). An endpoint to one of the
 //! account's own services also owes the `pendingAcceptance` state and a
 //! `VpcEndpointConnection` row, which is that operation's change rather than this one's.
 //!
@@ -514,6 +517,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // exist, which nothing could ever reach.
         if !state::endpoint_service_name_is_offered(&store, service_name) {
             return Err(state::invalid_service_name(service_name));
+        }
+
+        // "The type of endpoint" (`VpcEndpointType`) has to be one the SERVICE is reachable
+        // through ("the type of service", `ServiceDetail$ServiceType`): a gateway endpoint
+        // reaches a service only through that service's route-table prefix list and an
+        // interface endpoint only through endpoint network interfaces the service answers
+        // on, so an endpoint of a type the service does not offer would reach nothing at
+        // all. The types come from the one catalogue the describe reports from
+        // ([`crate::state::endpoint_service_types`]), so the pair the refusal names is the
+        // pair that describe shows, and a service whose types this emulator cannot know —
+        // one another account or a Marketplace partner offers — is held to its name's form
+        // alone rather than to a type list that does not exist here.
+        if let Some(service_types) = state::endpoint_service_types(&store, service_name) {
+            if !service_types.contains(&endpoint_type) {
+                return Err(state::endpoint_type_mismatch(&endpoint_type, &service_types));
+            }
         }
 
         // "To use a private hosted zone, you must set the following VPC attributes to true:

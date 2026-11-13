@@ -867,7 +867,11 @@ async fn a_request_that_cannot_be_served_is_refused_with_the_code_for_its_cause(
             "a route table the account does not hold",
             vec![
                 param("VpcId", &built.vpc_id),
-                param("ServiceName", SERVICE),
+                // A route table is a GATEWAY endpoint's member, so the service named here is
+                // one the Region offers a gateway endpoint to: a gateway endpoint to an
+                // interface-only service is refused for its TYPE before any table is looked
+                // up.
+                param("ServiceName", "com.amazonaws.us-east-1.s3"),
                 param("RouteTableId.1", "rtb-0000000000000beef"),
             ],
             400,
@@ -984,58 +988,79 @@ async fn a_service_name_is_resolved_against_the_one_endpoint_service_catalogue()
 
     // `offered` is what the catalogue is expected to hold; every row is checked against the
     // describe as well, so a row that disagreed with the catalogue would fail there rather
-    // than silently assert this test's own opinion.
-    let rows: [(&str, &str, bool); 11] = [
-        ("a gateway service", "com.amazonaws.us-east-1.s3", true),
-        ("an interface service", "com.amazonaws.us-east-1.logs", true),
+    // than silently assert this test's own opinion. Each row also names the endpoint TYPE its
+    // service is available through (`None` leaves the member out, which is the documented
+    // `Gateway` default), since a type the service does not offer is a refusal of its own.
+    let rows: [(&str, &str, Option<&str>, bool); 11] = [
+        (
+            "a gateway service",
+            "com.amazonaws.us-east-1.s3",
+            None,
+            true,
+        ),
+        (
+            "an interface service",
+            "com.amazonaws.us-east-1.logs",
+            Some("Interface"),
+            true,
+        ),
         (
             "a service label carrying a dot",
             "com.amazonaws.us-east-1.ecr.dkr",
+            Some("Interface"),
             true,
         ),
         (
             "a member of the aws.api family",
             "aws.api.us-east-1.emr-service-cell01",
+            Some("Interface"),
             true,
         ),
         (
             "a member of the api.aws family",
             "api.aws.us-east-1.cassandra-streams",
+            Some("Interface"),
             true,
         ),
         (
             "a label the catalogue does not publish",
             "com.amazonaws.us-east-1.not-a-real-service",
+            None,
             false,
         ),
         (
             "a near-miss of a published label",
             "com.amazonaws.us-east-1.s3-express",
+            None,
             false,
         ),
         (
             "an aws.api label the catalogue does not publish",
             "aws.api.us-east-1.emr-service-cell02",
+            None,
             false,
         ),
         (
             "an api.aws label published under com.amazonaws instead",
             "api.aws.us-east-1.cassandra",
+            None,
             false,
         ),
         (
             "an upper-cased label",
             "com.amazonaws.us-east-1.LOGS",
+            None,
             false,
         ),
         (
             "a partner-form name whose label is no service id",
             "com.amazonaws.vpce.us-east-1.not-a-service-id",
+            None,
             false,
         ),
     ];
 
-    for (case, service_name, offered) in rows {
+    for (case, service_name, endpoint_type, offered) in rows {
         // What the catalogue says, read through the describe that reports it.
         let (describe_status, describe_body) = call(
             &router,
@@ -1043,15 +1068,17 @@ async fn a_service_name_is_resolved_against_the_one_endpoint_service_catalogue()
             &indexed("ServiceName", &[service_name]),
         )
         .await;
-        let (status, body) = call(
-            &router,
-            "CreateVpcEndpoint",
-            &[
-                param("VpcId", &built.vpc_id),
-                param("ServiceName", service_name),
-            ],
-        )
-        .await;
+        let mut params = vec![
+            param("VpcId", &built.vpc_id),
+            param("ServiceName", service_name),
+        ];
+        if let Some(endpoint_type) = endpoint_type {
+            params.push(param("VpcEndpointType", endpoint_type));
+            // An interface endpoint stands up an endpoint network interface, which takes a
+            // subnet; the defaulted gateway type stands up none and refuses one.
+            params.extend(indexed("SubnetId", &[built.subnets[0].as_str()]));
+        }
+        let (status, body) = call(&router, "CreateVpcEndpoint", &params).await;
         assert_eq!(
             describe_status == 200,
             offered,
@@ -1099,8 +1126,8 @@ async fn a_service_name_is_resolved_against_the_one_endpoint_service_catalogue()
     let names: BTreeSet<String> = elements(&created, "serviceName").into_iter().collect();
     let expected: BTreeSet<String> = rows
         .iter()
-        .filter(|(_, _, offered)| *offered)
-        .map(|(_, service_name, _)| (*service_name).to_string())
+        .filter(|(_, _, _, offered)| *offered)
+        .map(|(_, service_name, _, _)| (*service_name).to_string())
         .collect();
     assert_eq!(
         names, expected,

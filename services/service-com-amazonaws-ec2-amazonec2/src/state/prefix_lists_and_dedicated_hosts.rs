@@ -2565,6 +2565,53 @@ pub fn endpoint_service_name_is_offered(
         .any(|service| service.service_name == service_name)
 }
 
+/// The endpoint TYPES the endpoint service called `service_name` is reachable through — the
+/// `ServiceType` enum members `ServiceDetail$ServiceType` reports for it — or `None` for a
+/// name this service holds no catalogue entry for.
+///
+/// The two sources are the two [`endpoint_service_name_is_offered`] resolves a name against,
+/// read in the same order, so the types a create of an endpoint is held to are exactly the
+/// ones `DescribeVpcEndpointServices` reports for that service. `None` is the PARTNER family
+/// (`com.amazonaws.vpce.<region>.<service-id>`), whose service belongs to another account and
+/// whose types are therefore not knowable here: such a name is read for form only, the way
+/// that function reads it, rather than held to a type list this emulator does not have.
+pub fn endpoint_service_types(
+    store: &ComAmazonawsEc2Amazonec2State,
+    service_name: &str,
+) -> Option<Vec<String>> {
+    let parsed = parse_endpoint_service_name(service_name)?;
+    if let Some(service) = store
+        .vpc_endpoint_services
+        .values()
+        .filter_map(account_endpoint_service_record)
+        .find(|service| service.service_name == service_name)
+    {
+        return Some(service.service_types);
+    }
+    endpoint_services_in_region(&parsed.region)
+        .into_iter()
+        .find(|service| service.service_name == service_name)
+        .map(|service| service.service_types)
+}
+
+/// Refuse an endpoint of a type the service it names is not reachable through: HTTP 400
+/// [`INVALID_PARAMETER`], naming the type the request asked for and the types the service is
+/// available through.
+///
+/// "The type of endpoint" (`CreateVpcEndpointRequest$VpcEndpointType`) has to be one of the
+/// service's own ("the type of service", `ServiceDetail$ServiceType`) — an endpoint of any
+/// other type would reach nothing — so the pair is what the message names.
+pub fn endpoint_type_mismatch<E>(endpoint_type: &str, service_types: &[String]) -> Scaffolded<E> {
+    Scaffolded::service_error(
+        INVALID_PARAMETER,
+        400,
+        format!(
+            "Endpoint type ({endpoint_type}) does not match available service types ([{types}]).",
+            types = service_types.join(", "),
+        ),
+    )
+}
+
 /// The name of an endpoint service the ACCOUNT offers, for the service `service_id` hosted in
 /// `region`.
 ///
