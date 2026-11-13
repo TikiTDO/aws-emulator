@@ -16,15 +16,18 @@
 //! ([`crate::state::ComAmazonawsEventbridgeAwseventsState::settle_replays`]),
 //! earning the `ReplayEndTime` every terminal replay carries, so a caller polling
 //! `DescribeReplay` straight after the call still observes the transient state.
-//! That cancelled state REPLACES the `COMPLETED` the clock owed the replay: a
-//! replay that was stopped did not finish its window.
+//! That cancelled state REPLACES the progress the clock owed the replay, so the
+//! replay never reaches `COMPLETED`: a replay that was stopped did not finish its
+//! window.
 //!
 //! "An error occurred because a replay can be canceled only when the state is
-//! Running or Starting" (`IllegalStatusException`): a replay that has already
-//! settled — or is already cancelling — is in a state this call cannot change, so
-//! it is refused with that modelled error rather than answered as if it had been
-//! cancelled again. The name stays held either way, so `StartReplay` reusing it is
-//! still `ResourceAlreadyExistsException`.
+//! Running or Starting" (`IllegalStatusException`): a replay is cancellable for as
+//! long as it has not finished its window — through BOTH the states a started
+//! replay passes ([`crate::state::next_replay_state`]) — and only a replay that
+//! has already settled, or is already cancelling, is in a state this call cannot
+//! change, so only that one is refused with the modelled error rather than
+//! answered as if it had been cancelled again. The name stays held either way, so
+//! `StartReplay` reusing it is still `ResourceAlreadyExistsException`.
 //!
 //! ## Shape of an operation
 //!
@@ -175,7 +178,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut store = state.lock();
         // What the clock already owed the replays is settled first, so the state
         // this call guards on is the state the replay is in at this instant —
-        // never the one the last write left behind.
+        // the progress the replay itself has made, never a terminal state seeded
+        // ahead of it and never the one the last write left behind.
         store.settle_replays(now);
 
         // `replay_mut` CREATES nothing — a replay comes into existence only

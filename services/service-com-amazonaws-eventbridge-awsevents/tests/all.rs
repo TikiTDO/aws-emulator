@@ -137,6 +137,8 @@ mod replay_cancellation;
 mod replay_filter_arns_scoping;
 #[path = "all/replay_name_opt_out.rs"]
 mod replay_name_opt_out;
+#[path = "all/replay_progress_states.rs"]
+mod replay_progress_states;
 #[path = "all/reserved_event_source.rs"]
 mod reserved_event_source;
 #[path = "all/resource_tagging.rs"]

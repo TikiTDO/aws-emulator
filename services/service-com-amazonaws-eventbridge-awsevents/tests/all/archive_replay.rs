@@ -48,12 +48,13 @@ const REGION: &str = "us-west-2";
 const SOURCE: &str = "com.demo.orders";
 const DETAIL_TYPE: &str = "Order Placed";
 
-/// How long a test waits before reading a resource whose next state the clock
-/// owes it: the span itself plus enough slack that a loaded machine does not make
-/// the wait the flaky part of the assertion.
-fn past_the_transition(span: Duration) -> Duration {
-    span + Duration::from_millis(250)
-}
+/// How long a poll of a replay's progress waits, at the OUTSIDE, for the state
+/// the clock owes it: generous, because what is asserted is the state the replay
+/// converges on and never how fast the host got it there.
+const SETTLE_DEADLINE: Duration = Duration::from_secs(60);
+
+/// How long a poll of a replay's progress waits between two reads.
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// The emulator: EventBridge and SQS on one engine, because a rule's target is an
 /// SQS queue and a redelivery is asserted on the queue.
@@ -120,6 +121,36 @@ async fn events(emulator: &Emulator, operation: &str, body: &Value) -> (u16, Val
 
 async fn sqs(emulator: &Emulator, operation: &str, body: &Value) -> (u16, Value) {
     rpc(emulator, "sqs", "AmazonSQS", "1.0", operation, body).await
+}
+
+/// The replay `name`, read back once its `State` is `wanted`: the read is
+/// repeated until it is, or until [`SETTLE_DEADLINE`] passes, so what the test
+/// waits for is the CONDITION and not a span. A replay that settles in any OTHER
+/// terminal state fails at once — no further read can move it to `wanted`.
+async fn poll_until_state(emulator: &Emulator, case: &str, name: &str, wanted: &str) -> Value {
+    let deadline = ::std::time::Instant::now() + SETTLE_DEADLINE;
+    loop {
+        let (status, body) = events(emulator, "DescribeReplay", &json!({ "ReplayName": name })).await;
+        assert_eq!(
+            status, 200,
+            "case {case}: DescribeReplay answered {status} {body}"
+        );
+        let reported = body["State"].as_str().unwrap_or_default().to_string();
+        if reported == wanted {
+            return body;
+        }
+        assert!(
+            !state::is_terminal_replay_state(&reported),
+            "case {case}: expected the replay to reach {wanted}, but it settled in \
+             {reported:?}, which nothing leaves: {body}"
+        );
+        assert!(
+            ::std::time::Instant::now() < deadline,
+            "case {case}: expected the replay to reach {wanted}, got {reported:?} up to the \
+             deadline: {body}"
+        );
+        ::tokio::time::sleep(POLL_INTERVAL).await;
+    }
 }
 
 /// The wire error code of a failure body (`__type` on awsJson), without its
@@ -623,7 +654,6 @@ async fn a_replay_redelivers_the_archived_events_its_window_selects() {
         );
 
         // What the replay reports it replayed, read back under its name.
-        ::tokio::time::sleep(past_the_transition(state::REPLAY_TRANSITION)).await;
         let (status, body) = events(
             &emulator,
             "DescribeReplay",
@@ -762,8 +792,11 @@ async fn a_replay_reaches_completed_and_stays_there() {
          with, got {body}"
     );
 
-    // Past the span, every read reports the terminal state and the same end time.
-    ::tokio::time::sleep(past_the_transition(state::REPLAY_TRANSITION)).await;
+    // The replay reaches its terminal state on its own: looked for by polling the
+    // replay's own progress, not by waiting a fixed time. Then every read reports
+    // that state and the same end time.
+    poll_until_state(&emulator, "the replay's progress", replay, state::REPLAY_STATE_COMPLETED)
+        .await;
     let mut seen: Vec<Value> = Vec::new();
     for read in 0..2 {
         let (status, body) = events(

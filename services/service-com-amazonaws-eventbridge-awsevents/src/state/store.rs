@@ -436,27 +436,14 @@ impl ComAmazonawsEventbridgeAwseventsState {
     /// and answer how many replays one was applied to.
     ///
     /// Each change is owed by the clock alone: the non-terminal state a call left
-    /// the replay in moves on [`REPLAY_TRANSITION`] after that call —
-    /// `STARTING` -> [`REPLAY_STATE_COMPLETED`] after `StartReplay`,
-    /// `CANCELLING` -> [`REPLAY_STATE_CANCELLED`] after `CancelReplay`. It was
-    /// owed at the same instant even if nobody had called, which is why a
-    /// reporting operation may finish it.
+    /// the replay in moves on [`REPLAY_TRANSITION`] after that call, along the
+    /// progression [`next_replay_state`] lays out
+    /// ([`ReplayRecord::settle`]). It was owed at the same instant even if nobody
+    /// had called, which is why a reporting operation may finish it.
     pub fn settle_replays(&mut self, now: SystemTime) -> usize {
         let mut settled = 0usize;
         for replay in self.replays.values_mut() {
-            let Some(pending) = replay.pending.clone().filter(|owed| owed.due <= now) else {
-                continue;
-            };
-            // The state moves to the instant the transition fell DUE, not to the
-            // instant it was noticed, so two reads agree.
-            replay.pending = None;
-            replay.state = pending.state;
-            // A replay that has reached a state nothing leaves ended when that
-            // state fell due; one still on its way reports no end yet.
-            if is_terminal_replay_state(&replay.state) {
-                replay.replay_end_time = Some(pending.due);
-            }
-            settled += 1;
+            settled += usize::from(replay.settle(now));
         }
         settled
     }

@@ -62,12 +62,13 @@ fn account() -> &'static str {
     engine::emulator_account_id()
 }
 
-/// How long a test waits before reading a resource whose next state the clock
-/// owes it: the span itself plus enough slack that a loaded machine does not make
-/// the wait the flaky part of the assertion.
-fn past_the_transition(span: Duration) -> Duration {
-    span + Duration::from_millis(250)
-}
+/// How long a poll of a replay's progress waits, at the OUTSIDE, for the state
+/// the clock owes it: generous, because what is asserted is the state the replay
+/// converges on and never how fast the host got it there.
+const SETTLE_DEADLINE: Duration = Duration::from_secs(60);
+
+/// How long a poll of a replay's progress waits between two reads.
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 async fn call(emulator: &Emulator, operation: &str, body: &Value) -> (u16, Value) {
     let credential = format!(
@@ -177,6 +178,36 @@ async fn given_archive(emulator: &Emulator, label: &str) -> (String, String, Str
     (bus_arn, archive, archive_arn)
 }
 
+/// The replay `name`, read back once its `State` is `wanted`: the read is
+/// repeated until it is, or until [`SETTLE_DEADLINE`] passes, so what the test
+/// waits for is the CONDITION and not a span. A replay that settles in any OTHER
+/// terminal state fails at once — no further read can move it to `wanted`.
+async fn poll_until_state(emulator: &Emulator, case: &str, name: &str, wanted: &str) -> Value {
+    let deadline = std::time::Instant::now() + SETTLE_DEADLINE;
+    loop {
+        let (status, body) = call(emulator, "DescribeReplay", &json!({ "ReplayName": name })).await;
+        assert_eq!(
+            status, 200,
+            "case {case}: DescribeReplay answered {status} {body}"
+        );
+        let reported = body["State"].as_str().unwrap_or_default().to_string();
+        if reported == wanted {
+            return body;
+        }
+        assert!(
+            !state::is_terminal_replay_state(&reported),
+            "case {case}: expected the replay to reach {wanted}, but it settled in \
+             {reported:?}, which nothing leaves: {body}"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "case {case}: expected the replay to reach {wanted}, got {reported:?} up to the \
+             deadline: {body}"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
 /// Every replay `ListReplays` reports under `filter`.
 async fn listed(emulator: &Emulator, case: &str, filter: &Value) -> Vec<Value> {
     let (status, body) = call(emulator, "ListReplays", filter).await;
@@ -268,10 +299,15 @@ async fn a_cancelled_replay_settles_cancelled_and_stays_terminal() {
          ReplayEndTime, got {body}"
     );
 
-    tokio::time::sleep(past_the_transition(state::REPLAY_TRANSITION)).await;
-
     // And then it is CANCELLED — never COMPLETED — with an end time every later
-    // read agrees on.
+    // read agrees on. The wait is for that state, not for a span.
+    poll_until_state(
+        &emulator,
+        "after the cancel",
+        replay,
+        state::REPLAY_STATE_CANCELLED,
+    )
+    .await;
     let mut seen: Vec<Value> = Vec::new();
     for read in ["first read", "second read"] {
         let (status, body) =
@@ -360,7 +396,23 @@ async fn cancel_replay_refuses_a_replay_it_cannot_stop() {
     )
     .await;
     assert_eq!(status, 200, "the settled replay's cancel: {status} {body}");
-    tokio::time::sleep(past_the_transition(state::REPLAY_TRANSITION)).await;
+    // Each of those two is left until its own record says it has settled: the one
+    // nobody stopped runs its whole progression to COMPLETED, the cancelled one
+    // settles CANCELLED.
+    poll_until_state(
+        &emulator,
+        "the replay the clock completed",
+        "completed",
+        state::REPLAY_STATE_COMPLETED,
+    )
+    .await;
+    poll_until_state(
+        &emulator,
+        "the replay that settled cancelled",
+        "settled",
+        state::REPLAY_STATE_CANCELLED,
+    )
+    .await;
     // And one cancelled just now, so it is still CANCELLING.
     let (status, body) = start_replay(&emulator, &bus_arn, &archive_arn, "cancelling").await;
     assert_eq!(status, 200, "the cancelling replay's start: {status} {body}");
@@ -622,7 +674,7 @@ async fn list_replays_reports_the_replays_one_filter_selects() {
         .to_string();
 
     // Two replays over the first archive: one left to complete and one cancelled,
-    // both settled by the wait below.
+    // both settled by the polls below.
     for name in ["alpha-done", "alpha-settled"] {
         let (status, body) = start_replay(&emulator, &bus_arn, &archive_arn, name).await;
         assert_eq!(status, 200, "the start of {name} answered {status} {body}");
@@ -634,7 +686,20 @@ async fn list_replays_reports_the_replays_one_filter_selects() {
     )
     .await;
     assert_eq!(status, 200, "the cancel of alpha-settled: {status} {body}");
-    tokio::time::sleep(past_the_transition(state::REPLAY_TRANSITION)).await;
+    poll_until_state(
+        &emulator,
+        "the replay left to complete",
+        "alpha-done",
+        state::REPLAY_STATE_COMPLETED,
+    )
+    .await;
+    poll_until_state(
+        &emulator,
+        "the replay left to settle cancelled",
+        "alpha-settled",
+        state::REPLAY_STATE_CANCELLED,
+    )
+    .await;
     // And a third started and cancelled only now, so it is still CANCELLING when
     // the listings below read it.
     let (status, body) = start_replay(&emulator, &bus_arn, &archive_arn, "beta-cancelling").await;

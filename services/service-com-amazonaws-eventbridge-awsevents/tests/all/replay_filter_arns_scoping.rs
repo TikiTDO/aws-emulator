@@ -255,9 +255,11 @@ async fn publish(emulator: &Emulator, detail: &Value, anchor: i64, offset: i64) 
 }
 
 /// Poll `DescribeReplay` until the replay has left the states a replay still
-/// moves out of, and answer what it reports then.
+/// moves out of, and answer what it reports then. The wait is for that CONDITION
+/// and is given generous room, so a loaded host does not decide the assertion.
 async fn settled_replay(emulator: &Emulator, replay: &str) -> Value {
-    for _ in 0..40 {
+    let deadline = ::std::time::Instant::now() + Duration::from_secs(60);
+    loop {
         let (status, body) = events(
             emulator,
             "DescribeReplay",
@@ -272,9 +274,12 @@ async fn settled_replay(emulator: &Emulator, replay: &str) -> Value {
         if state::is_terminal_replay_state(&state) {
             return body;
         }
+        assert!(
+            ::std::time::Instant::now() < deadline,
+            "case {replay}: the replay never reached a terminal state, last read {body}"
+        );
         ::tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("case {replay}: the replay never reached a terminal state");
 }
 
 /// `FilterArns` confines a replay to the rules it names, whatever the rules'
