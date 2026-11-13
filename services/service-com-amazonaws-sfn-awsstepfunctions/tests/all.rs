@@ -29,6 +29,8 @@ mod activity_tasks;
 mod activity_worker_hand_off;
 #[path = "all/alias_order_and_redrive_context.rs"]
 mod alias_order_and_redrive_context;
+#[path = "all/alias_traffic_split_series.rs"]
+mod alias_traffic_split_series;
 #[path = "all/arn_validation.rs"]
 mod arn_validation;
 #[path = "all/backup_task_integration.rs"]
