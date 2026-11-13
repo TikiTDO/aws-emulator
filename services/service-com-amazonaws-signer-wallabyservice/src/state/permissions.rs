@@ -156,6 +156,122 @@ pub fn ungrantable_action_message(action: &str, platform_id: &str) -> String {
     )
 }
 
+/// How wide an AWS account id is, as this service's own model states it:
+/// `AccountId` is `@length(12, 12)` with `^[0-9]{12}$`
+/// (`smithy_query(query="shape", shape="AccountId")`) — the form every member of
+/// this service that carries an account id (a job's `jobOwner` and `jobInvoker`,
+/// a signing call's `profileOwner`) is held to at the boundary.
+const ACCOUNT_ID_DIGITS: usize = 12;
+
+/// Whether `value` is an AWS account id: exactly [`ACCOUNT_ID_DIGITS`] ASCII
+/// digits, the form the modelled `AccountId` shape publishes.
+fn is_account_id(value: &str) -> bool {
+    value.len() == ACCOUNT_ID_DIGITS && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// The `(service, resource prefix, least number of `/`-separated parts after the
+/// prefix)` forms an ARN takes to name an AWS principal; a row whose count is
+/// zero is one whose prefix is the WHOLE resource.
+///
+/// Not a chosen list: `AddProfilePermissionRequest$principal` is "The AWS
+/// principal receiving cross-account permissions. This may be an IAM role or
+/// another AWS account ID" (`smithy_query(query="doc",
+/// shape="AddProfilePermissionRequest", member="principal")`), and a grant
+/// becomes the `AWS` key of the policy statement's `Principal` — which AWS's
+/// policy grammar publishes as an account id, an account root ARN, an IAM user
+/// or role ARN, or a role-session ARN (an assumed role or a federated user). A
+/// path before an IAM name, and the session name after a role, are part of those
+/// forms, which is why the parts after the prefix are COUNTED rather than
+/// spelled out: an IAM name carries no bound this grant is the place to apply.
+const PRINCIPAL_ARN_FORMS: [(&str, &str, usize); 5] = [
+    ("iam", "root", 0),
+    ("iam", "user/", 1),
+    ("iam", "role/", 1),
+    ("sts", "assumed-role/", 2),
+    ("sts", "federated-user/", 1),
+];
+
+/// Whether `resource` is `prefix` followed by at least `least` `/`-separated
+/// parts, none of them empty — and by nothing at all when `least` is zero.
+fn names_parts_after(resource: &str, prefix: &str, least: usize) -> bool {
+    let Some(rest) = resource.strip_prefix(prefix) else {
+        return false;
+    };
+    if least == 0 {
+        return rest.is_empty();
+    }
+    let mut parts = 0usize;
+    for part in rest.split('/') {
+        if part.is_empty() {
+            return false;
+        }
+        parts += 1;
+    }
+    parts >= least
+}
+
+/// Whether `value` is the ARN of an AWS principal: one of
+/// [`PRINCIPAL_ARN_FORMS`] under
+/// `arn:<partition>:<service>::<account id>:<resource>`.
+///
+/// A principal is an identity, which is global within its account: such an ARN
+/// carries no region, and its account field is an account id
+/// ([`is_account_id`]). A judgement on the ARN's SHAPE alone — a grant is
+/// CROSS-account, so the identity it names lives in an account this endpoint
+/// holds nothing of and could not be resolved even in principle.
+fn is_principal_arn(value: &str) -> bool {
+    // `arn : partition : service : region : account : resource`, the resource
+    // being the remainder because it carries `/`-separated parts of its own.
+    let mut fields = value.splitn(6, ':');
+    if fields.next() != Some("arn") {
+        return false;
+    }
+    let (Some(partition), Some(service), Some(region), Some(account), Some(resource)) = (
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+    ) else {
+        return false;
+    };
+    if partition.is_empty() || !region.is_empty() || !is_account_id(account) {
+        return false;
+    }
+    PRINCIPAL_ARN_FORMS
+        .iter()
+        .any(|(arn_service, prefix, least)| {
+            *arn_service == service && names_parts_after(resource, prefix, *least)
+        })
+}
+
+/// Whether `value` names an AWS principal — the only thing a cross-account grant
+/// can be written FOR: an AWS account id, or the ARN of an identity in one
+/// account ([`PRINCIPAL_ARN_FORMS`]).
+///
+/// `principal` is an unconstrained `String` in the model, so the boundary
+/// validator admits any text; what the member carries is an AWS principal, and a
+/// statement whose principal names no AWS identity grants nothing to anybody.
+pub fn is_aws_principal(value: &str) -> bool {
+    is_account_id(value) || is_principal_arn(value)
+}
+
+/// The refusal prose for a `principal` that names no AWS principal: the value,
+/// and the forms a principal takes — so the caller can fix the request from the
+/// text alone, the way [`ungrantable_action_message`] states the actions a grant
+/// may carry.
+///
+/// `principal` is a bare string in the model, so the supplied value is quoted
+/// through the one ceiling this crate states for a request value a clause
+/// carries ([`super::stated_value`]).
+pub fn invalid_principal_message(principal: &str) -> String {
+    format!(
+        "Invalid principal {}. principal must be an AWS account ID of {ACCOUNT_ID_DIGITS} digits, \
+         or the ARN of an AWS account root, an IAM user, an IAM role or a role session",
+        super::stated_value(principal)
+    )
+}
+
 /// The IAM policy-language version every Signer profile permission policy is
 /// written in — the one AWS's policy grammar publishes
 /// (`"Version": "2012-10-17"`).

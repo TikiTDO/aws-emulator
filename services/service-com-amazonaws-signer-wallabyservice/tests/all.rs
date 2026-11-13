@@ -62,6 +62,9 @@ mod profile_lifecycle_contract;
 #[path = "all/profile_listing_pagination.rs"]
 mod profile_listing_pagination;
 
+#[path = "all/profile_permission_principal_form.rs"]
+mod profile_permission_principal_form;
+
 #[path = "all/profile_permissions.rs"]
 mod profile_permissions;
 
