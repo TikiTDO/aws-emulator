@@ -165,6 +165,7 @@ dependencies = [
  "bytes",
  "http",
  "http-body-util",
+ "serde_json",
  "tokio",
  "uuid",
 ]

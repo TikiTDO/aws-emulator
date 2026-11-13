@@ -20,4 +20,5 @@ emulator-telemetry = { path = "../emulator-telemetry", package = "aws-emulator-e
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util", "time"] }
