@@ -25,5 +25,7 @@ mod constraint_refusals;
 mod identity_authorization;
 #[path = "all/put_audit_events.rs"]
 mod put_audit_events;
+#[path = "all/session_scoped_authorization.rs"]
+mod session_scoped_authorization;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;

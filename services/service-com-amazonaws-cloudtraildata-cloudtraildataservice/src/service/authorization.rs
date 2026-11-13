@@ -17,11 +17,15 @@
 //!    place `sts:GetCallerIdentity` answers from ([`sts_store::resolve_caller`]) for a
 //!    session credential, and from IAM's own `access_keys` map (the map `iam:GetUser`
 //!    resolves a caller through) for a long-term key;
-//! 2. **what it may do** — the identity-based policy documents in force on that principal
-//!    and the permissions boundary that caps them, read through the IAM service's OWN
+//! 2. **what it may do** — the identity-based policy documents in force on that principal,
+//!    the permissions boundary that caps them, read through the IAM service's OWN
 //!    accessors (`principal_policies`, `permissions_boundary_document`), so a document
 //!    `iam:PutRolePolicy` wrote takes effect on the next call and deleting it lifts it
-//!    again;
+//!    again — and the SESSION POLICIES the mint of this very credential scoped it with
+//!    ([`sts_store::session_scoping_documents`]), which cap those documents the same way:
+//!    "the resulting session's permissions are the intersection of the role's
+//!    identity-based policy and the session policies" (`AssumeRoleRequest$PolicyArns`), so
+//!    a session policy takes permissions away and grants none of its own;
 //! 3. **the decision** — [`::service_common::iam_authorization`], the one shared evaluation
 //!    of those documents against `(action, resource)`, and the SENTENCE a refusal carries,
 //!    which is that module's
@@ -90,9 +94,17 @@ pub fn action_for(operation: &str) -> String {
 ///
 /// IAM's order: an explicit `Deny` in a document that CAN be read refuses the request
 /// whatever else the principal carries; otherwise a grant is needed, which a caller this
-/// gate does not bound has by definition (see the module docs); and a grant is capped by the
-/// permissions boundary, since "a permissions boundary sets the maximum permissions that an
-/// identity-based policy can grant" (IAM, permissions boundaries).
+/// gate does not bound has by definition (see the module docs); and a grant is capped BOTH
+/// by the session policies the credential was minted with, since "the resulting session's
+/// permissions are the intersection of the role's identity-based policy and the session
+/// policies" (`AssumeRoleRequest$PolicyArns`), AND by the permissions boundary, since "a
+/// permissions boundary sets the maximum permissions that an identity-based policy can
+/// grant" (IAM, permissions boundaries). Each cap takes permissions away and grants none of
+/// its own, so a call only a cap allows is refused as if that cap had allowed nothing.
+///
+/// Which document withheld the grant is a different fact, and needs a different fix, from an
+/// explicit deny in it — so the refusal names the one the decision rested on, in the order
+/// IAM reads them.
 ///
 /// Asked with NO store guard of this service held, and before the request's own channel
 /// reference is resolved.
@@ -109,29 +121,42 @@ pub fn refusal<Eng: Send + Sync + 'static>(
     // the action and the resource the request addressed.
     let request = iam::Request::new(&action, resource, &[]);
     let said = iam::identity_decision(&caller.documents, &request);
-    if said == Decision::Denied {
-        return Some(iam::not_authorized_by_identity_policy(
-            &caller.arn,
-            &action,
-            resource,
-            iam::IDENTITY_POLICY_EXPLICIT_DENY,
-        ));
+    // Whether anything the principal carries grants the call at all. A caller this gate
+    // does not bound is granted by definition (see the module docs), but an explicit `Deny`
+    // in a document that CAN be read still wins over every grant.
+    let granted = iam::is_allowed(said, Decision::NotStated)
+        || (said != Decision::Denied && caller.identity_is_unbounded());
+    // What the SCOPE this credential was minted with says, through the tree's one reading of
+    // a resolved scope: a credential no mint scoped is capped by nothing, which that reading
+    // answers as allowed.
+    let scoped = caller.scope.decision(&request);
+    // The ceiling in force on the principal. A call an identity-based policy explicitly
+    // DENIES is already refused on that deny, so no ceiling is read for it.
+    let capped = match (said == Decision::Denied, caller.boundary.as_ref()) {
+        (false, Some(boundary)) => {
+            iam::identity_decision(::std::slice::from_ref(boundary), &request)
+        }
+        _ => Decision::Allowed,
+    };
+    if granted && scoped == Decision::Allowed && capped == Decision::Allowed {
+        return None;
     }
-    if !(iam::is_allowed(said, Decision::NotStated) || caller.identity_is_unbounded()) {
-        return Some(iam::not_authorized_by_identity_policy(
-            &caller.arn,
-            &action,
-            resource,
-            &iam::no_identity_policy_allows(&action),
-        ));
-    }
-    let boundary = caller.boundary.as_ref()?;
-    let reason = match iam::identity_decision(::std::slice::from_ref(boundary), &request) {
-        Decision::Allowed => return None,
-        // An explicit deny is a fact about the boundary document, so the refusal names it;
-        // a boundary that merely states nothing withheld the grant the policies gave.
-        Decision::Denied => iam::PERMISSIONS_BOUNDARY_EXPLICIT_DENY.to_string(),
-        Decision::NotStated => iam::no_permissions_boundary_allows(&action),
+    // An explicit deny is a fact about the document that carries it, so the refusal names
+    // that document; otherwise the refusal names the document that WITHHELD the grant — the
+    // principal's own policies where nothing granted the call, the scope where they granted
+    // it and the mint's session policies did not, and the boundary where both did.
+    let reason = if said == Decision::Denied {
+        iam::IDENTITY_POLICY_EXPLICIT_DENY.to_string()
+    } else if scoped == Decision::Denied {
+        iam::SESSION_POLICY_EXPLICIT_DENY.to_string()
+    } else if capped == Decision::Denied {
+        iam::PERMISSIONS_BOUNDARY_EXPLICIT_DENY.to_string()
+    } else if !granted {
+        iam::no_identity_policy_allows(&action)
+    } else if scoped != Decision::Allowed {
+        iam::no_session_policy_allows(&action)
+    } else {
+        iam::no_permissions_boundary_allows(&action)
     };
     Some(iam::not_authorized_by_identity_policy(
         &caller.arn,
@@ -165,6 +190,12 @@ struct Caller {
     /// The permissions boundary in force on the principal, when it carries one whose
     /// document this emulator holds.
     boundary: Option<String>,
+    /// The session policy documents the mint of this request's credential scoped it with, as
+    /// they read at the instant of this request, and whether a managed one among them names a
+    /// document this emulator does not hold. Empty for a credential no mint scoped — every
+    /// long-term access key, and every session minted without session policies — which is a
+    /// credential capped by nothing.
+    scope: sts_store::ScopingPolicies,
     /// Set when this request presents the account's own published credential, which holds
     /// no IAM policies (see the module docs).
     account_credential: bool,
@@ -209,22 +240,35 @@ fn caller<Eng: Send + Sync + 'static>(
     ctx: &::smithy_server_runtime::OperationContext<'_>,
 ) -> Caller {
     let access_key_id = ::engine::extract_akid(&ctx.parts().headers);
-    let identity = match sts_store::service_state(engine) {
-        Some(sts) => sts_store::resolve_caller(
+    // Who the credential speaks for AND what its mint scoped it to, read together from the
+    // session registry: the scope travels with the credential, so the only thing a later
+    // request carries is where it has to be read from.
+    let resolved = match sts_store::service_state(engine) {
+        Some(sts) => sts_store::resolve_request_caller(
             &mut sts.lock(),
             &access_key_id,
             SystemTime::now(),
             ctx.credential_store(),
+            sts_store::ambient_identity(),
         ),
         // No STS store on this engine: the only identity a request can present is the
-        // account's own published credential, which holds no identity policy.
-        None => Ok(sts_store::ambient_identity()),
+        // account's own published credential, which holds no identity policy and which no
+        // mint scoped.
+        None => Ok(sts_store::Caller {
+            identity: sts_store::ambient_identity(),
+            kind: None,
+            source_identity: None,
+            tags: Vec::new(),
+            transitive_tag_keys: Vec::new(),
+            role_arn: None,
+            session_policies: sts_store::SessionPolicies::default(),
+        }),
     };
     // An expired session credential speaks for nobody: it carries no document, so every
     // action it asks for is refused — and the refusal names the credential's STATE rather
     // than the key id that was presented, which this module never quotes back.
-    let identity = match identity {
-        Ok(identity) => identity,
+    let resolved = match resolved {
+        Ok(resolved) => resolved,
         Err(_) => {
             return Caller {
                 arn: EXPIRED_CREDENTIAL_PRINCIPAL.to_string(),
@@ -233,14 +277,22 @@ fn caller<Eng: Send + Sync + 'static>(
         }
     };
     let mut caller = Caller {
-        account_credential: identity.arn == sts_store::ambient_identity().arn,
-        arn: identity.arn,
+        account_credential: resolved.identity.arn == sts_store::ambient_identity().arn,
+        arn: resolved.identity.arn,
+        // The inline document the mint passed scopes the credential whether or not an IAM
+        // store is there; where there is one, the scope is re-read below so a managed session
+        // policy counts at the version in force NOW.
+        scope: sts_store::session_scoping_documents(None, &resolved.session_policies),
         ..Caller::default()
     };
     let Some(iam) = iam_store::service_state(engine) else {
         return caller;
     };
     let store = iam.lock();
+    // What the mint scoped this credential to, as the documents read at the instant of this
+    // request: a managed session policy stands for its DEFAULT version, so one edited since
+    // the mint scopes by what it says now.
+    caller.scope = sts_store::session_scoping_documents(Some(&store), &resolved.session_policies);
     // A LONG-TERM access key: STS's store holds SESSIONS, so its answer for a key it never
     // minted is the account's ambient identity — but IAM's store maps an access key id to
     // the user that owns it (the map `iam:GetUser` resolves a caller through), so a request

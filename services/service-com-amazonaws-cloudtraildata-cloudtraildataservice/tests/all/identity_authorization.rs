@@ -46,10 +46,10 @@ use service_com_amazonaws_cloudtraildata_cloudtraildataservice::state::Channel;
 const ACTION_PREFIX: &str = "cloudtrail-data";
 
 /// The action every row below is judged against.
-const ACTION: &str = "cloudtrail-data:PutAuditEvents";
+pub(crate) const ACTION: &str = "cloudtrail-data:PutAuditEvents";
 
 /// The access key id of the assumed-role session the role rows sign with.
-const SESSION_KEY_ID: &str = "ASIAEXAMPLECTDATASESS";
+pub(crate) const SESSION_KEY_ID: &str = "ASIAEXAMPLECTDATASESS";
 
 /// The access key id of the IAM user the long-term rows sign with.
 const USER_KEY_ID: &str = "AKIAEXAMPLECTDATAUSER";
@@ -66,13 +66,13 @@ const SESSION_SECONDS: i32 = 3_600;
 
 /// A JSON audit event that passes per-event validation, so nothing but authorization and
 /// the channel reference decides these calls.
-const GOOD_EVENT: &str = r#"{"eventSource":"custom.app","eventName":"Login"}"#;
+pub(crate) const GOOD_EVENT: &str = r#"{"eventSource":"custom.app","eventName":"Login"}"#;
 
 /// The error code and status the authorization layer answers an unauthorized call with.
 const ACCESS_DENIED: (u16, &str) = (403, "AccessDeniedException");
 
 /// The principal ARN the seeded session speaks for — what a refusal must name.
-fn session_arn() -> String {
+pub(crate) fn session_arn() -> String {
     format!(
         "arn:aws:sts::{}:assumed-role/{ROLE}/{SESSION}",
         engine::emulator_account_id()
@@ -81,7 +81,7 @@ fn session_arn() -> String {
 
 /// The ARN the account holds the role under, which is the identity whose policies an
 /// assumed-role session's request is judged on.
-fn role_arn() -> String {
+pub(crate) fn role_arn() -> String {
     format!("arn:aws:iam::{}:role/{ROLE}", engine::emulator_account_id())
 }
 
@@ -91,8 +91,18 @@ fn user_arn() -> String {
 }
 
 /// Record the role and the assumed-role session [`SESSION_KEY_ID`] speaks for, as
-/// `iam:CreateRole` and `sts:AssumeRole` record them.
-fn given_session(engine: &Arc<engine::InMemoryEngine>) {
+/// `iam:CreateRole` and `sts:AssumeRole` record them, with NO session policy scoping the
+/// session — the position of a credential whose mint passed none.
+pub(crate) fn given_session(engine: &Arc<engine::InMemoryEngine>) {
+    given_scoped_session(engine, sts::SessionPolicies::default());
+}
+
+/// The same, for a session whose mint passed `scope` — the session policies that cap what
+/// the role's own policies grant, recorded exactly where `sts:AssumeRole` records them.
+pub(crate) fn given_scoped_session(
+    engine: &Arc<engine::InMemoryEngine>,
+    scope: sts::SessionPolicies,
+) {
     let role_arn = role_arn();
     let iam_store = iam::service_state(&**engine).expect("the IAM store");
     iam_store.lock().roles.insert(
@@ -114,6 +124,7 @@ fn given_session(engine: &Arc<engine::InMemoryEngine>) {
     );
     let vend = sts::NewSession {
         role_arn: Some(role_arn.clone()),
+        policies: scope,
         ..sts::NewSession::new(
             sts::Identity {
                 user_id: sts::role_id(&role_arn),
@@ -164,7 +175,7 @@ fn given_user(engine: &Arc<engine::InMemoryEngine>) {
 /// Put `document` in force as the role's inline policy, replacing whatever it carried —
 /// what `iam:PutRolePolicy` does. `None` takes every policy off it, as
 /// `iam:DeleteRolePolicy` does.
-fn given_role_policy(engine: &Arc<engine::InMemoryEngine>, document: Option<&Value>) {
+pub(crate) fn given_role_policy(engine: &Arc<engine::InMemoryEngine>, document: Option<&Value>) {
     put_inline_policy(engine, Target::Role, document);
 }
 
@@ -211,7 +222,7 @@ fn put_inline_policy(
 }
 
 /// A policy allowing `actions` on every resource.
-fn allow(actions: Value) -> Value {
+pub(crate) fn allow(actions: Value) -> Value {
     json!({
         "Version": "2012-10-17",
         "Statement": [{ "Effect": "Allow", "Action": actions, "Resource": "*" }]
@@ -226,13 +237,21 @@ fn allow_on(resource: &str) -> Value {
     })
 }
 
-/// Which of IAM's two refusals a row expects.
+/// Which of IAM's refusals a row expects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Refusal {
+pub(crate) enum Refusal {
     /// The default deny of a request no readable statement allows.
     DefaultDeny,
     /// The explicit deny of a request a `Deny` statement covers.
     ExplicitDeny,
+    /// The grant the SESSION POLICIES the credential was minted with withheld.
+    SessionWithheld,
+    /// The explicit deny of a request a `Deny` in one of those session policies covers.
+    SessionExplicitDeny,
+    /// The grant the principal's PERMISSIONS BOUNDARY withheld.
+    BoundaryWithheld,
+    /// The explicit deny of a request a `Deny` in that boundary covers.
+    BoundaryExplicitDeny,
 }
 
 impl Refusal {
@@ -243,6 +262,16 @@ impl Refusal {
                 format!("because no identity-based policy allows the {ACTION} action")
             }
             Self::ExplicitDeny => "with an explicit deny in an identity-based policy".to_string(),
+            Self::SessionWithheld => {
+                format!("because no session policy allows the {ACTION} action")
+            }
+            Self::SessionExplicitDeny => "with an explicit deny in a session policy".to_string(),
+            Self::BoundaryWithheld => {
+                format!("because no permissions boundary allows the {ACTION} action")
+            }
+            Self::BoundaryExplicitDeny => {
+                "with an explicit deny in a permissions boundary".to_string()
+            }
         }
     }
 }
@@ -259,7 +288,13 @@ fn denial(principal: &str, resource: &str, refusal: Refusal) -> String {
 
 /// Assert that `reply` is the authorization refusal naming `principal` and `resource`, and
 /// that it reports nothing of the batch it refused.
-fn assert_refused(case: &str, reply: &Reply, principal: &str, resource: &str, refusal: Refusal) {
+pub(crate) fn assert_refused(
+    case: &str,
+    reply: &Reply,
+    principal: &str,
+    resource: &str,
+    refusal: Refusal,
+) {
     assert_eq!(
         (reply.status, reply.error_code().as_str()),
         ACCESS_DENIED,

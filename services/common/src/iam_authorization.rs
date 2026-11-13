@@ -614,11 +614,11 @@ pub fn not_authorized_by_resource_policy(principal: &str, action: &str, resource
 ///
 /// The counterpart of [`not_authorized_by_resource_policy`] for the identity-based half of
 /// the decision, and stated here for the same reason: the sentence is one rule, so two
-/// services that reach the same decision must word it the same way. The four reasons a
-/// decision can rest on are the four this module names beside it
-/// ([`IDENTITY_POLICY_EXPLICIT_DENY`], [`no_identity_policy_allows`],
-/// [`PERMISSIONS_BOUNDARY_EXPLICIT_DENY`], [`no_permissions_boundary_allows`]), so a caller
-/// states none of them itself. Every value comes from the request and from the stored
+/// services that reach the same decision must word it the same way. The reasons a decision
+/// can rest on are the ones this module names beside it ([`IDENTITY_POLICY_EXPLICIT_DENY`],
+/// [`no_identity_policy_allows`], [`SESSION_POLICY_EXPLICIT_DENY`],
+/// [`no_session_policy_allows`], [`PERMISSIONS_BOUNDARY_EXPLICIT_DENY`],
+/// [`no_permissions_boundary_allows`]), so a caller states none of them itself. Every value comes from the request and from the stored
 /// policies, and nothing about the resource is looked up — which is why the refusal can be
 /// stated before the resource is resolved.
 ///
@@ -653,6 +653,11 @@ pub const IDENTITY_POLICY_EXPLICIT_DENY: &str = "with an explicit deny in an ide
 pub const PERMISSIONS_BOUNDARY_EXPLICIT_DENY: &str =
     "with an explicit deny in a permissions boundary";
 
+/// The reason clause for a request an explicit `Deny` in one of the SESSION POLICIES the
+/// caller's temporary credential was minted with refuses — a fact about that document, so the
+/// sentence names it rather than the action.
+pub const SESSION_POLICY_EXPLICIT_DENY: &str = "with an explicit deny in a session policy";
+
 /// The reason clause for a request no readable identity-based document allows — IAM's default
 /// deny, which names the action nothing granted.
 #[must_use]
@@ -666,6 +671,16 @@ pub fn no_identity_policy_allows(action: &str) -> String {
 #[must_use]
 pub fn no_permissions_boundary_allows(action: &str) -> String {
     format!("because no permissions boundary allows the {action} action")
+}
+
+/// The reason clause for a grant the SESSION POLICIES the caller's temporary credential was
+/// minted with do not also allow: "the resulting session's permissions are the intersection
+/// of the role's identity-based policy and the session policies"
+/// (`AssumeRoleRequest$PolicyArns`), so a scope that states nothing about the action withholds
+/// it exactly as a permissions boundary that states nothing does.
+#[must_use]
+pub fn no_session_policy_allows(action: &str) -> String {
+    format!("because no session policy allows the {action} action")
 }
 
 /// The sentence AWS refuses a request with when the caller may not reach the named resource
