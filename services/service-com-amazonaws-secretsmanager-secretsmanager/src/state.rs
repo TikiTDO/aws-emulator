@@ -1264,6 +1264,7 @@ pub fn decode_next_token(token: &str) -> Option<String> {
 /// A tag as stored: both halves are optional, exactly as the modelled `Tag`
 /// shape has them, so a tag round-trips through state unchanged.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StoredTag {
     pub key: Option<String>,
     pub value: Option<String>,
@@ -1283,6 +1284,7 @@ impl StoredTag {
 /// key/value pair the modelled `ExternalSecretRotationMetadataItem` has, so the
 /// metadata a partner specified round-trips through state unchanged.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StoredKeyValue {
     pub key: Option<String>,
     pub value: Option<String>,
@@ -1309,6 +1311,7 @@ impl StoredKeyValue {
 /// A secret's rotation schedule as stored: every member of the modelled
 /// `RotationRulesType`, so the rules round-trip through state unchanged.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StoredRotationRules {
     pub automatically_after_days: Option<i64>,
     pub duration: Option<String>,
@@ -1338,6 +1341,7 @@ impl StoredRotationRules {
 /// One replica of a secret: the Region it is in, the KMS key it is encrypted
 /// with, and the `StatusType` its creation has reached.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Replica {
     pub region: String,
     pub kms_key_id: String,
@@ -1434,6 +1438,7 @@ pub fn replica_count_after_adding(existing: &[Replica], regions: &[&str]) -> usi
 
 /// One version of a secret: its value, and the staging labels pointing at it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SecretVersion {
     pub version_id: String,
     /// The version's value, under the key the secret names: sealed under a data
@@ -1505,6 +1510,7 @@ impl SecretVersion {
 
 /// A stored secret: its metadata and every version it still holds.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Secret {
     pub name: String,
     pub arn: String,
@@ -2401,6 +2407,7 @@ pub struct RotationConfig {
 /// name identifies at most one secret IN A REGION, and the same name in another
 /// Region is another secret.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SecretKey {
     pub region: String,
     pub name: String,
@@ -2424,13 +2431,28 @@ impl SecretKey {
 /// primary and its replica among them. The quota in [`SECRET_QUOTA`] bounds the
 /// whole store.
 #[derive(Debug, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ComAmazonawsSecretsmanagerSecretsmanagerState {
     /// Secrets by Region and name, in that order, so `ListSecrets` pages one
     /// Region deterministically in name order.
+    #[serde(with = "::service_common::persist::entries")]
     pub secrets: BTreeMap<SecretKey, Secret>,
     /// Full ARN to the secret it names, so a `SecretId` is accepted in either
     /// form.
     pub arn_index: HashMap<String, SecretKey>,
+}
+
+impl ::service_common::persist::Persisted for ComAmazonawsSecretsmanagerSecretsmanagerState {
+    const SERVICE: &'static str = "secretsmanager";
+    const VERSION: u32 = 1;
+
+    fn snapshot(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("Secrets Manager state serializes")
+    }
+
+    fn restore(_version: u32, snapshot: serde_json::Value) -> Result<Self, String> {
+        serde_json::from_value(snapshot).map_err(|error| error.to_string())
+    }
 }
 
 impl ComAmazonawsSecretsmanagerSecretsmanagerState {

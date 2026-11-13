@@ -544,6 +544,7 @@ fn rendered_instant(at: SystemTime, zone: ::chrono_tz::Tz) -> Option<String> {
 /// projects this record rather than inventing anything: what the create persisted is what
 /// a later read reports.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MaintenanceWindowRecord {
     /// The server-minted id this record is stored under ([`mint_window_id`]).
     pub window_id: String,

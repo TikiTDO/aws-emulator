@@ -376,6 +376,7 @@ pub const ISSUED_EXTENDED_KEY_USAGE_OIDS: &[&str] =
 /// reported under one name ([`EXTENDED_KEY_USAGE_CUSTOM`]), so the identifier is the
 /// only thing that still says WHICH purpose it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ExtendedKeyUsageRecord {
     /// An `ExtendedKeyUsageName` value.
     pub name: String,
@@ -779,6 +780,7 @@ pub const ACME_NONCE_WINDOW: usize = 256;
 /// "The supported configuration option is DaysBeforeExpiry"
 /// (`PutAccountConfiguration` doc), so that option is all this record carries.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AccountConfiguration {
     /// `ExpiryEventsConfiguration$DaysBeforeExpiry` as the last write carried it;
     /// `None` when that write named an `ExpiryEvents` with no `DaysBeforeExpiry`.
@@ -808,6 +810,7 @@ pub const IDEMPOTENCY_TOKEN_TTL: Duration = Duration::from_secs(60 * 60);
 /// repeating its idempotency token can be recognised as the same request — or, when
 /// it asks for something else, refused as a different one.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AccountConfigurationRequest {
     /// The `ExpiryEvents` that request carried, and `None` when it carried none.
     pub expiry_events: Option<AccountConfiguration>,
@@ -828,6 +831,7 @@ impl AccountConfigurationRequest {
 
 /// The validation ACM is waiting on for one domain name in a certificate.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DomainValidationRecord {
     /// The FQDN being validated.
     pub domain_name: String,
@@ -864,6 +868,7 @@ pub struct DomainValidationRecord {
 /// revised by the proof the DNS later carries (`dns_validation`); applied when the
 /// transition falls due.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum ValidationOutcome {
     /// The certificate is issued: "If you are requesting a private certificate,
     /// domain validation is not required" (`RequestCertificate` doc), so there is
@@ -909,6 +914,7 @@ impl ValidationOutcome {
 /// Stored, never slept on: the instant it falls due is fixed by the call that started
 /// it, so the outcome is owed at that instant whether or not anybody calls again.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PendingValidation {
     /// When the outcome falls due.
     pub due_at: SystemTime,
@@ -934,6 +940,7 @@ impl PendingValidation {
 /// the `RenewCertificate` call that started the renewal, so the renewal completes at
 /// that instant whether or not anybody calls again.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Renewal {
     /// A `RenewalStatus` value.
     pub status: String,
@@ -946,6 +953,7 @@ pub struct Renewal {
 
 /// One stored ACM certificate. Every field a response reports is read from here.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Certificate {
     /// `arn:aws:acm:<region>:<account>:certificate/<id>`.
     pub arn: String,
@@ -1324,6 +1332,7 @@ impl Certificate {
 /// the transition, so the endpoint reaches that status at that instant whether or not
 /// anybody calls again.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PendingAcmeEndpointStatus {
     /// When the transition falls due.
     pub due_at: SystemTime,
@@ -1345,6 +1354,7 @@ impl PendingAcmeEndpointStatus {
 /// One stored ACME endpoint. Every field `DescribeAcmeEndpoint` reports is read from
 /// here, so no response echoes its own request.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AcmeEndpointRecord {
     /// `arn:aws:acm:<region>:<account>:acme-endpoint/<id>`.
     pub arn: String,
@@ -1441,6 +1451,7 @@ impl AcmeEndpointRecord {
 /// carries, while work ANOTHER caller's update started is that caller's modification
 /// still in progress, which is the optimistic-concurrency conflict a client retries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum AcmeDomainValidationWork {
     /// The prevalidation the create started: the service proving the domain on its own.
     Prevalidation,
@@ -1455,6 +1466,7 @@ pub enum AcmeDomainValidationWork {
 /// instant it falls due is fixed by the call that started the prevalidation, so the
 /// validation reaches that status at that instant whether or not anybody calls again.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PendingAcmeDomainValidationStatus {
     /// When the transition falls due.
     pub due_at: SystemTime,
@@ -1496,6 +1508,7 @@ impl PendingAcmeDomainValidationStatus {
 /// echoes its own request — including the DNS record the caller must publish, which is
 /// server-managed ([`acme_prevalidation_resource_record`]).
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AcmeDomainValidationRecord {
     /// `arn:aws:acm:<region>:<account>:acme-endpoint/<endpoint>/acme-domain-validation/<id>`
     /// ([`acme_domain_validation_arn`]).
@@ -1572,6 +1585,7 @@ impl AcmeDomainValidationRecord {
 
 /// What one `CreateAcmeDomainValidation` idempotency token has already created.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AcmeDomainValidationIdempotency {
     /// A canonical rendering of every parameter the validation was created from, so a
     /// re-sent token can be told apart from a changed request carrying the same token.
@@ -1590,6 +1604,7 @@ pub struct AcmeDomainValidationIdempotency {
 /// service ([`mint_acme_external_account_binding_mac_key`]) and are not members of any
 /// request.
 #[derive(Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AcmeExternalAccountBindingRecord {
     /// `arn:aws:acm:<region>:<account>:acme-endpoint/<endpoint>/acme-external-account-binding/<id>`
     /// ([`acme_external_account_binding_arn`]).
@@ -1661,6 +1676,7 @@ impl ::std::fmt::Debug for AcmeExternalAccountBindingRecord {
 
 /// What one `CreateAcmeExternalAccountBinding` idempotency token has already created.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AcmeExternalAccountBindingIdempotency {
     /// A canonical rendering of every parameter the binding was created from, so a
     /// re-sent token can be told apart from a changed request carrying the same token.
@@ -1727,6 +1743,7 @@ pub fn mint_acme_external_account_binding_mac_key(
 /// An account is identified by the key it registered with, which is why the record
 /// carries the thumbprint of that key beside the `AccountUrl` the server assigned it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AcmeAccountRecord {
     /// The ACME endpoint the account is registered with: the ARN half of this
     /// record's key in [`ComAmazonawsAcmCertificatemanagerState::acme_accounts`].
@@ -1758,6 +1775,7 @@ pub struct AcmeAccountRecord {
 
 /// What one `CreateAcmeEndpoint` idempotency token has already created.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AcmeEndpointIdempotency {
     /// A canonical rendering of every parameter the endpoint was created from, so a
     /// re-sent token can be told apart from a changed request carrying the same token.
@@ -1774,6 +1792,7 @@ pub struct AcmeEndpointIdempotency {
 /// [`ComAmazonawsAcmCertificatemanagerState::expire_certificate_idempotency_tokens`]
 /// drops it and the index cannot accumulate one entry per token a caller ever sent.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CertificateIdempotency {
     /// The ARN the first call answered with.
     pub certificate_arn: String,
@@ -1797,6 +1816,7 @@ impl CertificateIdempotency {
 
 /// Per-service state for com-amazonaws-acm-certificatemanager. A handler reaches it through [`service_state`].
 #[derive(Debug, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ComAmazonawsAcmCertificatemanagerState {
     /// Certificate ARN -> record. A `BTreeMap`, so an unsorted `ListCertificates`
     /// page and its `NextToken` walk one deterministic order.
@@ -1826,6 +1846,7 @@ pub struct ComAmazonawsAcmCertificatemanagerState {
     /// endpoint's accounts are a contiguous range walked in one deterministic order —
     /// which is the order `ListAcmeAccounts` pages through
     /// ([`Self::acme_accounts_of`]).
+    #[serde(with = "::service_common::persist::entries")]
     pub acme_accounts: BTreeMap<(String, String), AcmeAccountRecord>,
     /// ACME domain-validation ARN -> record. A `BTreeMap`, and every validation's ARN
     /// begins with its endpoint's ARN ([`acme_domain_validation_arn`]), so one
@@ -1836,6 +1857,7 @@ pub struct ComAmazonawsAcmCertificatemanagerState {
     /// token created. Keyed by the PAIR rather than a joined string, so no endpoint ARN
     /// and token can run together into another pair's key, and separate from the other
     /// token indexes because the three resolve to different resources.
+    #[serde(with = "::service_common::persist::entries")]
     pub acme_domain_validation_idempotency:
         HashMap<(String, String), AcmeDomainValidationIdempotency>,
     /// ACME external-account-binding ARN -> record. A `BTreeMap`, and every binding's
@@ -1847,6 +1869,7 @@ pub struct ComAmazonawsAcmCertificatemanagerState {
     /// (ACME endpoint ARN, `CreateAcmeExternalAccountBinding` idempotency token) -> what
     /// that token created, keyed by the PAIR for the same reason
     /// [`Self::acme_domain_validation_idempotency`] is.
+    #[serde(with = "::service_common::persist::entries")]
     pub acme_external_account_binding_idempotency:
         HashMap<(String, String), AcmeExternalAccountBindingIdempotency>,
     /// The account's expiry-events configuration, as the last successful
@@ -1858,6 +1881,19 @@ pub struct ComAmazonawsAcmCertificatemanagerState {
     /// with, for as long as that token stays live. Repeating a token with the same
     /// request is the same request; repeating it with another is a conflict.
     pub account_configuration_requests: HashMap<String, AccountConfigurationRequest>,
+}
+
+impl ::service_common::persist::Persisted for ComAmazonawsAcmCertificatemanagerState {
+    const SERVICE: &'static str = "acm";
+    const VERSION: u32 = 1;
+
+    fn snapshot(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("ACM state serializes")
+    }
+
+    fn restore(_version: u32, snapshot: serde_json::Value) -> Result<Self, String> {
+        serde_json::from_value(snapshot).map_err(|error| error.to_string())
+    }
 }
 
 impl ComAmazonawsAcmCertificatemanagerState {

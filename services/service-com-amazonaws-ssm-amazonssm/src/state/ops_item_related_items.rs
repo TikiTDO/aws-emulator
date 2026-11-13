@@ -206,6 +206,7 @@ pub fn filter_rejection(
 /// Every member `ListOpsItemRelatedItems` reports is here, so a listing projects this
 /// record ([`RelatedItemRecord::to_summary`]) rather than recomputing anything.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RelatedItemRecord {
     /// The server-minted association id, unique within the store.
     pub association_id: String,

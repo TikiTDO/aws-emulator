@@ -228,6 +228,7 @@ pub fn target_type_of(node: &super::ManagedNodeRecord) -> Option<String> {
 /// What a preview worked out, before a status is attached to it: the four members
 /// `AutomationExecutionPreview` reports.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ComputedPreview {
     /// How many of the runbook's steps carry each `ImpactType` ([`step_impact`]), keyed by
     /// that impact type. An impact type no step carries holds no entry, so the counts add
@@ -400,6 +401,7 @@ fn resolved_resources(
 /// ONE execution preview: what the start worked out, and the status the clock has moved it
 /// to.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ExecutionPreviewRecord {
     /// "The generated ID for the existing execution preview"
     /// (`GetExecutionPreviewResponse$ExecutionPreviewId`), minted by this store's own

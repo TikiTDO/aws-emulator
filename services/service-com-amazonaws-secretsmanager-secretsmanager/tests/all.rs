@@ -17,6 +17,8 @@ mod authorization_before_existence;
 mod conditioned_authorization;
 #[path = "all/identity_based_authorization.rs"]
 mod identity_based_authorization;
+#[path = "all/restart_persistence.rs"]
+mod restart_persistence;
 #[path = "all/secret_batch_get.rs"]
 mod secret_batch_get;
 #[path = "all/secret_client_request_token.rs"]

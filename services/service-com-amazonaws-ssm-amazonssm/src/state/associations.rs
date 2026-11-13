@@ -265,6 +265,7 @@ pub fn is_association_filter_key(key: &str) -> bool {
 /// One version of an association: everything a create or an update sets, held as that call
 /// supplied it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AssociationVersionRecord {
     /// This version's number, counting from [`FIRST_ASSOCIATION_VERSION`]; what
     /// `AssociationDescription$AssociationVersion` reports and what an
@@ -304,6 +305,7 @@ pub struct AssociationVersionRecord {
 /// One association, as `CreateAssociation` persisted it and `DescribeAssociation` reports
 /// it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AssociationRecord {
     /// "The association ID" the create minted; part of the store key and what every read
     /// resolves the association by.

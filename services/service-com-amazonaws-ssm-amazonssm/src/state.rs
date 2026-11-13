@@ -773,6 +773,7 @@ pub fn policies_require_advanced_message() -> String {
 /// One stored version of one parameter: the value a put persisted, and everything the
 /// service recorded alongside it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ParameterVersionRecord {
     /// This version's number, counting from 1 for a parameter's first version.
     pub version: i64,
@@ -926,6 +927,7 @@ impl ParameterVersionRecord {
 /// One stored parameter: its name, where it lives, its tags, and every version of it
 /// the store still retains.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ParameterRecord {
     /// The name the create supplied, trimmed and rendered the one way the service
     /// renders a parameter name ([`reported_name`]), which is what every read reports
@@ -1382,6 +1384,7 @@ pub enum ContentRejection {
 /// What a document's content declares: everything a read reports that is derived from
 /// the content rather than echoed from the create's own members.
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ParsedDocumentContent {
     /// The content's `schemaVersion`, which is what `SchemaVersion` reports.
     pub schema_version: Option<String>,
@@ -2768,6 +2771,7 @@ pub fn attachment_names(attachments: Option<&[AttachmentsSource]>) -> Vec<String
 /// schema version, the description, the parameters and the platform types derived from it
 /// — is what an update supplies a new one of.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DocumentVersionRecord {
     /// "The document version", counting from [`FIRST_DOCUMENT_VERSION`].
     pub version: u64,
@@ -2814,6 +2818,7 @@ impl DocumentVersionRecord {
 /// `UpdateDocumentDefaultVersion` moves it, which is why an update's new version is the
 /// latest without becoming the default.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DocumentRecord {
     /// The identifier Systems Manager assigned the document when it was created, which is
     /// what a read reports as `DocumentId`: minted once, per document, so two reads of one
@@ -3152,15 +3157,17 @@ pub fn with_sdk_error_envelope(body: &str, status_code: u16, error_code: &str) -
 }
 
 /// Per-service state for com-amazonaws-ssm-amazonssm. A handler reaches it through [`service_state`].
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ComAmazonawsSsmAmazonssmState {
     /// Every parameter, keyed by `(region, canonical name)`: "A parameter name must be
     /// unique within an Amazon Web Services Region". A `BTreeMap` so a listing walks a
     /// stable, total order.
+    #[serde(with = "::service_common::persist::entries")]
     pub parameters: BTreeMap<(String, String), ParameterRecord>,
     /// Every SSM document, keyed by `(region, name)`: a document name is unique within
     /// a Region, which is what `DocumentAlreadyExists` reports a collision on. A
     /// `BTreeMap` so a listing walks a stable, total order.
+    #[serde(with = "::service_common::persist::entries")]
     pub documents: BTreeMap<(String, String), DocumentRecord>,
 
     /// The `DocumentId` of each document Systems Manager publishes ([`PUBLISHED_DOCUMENTS`]),
@@ -3172,6 +3179,7 @@ pub struct ComAmazonawsSsmAmazonssmState {
     /// Every command a caller sent, keyed by `(region, command id)`: a command is sent
     /// to the Systems Manager endpoint of one Region and identified there by the id this
     /// service minted for it. A `BTreeMap` so a listing walks a stable, total order.
+    #[serde(with = "::service_common::persist::entries")]
     pub commands: BTreeMap<(String, String), commands::CommandRecord>,
 
     /// How many command ids this store has minted, which is the entropy behind the next
@@ -3182,6 +3190,7 @@ pub struct ComAmazonawsSsmAmazonssmState {
     /// automation runs at the Systems Manager endpoint of one Region and is identified
     /// there by the id the start minted. A `BTreeMap` so a listing walks a stable, total
     /// order. See [`automation`].
+    #[serde(with = "::service_common::persist::entries")]
     pub automation_executions: BTreeMap<(String, String), automation::AutomationExecutionRecord>,
 
     /// How many automation execution and step-execution ids this store has minted, which
@@ -3193,6 +3202,7 @@ pub struct ComAmazonawsSsmAmazonssmState {
     /// id)`: a preview is worked out at the Systems Manager endpoint of one Region and is
     /// identified there by the id the start minted. A `BTreeMap` so a walk over them is
     /// stable and total. See [`execution_previews`].
+    #[serde(with = "::service_common::persist::entries")]
     pub execution_previews:
         BTreeMap<(String, String), execution_previews::ExecutionPreviewRecord>,
 
@@ -3213,6 +3223,7 @@ pub struct ComAmazonawsSsmAmazonssmState {
     /// empty set for a fresh emulator — what the store holds — rather than nodes nobody
     /// registered. An association names the nodes it targets without registering any of
     /// them, so creating one adds no node here either.
+    #[serde(with = "::service_common::persist::entries")]
     pub managed_nodes: BTreeMap<(String, String), ManagedNodeRecord>,
 
     /// Every hybrid activation, keyed by `(region, activation id)`: an activation is
@@ -3220,18 +3231,21 @@ pub struct ComAmazonawsSsmAmazonssmState {
     /// minted. A `BTreeMap` so a report walks a stable, total order — ascending by
     /// activation id within one Region — and can resume a page from the id it stopped at
     /// rather than from an offset.
+    #[serde(with = "::service_common::persist::entries")]
     pub activations: BTreeMap<(String, String), ActivationRecord>,
 
     /// Every cloud connector, keyed by `(region, connector id)`: a connector is reached
     /// through the endpoint of the Region it was created in, and is identified there by
     /// the id the create minted. A `BTreeMap` so a listing walks a stable, total order.
     /// See [`cloud_connectors`].
+    #[serde(with = "::service_common::persist::entries")]
     pub cloud_connectors: BTreeMap<(String, String), cloud_connectors::CloudConnectorRecord>,
 
     /// Every OpsItem, keyed by `(region, ops item id)`: an OpsItem is created through one
     /// Region's endpoint and is reached through that endpoint by the id the create minted
     /// ([`ops_items::mint_ops_item_id`]). A `BTreeMap` so a listing walks a stable, total
     /// order.
+    #[serde(with = "::service_common::persist::entries")]
     pub ops_items: BTreeMap<(String, String), ops_items::OpsItemRecord>,
 
     /// How many OpsItem ids this store has minted, which is what the next mint is drawn
@@ -3243,6 +3257,7 @@ pub struct ComAmazonawsSsmAmazonssmState {
     /// belongs to the Region of the OpsItem it is about and is identified there by the id
     /// the append minted ([`ComAmazonawsSsmAmazonssmState::mint_ops_item_event_id`]). A
     /// `BTreeMap` so a listing walks a stable, total order. See [`ops_item_events`].
+    #[serde(with = "::service_common::persist::entries")]
     pub ops_item_events: BTreeMap<(String, String), ops_item_events::OpsItemEventRecord>,
 
     /// How many OpsItem event ids this store has minted, which is what the next mint is
@@ -3255,6 +3270,7 @@ pub struct ComAmazonawsSsmAmazonssmState {
     /// there by the id the create minted. A `BTreeMap` so a listing walks a stable, total
     /// order and can resume a page from the association id it stopped at. See
     /// [`ops_item_related_items`].
+    #[serde(with = "::service_common::persist::entries")]
     pub ops_item_related_items:
         BTreeMap<(String, String, String), ops_item_related_items::RelatedItemRecord>,
 
@@ -3268,6 +3284,7 @@ pub struct ComAmazonawsSsmAmazonssmState {
     /// setting nobody has modified holds no entry and is reported from the catalogue
     /// instead ([`Self::service_setting`]), so the store holds the account's own choices
     /// and invents none.
+    #[serde(with = "::service_common::persist::entries")]
     pub service_settings: BTreeMap<(String, String), ServiceSettingRecord>,
 
     /// When this store came into being, and so how old the documents Systems Manager
@@ -3285,6 +3302,7 @@ pub struct ComAmazonawsSsmAmazonssmState {
     /// association is created through one Region's endpoint and is reached there by the id
     /// the create minted. A `BTreeMap` so a listing walks a stable, total order. See
     /// [`associations`].
+    #[serde(with = "::service_common::persist::entries")]
     pub associations: BTreeMap<(String, String), associations::AssociationRecord>,
 
     /// Every patch baseline the account created, keyed by `(region, baseline id)`: a
@@ -3295,6 +3313,7 @@ pub struct ComAmazonawsSsmAmazonssmState {
     /// resolved from the catalogue instead
     /// ([`ComAmazonawsSsmAmazonssmState::resolve_patch_baseline`]), so the store holds the
     /// account's own baselines and invents none.
+    #[serde(with = "::service_common::persist::entries")]
     pub patch_baselines: BTreeMap<(String, String), patch_baselines::PatchBaselineRecord>,
 
     /// How many patch baseline ids this store has minted, which is what the next mint is
@@ -3309,6 +3328,7 @@ pub struct ComAmazonawsSsmAmazonssmState {
     /// baseline is NAMED (`patch_baselines::ResolvedBaseline::reference`). An operating
     /// system nothing has registered a baseline for holds no entry and is reported from
     /// the predefined catalogue instead.
+    #[serde(with = "::service_common::persist::entries")]
     pub default_patch_baselines: BTreeMap<(String, String), String>,
 
     /// Every just-in-time node access request, keyed by `(region, access request id)`: a
@@ -3316,6 +3336,7 @@ pub struct ComAmazonawsSsmAmazonssmState {
     /// start minted
     /// ([`ComAmazonawsSsmAmazonssmState::next_access_request_id`]). A `BTreeMap` so a walk
     /// over them is stable and total. See [`just_in_time_node_access`].
+    #[serde(with = "::service_common::persist::entries")]
     pub access_requests:
         BTreeMap<(String, String), just_in_time_node_access::AccessRequestRecord>,
 
@@ -3328,6 +3349,7 @@ pub struct ComAmazonawsSsmAmazonssmState {
     /// `BTreeMap` so a listing walks a stable, total order — ascending by sync name
     /// within one Region — and can resume a page from the name it stopped at rather than
     /// from an offset. See [`resource_data_syncs`].
+    #[serde(with = "::service_common::persist::entries")]
     pub resource_data_syncs: BTreeMap<(String, String), resource_data_syncs::ResourceDataSyncRecord>,
 
     /// Every maintenance window the account created, keyed by `(region, window id)`: a
@@ -3335,6 +3357,7 @@ pub struct ComAmazonawsSsmAmazonssmState {
     /// identified there by the id the create minted
     /// ([`maintenance_windows::mint_window_id`]). A `BTreeMap` so a listing walks a
     /// stable, total order. See [`maintenance_windows`].
+    #[serde(with = "::service_common::persist::entries")]
     pub maintenance_windows:
         BTreeMap<(String, String), maintenance_windows::MaintenanceWindowRecord>,
 
@@ -3342,6 +3365,19 @@ pub struct ComAmazonawsSsmAmazonssmState {
     /// is drawn from ([`ComAmazonawsSsmAmazonssmState::next_maintenance_window_id`]) — so
     /// two windows of one store never carry one id.
     pub maintenance_window_sequence: u64,
+}
+
+impl ::service_common::persist::Persisted for ComAmazonawsSsmAmazonssmState {
+    const SERVICE: &'static str = "ssm";
+    const VERSION: u32 = 1;
+
+    fn snapshot(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("SSM state serializes")
+    }
+
+    fn restore(_version: u32, snapshot: serde_json::Value) -> Result<Self, String> {
+        serde_json::from_value(snapshot).map_err(|error| error.to_string())
+    }
 }
 
 impl Default for ComAmazonawsSsmAmazonssmState {
@@ -4114,6 +4150,7 @@ pub fn operator_matches(operator: &str, held: &str, wanted: &str) -> bool {
 /// `InstanceProperty` has no place for, so the record holds it beside them rather than
 /// in a second node store.
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ManagedNodeRecord {
     /// Everything a describe reports about this node.
     pub properties: InstanceProperty,
@@ -4368,6 +4405,7 @@ pub const INVALID_ACTIVATION_FILTER: &str =
 /// one field no read reports: the code is the activation's password, handed to its
 /// creator once.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ActivationRecord {
     /// The id the create minted; part of the store key and what a read reports.
     pub id: String,

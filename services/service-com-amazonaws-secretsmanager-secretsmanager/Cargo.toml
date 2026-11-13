@@ -20,6 +20,7 @@ tokio = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 tracing = { workspace = true }
 # A secret value is stored enveloped under the secret's KMS key: this is the KMS
 # client the seal and open calls go out over the in-process callback with.

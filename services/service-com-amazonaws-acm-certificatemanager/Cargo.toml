@@ -20,6 +20,7 @@ tokio = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 tracing = { workspace = true }
 # The STS store, for the identity an access key id speaks for: the principal
 # `sts:GetCallerIdentity` answers for the credentials a request signed with.

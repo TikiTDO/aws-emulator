@@ -300,6 +300,7 @@ enum Walked {
 /// ONE step execution of an automation: the step as the runbook declares it, and what the
 /// walk has done with it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StepExecutionRecord {
     /// The step as the runbook declared it when the execution started, so a later edit of
     /// the document cannot change what this execution runs.
@@ -436,6 +437,7 @@ impl StepExecutionRecord {
 /// One automation execution as this store holds it: the start as Systems Manager received
 /// it, the runbook it resolved, and what the walk has done with it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AutomationExecutionRecord {
     /// "The execution ID" (`AutomationExecution$AutomationExecutionId`), and part of the
     /// store key.

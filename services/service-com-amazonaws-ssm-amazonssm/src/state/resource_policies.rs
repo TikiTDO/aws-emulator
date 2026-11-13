@@ -205,7 +205,7 @@ impl PolicyResource<'_> {
 /// left empty — address the one set of policies instead of each holding its own. A
 /// resource is reached through the endpoint it lives at, which is the Region the request
 /// was signed for, so that Region is the key's first part.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub struct PolicyResourceKey {
     /// The Region whose endpoint the request reached.
     pub region: String,
@@ -213,6 +213,35 @@ pub struct PolicyResourceKey {
     pub resource_type: &'static str,
     /// The resource's own id within that type.
     pub name: String,
+}
+
+impl<'de> serde::Deserialize<'de> for PolicyResourceKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct OwnedKey {
+            region: String,
+            resource_type: String,
+            name: String,
+        }
+        let raw = OwnedKey::deserialize(deserializer)?;
+        for kind in [
+            PolicyResourceKind::OpsItemGroup,
+            PolicyResourceKind::Parameter,
+            PolicyResourceKind::Document,
+        ] {
+            if raw.resource_type == kind.resource_type() {
+                return Ok(Self {
+                    region: raw.region,
+                    resource_type: kind.resource_type(),
+                    name: raw.name,
+                });
+            }
+        }
+        Err(serde::de::Error::custom(format!(
+            "unknown SSM policy resource type {:?}",
+            raw.resource_type
+        )))
+    }
 }
 
 /// What `resource_arn` names, or `None` when it is not the ARN of a Systems Manager
@@ -259,6 +288,7 @@ pub fn policy_hash(policy: &str) -> String {
 /// One attached resource policy: the policy's id, the document as stored, and the
 /// document's hash.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ResourcePolicyRecord {
     /// `PolicyId`: minted when the policy is attached, and the value an update or a
     /// delete addresses this policy by.
@@ -288,9 +318,10 @@ impl ResourcePolicyRecord {
 /// A `BTreeMap` so a walk over the resources is a stable, total order, and each
 /// resource's policies are held in the order they were attached — which is the order
 /// `GetResourcePolicies` reports them in and what makes its resume cursor total.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ResourcePolicyStore {
     /// The policies attached to each resource, by that resource's key.
+    #[serde(with = "::service_common::persist::entries")]
     attached: BTreeMap<PolicyResourceKey, Vec<ResourcePolicyRecord>>,
     /// How many policies this store has minted an id for, the seed that makes the next
     /// [`Self::mint_policy_id`] unrelated to the last.

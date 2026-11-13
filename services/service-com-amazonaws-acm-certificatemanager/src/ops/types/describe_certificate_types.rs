@@ -73,6 +73,7 @@ pub struct DomainValidation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.acm#HttpRedirect")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct HttpRedirect {
     pub redirect_from: Option<String>,
     pub redirect_to: Option<String>,

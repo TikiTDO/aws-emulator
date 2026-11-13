@@ -122,6 +122,7 @@ pub fn filters_rejection(values: usize) -> Option<String> {
 /// Every member `ListOpsItemEvents` reports is here, so the listing projects this record
 /// ([`OpsItemEventRecord::to_summary`]) rather than deriving anything at read time.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct OpsItemEventRecord {
     /// The server-minted event id, unique within the store.
     pub event_id: String,

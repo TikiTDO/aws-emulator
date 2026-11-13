@@ -262,6 +262,7 @@ pub fn value_rejection(setting: &SettingDefinition, value: &str) -> Option<Strin
 /// instead ([`super::ComAmazonawsSsmAmazonssmState::service_setting`]) — so a record always
 /// carries a real modification: the instant it was made and the principal that made it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ServiceSettingRecord {
     /// The value the setting holds now: what an update stored, or the provisioned value a
     /// reset restored.

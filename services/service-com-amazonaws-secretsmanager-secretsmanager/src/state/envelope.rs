@@ -142,6 +142,7 @@ const CONTEXT_SECRET_VERSION_ID: &str = "SecretVersionId";
 /// value appears in SecretString instead."
 /// (`GetSecretValueResponse$SecretBinary`, this service's Smithy model.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum ValueKind {
     /// `SecretString`.
     Text,
@@ -209,6 +210,7 @@ impl SecretValue {
 
 /// A secret version's value as the store holds it.
 #[derive(Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StoredValue {
     kind: ValueKind,
     content: Content,
@@ -232,6 +234,7 @@ impl fmt::Debug for StoredValue {
 
 /// How the bytes of a stored value are held.
 #[derive(Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 enum Content {
     /// Held as sent: the secret is on the Amazon Web Services managed key, which no
     /// caller can act on, so no KMS refusal stands between a read and the value.
@@ -243,6 +246,7 @@ enum Content {
 /// A value sealed under a KMS data key: the wrapped key, the nonce and the
 /// ciphertext with its authentication tag.
 #[derive(Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Sealed {
     /// The key that wrapped the data key, as the write that sealed the value named
     /// it. A version is opened under the key it was SEALED with, so this — not

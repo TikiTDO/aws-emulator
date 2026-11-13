@@ -90,6 +90,7 @@ pub struct DnsPrevalidationOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.acm#DomainScope")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DomainScope {
     pub exact_domain: Option<String>,
     pub subdomains: Option<String>,
@@ -123,12 +124,14 @@ pub struct ServiceQuotaExceededException {
 #[smithy_macros::smithy(union_for = "com.amazonaws.acm#CertificateAuthority")]
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum CertificateAuthority {
     PublicCertificateAuthority(PublicCertificateAuthority),
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.acm#PublicCertificateAuthority")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PublicCertificateAuthority {
     pub allowed_key_algorithms: Option<Vec<String>>,
 }
@@ -169,6 +172,7 @@ pub struct DnsPrevalidationDetails {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.acm#ResourceRecord")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ResourceRecord {
     pub name: String,
     pub r#type: String,
@@ -177,6 +181,7 @@ pub struct ResourceRecord {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.acm#FailureDetails")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FailureDetails {
     pub reason: Option<String>,
     pub message: Option<String>,
@@ -184,6 +189,7 @@ pub struct FailureDetails {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.acm#CertificateOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CertificateOptions {
     pub certificate_transparency_logging_preference: Option<String>,
     pub export: Option<String>,

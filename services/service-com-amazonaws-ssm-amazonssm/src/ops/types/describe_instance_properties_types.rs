@@ -44,6 +44,7 @@ pub struct DescribeInstancePropertiesOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#InstanceProperty")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceProperty {
     pub name: Option<String>,
     pub instance_id: Option<String>,
@@ -53,8 +54,10 @@ pub struct InstanceProperty {
     pub instance_state: Option<String>,
     pub architecture: Option<String>,
     pub ip_address: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub launch_time: Option<::aws_smithy_types::DateTime>,
     pub ping_status: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub last_ping_date_time: Option<::aws_smithy_types::DateTime>,
     pub agent_version: Option<String>,
     pub platform_type: Option<String>,
@@ -62,11 +65,14 @@ pub struct InstanceProperty {
     pub platform_version: Option<String>,
     pub activation_id: Option<String>,
     pub iam_role: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub registration_date: Option<::aws_smithy_types::DateTime>,
     pub resource_type: Option<String>,
     pub computer_name: Option<String>,
     pub association_status: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub last_association_execution_date: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub last_successful_association_execution_date: Option<::aws_smithy_types::DateTime>,
     pub association_overview: Option<InstanceAggregatedAssociationOverview>,
     pub source_id: Option<String>,

@@ -47,6 +47,7 @@ pub const DEFAULT_MAX_ATTEMPTS: i32 = 1;
 
 /// One step of a runbook, exactly as the content declares it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RunbookStep {
     /// "The name of this execution step" (`StepExecution$StepName`), unique within the
     /// runbook, which is what `nextStep` and the `step:` form of `onFailure` name.
