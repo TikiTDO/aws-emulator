@@ -6,11 +6,13 @@
 //!
 //! RULE. AWS takes IAM's decision in FRONT of the service, so a request is served only
 //! where the identity-based policies in force on the principal its credentials name allow
-//! `aws-marketplace:<OperationName>`; a request no statement allows, or one an explicit
-//! `Deny` covers, is refused with the modelled `AccessDeniedException` (`@httpError(403)`,
-//! a service-common error of this model, so every operation declares it) BEFORE the store
-//! is read — so the refusal does not depend on what the request names, and an unauthorized
-//! caller cannot tell from it whether the agreement it named exists.
+//! one of the actions that PERMIT the operation — `aws-marketplace:<OperationName>`, and
+//! for an operation that only reports an account's agreements the coarse
+//! `aws-marketplace:ViewSubscriptions` as well; a request no statement allows, or one an
+//! explicit `Deny` covers, is refused with the modelled `AccessDeniedException`
+//! (`@httpError(403)`, a service-common error of this model, so every operation declares
+//! it) BEFORE the store is read — so the refusal does not depend on what the request names,
+//! and an unauthorized caller cannot tell from it whether the agreement it named exists.
 //!
 //! The rows span what the rule generalises over: the OPERATION asked for (a read of one
 //! agreement, the create that mints a quote, a listing, a mutation, and the one operation
@@ -41,31 +43,31 @@ const REGION: &str = "us-east-1";
 
 /// This service's sigv4 signing name, which is also the prefix of every IAM action its
 /// operations are performed under.
-const SIGNING_NAME: &str = "aws-marketplace";
+pub(crate) const SIGNING_NAME: &str = "aws-marketplace";
 
 /// The access-key id standing for the account's own published credential: neither STS nor
 /// IAM holds a record for it, so it resolves to the account's ambient identity, which holds
 /// no IAM policies and is allowed — the position AWS account root credentials are in.
-const ACCOUNT_KEY: &str = "AKIDEXAMPLE";
+pub(crate) const ACCOUNT_KEY: &str = "AKIDEXAMPLE";
 
 /// The resource an action of this service is judged against: the AWS Marketplace actions it
 /// is performed under take no resource type, so the decision is made against IAM's own
 /// resource wildcard, which is what the refusal names.
-const ANY_RESOURCE: &str = "*";
+pub(crate) const ANY_RESOURCE: &str = "*";
 
 /// The status and wire error code of an authorization refusal: the modelled
 /// `AccessDeniedException` at its modelled 403.
-const ACCESS_DENIED: (u16, &str) = (403, "AccessDeniedException");
+pub(crate) const ACCESS_DENIED: (u16, &str) = (403, "AccessDeniedException");
 
 /// The emulator these tests drive: one shared engine carrying this service beside the IAM
 /// and STS services the principals and their policies are made with — the same set
 /// `core/router`'s `build_router` assembles, narrowed to what this rule touches.
-struct Emulator {
+pub(crate) struct Emulator {
     router: MultiServiceRouter,
 }
 
 impl Emulator {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
         let mut router = MultiServiceRouter::new();
         // The suite signs nothing: the `Authorization` header carries only the credential
@@ -90,7 +92,12 @@ impl Emulator {
     }
 
     /// One call to this service, with `access_key_id` in the SigV4 credential scope.
-    async fn call(&self, access_key_id: &str, operation: &str, body: &Value) -> (u16, Value) {
+    pub(crate) async fn call(
+        &self,
+        access_key_id: &str,
+        operation: &str,
+        body: &Value,
+    ) -> (u16, Value) {
         let request = ::http::Request::builder()
             .method("POST")
             .uri("/")
@@ -161,7 +168,7 @@ impl Emulator {
 
     /// Create an IAM role the account may assume, assume it through STS, and answer the
     /// session's access key id with the session ARN `sts:GetCallerIdentity` reports.
-    async fn assumed_role(&self, role_name: &str, policy: Option<&Value>) -> Principal {
+    pub(crate) async fn assumed_role(&self, role_name: &str, policy: Option<&Value>) -> Principal {
         let account = ::engine::emulator_account_id();
         let trust = json!({
             "Version": "2012-10-17",
@@ -205,7 +212,7 @@ impl Emulator {
 
     /// Write (or rewrite) the one inline policy of `role_name`, under the same policy name
     /// every time, so a put REPLACES what the role carried — what `iam:PutRolePolicy` does.
-    async fn put_role_policy(&self, role_name: &str, policy: &Value) {
+    pub(crate) async fn put_role_policy(&self, role_name: &str, policy: &Value) {
         self.query(
             "iam",
             "2010-05-08",
@@ -220,7 +227,7 @@ impl Emulator {
     }
 
     /// Take that inline policy off the role again — what `iam:DeleteRolePolicy` does.
-    async fn delete_role_policy(&self, role_name: &str) {
+    pub(crate) async fn delete_role_policy(&self, role_name: &str) {
         self.query(
             "iam",
             "2010-05-08",
@@ -235,7 +242,7 @@ impl Emulator {
 
     /// Create and accept one agreement with the account's own credential, answering its
     /// agreement id — the stored resource the authorization rows are aimed at.
-    async fn given_agreement(&self, proposal: &str) -> String {
+    pub(crate) async fn given_agreement(&self, proposal: &str) -> String {
         let (status, created) = self
             .call(
                 ACCOUNT_KEY,
@@ -278,13 +285,13 @@ const POLICY_NAME: &str = "inline";
 
 /// A principal a call is signed as: the access key id it presents, and the ARN a refusal
 /// must blame it by — what `sts:GetCallerIdentity` reports for that key.
-struct Principal {
-    access_key_id: String,
-    arn: String,
+pub(crate) struct Principal {
+    pub(crate) access_key_id: String,
+    pub(crate) arn: String,
 }
 
 /// A policy allowing `actions` on every resource.
-fn allow(actions: Value) -> Value {
+pub(crate) fn allow(actions: Value) -> Value {
     json!({
         "Version": "2012-10-17",
         "Statement": [{"Effect": "Allow", "Action": actions, "Resource": "*"}],
@@ -293,7 +300,7 @@ fn allow(actions: Value) -> Value {
 
 /// A policy allowing everything beside an explicit deny of `actions` — the shape a
 /// scoped-down role carries, where the `Deny` beats any `Allow` the principal also holds.
-fn allow_all_but(actions: Value) -> Value {
+pub(crate) fn allow_all_but(actions: Value) -> Value {
     json!({
         "Version": "2012-10-17",
         "Statement": [
@@ -303,9 +310,32 @@ fn allow_all_but(actions: Value) -> Value {
     })
 }
 
+/// The coarse AWS Marketplace action that also permits an operation that only REPORTS an
+/// account's agreements — the alternative AWS names in the refusal it answers an
+/// unauthorized read of an agreement with.
+pub(crate) const VIEW_SUBSCRIPTIONS: &str = "ViewSubscriptions";
+
+/// The operations that coarse action also permits: the reports of an account's agreements.
+const VIEWABLE_OPERATIONS: &[&str] = &[
+    "DescribeAgreement",
+    "GetAgreementEntitlements",
+    "GetAgreementTerms",
+    "SearchAgreements",
+];
+
+/// Every action the decision about `operation` is taken over, the one it is performed under
+/// first.
+pub(crate) fn evaluated_actions(operation: &str) -> Vec<String> {
+    let mut actions = vec![format!("{SIGNING_NAME}:{operation}")];
+    if VIEWABLE_OPERATIONS.contains(&operation) {
+        actions.push(format!("{SIGNING_NAME}:{VIEW_SUBSCRIPTIONS}"));
+    }
+    actions
+}
+
 /// Which verdict a row expects, and — for a refusal — which of IAM's rules reached it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Verdict {
+pub(crate) enum Verdict {
     /// IAM permits the request, so the operation answers its own way.
     Served,
     /// The default deny of a request no statement allows.
@@ -315,14 +345,25 @@ enum Verdict {
 }
 
 impl Verdict {
-    /// The clause IAM closes the refusal with.
-    fn reason(self, action: &str) -> String {
+    /// The clause IAM closes the refusal with, over the actions the decision was taken
+    /// about: an operation SEVERAL actions permit is refused in one sentence naming the
+    /// whole set and neither rule, and one a single action permits names the rule.
+    pub(crate) fn reason(self, actions: &[String]) -> String {
+        assert_ne!(
+            self,
+            Self::Served,
+            "a served request carries no refusal clause"
+        );
+        let named = actions.join(" or ");
+        if actions.len() > 1 {
+            return format!(
+                "because no identity-based policy allows the {named} action, or explicitly \
+                 denies the actions"
+            );
+        }
         match self {
-            Self::DefaultDeny => {
-                format!("because no identity-based policy allows the {action} action")
-            }
             Self::ExplicitDeny => "with an explicit deny in an identity-based policy".to_string(),
-            Self::Served => panic!("a served request carries no refusal clause"),
+            _ => format!("because no identity-based policy allows the {named} action"),
         }
     }
 }
@@ -377,13 +418,13 @@ fn calls(agreement_id: &str) -> Vec<Call> {
 
 /// The error code a response carries (`__type` on the awsJson protocols), without its
 /// namespace prefix, and the empty string for a response that is no error at all.
-fn code_of(body: &Value) -> &str {
+pub(crate) fn code_of(body: &Value) -> &str {
     let code = body["__type"].as_str().unwrap_or_default();
     code.rsplit('#').next().unwrap_or(code)
 }
 
 /// The `message` an error response carries.
-fn message_of(body: &Value) -> &str {
+pub(crate) fn message_of(body: &Value) -> &str {
     body["message"].as_str().unwrap_or_default()
 }
 
@@ -436,6 +477,7 @@ async fn every_operation_is_authorized_under_this_services_action() {
                 .call(&session.access_key_id, call.operation, &call.body)
                 .await;
             let action = format!("{SIGNING_NAME}:{}", call.operation);
+            let actions = evaluated_actions(call.operation);
             match verdict {
                 Verdict::Served => {
                     assert_ne!(
@@ -461,7 +503,7 @@ async fn every_operation_is_authorized_under_this_services_action() {
                         "User: {} is not authorized to perform: {action} on resource: \
                          {ANY_RESOURCE} {}",
                         session.arn,
-                        refused.reason(&action)
+                        refused.reason(&actions)
                     );
                     assert_eq!(
                         message_of(&body),
@@ -552,7 +594,7 @@ async fn an_identity_denial_precedes_the_store_lookup() {
             format!(
                 "User: {} is not authorized to perform: {action} on resource: {ANY_RESOURCE} {}",
                 session.arn,
-                Verdict::DefaultDeny.reason(&action)
+                Verdict::DefaultDeny.reason(&evaluated_actions("DescribeAgreement"))
             ),
             "case {case:?} (no grant): expected IAM's wording, got {body}"
         );

@@ -46,12 +46,25 @@
 //! `service-common` would make every service that depends on that crate link the IAM and
 //! STS service crates.
 //!
-//! ## The action and the resource
+//! ## The actions and the resource
 //!
-//! The action is `aws-marketplace:<OperationName>` — this service's `sigv4Name` /
-//! `arnNamespace` ([`crate::state::SERVICE_CODE`], `smithy_query(query="service_info")`)
-//! and the operation's own shape name — so one policy statement scoped to this service's
-//! actions covers every operation of it and nothing outside it.
+//! The action an operation is performed under is `aws-marketplace:<OperationName>` — this
+//! service's `sigv4Name` / `arnNamespace` ([`crate::state::SERVICE_CODE`],
+//! `smithy_query(query="service_info")`) and the operation's own shape name — so one policy
+//! statement scoped to this service's actions covers every operation of it and nothing
+//! outside it. That is the action a refusal says the caller may not PERFORM.
+//!
+//! An operation may be PERMITTED by more than one action, though: AWS Marketplace grants
+//! the view of an account's agreements through the coarse `aws-marketplace:ViewSubscriptions`
+//! as well as through the per-API action, so the decision is taken over the SET of actions
+//! that permit the operation ([`actions_for`]) rather than over one action — an `Allow` of
+//! any of them grants the call, and IAM's "an explicit deny wins" is read over that same
+//! set, so a `Deny` of any action the decision was taken over refuses it. Because a
+//! refusal over a set is attributable to no single action, AWS states it in one sentence
+//! that names the whole set and neither rule (see [`identity_denial_clause`]); an operation
+//! only its own action permits keeps IAM's single-action wording. Whichever action granted
+//! or refused it, the sentence blames the caller for the action the operation is PERFORMED
+//! under, which is the one it asked for.
 //!
 //! The resource is [`ANY_RESOURCE`], IAM's own resource wildcard, for every operation: the
 //! AWS Marketplace actions these operations are performed under take no resource type (the
@@ -113,6 +126,76 @@ pub fn action_for(operation: &str) -> String {
     format!("{}:{operation}", crate::state::SERVICE_CODE)
 }
 
+/// The coarse AWS Marketplace action that grants the view of an account's agreements,
+/// beside the per-API action.
+///
+/// This is the alternative AWS itself names when it refuses an unauthorized report of an
+/// agreement: its IAM-denial sentence for that call lists this action beside the per-API one
+/// as the actions a policy could have allowed (the refusal recorded for this service, quoted
+/// in `issues/things-that-now-work/20261110T144129Z-marketplace-agreement-describeagreement-performs-no-identity-based-authorization-an-explicit.md`).
+/// A coarse action that grants the view of an account's subscriptions is a statement about
+/// the ACCOUNT's agreements rather than about one API, which is why it is read as permitting
+/// the operations below and no others.
+const VIEW_SUBSCRIPTIONS: &str = "ViewSubscriptions";
+
+/// The operations [`VIEW_SUBSCRIPTIONS`] also permits: the ones that only REPORT what an
+/// account's agreements are — the agreement itself (the one the recorded refusal names), the
+/// terms it was accepted under, the entitlements it grants, and the search across them —
+/// which is the subscription view that action grants. Every other operation of this service
+/// (the payment, cancellation, billing-adjustment and purchase-order workflows, and every
+/// write) reports or changes something other than what an account's agreements are, so it is
+/// permitted by its own action alone.
+const VIEWABLE_OPERATIONS: &[&str] = &[
+    "DescribeAgreement",
+    "GetAgreementEntitlements",
+    "GetAgreementTerms",
+    "SearchAgreements",
+];
+
+/// Every IAM action that permits `operation`, the action it is performed under first.
+///
+/// A policy allowing ANY of them grants the call and an explicit `Deny` of any of them
+/// refuses it, which is what a set of permitting actions means.
+pub fn actions_for(operation: &str) -> Vec<String> {
+    let mut actions = vec![action_for(operation)];
+    if VIEWABLE_OPERATIONS.contains(&operation) {
+        actions.push(action_for(VIEW_SUBSCRIPTIONS));
+    }
+    actions
+}
+
+/// The actions as IAM lists them in a refusal: `A`, or `A or B` for an operation more than
+/// one action permits.
+fn named(actions: &[String]) -> String {
+    actions.join(" or ")
+}
+
+/// IAM's clause for refusing `actions` on the identity-based policies in force, where
+/// `explicit` says a document this emulator can read DENIES one of them.
+///
+/// An operation SEVERAL actions permit is refused in one sentence naming the whole set,
+/// which attributes the refusal to neither of IAM's two rules — the refusal AWS answers
+/// such a call with carries that clause whether a statement denied the action or none
+/// allowed it. An operation one action permits is refused in IAM's single-action wording,
+/// which names the rule.
+fn identity_denial_clause(actions: &[String], explicit: bool) -> String {
+    if actions.len() > 1 {
+        return format!(
+            "because no identity-based policy allows the {} action, or explicitly denies the \
+             actions",
+            named(actions)
+        );
+    }
+    if explicit {
+        "with an explicit deny in an identity-based policy".to_string()
+    } else {
+        format!(
+            "because no identity-based policy allows the {} action",
+            named(actions)
+        )
+    }
+}
+
 /// Authorize this request, where `operation` is the operation's own name
 /// ([`::smithy_server_runtime::Operation::NAME`]).
 ///
@@ -131,15 +214,25 @@ pub fn authorize<Eng: Send + Sync + 'static>(
     ctx: &::smithy_server_runtime::OperationContext<'_>,
     operation: &str,
 ) -> Result<(), AccessDeniedException> {
-    let action = action_for(operation);
+    let actions = actions_for(operation);
+    // What a refusal blames the caller for is the action the operation is PERFORMED under,
+    // which is the FIRST of the actions that permit it ([`actions_for`], pinned by this
+    // module's own test); that function always states at least that action, so the fallback
+    // cannot be reached.
+    let action = actions
+        .first()
+        .cloned()
+        .unwrap_or_else(|| action_for(operation));
     let caller = caller(engine, ctx);
     // The principal spellings travel with the request because that is what a statement's
     // `Principal` element would be matched against; an identity-based document states no
     // such element, and this service publishes no resource-based policy of its own — its
     // model declares no policy operation and no policy member — so the decision below
-    // rests on the action and the resource.
-    let request = iam::Request::new(&action, ANY_RESOURCE, &caller.principals);
-    let identity_said = iam::identity_decision(&caller.documents, &request);
+    // rests on the actions and the resource.
+    let documents = iam::prepare_documents(&caller.documents);
+    let identity_said = over_actions(&actions, &caller.principals, |request| {
+        iam::identity_decision_prepared(&documents, request)
+    });
     // The decision is taken FIRST, so an explicit `Deny` in a document that CAN be read
     // refuses the request whatever else the principal carries — including a grant this
     // emulator cannot read, which only lifts the DEFAULT deny of a request no readable
@@ -149,7 +242,7 @@ pub fn authorize<Eng: Send + Sync + 'static>(
             &caller.arn,
             &action,
             operation,
-            "with an explicit deny in an identity-based policy",
+            &identity_denial_clause(&actions, true),
         ));
     }
     let granted =
@@ -159,26 +252,50 @@ pub fn authorize<Eng: Send + Sync + 'static>(
             &caller.arn,
             &action,
             operation,
-            &format!("because no identity-based policy allows the {action} action"),
+            &identity_denial_clause(&actions, false),
         ));
     }
     // "A permissions boundary sets the maximum permissions that an identity-based policy
     // can grant" (IAM, permissions boundaries): a grant the boundary does not also allow is
     // not a permission the principal has. The account's own credential carries none.
     if let Some(boundary) = &caller.boundary {
-        let reason = match iam::identity_decision(::std::slice::from_ref(boundary), &request) {
+        let capped = iam::prepare_documents(::std::slice::from_ref(boundary));
+        let reason = match over_actions(&actions, &caller.principals, |request| {
+            iam::identity_decision_prepared(&capped, request)
+        }) {
             Decision::Allowed => return Ok(()),
             // An explicit deny is a fact about the boundary document, so the refusal names
             // it; a boundary that merely states nothing withheld the grant the
             // identity-based policies gave.
             Decision::Denied => "with an explicit deny in a permissions boundary".to_string(),
-            Decision::NotStated => {
-                format!("because no permissions boundary allows the {action} action")
-            }
+            Decision::NotStated => format!(
+                "because no permissions boundary allows the {} action",
+                named(&actions)
+            ),
         };
         return Err(refused(&caller.arn, &action, operation, &reason));
     }
     Ok(())
+}
+
+/// What one set of documents says about an operation SEVERAL actions permit: `decide` is
+/// asked about each of them on [`ANY_RESOURCE`], and the answers are combined the way a set
+/// of permitting actions combines them — a `Deny` of any action refuses, otherwise an
+/// `Allow` of any grants, and with neither the documents state nothing.
+fn over_actions(
+    actions: &[String],
+    principals: &[String],
+    mut decide: impl FnMut(&iam::Request<'_>) -> Decision,
+) -> Decision {
+    let mut reached = Decision::NotStated;
+    for action in actions {
+        match decide(&iam::Request::new(action, ANY_RESOURCE, principals)) {
+            Decision::Denied => return Decision::Denied,
+            Decision::Allowed => reached = Decision::Allowed,
+            Decision::NotStated => {}
+        }
+    }
+    reached
 }
 
 /// The refusal IAM states an authorization failure with: who was refused, which action, on
@@ -502,6 +619,98 @@ mod tests {
                 denial.reason.is_none(),
                 "case {case:?}: an IAM denial states no marketplace reason, got {:?}",
                 denial.reason
+            );
+        }
+    }
+
+    /// RULE: an operation is decided over every action that PERMITS it — its own action,
+    /// plus the coarse view action for the operations that only report an account's
+    /// agreements — so an allow of any of them grants it and a deny of any refuses it.
+    #[test]
+    fn an_operation_is_decided_over_every_action_that_permits_it() {
+        let view = action_for(VIEW_SUBSCRIPTIONS);
+        // (case, operation, whether the coarse view action also permits it)
+        let rows: &[(&str, &str, bool)] = &[
+            ("a read of one agreement", "DescribeAgreement", true),
+            ("the terms of an agreement", "GetAgreementTerms", true),
+            ("the entitlements it grants", "GetAgreementEntitlements", true),
+            ("the search across agreements", "SearchAgreements", true),
+            ("a payment-request read", "GetAgreementPaymentRequest", false),
+            ("a listing of charges", "ListAgreementCharges", false),
+            ("a write", "CancelAgreement", false),
+            ("the create", "CreateAgreementRequest", false),
+        ];
+        for (case, operation, viewable) in rows {
+            let actions = actions_for(operation);
+            let expected: Vec<String> = if *viewable {
+                vec![action_for(operation), view.clone()]
+            } else {
+                vec![action_for(operation)]
+            };
+            assert_eq!(
+                actions, expected,
+                "case {case:?}: expected {expected:?} to be the permitting actions, got \
+                 {actions:?}"
+            );
+            // An allow of ANY permitting action grants the call, and a deny of any refuses.
+            let allow_view =
+                format!(r#"{{"Statement":[{{"Effect":"Allow","Action":"{view}","Resource":"*"}}]}}"#);
+            let said = over_actions(&actions, &[], |request| {
+                iam::identity_decision(::std::slice::from_ref(&allow_view), request)
+            });
+            let granted = iam::is_allowed(said, Decision::NotStated);
+            assert_eq!(
+                granted, *viewable,
+                "case {case:?}: expected the coarse view grant to allow == {viewable}, got \
+                 {granted} ({said:?})"
+            );
+            let deny_own = format!(
+                r#"{{"Statement":[{{"Effect":"Allow","Action":"*","Resource":"*"}},
+                   {{"Effect":"Deny","Action":"{}","Resource":"*"}}]}}"#,
+                action_for(operation)
+            );
+            let denied = over_actions(&actions, &[], |request| {
+                iam::identity_decision(::std::slice::from_ref(&deny_own), request)
+            });
+            assert_eq!(
+                denied,
+                Decision::Denied,
+                "case {case:?}: expected a deny of the operation's own action to refuse it, \
+                 got {denied:?}"
+            );
+        }
+    }
+
+    /// RULE: a refusal of an operation SEVERAL actions permit names the whole set in one
+    /// sentence that attributes it to neither of IAM's rules; one a single action permits
+    /// names the rule that refused it.
+    #[test]
+    fn the_clause_names_every_action_the_decision_was_taken_over() {
+        let view = action_for(VIEW_SUBSCRIPTIONS);
+        // (case, operation, whether a readable document denied an action, the clause)
+        let rows: &[(&str, &str, bool)] = &[
+            ("a read no policy allows", "DescribeAgreement", false),
+            ("a read a policy denies", "DescribeAgreement", true),
+            ("a write no policy allows", "CancelAgreement", false),
+            ("a write a policy denies", "CancelAgreement", true),
+        ];
+        for (case, operation, explicit) in rows {
+            let actions = actions_for(operation);
+            let own = action_for(operation);
+            let expected = if actions.len() > 1 {
+                format!(
+                    "because no identity-based policy allows the {own} or {view} action, or \
+                     explicitly denies the actions"
+                )
+            } else if *explicit {
+                "with an explicit deny in an identity-based policy".to_string()
+            } else {
+                format!("because no identity-based policy allows the {own} action")
+            };
+            let clause = identity_denial_clause(&actions, *explicit);
+            assert_eq!(
+                clause, expected,
+                "case {case:?}: expected IAM's clause {expected:?}, got {clause:?}"
             );
         }
     }
