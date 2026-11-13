@@ -230,6 +230,12 @@ pub struct AccessRequestRecord {
     pub approval_due: Option<SystemTime>,
     /// The credentials vended for this request, once it is approved and something has asked
     /// for them. Held until they expire, so two reads report the one set.
+    ///
+    /// Not persisted: the credential store that makes them valid is in memory and starts empty
+    /// after a restart, so a restored copy would be returned and then refused (Hearth, PR 19
+    /// owner reading, finding 3). A restored request comes back holding none, and its next
+    /// GetAccessToken mints a fresh set through the store. It also keeps the secrets off disk.
+    #[serde(skip)]
     pub credential: Option<VendedCredential>,
     /// When the request was raised.
     pub created_at: SystemTime,

@@ -219,6 +219,26 @@ pub fn populate_issued_key_material(
     }
 }
 
+/// The ARNs of issued `AMAZON_ISSUED` certificates that hold a certificate body but whose private
+/// key is not in `directory`. After a restore that is an incomplete pair: left alone,
+/// [`populate_issued_key_material`] would mint a different leaf under the same ARN on the next
+/// read (Hearth, PR 19 owner reading, finding 2), so boot reports these instead.
+pub fn issued_without_key_material(
+    certificates: &std::collections::BTreeMap<String, Certificate>,
+    directory: &CertificateKeyMaterialDirectory,
+) -> Vec<String> {
+    certificates
+        .iter()
+        .filter(|(arn, cert)| {
+            cert.status == STATUS_ISSUED
+                && cert.cert_type == TYPE_AMAZON_ISSUED
+                && cert.certificate_body.is_some()
+                && directory.material(arn).is_none()
+        })
+        .map(|(arn, _)| arn.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

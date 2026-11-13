@@ -221,7 +221,7 @@ impl Listeners {
     ) -> Result<ResourceListener, SurfaceError> {
         let server_config = Arc::new(self.rustls_server_config()?);
         let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
-        serve_native(handler, idle, Some(acceptor)).await
+        serve_native(handler, idle, Some(acceptor), None).await
     }
 
     /// Open a native-protocol (TCP) listener that hands the RAW, unencrypted
@@ -235,7 +235,19 @@ impl Listeners {
         &self,
         handler: H,
     ) -> Result<ResourceListener, SurfaceError> {
-        serve_native(handler, Duration::from_secs(caps::IDLE_TIMEOUT_SECS), None).await
+        serve_native(handler, Duration::from_secs(caps::IDLE_TIMEOUT_SECS), None, None).await
+    }
+
+    /// [`Self::tcp_plaintext`] on exactly `port`, for a listener whose address was already
+    /// published before a restart (an RDS endpoint a client stored). It never falls back to
+    /// another port: a client would keep connecting to the old one, so an occupied port is a
+    /// named [`SurfaceError::Bind`] the caller must surface.
+    pub async fn tcp_plaintext_at<H: NativeHandler>(
+        &self,
+        handler: H,
+        port: u16,
+    ) -> Result<ResourceListener, SurfaceError> {
+        serve_native(handler, Duration::from_secs(caps::IDLE_TIMEOUT_SECS), None, Some(port)).await
     }
 }
 
@@ -289,10 +301,17 @@ async fn serve_native<H: NativeHandler>(
     handler: H,
     idle: Duration,
     tls: Option<tokio_rustls::TlsAcceptor>,
+    exact_port: Option<u16>,
 ) -> Result<ResourceListener, SurfaceError> {
     {
         let acceptor = tls;
-        let listener = bind_tokio(bind_ip_from_env()?, listener_port_range_from_env()?).await?;
+        let bind_ip = bind_ip_from_env()?;
+        let listener = match exact_port {
+            Some(port) => tokio::net::TcpListener::bind((bind_ip, port)).await.map_err(|e| {
+                SurfaceError::Bind(format!("the published port {bind_ip}:{port} could not be bound again: {e}"))
+            })?,
+            None => bind_tokio(bind_ip, listener_port_range_from_env()?).await?,
+        };
         let addr = listener.local_addr().map_err(|e| SurfaceError::Bind(e.to_string()))?;
 
         let handler = Arc::new(handler);
@@ -820,5 +839,42 @@ mod host_allowed_tests {
             let addr = addr.parse().unwrap();
             assert_eq!(url_for(addr), format!("https://{}", authority_for(addr)));
         }
+    }
+}
+
+#[cfg(test)]
+mod exact_port_tests {
+    use super::*;
+
+    struct Idle;
+    impl NativeHandler for Idle {
+        fn serve(&self, _conn: ListenerConn) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+            Box::pin(async {})
+        }
+    }
+
+    // A restored endpoint rebinds the port it published, and an occupied port is a named
+    // failure, never a quiet move to another port (Mira, PR 19 source reading, finding 2).
+    #[tokio::test]
+    async fn a_published_port_is_bound_again_or_refused_by_name() {
+        let listeners = Listeners::new();
+        let first = listeners.tcp_plaintext(Idle).await.expect("ephemeral bind");
+        let port = first.port();
+
+        let taken = listeners.tcp_plaintext_at(Idle, port).await;
+        let error = taken.err().expect("an occupied published port must not bind elsewhere");
+        assert!(error.to_string().contains(&format!(":{port}")), "{error}");
+
+        // Dropping a listener cancels its accept task, which releases the socket shortly after.
+        drop(first);
+        let mut again = None;
+        for _ in 0..50 {
+            if let Ok(listener) = listeners.tcp_plaintext_at(Idle, port).await {
+                again = Some(listener);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(again.expect("the freed port binds again").port(), port);
     }
 }

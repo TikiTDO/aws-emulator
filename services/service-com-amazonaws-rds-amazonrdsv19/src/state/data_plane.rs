@@ -627,17 +627,20 @@ pub async fn open_relayed_endpoint_at<Eng: Send + Sync + 'static>(
     upstream: std::net::SocketAddr,
     preferred_port: Option<u16>,
 ) -> Result<DbEngineEndpoint, String> {
-    let _ = preferred_port;
     let listeners = shared_engine(engine)
         .ok_or_else(|| "this emulator's engine has no listener surface".to_string())?
         .listeners();
     let upgrader = listeners
         .tls_upgrader()
         .map_err(|error| format!("the engine endpoint's TLS could not be prepared: {error}"))?;
-    let listener = listeners
-        .tcp_plaintext(real_engine::PgRelay::new(upstream, upgrader))
-        .await
-        .map_err(|error| format!("the engine endpoint could not be opened: {error}"))?;
+    let relay = real_engine::PgRelay::new(upstream, upgrader);
+    // A restored instance's endpoint was already published, so it rebinds that port or fails by
+    // name; it never moves silently to a new one a stored connection string does not know.
+    let listener = match preferred_port {
+        Some(port) => listeners.tcp_plaintext_at(relay, port).await,
+        None => listeners.tcp_plaintext(relay).await,
+    }
+    .map_err(|error| format!("the engine endpoint could not be opened: {error}"))?;
     let database = Arc::new(sql_engine::InstanceDatabase::open().map_err(|error| {
         format!("the SQL engine could not be started: {}", error.message)
     })?);

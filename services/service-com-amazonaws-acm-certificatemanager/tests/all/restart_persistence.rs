@@ -81,3 +81,30 @@ async fn certificate_metadata_tags_and_serving_key_material_survive_restart() {
     assert!(serving.covers("api.app.test"));
     assert!(serving.covers("portal.app.test"));
 }
+
+// Hearth, PR 19 owner reading, finding 2: an issued certificate restored without its private key
+// must be reported, not reminted under the same ARN. The gate is what boot calls.
+#[tokio::test]
+async fn an_issued_certificate_restored_without_its_key_is_reported() {
+    use service_com_amazonaws_acm_certificatemanager::state::sandbox_ca::issued_without_key_material;
+
+    let (router, engine) = router_with_engine();
+    let generated = generate(&Blueprint {
+        common_name: Some("api.app.test"),
+        dns_names: &["api.app.test"],
+        ..Blueprint::default()
+    });
+    let (status, imported) = call(&router, "ImportCertificate", &import_body(&generated)).await;
+    assert_eq!(status, 200, "ImportCertificate failed: {imported}");
+    let arn = imported["CertificateArn"].as_str().unwrap().to_string();
+    // Stand the imported certificate in for an Amazon-issued one: the remint path is theirs.
+    engine.state::<AcmState>().lock().certificates.get_mut(&arn).unwrap().cert_type =
+        "AMAZON_ISSUED".to_string();
+
+    let acm = engine.state::<AcmState>();
+    let with_keys = engine.state::<CertificateKeyMaterialDirectory>();
+    assert!(issued_without_key_material(&acm.lock().certificates, &with_keys.lock()).is_empty());
+
+    let missing = CertificateKeyMaterialDirectory::default();
+    assert_eq!(issued_without_key_material(&acm.lock().certificates, &missing), vec![arn]);
+}

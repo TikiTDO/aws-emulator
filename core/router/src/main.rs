@@ -221,6 +221,13 @@ async fn build_and_serve(options: RunOptions) {
                 std::process::exit(1);
             }
         }
+        match persistence.rearm().await {
+            Ok(rearmed) => tracing::info!(?rearmed, "restored workloads brought back"),
+            Err(error) => {
+                eprintln!("emulator state could not be brought back: {error}");
+                std::process::exit(1);
+            }
+        }
     }
 
     let router = aws_emulator_router::build_router(engine);

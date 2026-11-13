@@ -65,6 +65,12 @@ impl Entry {
 }
 
 /// The persisted services of one engine, and what was last written for each.
+/// What [`Persistence::rearm`] brought back.
+#[derive(Debug, Default)]
+pub struct Rearmed {
+    pub rds_instances: usize,
+}
+
 pub struct Persistence {
     state_dir: StateDir,
     engine: Arc<InMemoryEngine>,
@@ -125,6 +131,47 @@ impl Persistence {
             }
         }
         Ok(outcome)
+    }
+
+    /// Bring back the live workloads restored state describes, before the router answers: a
+    /// restored record is only half the instance until its engine is running again and its
+    /// published endpoint is listening (Mira, PR 19 source reading, finding 1). Today that is the
+    /// RDS real engines; a failure stops the boot rather than advertise a dead endpoint.
+    pub async fn rearm(&self) -> Result<Rearmed, String> {
+        use service_com_amazonaws_rds_amazonrdsv19::state::{
+            reconcile_restored_real_engines, ComAmazonawsRdsAmazonrdsv19State,
+        };
+        // An issued certificate whose private key did not come back would be reminted under the
+        // same ARN on its next read: a different certificate wearing the old identity (Hearth,
+        // PR 19 owner reading, finding 2). Stop the boot and name them instead.
+        let unkeyed = self.issued_certificates_without_keys();
+        if !unkeyed.is_empty() {
+            return Err(format!(
+                "ACM certificates restored without their private keys (the key directory snapshot \
+                 is missing or incomplete): {}",
+                unkeyed.join(", ")
+            ));
+        }
+        let rds = reconcile_restored_real_engines(
+            &*self.engine,
+            &self.engine.state::<ComAmazonawsRdsAmazonrdsv19State>(),
+        )
+        .await
+        .map_err(|error| format!("RDS real engines could not be brought back: {error}"))?;
+        // Route 53 health checks keep their counters and next times, but the clock that
+        // publishes them is a task, which is not persisted. Start it once again (Hearth, PR 19
+        // owner reading, finding 1); it claims a single clock, so a later write starts no second.
+        service_com_amazonaws_route53_awsdnsv20130401::state::health_check_status::drive_health_check_metrics(
+            &self.engine,
+        );
+        Ok(Rearmed { rds_instances: rds })
+    }
+
+    fn issued_certificates_without_keys(&self) -> Vec<String> {
+        service_com_amazonaws_acm_certificatemanager::state::sandbox_ca::issued_without_key_material(
+            &self.engine.state::<service_com_amazonaws_acm_certificatemanager::state::ComAmazonawsAcmCertificatemanagerState>().lock().certificates,
+            &self.engine.state::<service_common::acm_certificate_key_material::CertificateKeyMaterialDirectory>().lock(),
+        )
     }
 
     /// Write every service whose state differs from what was last written. Returns the
