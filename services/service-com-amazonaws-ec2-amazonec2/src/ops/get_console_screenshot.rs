@@ -61,10 +61,10 @@
 //! [`require_screenshotted_instance`] for why this operation's validator is the strict one
 //! that reports no not-found for a well-formed id, and where each wording goes.
 //!
-//! A KNOWN FIDELITY GAP, shared with every `DryRun` in this crate: the probe always answers
-//! `DryRunOperation`, never the `UnauthorizedOperation` of "otherwise, it is
-//! UnauthorizedOperation". This emulator has no principal or policy model, so a passing dry
-//! run means "this request is well formed", not "this caller is authorised".
+//! The `UnauthorizedOperation` of "otherwise, it is UnauthorizedOperation" is answered
+//! BEFORE this handler runs at all, by the service-wide gate that decides whether the
+//! caller holds the action ([`crate::service::authorization`]), so reaching the arm below
+//! means the caller's documents do allow the action.
 //!
 //! ## Shape of an operation
 //!

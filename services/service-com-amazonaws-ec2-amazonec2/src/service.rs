@@ -70,7 +70,7 @@ use service_common::query_decimal_floats::DecimalFloatsRef;
 use std::sync::Arc;
 
 /// Whether IAM lets a request perform the EC2 action it names: the decision
-/// [`FinishedEnvelope::run`] takes ahead of the account-wide reads, beside the Region
+/// [`FinishedEnvelope::run`] takes ahead of every operation, beside the Region
 /// gate, because it is a fact of the request's CREDENTIAL rather than of any one
 /// operation's input.
 pub mod authorization;
@@ -85,6 +85,11 @@ pub mod injected_faults;
 /// declare, written beside each reported shape's modelled members by
 /// [`Ec2QueryEnvelope::serialize_output`].
 pub mod recorded_response_members;
+
+/// The resources an EC2 request ADDRESSES, as the ARNs IAM judges its action against: what
+/// [`authorization_refusal`] reads out of the request so the gate can decide an action that
+/// supports resource-level permissions.
+pub mod addressed_resources;
 
 /// The `com-amazonaws-ec2-amazonec2` emulated service: the generated [`ServiceDefinition`] plus
 /// the behavioral seams this file owns.
@@ -823,14 +828,14 @@ fn region_refusal(ctx: &smithy_server_runtime::OperationContext<'_>) -> Option<R
 
 /// EC2's `UnauthorizedOperation` response for a request whose caller the IAM policies in
 /// force do not permit to perform the action it named, or `None` when they do — and for
-/// every operation whose action this gate does not decide
-/// ([`authorization::judged_over_every_resource`]).
+/// every caller the gate does not bound ([`authorization::authorize`]).
 ///
 /// The action asked about is the operation's own name, taken from the request's routing key
 /// and only when the routing table SERVES that key: so it is always a modelled operation's
 /// name, never an arbitrary value the body carried, and a request naming no operation of
 /// this service still reaches the routing failure rather than an authorization decision
-/// about a name nothing serves.
+/// about a name nothing serves. The resources it is judged against are the ones the request
+/// itself addresses ([`addressed_resources`]).
 ///
 /// The code and the sentence are EC2's own ([`crate::state::UNAUTHORIZED_OPERATION`],
 /// [`authorization::Denied::message`]); the status is the 403 the framework's own
@@ -846,7 +851,15 @@ fn authorization_refusal<Eng: Send + Sync + 'static>(
 ) -> Option<RtResponse> {
     let operation = svc.definition().protocol().routing_key(req).ok()?;
     svc.definition().routing_table().get(operation)?;
-    let refusal = authorization::authorize(engine, ctx, operation).err()?;
+    // The resources the request addresses, which an action that supports resource-level
+    // permissions is judged against. An action judged over EVERY resource is decided from
+    // the caller's policies alone, so nothing is read out of the request for it.
+    let resources = if authorization::judged_over_every_resource(operation) {
+        Vec::new()
+    } else {
+        addressed_resources::addressed_by(req, &crate::state::request_region(ctx.parts()))
+    };
+    let refusal = authorization::authorize(engine, ctx, operation, &resources).err()?;
     Some(smithy_server_runtime::protocol_error_response_with(
         smithy_server_runtime::PreDispatchProtocol::Query { ec2: true },
         ProtocolError::Unauthenticated {

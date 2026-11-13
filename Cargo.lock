@@ -12388,6 +12388,7 @@ dependencies = [
  "bytes",
  "chrono",
  "font8x8",
+ "form_urlencoded",
  "hex",
  "hmac 0.12.1",
  "http",

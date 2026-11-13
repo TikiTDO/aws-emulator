@@ -1962,6 +1962,13 @@ mod create_coip_pool;
 // cannot resolve, and how much capacity a source has to give. Declared beside `prefix_lists`
 #[path = "all/capacity_reservation_split_refusals.rs"]
 mod capacity_reservation_split_refusals;
+// WHO may drive an EC2 action that supports resource-level permissions: the
+// `UnauthorizedOperation` a caller whose documents allow the action nowhere earns, the
+// `DryRunOperation` one that holds it earns under `DryRun`, the ceiling a permissions
+// boundary sets, and the state a refused create does not write. Declared at the tail of this
+// file, which is where every new ec2 suite lands, for the reason the note at the top records.
+#[path = "all/resource_level_action_authorization.rs"]
+mod resource_level_action_authorization;
 // `DeleteLocalGatewayRouteTable`: the stored local gateway route table a delete answers in
 // `deleting`, the terminal `deleted` the clock then owes it, and the ids, absent parameters,
 // standing associations, dry runs and already-deleted tables it refuses without touching a

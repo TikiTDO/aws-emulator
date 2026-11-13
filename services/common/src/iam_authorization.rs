@@ -553,6 +553,37 @@ pub fn is_allowed(identity: Decision, resource: Decision) -> bool {
     identity == Decision::Allowed || resource == Decision::Allowed
 }
 
+/// Whether these identity-based documents could allow `action` AT ALL — on SOME resource,
+/// whichever one it is.
+///
+/// A request is granted only by an `Allow` whose action element covers the requested action
+/// AND whose resource element covers the requested resource, so documents holding no `Allow`
+/// of the action are about no request for it, whatever resource it names: every such request
+/// falls to the default deny. That is the question a caller asks here when it knows the
+/// ACTION but not the resource ARNs the request addresses — a service's request-time gate
+/// standing in front of an action that supports resource-level permissions, where
+/// withholding a grant on [`identity_decision`] over `*` alone would refuse a request a
+/// resource-scoped statement permits.
+///
+/// Deliberately the WEAKER question, in the same direction the rest of this module reads an
+/// undecidable clause: `true` for a grant scoped to resources this request may not even be
+/// about, and `true` for an `Allow` whose `Condition` this evaluator cannot decide, so a
+/// caller that refuses on `false` refuses only what no readable document can permit. It
+/// answers nothing about `Deny`: an explicit deny is decided against the resource, through
+/// [`identity_decision`].
+#[must_use]
+pub fn identity_may_allow_action(documents: &[PreparedDocument], action: &str) -> bool {
+    documents.iter().any(|document| {
+        statements(document).into_iter().any(|statement| {
+            statement["Effect"]
+                .as_str()
+                .unwrap_or_default()
+                .eq_ignore_ascii_case("Allow")
+                && names_action(statement, action)
+        })
+    })
+}
+
 /// The spellings a policy's `Principal`/`NotPrincipal` element names a whole ACCOUNT by:
 /// that account's root ARN and its bare account id.
 ///
@@ -1004,6 +1035,23 @@ impl RequiredKeys {
     }
 }
 
+/// The statements of ONE document, in document order: the `Statement` element's entries,
+/// or the single statement a document that states one object carries.
+///
+/// Empty for a document this could not read as a policy at all, and for one whose
+/// `Statement` is neither — both state nothing, which is what walking no statement answers.
+fn statements(document: &PreparedDocument) -> Vec<&::serde_json::Value> {
+    let Some(policy) = document.policy.as_ref() else {
+        return Vec::new();
+    };
+    let statement = &policy["Statement"];
+    match statement {
+        ::serde_json::Value::Array(entries) => entries.iter().collect(),
+        ::serde_json::Value::Object(_) => vec![statement],
+        _ => Vec::new(),
+    }
+}
+
 /// Every statement of ONE document that APPLIES to the request, pushed onto `into` in
 /// document order as `(whether it denies, where it was read from)`.
 ///
@@ -1017,18 +1065,7 @@ fn collect_applying(
     into: &mut Vec<(bool, MatchedStatement)>,
     required: &mut RequiredKeys,
 ) {
-    let Some(policy) = document.policy.as_ref() else {
-        // Not a policy this can be read out of: it states nothing.
-        return;
-    };
-    let statement = &policy["Statement"];
-    let statements: Vec<&::serde_json::Value> = match statement {
-        ::serde_json::Value::Array(entries) => entries.iter().collect(),
-        ::serde_json::Value::Object(_) => vec![statement],
-        _ => return,
-    };
-
-    for (at, entry) in statements.into_iter().enumerate() {
+    for (at, entry) in statements(document).into_iter().enumerate() {
         let effect = entry["Effect"].as_str().unwrap_or_default();
         let denies = effect.eq_ignore_ascii_case("Deny");
         let allows = effect.eq_ignore_ascii_case("Allow");
@@ -2602,6 +2639,73 @@ mod tests {
             assert_eq!(
                 spellings, expected,
                 "case {case:?}: expected {expected:?}, got {spellings:?}"
+            );
+        }
+    }
+
+    /// RULE: documents could allow an action only if one of them holds an `Allow` whose
+    /// action element covers it — whichever resource that statement is scoped to, and
+    /// whatever condition it carries — because an `Allow` is the only thing that grants.
+    #[test]
+    fn documents_could_allow_only_an_action_an_allow_statement_names() {
+        // (case, the statements of the one document, whether `rum:PutRumEvents` could be
+        // allowed by them)
+        let rows: [(&str, &str, bool); 10] = [
+            ("no statement at all", "", false),
+            (
+                "an allow of the action over every resource",
+                "{\"Effect\":\"Allow\",\"Action\":\"rum:PutRumEvents\",\"Resource\":\"*\"}",
+                true,
+            ),
+            (
+                "an allow scoped to one resource ARN",
+                "{\"Effect\":\"Allow\",\"Action\":\"rum:PutRumEvents\",\"Resource\":\"arn:aws:rum:us-east-1:000000000000:appmonitor/shop\"}",
+                true,
+            ),
+            (
+                "an allow of the action in another case",
+                "{\"Effect\":\"Allow\",\"Action\":\"RUM:putrumevents\",\"Resource\":\"*\"}",
+                true,
+            ),
+            (
+                "an allow under a wildcard over the service",
+                "{\"Effect\":\"Allow\",\"Action\":\"rum:*\",\"Resource\":\"*\"}",
+                true,
+            ),
+            (
+                "an allow of another service's action",
+                "{\"Effect\":\"Allow\",\"Action\":\"secretsmanager:*\",\"Resource\":\"*\"}",
+                false,
+            ),
+            (
+                "a DENY of the action and nothing else",
+                "{\"Effect\":\"Deny\",\"Action\":\"rum:PutRumEvents\",\"Resource\":\"*\"}",
+                false,
+            ),
+            (
+                "an allow whose condition this cannot decide",
+                "{\"Effect\":\"Allow\",\"Action\":\"rum:PutRumEvents\",\"Resource\":\"*\",\
+                 \"Condition\":{\"StringEquals\":{\"rum:alias\":\"shop\"}}}",
+                true,
+            ),
+            (
+                "an allow of everything but this action",
+                "{\"Effect\":\"Allow\",\"NotAction\":\"rum:PutRumEvents\",\"Resource\":\"*\"}",
+                false,
+            ),
+            (
+                "an allow of the action beside one of another",
+                "{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"*\"},\
+                 {\"Effect\":\"Allow\",\"Action\":\"rum:PutRumEvents\",\"Resource\":\"*\"}",
+                true,
+            ),
+        ];
+        for (case, text, expected) in rows {
+            let documents = prepare_documents(&[identity(text)]);
+            let could = identity_may_allow_action(&documents, "rum:PutRumEvents");
+            assert_eq!(
+                could, expected,
+                "case {case:?}: expected identity_may_allow_action {expected}, got {could}"
             );
         }
     }
