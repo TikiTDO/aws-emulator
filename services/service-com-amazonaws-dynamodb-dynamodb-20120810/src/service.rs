@@ -101,6 +101,11 @@ use std::sync::Arc;
 /// rule (see "Naming the request a response answers").
 mod request_id;
 
+/// The `AWS/DynamoDB` `SuccessfulRequestLatency` series this service publishes for each
+/// table request it serves, under the `{TableName, Operation}` dimension pair that family is
+/// reported on.
+mod request_latency_metrics;
+
 /// The error code this service answers an input-constraint violation with: the
 /// `ValidationException` (HTTP 400) every DynamoDB operation refuses a malformed
 /// request with. Restated here because `override_refusal` replaces the code and
@@ -506,6 +511,10 @@ impl<Eng: Send + Sync + 'static> ErasedOperation for OperationScopedClauseForm<E
             let Some((operation, op)) = routed else {
                 return svc.definition().routing_error_response(req);
             };
+            // What serving this request TAKES is measured around the operation's own run,
+            // which is the elapsed time its latency series reports
+            // ([`request_latency_metrics`]).
+            let started = ::std::time::Instant::now();
             let answered = SERVED_CLAUSE_FORM
                 .scope(
                     clause_form(operation),
@@ -515,6 +524,7 @@ impl<Eng: Send + Sync + 'static> ErasedOperation for OperationScopedClauseForm<E
                     ),
                 )
                 .await;
+            let took = started.elapsed();
             // This is the ONE place every response an operation of this service produces
             // passes through, so no operation can answer without naming the request it
             // answered — and each attempt gets its own id, because each attempt is served
@@ -523,6 +533,17 @@ impl<Eng: Send + Sync + 'static> ErasedOperation for OperationScopedClauseForm<E
             // belongs to is CloudWatch's own, so the publish happens here, with that lock
             // released and the request already served.
             crate::state::publish_pending_consumed(&*self.engine);
+            // And where the request itself is counted: a served table request is an
+            // observation of its operation's latency on that table, published into the same
+            // CloudWatch store.
+            request_latency_metrics::publish_served_request(
+                &*self.engine,
+                operation,
+                req,
+                ctx.parts(),
+                &answered,
+                took,
+            );
             with_request_id_header(answered)
         })
     }

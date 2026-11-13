@@ -167,6 +167,8 @@ mod query_mixed_parameter_order;
 mod refusal_contracts_and_expression_pre_images;
 #[path = "all/required_member_refusals.rs"]
 mod required_member_refusals;
+#[path = "all/request_latency_metrics.rs"]
+mod request_latency_metrics;
 #[path = "all/request_shape_validation_classes.rs"]
 mod request_shape_validation_classes;
 #[path = "all/request_validation_refusals.rs"]
