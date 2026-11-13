@@ -1560,3 +1560,10 @@ mod cloudformation_rotation_schedule_rotates_its_secret;
 // destination that decides the refusal) at once.
 #[path = "all/cloudformation_rollback_deletes_the_buckets_it_created.rs"]
 mod cloudformation_rollback_deletes_the_buckets_it_created;
+// Declared in the appended tail, which is where every new suite inserts its lines: what a log
+// group's subscription filter whose destination is a LAMBDA FUNCTION really hands that
+// function, and the lines the run it caused left in the function's own log group — CloudWatch
+// Logs, AWS Lambda, IAM and CloudFormation at once, so no single service crate's test target
+// can see both ends of it.
+#[path = "all/logs_subscription_filter_to_lambda.rs"]
+mod logs_subscription_filter_to_lambda;
