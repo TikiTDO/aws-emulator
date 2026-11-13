@@ -47,6 +47,22 @@ pub use refusals::*;
 /// the store for the same reason.
 pub mod execution_role;
 
+/// The work an executed action's `Definition` describes, performed in the service that owns
+/// the resources it names — the third part of this service that calls another service, kept
+/// apart from the store for the same reason.
+pub mod applied_definition;
+
+/// The Region every in-process hop this service makes is addressed in.
+///
+/// Each service that holds what a budget action's members name is PARTITION-GLOBAL: IAM holds
+/// one set of identities and policies per account, and AWS Organizations one organization,
+/// whichever Region either is asked in. AWS Budgets is itself a global service whose requests
+/// are signed in `us-east-1`, so that is where those hops are addressed — one constant rather
+/// than anything read off a request. The one hop addressed elsewhere is the Systems Manager
+/// one, whose Region the definition itself states (`SsmActionDefinition$Region`, "the Region
+/// to run the SSM document").
+pub const PARTITION_GLOBAL_REGION: &str = "us-east-1";
+
 /// Per-service state for com-amazonaws-budgets-awsbudgetservicegateway. A handler reaches it through [`service_state`].
 #[derive(Debug, Default)]
 pub struct ComAmazonawsBudgetsAwsbudgetservicegatewayState {
@@ -96,10 +112,10 @@ pub struct StoredNotification {
 /// One persisted budget action: the modelled `Action` a read reports, the tags created
 /// with it, and the settle the clock owes while the action is mid-flight.
 ///
-/// Nothing in this emulator applies an action's `Definition` to IAM, Organizations or
-/// Systems Manager — that work belongs to other services and no request here runs it.
-/// What is modelled is the budget control plane's own record of the action: the
-/// resource, and the `Action$Status` state machine `ExecuteBudgetAction` drives.
+/// The action's `Definition` is not merely recorded here: executing the action performs the
+/// work that definition describes in the service that owns it and reverting it takes that
+/// work back off ([`applied_definition`]), so the `Action$Status` state machine
+/// `ExecuteBudgetAction` drives reports what that service did with it.
 #[derive(Debug, Clone)]
 pub struct StoredAction {
     /// The action as `DescribeBudgetAction` reads it back.
@@ -114,6 +130,15 @@ pub struct StoredAction {
     /// The settle owed while `action.status` is one of the `*_IN_PROGRESS` statuses,
     /// or `None` for an action whose status is settled.
     pub pending: Option<PendingSettle>,
+    /// Whether the work the running execution started is still outstanding — set by the call
+    /// that starts work in the service that owns the definition ([`applied_definition`]) and
+    /// cleared by that same call once that service has answered.
+    ///
+    /// A settle is not due while it is set, however long the clock says: the status an
+    /// execution settles to is the one its WORK leaves behind, so an action whose work has
+    /// not answered yet is still executing and keeps its `*_IN_PROGRESS` status — which is
+    /// also what holds a second execution off it ([`action_is_in_progress`]).
+    pub work_outstanding: bool,
 }
 
 /// The status an in-flight action moves to, and the instant the clock owes that move.
@@ -136,6 +161,7 @@ impl StoredAction {
             tags,
             history: Vec::new(),
             pending: None,
+            work_outstanding: false,
         }
     }
 
@@ -153,7 +179,31 @@ impl StoredAction {
     /// fell due, not at the instant someone noticed, and carries the settled status —
     /// so the newest history record always agrees with what a read of the action itself
     /// reports.
+    ///
+    /// Nothing is due while the execution's own work is still outstanding
+    /// ([`Self::work_outstanding`]): the status a settle makes is the one that work leaves
+    /// behind, so settling before it answers would report an outcome nothing had reached.
+    /// That hold is itself bounded ([`WORK_ANSWER_BACKSTOP`]) — work that never answers at
+    /// all, because the request performing it went away, did not complete either, so the
+    /// settle is made at the failure status rather than leaving the action executing for
+    /// ever.
     pub fn settle_due(&mut self, now: SystemTime) {
+        let Some(pending) = self.pending.clone() else {
+            return;
+        };
+        if self.work_outstanding {
+            // The backstop instant, built with `checked_add` for the reason
+            // [`Self::start`] gives: an unrepresentable one leaves the hold at the settle's
+            // own instant, which is the nearest this clock can name.
+            let backstop = pending
+                .settles_at
+                .checked_add(WORK_ANSWER_BACKSTOP)
+                .unwrap_or(pending.settles_at);
+            if now < backstop {
+                return;
+            }
+            self.work_answered(true);
+        }
         let Some(pending) = self.pending.clone() else {
             return;
         };
@@ -165,10 +215,42 @@ impl StoredAction {
         record_action_event(self, EVENT_TYPE_SYSTEM, pending.settles_at);
     }
 
+    /// The work this action's execution started has ANSWERED, `refused` when the service
+    /// that owns it answered that it did not do the work ([`applied_definition`]).
+    ///
+    /// Work that was refused leaves the definition out of place and the execution
+    /// incomplete, so what the clock owes becomes the failure counterpart of the status the
+    /// execution was started with ([`failed_settle`]). Either way the settle this execution
+    /// owes is no longer held back ([`Self::work_outstanding`]), so it falls due at the
+    /// instant the execution set — or at once, where that instant has already passed while
+    /// the work ran.
+    ///
+    /// The action keeps the `*_IN_PROGRESS` status its execution gave it: only the status the
+    /// clock owes is decided here, so a caller reading while the work runs still sees that
+    /// status and the refusals it carries. An action whose settle is no longer owed — one
+    /// nothing started — has nothing to answer for.
+    pub fn work_answered(&mut self, refused: bool) {
+        self.work_outstanding = false;
+        let Some(pending) = self.pending.as_mut() else {
+            return;
+        };
+        if refused {
+            if let Some(failed) = failed_settle(&pending.settles_to) {
+                pending.settles_to = failed.to_string();
+            }
+        }
+    }
+
     /// Start `execution`'s work: the action takes its `*_IN_PROGRESS` status now, and
     /// the clock owes the settled status [`ACTION_SETTLES_AFTER`] later.
-    pub fn start(&mut self, execution: ActionExecution, now: SystemTime) {
+    ///
+    /// `performs_work` says whether this execution has work for the service that owns the
+    /// action's definition ([`applied_definition::work_of`]). While that work is outstanding
+    /// no settle is due, and the call that started it answers for it
+    /// ([`Self::work_answered`]) on every path.
+    pub fn start(&mut self, execution: ActionExecution, now: SystemTime, performs_work: bool) {
         self.action.status = execution.in_progress.to_string();
+        self.work_outstanding = performs_work;
         self.pending = Some(PendingSettle {
             // `checked_add` rather than `SystemTime`'s own `Add`, which is an expect on
             // overflow — the same reason [`instant_at`] uses it. An unrepresentable
@@ -209,10 +291,11 @@ pub const APPROVAL_MODEL_MANUAL: &str = "MANUAL";
 /// arrives.
 ///
 /// An action that is approved automatically is left ARMED even where its trigger is
-/// already met: AWS would run such an action, and nothing in this emulator performs an
-/// action's execution, so reporting an execution status for it would be a status for work
-/// nothing did. That is a known divergence of this emulator rather than a reading of the
-/// model.
+/// already met: AWS would run such an action, and nothing in this emulator TRIGGERS an
+/// action's execution on its own — an execution is performed by an `ExecuteBudgetAction`
+/// call and by nothing else ([`applied_definition`]) — so reporting an execution status for
+/// it would be a status for work nothing started. That is a known divergence of this
+/// emulator rather than a reading of the model.
 ///
 /// Where the budget's figures state no comparison at all — a `FORECASTED` action of a
 /// budget no forecast is reported for, a percentage of a budget that reports no limit —
@@ -301,6 +384,18 @@ pub const EXECUTION_TYPE_REVERSE: &str = "REVERSE_BUDGET_ACTION";
 /// `ExecutionType$RESET_BUDGET_ACTION` — re-arm a settled action.
 pub const EXECUTION_TYPE_RESET: &str = "RESET_BUDGET_ACTION";
 
+/// How long the settle an execution owes is held back for work that has not answered yet
+/// ([`StoredAction::work_outstanding`]).
+///
+/// Emulator backstop, NOT an AWS figure: the call that starts the work answers for it on
+/// every path it returns on, so this is reached only where that request went away without
+/// answering — and without it such an action would be left executing, and locked against
+/// every later execution, for good. Generous rather than tight, because the work is as slow
+/// as what the owning service does for it: a definition applied across a hundred identities
+/// on a loaded host is still work in progress, and only a request that is gone fails to
+/// answer inside this.
+pub const WORK_ANSWER_BACKSTOP: Duration = Duration::from_secs(60);
+
 /// How long an action's work stays in flight before the clock settles it.
 ///
 /// `ExecuteBudgetAction` answers while the work is still running — that is what the
@@ -358,9 +453,10 @@ pub fn action_is_in_progress(status: &str) -> bool {
 /// * `RETRY_BUDGET_ACTION` runs the work that failed again, so it is accepted from each
 ///   `*_FAILURE` status and repeats the operation that produced it.
 ///
-/// Nothing in this emulator ever fails an action's work, so no call here mints a
-/// `*_FAILURE` status; those rows are the rule stated over the whole `ActionStatus`
-/// enum, not a status this service invents for work nothing ran.
+/// Nothing in this emulator ever fails an action's work BY ITSELF: a `*_FAILURE` status is
+/// minted only where the service that owns the definition's work refused it
+/// ([`applied_definition`]), which is what [`failed_settle`] names, so those rows are the
+/// rule stated over the whole `ActionStatus` enum rather than a status this service invents.
 pub fn action_execution(execution_type: &str, status: &str) -> Option<ActionExecution> {
     let execute = ActionExecution {
         in_progress: ACTION_STATUS_EXECUTION_IN_PROGRESS,
@@ -395,6 +491,24 @@ pub fn action_execution(execution_type: &str, status: &str) -> Option<ActionExec
     }
 }
 
+/// The `ActionStatus` an execution that was aimed at `settles_to` settles to instead when
+/// the work it performs did not complete, or `None` when no failure status corresponds to
+/// it.
+///
+/// Each settled status that reports completed work has one `*_FAILURE` counterpart in the
+/// modelled `ActionStatus` catalog, naming the operation that did not complete: an execution
+/// that was to leave the definition in place, a reversal that was to take it off, and the
+/// re-arming a reset performs — whose completed status is [`ACTION_STATUS_STANDBY`], the
+/// status an armed action carries, since `ActionStatus` has no `RESET_SUCCESS`.
+pub fn failed_settle(settles_to: &str) -> Option<&'static str> {
+    match settles_to {
+        ACTION_STATUS_EXECUTION_SUCCESS => Some(ACTION_STATUS_EXECUTION_FAILURE),
+        ACTION_STATUS_REVERSE_SUCCESS => Some(ACTION_STATUS_REVERSE_FAILURE),
+        ACTION_STATUS_STANDBY => Some(ACTION_STATUS_RESET_FAILURE),
+        _ => None,
+    }
+}
+
 /// The action of `stored` that `action_id` names, with any settle the clock has already
 /// made due materialised ([`StoredAction::settle_due`]), or `None` when the budget
 /// holds no such action — which the caller answers with `NotFoundException`.
@@ -403,12 +517,28 @@ pub fn find_action_mut<'a>(
     action_id: &str,
     now: SystemTime,
 ) -> Option<&'a mut StoredAction> {
-    let found = stored
-        .actions
-        .iter_mut()
-        .find(|held| held.action.action_id == action_id)?;
+    let found = find_action_unsettled_mut(stored, action_id)?;
     found.settle_due(now);
     Some(found)
+}
+
+/// The action of `stored` that `action_id` names, with the settle the clock owes it left
+/// OWED, or `None` when the budget holds no such action.
+///
+/// For the one caller that has to re-aim that owed settle rather than report it
+/// ([`StoredAction::work_answered`]): a settle already due is still the one this execution
+/// owes, so materialising it first would record a status the work never reached, while
+/// leaving it owed lets the next observation report the status the work actually left —
+/// timestamped at the instant it fell due, as every settle is. Every OTHER reader goes
+/// through [`find_action_mut`], which materialises it.
+pub fn find_action_unsettled_mut<'a>(
+    stored: &'a mut StoredBudget,
+    action_id: &str,
+) -> Option<&'a mut StoredAction> {
+    stored
+        .actions
+        .iter_mut()
+        .find(|held| held.action.action_id == action_id)
 }
 
 /// Every action `stored` holds, as a read reports it at `now`, in the order they were
@@ -451,12 +581,24 @@ pub const MAX_ACTIONS_PER_BUDGET: usize = 10;
 /// `ActionType` enum already refuses at the boundary.
 fn definition_member_for(action_type: &str) -> Option<&'static str> {
     match action_type {
-        "APPLY_IAM_POLICY" => Some("IamActionDefinition"),
-        "APPLY_SCP_POLICY" => Some("ScpActionDefinition"),
-        "RUN_SSM_DOCUMENTS" => Some("SsmActionDefinition"),
+        ACTION_TYPE_APPLY_IAM_POLICY => Some("IamActionDefinition"),
+        ACTION_TYPE_APPLY_SCP_POLICY => Some("ScpActionDefinition"),
+        ACTION_TYPE_RUN_SSM_DOCUMENTS => Some("SsmActionDefinition"),
         _ => None,
     }
 }
+
+/// `ActionType$APPLY_IAM_POLICY` — the action whose definition is a managed policy and the
+/// IAM identities it goes on, so the work it performs belongs to IAM.
+pub const ACTION_TYPE_APPLY_IAM_POLICY: &str = "APPLY_IAM_POLICY";
+
+/// `ActionType$APPLY_SCP_POLICY` — the action whose definition is a service control policy
+/// and the targets it goes on, so the work it performs belongs to AWS Organizations.
+pub const ACTION_TYPE_APPLY_SCP_POLICY: &str = "APPLY_SCP_POLICY";
+
+/// `ActionType$RUN_SSM_DOCUMENTS` — the action whose definition is a document to run and the
+/// instances to run it against, so the work it performs belongs to Systems Manager.
+pub const ACTION_TYPE_RUN_SSM_DOCUMENTS: &str = "RUN_SSM_DOCUMENTS";
 
 /// The cross-member rule `Action$ActionType` documents, checked over the `Definition`
 /// supplied with an action: the action type determines which member of `Definition`

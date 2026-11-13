@@ -21,6 +21,8 @@ mod action_arn_name_boundary;
 mod attached_notification_identity;
 #[path = "all/budget_action_approval_gate.rs"]
 mod budget_action_approval_gate;
+#[path = "all/budget_action_definition_effect.rs"]
+mod budget_action_definition_effect;
 #[path = "all/budget_action_execution.rs"]
 mod budget_action_execution;
 #[path = "all/budget_action_execution_role.rs"]

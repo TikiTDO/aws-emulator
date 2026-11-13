@@ -32,6 +32,16 @@ aws-sdk-s3 = { version = "1", default-features = false }
 # built once here for every service that publishes. Only the generated client is needed: the
 # emulator supplies the transport, so the SDK's own HTTPS stack is left out.
 aws-sdk-sns = { version = "1", default-features = false }
+# `organizations_client`: the in-process AWS Organizations client a service ACTING on an
+# organization drives — attaching the service control policy a budget action's definition
+# names to each of its targets among them — built once here for every such service. Only the
+# generated client is needed: the emulator supplies the transport, so the SDK's own HTTPS
+# stack is left out.
+aws-sdk-organizations = { version = "1", default-features = false }
+# `ssm_client`: the in-process AWS Systems Manager client a service RUNNING a document or
+# resolving a parameter on a client's behalf drives, built once here for the same reason and
+# with the same features left out.
+aws-sdk-ssm = { version = "1", default-features = false }
 # `trail_log_files`: a CloudTrail log file IS a gzip stream, so it is written with the
 # maintained DEFLATE implementation this workspace already compresses with rather than by
 # laying out the framing here.

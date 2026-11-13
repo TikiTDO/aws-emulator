@@ -39,15 +39,15 @@ pub const SERVICE_PRINCIPAL: &str = "budgets.amazonaws.com";
 /// The question goes to IAM over the IN-PROCESS callback
 /// ([`smithy_server_runtime::OperationContext::callback`]), the way every emulated service
 /// asks another: nothing here opens a socket or leaves the host, and the address that hop
-/// is made to is [`IAM_REGION`] — this service's own constant — so no caller-supplied value
-/// reaches it.
+/// is made to is [`super::PARTITION_GLOBAL_REGION`] — this service's own constant — so no
+/// caller-supplied value reaches it.
 pub async fn unassumable_refusal(
     ctx: &::smithy_server_runtime::OperationContext<'_>,
     execution_role_arn: &str,
 ) -> Option<String> {
     ::service_common::iam_role::role_is_unassumable(
         ctx,
-        IAM_REGION,
+        super::PARTITION_GLOBAL_REGION,
         execution_role_arn,
         SERVICE_PRINCIPAL,
     )
@@ -64,10 +64,3 @@ fn unassumable_message(execution_role_arn: &str) -> String {
          {SERVICE_PRINCIPAL}]."
     )
 }
-
-/// The Region the in-process hop to IAM is addressed in.
-///
-/// IAM holds one set of roles per account whichever Region it is asked in, and AWS Budgets
-/// is itself a global service whose requests are signed in `us-east-1`, so the hop is
-/// addressed there — a constant rather than anything read off the request.
-const IAM_REGION: &str = "us-east-1";

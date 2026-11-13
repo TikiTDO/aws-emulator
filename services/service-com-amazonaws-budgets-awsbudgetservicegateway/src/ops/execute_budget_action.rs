@@ -3,9 +3,12 @@
 //! @op ExecuteBudgetAction
 //!
 //! Drives the `Action$Status` state machine of one stored budget action: the execution
-//! type the caller names takes the action into the matching `*_IN_PROGRESS` status, and
-//! the clock owes the settled status [`crate::state::ACTION_SETTLES_AFTER`] later
-//! ([`crate::state::action_execution`]). An execution the action's current status does
+//! type the caller names takes the action into the matching `*_IN_PROGRESS` status, the
+//! work that execution performs is carried out in the service that owns the action's
+//! `Definition` ([`crate::state::applied_definition`]), and the clock owes the settled
+//! status [`crate::state::ACTION_SETTLES_AFTER`] later
+//! ([`crate::state::action_execution`]) — the status that work's outcome leaves it at. An
+//! execution the action's current status does
 //! not allow — one aimed at work that is still running, or one its settled status leaves
 //! nothing to do — is refused for the state the resource is in, which is the locked
 //! resource `ResourceLockedException` names; a
@@ -13,10 +16,13 @@
 //! recorded as the action's `EXECUTE_ACTION` event, which
 //! `DescribeBudgetActionHistories` reports.
 //!
-//! Nothing here applies the action's `Definition` to IAM, Organizations or Systems
-//! Manager: that work belongs to other services and no request in this emulator runs
-//! it. What this operation owns is the budget control plane's own record of the action,
-//! which is what every read of that action reports.
+//! What the action's definition names is applied where it lives: the managed policy of an
+//! `APPLY_IAM_POLICY` action is attached to the identities it names through IAM, a service
+//! control policy through AWS Organizations and a document is run through Systems Manager
+//! — each over the in-process hop into this same emulator — and a reversion takes that
+//! work back off. So a settled `EXECUTION_SUCCESS` reports work that was done, and work
+//! the owning service refused settles the action at the matching `*_FAILURE` status
+//! instead.
 //!
 //! ## Shape of an operation
 //!
@@ -178,7 +184,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         // The budgets control plane is scoped to the account the caller signed with, so
         // an `AccountId` naming any other account is refused with the modelled 403
         // before anything is read or written (`crate::state::foreign_account_refusal`).
@@ -208,58 +213,108 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let now = ::std::time::SystemTime::now();
-        let mut store = crate::state::store_at(&state, now);
-        // An action is a resource OF the budget it names (`Action$BudgetName`), so a
-        // budget this account does not hold holds no action either.
-        let stored = store
-            .budgets
-            .get_mut(&(input.account_id.clone(), input.budget_name.clone()))
-            .ok_or_else(|| {
-                ExecuteBudgetActionErrorModeled::NotFoundException(NotFoundException {
-                    message: Some(crate::state::budget_not_found(&input.budget_name)),
-                })
-            })?;
-        // The lookup materialises any settle the clock had already made due, so the
-        // status this call decides from is the one the action already carried.
-        let action =
-            crate::state::find_action_mut(stored, &input.action_id, now).ok_or_else(|| {
-                ExecuteBudgetActionErrorModeled::NotFoundException(NotFoundException {
-                    message: Some(crate::state::action_not_found(
-                        &input.account_id,
-                        &input.action_id,
-                    )),
-                })
-            })?;
+        // What this execution DOES, decided and written under the store's lock: the work
+        // the action's `Definition` describes in the direction this execution takes it, and
+        // the definition itself. The lock is released with the block, so the work below is
+        // never performed while the store is held.
+        let (work, action_type, definition) = {
+            let mut store = crate::state::store_at(&state, now);
+            // An action is a resource OF the budget it names (`Action$BudgetName`), so a
+            // budget this account does not hold holds no action either.
+            let stored = store
+                .budgets
+                .get_mut(&(input.account_id.clone(), input.budget_name.clone()))
+                .ok_or_else(|| {
+                    ExecuteBudgetActionErrorModeled::NotFoundException(NotFoundException {
+                        message: Some(crate::state::budget_not_found(&input.budget_name)),
+                    })
+                })?;
+            // The lookup materialises any settle the clock had already made due, so the
+            // status this call decides from is the one the action already carried.
+            let action = crate::state::find_action_mut(stored, &input.action_id, now)
+                .ok_or_else(|| {
+                    ExecuteBudgetActionErrorModeled::NotFoundException(NotFoundException {
+                        message: Some(crate::state::action_not_found(
+                            &input.account_id,
+                            &input.action_id,
+                        )),
+                    })
+                })?;
 
-        // Which executions an action's status leaves to do is the rule, and an execution
-        // the action's CURRENT STATUS does not allow is a refusal of the method for the
-        // state the resource is in — not of any value in the request: work this service
-        // started and has not settled yet is locked against a second execution, and a
-        // settled status that leaves this execution type nothing to do — the approval of
-        // an action whose threshold has not triggered among them — refuses it the same
-        // way. Both are the locked resource `ResourceLockedException` names ("the
-        // server rejected that particular method for the requested resource"), reported
-        // with the status the action carries at this instant, and refused before anything
-        // is written, so the action keeps the status and the members it already had.
-        let execution = (!crate::state::action_is_in_progress(&action.action.status))
-            .then(|| crate::state::action_execution(&input.execution_type, &action.action.status))
-            .flatten()
-            .ok_or_else(|| {
-                ExecuteBudgetActionErrorModeled::ResourceLockedException(ResourceLockedException {
-                    message: Some(crate::state::method_not_allowed_during(
-                        &action.action.status,
-                    )),
+            // Which executions an action's status leaves to do is the rule, and an
+            // execution the action's CURRENT STATUS does not allow is a refusal of the
+            // method for the state the resource is in — not of any value in the request:
+            // work this service started and has not settled yet is locked against a second
+            // execution, and a settled status that leaves this execution type nothing to do
+            // — the approval of an action whose threshold has not triggered among them —
+            // refuses it the same way. Both are the locked resource
+            // `ResourceLockedException` names ("the server rejected that particular method
+            // for the requested resource"), reported with the status the action carries at
+            // this instant, and refused before anything is written, so the action keeps the
+            // status and the members it already had.
+            let execution = (!crate::state::action_is_in_progress(&action.action.status))
+                .then(|| {
+                    crate::state::action_execution(&input.execution_type, &action.action.status)
                 })
-            })?;
-        // In progress NOW, settled when the clock says so — so a caller reading
-        // straight after this call still sees the in-progress status and the refusals
-        // that status carries.
-        action.start(execution, now);
-        // Every write against an action is recorded in its history, which
-        // `DescribeBudgetActionHistories` reports. `ActionHistory$Status` is "the status
-        // of action at the time of the event", so the record carries the `*_IN_PROGRESS`
-        // status this call moved the action to, not the status the clock owes it next.
-        crate::state::record_action_event(action, crate::state::EVENT_TYPE_EXECUTE_ACTION, now);
+                .flatten()
+                .ok_or_else(|| {
+                    ExecuteBudgetActionErrorModeled::ResourceLockedException(
+                        ResourceLockedException {
+                            message: Some(crate::state::method_not_allowed_during(
+                                &action.action.status,
+                            )),
+                        },
+                    )
+                })?;
+            // In progress NOW, settled when the clock says so — so a caller reading
+            // straight after this call still sees the in-progress status and the refusals
+            // that status carries. An execution with work for another service holds that
+            // settle back until the work answers (`StoredAction::work_answered` below), so
+            // no read can report an outcome the work had not reached.
+            let work = crate::state::applied_definition::work_of(execution);
+            action.start(execution, now, work.is_some());
+            // Every write against an action is recorded in its history, which
+            // `DescribeBudgetActionHistories` reports. `ActionHistory$Status` is "the status
+            // of action at the time of the event", so the record carries the
+            // `*_IN_PROGRESS` status this call moved the action to, not the status the clock
+            // owes it next.
+            crate::state::record_action_event(
+                action,
+                crate::state::EVENT_TYPE_EXECUTE_ACTION,
+                now,
+            );
+            (
+                work,
+                action.action.action_type.clone(),
+                action.action.definition.clone(),
+            )
+        };
+
+        if let Some(work) = work {
+            // The work the execution performs, carried out where the definition's resources
+            // live — the action carries the `*_IN_PROGRESS` status that locks it against a
+            // second execution while that runs.
+            let performed =
+                crate::state::applied_definition::perform(ctx, &action_type, &definition, work)
+                    .await;
+            // What that service answered is what the action settles to: an answer that the
+            // work was not done makes the owed status the matching `*_FAILURE` one, and
+            // either way the settle this execution owes stops being held back. The settle is
+            // DECIDED here rather than reported, so the action is looked up without
+            // materialising it (`crate::state::find_action_unsettled_mut`).
+            let mut store = crate::state::store_at(&state, now);
+            if let Some(action) = store
+                .budgets
+                .get_mut(&(input.account_id.clone(), input.budget_name.clone()))
+                .and_then(|stored| {
+                    crate::state::find_action_unsettled_mut(stored, &input.action_id)
+                })
+            {
+                action.work_answered(
+                    performed == crate::state::applied_definition::Outcome::Refused,
+                );
+            }
+        }
 
         Ok(ExecuteBudgetActionOutput {
             account_id: input.account_id,

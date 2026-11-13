@@ -46,11 +46,19 @@ hex = { workspace = true }
 # SNS is mounted beside budgets on one engine in the alert-delivery suite, because a
 # budget alert is asserted where a client sees it: on the topic the subscriber named.
 service-com-amazonaws-sns-amazonsimplenotificationservice = { workspace = true }
-# IAM is mounted beside budgets on one engine in the execution-role suite, because the
-# role a budget action is written with exists only if IAM answers for it — and the roles
-# that suite creates are created through IAM's own operations, over this client.
+# IAM is mounted beside budgets on one engine in the execution-role and
+# definition-effect suites, because the role a budget action is written with exists only if
+# IAM answers for it, and the policy an executed action attaches is asserted where a client
+# sees it — on the identity IAM holds it against. The roles, users, groups and policies
+# those suites create are created through IAM's own operations, over this client.
 service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 aws-sdk-iam = { version = "1", default-features = false }
+# Systems Manager and AWS Organizations are mounted beside budgets on one engine in the
+# definition-effect suite too, because the document a `RUN_SSM_DOCUMENTS` action runs and the
+# service control policy an `APPLY_SCP_POLICY` action attaches are performed by those
+# services, so what each answers is what the action's status reports.
+service-com-amazonaws-ssm-amazonssm = { workspace = true }
+service-com-amazonaws-organizations-awsorganizationsv20161128 = { workspace = true }
 
 [lints]
 workspace = true

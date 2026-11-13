@@ -491,6 +491,13 @@ pub mod s3_client;
 /// The ONE construction of the in-process Amazon SNS client a service publishing a
 /// notification drives, so no two services configure that hop differently.
 pub mod sns_client;
+/// The ONE construction of the in-process AWS Organizations client a service acting on an
+/// organization drives, so no two services configure that hop differently.
+pub mod organizations_client;
+/// The ONE construction of the in-process AWS Systems Manager client a service running a
+/// document or resolving a parameter drives, so no two services configure that hop
+/// differently.
+pub mod ssm_client;
 /// The ONE read of an Amazon S3 object a service was pointed at, and the ONE reading of
 /// what the object store's answer about it established, over that same hop.
 pub mod s3_object_read;
