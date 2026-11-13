@@ -9,6 +9,11 @@
 //! `accessPolicy` is left to `PutDestinationPolicy`: "By default, PutDestination does not set
 //! any access policy with the destination."
 //!
+//! The put VALIDATES the wiring it configures the way the service does — by assuming the
+//! `roleArn` it names and test-delivering a message to the target
+//! ([`crate::state::delivery_role`]) — so a role IAM reports CloudWatch Logs cannot assume is
+//! refused with `InvalidParameterException` and no destination is stored.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -173,15 +178,36 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // together and reported as one failure
         // (`crate::state::DESTINATION_ARN_PARSE_FAILED`).
         //
-        // Nothing narrower is asserted about either ARN: `Destination$targetArn` documents
+        // Nothing narrower is asserted about `targetArn`: `Destination$targetArn` documents
         // the target as a physical resource "(for example, a Kinesis stream)" — an example
-        // rather than a closed set — and whether the role exists and grants those
-        // permissions is IAM's answer, not this service's.
+        // rather than a closed set. What IS asked about `roleArn` is the one thing the service
+        // establishes while it configures the destination, below: that this service can assume
+        // it. What that role is then ALLOWED to do is asked of IAM per delivery, where the
+        // write is made.
         if [input.target_arn.as_str(), input.role_arn.as_str()]
             .iter()
             .any(|value| crate::state::arn_service_and_resource(value).is_none())
         {
             return Err(invalid(crate::state::DESTINATION_ARN_PARSE_FAILED));
+        }
+
+        // What the role is for is the delivery CloudWatch Logs makes to the target under it
+        // ("grants CloudWatch Logs permissions to call the Amazon Kinesis PutRecord operation
+        // on the destination stream"), and the service validates that wiring while it
+        // configures it: it assumes the role and test-delivers a message to the target. A role
+        // IAM reports this service cannot assume is refused as the invalid parameter it is,
+        // and no destination is stored ([`crate::state::delivery_role`]). Asked before the
+        // store's guard is taken, because a lock guard must not be held across an in-process
+        // call into another service.
+        if let Some(message) = crate::state::delivery_role::unassumable_role_message(
+            ctx,
+            &region,
+            &input.role_arn,
+            &input.target_arn,
+        )
+        .await
+        {
+            return Err(invalid(&message));
         }
 
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {

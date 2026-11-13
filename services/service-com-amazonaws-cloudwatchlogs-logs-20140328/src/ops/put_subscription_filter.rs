@@ -7,6 +7,10 @@
 //! that destination's access policy — the only thing that authorizes one
 //! ([`crate::state::subscription_destination_refusal`]) — and refused with
 //! `AccessDeniedException` when it grants this caller nothing.
+//! A put also VALIDATES the delivery it configures the way the service does — by assuming the
+//! `roleArn` it names and test-delivering a message to the destination
+//! ([`crate::state::delivery_role`]) — so a role IAM reports CloudWatch Logs cannot assume is
+//! refused with `InvalidParameterException` and no filter is stored.
 //! A put also RE-VALIDATES the filter's destination: a filter whose destination refused its
 //! last delivery ([`crate::state::subscription_delivery`]) is attempted again from the next
 //! ingested batch on, with no replay of the batches it missed. The put WRITES to the
@@ -231,11 +235,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `ctx` carries request metadata: the Region the credential scope names, which is
         // where the configured destination is reached when its own ARN names no Region.
         let region = crate::state::request_region(ctx.parts());
+        // CloudWatch Logs validates the wiring it is being asked to configure by assuming the
+        // role the filter names and test-delivering a message under it, so whether that role
+        // can be assumed at all is asked of IAM FIRST — before the store's guard is taken,
+        // because a lock guard must not be held across an in-process call into another
+        // service ([`crate::state::delivery_role`]). What the answer decides is applied
+        // inside the configuration step, in the place the service answers it: after
+        // everything about the request itself, and before anything is stored.
+        let unassumable_role = match input.role_arn.as_deref() {
+            Some(role_arn) => {
+                crate::state::delivery_role::unassumable_role_message(
+                    ctx,
+                    &region,
+                    role_arn,
+                    &input.destination_arn,
+                )
+                .await
+            }
+            None => None,
+        };
         // Configuring the filter holds the store's guard, so it is done in a SYNCHRONOUS
         // step ([`PutSubscriptionFilter::configure`]) and the guard is gone by the time the
         // health check it resolved is handed over below: a lock guard must not be held
         // across an in-process call into another service.
-        let health_check = self.configure(input)?;
+        let health_check = self.configure(input, unassumable_role)?;
         // The put VALIDATES the destination: CloudWatch Logs writes one health-check record
         // to it, before any log event of this filter exists
         // ([`crate::state::subscription_delivery::health_check`]).
@@ -262,6 +285,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutSubscriptionFi
     fn configure(
         &self,
         input: PutSubscriptionFilterInput,
+        unassumable_role: Option<String>,
     ) -> Result<Option<crate::state::subscription_delivery::Delivery>, PutSubscriptionFilterError>
     {
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
@@ -407,6 +431,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutSubscriptionFi
                 },
             )
             .into());
+        }
+
+        // The delivery the filter configures is VALIDATED before it is stored: CloudWatch
+        // Logs assumes the role the filter names and test-delivers a message to the
+        // destination under it, so a role IAM reports this service cannot assume is refused
+        // as the invalid parameter it is and nothing of the filter is stored — neither a
+        // creation nor an update of one ([`crate::state::delivery_role`]).
+        if let Some(message) = unassumable_role {
+            return Err(invalid(message));
         }
 
         // An update keeps the filter's creation time: it is still the same filter, so

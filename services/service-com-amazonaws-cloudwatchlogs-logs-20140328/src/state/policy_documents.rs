@@ -322,8 +322,9 @@ pub fn check_index_policy_quotas(fields: &[IndexedField]) -> Result<(), IndexPol
 /// and how each is configured, is the catalogue `PutTransformer` owns, so what is judged
 /// here is that the document carries a non-empty array of processor blocks — written
 /// either as that array itself or as an object holding it — whose FIRST block names a
-/// parse-type processor, which is the one rule a transformer's pipeline has to satisfy
-/// wherever it is configured ([`PARSE_TYPE_PROCESSORS`]).
+/// parse-type processor, and in which a parser for an AWS-vended log format appears nowhere
+/// but first: the two rules a transformer's pipeline has to satisfy wherever it is configured
+/// ([`PARSE_TYPE_PROCESSORS`], [`LEADING_ONLY_PROCESSORS`]).
 pub(super) fn check_transformer_policy_document(document: &str) -> Result<(), String> {
     let expected =
         "policyDocument for a transformer policy must include an array of processors".to_string();
@@ -346,6 +347,20 @@ pub(super) fn check_transformer_policy_document(document: &str) -> Result<(), St
         .ok_or_else(|| expected.clone())?;
     if !is_parse_type_processor(leading) {
         return Err(transformer_leading_parser_message(leading));
+    }
+    // A parser for an AWS-vended log format may appear NOWHERE but first ("If you use this
+    // processor, it must be the first processor in your transformer"), which is the same rule
+    // wherever a processor list is configured: an account-level transformer policy carries one
+    // too, so a block naming such a parser at any later position is refused here as well
+    // ([`LEADING_ONLY_PROCESSORS`]).
+    if let Some(misplaced) = processors
+        .iter()
+        .skip(1)
+        .filter_map(serde_json::Value::as_object)
+        .flat_map(|block| block.keys())
+        .find(|named| LEADING_ONLY_PROCESSORS.contains(&named.as_str()))
+    {
+        return Err(transformer_leading_only_message(misplaced));
     }
     Ok(())
 }

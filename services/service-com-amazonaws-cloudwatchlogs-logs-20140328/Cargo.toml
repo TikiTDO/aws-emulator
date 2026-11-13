@@ -80,6 +80,10 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", 
 # Logs use it for that group, which is read from KMS with the `GetKeyPolicy` this client
 # generates, over the same in-process callback.
 aws-sdk-kms = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# `PutDeliverySource` resolves the resource its `resourceArn` names where the owning service
+# holds it; for a CloudFront distribution that is the `GetDistribution` this client generates,
+# driven over the same in-process callback.
+aws-sdk-cloudfront = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
 # `CreateImportTask` imports from a CloudTrail Lake event data store, so it resolves the
 # source its `importSourceArn` names where CloudTrail holds it, with the `GetEventDataStore`
 # this client generates, over the same in-process callback.

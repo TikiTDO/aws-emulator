@@ -177,12 +177,20 @@ pub mod metric_filters;
 /// filters.
 pub mod subscription_delivery;
 
+/// Whether CloudWatch Logs can assume the role a subscription delivery is configured under,
+/// which is what a put that configures one validates.
+pub mod delivery_role;
+
 /// Building another emulated service's AWS SDK client over the in-process callback, which is
 /// how every call this service makes to another one is made.
 pub mod callback_client;
 
 /// Resolving the S3 bucket an export task's `destination` names against the object store.
 pub mod export_destination;
+
+/// Resolving the resource a delivery source's `resourceArn` names against the service that
+/// owns it.
+pub mod delivery_source_resource;
 
 /// Resolving the data source an import task's `importSourceArn` names against the service
 /// that holds it.
@@ -2384,11 +2392,13 @@ pub fn transformer_leading_parser_message(named: &str) -> String {
 
 /// The refusal for a processor the model admits only as the first one of a transformer
 /// ([`LEADING_ONLY_PROCESSORS`]), used at any later position.
-pub fn transformer_leading_only_message(named: &str, at: usize) -> String {
-    format!(
-        "{named} must be the first processor in a transformer, and this transformer has it \
-         at transformerConfig[{at}]."
-    )
+///
+/// The sentence is the service's own for that error class — a log processor which has to lead
+/// must be in the first position of the processor list — and its one variable part is the
+/// processor kind the request put later, as the request named it. Neither the position it was
+/// found at nor anything else of the request is interpolated.
+pub fn transformer_leading_only_message(named: &str) -> String {
+    format!("Log processor {named} must be in the first position of the processor list")
 }
 
 /// One saved CloudWatch Logs Insights query definition — "details about a saved

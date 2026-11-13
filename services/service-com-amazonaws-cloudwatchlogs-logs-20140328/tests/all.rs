@@ -69,6 +69,8 @@ mod delivery_resource_in_use_refusals;
 mod delivery_source_log_types;
 #[path = "all/delivery_source_region_support.rs"]
 mod delivery_source_region_support;
+#[path = "all/delivery_source_resource_resolution.rs"]
+mod delivery_source_resource_resolution;
 #[path = "all/delivery_source_resource_pairings.rs"]
 mod delivery_source_resource_pairings;
 #[path = "all/delivery_sources.rs"]
@@ -291,3 +293,5 @@ mod validation_message_rendering;
 mod vended_log_template_catalog_rows;
 #[path = "all/vended_log_template_schemas.rs"]
 mod vended_log_template_schemas;
+#[path = "all/vended_parser_position.rs"]
+mod vended_parser_position;

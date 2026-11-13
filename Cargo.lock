@@ -10641,6 +10641,7 @@ dependencies = [
  "aws-emulator-smithy-macros",
  "aws-emulator-smithy-schema-server",
  "aws-emulator-smithy-server-runtime",
+ "aws-sdk-cloudfront",
  "aws-sdk-cloudtrail",
  "aws-sdk-ec2",
  "aws-sdk-firehose",

@@ -27,6 +27,11 @@
 //! for the log source when the type is one some other service sends, and otherwise that the
 //! type is not valid, with the options that service does support
 //! ([`crate::state::unsupported_log_type_message`]).
+//!
+//! The resource itself is RESOLVED where its owning service holds it
+//! ([`crate::state::delivery_source_resource`]): a source over a resource that service reports
+//! it does not hold represents nothing and is refused with `ResourceNotFoundException`,
+//! carrying that service's own wording for the missing resource, and stores nothing.
 
 //!
 //! ## Shape of an operation
@@ -214,9 +219,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "The ARN of the Amazon Web Services resource that is generating and sending logs":
         // the source's `service` member is read off it, so a value that is not an ARN at all
-        // names no resource and is refused here. Whether that resource EXISTS is a question
-        // this service cannot answer for another service's resource, and the operation
-        // documents no existence requirement, so it is not asked.
+        // names no resource and is refused here.
         if let Some(message) =
             crate::state::unparsable_arn_message("resourceArn", &input.resource_arn)
         {
@@ -250,6 +253,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::state::unsupported_log_type_message(&input.resource_arn, &input.log_type)
         {
             return Err(crate::scaffolded::Scaffolded::validation(message));
+        }
+
+        // "A delivery source represents an Amazon Web Services resource that sends logs":
+        // the source is a reference to a resource of ANOTHER service, so the reference is
+        // RESOLVED where that service holds it before one is stored — a source over a
+        // resource that does not exist represents nothing and can never send a log event, so
+        // it is refused as the resource not being found
+        // ([`crate::state::delivery_source_resource`]). Only the owning service's own answer
+        // grounds that refusal: a sender this emulator cannot ask, and every other
+        // non-answer, is no basis to refuse a put.
+        if let Some(message) = crate::state::delivery_source_resource::absent_resource_message(
+            ctx,
+            &region,
+            &input.resource_arn,
+        )
+        .await
+        {
+            return Err(PutDeliverySourceErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: Some(message),
+                },
+            )
+            .into());
         }
 
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {

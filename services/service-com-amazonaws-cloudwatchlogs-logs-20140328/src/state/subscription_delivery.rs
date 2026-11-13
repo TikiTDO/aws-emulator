@@ -589,7 +589,12 @@ fn is_deliverable(arn: &str) -> bool {
 /// The kind of destination an ARN names, as the [`DESTINATION_TYPE_DIMENSION`] of the
 /// delivery's telemetry names it: the service that serves the resource the envelope reaches.
 /// `None` for an ARN of no kind a subscription filter delivers to.
-fn destination_type(arn: &str) -> Option<&'static str> {
+///
+/// Visible to the rest of this service's state because the refusal a put answers when it cannot
+/// assume the configured delivery role names the same kind
+/// ([`super::delivery_role`]): one reading of the vendor-to-kind question, so the two cannot
+/// disagree about what a destination is called.
+pub(super) fn destination_type(arn: &str) -> Option<&'static str> {
     let vendor = ::service_common::arn::parse(arn)?.vendor.to_string();
     [
         (KINESIS_STREAM.0, KINESIS_DESTINATION_TYPE),
@@ -888,7 +893,7 @@ async fn deliver_to_firehose<Eng: Send + Sync + 'static>(
 /// is the principal a filter's delivery role trusts (`PutSubscriptionFilter$roleArn`, "an IAM
 /// role that grants CloudWatch Logs permissions to deliver ingested log events to the
 /// destination stream").
-const SERVICE_PRINCIPAL: &str = "logs.amazonaws.com";
+pub const SERVICE_PRINCIPAL: &str = "logs.amazonaws.com";
 
 /// How long a record of one in-flight delivery stays readable.
 ///

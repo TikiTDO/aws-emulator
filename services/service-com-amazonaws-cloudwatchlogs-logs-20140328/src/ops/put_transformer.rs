@@ -240,7 +240,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             if let Some(named) = leading_only.filter(|_| at > 0) {
                 return Err(PutTransformerErrorModeled::InvalidParameterException(
                     InvalidParameterException {
-                        message: Some(crate::state::transformer_leading_only_message(named, at)),
+                        message: Some(crate::state::transformer_leading_only_message(named)),
                     },
                 )
                 .into());
