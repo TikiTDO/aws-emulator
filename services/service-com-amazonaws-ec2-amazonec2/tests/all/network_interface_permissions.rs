@@ -35,12 +35,14 @@
 //! bound — so no row is the specification.
 //!
 //! The permissions themselves are SEEDED through the store's writer seam
-//! ([`Ec2State::insert_network_interface_permission`]): `CreateNetworkInterfacePermission`,
-//! the operation that grants one, is still a scaffold (it carries this crate's
-//! `SCAFFOLDED, NOT IMPLEMENTED` marker), so the store is the only writer available — and
-//! seeding is what lets one row per published `InterfacePermissionType` be a case. The
-//! interfaces the grants are over, and the delete that takes one away, ARE driven over the
-//! wire, so the describe is proven to report the same store the implemented mutations write.
+//! ([`Ec2State::insert_network_interface_permission`]) rather than granted over the wire:
+//! seeding is what lets one row per published `InterfacePermissionType` and one per grantee
+//! KIND be a case, including the service grantee
+//! (`NetworkInterfacePermission$AwsService`) that `CreateNetworkInterfacePermission` itself
+//! does not record. What that operation records, and which grants it refuses, is the sibling
+//! suite `network_interface_permission_grants.rs`. The interfaces the grants are over, and
+//! the delete that takes one away, ARE driven over the wire, so the describe is proven to
+//! report the same store the implemented mutations write.
 
 use ec2::ops::types::INTERFACE_PERMISSION_TYPE_VALUES;
 use ec2::state::{

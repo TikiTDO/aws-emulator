@@ -787,6 +787,43 @@ pub fn invalid_network_interface_permission_id_not_found<E>(
     )
 }
 
+/// Refuse a grant to a party the service cannot confirm as an authorized grantee: HTTP 400
+/// `OperationNotPermitted`, naming the account the request asked to grant to.
+///
+/// "Grants an Amazon Web Services-authorized account permission to attach the specified
+/// network interface to an instance in their account" (`CreateNetworkInterfacePermission`):
+/// the standing the grantee needs is given to an ACCOUNT by AWS, out of band, and no
+/// operation of this API gives it — so a grantee the service cannot confirm holds it is
+/// refused the operation and nothing is recorded, whichever interface and permission type
+/// the request named.
+///
+/// This emulator serves one account ([`::engine::emulator_account_id`]), so that account is
+/// the only grantee whose standing it can confirm, exactly as the one account bounds which
+/// peer a transit gateway peering request may name. The sentence's one variable part is the
+/// account the REQUEST named, bounded by [`echoed_resource_id`] like every other echo of a
+/// caller-chosen value.
+pub fn network_interface_permission_grantee_not_authorized<E>(aws_account_id: &str) -> Scaffolded<E> {
+    Scaffolded::operation_not_permitted(format!(
+        "You are not authorized to grant permissions to account {}",
+        echoed_resource_id(aws_account_id)
+    ))
+}
+
+/// Refuse a grant over a network interface the account does not manage: HTTP 400
+/// `OperationNotPermitted`, naming the interface the request asked to share.
+///
+/// "Indicates whether the network interface is being managed by Amazon Web Services"
+/// (`NetworkInterface$RequesterManaged`): such an interface was created for another service's
+/// own resource, so it is not the account's to share — the same reading
+/// [`attachment_is_not_the_accounts_to_manage`] takes of its attachment, told of the
+/// INTERFACE here because that is what a permission is over.
+pub fn network_interface_cannot_be_shared<E>(network_interface_id: &str) -> Scaffolded<E> {
+    Scaffolded::operation_not_permitted(format!(
+        "The network interface '{network_interface_id}' is managed by Amazon Web Services and \
+         cannot be shared"
+    ))
+}
+
 /// What one network interface permission is granted with, beyond everything the service
 /// itself derives ([`ComAmazonawsEc2Amazonec2State::insert_network_interface_permission`]
 /// mints the id and the state the clock then moves).
@@ -916,6 +953,27 @@ impl ComAmazonawsEc2Amazonec2State {
         self.network_interface_permission_granted_at
             .remove(network_interface_permission_id);
         Some(permission)
+    }
+
+    /// The permission the store already holds over `network_interface_id` for the account
+    /// `aws_account_id` and the permission type `permission`, if it holds one.
+    ///
+    /// A READ ONLY, beside the writer seam above because it answers the question the writer
+    /// has to ask first: "you can grant permission to a single Amazon Web Services account
+    /// only, and only one account at a time" (`CreateNetworkInterfacePermission`), so one
+    /// grantee's grant of one permission type over one interface is ONE record — asking for
+    /// it again names the grant that is already there rather than a second one beside it.
+    pub fn network_interface_permission_granted_to(
+        &self,
+        network_interface_id: &str,
+        aws_account_id: &str,
+        permission: &str,
+    ) -> Option<&NetworkInterfacePermission> {
+        self.network_interface_permissions.values().find(|held| {
+            held.network_interface_id.as_deref() == Some(network_interface_id)
+                && held.aws_account_id.as_deref() == Some(aws_account_id)
+                && held.permission.as_deref() == Some(permission)
+        })
     }
 
     /// The ids of every permission the store holds over the network interface

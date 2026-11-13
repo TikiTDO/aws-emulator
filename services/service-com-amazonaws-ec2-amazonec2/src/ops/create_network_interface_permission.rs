@@ -1,15 +1,49 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateNetworkInterfacePermission
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateNetworkInterfacePermission`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateNetworkInterfacePermission::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! "Grants an Amazon Web Services-authorized account permission to attach the specified
+//! network interface to an instance in their account": this operation RECORDS one grant over
+//! one of the account's network interfaces in
+//! [`crate::state::ComAmazonawsEc2Amazonec2State::network_interface_permissions`] and answers
+//! it as it was stored, so `DescribeNetworkInterfacePermissions` reports the very record this
+//! call wrote.
+//!
+//! What it decides, in the order it decides it:
+//!
+//! * the request names exactly ONE grantee — an account (`AwsAccountId`) or the service
+//!   member the model documents as "Currently not supported" (`AwsService`) — so a request
+//!   naming neither is refused `MissingParameter`, one naming both
+//!   `InvalidParameterCombination`, one naming a service `UnsupportedOperation`, and an
+//!   account that is not an account id at all `InvalidParameterValue`. None of that reads the
+//!   store: it is a fact of the request;
+//! * the interface the grant is over has to be one the account holds AND manages: a value
+//!   that is not an interface id is refused before the store is read
+//!   (`InvalidNetworkInterfaceId.Malformed`), an id the account holds no interface for is
+//!   `InvalidNetworkInterfaceID.NotFound`, and an interface another Amazon Web Services
+//!   service manages is not the account's to share
+//!   ([`crate::state::network_interface_cannot_be_shared`]);
+//! * the standing a grantee needs is given to an ACCOUNT by AWS out of band, and no operation
+//!   of this API gives it, so a grantee the service cannot confirm holds it is refused
+//!   `OperationNotPermitted` and nothing at all is recorded
+//!   ([`crate::state::network_interface_permission_grantee_not_authorized`]). This emulator
+//!   serves one account ([`::engine::emulator_account_id`]), so that is the only grantee
+//!   whose standing it can confirm — the same bound `CreateTransitGatewayPeeringAttachment`
+//!   puts on the peer account a request may name;
+//! * "You can grant permission to a single Amazon Web Services account only, and only one
+//!   account at a time": one grantee's grant of one permission type over one interface is ONE
+//!   record, so a repeat of a grant the account already holds answers that grant rather than
+//!   minting a second id beside it;
+//! * `DryRun` stops a request that would have succeeded with `DryRunOperation`, before
+//!   anything is written — "If you have the required permissions, the error response is
+//!   DryRunOperation" (`$DryRun`).
+//!
+//! A grant is recorded in the non-terminal `pending` state and the clock owes it `granted`
+//! one transition span later, which
+//! [`crate::state::ComAmazonawsEc2Amazonec2State::materialize_due_transitions`] applies — so
+//! a caller that reads the grant straight after this call still sees `pending`, and a later
+//! one sees `granted`. A permission is a grant over one interface, so it goes when that
+//! interface does ([`crate::state::ComAmazonawsEc2Amazonec2State::remove_network_interface`]).
 //!
 //! ## Shape of an operation
 //!
@@ -141,18 +175,166 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateNetworkInterfacePermission` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateNetworkInterfacePermissionErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateNetworkInterfacePermission"))
+        use crate::state;
+
+        // `ctx` carries request metadata only, and nothing a grant records depends on it: the
+        // modelled `NetworkInterfacePermission` carries neither a Region nor an ARN, only the
+        // interface the grant is over, the grantee it is for, the type of permission and its
+        // state. The store is reached through the engine held on `self`.
+        let _ = ctx;
+
+        // Which grantee the request names is a fact of the REQUEST, so it is settled before
+        // the store is opened: a request that does not name exactly one account to grant to
+        // is refused whatever interface it names.
+        let aws_account_id = grantee_account(&input)?;
+
+        // A value that is not a network interface id at all is refused BEFORE the store is
+        // asked about it, the way this service orders the two: there is nothing to look up.
+        let network_interface_id = input.network_interface_id.as_str();
+        if !state::network_interface_id_is_well_formed(network_interface_id) {
+            return Err(state::invalid_network_interface_id_malformed(
+                network_interface_id,
+            ));
+        }
+
+        let state_handle = state::require_service_state(&*self.engine)?;
+        let mut store = state_handle.lock();
+        // The clock-owed move this call applies before it reads the grants the account already
+        // holds: a permission recorded `pending` is `granted` once its due instant has passed,
+        // whether or not anybody called, so a grant this call reports as already held is
+        // reported in the state the clock has already given it.
+        store.materialize_due_transitions();
+
+        // A permission is a grant over an interface the account holds, so an id it holds no
+        // interface for is a refusal rather than a grant over nothing.
+        let Some(interface) = store.network_interfaces.get(network_interface_id) else {
+            return Err(state::invalid_network_interface_id_not_found(
+                network_interface_id,
+            ));
+        };
+        // "Indicates whether the network interface is being managed by Amazon Web Services"
+        // (`NetworkInterface$RequesterManaged`): an interface another service created for its
+        // own resource is not the account's to share, so it cannot be the subject of a grant.
+        if interface.requester_managed == Some(true) {
+            return Err(state::network_interface_cannot_be_shared(
+                network_interface_id,
+            ));
+        }
+
+        // The standing the grantee needs comes from AWS rather than from this API, and the one
+        // account this emulator serves is the only grantee whose standing it can confirm —
+        // so every other account is refused the OPERATION, with nothing written and nothing
+        // said about the interface.
+        if aws_account_id != ::engine::emulator_account_id() {
+            return Err(state::network_interface_permission_grantee_not_authorized(
+                aws_account_id,
+            ));
+        }
+
+        // "only one account at a time": the grant IS the record, so asking again for one the
+        // account already holds names that grant rather than a second one beside it. Read
+        // before the dry run, because whether this request would have succeeded does not
+        // depend on which of the two it is.
+        let already_held = store
+            .network_interface_permission_granted_to(
+                network_interface_id,
+                aws_account_id,
+                &input.permission,
+            )
+            .cloned();
+
+        // The request is one that would have succeeded, so a dry run stops HERE: "If you have
+        // the required permissions, the error response is DryRunOperation" (`$DryRun`).
+        // Nothing has been written yet, and nothing is.
+        if input.dry_run.unwrap_or(false) {
+            return Err(state::dry_run_operation());
+        }
+
+        if let Some(already_held) = already_held {
+            return Ok(CreateNetworkInterfacePermissionOutput {
+                interface_permission: Some(already_held),
+            });
+        }
+
+        // The write: everything the service owns — the `NetworkInterfacePermissionId` and the
+        // `pending` state the clock then moves to `granted` — is derived by the store's one
+        // writer seam rather than here, so this grant and a seeded one are the same record.
+        let Some(permission_id) =
+            store.insert_network_interface_permission(state::NetworkInterfacePermissionSpec {
+                network_interface_id: network_interface_id.to_string(),
+                aws_account_id: Some(aws_account_id.to_string()),
+                // The grantee is the account above: a service grantee is refused by
+                // [`grantee_account`], the member being "Currently not supported".
+                aws_service: None,
+                // One member of the model's `InterfacePermissionType` enum: the boundary
+                // validator has already refused every other value.
+                permission: input.permission.clone(),
+            })
+        else {
+            return Err(state::resource_limit_exceeded(format!(
+                "This emulator holds {max} network interface permissions, which is as many as \
+                 it stores",
+                max = state::MAX_NETWORK_INTERFACE_PERMISSIONS,
+            )));
+        };
+
+        // The answer is the record as it was stored, so this operation and
+        // `DescribeNetworkInterfacePermissions` cannot drift apart.
+        let Some(permission) = store
+            .network_interface_permissions
+            .get(&permission_id)
+            .cloned()
+        else {
+            return Err(state::internal_error(format!(
+                "the network interface permission '{permission_id}' just granted could not be \
+                 read back"
+            )));
+        };
+        Ok(CreateNetworkInterfacePermissionOutput {
+            interface_permission: Some(permission),
+        })
+    }
+}
+
+/// The account the request grants to, or the refusal the grantee it names earns.
+///
+/// "The Amazon Web Services account ID" (`$AwsAccountId`) and "The Amazon Web Services
+/// service. Currently not supported." (`$AwsService`) are the two grantees the model offers
+/// and neither is `@required`, so WHICH of them a request names is this operation's own rule:
+/// a grant is to one grantee, the service one is not served, and the account one has to be an
+/// account id. An empty value names no grantee — a form-encoded request can carry a member
+/// with no value — so it is read as absent rather than as an account called "".
+fn grantee_account(
+    input: &CreateNetworkInterfacePermissionInput,
+) -> Result<&str, CreateNetworkInterfacePermissionError> {
+    fn named(value: &Option<String>) -> Option<&str> {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+    match (named(&input.aws_account_id), named(&input.aws_service)) {
+        // Each member is readable on its own, but a grant has ONE grantee.
+        (Some(_), Some(_)) => Err(crate::state::invalid_parameter_combination(
+            "The parameters awsAccountId and awsService may not be used together",
+        )),
+        (None, None) => Err(crate::state::missing_parameter(
+            "The request must contain the parameter awsAccountId",
+        )),
+        // "The Amazon Web Services service. Currently not supported." — the member is part of
+        // the request shape and reported back by the describe, but it is not a grantee this
+        // API records a grant for, so naming it is refused rather than stored.
+        (None, Some(_)) => Err(crate::state::unsupported_operation(
+            "The parameter awsService is not supported",
+        )),
+        (Some(account), None) if !crate::state::aws_account_id_is_well_formed(account) => {
+            Err(crate::state::invalid_parameter_value(format!(
+                "Invalid value '{account}' for awsAccountId. It must be an Amazon Web Services \
+                 account ID of {digits} digits",
+                account = crate::state::echoed_resource_id(account),
+                digits = crate::state::AWS_ACCOUNT_ID_DIGITS,
+            )))
+        }
+        (Some(account), None) => Ok(account),
     }
 }
