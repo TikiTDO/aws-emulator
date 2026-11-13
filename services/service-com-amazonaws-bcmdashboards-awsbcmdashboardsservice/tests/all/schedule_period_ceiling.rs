@@ -209,7 +209,7 @@ fn refusal_cases(report_arn: &str, dashboard_arn: &str) -> Vec<RefusalCase> {
         });
 
         let mut schedule = json!({
-            "scheduleExpression": "rate(7 days)",
+            "scheduleExpression": "cron(0/15 * * * ? *)",
             "schedulePeriod": period(None, Some(end))
         });
         if index % 2 == 1 {
@@ -446,7 +446,7 @@ async fn an_end_time_within_the_ceiling_round_trips() {
             &json!({
                 "arn": other,
                 "scheduleConfig": {
-                    "scheduleExpression": "rate(1 day)",
+                    "scheduleExpression": "cron(0 12 L * ? *)",
                     "schedulePeriod": case.schedule_period
                 }
             }),
@@ -458,7 +458,7 @@ async fn an_end_time_within_the_ceiling_round_trips() {
             updated["scheduleConfig"]
                 .get("scheduleExpression")
                 .and_then(Value::as_str),
-            Some("rate(1 day)"),
+            Some("cron(0 12 L * ? *)"),
             "case {label}: the accepted update must have stored its schedule, got {updated}"
         );
     }

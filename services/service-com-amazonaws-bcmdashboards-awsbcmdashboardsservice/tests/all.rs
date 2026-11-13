@@ -69,6 +69,8 @@ mod schedule_period_ceiling;
 mod schedule_period_defaults;
 #[path = "all/schedule_period_start_time.rs"]
 mod schedule_period_start_time;
+#[path = "all/scheduled_report_config_validation.rs"]
+mod scheduled_report_config_validation;
 #[path = "all/scheduled_report_execution.rs"]
 mod scheduled_report_execution;
 #[path = "all/scheduled_report_execution_events.rs"]

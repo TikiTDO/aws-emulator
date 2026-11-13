@@ -17,7 +17,7 @@
 //!
 //! The rows below are a TABLE spanning that class rather than one request: they differ in
 //! the state the report was CREATED with (`DISABLED`, `ENABLED`, and a create that names
-//! none), in WHAT the update submits (a cron expression, a rate expression, a time zone, a
+//! none), in WHAT the update submits (several cron expressions, a time zone, a
 //! schedule period, an empty config, no `scheduleConfig` at all) and in whether the update
 //! NAMES a state (none, `ENABLED`, `DISABLED`). Every row asserts the three places the
 //! state is observable: `GetScheduledReport`, the `ListScheduledReports` summary, and
@@ -51,10 +51,10 @@ fn cases() -> Vec<StateCase> {
             expected_state: "DISABLED",
         },
         StateCase {
-            label: "a paused report keeps DISABLED across a rate expression and a time zone",
+            label: "a paused report keeps DISABLED across a stepped cron and a time zone",
             created_state: Some("DISABLED"),
             submitted: Some(json!({
-                "scheduleExpression": "rate(7 days)",
+                "scheduleExpression": "cron(0/15 * * * ? *)",
                 "scheduleExpressionTimeZone": "Europe/Berlin"
             })),
             expected_state: "DISABLED",
@@ -106,7 +106,7 @@ fn cases() -> Vec<StateCase> {
         StateCase {
             label: "a report created without a state keeps the created default",
             created_state: None,
-            submitted: Some(json!({"scheduleExpression": "rate(1 day)"})),
+            submitted: Some(json!({"scheduleExpression": "cron(0 12 L * ? *)"})),
             expected_state: "ENABLED",
         },
         StateCase {

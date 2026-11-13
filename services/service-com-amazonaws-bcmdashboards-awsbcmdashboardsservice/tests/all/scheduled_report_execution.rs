@@ -75,6 +75,40 @@ pub(crate) async fn create_report(
         .to_string()
 }
 
+/// Create a scheduled report on `dashboard_arn` whose stored `widgetIds` name a widget
+/// that dashboard does NOT hold, and return its ARN.
+///
+/// A create can no longer be asked for that configuration directly — a submitted
+/// `widgetIds` entry has to identify a widget of the dashboard the request names — so this
+/// is how a client reaches it: the report is created on a dashboard of its own, naming that
+/// dashboard's widget, and then re-pointed at `dashboard_arn`, which does not hold that
+/// widget. `dashboard_arn`'s own widgets are untouched, so another report of the same suite
+/// that names one of them keeps resolving.
+pub(crate) async fn create_report_naming_a_foreign_widget(
+    router: &MultiServiceRouter,
+    dashboard_arn: &str,
+    name: &str,
+    schedule_state: Option<&str>,
+) -> String {
+    let (own_dashboard, own_widget) =
+        source_dashboard(router, &format!("{name} Widget Source")).await;
+    let arn = create_report(
+        router,
+        &own_dashboard,
+        name,
+        schedule_state,
+        Some(vec![own_widget]),
+    )
+    .await;
+    ok_call(
+        router,
+        "UpdateScheduledReport",
+        &json!({"arn": arn, "dashboardArn": dashboard_arn}),
+    )
+    .await;
+    arn
+}
+
 /// The stored record `GetScheduledReport` answers for `arn`. Shared with the sibling
 /// health-view suite.
 pub(crate) async fn stored_report(router: &MultiServiceRouter, arn: &str) -> Value {

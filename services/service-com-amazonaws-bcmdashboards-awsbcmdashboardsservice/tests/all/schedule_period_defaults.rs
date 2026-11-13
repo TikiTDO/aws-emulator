@@ -280,7 +280,7 @@ async fn an_update_resolves_the_bounds_of_the_period_it_submits() {
             .clone();
 
         let mut update = json!({"arn": arn});
-        update["scheduleConfig"] = schedule_config(&case, "rate(1 day)");
+        update["scheduleConfig"] = schedule_config(&case, "cron(0 12 L * ? *)");
         ok_call(&router, "UpdateScheduledReport", &update).await;
 
         let record = stored_report(&router, &arn, label).await;

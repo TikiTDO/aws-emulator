@@ -52,10 +52,23 @@
 //!   `CreateScheduledReport`, whose model declares no `ResourceNotFoundException`, words
 //!   that same rule as its `ValidationException`.
 //!
-//! A `widgetIds` entry that names no widget of the dashboard is NOT refused: the
-//! configuration is stored and that mismatch surfaces as the report's health
-//! (`WIDGET_ID_NOT_FOUND`) at its next refresh, exactly as it does for a report created
-//! that way.
+//! A submitted `scheduleConfig.scheduleExpression` is held to the form its own member
+//! states — "This value must be a cron expression consisting of six fields separated by
+//! white spaces: `cron(minutes hours day_of_month month day_of_week year)`"
+//! (`smithy_query(query="shape",shape="ScheduleConfig")`) — with the modelled
+//! `ValidationException` (400) for one that is not
+//! ([`crate::state::schedule_expression_refusal`], the rule the create path applies to the
+//! expression it stores), so a report cannot be created under that form and then updated
+//! out of it.
+//!
+//! A submitted `widgetIds` names widgets of the dashboard the report renders once this
+//! call is applied — the one it re-points to where the request carries a `dashboardArn`,
+//! the stored one otherwise — and an id identifying no widget of it is refused with that
+//! same `ValidationException` ([`crate::state::widget_ids_refusal`], shared with the create
+//! path). Only the ids the REQUEST carries are held to it: the widgets of a dashboard are
+//! replaced and deleted after the write that named them, and a report left pointing at a
+//! widget that went away reports it as its derived `WIDGET_ID_NOT_FOUND` health rather than
+//! blocking an unrelated update.
 //!
 //! Being state-changing, it emits the audit record [`crate::state::record_state_change`]
 //! writes on the success and on each refusal above.
@@ -269,6 +282,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let now = ::std::time::SystemTime::now();
 
+        // The expression the submitted schedule carries is held to the form its own member
+        // states, the rule the create path applies to the expression it stores
+        // (`crate::state::schedule_expression_refusal`): a request outside it changes
+        // nothing, so the stored record keeps the schedule it had.
+        if let Some(message) = input
+            .schedule_config
+            .as_ref()
+            .and_then(|config| crate::state::schedule_expression_refusal("scheduleConfig", config))
+        {
+            crate::state::record_state_change(ctx, Self::NAME, &arn, "ValidationException");
+            return Err(UpdateScheduledReportErrorModeled::ValidationException(
+                ValidationException { message },
+            )
+            .into());
+        }
+
         // The schedule this request submits is held to the two bounds the model states on
         // the period's own members — a start time at most 5 minutes before the request and
         // an end time at most 3 years past it, sentences written for the create request and
@@ -356,6 +385,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     format!("Dashboard not found: {dashboard_arn}"),
                 ));
             }
+        }
+
+        // The widget ids this request submits are ids of the dashboard the report renders
+        // ONCE this call is applied: the one it re-points to where it carries a
+        // `dashboardArn` — resolved just above — and the stored one otherwise. An id
+        // identifying no widget of that dashboard is refused with the same
+        // `ValidationException` the create path answers (`crate::state::widget_ids_refusal`),
+        // before any member is written, so a request that got this wrong changes nothing.
+        if let Some(message) = input.widget_ids.as_deref().and_then(|widget_ids| {
+            let dashboard_arn = input.dashboard_arn.as_deref().or_else(|| {
+                state
+                    .scheduled_reports
+                    .get(&arn)
+                    .map(|report| report.dashboard_arn.as_str())
+            })?;
+            let dashboard = state.dashboards.get(dashboard_arn)?;
+            crate::state::widget_ids_refusal("widgetIds", dashboard, widget_ids)
+        }) {
+            crate::state::record_state_change(ctx, Self::NAME, &arn, "ValidationException");
+            return Err(UpdateScheduledReportErrorModeled::ValidationException(
+                ValidationException { message },
+            )
+            .into());
         }
 
         let Some(report) = state.scheduled_reports.get_mut(&arn) else {

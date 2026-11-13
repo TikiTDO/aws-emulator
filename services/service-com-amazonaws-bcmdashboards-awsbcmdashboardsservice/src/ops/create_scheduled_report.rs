@@ -32,6 +32,17 @@
 //!   `ValidationException` (400) and creates nothing
 //!   ([`crate::state::schedule_period_refusal`], shared with the update path the same
 //!   sentences are written for);
+//! * a `scheduleConfig.scheduleExpression` outside the form its own member states — "This
+//!   value must be a cron expression consisting of six fields separated by white spaces:
+//!   `cron(minutes hours day_of_month month day_of_week year)`"
+//!   (`smithy_query(query="shape",shape="ScheduleConfig")`) — is refused the same way
+//!   ([`crate::state::schedule_expression_refusal`], shared with the update path);
+//! * a `scheduledReport.widgetIds` entry that identifies no widget of the dashboard the
+//!   report renders is refused the same way ([`crate::state::widget_ids_refusal`]): the
+//!   member is "the list of widget identifiers to include in the scheduled report", so the
+//!   ids it carries are ids of that dashboard's widgets. A widget deleted or replaced AFTER
+//!   this write is a different matter, reported as the report's derived
+//!   `WIDGET_ID_NOT_FOUND` health rather than refused;
 //! * a `clientToken` already claimed by a create this call does NOT repeat is refused with
 //!   the modelled `ConflictException` (409) — what the model documents it for, "a resource
 //!   that already exists or is being created" — and creates nothing. The claim's own state
@@ -321,6 +332,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        // The schedule's EXPRESSION is held to the form its own member states — "This value
+        // must be a cron expression consisting of six fields separated by white spaces:
+        // cron(minutes hours day_of_month month day_of_week year)"
+        // (`crate::state::schedule_expression_refusal`) — which the unconstrained
+        // `GenericString` behind it leaves to this service to apply. The update path applies
+        // the same rule, so a report cannot be created under it and then updated out of it.
+        // A request outside the form creates NO report: no ARN is minted and its
+        // `clientToken` stays free.
+        if let Some(message) = crate::state::schedule_expression_refusal(
+            "scheduledReport.scheduleConfig",
+            &requested.schedule_config,
+        ) {
+            crate::state::record_state_change(ctx, Self::NAME, "-", "ValidationException");
+            return Err(CreateScheduledReportErrorModeled::ValidationException(
+                ValidationException { message },
+            )
+            .into());
+        }
+
         // Past the replay above, this call is not a repeat of a create this token already
         // answered for, so it is the call that claims the token: it claims it before it
         // stores anything
@@ -387,6 +417,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         requested.dashboard_arn
                     )),
                 },
+            )
+            .into());
+        }
+
+        // The widgets the report includes are widgets OF that dashboard: `widgetIds` is
+        // "the list of widget identifiers to include in the scheduled report", so an id
+        // identifying no widget of the dashboard this report renders is refused with the
+        // same modelled `ValidationException` (`crate::state::widget_ids_refusal`) and
+        // creates NO report — the claim this call took is released, so its `clientToken`
+        // stays free for the request that corrects it.
+        if let Some(message) = state
+            .dashboards
+            .get(&requested.dashboard_arn)
+            .and_then(|dashboard| {
+                crate::state::widget_ids_refusal(
+                    "scheduledReport.widgetIds",
+                    dashboard,
+                    requested.widget_ids.as_deref().unwrap_or_default(),
+                )
+            })
+        {
+            release_claim(&mut state, input.client_token.as_deref());
+            crate::state::record_state_change(ctx, Self::NAME, "-", "ValidationException");
+            return Err(CreateScheduledReportErrorModeled::ValidationException(
+                ValidationException { message },
             )
             .into());
         }

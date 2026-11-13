@@ -104,7 +104,7 @@ fn refusal_cases(report_arn: &str, dashboard_arn: &str) -> Vec<RefusalCase> {
         });
 
         let mut schedule = json!({
-            "scheduleExpression": "rate(7 days)",
+            "scheduleExpression": "cron(0/15 * * * ? *)",
             "schedulePeriod": {"startTime": start}
         });
         if index % 2 == 1 {
@@ -313,7 +313,7 @@ async fn a_start_time_inside_the_documented_grace_round_trips() {
             &json!({
                 "arn": other,
                 "scheduleConfig": {
-                    "scheduleExpression": "rate(1 day)",
+                    "scheduleExpression": "cron(0 12 L * ? *)",
                     "schedulePeriod": {"startTime": case.start}
                 }
             }),

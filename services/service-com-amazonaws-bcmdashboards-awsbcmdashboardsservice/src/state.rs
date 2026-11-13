@@ -1839,6 +1839,134 @@ pub fn schedule_period_refusal(
     )))
 }
 
+/// How a schedule expression this service stores OPENS, as the member that carries it
+/// writes the form: `ScheduleConfig$scheduleExpression` is documented "This value must be a
+/// cron expression consisting of six fields separated by white spaces:
+/// `cron(minutes hours day_of_month month day_of_week year)`"
+/// (`smithy_query(query="shape",shape="ScheduleConfig")`).
+const SCHEDULE_EXPRESSION_CRON_PREFIX: &str = "cron(";
+
+/// How that same expression CLOSES.
+const SCHEDULE_EXPRESSION_CRON_SUFFIX: &str = ")";
+
+/// How many white-space separated fields the documented form carries between those two:
+/// the minutes, the hours, the day of the month, the month, the day of the week and the
+/// year.
+pub const SCHEDULE_EXPRESSION_CRON_FIELDS: usize = 6;
+
+/// Whether `expression` is spelled the way the member carrying it documents: the
+/// [`SCHEDULE_EXPRESSION_CRON_PREFIX`] wrapper around exactly
+/// [`SCHEDULE_EXPRESSION_CRON_FIELDS`] fields separated by white space.
+///
+/// The fields are counted as the sentence words them — separated by white space — so a run
+/// of blanks separates two fields rather than naming an empty one, and nothing here reads
+/// INSIDE a field: which minutes, days and months a field may name is the cron dialect's
+/// own business, which this service neither interprets nor runs.
+fn names_a_cron_schedule(expression: &str) -> bool {
+    expression
+        .strip_prefix(SCHEDULE_EXPRESSION_CRON_PREFIX)
+        .and_then(|rest| rest.strip_suffix(SCHEDULE_EXPRESSION_CRON_SUFFIX))
+        .is_some_and(|fields| {
+            fields.split_whitespace().count() == SCHEDULE_EXPRESSION_CRON_FIELDS
+        })
+}
+
+/// How this service refuses the `scheduleExpression` of the `scheduleConfig` a write
+/// submits at the member path `path`, or `None` when that expression is one it can store.
+///
+/// The member states the form of its own value — "This value must be a cron expression
+/// consisting of six fields separated by white spaces:
+/// `cron(minutes hours day_of_month month day_of_week year)`"
+/// (`smithy_query(query="shape",shape="ScheduleConfig")`) — and the modelled shape behind
+/// it is an unconstrained `GenericString`, so nothing at the boundary can hold a request to
+/// that sentence: it is applied here, on every write that submits a schedule, with the
+/// modelled `ValidationException`. A config that names no expression at all breaks no rule:
+/// the member is optional, and an absent one is no value to hold to a form.
+///
+/// One helper for the create path and the update path alike, so the form a stored schedule
+/// is in cannot depend on which call wrote it — a report could otherwise be created under
+/// the rule and then updated out of it.
+///
+/// The refusal quotes the expression the request carried within the room the clause leaves
+/// inside the maximum the member that has to carry the message declares
+/// ([`MAX_MESSAGE_LENGTH`]), which the quoted value alone may reach.
+pub fn schedule_expression_refusal(path: &str, config: &ScheduleConfig) -> Option<String> {
+    let expression = config.schedule_expression.as_deref()?;
+    if names_a_cron_schedule(expression) {
+        return None;
+    }
+    let worded = |expression: &str| {
+        format!(
+            "{path}.scheduleExpression: '{expression}' is not a cron expression; the schedule \
+             expression must be a cron expression consisting of six fields separated by white \
+             spaces: cron(minutes hours day_of_month month day_of_week year)"
+        )
+    };
+    let budget = MAX_MESSAGE_LENGTH.saturating_sub(worded("").chars().count());
+    Some(within_message_bound(worded(&elided_within(
+        expression, budget,
+    ))))
+}
+
+/// How this service refuses the `widgetIds` a write submits at the member path `path` for a
+/// report on `dashboard`, or `None` when every id it names is a widget of that dashboard.
+///
+/// `widgetIds` is documented "The list of widget identifiers to include in the scheduled
+/// report. If not specified, all widgets in the dashboard are included"
+/// (`smithy_query(query="shape",shape="ScheduledReportInput")`), so an id in it identifies
+/// a widget OF the dashboard the report is rendered from: a report including a widget that
+/// dashboard does not hold is a request for something the service cannot render, and it is
+/// refused with the modelled `ValidationException` rather than stored. The empty list names
+/// no widget, so it breaks no rule, and neither does an absent member — the documented "all
+/// widgets in the dashboard" case.
+///
+/// Only the ids a REQUEST submits are held to this: the widgets of a stored dashboard are
+/// replaced and deleted after the write that named them, which is what the derived
+/// `WIDGET_ID_NOT_FOUND` health reason reports
+/// ([`ComAmazonawsBcmdashboardsAwsbcmdashboardsserviceState::unresolved_configuration_reasons`]),
+/// and no rule applied to a submitted member can be a rule about a widget that went away
+/// later.
+///
+/// The offenders are sorted and deduplicated, so the text does not depend on iteration
+/// order, and quoted within the room the clause leaves inside the maximum the message
+/// member declares ([`values_within`]).
+pub fn widget_ids_refusal(
+    path: &str,
+    dashboard: &Dashboard,
+    widget_ids: &[String],
+) -> Option<String> {
+    let present: BTreeSet<&str> = dashboard
+        .widgets
+        .iter()
+        .filter_map(|widget| widget.id.as_deref())
+        .collect();
+    let mut unknown: Vec<&str> = widget_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !present.contains(id))
+        .collect();
+    if unknown.is_empty() {
+        return None;
+    }
+    unknown.sort_unstable();
+    unknown.dedup();
+    let worded = |dashboard_arn: &str, ids: &str| {
+        format!(
+            "{path}: the dashboard '{dashboard_arn}' has no widget with these identifiers: \
+             {ids}"
+        )
+    };
+    // A `DashboardArn` reaches 2048 characters where a `WidgetId` is 32 of them, so the ARN
+    // is held to half the room the clause leaves and the ids get what it does not spend.
+    let room = MAX_MESSAGE_LENGTH.saturating_sub(worded("", "").chars().count());
+    let dashboard_arn = elided_within(&dashboard.arn, room / 2);
+    let budget = room.saturating_sub(dashboard_arn.chars().count());
+    Some(within_message_bound(worded(
+        &dashboard_arn,
+        &values_within(&unknown, budget),
+    )))
+}
+
 /// The `@pattern` of `DashboardName` and `ScheduledReportName`, as the model writes it
 /// (`smithy_query(query="shape",shape="DashboardName,ScheduledReportName")`): both shapes
 /// declare this one expression.

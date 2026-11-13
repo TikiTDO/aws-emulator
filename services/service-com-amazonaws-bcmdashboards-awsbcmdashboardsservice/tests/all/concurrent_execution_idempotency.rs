@@ -33,16 +33,13 @@ use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
 use super::dashboard_lifecycle::{call, emulator, timestamp};
-use super::scheduled_report_execution::{create_report, stored_report, HEALTHY, UNHEALTHY};
+use super::scheduled_report_execution::{
+    create_report, create_report_naming_a_foreign_widget, stored_report, HEALTHY, UNHEALTHY,
+};
 use super::scheduled_report_execution_events::{
     published, Published, DEFAULT_BUS, EVENT_SOURCE, EXECUTION_DETAIL_TYPE,
 };
 use super::scheduled_report_lifecycle::source_dashboard;
-
-/// A `WidgetId` in the form the model requires — length 32..32, pattern `^[0-9a-f]{32}$`
-/// (`smithy_query(query="shape",shape="WidgetId")`) — that no dashboard these stores hold
-/// carries, so a report naming it has nothing to render and triggers no execution.
-const MISSING_WIDGET_ID: &str = "ffffffffffffffffffffffffffffffff";
 
 /// How many times a racing task re-schedules itself while waiting for its peers before it
 /// gives up waiting and calls anyway. A bound, so a task can never spin forever: the
@@ -59,7 +56,9 @@ enum Widgets {
     Empty,
     /// The one widget the source dashboard really holds.
     Real,
-    /// A well-formed widget id the dashboard does not hold, so nothing resolves.
+    /// A widget id the dashboard does not hold, so nothing resolves — reached by
+    /// re-pointing the report, since a create has to name a widget of the dashboard it
+    /// names (`create_report_naming_a_foreign_widget`).
     Missing,
 }
 
@@ -170,14 +169,31 @@ fn race_cases() -> Vec<RaceCase> {
     ]
 }
 
-/// The widget-id list a row's create request carries.
-fn widget_ids(widgets: Widgets, real: &str) -> Option<Vec<String>> {
-    match widgets {
+/// The report a row executes: created on `dashboard_arn`, carrying the widget ids the row
+/// asks for.
+async fn report_of(
+    router: &MultiServiceRouter,
+    dashboard_arn: &str,
+    name: &str,
+    schedule_state: Option<&str>,
+    widgets: Widgets,
+    real: &str,
+) -> String {
+    let widget_ids = match widgets {
         Widgets::Absent => None,
         Widgets::Empty => Some(Vec::new()),
         Widgets::Real => Some(vec![real.to_string()]),
-        Widgets::Missing => Some(vec![MISSING_WIDGET_ID.to_string()]),
-    }
+        Widgets::Missing => {
+            return create_report_naming_a_foreign_widget(
+                router,
+                dashboard_arn,
+                name,
+                schedule_state,
+            )
+            .await
+        }
+    };
+    create_report(router, dashboard_arn, name, schedule_state, widget_ids).await
 }
 
 /// Several calls presenting ONE client token for one report, all in flight at the same
@@ -191,12 +207,13 @@ async fn racing_calls_under_one_token_execute_the_report_once() {
         let (router, engine) = emulator();
         let router = Arc::new(router);
         let (dashboard_arn, widget_id) = source_dashboard(&router, "RaceSource").await;
-        let arn = create_report(
+        let arn = report_of(
             &router,
             &dashboard_arn,
             case.name,
             case.schedule_state,
-            widget_ids(case.widgets, &widget_id),
+            case.widgets,
+            &widget_id,
         )
         .await;
 
@@ -342,12 +359,13 @@ async fn racing_calls_that_share_no_token_each_execute() {
         let (router, engine) = emulator();
         let router = Arc::new(router);
         let (dashboard_arn, widget_id) = source_dashboard(&router, "UnsharedSource").await;
-        let arn = create_report(
+        let arn = report_of(
             &router,
             &dashboard_arn,
             "Unshared Token Report",
             None,
-            widget_ids(widgets, &widget_id),
+            widgets,
+            &widget_id,
         )
         .await;
 

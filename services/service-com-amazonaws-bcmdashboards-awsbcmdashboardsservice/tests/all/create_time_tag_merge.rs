@@ -137,7 +137,7 @@ async fn create_report_with_tags(
                 "name": name,
                 "dashboardArn": dashboard_arn,
                 "scheduledReportExecutionRoleArn": EXECUTION_ROLE_ARN,
-                "scheduleConfig": {"scheduleExpression": "rate(1 day)"}
+                "scheduleConfig": {"scheduleExpression": "cron(0 12 L * ? *)"}
             },
             "resourceTags": tags_json(tags),
         }),

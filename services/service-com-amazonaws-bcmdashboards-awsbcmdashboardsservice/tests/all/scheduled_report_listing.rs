@@ -10,7 +10,7 @@
 //! walk where it left off. It is a read: it changes nothing a later caller sees.
 //!
 //! Each assertion spans the class rather than one recorded request: the table below
-//! differs in schedule expression (cron, rate, empty, absent), in schedule state
+//! differs in schedule expression (four cron forms and none at all), in schedule state
 //! (absent, `ENABLED`, `DISABLED`), in whether a time zone is present and in widget-id
 //! count (absent, empty, one), and the paging is walked at every page size from 1 to
 //! past the stored count, plus the defaulted one.
@@ -59,14 +59,14 @@ fn rows(widget_id: &str) -> Vec<ReportRow> {
             widget_ids: None,
         },
         ReportRow {
-            label: "rate expression, DISABLED, time zone, empty widget list",
+            label: "stepped cron expression, DISABLED, time zone, empty widget list",
             name: "Bravo Rollup",
             schedule_config: json!({
-                "scheduleExpression": "rate(7 days)",
+                "scheduleExpression": "cron(0/15 * * * ? *)",
                 "scheduleExpressionTimeZone": "Europe/Berlin",
                 "state": "DISABLED"
             }),
-            expected_expression: "rate(7 days)",
+            expected_expression: "cron(0/15 * * * ? *)",
             expected_state: "DISABLED",
             expected_time_zone: Some("Europe/Berlin"),
             widget_ids: Some(vec![]),
@@ -96,17 +96,16 @@ fn rows(widget_id: &str) -> Vec<ReportRow> {
             widget_ids: None,
         },
         ReportRow {
-            label: "empty schedule expression, schedule period",
+            label: "last-day-of-month cron expression, schedule period",
             name: "Echo Rollup",
             schedule_config: json!({
-                // `GenericString`, length 0..1024, so the empty string is legal.
-                "scheduleExpression": "",
+                "scheduleExpression": "cron(0 12 L * ? *)",
                 // Both bounds relative to this instant, because each is held to a rule
                 // measured from the request that submits it
                 // (`tests/all/schedule_period_defaults.rs`).
                 "schedulePeriod": acceptable_period()
             }),
-            expected_expression: "",
+            expected_expression: "cron(0 12 L * ? *)",
             expected_state: "ENABLED",
             expected_time_zone: None,
             widget_ids: Some(vec![]),
@@ -569,7 +568,7 @@ async fn a_report_created_after_a_listing_is_listed_next_time() {
                     "name": name,
                     "dashboardArn": dashboard_arn,
                     "scheduledReportExecutionRoleArn": EXECUTION_ROLE_ARN,
-                    "scheduleConfig": {"scheduleExpression": "rate(1 day)"}
+                    "scheduleConfig": {"scheduleExpression": "cron(0 12 L * ? *)"}
                 }
             }),
         )

@@ -145,8 +145,8 @@ fn cases(widget_id: &str) -> Vec<ReportCase> {
             label: "required members only, no state, no token",
             name: "Monthly Rollup",
             description: None,
-            // `scheduleExpression`/`scheduleExpressionTimeZone` are free-form
-            // `GenericString`s in the model, so a cron expression is stored verbatim.
+            // `scheduleExpression` states the form of its own value — a six-field
+            // `cron(...)` — so a well-formed cron is stored verbatim.
             schedule_config: json!({"scheduleExpression": "cron(0 8 1 * ? *)"}),
             expected_state: "ENABLED",
             widget_ids: None,
@@ -159,7 +159,7 @@ fn cases(widget_id: &str) -> Vec<ReportCase> {
             name: "Weekly_Spend-1",
             description: Some("Weekly spend, by service."),
             schedule_config: json!({
-                "scheduleExpression": "rate(7 days)",
+                "scheduleExpression": "cron(0/15 * * * ? *)",
                 "scheduleExpressionTimeZone": "Europe/Berlin",
                 // GenericTimeStamp members, epoch seconds on the awsJson1_0 wire. Both
                 // bounds are built relative to this instant, because both are held to a
@@ -458,7 +458,7 @@ async fn a_client_token_creates_at_most_one_scheduled_report() {
     // reports.
     let mut different = first.clone();
     different["scheduledReport"]["name"] = json!("Token Loser");
-    different["scheduledReport"]["scheduleConfig"] = json!({"scheduleExpression": "rate(1 day)", "state": "DISABLED"});
+    different["scheduledReport"]["scheduleConfig"] = json!({"scheduleExpression": "cron(0 12 L * ? *)", "state": "DISABLED"});
     let (status, body) = call(&router, "CreateScheduledReport", &different).await;
     assert_eq!(
         status, 409,

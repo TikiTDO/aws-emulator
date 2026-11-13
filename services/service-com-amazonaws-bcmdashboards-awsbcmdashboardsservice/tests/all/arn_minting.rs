@@ -221,7 +221,7 @@ fn cases() -> Vec<MintCase> {
                         "scheduledReportExecutionRoleArn": EXECUTION_ROLE_ARN,
                         "widgetIds": [],
                         "scheduleConfig": {
-                            "scheduleExpression": "rate(7 days)",
+                            "scheduleExpression": "cron(0/15 * * * ? *)",
                             "state": "ENABLED"
                         }
                     },

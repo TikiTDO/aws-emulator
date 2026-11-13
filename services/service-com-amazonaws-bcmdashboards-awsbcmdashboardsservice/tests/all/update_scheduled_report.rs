@@ -16,8 +16,8 @@
 //! config, widget ids, date-range override, several at once, none at all), in the KIND of
 //! change (replace a value, replace with a shorter member set, replace with the empty
 //! list, unset through a `clear…` flag, leave alone through an absent member or a
-//! `clear…` flag set to false) and in the FORM of the values (a cron and a rate
-//! expression, an absolute and a relative date range, a schedule with and without an
+//! `clear…` flag set to false) and in the FORM of the values (several cron forms, an
+//! absolute and a relative date range, a schedule with and without an
 //! explicit state). Every row asserts the WHOLE stored record afterwards, so a member the
 //! request did not name cannot quietly change.
 //!
@@ -132,14 +132,14 @@ fn cases(other_dashboard: &str, other_widget: &str) -> Vec<UpdateCase> {
             // A property of the submitted `scheduleConfig` is named only when that config
             // carries it, so the two properties this one names move and the time zone the
             // baseline carried stays exactly as stored.
-            label: "schedule config replaced with a rate expression and DISABLED",
+            label: "schedule config replaced with a stepped cron and DISABLED",
             request: json!({
-                "scheduleConfig": {"scheduleExpression": "rate(7 days)", "state": "DISABLED"}
+                "scheduleConfig": {"scheduleExpression": "cron(0/15 * * * ? *)", "state": "DISABLED"}
             }),
             expected: vec![(
                 "scheduleConfig",
                 Some(json!({
-                    "scheduleExpression": "rate(7 days)",
+                    "scheduleExpression": "cron(0/15 * * * ? *)",
                     "scheduleExpressionTimeZone": "UTC",
                     "state": "DISABLED"
                 })),
@@ -165,20 +165,15 @@ fn cases(other_dashboard: &str, other_widget: &str) -> Vec<UpdateCase> {
             )],
         },
         UpdateCase {
-            // The replacement names a widget of the OTHER dashboard, which the report
-            // still does not point at — the same mismatch, reached from the other side,
-            // so the derived health reports it too.
-            label: "widget ids replaced with another dashboard's widget",
-            request: json!({"widgetIds": [other_widget]}),
+            // The dashboard and the widget ids move TOGETHER, which is the request that
+            // re-points a report and brings its widget along: the ids name widgets of the
+            // dashboard this call points the report at, so the stored configuration still
+            // resolves and the derived health stays as it was.
+            label: "dashboard and widget ids re-pointed together",
+            request: json!({"dashboardArn": other_dashboard, "widgetIds": [other_widget]}),
             expected: vec![
+                ("dashboardArn", Some(json!(other_dashboard))),
                 ("widgetIds", Some(json!([other_widget]))),
-                (
-                    "healthStatus",
-                    Some(json!({
-                        "statusCode": "UNHEALTHY",
-                        "statusReasons": ["WIDGET_ID_NOT_FOUND"]
-                    })),
-                ),
             ],
         },
         UpdateCase {

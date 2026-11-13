@@ -168,7 +168,7 @@ fn sibling_request(name: &str, dashboard_arn: &str) -> Value {
             "name": name,
             "dashboardArn": dashboard_arn,
             "scheduledReportExecutionRoleArn": EXECUTION_ROLE_ARN,
-            "scheduleConfig": {"scheduleExpression": "rate(1 day)"}
+            "scheduleConfig": {"scheduleExpression": "cron(0 12 L * ? *)"}
         }
     })
 }

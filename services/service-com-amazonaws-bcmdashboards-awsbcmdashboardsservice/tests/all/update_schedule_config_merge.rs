@@ -18,8 +18,8 @@
 //! The rows below are a TABLE spanning that class rather than one request: they differ in
 //! WHICH subset of the config's properties the update names (each one on its own, two at a
 //! time, all four, and none at all), in the KIND of the property (two strings, a nested
-//! structure, an enum), in the FORM of the values submitted (a cron and a rate expression,
-//! two time zones, a period with other bounds, both schedule states) and in WHAT the report
+//! structure, an enum), in the FORM of the values submitted (several cron forms, two time
+//! zones, a period with other bounds, both schedule states) and in WHAT the report
 //! was created with (a config carrying every property, and a config carrying the expression
 //! alone, where there is nothing stored for an absent property to keep). Every row asserts
 //! the whole stored config through `GetScheduledReport` and the three of its properties the
@@ -111,18 +111,18 @@ fn cases() -> Vec<MergeCase> {
         (
             "the expression and the time zone",
             json!({
-                "scheduleExpression": "rate(7 days)",
+                "scheduleExpression": "cron(0/15 * * * ? *)",
                 "scheduleExpressionTimeZone": "UTC"
             }),
             json!({
-                "scheduleExpression": "rate(7 days)",
+                "scheduleExpression": "cron(0/15 * * * ? *)",
                 "scheduleExpressionTimeZone": "UTC"
             }),
         ),
         (
             "the expression and the state",
-            json!({"scheduleExpression": "rate(1 day)", "state": "ENABLED"}),
-            json!({"scheduleExpression": "rate(1 day)", "state": "ENABLED"}),
+            json!({"scheduleExpression": "cron(0 12 L * ? *)", "state": "ENABLED"}),
+            json!({"scheduleExpression": "cron(0 12 L * ? *)", "state": "ENABLED"}),
         ),
         (
             "the period and the state",
@@ -166,8 +166,8 @@ fn cases() -> Vec<MergeCase> {
     for (label, submitted, changed) in [
         (
             "the expression alone",
-            json!({"scheduleExpression": "rate(2 days)"}),
-            json!({"scheduleExpression": "rate(2 days)"}),
+            json!({"scheduleExpression": "cron(15 10 ? * 6L *)"}),
+            json!({"scheduleExpression": "cron(15 10 ? * 6L *)"}),
         ),
         (
             "the time zone alone",

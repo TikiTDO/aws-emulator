@@ -66,7 +66,7 @@ fn cases() -> Vec<ReplayCase> {
                         "dashboardArn": dashboard,
                         "scheduledReportExecutionRoleArn": EXECUTION_ROLE_ARN,
                         "scheduleConfig": {
-                            "scheduleExpression": "rate(7 days)",
+                            "scheduleExpression": "cron(0 18 ? * MON-FRI *)",
                             "scheduleExpressionTimeZone": "Europe/Berlin",
                             // Built relative to the call: each bound of a submitted period
                             // is held to a rule measured from the request that carries it.

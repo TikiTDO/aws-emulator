@@ -103,7 +103,7 @@ fn cases() -> Vec<ReuseCase> {
             label: "a different schedule expression",
             reuse: |request, _other| {
                 request["scheduledReport"]["scheduleConfig"]["scheduleExpression"] =
-                    json!("rate(7 days)");
+                    json!("cron(0/15 * * * ? *)");
             },
             answer: Answer::Refused,
         },

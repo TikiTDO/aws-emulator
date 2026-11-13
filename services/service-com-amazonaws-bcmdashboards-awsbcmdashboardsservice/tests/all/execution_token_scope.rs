@@ -19,14 +19,10 @@ use serde_json::{json, Value};
 
 use super::dashboard_lifecycle::{call, ok_call, router, timestamp};
 use super::scheduled_report_execution::{
-    create_report, stored_report, HEALTHY, UNHEALTHY, WIDGET_ID_NOT_FOUND,
+    create_report, create_report_naming_a_foreign_widget, stored_report, HEALTHY, UNHEALTHY,
+    WIDGET_ID_NOT_FOUND,
 };
 use super::scheduled_report_lifecycle::{error_code, source_dashboard};
-
-/// A `WidgetId` in the form the model requires — `WidgetId` is length 32..32 with
-/// pattern `^[0-9a-f]{32}$` (`smithy_query(query="shape",shape="WidgetId")`) — that no
-/// dashboard these stores hold carries, so a report naming it resolves to UNHEALTHY.
-const MISSING_WIDGET_ID: &str = "ffffffffffffffffffffffffffffffff";
 
 /// Which widgets a report of the sweep names.
 #[derive(Clone, Copy)]
@@ -37,7 +33,9 @@ enum Widgets {
     Empty,
     /// The one widget the source dashboard really holds.
     Real,
-    /// A well-formed widget id the dashboard does not hold.
+    /// A widget id the dashboard does not hold — reached by re-pointing the report, since
+    /// a create has to name a widget of the dashboard it names
+    /// (`create_report_naming_a_foreign_widget`).
     Missing,
 }
 
@@ -257,22 +255,33 @@ async fn one_token_swept_over_several_reports_executes_each_of_them() {
         // before looping over them would.
         let mut arns: Vec<String> = Vec::new();
         for report in &case.reports {
-            let widget_ids = match report.widgets {
-                Widgets::Absent => None,
-                Widgets::Empty => Some(Vec::new()),
-                Widgets::Real => Some(vec![widget_id.clone()]),
-                Widgets::Missing => Some(vec![MISSING_WIDGET_ID.to_string()]),
+            let arn = match report.widgets {
+                Widgets::Missing => {
+                    create_report_naming_a_foreign_widget(
+                        &router,
+                        &dashboard_arn,
+                        report.name,
+                        report.schedule_state,
+                    )
+                    .await
+                }
+                widgets => {
+                    let widget_ids = match widgets {
+                        Widgets::Absent => None,
+                        Widgets::Empty => Some(Vec::new()),
+                        _ => Some(vec![widget_id.clone()]),
+                    };
+                    create_report(
+                        &router,
+                        &dashboard_arn,
+                        report.name,
+                        report.schedule_state,
+                        widget_ids,
+                    )
+                    .await
+                }
             };
-            arns.push(
-                create_report(
-                    &router,
-                    &dashboard_arn,
-                    report.name,
-                    report.schedule_state,
-                    widget_ids,
-                )
-                .await,
-            );
+            arns.push(arn);
         }
 
         // The sweep itself: one token, every report.
@@ -340,12 +349,11 @@ async fn each_report_keeps_its_own_outcome_under_a_shared_token() {
     let router = router();
     let (dashboard_arn, widget_id) = source_dashboard(&router, "SharedTokenSource").await;
     let healthy = create_report(&router, &dashboard_arn, "Shared Healthy", None, None).await;
-    let unhealthy = create_report(
+    let unhealthy = create_report_naming_a_foreign_widget(
         &router,
         &dashboard_arn,
         "Shared Unhealthy",
         None,
-        Some(vec![MISSING_WIDGET_ID.to_string()]),
     )
     .await;
     let with_widget = create_report(
