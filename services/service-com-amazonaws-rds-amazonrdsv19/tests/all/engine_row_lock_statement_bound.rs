@@ -14,9 +14,9 @@
 //! statement itself and which then go on to run: an `UPDATE` and a `DELETE`. The explicit
 //! locking-clause form is left to
 //! [`crate::engine_server_surface::a_waiting_function_in_a_locking_statements_predicate_stops_at_the_deadline`],
-//! which is where what this endpoint answers for a clause whose rows it could not identify
-//! in time belongs; that sibling test also covers the single-session case of this rule,
-//! and this one adds the budget a statement must not inherit.
+//! which is where what this endpoint answers for a locking statement whose rows it could
+//! not identify in time belongs; that sibling test also covers the single-session case of
+//! this rule, and this one adds the budget a statement must not inherit.
 //!
 //! The client is the one the sibling endpoint suites drive
 //! ([`crate::db_instance_engine_endpoint`]), written against the PostgreSQL wire itself,

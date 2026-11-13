@@ -327,11 +327,13 @@ pub struct ServerView {
     pub deadline: Option<Instant>,
 }
 
-/// How many rows ONE statement may take row locks on.
+/// How many rows ONE statement's row ids are read for, which is how many rows it may take
+/// row locks on.
 ///
 /// A statement over more rows than this is run with no row locks rather than with a lock
 /// table the size of the table it reads: the same ceiling the result of one statement is
-/// held to ([`MAX_RESULT_ROWS`]).
+/// held to ([`MAX_RESULT_ROWS`]). It is a bound on this endpoint's own bookkeeping and never
+/// a refusal — a statement past it is answered by the engine exactly as one under it is.
 pub const MAX_LOCKED_ROWS: usize = MAX_RESULT_ROWS;
 
 /// The wall-clock budget ONE commit gets: the same budget one statement gets, because
@@ -890,10 +892,16 @@ impl InstanceDatabase {
     /// the scan itself. So the scan cannot hold this endpoint's engine for longer than one
     /// statement may.
     ///
+    /// `sql` is the statement the ENGINE is to run, which is what the row query's
+    /// placeholders are matched against: a locking clause has no engine grammar, so a caller
+    /// hands over the statement with its clause already taken off
+    /// ([`super::lock_plan::LockPlan::engine_sql`]).
+    ///
     /// `None` where the rows cannot be identified: a row query the engine will not run or
     /// could not finish inside that budget, a statement whose bound parameters cannot be
     /// matched to the row query by name, or more rows than [`MAX_LOCKED_ROWS`]. The caller
-    /// then takes NO row locks rather than the wrong ones.
+    /// then takes NO row locks rather than the wrong ones, and reports nothing of its own
+    /// for the statement: whatever the engine answers for it is what the client reads.
     pub fn row_ids(
         &self,
         session: u32,

@@ -1418,16 +1418,22 @@ struct HeldRows {
 /// Take the row locks `sql` asks for, answering what the engine is to run and which rows
 /// this session now holds.
 ///
-/// The rows are the statement's own ([`lock_plan`]). A statement that carried a locking
-/// CLAUSE is this server's to serve, so one whose rows it cannot identify — more of them than
-/// this endpoint locks, or a row query the engine will not run — is REFUSED rather than
-/// served with the clause dropped: answering `FOR UPDATE NOWAIT` with the rows another
-/// transaction holds would be worse than telling the client what this endpoint does not
-/// serve. A statement that carried no clause (an `UPDATE`, a `DELETE`) runs as it always did
-/// when its rows cannot be identified, because the lock it takes is the engine's own and
-/// implicit. The other refusals are the engine's own conditions — `NOWAIT` on a row another
-/// transaction holds, and a wait that would close a cycle, which ends this transaction as the
-/// engine ends the one it chooses.
+/// The rows are the statement's own ([`lock_plan`]). A locking CLAUSE over a base relation is
+/// always served: the rows the statement's own predicate resolves to are locked and the
+/// statement — its clause taken off, because the engine has no grammar for one — is what the
+/// engine then runs, so what the client reads back is the engine's own answer for its query.
+/// The clause itself therefore produces only the engine's own lock conditions: `NOWAIT` on a
+/// row another transaction holds, a wait that would close a cycle (which ends this
+/// transaction, as the engine ends the one it chooses), a wait past the statement's deadline,
+/// and the lock table's own ceiling.
+///
+/// Where the rows cannot be IDENTIFIED — a row query the engine will not run, because the
+/// statement names a relation or a column it has not got, or more rows than one statement's
+/// row ids are read for — the statement still runs: nothing of this endpoint's own is
+/// reported for it, so the client reads the engine's rows, or the engine's own condition for
+/// whatever is wrong with the statement, rather than a limit of the endpoint. It is then run
+/// with no row locks held, exactly as a statement that carried no clause (an `UPDATE`, a
+/// `DELETE`) is, because the lock such a statement takes is the engine's own and implicit.
 fn take_the_rows_it_locks(
     database: &InstanceDatabase,
     facts: &SessionFacts,
@@ -1442,22 +1448,27 @@ fn take_the_rows_it_locks(
             engine_sql: None,
         });
     };
+    // The statement WITHOUT its locking clause: the one the engine can parse, and so also
+    // the one the row query's placeholders are matched against — a clause-carrying statement
+    // cannot be prepared at all, which is why matching them against the client's own text
+    // left every parameterised locking statement with no rows identified.
+    let without_the_clause = plan.engine_sql(None);
+    let bound_in = without_the_clause
+        .clone()
+        .unwrap_or_else(|| sql.to_string());
     let Some(ids) = database.row_ids(
         facts.connection_id,
         target,
         &server_view(facts),
         &plan.rows_sql,
-        sql,
+        &bound_in,
         params,
     )
     else {
-        if plan.carries_a_clause() {
-            return Err(unservable_clause(&plan));
-        }
         return Ok(HeldRows {
             rows: Vec::new(),
             writes: false,
-            engine_sql: None,
+            engine_sql: without_the_clause,
         });
     };
     let table = plan.table.to_ascii_lowercase();
@@ -1475,11 +1486,12 @@ fn take_the_rows_it_locks(
     ) {
         row_locks::LockOutcome::Granted(granted) => {
             let ids: Vec<i64> = granted.iter().map(|(_, _, rowid)| *rowid).collect();
-            let engine_sql = plan.engine_sql(Some(&ids));
-            if plan.carries_a_clause() && engine_sql.is_none() {
-                database.locks().release_rows(facts.connection_id, &granted);
-                return Err(unservable_clause(&plan));
-            }
+            // `SKIP LOCKED` asks for the rows another transaction does NOT hold, so the
+            // statement the engine runs is restricted to the rows that were granted; every
+            // other clause runs over the client's own query with the clause taken off.
+            let engine_sql = plan
+                .engine_sql(Some(&ids))
+                .or_else(|| without_the_clause.clone());
             Ok(HeldRows {
                 engine_sql,
                 rows: granted,
@@ -1512,20 +1524,6 @@ fn take_the_rows_it_locks(
             ),
         )),
     }
-}
-
-/// What a client is told when its own locking clause cannot be served over the statement it
-/// sent: the rows the clause names could not be identified, so the clause is refused rather
-/// than dropped.
-fn unservable_clause(plan: &lock_plan::LockPlan) -> EngineError {
-    EngineError::new(
-        EngineErrorKind::LimitExceeded,
-        format!(
-            "this endpoint serves a row-locking clause over at most {} rows of one statement, \
-             and only where it can identify them in relation \"{}\"",
-            super::sql_engine::MAX_LOCKED_ROWS, plan.table
-        ),
-    )
 }
 
 /// The isolation level the session reports after a transaction-control statement, or `None`

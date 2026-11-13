@@ -439,10 +439,11 @@ async fn a_statement_past_the_sessions_statement_timeout_is_cancelled() {
 ///
 /// The rows span the statement forms whose predicate the endpoint evaluates ahead of the
 /// statement itself: a locking `SELECT`, an `UPDATE` and a `DELETE`. Each is refused
-/// promptly — a locking clause whose rows the endpoint could not identify inside the
-/// statement's budget is the clause it cannot serve (SQLSTATE `54000`), and a statement
-/// with no clause goes on to run and is cancelled by the same deadline (`57014`) — and in
-/// no case does the endpoint wait for the number the predicate asked for.
+/// promptly, and with the engine's OWN cancellation (SQLSTATE `57014`) whatever clause it
+/// carried: a statement whose rows the endpoint could not identify inside the budget goes
+/// on to run and is cancelled by the same deadline, so the client reads the condition the
+/// engine raised rather than a limit of the endpoint. In no case does the endpoint wait for
+/// the number the predicate asked for.
 #[tokio::test]
 async fn a_waiting_function_in_a_locking_statements_predicate_stops_at_the_deadline() {
     let router = emulator();
@@ -470,7 +471,7 @@ async fn a_waiting_function_in_a_locking_statements_predicate_stops_at_the_deadl
         (
             "a locking SELECT",
             "SELECT id FROM waits WHERE pg_sleep(3) IS NULL FOR UPDATE",
-            "54000",
+            "57014",
         ),
         (
             "an UPDATE",

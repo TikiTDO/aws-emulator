@@ -21,7 +21,9 @@
 //! no grammar for it: the clause is taken off the statement's own token stream, so what the
 //! engine runs is the client's query exactly as it was written up to the clause, and the
 //! clause itself is served here ([`LockPlan::engine_sql`], which is also where `SKIP
-//! LOCKED` leaves the rows another transaction holds out of the answer).
+//! LOCKED` leaves the rows another transaction holds out of the answer). That same
+//! clause-less statement is what the statement's bound parameters are resolved against,
+//! because it is the only form of it the engine can prepare at all.
 //!
 //! The four strengths PostgreSQL defines are read as the two the lock table has: `FOR
 //! UPDATE` and `FOR NO KEY UPDATE` are a row reserved for writing, `FOR SHARE` and `FOR KEY
@@ -54,21 +56,16 @@ pub struct LockPlan {
 }
 
 impl LockPlan {
-    /// Whether the statement carried a locking CLAUSE of its own, which this server serves
-    /// rather than the engine: a clause it cannot serve is refused rather than dropped.
-    #[must_use]
-    pub fn carries_a_clause(&self) -> bool {
-        self.query.is_some()
-    }
-
     /// The statement the ENGINE is to run, or `None` where the client's own text is what it
     /// runs.
     ///
     /// `granted` is the rows the lock table gave this statement, where they are known. It
     /// matters for `SKIP LOCKED` and only there: that clause asks for the rows another
-    /// transaction does NOT hold, so the query the engine runs is restricted to them — and
-    /// `None` for a clause-carrying statement means the clause could not be served over it,
-    /// which the caller answers as the limit it is.
+    /// transaction does NOT hold, so the query the engine runs is restricted to them.
+    ///
+    /// A clause-carrying statement with `granted` left out answers the client's own query
+    /// WITHOUT its clause, which is the statement the engine can parse — and so also the
+    /// statement its bound parameters are matched against.
     #[must_use]
     pub fn engine_sql(&self, granted: Option<&[i64]>) -> Option<String> {
         let query = self.query.as_ref()?;
@@ -282,9 +279,8 @@ fn rows_sql(table: &str, selection: Option<&Expr>) -> String {
 /// `query` restricted to the rows `granted`, which is what `SKIP LOCKED` asked for: the rows
 /// another transaction holds are not among them, so they are not in the answer either.
 ///
-/// `None` where the restriction cannot be put back into the query — the clause is then not
-/// served over this statement at all, which the caller answers as a refusal rather than by
-/// returning the rows the clause asked it to leave out.
+/// `None` where the restriction cannot be put back into the query; the caller then runs the
+/// statement without its clause.
 fn restricted_to(query: &Query, granted: &[i64]) -> Option<String> {
     let mut query = query.clone();
     let restriction = if granted.is_empty() {

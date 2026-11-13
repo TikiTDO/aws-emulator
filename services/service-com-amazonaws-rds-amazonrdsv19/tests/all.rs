@@ -15,6 +15,8 @@
 mod account_attributes;
 #[path = "all/already_exists_refusal_sentences.rs"]
 mod already_exists_refusal_sentences;
+#[path = "all/aurora_engine_parameterised_row_locks.rs"]
+mod aurora_engine_parameterised_row_locks;
 #[path = "all/aurora_engine_row_locks.rs"]
 mod aurora_engine_row_locks;
 #[path = "all/aws_managed_group_catalog.rs"]
