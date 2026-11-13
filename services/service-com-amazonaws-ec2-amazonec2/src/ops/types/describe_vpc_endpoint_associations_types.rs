@@ -30,6 +30,7 @@ pub struct DescribeVpcEndpointAssociationsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpcEndpointAssociation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpcEndpointAssociation {
     pub id: Option<String>,
     pub vpc_endpoint_id: Option<String>,

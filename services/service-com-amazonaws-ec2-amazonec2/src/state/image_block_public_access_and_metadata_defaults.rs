@@ -226,6 +226,7 @@ pub fn catalog_member(catalog: &'static [&'static str], requested: &str) -> Opti
 /// response reports them from can be stored ([`catalog_member`] against that catalog is
 /// what turns a request's word into one), never the request's own text.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AccountInstanceMetadataDefaults {
     /// `HttpTokensState`: whether IMDSv2 is required.
     pub http_tokens: Option<&'static str>,

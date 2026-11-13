@@ -29,6 +29,7 @@ pub struct DescribeAwsNetworkPerformanceMetricSubscriptionsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Subscription")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Subscription {
     pub source: Option<String>,
     pub destination: Option<String>,

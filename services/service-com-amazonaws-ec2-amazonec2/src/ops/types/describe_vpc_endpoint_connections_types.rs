@@ -29,11 +29,13 @@ pub struct DescribeVpcEndpointConnectionsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpcEndpointConnection")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpcEndpointConnection {
     pub service_id: Option<String>,
     pub vpc_endpoint_id: Option<String>,
     pub vpc_endpoint_owner: Option<String>,
     pub vpc_endpoint_state: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub creation_timestamp: Option<::aws_smithy_types::DateTime>,
     pub dns_entries: Option<Vec<DnsEntry>>,
     pub network_load_balancer_arns: Option<Vec<String>>,

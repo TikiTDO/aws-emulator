@@ -1488,6 +1488,17 @@ impl Bounds {
 }
 
 /// How many bytes of memory THIS thread has faulted in, as the host reports it.
+///
+/// Per-thread usage (`RUSAGE_THREAD`) is Linux's alone. Elsewhere (a developer's macOS build)
+/// this reports nothing faulted, the same answer an unreadable count gives, rather than the
+/// whole process's faults, which would charge one function every other thread's memory.
+#[cfg(not(target_os = "linux"))]
+fn faulted_bytes() -> u64 {
+    0
+}
+
+/// How many bytes of memory THIS thread has faulted in, as the host reports it.
+#[cfg(target_os = "linux")]
 fn faulted_bytes() -> u64 {
     match ::nix::sys::resource::getrusage(::nix::sys::resource::UsageWho::RUSAGE_THREAD) {
         Ok(usage) => {

@@ -70,6 +70,7 @@ pub const MAX_STORED_EXPORT_IMAGE_TASKS: usize = 4_096;
 /// writes is an object of another service), which is what lets it be derived here where an
 /// import's completion has to be applied once.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ExportImageTaskRecord {
     /// The task as the model shapes it, with `Status` and `Progress` left for
     /// [`Self::view_at`] to fill from the clock.
@@ -83,13 +84,16 @@ pub struct ExportImageTaskRecord {
     /// the task shape does not carry; `None` for a request that named none.
     pub role_name: Option<String>,
     /// When the export started, which progress is measured from.
+    #[serde(with = "::service_common::persist::instant")]
     pub started_at: Instant,
     /// The instant from which this task's `active` -> `completed` move is due. Monotonic
     /// ([`Instant`]), because it is only ever compared against the clock and never reported,
     /// so a wall-clock adjustment cannot move a task back to `active`.
+    #[serde(with = "::service_common::persist::instant")]
     pub completed_at: Instant,
     /// When the `deleting` -> `deleted` move of a cancelled task falls due; `None` for a task
     /// nothing has cancelled.
+    #[serde(with = "::service_common::persist::instant_opt")]
     pub deleted_at: Option<Instant>,
 }
 

@@ -27,6 +27,7 @@ pub struct GetAllowedImagesSettingsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ImageCriterion")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ImageCriterion {
     pub image_providers: Option<Vec<String>>,
     pub marketplace_product_codes: Option<Vec<String>>,
@@ -38,18 +39,21 @@ pub struct ImageCriterion {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#DeprecationTimeCondition")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DeprecationTimeCondition {
     pub maximum_days_since_deprecated: Option<i32>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CreationDateCondition")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CreationDateCondition {
     pub maximum_days_since_created: Option<i32>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ImageWatermarkFilterResponse")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ImageWatermarkFilterResponse {
     pub watermark_key: Option<String>,
     pub source_image_region: Option<String>,

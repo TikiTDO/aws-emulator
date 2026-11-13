@@ -20,6 +20,7 @@ tokio = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 tracing = { workspace = true }
 # AES-256-GCM (and the OS CSPRNG) for the ciphertext envelope a SYMMETRIC_DEFAULT
 # KMS key seals and opens; `ring` is already in this workspace's lock file.

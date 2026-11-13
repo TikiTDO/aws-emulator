@@ -251,6 +251,7 @@ pub const AUTO_ENABLE_IO_AT_CREATION: bool = false;
 /// [`VolumeRecord::view_at`] derives it rather than letting two writers store two
 /// different words for it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VolumeRecord {
     /// The volume as the model shapes it, with `State` left for `view_at` to fill.
     pub view: VolumeView,
@@ -258,6 +259,7 @@ pub struct VolumeRecord {
     /// Monotonic ([`Instant`]), because it is only ever compared against the clock
     /// and never reported, so a wall-clock adjustment cannot move a volume back to
     /// `creating`.
+    #[serde(with = "::service_common::persist::instant")]
     pub available_at: Instant,
     /// `autoEnableIO`: "whether the volume should be auto-enabled for I/O operations"
     /// (`ModifyVolumeAttributeRequest$AutoEnableIO`), which `ModifyVolumeAttribute`
@@ -294,6 +296,7 @@ pub struct VolumeRecord {
     /// reporting a `detached` row for ever, and the next writer materialises that removal
     /// ([`VolumeRecord::materialize_due_detachments`]) so no entry outlives the attachment
     /// it was made for.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub detaching_at: BTreeMap<(String, String), Instant>,
     /// For each attachment of this volume that is being brought up, the instant its
     /// `attaching` -> `attached` move falls due, keyed by the same `(InstanceId, Device)`
@@ -307,6 +310,7 @@ pub struct VolumeRecord {
     /// [`VolumeRecord::attachments_at`] reports it `attached` once the move is due and the
     /// next writer materialises that
     /// ([`VolumeRecord::materialize_due_attachments`]).
+    #[serde(with = "::service_common::persist::instant_map")]
     pub attaching_at: BTreeMap<(String, String), Instant>,
 }
 

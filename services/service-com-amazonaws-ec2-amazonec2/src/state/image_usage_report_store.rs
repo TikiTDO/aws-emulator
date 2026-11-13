@@ -110,11 +110,13 @@ pub const EXPORT_TASK_STATE_COMPLETED: &str = "completed";
 /// [`ExportTaskRecord::view_at`] derives the state from it, the way [`VolumeRecord`] does
 /// for a volume.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ExportTaskRecord {
     /// The export task as the model shapes it, carrying the state it has reached on its own.
     pub view: ExportTask,
     /// When the `cancelling` -> `cancelled` move of a cancelled task falls due; `None` for a
     /// task nothing has cancelled.
+    #[serde(with = "::service_common::persist::instant_opt")]
     pub cancelled_at: Option<Instant>,
 }
 

@@ -465,6 +465,8 @@ pub fn reserved_instances_not_identical<E>() -> Scaffolded<E> {
 /// [`CapacityReservationRecord`] keeps its own that way: every member a writer sets
 /// round-trips through a reader without a field-by-field copy that can silently drop one.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "'de: 'static"))]
 pub struct ReservedInstancesModificationRecord {
     /// The modification as the model shapes it.
     pub view: ReservedInstancesModification,
@@ -1317,6 +1319,7 @@ pub fn invalid_marketplace_value_because<E>(member: &str, reason: impl AsRef<str
 /// one. Its price schedules carry NO `Active` flag, because which schedule is in effect is
 /// a fact of the clock rather than of the listing: a reader derives it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ReservedInstancesListingRecord {
     /// The listing as the model shapes it.
     pub view: ReservedInstancesListing,

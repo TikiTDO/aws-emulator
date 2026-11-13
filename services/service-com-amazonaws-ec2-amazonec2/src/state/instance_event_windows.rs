@@ -168,12 +168,14 @@ pub const CRON_FIELDS: usize = 5;
 /// [`InstanceEventWindowRecord::view_at`] derives it rather than letting two writers store
 /// two different words for it — the same shape [`VolumeRecord`] has.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceEventWindowRecord {
     /// The window as the model shapes it, with `State` left for `view_at` to fill.
     pub view: InstanceEventWindow,
     /// The instant from which this window's move to `active` is due.
     /// Monotonic ([`Instant`]), because it is only ever compared against the clock and
     /// never reported, so a wall-clock adjustment cannot move a window back to `creating`.
+    #[serde(with = "::service_common::persist::instant")]
     pub active_at: Instant,
     /// The `InstanceEventWindowState` this window reports until [`Self::active_at`]: the
     /// word for the work the last call to change it started — `creating` for the window a

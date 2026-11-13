@@ -138,6 +138,7 @@ impl ComAmazonawsEc2Amazonec2State {
 /// One AMI the account deregistered that is currently in the Recycle Bin — see the module
 /// docs.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RecycledImageRecord {
     /// The whole [`Image`] the account last saw, so a restore puts back the same image
     /// rather than a rebuilt copy.

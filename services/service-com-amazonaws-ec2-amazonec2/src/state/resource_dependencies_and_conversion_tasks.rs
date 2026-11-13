@@ -675,17 +675,21 @@ pub const IMPORT_SNAPSHOT_TASK_STATUS_MESSAGE_PENDING: &str = "pending";
 /// Every instant is monotonic ([`Instant`]), because each is only ever compared against the
 /// clock and never reported, so a wall-clock adjustment cannot move a task back to `active`.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ImportSnapshotConversion {
     /// When the import started, which its progress percentage is measured from.
+    #[serde(with = "::service_common::persist::instant")]
     pub started_at: Instant,
     /// The instant from which the snapshot this import makes is due to exist. Before it,
     /// the task reports no `SnapshotId`: there is no snapshot of a disk that has not been
     /// read yet.
+    #[serde(with = "::service_common::persist::instant")]
     pub snapshot_due_at: Instant,
     /// The instant from which the task's `active` -> `completed` move is due, which is the
     /// instant the snapshot it minted is itself `completed` — a task that provisions another
     /// resource is not finished before that resource is ready. `None` until the snapshot has
     /// been minted, because until then there is nothing to wait for.
+    #[serde(with = "::service_common::persist::instant_opt")]
     pub completed_at: Option<Instant>,
 }
 

@@ -152,6 +152,7 @@ pub struct XksProxyVpcEndpointServiceNotFoundException {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.kms#GrantConstraints")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct GrantConstraints {
     pub encryption_context_subset: Option<std::collections::HashMap<String, String>>,
     pub encryption_context_equals: Option<std::collections::HashMap<String, String>>,

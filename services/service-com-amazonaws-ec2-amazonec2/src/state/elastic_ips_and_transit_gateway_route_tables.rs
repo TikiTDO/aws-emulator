@@ -669,6 +669,7 @@ pub fn capacity_reservation_cancellation_quote_payload_bytes(
 
 /// What the clock owes one stored cancellation quote next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum CapacityReservationCancellationQuoteMove {
     /// `pending` -> `active`: the quote is generated and usable.
     Active,
@@ -687,6 +688,8 @@ pub type CapacityReservationCancellationQuoteTransition =
 /// writer sets round-trips through a reader without a field-by-field copy that can silently
 /// drop one — the same arrangement [`CapacityReservationRecord`] uses.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "'de: 'static"))]
 pub struct CapacityReservationCancellationQuoteRecord {
     /// The quote as the model shapes it.
     pub view: CapacityReservationCancellationQuote,
@@ -925,6 +928,7 @@ pub fn timestamp_filter_values(at: Option<::aws_smithy_types::DateTime>) -> Vec<
 /// of the same request reports the same move instead of moving the capacity twice, and a
 /// DIFFERENT request under a token already in use is told so rather than served.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CapacityReservationInstanceMove {
     /// "The ID of the Capacity Reservation from which you want to move capacity"
     /// (`MoveCapacityReservationInstancesRequest$SourceCapacityReservationId`).
@@ -1279,6 +1283,7 @@ pub fn incorrect_state_of<E>(kind: &str, id: &str, state: &str) -> Scaffolded<E>
 
 /// What the clock owes a stored Windows fast launch configuration next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum FastLaunchMove {
     /// `enabling` -> `enabled`: the reserved snapshots an enable started are in place.
     Enabled,
@@ -1295,12 +1300,15 @@ pub enum FastLaunchMove {
 /// instance's [`PendingTransition`] is deliberately NOT one of these — it carries no
 /// wall-clock instant, an instance reporting no transition time.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "'de: 'static, T: serde::Deserialize<'de>"))]
 pub struct ClockTransition<T> {
     /// What the resource becomes.
     pub to: T,
     /// The instant from which the move is due. Monotonic ([`Instant`]), because it is only
     /// ever compared against the clock and never reported, so a wall-clock adjustment
     /// cannot move a resource back to the state it is leaving.
+    #[serde(with = "::service_common::persist::instant")]
     pub due_at: Instant,
     /// The wall-clock instant the move falls due, which the resource reports as the time it
     /// reached the new state once the move has been applied — the state changed when the
@@ -1729,6 +1737,8 @@ pub type FastLaunchTransition = ClockTransition<FastLaunchMove>;
 /// same member set, so the one stored item is what all three report and they cannot
 /// describe one configuration differently.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "'de: 'static"))]
 pub struct FastLaunchRecord {
     /// The configuration as the model shapes it, carrying the state reached so far.
     pub view: DescribeFastLaunchImagesSuccessItem,
@@ -2775,6 +2785,7 @@ pub const PENDING_REQUEST_ALREADY_EXISTS: &str = "PendingRequestAlreadyExists";
 /// modelled `AddressAttribute` shape by
 /// [`ComAmazonawsEc2Amazonec2State::address_attribute_view`].
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AddressPtrRecord {
     /// The PTR record in effect for the address, which is what
     /// `AddressAttribute$PtrRecord` reports. `None` until an update that names one has been
@@ -2788,6 +2799,7 @@ pub struct AddressPtrRecord {
 /// A PTR record update the clock has not finished yet: what it leaves in effect, and when it
 /// falls due.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PendingPtrRecordUpdate {
     /// The PTR record this update leaves in effect. `None` is a RESET, which takes the
     /// record away instead of naming a new one — "Resets the attribute of the specified IP
@@ -2796,6 +2808,7 @@ pub struct PendingPtrRecordUpdate {
     pub value: Option<String>,
     /// When the update falls due, on the same monotonic clock and the same
     /// [`TRANSITION_DELAY`] as every other move this store records rather than sleeps for.
+    #[serde(with = "::service_common::persist::instant")]
     pub due_at: Instant,
 }
 
@@ -2960,3 +2973,4 @@ pub fn invalid_network_interface_id_not_found<E>(network_interface_id: &str) -> 
         format!("The networkInterface ID '{network_interface_id}' does not exist"),
     )
 }
+

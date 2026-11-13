@@ -133,6 +133,8 @@ mod refusal_fidelity;
 mod replicate_key;
 #[path = "all/resource_tags.rs"]
 mod resource_tags;
+#[path = "all/restart_persistence.rs"]
+mod restart_persistence;
 #[path = "all/signature_verification.rs"]
 mod signature_verification;
 #[path = "all/signatures.rs"]

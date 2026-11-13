@@ -21,6 +21,7 @@ use super::*;
 /// `GetOrganizationsAccessReport` reports, which is why the job is a stored record rather
 /// than an answer computed on the spot.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct OrganizationsAccessReportJob {
     /// "The path of the Organizations entity (root, OU, or account)"
     /// (`GenerateOrganizationsAccessReport$EntityPath`) the report was asked for, which
@@ -31,11 +32,13 @@ pub struct OrganizationsAccessReportJob {
     pub organizations_policy_id: Option<String>,
     /// "The date and time, in ISO 8601 date-time format, when the report job was created"
     /// (`GetOrganizationsAccessReport$JobCreationDate`).
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub created: ::aws_smithy_types::DateTime,
     /// The instant the generation is DUE: until it, the read reports the job
     /// `IN_PROGRESS`; from it, `COMPLETED` with this instant as its
     /// `JobCompletionDate`. Stored rather than slept for, so a caller that polls
     /// straight after the generate still sees the job in flight.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub completes: ::aws_smithy_types::DateTime,
 }
 
@@ -50,6 +53,7 @@ pub struct OrganizationsAccessReportJob {
 /// report, so the job records WHICH resource and WHICH level of detail were asked for
 /// rather than an answer computed on the spot.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ServiceLastAccessedJob {
     /// "The ARN of the IAM resource (user, group, role, or managed policy) used to
     /// generate information about when the resource was last used in an attempt to
@@ -65,11 +69,13 @@ pub struct ServiceLastAccessedJob {
     pub granularity: String,
     /// "The date and time, in ISO 8601 date-time format, when the report job was
     /// created" (`GetServiceLastAccessedDetails$JobCreationDate`).
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub created: ::aws_smithy_types::DateTime,
     /// The instant the generation is DUE, read through [`report_job_status`] exactly as
     /// an Organizations report job's is ([`OrganizationsAccessReportJob::completes`]):
     /// stored rather than slept for, so a caller polling straight after the generate
     /// still sees the job in flight.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub completes: ::aws_smithy_types::DateTime,
 }
 
@@ -83,6 +89,7 @@ pub struct ServiceLastAccessedJob {
 /// The record says WHICH role the deletion was submitted for and WHEN it is due, so the
 /// status a read reports is read off the clock rather than invented per read.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ServiceLinkedRoleDeletionTask {
     /// The key the deleted role was held under
     /// ([`ComAmazonawsIamAwsidentitymanagementv20100508State::roles`]), which is what
@@ -90,10 +97,12 @@ pub struct ServiceLinkedRoleDeletionTask {
     pub role_key: String,
     /// The instant the deletion was submitted, which orders the tasks by age for the
     /// bounded retention [`MAX_RETAINED_SERVICE_LINKED_ROLE_DELETION_TASKS`] states.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub created: ::aws_smithy_types::DateTime,
     /// The instant the deletion is DUE: until it, a read reports the task
     /// `IN_PROGRESS`; from it, `SUCCEEDED`. Stored rather than slept for, so a caller
     /// that polls straight after the submit still sees the deletion in flight.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub completes: ::aws_smithy_types::DateTime,
 }
 
@@ -106,6 +115,7 @@ pub struct ServiceLinkedRoleDeletionTask {
 /// whether a caller has already been told it finished — the three facts the state a call
 /// reports is read off.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CredentialReportGeneration {
     /// The instant the generation was asked for, which is what the once-every-four-hours
     /// rate ([`CREDENTIAL_REPORT_REGENERATION_SECONDS`]) is measured from.
@@ -116,12 +126,14 @@ pub struct CredentialReportGeneration {
     /// names are one, and the window the report stays readable for
     /// ([`CREDENTIAL_REPORT_VALIDITY_SECONDS`]) runs from that same instant — which is
     /// why it ends exactly where this record stops holding a new generation back.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub requested: ::aws_smithy_types::DateTime,
     /// The instant the generation is DUE: until it, a call reports the generation
     /// `INPROGRESS`; from it, the report exists. Stored rather than slept for, so a caller
     /// that calls again straight away still sees the generation in flight — the same clock
     /// rule every asynchronous job of this service is read through
     /// ([`report_job_status`]).
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub completes: ::aws_smithy_types::DateTime,
     /// Whether a call has already reported this generation `COMPLETE`.
     ///
@@ -155,6 +167,7 @@ pub struct CredentialReportGeneration {
 /// holding it would be keeping a secret no caller may be given. It is read once, by the
 /// upload, to check that it belongs to the certificate's public key.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ServerCertificateRecord {
     /// "The meta information of the uploaded server certificate without its certificate
     /// body, certificate chain, and private key"
@@ -184,6 +197,7 @@ pub struct ServerCertificateRecord {
 /// addressed by, the user it is enabled for, when it was first enabled and the
 /// certification levels it was published with.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FidoSecurityKey {
     /// "Serial number that uniquely identifies the MFA device"
     /// (`GetMFADeviceResponse$SerialNumber`) — the key this device is held under, and the
@@ -196,6 +210,7 @@ pub struct FidoSecurityKey {
     pub user_key: String,
     /// "The date that a specified user's MFA device was first enabled"
     /// (`GetMFADeviceResponse$EnableDate`).
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub enable_date: ::aws_smithy_types::DateTime,
     /// "The certifications of a specified user's MFA device … obtained from FIDO Alliance
     /// Metadata Service (MDS)" (`GetMFADeviceResponse$Certifications`), keyed by
@@ -216,6 +231,7 @@ pub struct FidoSecurityKey {
 /// its feature set, whether IAM has trusted access to it, which accounts administer that
 /// access, and which of the modelled features are enabled for it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Organization {
     /// "The unique identifier (ID) of an organization" (`OrganizationIdType`, pattern
     /// `^o-[a-z0-9]{10,32}$`) — the value an entity path's first segment carries.
@@ -349,6 +365,7 @@ pub fn organizations_entity_path_organization(entity_path: &str) -> Option<&str>
 /// ([`Self::default`]), which is why [`Self::empty`] — the account with nothing at all in
 /// it — is a separate constructor.
 #[derive(Debug)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ComAmazonawsIamAwsidentitymanagementv20100508State {
     /// The persisted IAM users, keyed by [`name_key`] of the user name. IAM names
     /// "are not distinguished by case" (`CreateUser$UserName` documentation), so
@@ -737,6 +754,21 @@ pub struct ComAmazonawsIamAwsidentitymanagementv20100508State {
     /// Monotonic counter feeding [`hold_password`](Self::hold_password), so every
     /// password the account holds a verifier for carries its own salt.
     pub password_salt_seq: u64,
+}
+
+impl ::service_common::persist::Persisted for ComAmazonawsIamAwsidentitymanagementv20100508State {
+    const SERVICE: &'static str = "iam";
+    const VERSION: u32 = 1;
+
+    fn snapshot(&self) -> serde_json::Value {
+        // Every field is plain data; a failure here is a bug, and an empty snapshot would
+        // silently lose every role and policy, so it is refused loudly instead.
+        serde_json::to_value(self).expect("IAM state serializes")
+    }
+
+    fn restore(_version: u32, snapshot: serde_json::Value) -> Result<Self, String> {
+        serde_json::from_value(snapshot).map_err(|error| error.to_string())
+    }
 }
 
 impl Default for ComAmazonawsIamAwsidentitymanagementv20100508State {
