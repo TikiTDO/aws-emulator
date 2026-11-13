@@ -261,6 +261,7 @@ fn caller<Eng: Send + Sync + 'static>(
             tags: Vec::new(),
             transitive_tag_keys: Vec::new(),
             role_arn: None,
+            federated_claims: Vec::new(),
             session_policies: sts_store::SessionPolicies::default(),
         }),
     };

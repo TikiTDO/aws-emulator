@@ -528,6 +528,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> GetCredentialsFor
                     &role,
                     now,
                     CREDENTIAL_VALIDITY,
+                    &context,
                 );
                 // A vend that could not be recorded is refused rather than answered with a
                 // credential no later call can resolve.

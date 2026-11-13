@@ -83,6 +83,12 @@
 //!   `${aws:PrincipalTag/<key>}` takes the text it stands for. They are known for a
 //!   session this emulator's STS registry minted and for nobody else, so only such a
 //!   caller declares that an absent tag key is a tag it does not carry.
+//! * the federated identity the calling credential was minted by exchanging, which a
+//!   session of a role assumed with a web identity token carries: the
+//!   `<provider>:<claim>` keys that token publishes, among them the subject it names. They
+//!   are what a policy written with `${<provider>:<claim>}` takes the text it stands for,
+//!   so a statement conditioned on the partitions a call addresses can pin them to the
+//!   caller's OWN federated subject.
 //!
 //! Both are passed through [`::service_common::iam_authorization::Request`] — for the
 //! table's own document as much as for the identity's — so the clause is decided by the
@@ -141,6 +147,11 @@ pub struct Caller {
     /// carry be decided rather than left undecided. A long-term credential's tags live in
     /// IAM and are not read here, so such a caller declares nothing about them.
     pub tags_known: bool,
+    /// The condition keys the web identity this credential was minted by exchanging
+    /// publishes, as STS recorded them on the session: the values a
+    /// `<provider>:<claim>` clause, and a policy variable naming one, hold for a request
+    /// this credential signs. Empty for a credential no such exchange minted.
+    pub federated_claims: Vec<(String, String)>,
 }
 
 impl Caller {
@@ -187,6 +198,7 @@ pub fn request_caller<Eng: Send + Sync + 'static>(
                 caller.kind.is_some(),
                 caller.tags,
                 caller.session_policies,
+                caller.federated_claims,
             )
         }),
         // No STS store on this engine: the credential names no session, so it speaks for
@@ -198,12 +210,15 @@ pub fn request_caller<Eng: Send + Sync + 'static>(
             false,
             Vec::new(),
             sts_store::SessionPolicies::default(),
+            Vec::new(),
         )),
     };
     // An expired session credential speaks for nobody: it carries no documents and no
     // principal spelling. The refusal still names what was presented, so a caller reading
     // it can tell an expired credential from an unauthorized one.
-    let Ok((arn, account, role_arn, tags_known, tags, session_policies)) = resolved else {
+    let Ok((arn, account, role_arn, tags_known, tags, session_policies, federated_claims)) =
+        resolved
+    else {
         return Caller {
             arn: format!("an expired session credential ({access_key_id})"),
             ..Caller::default()
@@ -216,6 +231,7 @@ pub fn request_caller<Eng: Send + Sync + 'static>(
         arn,
         tags,
         tags_known,
+        federated_claims,
         ..Caller::default()
     };
     // An assumed-role session is also named by the ARN of the role it is a session of,
@@ -351,7 +367,8 @@ pub(crate) fn condition_key_text(value: &AttributeValue) -> Option<String> {
 }
 
 /// The condition keys this request carries values for, as `(key, value)` pairs: one entry
-/// per partition it addresses, and one per session tag the calling principal carries.
+/// per partition it addresses, one per session tag the calling principal carries, and one
+/// per claim of the web identity its credential was minted by exchanging.
 fn condition_context(caller: &Caller, addressed: &AddressedKeys) -> Vec<(String, String)> {
     let mut context: Vec<(String, String)> = addressed
         .values
@@ -365,6 +382,7 @@ fn condition_context(caller: &Caller, addressed: &AddressedKeys) -> Vec<(String,
             value.clone(),
         ));
     }
+    context.extend(caller.federated_claims.iter().cloned());
     context
 }
 
@@ -375,8 +393,9 @@ fn condition_context(caller: &Caller, addressed: &AddressedKeys) -> Vec<(String,
 /// A call that addresses partitions knows every one it addresses, and a caller whose
 /// session tags are known knows every tag it carries — so the whole tag FAMILY is
 /// published, which is what lets a clause over a tag key the principal does not carry be
-/// decided.
-fn published_condition_keys(caller: &Caller, addressed: &AddressedKeys) -> Vec<&'static str> {
+/// decided. A federated credential answers for each key its own exchange published, so
+/// those are published one by one ([`sts_store::federated_claim_keys`]).
+fn published_condition_keys<'a>(caller: &'a Caller, addressed: &AddressedKeys) -> Vec<&'a str> {
     let mut published = Vec::new();
     if addressed.values.is_some() {
         published.push(LEADING_KEYS_CONDITION_KEY);
@@ -384,6 +403,7 @@ fn published_condition_keys(caller: &Caller, addressed: &AddressedKeys) -> Vec<&
     if caller.tags_known {
         published.push(PRINCIPAL_TAG_CONDITION_KEY_FAMILY);
     }
+    published.extend(sts_store::federated_claim_keys(&caller.federated_claims));
     published
 }
 

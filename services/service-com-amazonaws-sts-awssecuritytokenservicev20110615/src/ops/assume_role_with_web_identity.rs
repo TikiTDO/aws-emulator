@@ -486,6 +486,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     managed_arns: named_policy_arns,
                 },
                 role_arn: Some(role.arn.clone()),
+                // The identity the exchanged token established travels with the session it
+                // mints, so a request the vended credential signs is decided against the
+                // very keys this assume was decided under
+                // (`crate::state::federated_claim_keys`).
+                federated_claims: context.clone(),
                 ..NewSession::new(session_identity, SessionKind::AssumedRole, duration_seconds)
             },
         );

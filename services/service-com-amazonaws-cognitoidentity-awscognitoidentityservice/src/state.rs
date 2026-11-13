@@ -3216,6 +3216,11 @@ pub struct VendedSession {
 /// The session lasts `validity`, capped by the role's own `MaxSessionDuration` — a session
 /// is never minted for longer than the role admits.
 ///
+/// `federated_claims` are the condition keys the exchange this vend makes publishes about
+/// the token it stands for ([`web_identity_condition_context`]); they travel with the
+/// session, so a request the vended credential signs is decided against the same keys the
+/// assume was.
+///
 /// `Err` says why no session could be minted — this engine carries no STS registry, or the
 /// registry is full of sessions that have not expired — so the caller refuses the request
 /// rather than answering with a credential that stands for nothing.
@@ -3225,6 +3230,7 @@ pub fn mint_vended_role_session<Eng: Send + Sync + 'static>(
     role: &ResolvedRole,
     now: SystemTime,
     validity: Duration,
+    federated_claims: &[(String, String)],
 ) -> Result<VendedSession, String> {
     use ::service_com_amazonaws_sts_awssecuritytokenservicev20110615::state as sts;
 
@@ -3258,6 +3264,10 @@ pub fn mint_vended_role_session<Eng: Send + Sync + 'static>(
         now,
         sts::NewSession {
             role_arn: Some(role.arn.clone()),
+            // The identity the exchanged token stands for travels with the session, so a
+            // policy in force on the role can scope what the session may do to its own
+            // federated subject.
+            federated_claims: federated_claims.to_vec(),
             ..sts::NewSession::new(identity, sts::SessionKind::AssumedRole, duration_seconds)
         },
     )

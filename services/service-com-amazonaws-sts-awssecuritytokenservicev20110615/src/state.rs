@@ -173,6 +173,14 @@ pub struct Session {
     /// it — the spelling a trust policy names when this session chains into another
     /// role. `None` for every other kind of session.
     pub role_arn: Option<String>,
+    /// The condition keys the WEB IDENTITY this session was minted by exchanging publishes,
+    /// as `(key, value)` pairs already named after the provider that issued the token; see
+    /// [`federated_claim_keys`]. Empty for a session no web-identity exchange minted.
+    ///
+    /// Bounded by the token the exchange presented, whose own modelled length
+    /// (`AssumeRoleWithWebIdentityRequest$WebIdentityToken` is `clientTokenType`, length
+    /// 4..20000) caps the claims it can carry, and by [`MAX_SESSIONS`] records in all.
+    pub federated_claims: Vec<(String, String)>,
     /// Set once the credential has been deleted from the credential store because
     /// the session expired, so the deletion happens exactly once.
     pub revoked: bool,
@@ -201,6 +209,8 @@ pub struct NewSession {
     pub external_id: Option<String>,
     /// See [`Session::role_arn`].
     pub role_arn: Option<String>,
+    /// See [`Session::federated_claims`].
+    pub federated_claims: Vec<(String, String)>,
 }
 
 impl NewSession {
@@ -218,6 +228,7 @@ impl NewSession {
             policies: SessionPolicies::default(),
             external_id: None,
             role_arn: None,
+            federated_claims: Vec::new(),
         }
     }
 
@@ -254,6 +265,7 @@ impl NewSession {
             policies: self.policies,
             external_id: self.external_id,
             role_arn: self.role_arn,
+            federated_claims: self.federated_claims,
             revoked: false,
         }
     }
@@ -990,6 +1002,9 @@ pub struct Caller {
     pub transitive_tag_keys: Vec<String>,
     /// The role ARN of an assumed-role credential; see [`Session::role_arn`].
     pub role_arn: Option<String>,
+    /// The condition keys the web identity this credential was minted by exchanging
+    /// publishes; see [`Session::federated_claims`]. Empty for every other credential.
+    pub federated_claims: Vec<(String, String)>,
     /// The session policies the mint of this credential passed, which scope what a
     /// request signed with it may do; see [`SessionPolicies`]. Empty for a long-term
     /// access key, which no mint scoped.
@@ -1006,6 +1021,7 @@ impl Caller {
             tags: Vec::new(),
             transitive_tag_keys: Vec::new(),
             role_arn: None,
+            federated_claims: Vec::new(),
             session_policies: SessionPolicies::default(),
         }
     }
@@ -1054,6 +1070,7 @@ pub fn resolve_request_caller(
             tags: session.tags.clone(),
             transitive_tag_keys: session.transitive_tag_keys.clone(),
             role_arn: session.role_arn.clone(),
+            federated_claims: session.federated_claims.clone(),
             session_policies: session.policies.clone(),
         }),
         None => Ok(Caller::long_term(long_term)),
@@ -1309,6 +1326,28 @@ pub fn assume_role_published_condition_keys(caller: &Caller) -> Vec<&'static str
         published.push(PRINCIPAL_TAG_CONDITION_KEY_FAMILY);
     }
     published
+}
+
+/// The condition keys a credential's federated claims ANSWER for — each distinct key in
+/// [`Session::federated_claims`], once.
+///
+/// A session minted by exchanging a web identity token stands for the identity that token
+/// established, and the facts of that identity travel with the session: a request the
+/// credential signs is decided against the very `<provider>:<claim>` keys the exchange was
+/// decided under, which is what lets a policy in force on the role scope the session to its
+/// own federated subject. Publishing them is what makes a clause over one of them DECIDE a
+/// request rather than stay undecided, and what lets a `${<provider>:<claim>}` policy
+/// variable be substituted at all. A credential no web-identity exchange minted answers for
+/// none of them, so a clause over one stays undecided and withholds the grant.
+#[must_use]
+pub fn federated_claim_keys(claims: &[(String, String)]) -> Vec<&str> {
+    let mut keys: Vec<&str> = Vec::new();
+    for (key, _) in claims {
+        if !keys.contains(&key.as_str()) {
+            keys.push(key);
+        }
+    }
+    keys
 }
 
 /// The condition keys STS publishes about one role-session mint, for a trust policy's

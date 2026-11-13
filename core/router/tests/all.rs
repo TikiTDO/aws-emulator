@@ -453,6 +453,10 @@ mod cognito_vended_session_is_audited;
 #[path = "all/cognito_vended_session_is_an_assumed_role_caller.rs"]
 mod cognito_vended_session_is_an_assumed_role_caller;
 // Declared beside its sibling cognito suites, at the head, for the same reason they are
+// here: the appended tail and the sorted `c…` span are both regions concurrent suites land in.
+#[path = "all/cognito_vended_session_leading_keys_scoped_query.rs"]
+mod cognito_vended_session_leading_keys_scoped_query;
+// Declared beside its sibling cognito suites, at the head, for the same reason they are
 #[path = "all/cognito_post_confirmation_lambda_trigger.rs"]
 mod cognito_post_confirmation_lambda_trigger;
 #[path = "all/cognito_group_role_mapping.rs"]

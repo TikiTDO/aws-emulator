@@ -901,6 +901,7 @@ async fn an_expired_session_credential_is_refused_and_a_live_one_is_served() {
                 policies: SessionPolicies::default(),
                 external_id: None,
                 role_arn: None,
+                federated_claims: Vec::new(),
                 revoked: false,
             })
             .unwrap_or_else(|e| panic!("case {case:?}: recording the session: {}", e.message()));
@@ -1007,6 +1008,7 @@ async fn the_session_registry_is_bounded_and_prunes_what_the_clock_retired() {
                 policies: SessionPolicies::default(),
                 external_id: None,
                 role_arn: None,
+                federated_claims: Vec::new(),
                 revoked: false,
             };
             engine
@@ -1034,6 +1036,7 @@ async fn the_session_registry_is_bounded_and_prunes_what_the_clock_retired() {
             policies: SessionPolicies::default(),
             external_id: None,
             role_arn: None,
+            federated_claims: Vec::new(),
             revoked: false,
         });
         assert!(
@@ -1086,6 +1089,7 @@ async fn the_session_registry_is_bounded_and_prunes_what_the_clock_retired() {
             policies: SessionPolicies::default(),
             external_id: None,
             role_arn: None,
+            federated_claims: Vec::new(),
             revoked: false,
         })
         .expect("recording a long-expired session");
@@ -1154,6 +1158,7 @@ async fn get_access_key_info_answers_from_the_session_registry() {
                 policies: SessionPolicies::default(),
                 external_id: None,
                 role_arn: None,
+                federated_claims: Vec::new(),
                 revoked: false,
             })
             .unwrap_or_else(|e| panic!("case {account:?}: recording the session: {}", e.message()));
