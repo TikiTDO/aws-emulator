@@ -116,9 +116,14 @@ pub(crate) fn reported(
     )
 }
 
-/// A bucket carrying a metadata configuration whose tables are in service, so a row acts on
-/// the state the API asks a caller to wait for.
-pub(crate) async fn bucket_with_an_active_configuration(
+/// A bucket carrying a metadata configuration with the tables the row asks for, whose tables
+/// may still be being created.
+///
+/// The create step [`bucket_with_an_active_configuration`] waits on, on its own: a suite that
+/// acts on the CONFIGURATION rather than on the tables it provisioned needs no wait, and
+/// drives this rather than standing up a second copy of the create
+/// ([`super::bucket_metadata_configuration_delete_scope`]).
+pub(crate) async fn bucket_with_a_configuration(
     router: &MultiServiceRouter,
     bucket: &str,
     inventory: bool,
@@ -135,10 +140,21 @@ pub(crate) async fn bucket_with_an_active_configuration(
         create_metadata_configuration(router, bucket, &[], &payload(inventory, annotation)).await;
     assert_eq!(
         configured.status, 200,
-        "the configuration must be created first, got {} with body {:?}",
+        "the configuration of {bucket:?} must be created first, got {} with body {:?}",
         configured.status,
         text(&configured)
     );
+}
+
+/// A bucket carrying a metadata configuration whose tables are in service, so a row acts on
+/// the state the API asks a caller to wait for.
+pub(crate) async fn bucket_with_an_active_configuration(
+    router: &MultiServiceRouter,
+    bucket: &str,
+    inventory: bool,
+    annotation: bool,
+) {
+    bucket_with_a_configuration(router, bucket, inventory, annotation).await;
     wait_for_the_tables();
     let read = get_metadata_configuration(router, bucket, &[]).await;
     let body = text(&read);
