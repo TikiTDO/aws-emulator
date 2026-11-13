@@ -362,8 +362,8 @@ pub const MANAGEMENT_TYPE_AWS_MANAGED: &str = "AWS_MANAGED";
 pub const AWS_MANAGED_VENDOR_NAME: &str = "Amazon Web Services";
 
 /// One entry of the catalog of security requirement packs AWS ships with every
-/// account: the id a client references the pack by, its display name, and the status it
-/// is shipped in.
+/// account: the id a client references the pack by, its display name, the description
+/// it is shipped with, and the status it is shipped in.
 ///
 /// Only the status is a caller's to change — `UpdateSecurityRequirementPack` documents
 /// "For AWS managed packs, only status can be updated" — so the rest of the record is
@@ -372,7 +372,30 @@ pub const AWS_MANAGED_VENDOR_NAME: &str = "Amazon Web Services";
 pub struct AwsManagedPack {
     pub pack_id: &'static str,
     pub name: &'static str,
+    /// The description this pack is shipped with, which every read of it reports.
+    /// Static catalog content like the name beside it, so it is part of this table
+    /// rather than something a caller supplies.
+    pub description: &'static str,
     pub status: &'static str,
+}
+
+/// When the AWS managed security requirement pack catalog was published, as seconds
+/// since the Unix epoch: 2025-12-01T00:00:00Z.
+///
+/// RECORDED, not modelled: the model says nothing about which packs AWS ships or when,
+/// and the `securityagent-catalog-list-security-requirement-packs` fixture reports ONE
+/// instant as both `createdAt` and `updatedAt` for EVERY managed pack. That instant is a
+/// property of the shipped catalog, not of this process: a pack the account was created
+/// with was not published when the emulator started, and a client that caches the
+/// catalog or asks "has it changed since X" must see the same instant across restarts.
+/// So it is written here instead of read from the clock, and it moves only when the
+/// catalog revision below it does.
+pub const AWS_MANAGED_PACK_PUBLISHED_AT_EPOCH_SECONDS: u64 = 1_764_547_200;
+
+/// [`AWS_MANAGED_PACK_PUBLISHED_AT_EPOCH_SECONDS`] as the `SystemTime` the seeded
+/// records carry, so every managed pack's stamps come from one place.
+pub fn aws_managed_pack_published_at() -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(AWS_MANAGED_PACK_PUBLISHED_AT_EPOCH_SECONDS)
 }
 
 /// The AWS managed pack catalog a fresh account holds.
@@ -388,21 +411,26 @@ pub const AWS_MANAGED_PACKS: [AwsManagedPack; 4] = [
     AwsManagedPack {
         pack_id: "srp-am-base",
         name: "ASA Base Pack",
+        description: "Default security requirements shipped with AWS Security Agent",
         status: PACK_STATUS_ENABLED,
     },
     AwsManagedPack {
         pack_id: "srp-am-nist-csf",
         name: "NIST CSF Pack",
+        description: "Security requirements derived from the NIST Cybersecurity Framework",
         status: PACK_STATUS_DISABLED,
     },
     AwsManagedPack {
         pack_id: "srp-am-pci-dss",
         name: "PCI DSS Pack",
+        description: "Security requirements derived from the PCI DSS v4.0.1 standard",
         status: PACK_STATUS_DISABLED,
     },
     AwsManagedPack {
         pack_id: "srp-am-well-architected",
         name: "AWS Well-Architected Pack",
+        description:
+            "Security requirements derived from the AWS Well-Architected Framework Security Pillar",
         status: PACK_STATUS_DISABLED,
     },
 ];
@@ -745,15 +773,15 @@ pub struct SecurityRequirementPack {
 
 impl SecurityRequirementPack {
     /// One entry of the seeded AWS managed catalog as a stored record: the catalog's own
-    /// id, name and shipped status, the AWS vendor, and `now` as both stamps — nothing
-    /// has updated a pack the account was created with.
-    pub fn aws_managed(entry: &AwsManagedPack, now: SystemTime) -> Self {
+    /// id, name, description and shipped status, the AWS vendor, and the catalog's
+    /// publication instant as both stamps — nothing has updated a pack the account was
+    /// created with, and when it was published is not when this process started.
+    pub fn aws_managed(entry: &AwsManagedPack) -> Self {
+        let published_at = aws_managed_pack_published_at();
         Self {
             pack_id: entry.pack_id.to_string(),
             name: entry.name.to_string(),
-            // The catalog's descriptions are not recorded, and a description AWS does
-            // not ship is not one to invent: the member is optional, so it stays absent.
-            description: None,
+            description: Some(entry.description.to_string()),
             vendor_name: Some(AWS_MANAGED_VENDOR_NAME.to_string()),
             management_type: MANAGEMENT_TYPE_AWS_MANAGED.to_string(),
             status: entry.status.to_string(),
@@ -761,8 +789,8 @@ impl SecurityRequirementPack {
             import_status: None,
             kms_key_id: None,
             tags: BTreeMap::new(),
-            created_at: now,
-            updated_at: now,
+            created_at: published_at,
+            updated_at: published_at,
         }
     }
 
@@ -1504,7 +1532,6 @@ impl Default for ComAmazonawsSecurityagentSecurityagentState {
     /// through exactly the same path as a created pack, and
     /// `UpdateSecurityRequirementPack` writes their status in place.
     fn default() -> Self {
-        let now = SystemTime::now();
         Self {
             applications: BTreeMap::new(),
             private_connections: BTreeMap::new(),
@@ -1515,7 +1542,7 @@ impl Default for ComAmazonawsSecurityagentSecurityagentState {
                 .map(|entry| {
                     (
                         entry.pack_id.to_string(),
-                        SecurityRequirementPack::aws_managed(entry, now),
+                        SecurityRequirementPack::aws_managed(entry),
                     )
                 })
                 .collect(),

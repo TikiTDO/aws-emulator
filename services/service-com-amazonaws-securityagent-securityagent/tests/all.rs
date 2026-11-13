@@ -31,6 +31,8 @@ mod artifact_metadata_batch_read;
 mod artifact_listing;
 #[path = "all/artifact_storage.rs"]
 mod artifact_storage;
+#[path = "all/aws_managed_pack_catalog.rs"]
+mod aws_managed_pack_catalog;
 #[path = "all/error_message_wording.rs"]
 mod error_message_wording;
 #[path = "all/minted_identifiers.rs"]
