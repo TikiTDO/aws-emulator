@@ -1998,3 +1998,7 @@ mod vpc_endpoint_type_matches_service;
 // this file, which is where every new ec2 suite lands.
 #[path = "all/describe_tags.rs"]
 mod describe_tags;
+// `ModifyVpcTenancy`: the tenancy attribute the call writes onto the VPC the request names,
+// read back through `DescribeVpcs`, beside what it refuses and what it leaves alone. Declared
+#[path = "all/modify_vpc_tenancy.rs"]
+mod modify_vpc_tenancy;
