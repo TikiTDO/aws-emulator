@@ -693,11 +693,13 @@ async fn list_connections_reports_the_stored_connections_under_one_filter() {
 }
 
 /// One row of the update table: the case, the update, the authorization type the
-/// connection then has, the `ConnectionState` the clock then owes it, the member
-/// path a read must report, and the value it must report there.
+/// connection then has, the `ConnectionState` the update ANSWERS, the one it
+/// comes to rest in, the member path a read must report, and the value it must
+/// report there.
 type UpdateRow = (
     &'static str,
     Value,
+    &'static str,
     &'static str,
     &'static str,
     Vec<&'static str>,
@@ -718,6 +720,7 @@ async fn update_connection_writes_the_members_it_is_given() {
                 },
             }),
             "BASIC",
+            state::CONNECTION_STATE_AUTHORIZED,
             state::CONNECTION_STATE_AUTHORIZED,
             vec!["BasicAuthParameters", "Username"],
             json!("new-user"),
@@ -742,6 +745,7 @@ async fn update_connection_writes_the_members_it_is_given() {
                 },
             }),
             "OAUTH_CLIENT_CREDENTIALS",
+            state::CONNECTION_STATE_UPDATING,
             state::CONNECTION_STATE_DEAUTHORIZED,
             vec!["OAuthParameters", "ClientParameters", "ClientID"],
             json!("new-client"),
@@ -760,6 +764,7 @@ async fn update_connection_writes_the_members_it_is_given() {
             }),
             "API_KEY",
             state::CONNECTION_STATE_AUTHORIZED,
+            state::CONNECTION_STATE_AUTHORIZED,
             vec!["ApiKeyAuthParameters", "ApiKeyName"],
             json!("x-other-key"),
         ),
@@ -768,12 +773,14 @@ async fn update_connection_writes_the_members_it_is_given() {
             json!({ "Description": "the updated connection" }),
             "API_KEY",
             state::CONNECTION_STATE_AUTHORIZED,
+            state::CONNECTION_STATE_AUTHORIZED,
             vec!["ApiKeyAuthParameters", "ApiKeyName"],
             json!("x-api-key"),
         ),
     ];
 
-    for (case, update, expected_type, expected_state, path, expected_value) in rows {
+    for (case, update, expected_type, answered_state, expected_state, path, expected_value) in rows
+    {
         let router = emulator();
         let name = "the-connection";
         given_connection(&router, name).await;
@@ -793,22 +800,21 @@ async fn update_connection_writes_the_members_it_is_given() {
         );
         assert_eq!(
             updated["ConnectionState"],
-            json!(state::CONNECTION_STATE_UPDATING),
-            "case {case:?}: an update is answered in {}, got {updated}",
-            state::CONNECTION_STATE_UPDATING
+            json!(answered_state),
+            "case {case:?}: an update is answered in {answered_state}, got {updated}"
         );
         assert_eq!(
             updated["CreationTime"], before["CreationTime"],
             "case {case:?}: an update does not move the creation time, got {updated}"
         );
 
-        // The transient state is OBSERVABLE, and settles on its own.
+        // The state the update answered is the state a caller reading straight
+        // after it sees; a transient one then settles on its own.
         let (_, transient) = events(&router, "DescribeConnection", &json!({ "Name": name })).await;
         assert_eq!(
             transient["ConnectionState"],
-            json!(state::CONNECTION_STATE_UPDATING),
-            "case {case:?}: a read taken at once still reports {}, got {transient}",
-            state::CONNECTION_STATE_UPDATING
+            json!(answered_state),
+            "case {case:?}: a read taken at once still reports {answered_state}, got {transient}"
         );
         tokio::time::sleep(past_the_transition()).await;
         let (status, settled) = events(&router, "DescribeConnection", &json!({ "Name": name })).await;

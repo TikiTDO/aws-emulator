@@ -14,7 +14,7 @@
 //!   `IsValueSecret` flag, with the value withheld wherever that flag is set.
 //!   A value the write did not flag secret is reported as it was given;
 //! * a connection whose credentials ARE the authorization is usable as soon as it
-//!   is written (`CREATING` -> `AUTHORIZED`), while an
+//!   is written (the create answers `AUTHORIZED`), while an
 //!   `OAUTH_CLIENT_CREDENTIALS` connection must first exchange its client
 //!   credentials for a token at its own authorization endpoint ("OAUTH tokens are
 //!   refreshed when a 401 or 407 response is returned"): it is `AUTHORIZING`
@@ -407,7 +407,7 @@ async fn a_connection_is_authorized_by_the_exchange_its_type_needs() {
             json!({
                 "ApiKeyAuthParameters": { "ApiKeyName": "x-api-key", "ApiKeyValue": "sekrit-key" },
             }),
-            state::CONNECTION_STATE_CREATING,
+            state::CONNECTION_STATE_AUTHORIZED,
             state::CONNECTION_STATE_AUTHORIZED,
             None,
         ),
@@ -417,7 +417,7 @@ async fn a_connection_is_authorized_by_the_exchange_its_type_needs() {
             json!({
                 "BasicAuthParameters": { "Username": "the-user", "Password": "sekrit-password" },
             }),
-            state::CONNECTION_STATE_CREATING,
+            state::CONNECTION_STATE_AUTHORIZED,
             state::CONNECTION_STATE_AUTHORIZED,
             None,
         ),
@@ -450,8 +450,8 @@ async fn a_connection_is_authorized_by_the_exchange_its_type_needs() {
             "case {case:?}: a created connection is answered in {created_state}, got {created}"
         );
 
-        // The transient state is OBSERVABLE: a caller reading straight after the
-        // create still sees it.
+        // The state the create answered is the state a caller reading straight
+        // after it sees.
         let (_, transient) = events(&router, "DescribeConnection", &json!({ "Name": name })).await;
         assert_eq!(
             transient["ConnectionState"],

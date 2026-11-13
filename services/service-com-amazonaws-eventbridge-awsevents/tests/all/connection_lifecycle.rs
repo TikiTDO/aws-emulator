@@ -13,9 +13,10 @@
 //!   back under its name through `DescribeConnection` with every member it was
 //!   created with, and its ARN and timestamps do not change between reads;
 //! * a connection AWS answers in a non-terminal state reaches its next state on
-//!   its own, a moment later rather than instantly: `CREATING` -> `AUTHORIZED`,
-//!   `DEAUTHORIZING` -> `DEAUTHORIZED`, `DELETING` -> gone. A caller reading
-//!   straight after the call still observes the transient state;
+//!   its own, a moment later rather than instantly: `DEAUTHORIZING` ->
+//!   `DEAUTHORIZED`, `DELETING` -> gone. A caller reading straight after the call
+//!   still observes the transient state, while a connection the call itself
+//!   settled (`AUTHORIZED`) stays where it is;
 //! * no credential a connection was created with is ever reported: the response
 //!   parameters carry a user name, an API key NAME and a client id, and never the
 //!   password, key value or client secret;
@@ -120,12 +121,12 @@ struct AuthCase {
 /// OAUTH_CLIENT_CREDENTIALS`, and `CreateConnectionAuthRequestParameters` carries
 /// exactly one member per type.
 ///
-/// The states differ with the type: credentials that ARE the authorization leave
-/// the connection `CREATING` and then `AUTHORIZED`, while OAuth client
-/// credentials have to be exchanged for a token at the connection's
-/// authorization endpoint first, so the connection is `AUTHORIZING` and settles
-/// by what that exchange came to — `DEAUTHORIZED` here, because nothing answers
-/// at the endpoint the row names.
+/// The states differ with the type: credentials that ARE the authorization are
+/// accepted by the create itself, which leaves the connection `AUTHORIZED` with
+/// nothing further owed to it, while OAuth client credentials have to be
+/// exchanged for a token at the connection's authorization endpoint first, so
+/// the connection is `AUTHORIZING` and settles by what that exchange came to —
+/// `DEAUTHORIZED` here, because nothing answers at the endpoint the row names.
 fn auth_cases() -> Vec<AuthCase> {
     vec![
         AuthCase {
@@ -136,7 +137,7 @@ fn auth_cases() -> Vec<AuthCase> {
                     "ApiKeyValue": "sekrit-api-key-value",
                 },
             }),
-            created_state: state::CONNECTION_STATE_CREATING,
+            created_state: state::CONNECTION_STATE_AUTHORIZED,
             settled_state: state::CONNECTION_STATE_AUTHORIZED,
             reported: vec![(
                 vec!["ApiKeyAuthParameters", "ApiKeyName"],
@@ -149,7 +150,7 @@ fn auth_cases() -> Vec<AuthCase> {
             parameters: json!({
                 "BasicAuthParameters": { "Username": "deep-user", "Password": "sekrit-password" },
             }),
-            created_state: state::CONNECTION_STATE_CREATING,
+            created_state: state::CONNECTION_STATE_AUTHORIZED,
             settled_state: state::CONNECTION_STATE_AUTHORIZED,
             reported: vec![(vec!["BasicAuthParameters", "Username"], json!("deep-user"))],
             secrets: vec!["sekrit-password"],
@@ -255,8 +256,9 @@ async fn a_created_connection_is_read_back_and_settles_into_authorized() {
             );
         }
 
-        // The transient state is OBSERVABLE: a caller reading straight after the
-        // create still sees it.
+        // The state the create answered is the state a caller reading straight
+        // after it sees: a transient one is still observable, and one the call
+        // settled has not moved.
         let (status, transient) =
             events(&router, "DescribeConnection", &json!({ "Name": name })).await;
         assert_eq!(
@@ -490,17 +492,17 @@ async fn deauthorizing_and_deleting_move_the_connection_through_its_states() {
 /// works, and a second delete while the first is still due is refused.
 #[tokio::test]
 async fn only_a_connection_already_being_removed_conflicts_with_a_write() {
-    // (case, the operation taken while the connection is still CREATING, the
-    //  status it answers, the wire code it answers)
+    // (case, the operation taken at once after the create, the status it
+    //  answers, the wire code it answers)
     let rows: Vec<(&str, &str, u16, &str)> = vec![
         (
-            "a delete taken while the connection is still CREATING",
+            "a delete taken at once after the create",
             "DeleteConnection",
             200,
             "",
         ),
         (
-            "a deauthorize taken while the connection is still CREATING",
+            "a deauthorize taken at once after the create",
             "DeauthorizeConnection",
             200,
             "",

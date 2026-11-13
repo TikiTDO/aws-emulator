@@ -43,6 +43,8 @@ mod bus_policy_publication_authorization;
 mod client_error_wording;
 #[path = "all/connection_authorization.rs"]
 mod connection_authorization;
+#[path = "all/connection_authorization_is_settled_by_its_credentials.rs"]
+mod connection_authorization_is_settled_by_its_credentials;
 #[path = "all/connection_filter_exclusivity_and_update_completeness.rs"]
 mod connection_filter_exclusivity_and_update_completeness;
 #[path = "all/connection_lifecycle.rs"]

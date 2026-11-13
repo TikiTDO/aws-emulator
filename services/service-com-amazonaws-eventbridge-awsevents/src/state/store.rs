@@ -508,6 +508,31 @@ impl ComAmazonawsEventbridgeAwseventsState {
             )
     }
 
+    /// Carry the authorization the connection `connection_arn` now settles on
+    /// through to every API destination invoking through it.
+    ///
+    /// A destination can be invoked only while its connection authorizes the
+    /// invocation, and what it holds is the authorization that connection
+    /// SETTLES on ([`Self::api_destination_state_on`]) — so every write that
+    /// decides that authorization reaches the destinations already invoking
+    /// through it, and a destination written at the same instant
+    /// ([`Self::api_destination_state_on`] again) cannot report anything else.
+    /// Both writers call it: the clock-owed transition
+    /// [`Self::settle_connections`] materialises, and the call that decided the
+    /// authorization itself.
+    ///
+    /// Call it only for a connection that still exists: a destination's
+    /// reference may outlive the connection, and deleting a connection does not
+    /// revoke the destinations naming it.
+    pub fn carry_connection_authorization(&mut self, connection_arn: &str) {
+        let state = self.api_destination_state_on(connection_arn);
+        for destination in self.api_destinations.values_mut() {
+            if destination.connection_arn == connection_arn {
+                destination.state = state.clone();
+            }
+        }
+    }
+
     /// Every member `DescribeApiDestination` reports, read back from the stored
     /// record, with the state derived from the connection
     /// ([`Self::api_destination_state`]).
@@ -768,11 +793,11 @@ impl ComAmazonawsEventbridgeAwseventsState {
             })
             .map(|connection| connection.name.clone())
             .collect();
-        // (the ARN of a connection that settled on a state, the
-        //  `ApiDestinationState` the destinations invoking through it take from
-        //  it) — collected while each connection is written and applied after,
-        //  so one walk of the destinations serves them all.
-        let mut settled_authorizations: Vec<(String, String)> = Vec::new();
+        // The ARNs of the connections that settled on a state, collected while
+        // each one is written and carried to their destinations after, so the
+        // walk of the destinations happens once per settled connection and in
+        // one place ([`Self::carry_connection_authorization`]).
+        let mut settled_authorizations: Vec<String> = Vec::new();
         for name in &due {
             let Some(connection) = self.connections.get_mut(name) else {
                 continue;
@@ -796,19 +821,12 @@ impl ComAmazonawsEventbridgeAwseventsState {
                     // The reason belongs to the state the connection reaches, so
                     // a state that needs none reports none.
                     connection.state_reason = reason;
-                    settled_authorizations.push((
-                        connection.arn.clone(),
-                        api_destination_state_of(&connection.state),
-                    ));
+                    settled_authorizations.push(connection.arn.clone());
                 }
             }
         }
-        for (connection_arn, state) in settled_authorizations {
-            for destination in self.api_destinations.values_mut() {
-                if destination.connection_arn == connection_arn {
-                    destination.state = state.clone();
-                }
-            }
+        for connection_arn in settled_authorizations {
+            self.carry_connection_authorization(&connection_arn);
         }
         due.len()
     }

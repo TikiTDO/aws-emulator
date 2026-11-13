@@ -59,6 +59,41 @@ fn past_the_transition(span: Duration) -> Duration {
     span + Duration::from_millis(250)
 }
 
+/// How long a test keeps LOOKING for a state the clock owes a resource before it
+/// gives up: generous, because what is waited on is the condition and not a
+/// duration, so a loaded machine cannot make the wait the flaky part of an
+/// assertion.
+const SETTLE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long between two looks at a resource whose next state is still owed.
+const LOOK_INTERVAL: Duration = Duration::from_millis(50);
+
+/// The destination `name`, looked at again until its `ApiDestinationState` is
+/// `expected` or [`SETTLE_DEADLINE`] passes; answers the last read either way, so
+/// the caller's assertion names what was actually reported.
+async fn until_destination_state(
+    router: &MultiServiceRouter,
+    name: &str,
+    expected: &str,
+) -> Value {
+    let looks = SETTLE_DEADLINE.as_millis() / LOOK_INTERVAL.as_millis().max(1);
+    let mut last = Value::Null;
+    for _ in 0..looks {
+        let (status, described) =
+            events(router, "DescribeApiDestination", &json!({ "Name": name })).await;
+        assert_eq!(
+            status, 200,
+            "DescribeApiDestination answered {status} {described}"
+        );
+        if described["ApiDestinationState"] == json!(expected) {
+            return described;
+        }
+        last = described;
+        tokio::time::sleep(LOOK_INTERVAL).await;
+    }
+    last
+}
+
 /// One `awsJson1_1` call to EventBridge over the router.
 async fn events(router: &MultiServiceRouter, operation: &str, body: &Value) -> (u16, Value) {
     let request = http::Request::builder()
@@ -850,7 +885,8 @@ async fn a_created_api_destination_is_read_back_and_follows_its_connection() {
 #[tokio::test]
 async fn the_destination_state_tracks_the_connections_own_state() {
     let router = emulator();
-    // The connection is still CREATING, on its way to being authorized.
+    // The connection's credentials ARE the authorization, so the create settled
+    // it in AUTHORIZED.
     let connection = given_connection(&router, "slow-connection", false).await;
     let name = "tracking-destination";
     let (status, created) = events(
@@ -871,11 +907,12 @@ async fn the_destination_state_tracks_the_connections_own_state() {
     assert_eq!(
         created["ApiDestinationState"],
         json!(state::API_DESTINATION_STATE_ACTIVE),
-        "a destination whose connection is settling into its authorization is {}, got {created}",
+        "a destination whose connection holds its authorization is {}, got {created}",
         state::API_DESTINATION_STATE_ACTIVE
     );
 
-    tokio::time::sleep(past_the_transition(state::CONNECTION_TRANSITION)).await;
+    // A read taken straight after the create reports the same: the connection's
+    // credentials ARE the authorization, so there is no transition to wait out.
     let (status, described) = events(&router, "DescribeApiDestination", &json!({ "Name": name })).await;
     assert_eq!(
         status, 200,
@@ -895,12 +932,10 @@ async fn the_destination_state_tracks_the_connections_own_state() {
     )
     .await;
     assert_eq!(status, 200, "DeauthorizeConnection answered {status} {body}");
-    tokio::time::sleep(past_the_transition(state::CONNECTION_TRANSITION)).await;
-    let (status, described) = events(&router, "DescribeApiDestination", &json!({ "Name": name })).await;
-    assert_eq!(
-        status, 200,
-        "DescribeApiDestination answered {status} {described}"
-    );
+    // The deauthorized connection reaches DEAUTHORIZED on its own, and carries
+    // its destinations with it: the read is taken again until that has happened.
+    let described =
+        until_destination_state(&router, name, state::API_DESTINATION_STATE_INACTIVE).await;
     assert_eq!(
         described["ApiDestinationState"],
         json!(state::API_DESTINATION_STATE_INACTIVE),

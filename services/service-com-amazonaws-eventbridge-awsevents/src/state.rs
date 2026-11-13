@@ -951,7 +951,11 @@ pub const MAX_COUNTED_MATCHES_PER_REQUEST: usize = 1_000;
 /// identifiers and a refusal message, never the event text.
 pub const MAX_TARGET_INVOCATIONS: usize = 10_000;
 
-/// The `ConnectionState` a connection is created in: "CREATING".
+/// The `ConnectionState` of a connection whose creation is still in flight: one
+/// of `CONNECTION_STATE_VALUES`, so `ListConnections` admits it as a filter. No
+/// connection this emulator writes rests in it — credentials that ARE the
+/// authorization settle it in [`CONNECTION_STATE_AUTHORIZED`] as they are
+/// accepted, and one still to obtain a token is [`CONNECTION_STATE_AUTHORIZING`].
 pub const CONNECTION_STATE_CREATING: &str = "CREATING";
 
 /// The `ConnectionState` a connection whose credentials are in place reaches.
@@ -963,6 +967,11 @@ pub const CONNECTION_STATE_DEAUTHORIZING: &str = "DEAUTHORIZING";
 
 /// The `ConnectionState` a deauthorized connection settles in.
 pub const CONNECTION_STATE_DEAUTHORIZED: &str = "DEAUTHORIZED";
+
+/// Why a connection whose authorization parameters `DeauthorizeConnection` took
+/// away holds none, as its `StateReason`: fixed wording with no variable part.
+pub const DEAUTHORIZED_BY_REQUEST: &str = "The authorization parameters were removed from this \
+                                           connection by a DeauthorizeConnection operation.";
 
 /// The `ConnectionState` `UpdateConnection` moves a connection into while its
 /// new settings are being applied.
