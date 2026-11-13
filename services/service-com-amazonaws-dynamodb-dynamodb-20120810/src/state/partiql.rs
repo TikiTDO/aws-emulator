@@ -116,8 +116,9 @@ impl Position {
 /// its own phrase above.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParseDefect {
-    /// The text states none of the verbs that read or write items, so it reads as an
-    /// expression rather than as the data manipulation this surface runs.
+    /// The text states none of the verbs that read or write items, so it manipulates no
+    /// data whatever else it spells — the defect every statement that opens with no such
+    /// verb carries.
     NotDataManipulation,
     /// A NAME was required there — a table, an index, an attribute or an alias — and
     /// what the statement spells is not one (a string literal, say).
@@ -1389,130 +1390,10 @@ impl StatementParser<'_> {
         if self.accept_word("delete") {
             return self.delete().map(PartiqlStatement::Delete);
         }
-        // Text that opens with none of the four verbs manipulates no data — but it is
-        // still read as the EXPRESSION a PartiQL query may be, because which defect a
-        // client is told about turns on whether that expression accounted for the whole
-        // text ([`Self::no_data_manipulation`]).
-        Err(statement_parse_error(self.no_data_manipulation()))
-    }
-
-    /// Which defect text that states no data manipulation carries.
-    ///
-    /// A PartiQL query may be a bare expression, so such text is parsed rather than
-    /// rejected on sight: an expression that accounts for the WHOLE text states no
-    /// manipulation of data ([`ParseDefect::NotDataManipulation`] — `my_table`, say),
-    /// while text that carries on past the one expression it opens with is a token after
-    /// that expression ([`ParseDefect::TrailingToken`] — a misspelled verb, whose
-    /// remaining words belong to nothing). Text that reads as no expression at all keeps
-    /// the data-manipulation phrase: it is not an expression this surface could run
-    /// either.
-    fn no_data_manipulation(&mut self) -> ParseDefect {
-        if self.skip_expression() && !self.at_end() {
-            return ParseDefect::TrailingToken;
-        }
-        ParseDefect::NotDataManipulation
-    }
-
-    /// Walk over ONE expression's tokens, reporting whether the text read as one.
-    ///
-    /// A walk rather than a parse: nothing here builds a tree, because an expression is
-    /// not something this surface runs — all that is read off it is where it ENDS. It
-    /// never recurses on the caller's nesting (a bracketed run is skipped by counting
-    /// brackets) and only ever moves forward.
-    fn skip_expression(&mut self) -> bool {
-        if !self.skip_operand() {
-            return false;
-        }
-        while !self.at_end() {
-            if !self.skip_infix() {
-                return true;
-            }
-            if !self.skip_operand() {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// One operand of such an expression: a signed literal, a name with the path steps
-    /// and call brackets after it, or a bracketed run.
-    fn skip_operand(&mut self) -> bool {
-        while matches!(self.peek(), Some(Token::Minus | Token::Plus)) {
-            self.at += 1;
-        }
-        match self.peek() {
-            Some(
-                Token::Word(_)
-                | Token::Quoted(_)
-                | Token::Text(_)
-                | Token::Number(_)
-                | Token::Parameter
-                | Token::Star,
-            ) => self.at += 1,
-            Some(Token::Open | Token::OpenBracket | Token::OpenBrace | Token::OpenBag) => {
-                return self.skip_bracketed()
-            }
-            _ => return false,
-        }
-        // The `.name`, `[index]` and `(argument)` runs that may follow a name.
-        loop {
-            match self.peek() {
-                Some(Token::Dot) => {
-                    self.at += 1;
-                    if !matches!(self.peek(), Some(Token::Word(_) | Token::Quoted(_))) {
-                        return false;
-                    }
-                    self.at += 1;
-                }
-                Some(Token::Open | Token::OpenBracket) => {
-                    if !self.skip_bracketed() {
-                        return false;
-                    }
-                }
-                _ => return true,
-            }
-        }
-    }
-
-    /// Skip one bracketed run, whatever it holds, by counting the brackets in it.
-    fn skip_bracketed(&mut self) -> bool {
-        let mut depth = 0usize;
-        while let Some(token) = self.peek() {
-            match token {
-                Token::Open | Token::OpenBracket | Token::OpenBrace | Token::OpenBag => {
-                    depth += 1;
-                }
-                Token::Close | Token::CloseBracket | Token::CloseBrace | Token::CloseBag => {
-                    depth = depth.saturating_sub(1);
-                }
-                _ => {}
-            }
-            self.at += 1;
-            if depth == 0 {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// One operator that joins two operands of such an expression.
-    fn skip_infix(&mut self) -> bool {
-        const INFIX_WORDS: [&str; 7] = ["and", "or", "is", "in", "not", "between", "like"];
-        match self.peek() {
-            Some(Token::Compare(_) | Token::Plus | Token::Minus | Token::Star) => {
-                self.at += 1;
-                true
-            }
-            Some(Token::Word(word))
-                if INFIX_WORDS
-                    .iter()
-                    .any(|infix| word.eq_ignore_ascii_case(infix)) =>
-            {
-                self.at += 1;
-                true
-            }
-            _ => false,
-        }
+        // Text that opens with none of the four verbs this surface serves manipulates no
+        // data, whatever else it spells, and is refused as exactly that
+        // ([`ParseDefect::NotDataManipulation`]).
+        Err(statement_parse_error(ParseDefect::NotDataManipulation))
     }
 
     /// `SELECT (* | attribute, …) FROM source [WHERE predicate] [ORDER BY attribute
@@ -2298,14 +2179,41 @@ fn set_of(members: Vec<AttributeValue>) -> Result<AttributeValue, RequestError> 
 // ===========================================================================
 
 /// The substitution tables one rendered expression's `#name` aliases and `:value`
-/// placeholders resolve through.
+/// placeholders resolve through, and how deep the render has walked.
 #[derive(Debug, Default)]
 struct Rendered {
     names: HashMap<String, String>,
     values: HashMap<String, AttributeValue>,
+    /// How many levels of the predicate or operand tree are being rendered right now,
+    /// held to [`MAX_STATEMENT_DEPTH`] by [`Rendered::deeper`].
+    depth: usize,
 }
 
 impl Rendered {
+    /// Render `body` one level deeper, refusing a tree that nests past
+    /// [`MAX_STATEMENT_DEPTH`].
+    ///
+    /// The render walks a tree whose shape is the CALLER's — `NOT (NOT (…))`,
+    /// `list_append(list_append(…))` — so the budget travels with the walk rather than
+    /// being inherited from the parse that built the tree: the recursion is bounded here,
+    /// at the site that recurses, by the same ceiling [`Parser::nested`] holds the grammar
+    /// to, and a tree past it is refused with this surface's own sentence instead of
+    /// growing the stack.
+    fn deeper<T>(
+        &mut self,
+        body: impl FnOnce(&mut Self) -> Result<T, RequestError>,
+    ) -> Result<T, RequestError> {
+        if self.depth >= MAX_STATEMENT_DEPTH {
+            return Err(statement_refused(&format!(
+                "a statement may nest at most {MAX_STATEMENT_DEPTH} levels deep"
+            )));
+        }
+        self.depth += 1;
+        let outcome = body(self);
+        self.depth -= 1;
+        outcome
+    }
+
     /// The alias for one attribute name, minted once per distinct name so the same
     /// name renders the same way wherever it appears.
     fn alias(&mut self, name: &str) -> String {
@@ -2365,27 +2273,30 @@ impl Rendered {
     ///
     /// `AND` and `OR` chains are joined FLAT, and only a branch of lower precedence
     /// is parenthesised, so the rendered text nests no deeper than the statement did.
-    fn predicate(&mut self, predicate: &Predicate) -> String {
-        match predicate {
-            Predicate::All(branches) => branches
-                .iter()
-                .map(|branch| {
-                    let text = self.predicate(branch);
-                    if matches!(branch, Predicate::Any(_)) {
+    /// Every descent into a branch goes through [`Self::deeper`], which bounds the walk.
+    fn predicate(&mut self, predicate: &Predicate) -> Result<String, RequestError> {
+        Ok(match predicate {
+            Predicate::All(branches) => {
+                let mut rendered = Vec::with_capacity(branches.len());
+                for branch in branches {
+                    let text = self.deeper(|this| this.predicate(branch))?;
+                    rendered.push(if matches!(branch, Predicate::Any(_)) {
                         format!("({text})")
                     } else {
                         text
-                    }
-                })
-                .collect::<Vec<String>>()
-                .join(" AND "),
-            Predicate::Any(branches) => branches
-                .iter()
-                .map(|branch| self.predicate(branch))
-                .collect::<Vec<String>>()
-                .join(" OR "),
+                    });
+                }
+                rendered.join(" AND ")
+            }
+            Predicate::Any(branches) => {
+                let mut rendered = Vec::with_capacity(branches.len());
+                for branch in branches {
+                    rendered.push(self.deeper(|this| this.predicate(branch))?);
+                }
+                rendered.join(" OR ")
+            }
             Predicate::Not(inner) => {
-                let text = self.predicate(inner);
+                let text = self.deeper(|this| this.predicate(inner))?;
                 format!("NOT ({text})")
             }
             Predicate::Compare(left, operator, right) => {
@@ -2461,24 +2372,26 @@ impl Rendered {
                     format!("attribute_not_exists({path})")
                 }
             }
-        }
+        })
     }
 
-    fn set_operand(&mut self, operand: &AssignmentOperand) -> String {
-        match operand {
+    /// One assignment operand, whose `list_append` nests as deeply as the statement
+    /// spelled it — so each descent goes through [`Self::deeper`].
+    fn set_operand(&mut self, operand: &AssignmentOperand) -> Result<String, RequestError> {
+        Ok(match operand {
             AssignmentOperand::Path(path) => self.path(path),
             AssignmentOperand::Value(value) => self.placeholder(value.clone()),
             AssignmentOperand::ListAppend(left, right) => {
-                let left = self.set_operand(left);
-                let right = self.set_operand(right);
+                let left = self.deeper(|this| this.set_operand(left))?;
+                let right = self.deeper(|this| this.set_operand(right))?;
                 format!("list_append({left}, {right})")
             }
-        }
+        })
     }
 
     /// The `UPDATE`'s clauses, as an `UpdateExpression`: one section per action kind,
     /// in the order the grammar names them.
-    fn clauses(&mut self, clauses: &[UpdateClause]) -> String {
+    fn clauses(&mut self, clauses: &[UpdateClause]) -> Result<String, RequestError> {
         let mut sets = Vec::new();
         let mut removes = Vec::new();
         let mut adds = Vec::new();
@@ -2488,15 +2401,15 @@ impl Rendered {
                 UpdateClause::Set(path, expression) => {
                     let path = self.path(path);
                     let value = match expression {
-                        SetExpression::Single(operand) => self.set_operand(operand),
+                        SetExpression::Single(operand) => self.set_operand(operand)?,
                         SetExpression::Sum(left, right) => {
-                            let left = self.set_operand(left);
-                            let right = self.set_operand(right);
+                            let left = self.set_operand(left)?;
+                            let right = self.set_operand(right)?;
                             format!("{left} + {right}")
                         }
                         SetExpression::Difference(left, right) => {
-                            let left = self.set_operand(left);
-                            let right = self.set_operand(right);
+                            let left = self.set_operand(left)?;
+                            let right = self.set_operand(right)?;
                             format!("{left} - {right}")
                         }
                     };
@@ -2529,7 +2442,7 @@ impl Rendered {
                 sections.push(format!("{keyword} {}", actions.join(", ")));
             }
         }
-        sections.join(" ")
+        Ok(sections.join(" "))
     }
 }
 
@@ -2538,7 +2451,7 @@ impl Rendered {
 /// attribute values.
 pub fn parsed_condition(predicate: &Predicate) -> Result<ParsedCondition, RequestError> {
     let mut rendered = Rendered::default();
-    let text = rendered.predicate(predicate);
+    let text = rendered.predicate(predicate)?;
     ParsedCondition::parse(
         "Statement",
         &text,
@@ -2550,7 +2463,7 @@ pub fn parsed_condition(predicate: &Predicate) -> Result<ParsedCondition, Reques
 /// API applies, so one implementation decides what each action does to an item.
 pub fn parsed_update(clauses: &[UpdateClause]) -> Result<ParsedUpdate, RequestError> {
     let mut rendered = Rendered::default();
-    let text = rendered.clauses(clauses);
+    let text = rendered.clauses(clauses)?;
     ParsedUpdate::parse(
         "Statement",
         &text,
@@ -2704,55 +2617,55 @@ fn invalid_next_token() -> RequestError {
 /// that source has to carry for the predicate to mean anything — which is what
 /// [`unprojected_filter_attributes`] holds an index's projection to. A path that reaches
 /// inside an attribute needs that attribute, so only its first step counts.
+///
+/// The walk is an explicit WORKLIST rather than a recursion, the way
+/// [`pinned_equalities`] walks the same tree: how deeply a predicate nests is the
+/// client's choice, so the branches still to visit live in a vector on the heap and the
+/// walk's own memory is never a function of the statement's shape.
 pub fn predicate_attributes(predicate: &Predicate) -> BTreeSet<String> {
     let mut named = BTreeSet::new();
-    collect_predicate_attributes(predicate, &mut named);
-    named
-}
-
-/// The walk behind [`predicate_attributes`], over the flat `And`/`Or` operand lists the
-/// parser builds.
-fn collect_predicate_attributes(predicate: &Predicate, named: &mut BTreeSet<String>) {
     let operand = |operand: &PredicateOperand, named: &mut BTreeSet<String>| match operand {
         PredicateOperand::Path(path) | PredicateOperand::Size(path) => {
             named.insert(path.attribute().to_string());
         }
         PredicateOperand::Value(_) => {}
     };
-    match predicate {
-        Predicate::All(operands) | Predicate::Any(operands) => {
-            for nested in operands {
-                collect_predicate_attributes(nested, named);
+    let mut pending = vec![predicate];
+    while let Some(predicate) = pending.pop() {
+        match predicate {
+            Predicate::All(operands) | Predicate::Any(operands) => {
+                pending.extend(operands.iter());
             }
-        }
-        Predicate::Not(nested) => collect_predicate_attributes(nested, named),
-        Predicate::Compare(left, _, right) => {
-            operand(left, named);
-            operand(right, named);
-        }
-        Predicate::Between(value, low, high) => {
-            operand(value, named);
-            operand(low, named);
-            operand(high, named);
-        }
-        Predicate::In(value, candidates) => {
-            operand(value, named);
-            for candidate in candidates {
-                operand(candidate, named);
+            Predicate::Not(nested) => pending.push(nested.as_ref()),
+            Predicate::Compare(left, _, right) => {
+                operand(left, &mut named);
+                operand(right, &mut named);
             }
-        }
-        Predicate::IsNull(path, _)
-        | Predicate::IsMissing(path, _)
-        | Predicate::Exists(path, _) => {
-            named.insert(path.attribute().to_string());
-        }
-        Predicate::BeginsWith(path, operand_value)
-        | Predicate::Contains(path, operand_value)
-        | Predicate::AttributeType(path, operand_value) => {
-            named.insert(path.attribute().to_string());
-            operand(operand_value, named);
+            Predicate::Between(value, low, high) => {
+                operand(value, &mut named);
+                operand(low, &mut named);
+                operand(high, &mut named);
+            }
+            Predicate::In(value, candidates) => {
+                operand(value, &mut named);
+                for candidate in candidates {
+                    operand(candidate, &mut named);
+                }
+            }
+            Predicate::IsNull(path, _)
+            | Predicate::IsMissing(path, _)
+            | Predicate::Exists(path, _) => {
+                named.insert(path.attribute().to_string());
+            }
+            Predicate::BeginsWith(path, operand_value)
+            | Predicate::Contains(path, operand_value)
+            | Predicate::AttributeType(path, operand_value) => {
+                named.insert(path.attribute().to_string());
+                operand(operand_value, &mut named);
+            }
         }
     }
+    named
 }
 
 /// The attributes a statement's `WHERE` clause speaks about that the SOURCE it names

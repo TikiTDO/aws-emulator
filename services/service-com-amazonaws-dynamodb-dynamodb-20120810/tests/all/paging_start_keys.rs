@@ -8,11 +8,12 @@
 //! 1. a `LastEvaluatedKey` a page reported is a token the next request resumes from, and
 //!    the pages it drives partition the matching items with none lost and none repeated;
 //! 2. a starting key that is NOT a key of the schema being paged — an attribute the
-//!    schema does not declare, a key attribute it omits, a key attribute of another type,
-//!    a value that is no scalar key at all — is refused as the invalid TOKEN it is: 400
-//!    `ValidationException` stating that the starting key is invalid and then, after a
-//!    colon, the schema reason — not the bare mismatch AWS words for a `Key` member,
-//!    which addresses ONE item and is what `GetItem` and `DeleteItem` carry;
+//!    schema does not declare, an extra attribute beside the key, a key attribute it
+//!    omits — is refused as the invalid TOKEN it is: 400 `ValidationException` stating
+//!    that the starting key is invalid, and not the bare mismatch AWS words for a `Key`
+//!    member, which addresses ONE item and is what `GetItem` and `DeleteItem` carry; a
+//!    token whose key element carries another TYPE than the schema declares states that
+//!    schema reason after a colon;
 //! 3. the refusal is the same for both paged reads and for both key schemas a table can
 //!    declare, and a refused request pages nothing.
 //!
@@ -31,11 +32,10 @@ use crate::emulator::{call, emulator, error_code, message, ok};
 const START_KEY_INVALID: &str =
     service_com_amazonaws_dynamodb_dynamodb_20120810::state::START_KEY_INVALID_MESSAGE;
 
-/// The sentence AWS states for a starting key that gives no value for a key attribute the
-/// schema declares, which leaves the token INCOMPLETE rather than a key of some other
-/// schema.
-const START_KEY_INCOMPLETE: &str =
-    service_com_amazonaws_dynamodb_dynamodb_20120810::state::START_KEY_INCOMPLETE_MESSAGE;
+/// The sentence AWS states for a starting key whose key element carries another TYPE than
+/// the schema declares for it, which is the one defect it diagnoses after the colon.
+const START_KEY_TYPE_MISMATCH: &str =
+    service_com_amazonaws_dynamodb_dynamodb_20120810::state::START_KEY_TYPE_MISMATCH_MESSAGE;
 
 /// The sentence AWS states for a `Key` MEMBER that is not the table's primary key, which
 /// the paged reads must NOT borrow.
@@ -173,38 +173,55 @@ async fn a_starting_key_that_is_not_a_key_of_the_schema_is_an_invalid_token() {
     simple_table(&router, "TokensSimple", 3).await;
     composite_table(&router, "TokensComposite", 3).await;
 
-    // Rows differ in HOW the token fails to name a key of the schema: an attribute the
-    // schema does not declare, an extra attribute beside the key, a key attribute of
-    // another type, and a key attribute that is no scalar at all. Each is refused the same
-    // way, whichever of the two paged reads carries it and whichever key schema the table
-    // declares. A token that merely gives no value for a key attribute is INCOMPLETE
-    // rather than a key of another schema, and states the other sentence (below).
-    let simple_tokens: Vec<(&str, Value)> = vec![
+    // Rows differ in HOW the token fails to name a key of the schema, and in the sentence
+    // that failure earns: a key attribute carrying another TYPE than the schema declares is
+    // the one defect AWS diagnoses after the colon, while an attribute the schema does not
+    // declare, an extra attribute beside the key and a key attribute the token omits each
+    // leave the token invalid and nothing more. Each is refused the same way whichever of
+    // the two paged reads carries it and whichever key schema the table declares.
+    let simple_tokens: Vec<(&str, Value, &str)> = vec![
         (
             "an attribute the schema does not declare",
             json!({"Nope": {"S": "x"}}),
+            START_KEY_INVALID,
         ),
         (
             "an extra attribute beside the key",
             json!({"Part": {"S": "p0"}, "Spare": {"S": "x"}}),
+            START_KEY_INVALID,
         ),
         (
             "the key attribute as a number",
             json!({"Part": {"N": "1"}}),
+            START_KEY_TYPE_MISMATCH,
         ),
         (
             "the key attribute as a set",
             json!({"Part": {"SS": ["p0"]}}),
+            START_KEY_TYPE_MISMATCH,
         ),
+        ("no attribute at all", json!({}), START_KEY_INVALID),
     ];
-    let composite_tokens: Vec<(&str, Value)> = vec![
+    let composite_tokens: Vec<(&str, Value, &str)> = vec![
         (
             "the sort key as a string",
             json!({"Part": {"S": "one"}, "Sort": {"S": "1"}}),
+            START_KEY_TYPE_MISMATCH,
         ),
         (
             "a third attribute beside both keys",
             json!({"Part": {"S": "one"}, "Sort": {"N": "1"}, "Spare": {"S": "x"}}),
+            START_KEY_INVALID,
+        ),
+        (
+            "only the partition key of a composite schema",
+            json!({"Part": {"S": "one"}}),
+            START_KEY_INVALID,
+        ),
+        (
+            "only the sort key of a composite schema",
+            json!({"Sort": {"N": "1"}}),
+            START_KEY_INVALID,
         ),
     ];
 
@@ -212,7 +229,7 @@ async fn a_starting_key_that_is_not_a_key_of_the_schema_is_an_invalid_token() {
         ("TokensSimple", simple_tokens),
         ("TokensComposite", composite_tokens),
     ] {
-        for (case, token) in tokens {
+        for (case, token, stated) in tokens {
             for operation in ["Query", "Scan"] {
                 let mut request = json!({"TableName": table, "ExclusiveStartKey": token.clone()});
                 if operation == "Query" {
@@ -220,47 +237,13 @@ async fn a_starting_key_that_is_not_a_key_of_the_schema_is_an_invalid_token() {
                     request["ExpressionAttributeValues"] = json!({":p": {"S": "one"}});
                 }
                 let (status, body) = call(&router, operation, request.clone()).await;
-                let stated = message(&body);
                 assert_eq!(
-                    (status, error_code(&body).as_str(), stated.as_str()),
-                    (400, "ValidationException", START_KEY_INVALID),
-                    "case {case:?} on {operation} over {table}: the token is refused as invalid, \
-                     got {status} with {body}"
+                    (status, error_code(&body).as_str(), message(&body).as_str()),
+                    (400, "ValidationException", stated),
+                    "case {case:?} on {operation} over {table}: expected the refusal \
+                     {stated:?}, got {status} with {body}"
                 );
             }
-        }
-    }
-
-    // A token that gives no value for a key attribute the schema declares is INCOMPLETE:
-    // there is nothing about it that names another schema's key, so the refusal states the
-    // token invalid and nothing more. The rows span an empty map, a composite schema's
-    // partition key alone and its sort key alone.
-    for (table, case, token) in [
-        ("TokensSimple", "no attribute at all", json!({})),
-        (
-            "TokensComposite",
-            "only the partition key of a composite schema",
-            json!({"Part": {"S": "one"}}),
-        ),
-        (
-            "TokensComposite",
-            "only the sort key of a composite schema",
-            json!({"Sort": {"N": "1"}}),
-        ),
-    ] {
-        for operation in ["Query", "Scan"] {
-            let mut request = json!({"TableName": table, "ExclusiveStartKey": token.clone()});
-            if operation == "Query" {
-                request["KeyConditionExpression"] = json!("Part = :p");
-                request["ExpressionAttributeValues"] = json!({":p": {"S": "one"}});
-            }
-            let (status, body) = call(&router, operation, request.clone()).await;
-            assert_eq!(
-                (status, error_code(&body).as_str(), message(&body).as_str()),
-                (400, "ValidationException", START_KEY_INCOMPLETE),
-                "case {case:?} on {operation} over {table}: the token is refused as \
-                 incomplete, got {status} with {body}"
-            );
         }
     }
 

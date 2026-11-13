@@ -315,20 +315,29 @@ pub const DEFAULT_PRESIGNED_URL_SESSION_SECONDS: i32 = 1800;
 ///
 /// SageMaker ML Lineage Tracking gives an ACCOUNT one lineage group per Region, with no
 /// call creating it, and reports its ARN as the `LineageGroupArn` of each entity in it.
-/// Its name is that account and that Region: `sagemaker-<region>-<account>`, computed
-/// here from the Region the request signed for and the account every ARN this service
-/// mints carries, so two Regions have two groups and neither name is a literal this
-/// crate chose. The form satisfies `ExperimentEntityName`
-/// (`^[a-zA-Z0-9](-*[a-zA-Z0-9]){0,119}$`), so the group is addressable by name wherever
-/// a reader takes one.
+/// That group carries SageMaker's own fixed name, [`DEFAULT_LINEAGE_GROUP_NAME`], the
+/// same in every Region: what makes two Regions' groups two groups is the Region their
+/// ARN names, not their name. The `region` argument is taken so every caller reads the
+/// group of the Region it is answering for through one function, whether or not the name
+/// itself varies.
 ///
 /// This is also the group the lineage-entity creates materialise through
 /// [`ComAmazonawsSagemakerSagemakerState::ensure_lineage_group`], so that
 /// `DescribeLineageGroup` reports the group those entities are in and
 /// `ListLineageGroups` lists it.
-pub fn default_lineage_group_name(region: &str) -> String {
-    format!("sagemaker-{region}-{}", ::emulator_server::emulator_account_id())
+pub fn default_lineage_group_name(_region: &str) -> String {
+    DEFAULT_LINEAGE_GROUP_NAME.to_string()
 }
+
+/// The name SageMaker gives the lineage group it creates for an account, which every
+/// lineage entity belongs to unless another group is named for it.
+///
+/// Recorded behavior for the text, and it is FIXED: the group is SageMaker's own, so its
+/// name carries nothing of the account or of the Region — the Region is what the group's
+/// ARN names ([`lineage_group_arn`]). The form satisfies
+/// `ExperimentEntityName` (`^[a-zA-Z0-9](-*[a-zA-Z0-9]){0,119}$`), so the group is
+/// addressable by name wherever a reader takes one.
+pub const DEFAULT_LINEAGE_GROUP_NAME: &str = "sagemaker-default-lineage-group";
 
 /// See [`MODEL_QUOTA`]. `DeleteHyperParameterTuningJob` is still a stub, so no call
 /// releases a tuning-job record yet; the bound is what keeps the store finite in the

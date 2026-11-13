@@ -51,8 +51,9 @@ const INVERTED_COMPUTE_LIMITS_SENTENCE: &str = "Invalid configuration for manage
                                                 than min capacity.";
 
 /// The sentence a step concurrency level NO step execution mode could take is refused
-/// with: no band, because there is no band to aim for.
-const BEYOND_EVERY_BAND_SENTENCE: &str = "Invalid step concurrency level.";
+/// with: the band the cluster's own mode allows, and nothing of the request.
+const BEYOND_EVERY_BAND_SENTENCE: &str =
+    "Invalid step concurrency level. Allowed level is from 1 to 256";
 
 /// The sentence a level above the cluster's own ceiling but inside the widest one a mode
 /// raises it to is refused with: the level it could not take, the ceiling and the mode that
@@ -470,9 +471,9 @@ async fn inverted_managed_scaling_compute_limits_are_refused_with_one_fixed_sent
 /// THE RULE: a `StepConcurrencyLevel` outside the band the cluster's step execution mode
 /// allows is refused under the error identity `ModifyCluster` MODELS, with the sentence of
 /// the class it falls into — the level, the ceiling it exceeded and the mode that would take
-/// it for a level another mode would take, and a sentence naming no band at all, and nothing
-/// of the request, for one no mode could take. Rows walk each published bound of both bands,
-/// one past each, and far past both.
+/// it for a level another mode would take, and the cluster's own band, with nothing of the
+/// request, for one no mode could take. Rows walk each published bound of both bands, one
+/// past each, and far past both.
 #[tokio::test]
 async fn an_out_of_range_step_concurrency_level_is_refused_per_class() {
     let emr = Emr::new();

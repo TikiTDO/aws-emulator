@@ -563,9 +563,9 @@ fn summary_cases() -> Vec<SummaryCase<'static>> {
     // follows is the order the body itself states, so each such row states it.
     vec![
         SummaryCase {
-            // The identifier is the type's NAME property. The types are reported one per
-            // declared resource, in the order the BODY declares them, and so are the logical
-            // ids of each identifier summary.
+            // The identifier is the type's NAME property. The types are reported once each in
+            // ascending order, whatever order the body declares resources of them in, while
+            // the identifier summaries follow the order the BODY declares them.
             case: "a bucket declared before a role",
             template: r#"{"AWSTemplateFormatVersion":"2010-09-09",
                 "Resources":{
@@ -573,7 +573,7 @@ fn summary_cases() -> Vec<SummaryCase<'static>> {
                     "Role":{"Type":"AWS::IAM::Role"}}}"#
                 .to_string(),
             version: "2010-09-09",
-            resource_types: vec!["AWS::S3::Bucket", "AWS::IAM::Role"],
+            resource_types: vec!["AWS::IAM::Role", "AWS::S3::Bucket"],
             summaries: vec![
                 summary("AWS::S3::Bucket", &["Bucket"], &["BucketName"]),
                 summary("AWS::IAM::Role", &["Role"], &["RoleName"]),
@@ -598,8 +598,8 @@ fn summary_cases() -> Vec<SummaryCase<'static>> {
         },
         SummaryCase {
             // Several resources of ONE type: the identifier summary of that type is reported
-            // once, carrying every logical id declared with it in declared order, while
-            // `ResourceTypes` carries one entry per declared RESOURCE.
+            // once, carrying every logical id declared with it in declared order, and
+            // `ResourceTypes` carries that type once as well.
             case: "three resources of two types",
             template: r#"{"Resources":{
                     "Data":{"Type":"AWS::S3::Bucket"},
@@ -608,7 +608,7 @@ fn summary_cases() -> Vec<SummaryCase<'static>> {
                            "Properties":{"CidrBlock":"10.0.0.0/16"}}}}"#
                 .to_string(),
             version: "2010-09-09",
-            resource_types: vec!["AWS::S3::Bucket", "AWS::S3::Bucket", "AWS::EC2::VPC"],
+            resource_types: vec!["AWS::EC2::VPC", "AWS::S3::Bucket"],
             summaries: vec![
                 summary("AWS::S3::Bucket", &["Data", "Archive"], &["BucketName"]),
                 summary("AWS::EC2::VPC", &["Vpc"], &["VpcId"]),
@@ -648,7 +648,8 @@ async fn a_template_summary_reports_its_version_types_and_identifier_summaries()
         let reported = wire_resource_types(&body);
         assert_eq!(
             reported, row.resource_types,
-            "case {case:?}: expected one entry per declared resource {:?}, got {reported:?}",
+            "case {case:?}: expected each declared type once, in ascending order, {:?}, got \
+             {reported:?}",
             row.resource_types
         );
         let reported = wire_summaries(&body);

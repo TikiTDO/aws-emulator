@@ -11,12 +11,11 @@
 //!   template reused alongside a submitted one, and no source at all are three distinct
 //!   refusals. The rows differ along the operation whose input carries the three members and
 //!   along which combination the request states.
-//! * **What a summary reports per RESOURCE follows the order the body declares its resources
-//!   in**: `ResourceTypes` carries one entry per declared resource — a repeated type as many
-//!   times as it is declared — and each `ResourceIdentifierSummary` carries the logical ids
-//!   declared with its type in that same order. The rows differ along the spelling of the
-//!   body (JSON and YAML), whether the declared order agrees with the alphabetical one, and
-//!   whether a type is declared once or several times.
+//! * **What a summary reports about a template's resources**: `ResourceTypes` carries each
+//!   type the body declares ONCE, in ascending order, while each `ResourceIdentifierSummary`
+//!   carries the logical ids declared with its type in the order the body declares them. The
+//!   rows differ along the spelling of the body (JSON and YAML), whether the declared order
+//!   agrees with the alphabetical one, and whether a type is declared once or several times.
 //! * **The size of a template an operation reads is the quota of the operation that takes
 //!   it**: a body submitted for DEPLOYMENT is held to the 51,200-byte inline quota, while an
 //!   operation that only REPORTS on a template reads one up to the size of the biggest
@@ -197,7 +196,8 @@ async fn a_request_that_states_no_one_template_source_is_refused_for_what_it_sta
 struct OrderRow {
     case: &'static str,
     template: String,
-    /// `ResourceTypes`, one entry per declared resource, in the order the body declares them.
+    /// `ResourceTypes`, each type the body declares ONCE, in ascending order whatever order
+    /// the body declares resources of it in.
     types: Vec<&'static str>,
     /// Each `ResourceIdentifierSummary` as `(ResourceType, LogicalResourceIds)`, in that same
     /// order.
@@ -216,7 +216,7 @@ fn order_rows() -> Vec<OrderRow> {
                 "Alpha":{"Type":"AWS::SQS::Queue"},
                 "Mid":{"Type":"AWS::S3::Bucket"}}}"#
                 .to_string(),
-            types: vec!["AWS::SNS::Topic", "AWS::SQS::Queue", "AWS::S3::Bucket"],
+            types: vec!["AWS::S3::Bucket", "AWS::SNS::Topic", "AWS::SQS::Queue"],
             summaries: vec![
                 ("AWS::SNS::Topic", vec!["Zebra"]),
                 ("AWS::SQS::Queue", vec!["Alpha"]),
@@ -230,7 +230,7 @@ fn order_rows() -> Vec<OrderRow> {
                 "First":{"Type":"AWS::SNS::Topic"},
                 "Second":{"Type":"AWS::SNS::Topic"}}}"#
                 .to_string(),
-            types: vec!["AWS::SNS::Topic", "AWS::SNS::Topic", "AWS::SNS::Topic"],
+            types: vec!["AWS::SNS::Topic"],
             summaries: vec![("AWS::SNS::Topic", vec!["Third", "First", "Second"])],
         },
         OrderRow {
@@ -240,7 +240,7 @@ fn order_rows() -> Vec<OrderRow> {
                  Alpha:\n    Type: AWS::SNS::Topic\n  \
                  Mid:\n    Type: AWS::SQS::Queue\n"
                 .to_string(),
-            types: vec!["AWS::SQS::Queue", "AWS::SNS::Topic", "AWS::SQS::Queue"],
+            types: vec!["AWS::SNS::Topic", "AWS::SQS::Queue"],
             summaries: vec![
                 ("AWS::SQS::Queue", vec!["Zebra", "Mid"]),
                 ("AWS::SNS::Topic", vec!["Alpha"]),
@@ -276,7 +276,7 @@ fn wire_summaries(xml: &str) -> Vec<(String, Vec<String>)> {
 }
 
 #[tokio::test]
-async fn a_summary_reports_one_type_per_resource_in_the_order_the_body_declares_them() {
+async fn a_summary_reports_each_declared_type_once_and_its_resources_as_declared() {
     let router = router();
     for row in order_rows() {
         let case = row.case;

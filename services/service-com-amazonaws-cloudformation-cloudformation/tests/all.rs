@@ -515,6 +515,8 @@ mod template_stages_and_resource_events;
 mod template_structure_refusals;
 #[path = "all/template_summary.rs"]
 mod template_summary;
+#[path = "all/template_summary_resource_types.rs"]
+mod template_summary_resource_types;
 #[path = "all/template_validation.rs"]
 mod template_validation;
 #[path = "all/test_type_publisher_gate.rs"]

@@ -58,21 +58,24 @@ pub fn required_capabilities(body: &str, declared: &Template) -> RequiredCapabil
     required
 }
 
-/// "A list of all the template resource types that are defined in the template": ONE entry
-/// per resource the template declares, in the order the BODY declares them.
+/// "A list of all the template resource types that are defined in the template": each
+/// DISTINCT type the template declares, in ascending order.
 ///
-/// `ResourceTypes` is a LIST of `ResourceType` rather than a set (the model puts no
-/// `@uniqueItems` on it), and what it reports is what the template DEFINES: a template
-/// declaring the same type for several resources defines that type several times, and a
-/// caller sizing a deployment from this list reads one entry per resource. The order is the
-/// template's own ([`super::declaration_order`]), which `body` is where it is read from — a
-/// resource some other reader contributed (a transform's expansion) follows the declared
-/// ones.
+/// What this reports is the SET of types the template defines, not one entry per resource:
+/// a template declaring the same type for several resources defines that type once, and
+/// the entries are ordered by the type name rather than by where the body declares a
+/// resource of it — which is what makes the list stable for a client that compares the
+/// types two templates define, or looks a type up in it. The per-RESOURCE reading of the
+/// same section is `ResourceIdentifierSummaries` ([`identifier_summaries`]), which carries
+/// every logical id of each type in the order the body declares them.
 pub fn resource_types(body: &str, declared: &Template) -> Vec<String> {
-    resources_as_declared(body, declared)
+    let mut types: Vec<String> = resources_as_declared(body, declared)
         .into_iter()
         .map(|resource| resource.resource_type.clone())
-        .collect()
+        .collect();
+    types.sort();
+    types.dedup();
+    types
 }
 
 /// The template's resources in the order the BODY declares them, which is the order every
@@ -191,10 +194,10 @@ mod tests {
         }
     }
 
-    /// The types a template defines are reported one per DECLARED RESOURCE, in the order the
-    /// BODY declares them — a repeated type is reported as many times as it is declared.
+    /// The types a template defines are reported ONCE each, in ascending order, however
+    /// many resources of a type the body declares and wherever it declares them.
     #[test]
-    fn the_resource_types_report_one_entry_per_declared_resource() {
+    fn the_resource_types_report_each_declared_type_once_in_order() {
         let body = r#"{"Resources":{
             "Zebra":{"Type":"AWS::S3::Bucket"},
             "Alpha":{"Type":"AWS::IAM::Role"},
@@ -203,13 +206,9 @@ mod tests {
         let reported = resource_types(body, &declared);
         assert_eq!(
             reported,
-            vec![
-                "AWS::S3::Bucket".to_string(),
-                "AWS::IAM::Role".to_string(),
-                "AWS::S3::Bucket".to_string()
-            ],
-            "case \"two buckets and a role, declared out of alphabetical order\": expected one \
-             entry per declared resource in declared order, got {reported:?}"
+            vec!["AWS::IAM::Role".to_string(), "AWS::S3::Bucket".to_string()],
+            "case \"two buckets and a role, declared out of alphabetical order\": expected each \
+             declared type once in ascending order, got {reported:?}"
         );
     }
 

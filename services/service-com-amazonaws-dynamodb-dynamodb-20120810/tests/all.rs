@@ -139,6 +139,8 @@ mod on_demand_throughput_capacity_mode;
 mod paging_start_keys;
 #[path = "all/parallel_scan_segment_refusals.rs"]
 mod parallel_scan_segment_refusals;
+#[path = "all/partiql_non_dml_statements.rs"]
+mod partiql_non_dml_statements;
 #[path = "all/partiql_refusal_wording.rs"]
 mod partiql_refusal_wording;
 #[path = "all/partiql_statement_boundaries.rs"]
@@ -183,6 +185,8 @@ mod response_request_id;
 mod resource_tags;
 #[path = "all/restore_table_from_backup.rs"]
 mod restore_table_from_backup;
+#[path = "all/resume_token_schema_refusals.rs"]
+mod resume_token_schema_refusals;
 #[path = "all/scan_filter_value_types_and_segments.rs"]
 mod scan_filter_value_types_and_segments;
 #[path = "all/scan_indexes_and_projections.rs"]

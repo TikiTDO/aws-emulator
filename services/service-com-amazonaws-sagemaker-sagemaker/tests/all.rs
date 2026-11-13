@@ -67,6 +67,8 @@ mod custom_image_deletion;
 mod custom_image_version_deletion;
 #[path = "all/custom_images.rs"]
 mod custom_images;
+#[path = "all/default_lineage_group_identity.rs"]
+mod default_lineage_group_identity;
 #[path = "all/delete_and_stop_preconditions.rs"]
 mod delete_and_stop_preconditions;
 #[path = "all/endpoint_config_deletion.rs"]

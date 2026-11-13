@@ -116,37 +116,37 @@ pub fn missing_item_key_message(attribute: &str) -> String {
     format!("{INVALID_PARAMETER_CLAUSE}: Missing the key {attribute} in the item")
 }
 
-/// How an `ExclusiveStartKey` that does not give a value for every key attribute of the
-/// schema being paged is refused: a resume token is not an item selector — a caller gets
-/// it from the previous page's `LastEvaluatedKey` — so AWS states the TOKEN invalid, in
-/// this one fixed sentence that names neither the attribute nor the schema.
-pub const START_KEY_INCOMPLETE_MESSAGE: &str = "The provided starting key is invalid";
+/// How an `ExclusiveStartKey` that is not a key of the schema being paged is refused: a
+/// resume token is not an item selector — a caller gets it from the previous page's
+/// `LastEvaluatedKey` — so AWS states the TOKEN invalid, in this one fixed sentence that
+/// names neither the attribute nor the schema. Every way the map fails to be that key
+/// earns it, bar the one defect AWS diagnoses further
+/// ([`START_KEY_TYPE_MISMATCH_MESSAGE`]).
+pub const START_KEY_INVALID_MESSAGE: &str = "The provided starting key is invalid";
 
-/// How an `ExclusiveStartKey` that is not a key of the schema being paged is
-/// refused. It names attributes that schema does not declare as its key, or one
-/// of a type it does not declare for it, so AWS states the TOKEN invalid and then
-/// says WHY after a colon — the same key-schema sentence a `Key` member is
-/// refused with ([`KEY_SCHEMA_MISMATCH_MESSAGE`]), which is what tells the caller
-/// its token's attributes are not this schema's key rather than the token being
-/// incomplete ([`START_KEY_INCOMPLETE_MESSAGE`]). Both halves are fixed text,
-/// naming no attribute of either side.
-pub const START_KEY_INVALID_MESSAGE: &str =
+/// How an `ExclusiveStartKey` whose key element carries another TYPE than the schema
+/// being paged declares for it is refused: AWS states the token invalid and then says WHY
+/// after a colon — the same key-schema sentence a `Key` member is refused with
+/// ([`KEY_SCHEMA_MISMATCH_MESSAGE`]), which tells the caller its token holds this schema's
+/// key attributes with the wrong types rather than being no key of it at all. Both halves
+/// are fixed text.
+pub const START_KEY_TYPE_MISMATCH_MESSAGE: &str =
     "The provided starting key is invalid: The provided key element does not match the schema";
 
 /// Which request member a primary key is being read out of.
 ///
 /// The walk over the key schema is the same for all of them; only the WORDING of a
-/// missing or wrongly-typed element differs, which is what this carries. A
-/// `Key` IS the primary key, so any way it differs from the schema is the one
-/// mismatch; an `Item` a SINGLE-item write carries is the whole item, so a key
-/// attribute it does not carry is reported as the value it did not give, and one
-/// of another type as the mismatch between the two types; an `ExclusiveStartKey`
-/// is a resume token, so a key attribute it gives no value for leaves it INCOMPLETE and
-/// anything else about it makes it an invalid token; the item an element of a BATCHED write
-/// carries is held to the schema as a whole, so every way it differs from it is the one
-/// mismatch sentence; and the item an element of a TRANSACTIONAL write carries is reported
-/// per defect for its TYPE, as a single-item write's is, which is the mismatch its
-/// cancellation reason states.
+/// missing or wrongly-typed element differs, which is what this carries. A `Key` IS the
+/// primary key, so any way it differs from the schema is the one mismatch; an `Item` a
+/// SINGLE-item write carries is the whole item, so a key attribute it does not carry is
+/// reported as the value it did not give, and one of another type as the mismatch between
+/// the two types; an `ExclusiveStartKey` is a resume token, so every way it fails to be a
+/// key of the schema being paged makes it an invalid token, bar the one defect AWS
+/// diagnoses further, a key element of another TYPE than that schema declares
+/// ([`Self::typed_against_schema`]); a BATCHED write's element is held to the schema as a
+/// whole, so every way it differs from it is the one mismatch sentence; and a
+/// TRANSACTIONAL write's element is reported per defect for its TYPE, as a single-item
+/// write's is, which is the mismatch its cancellation reason states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeySource {
     Item,
@@ -162,10 +162,7 @@ impl KeySource {
     fn absent(self, attribute: &str) -> RequestError {
         match self {
             Self::Item => RequestError::Validation(missing_item_key_message(attribute)),
-            Self::StartKey => {
-                RequestError::Validation(START_KEY_INCOMPLETE_MESSAGE.to_string())
-            }
-            Self::BatchItem | Self::TransactItem | Self::Key => self.mismatch(),
+            Self::StartKey | Self::BatchItem | Self::TransactItem | Self::Key => self.mismatch(),
         }
     }
 
@@ -179,6 +176,21 @@ impl KeySource {
     /// TRANSACTIONAL write's element state the two types instead.
     fn hides_the_type_mismatch(self) -> bool {
         matches!(self, Self::BatchItem | Self::Key | Self::StartKey)
+    }
+
+    /// How this source words a key attribute carrying another TYPE than the schema
+    /// declares for it, where the source states the key as a whole
+    /// ([`Self::hides_the_type_mismatch`]). A resume token is the one member AWS diagnoses
+    /// that defect of ([`START_KEY_TYPE_MISMATCH_MESSAGE`]), which separates a token whose
+    /// elements ARE this schema's key attributes from one that is no key of it at all;
+    /// every other member states its own mismatch sentence for it.
+    fn typed_against_schema(self) -> RequestError {
+        match self {
+            Self::StartKey => {
+                RequestError::Validation(START_KEY_TYPE_MISMATCH_MESSAGE.to_string())
+            }
+            Self::Item | Self::BatchItem | Self::TransactItem | Self::Key => self.mismatch(),
+        }
     }
 
     /// The one sentence a key that is not this table's primary key is refused

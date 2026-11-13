@@ -446,7 +446,10 @@ impl Table {
 
     /// The primary key a paging member (`ExclusiveStartKey`) resumes from: read
     /// through the same key schema as a `Key`, and refused as the INVALID RESUME
-    /// TOKEN it is when it is not a key of that schema ([`START_KEY_INVALID_MESSAGE`]).
+    /// TOKEN it is when it is not a key of that schema ([`START_KEY_INVALID_MESSAGE`]) —
+    /// with the schema reason stated for the one defect AWS diagnoses further, a key
+    /// element of another TYPE than the schema declares
+    /// ([`START_KEY_TYPE_MISMATCH_MESSAGE`]).
     pub fn key_of_start_key(&self, key: &Item) -> Result<ItemKey, RequestError> {
         self.key_of_map(key, KeySource::StartKey).map_err(Into::into)
     }
@@ -506,7 +509,7 @@ impl Table {
                     .declared_type(name)
                     .is_some_and(|declared| declared != attribute_value_type(value))
             {
-                return Err(KeyRefusal::Schema(source.mismatch()));
+                return Err(KeyRefusal::Schema(source.typed_against_schema()));
             }
             let encoded = self
                 .key_value(name, value)
@@ -890,9 +893,10 @@ impl Table {
     /// The place in `index`'s order an `ExclusiveStartKey` resumes a read from.
     ///
     /// A resume token is read back through the two schemas the read reported it from, so
-    /// a map that names an attribute neither declares, leaves one of them out, or carries
-    /// one with a type other than the table declared is the INVALID RESUME TOKEN it is
-    /// ([`START_KEY_INVALID_MESSAGE`]) — the same way a base-table token is
+    /// a map that names an attribute neither declares or leaves one of them out is the
+    /// INVALID RESUME TOKEN it is ([`START_KEY_INVALID_MESSAGE`]), and one carrying a key
+    /// attribute with a type other than the table declared states the schema reason after
+    /// it ([`START_KEY_TYPE_MISMATCH_MESSAGE`]) — the same way a base-table token is
     /// ([`Self::key_of_start_key`]).
     pub fn index_key_of_start_key(
         &self,
@@ -914,7 +918,7 @@ impl Table {
                 .declared_type(name)
                 .is_some_and(|declared| declared != attribute_value_type(value))
             {
-                return Err(KeySource::StartKey.mismatch());
+                return Err(KeySource::StartKey.typed_against_schema());
             }
             values.push(
                 self.key_value(name, value)

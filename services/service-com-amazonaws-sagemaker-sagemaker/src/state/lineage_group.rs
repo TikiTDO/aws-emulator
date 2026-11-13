@@ -67,7 +67,7 @@ impl ComAmazonawsSagemakerSagemakerState {
     /// group — so it is a group of the ACCOUNT, reported by `ListLineageGroups` and
     /// `DescribeLineageGroup` in a Region nothing has put an entity in yet.
     ///
-    /// Its NAME is that of the account and the Region
+    /// Its NAME is the one SageMaker gives that group
     /// ([`default_lineage_group_name`]), and its ARN is minted from it like every other
     /// ARN this service mints. Its instants are
     /// [`ComAmazonawsSagemakerSagemakerState::store_created_at`], the

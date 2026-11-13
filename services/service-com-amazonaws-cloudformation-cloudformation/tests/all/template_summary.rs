@@ -190,9 +190,9 @@ fn cases() -> Vec<Case> {
             capabilities: Vec::new(),
             reason_types: Vec::new(),
             // "A list of all the template resource types that are defined in the template":
-            // one entry per declared resource, so a type two resources share is two entries,
-            // in the order the reader holds the resources in (by logical id).
-            resource_types: vec!["AWS::S3::Bucket", "AWS::SNS::Topic", "AWS::S3::Bucket"],
+            // each DISTINCT type the body declares, in ascending order, so a type two
+            // resources share is one entry.
+            resource_types: vec!["AWS::S3::Bucket", "AWS::SNS::Topic"],
             transforms: Vec::new(),
         },
         Case {
@@ -219,8 +219,8 @@ fn cases() -> Vec<Case> {
             resource_types: vec![
                 "AWS::S3::Bucket",
                 "AWS::S3Tables::TableBucket",
-                "AWS::S3Vectors::VectorBucket",
                 "AWS::S3Vectors::Index",
+                "AWS::S3Vectors::VectorBucket",
             ],
             transforms: Vec::new(),
         },
@@ -416,7 +416,8 @@ async fn get_template_summary_reports_what_the_template_declares() {
         assert_eq!(
             wire_list(&body, "ResourceTypes"),
             case.resource_types,
-            "case {label:?}: expected one entry per declared resource type, got {body}"
+            "case {label:?}: expected each declared resource type once, in ascending order, \
+             got {body}"
         );
         assert_eq!(
             wire_list(&body, "DeclaredTransforms"),
@@ -614,7 +615,7 @@ struct WarningCase {
     template: String,
     /// The types the warning must name, in wire order.
     unrecognized: Vec<&'static str>,
-    /// Every type the template declares, which the summary reports either way.
+    /// Every type the template declares, once each, which the summary reports either way.
     resource_types: Vec<&'static str>,
 }
 
@@ -643,11 +644,7 @@ fn warning_cases() -> Vec<WarningCase> {
             })
             .to_string(),
             unrecognized: vec!["AWS::Nonesuch::Thing", "Example::Private::Resource"],
-            resource_types: vec![
-                "AWS::Nonesuch::Thing",
-                "AWS::Nonesuch::Thing",
-                "Example::Private::Resource",
-            ],
+            resource_types: vec!["AWS::Nonesuch::Thing", "Example::Private::Resource"],
         },
         WarningCase {
             // The configuration asked for warnings and this template gives them nothing to
