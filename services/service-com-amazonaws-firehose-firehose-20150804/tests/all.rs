@@ -15,6 +15,8 @@
 mod argument_validation;
 #[path = "all/buffering_hints.rs"]
 mod buffering_hints;
+#[path = "all/buffering_hints_destination_members.rs"]
+mod buffering_hints_destination_members;
 #[path = "all/clock_owed_transition_span.rs"]
 mod clock_owed_transition_span;
 #[path = "all/cloudwatch_logs_pipeline_delivery.rs"]
