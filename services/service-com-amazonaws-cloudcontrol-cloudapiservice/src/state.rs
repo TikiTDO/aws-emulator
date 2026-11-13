@@ -2172,6 +2172,12 @@ mod tests {
                 "status {status:?}: not a value the model's OperationStatus enum declares"
             );
         }
+        for status in CANCELABLE_STATUSES {
+            assert!(
+                crate::ops::types::OPERATION_STATUS_VALUES.contains(&status),
+                "status {status:?}: not a value the model's OperationStatus enum declares"
+            );
+        }
         for code in [
             EffectFailure::ResourceGone.error_code(),
             EffectFailure::ResourceExists.error_code(),
@@ -2256,6 +2262,106 @@ mod tests {
             absent,
             request_fingerprint(&[Some("CreateResource"), None]),
             "the same member set must digest alike"
+        );
+    }
+
+    /// One accepted create of a type no provider stands behind, carrying `status`.
+    fn record_in(status: &str, now: SystemTime) -> RequestRecord {
+        let mut record = RequestRecord::accepted(
+            "a-request-token".to_string(),
+            "AWS::Kinesis::Stream".to_string(),
+            Some("stream".to_string()),
+            OPERATION_CREATE,
+            now,
+            ResourceEffect::Create {
+                properties: ::serde_json::json!({ "StreamName": "stream" }),
+                identifier_property: "StreamName".to_string(),
+                type_version_id: None,
+                region: DEFAULT_REGION.to_string(),
+            },
+        );
+        record.operation_status = status.to_string();
+        record
+    }
+
+    /// A cancel acts exactly on a request in one of the two cancelable statuses, and the
+    /// work it abandons is never applied.
+    ///
+    /// The rows are the model's OWN `OperationStatus` enum
+    /// (`smithy_query(query="shape",shape="OperationStatus")`), so every status a request
+    /// can carry is a case — the terminal ones and the two a cancellation itself reaches.
+    #[test]
+    fn a_cancel_acts_only_inside_the_cancelable_window() {
+        let native = NativeResources::for_engine(&());
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for status in crate::ops::types::OPERATION_STATUS_VALUES {
+            let mut store = ComAmazonawsCloudcontrolCloudapiserviceState::default();
+            store
+                .record_request(record_in(status, now))
+                .expect("an empty store takes one record");
+            let verdict = store.cancel_request("a-request-token", now);
+            if is_cancelable_status(status) {
+                let canceling = match &verdict {
+                    CancelVerdict::Canceling(record) => record.operation_status.clone(),
+                    other => panic!(
+                        "case {status:?}: expected the request to be canceled, got {other:?}"
+                    ),
+                };
+                assert_eq!(
+                    canceling, STATUS_CANCEL_IN_PROGRESS,
+                    "case {status:?}: expected the canceling status, got {canceling:?}"
+                );
+                // The cancellation is what the request now owes the clock, and settling it
+                // applies none of the work the request was carrying: nothing is provisioned.
+                store.materialise_due(now + RESOURCE_OPERATION_SPAN, &native);
+                assert_eq!(
+                    store
+                        .request("a-request-token")
+                        .map(|record| record.operation_status.as_str()),
+                    Some(STATUS_CANCEL_COMPLETE),
+                    "case {status:?}: expected the request to settle as canceled, got {:?}",
+                    store.request("a-request-token")
+                );
+                assert_eq!(
+                    store.resource_count(),
+                    0,
+                    "case {status:?}: a canceled create must provision nothing"
+                );
+                assert!(
+                    store
+                        .resolve(&native, DEFAULT_REGION, "AWS::Kinesis::Stream", "stream")
+                        .is_none(),
+                    "case {status:?}: a canceled create must leave no resource to resolve"
+                );
+            } else {
+                match &verdict {
+                    CancelVerdict::NotCancelable(reported) => assert_eq!(
+                        reported, status,
+                        "case {status:?}: expected the refusal to name that status, got \
+                         {reported:?}"
+                    ),
+                    other => panic!(
+                        "case {status:?}: expected the cancel to be refused, got {other:?}"
+                    ),
+                }
+                assert_eq!(
+                    store
+                        .request("a-request-token")
+                        .map(|record| record.operation_status.as_str()),
+                    Some(*status),
+                    "case {status:?}: a refused cancel must leave the request as it was, got \
+                     {:?}",
+                    store.request("a-request-token")
+                );
+            }
+        }
+        let mut empty = ComAmazonawsCloudcontrolCloudapiserviceState::default();
+        assert!(
+            matches!(
+                empty.cancel_request("a-request-token", now),
+                CancelVerdict::NotFound
+            ),
+            "case no such request: expected the token to name nothing"
         );
     }
 }

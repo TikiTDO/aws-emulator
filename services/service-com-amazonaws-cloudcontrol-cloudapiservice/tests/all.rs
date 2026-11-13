@@ -23,6 +23,8 @@ mod native_resource_resolution;
 mod primary_identifier;
 #[path = "all/refusal_wording.rs"]
 mod refusal_wording;
+#[path = "all/request_cancellation.rs"]
+mod request_cancellation;
 #[path = "all/request_listing.rs"]
 mod request_listing;
 #[path = "all/resource_lifecycle.rs"]
@@ -31,6 +33,8 @@ mod resource_lifecycle;
 mod resource_listing;
 #[path = "all/s3_bucket_provisioning.rs"]
 mod s3_bucket_provisioning;
+#[path = "all/sns_topic_read_through.rs"]
+mod sns_topic_read_through;
 #[path = "all/sqs_queue_read_through.rs"]
 mod sqs_queue_read_through;
 #[path = "all/state_roundtrip.rs"]

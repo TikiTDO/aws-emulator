@@ -131,27 +131,30 @@ async fn a_type_a_provider_stands_behind_is_served() {
     let emulator = Emulator::new();
     // The rows differ along the owning service — including CloudFormation's own
     // `AWS::CloudFormation::Stack`, whose namespace is the one every refused row above
-    // lives in — and along the property that carries the primary identifier. Each row
-    // names the model a read must report: for a type whose resources live in the OWNING
-    // service's store (`AWS::Logs::LogGroup` is a CloudWatch Logs log group) that is the
-    // model that service holds, read-only properties included.
+    // lives in — and along where the primary identifier comes from: a desired state that
+    // carries it, and a type whose OWNING service assigns it (`AWS::SNS::Topic`'s
+    // `TopicArn`, which its schema declares read-only). Each row names the model a read
+    // must report: for a type whose resources live in the OWNING service's store
+    // (`AWS::Logs::LogGroup` is a CloudWatch Logs log group) that is the model that service
+    // holds, read-only properties included.
+    let topic_arn = engine::emulator_arn("sns", super::emulator::SIGNING_REGION, "provisionable-topic");
     let rows = [
         (
             "AWS::SNS::Topic",
             json!({ "TopicName": "provisionable-topic" }),
-            "TopicName",
-            json!({ "TopicName": "provisionable-topic" }),
+            topic_arn.clone(),
+            json!({ "TopicArn": topic_arn, "TopicName": "provisionable-topic" }),
         ),
         (
             "AWS::CloudFormation::Stack",
             json!({ "StackName": "provisionable-stack" }),
-            "StackName",
+            "provisionable-stack".to_string(),
             json!({ "StackName": "provisionable-stack" }),
         ),
         (
             "AWS::Logs::LogGroup",
             json!({ "LogGroupName": "/provisionable/group" }),
-            "LogGroupName",
+            "/provisionable/group".to_string(),
             json!({
                 "LogGroupName": "/provisionable/group",
                 "LogGroupClass": "STANDARD",
@@ -164,13 +167,12 @@ async fn a_type_a_provider_stands_behind_is_served() {
         ),
     ];
 
-    for (type_name, desired, property, expected) in rows {
+    for (type_name, desired, expected_identifier, expected) in rows {
         let identifier = emulator.provision(type_name, &desired).await;
         assert_eq!(
-            identifier,
-            text(&desired, property),
-            "case {type_name:?}: expected the identifier the desired state carried under \
-             {property:?}, got {identifier:?}"
+            identifier, expected_identifier,
+            "case {type_name:?}: expected the identifier {expected_identifier:?}, got \
+             {identifier:?}"
         );
         let stored = emulator.properties(type_name, &identifier).await;
         assert_eq!(

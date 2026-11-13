@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde_json::{json, Map, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -32,6 +33,13 @@ pub(crate) const LOGS_SIGNING_NAME: &str = "logs";
 /// The `X-Amz-Target` prefix a client writes for that service: the local name of its
 /// Smithy service shape.
 pub(crate) const LOGS_TARGET_PREFIX: &str = "Logs_20140328";
+
+/// The sigv4 signing name of the Amazon SNS service, whose own store holds the topics
+/// `AWS::SNS::Topic` names.
+pub(crate) const SNS_SIGNING_NAME: &str = "sns";
+
+/// The API version an `awsQuery` call of that service carries, as its model declares it.
+pub(crate) const SNS_API_VERSION: &str = "2010-03-31";
 
 /// The sigv4 signing name of the Amazon SQS service, whose own store holds the queues
 /// `AWS::SQS::Queue` names.
@@ -125,6 +133,50 @@ impl Emulator {
             router
                 .register_service(service_com_amazonaws_sqs_amazonsqs::EmulatedService::new(engine));
         })
+    }
+
+    /// One emulator with the service that OWNS `AWS::SNS::Topic` mounted beside this one.
+    pub(crate) fn with_sns() -> Self {
+        Self::mounted(|router, engine| {
+            router.register_service(
+                service_com_amazonaws_sns_amazonsimplenotificationservice::EmulatedService::new(
+                    engine,
+                ),
+            );
+        })
+    }
+
+    /// One operation of the Amazon SNS service — the OWNING service's own API, the one a
+    /// client uses when it is not going through Cloud Control API.
+    ///
+    /// Amazon SNS speaks the `awsQuery` protocol: the call is a form-encoded `POST` naming
+    /// the action in its own body, and the answer is an XML envelope, so it is handed back
+    /// as the `(status, body)` text it is rather than as JSON.
+    pub(crate) async fn sns(&self, action: &str, params: &[(&str, &str)]) -> (u16, String) {
+        let mut body = format!("Action={action}&Version={SNS_API_VERSION}");
+        for (name, value) in params {
+            body.push('&');
+            body.push_str(name);
+            body.push('=');
+            body.push_str(&form_encoded(value));
+        }
+        let authorization = format!(
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/{SIGNING_REGION}/\
+             {SNS_SIGNING_NAME}/aws4_request, SignedHeaders=host, Signature=00"
+        );
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("host", format!("{SNS_SIGNING_NAME}.localhost"))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("authorization", authorization)
+            .body(Bytes::from(body))
+            .expect("a well-formed request");
+        let response = self.router.dispatch(request).await;
+        (
+            response.status().as_u16(),
+            String::from_utf8_lossy(response.body()).to_string(),
+        )
     }
 
     /// One emulator with the service that OWNS `AWS::S3::Bucket` mounted beside this one.
@@ -581,4 +633,57 @@ pub(crate) fn message(body: &Value) -> String {
         .or_else(|| body["Message"].as_str())
         .unwrap_or_default()
         .to_string()
+}
+
+/// One form value as an `awsQuery` body carries it: everything outside RFC 3986's
+/// unreserved set (`ALPHA / DIGIT / "-" / "." / "_" / "~"`) percent-encoded, which is what
+/// an AWS SDK escapes in a form value — so an ARN's `:` reaches the service as part of the
+/// value rather than as syntax.
+pub(crate) fn form_encoded(value: &str) -> String {
+    const UNRESERVED: &AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'_')
+        .remove(b'~');
+    utf8_percent_encode(value, UNRESERVED).to_string()
+}
+
+/// The text of the first `<tag>…</tag>` element of `block`, with the entities an XML
+/// envelope escapes decoded back — or `""` when it carries none.
+///
+/// The ONE reader of an `awsQuery` answer in this test target, so every suite that drives a
+/// service that OWNS a resource type over that wire reads its envelope the same way.
+pub(crate) fn element(block: &str, tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let Some(start) = block.find(&open) else {
+        return String::new();
+    };
+    let rest = &block[start + open.len()..];
+    match rest.find(&format!("</{tag}>")) {
+        Some(end) => rest[..end]
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&"),
+        None => String::new(),
+    }
+}
+
+/// The value an `awsQuery` answer reports for the map entry keyed `name`, or `""` when it
+/// reports none: such a map is one `<entry><key>…</key><value>…</value></entry>` per entry.
+pub(crate) fn map_entry(block: &str, name: &str) -> String {
+    let mut rest = block;
+    while let Some(start) = rest.find("<entry>") {
+        rest = &rest[start + "<entry>".len()..];
+        let Some(end) = rest.find("</entry>") else {
+            break;
+        };
+        let (entry, remainder) = rest.split_at(end);
+        rest = remainder;
+        if element(entry, "key") == name {
+            return element(entry, "value");
+        }
+    }
+    String::new()
 }

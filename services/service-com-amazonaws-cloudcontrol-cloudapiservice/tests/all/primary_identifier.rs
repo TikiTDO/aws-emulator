@@ -68,12 +68,12 @@ async fn the_primary_identifier_is_the_value_of_the_types_own_identifier_propert
         },
         Case {
             name: "the type's own ARN property",
-            type_name: "AWS::SNS::Topic",
+            type_name: "AWS::StepFunctions::StateMachine",
             desired: json!({
-                "TopicArn": "arn:aws:sns:us-east-1:123456789012:orders",
-                "DisplayName": "Orders",
+                "StateMachineArn": "arn:aws:states:us-east-1:123456789012:stateMachine:orders",
+                "StateMachineType": "STANDARD",
             }),
-            expected: Some("arn:aws:sns:us-east-1:123456789012:orders"),
+            expected: Some("arn:aws:states:us-east-1:123456789012:stateMachine:orders"),
         },
         Case {
             name: "the bare Name fallback",

@@ -74,14 +74,9 @@ const DATA_PROTECTION_POLICY: &str = "DataProtectionPolicy";
 /// installed by a call of its own and applied by nothing here.
 const FIELD_INDEX_POLICIES: &str = "FieldIndexPolicies";
 
-/// The group's tag set (`Tags`), a list of `{ Key, Value }` pairs.
+/// The group's tag set (`Tags`), a list of `{ Key, Value }` pairs — read and rendered by
+/// the shared reading of a tag set every provider uses.
 const TAGS: &str = "Tags";
-
-/// The key member of one entry of [`TAGS`].
-const TAG_KEY: &str = "Key";
-
-/// The value member of one entry of [`TAGS`].
-const TAG_VALUE: &str = "Value";
 
 /// The CloudWatch Logs log groups of one engine, as Cloud Control API resources.
 pub struct LogGroupProvider {
@@ -250,17 +245,7 @@ fn model(group: &logs::LogGroupRecord) -> Value {
         model.insert(KMS_KEY_ID.to_string(), Value::from(key.clone()));
     }
     if !group.tags.is_empty() {
-        let tags: Vec<Value> = group
-            .tags
-            .iter()
-            .map(|(key, value)| {
-                Value::Object(Map::from_iter([
-                    (TAG_KEY.to_string(), Value::from(key.clone())),
-                    (TAG_VALUE.to_string(), Value::from(value.clone())),
-                ]))
-            })
-            .collect();
-        model.insert(TAGS.to_string(), Value::Array(tags));
+        model.insert(TAGS.to_string(), super::tag_list(group.tags.iter()));
     }
     Value::Object(model)
 }
@@ -375,38 +360,23 @@ impl DesiredModel {
     }
 }
 
-/// The refusal for a property of the type's schema that THIS path does not apply, named so
-/// a caller can tell it from a property the type does not declare at all.
+/// The refusal for a property of the type's schema that THIS path does not apply — the
+/// shared wording, so a caller can tell it from a property the type does not declare at
+/// all.
 fn unsupported(property: &str) -> NativeRefusal {
-    NativeRefusal::Invalid(format!(
-        "{property} is a property of {TYPE_NAME} this emulator's handler does not apply"
-    ))
+    super::unsupported(TYPE_NAME, property)
 }
 
-/// The tag set `value` carries: a list of `{ Key, Value }` pairs, bounded by the owning
+/// The tag set `value` carries: the shared reading of a tag set, bounded by the owning
 /// service's own per-resource tag quota.
 fn tag_set(value: &Value) -> Result<BTreeMap<String, String>, NativeRefusal> {
-    let Some(entries) = value.as_array() else {
-        return Err(NativeRefusal::Invalid(format!(
-            "{TAGS} must be a list of {{ {TAG_KEY}, {TAG_VALUE} }} pairs"
-        )));
-    };
     // The quota is on what the LIST carries, judged before any two entries of one key are
     // folded together, so a list past the quota is refused however many keys it repeats.
+    let entries = super::tag_entries(value)?;
     if entries.len() > logs::MAX_TAGS_PER_RESOURCE {
         return Err(NativeRefusal::Invalid(logs::too_many_tags_message()));
     }
-    let mut tags = BTreeMap::new();
-    for entry in entries {
-        let key = entry.get(TAG_KEY).and_then(Value::as_str);
-        let tag_value = entry.get(TAG_VALUE).and_then(Value::as_str);
-        let (Some(key), Some(tag_value)) = (key, tag_value) else {
-            return Err(NativeRefusal::Invalid(format!(
-                "every {TAGS} entry must carry {TAG_KEY} and {TAG_VALUE}"
-            )));
-        };
-        tags.insert(key.to_string(), tag_value.to_string());
-    }
+    let tags: BTreeMap<String, String> = entries.into_iter().collect();
     // The tag-key namespace the owning service keeps for Amazon Web Services' own tags is
     // not a caller's to assign, in its own words: a model naming one is refused here for
     // the same reason that service's own tagging operations refuse it, so nothing writes a

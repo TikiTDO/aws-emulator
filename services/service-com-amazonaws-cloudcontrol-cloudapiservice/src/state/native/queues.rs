@@ -66,14 +66,9 @@ const ARN: &str = "Arn";
 /// and ARN are built from.
 const QUEUE_NAME: &str = "QueueName";
 
-/// The queue's tag set (`Tags`), a list of `{ Key, Value }` pairs.
+/// The queue's tag set (`Tags`), a list of `{ Key, Value }` pairs — read and rendered by
+/// the shared reading of a tag set every provider uses.
 const TAGS: &str = "Tags";
-
-/// The key member of one entry of [`TAGS`].
-const TAG_KEY: &str = "Key";
-
-/// The value member of one entry of [`TAGS`].
-const TAG_VALUE: &str = "Value";
 
 /// The Amazon SQS queues of one engine, as Cloud Control API resources.
 pub struct QueueProvider {
@@ -355,19 +350,13 @@ fn queue_url_requirement() -> String {
     )
 }
 
-/// The name a create picks for a queue whose model names none.
-///
-/// A name is the queue's identity and `QueueName` is optional in the type's schema, exactly
-/// as it is optional in a template — where "if you don't specify a name, CloudFormation
-/// generates a unique physical ID". The generated name carries the `.fifo` suffix a FIFO
-/// queue's name must end with, so a model that asks for a FIFO queue and names none still
-/// gets a name the owning service accepts.
+/// The name a create picks for a queue whose model names none — the shared rule, carrying
+/// the `.fifo` suffix a FIFO queue's name must end with.
 fn generated_name(properties: &Value) -> String {
-    let minted = crate::state::mint_token();
-    if designates_fifo(properties.get(sqs::FIFO_QUEUE_ATTRIBUTE)) {
-        return format!("{minted}{}", sqs::FIFO_QUEUE_NAME_SUFFIX);
-    }
-    minted
+    super::generated_name(
+        designates_fifo(properties.get(sqs::FIFO_QUEUE_ATTRIBUTE)),
+        sqs::FIFO_QUEUE_NAME_SUFFIX,
+    )
 }
 
 /// Whether a model's `FifoQueue` value designates a FIFO queue.
@@ -415,17 +404,7 @@ fn model(queue: &sqs::Queue) -> Value {
         }
     }
     if !queue.tags.is_empty() {
-        let tags: Vec<Value> = queue
-            .tags
-            .iter()
-            .map(|(key, value)| {
-                Value::Object(Map::from_iter([
-                    (TAG_KEY.to_string(), Value::from(key.clone())),
-                    (TAG_VALUE.to_string(), Value::from(value.clone())),
-                ]))
-            })
-            .collect();
-        model.insert(TAGS.to_string(), Value::Array(tags));
+        model.insert(TAGS.to_string(), super::tag_list(queue.tags.iter()));
     }
     Value::Object(model)
 }
@@ -485,7 +464,10 @@ impl DesiredModel {
                 IDENTIFIER_PROPERTY => require_value(property, value, url)?,
                 ARN => require_value(property, value, arn)?,
                 QUEUE_NAME => require_value(property, value, name)?,
-                TAGS => desired.tags = tag_set(value)?,
+                // The shared reading of a tag set; its entries are then judged by the
+                // owning service's own tagging rules, where the queue they are written on
+                // is known ([`sqs::tag_refusal`]).
+                TAGS => desired.tags = super::tag_set(value)?,
                 other => match attribute_property(other) {
                     Some(_) => {
                         desired
@@ -576,25 +558,3 @@ fn detail(message: Option<String>) -> String {
     message.unwrap_or_else(|| format!("{TYPE_NAME} was refused by Amazon SQS"))
 }
 
-/// The tag set `value` carries: a list of `{ Key, Value }` pairs, each judged by the
-/// owning service's own tagging rules where the queue they are written on is known
-/// ([`sqs::tag_refusal`]).
-fn tag_set(value: &Value) -> Result<BTreeMap<String, String>, NativeRefusal> {
-    let Some(entries) = value.as_array() else {
-        return Err(NativeRefusal::Invalid(format!(
-            "{TAGS} must be a list of {{ {TAG_KEY}, {TAG_VALUE} }} pairs"
-        )));
-    };
-    let mut tags = BTreeMap::new();
-    for entry in entries {
-        let key = entry.get(TAG_KEY).and_then(Value::as_str);
-        let tag_value = entry.get(TAG_VALUE).and_then(Value::as_str);
-        let (Some(key), Some(tag_value)) = (key, tag_value) else {
-            return Err(NativeRefusal::Invalid(format!(
-                "every {TAGS} entry must carry {TAG_KEY} and {TAG_VALUE}"
-            )));
-        };
-        tags.insert(key.to_string(), tag_value.to_string());
-    }
-    Ok(tags)
-}

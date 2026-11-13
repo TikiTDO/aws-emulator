@@ -37,6 +37,7 @@ mod buckets;
 mod destinations;
 mod log_groups;
 mod queues;
+mod topics;
 
 use ::serde_json::Value;
 use ::std::collections::BTreeMap;
@@ -192,6 +193,9 @@ impl NativeResources {
         if let Some(provider) = queues::QueueProvider::for_engine(engine) {
             providers.push(Box::new(provider));
         }
+        if let Some(provider) = topics::TopicProvider::for_engine(engine) {
+            providers.push(Box::new(provider));
+        }
         if let Some(provider) = buckets::BucketProvider::for_engine(engine) {
             providers.push(Box::new(provider));
         }
@@ -227,6 +231,12 @@ pub type LogsState =
 /// OWN state struct, reached through the shared engine, so a queue this emulator holds is
 /// the queue Cloud Control API acts on whichever API created it.
 pub type SqsState = ::service_com_amazonaws_sqs_amazonsqs::state::ComAmazonawsSqsAmazonsqsState;
+
+/// The Amazon SNS store the resources of the `AWS::SNS::*` types live in — that service's
+/// OWN state struct, reached through the shared engine, so a topic this emulator holds is
+/// the topic Cloud Control API acts on whichever API created it.
+pub type SnsState =
+    ::service_com_amazonaws_sns_amazonsimplenotificationservice::ComAmazonawsSnsAmazonsimplenotificationserviceState;
 
 /// The Amazon S3 store the resources of the `AWS::S3::Bucket` type live in — that service's
 /// OWN state struct, reached through the shared engine, so a bucket Cloud Control API
@@ -283,10 +293,95 @@ fn require_held(
 ) -> Result<(), NativeRefusal> {
     match held {
         Some(held) => require_value(property, value, held),
-        None => Err(NativeRefusal::Invalid(format!(
-            "{property} is a property of {type_name} this emulator's handler does not apply"
-        ))),
+        None => Err(unsupported(type_name, property)),
     }
+}
+
+/// The refusal for a property of a type's schema that THIS path does not apply, named so a
+/// caller can tell it from a property the type does not declare at all.
+///
+/// Shared by every provider, because "this emulator's handler does not apply that property"
+/// is one condition whichever type's model carried it.
+fn unsupported(type_name: &str, property: &str) -> NativeRefusal {
+    NativeRefusal::Invalid(format!(
+        "{property} is a property of {type_name} this emulator's handler does not apply"
+    ))
+}
+
+/// The property every type's schema carries its tag set under, as a list of
+/// `{ Key, Value }` pairs.
+const TAGS: &str = "Tags";
+
+/// The key member of one entry of [`TAGS`].
+const TAG_KEY: &str = "Key";
+
+/// The value member of one entry of [`TAGS`].
+const TAG_VALUE: &str = "Value";
+
+/// The tag entries `value` carries, in the order the list carried them — or why it is not a
+/// tag set at all.
+///
+/// Shared by every provider: the shape of a tag set is the registry's rather than any one
+/// type's, so the condition and its wording are one. The entries are handed back as the
+/// LIST, before two entries of one key are folded together, so a provider whose owning
+/// service bounds the tag COUNT judges the list the request sent.
+fn tag_entries(value: &Value) -> Result<Vec<(String, String)>, NativeRefusal> {
+    let Some(entries) = value.as_array() else {
+        return Err(NativeRefusal::Invalid(format!(
+            "{TAGS} must be a list of {{ {TAG_KEY}, {TAG_VALUE} }} pairs"
+        )));
+    };
+    let mut tags = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let key = entry.get(TAG_KEY).and_then(Value::as_str);
+        let tag_value = entry.get(TAG_VALUE).and_then(Value::as_str);
+        let (Some(key), Some(tag_value)) = (key, tag_value) else {
+            return Err(NativeRefusal::Invalid(format!(
+                "every {TAGS} entry must carry {TAG_KEY} and {TAG_VALUE}"
+            )));
+        };
+        tags.push((key.to_string(), tag_value.to_string()));
+    }
+    Ok(tags)
+}
+
+/// The tag set `value` carries, folded by key — what a provider writes onto the resource.
+fn tag_set(value: &Value) -> Result<BTreeMap<String, String>, NativeRefusal> {
+    Ok(tag_entries(value)?.into_iter().collect())
+}
+
+/// The tag set one resource renders as: one `{ Key, Value }` object per tag, in key order.
+///
+/// Shared by every provider, so one resource reports its tags the same way whichever type
+/// it is of and whichever order the owning store holds them in.
+fn tag_list<'a>(tags: impl IntoIterator<Item = (&'a String, &'a String)>) -> Value {
+    let ordered: BTreeMap<&String, &String> = tags.into_iter().collect();
+    Value::Array(
+        ordered
+            .into_iter()
+            .map(|(key, value)| {
+                Value::Object(::serde_json::Map::from_iter([
+                    (TAG_KEY.to_string(), Value::from(key.clone())),
+                    (TAG_VALUE.to_string(), Value::from(value.clone())),
+                ]))
+            })
+            .collect(),
+    )
+}
+
+/// The name a create picks for a resource whose model names none.
+///
+/// A name is the resource's identity and the property that carries it is optional in the
+/// type's schema, exactly as it is optional in a template — where "if you don't specify a
+/// name, CloudFormation generates a unique physical ID". A generated name for a FIFO
+/// resource carries the suffix such a name must end with, so a model that asks for one and
+/// names none still gets a name the owning service accepts.
+fn generated_name(fifo: bool, fifo_suffix: &str) -> String {
+    let minted = crate::state::mint_token();
+    if fifo {
+        return format!("{minted}{fifo_suffix}");
+    }
+    minted
 }
 
 #[cfg(test)]
@@ -331,6 +426,10 @@ mod tests {
         assert!(
             native.provider("AWS::SQS::Queue").is_some(),
             "expected the queue provider, got {native:?}"
+        );
+        assert!(
+            native.provider("AWS::SNS::Topic").is_some(),
+            "expected the topic provider, got {native:?}"
         );
         assert!(
             native.provider("AWS::S3::Bucket").is_some(),

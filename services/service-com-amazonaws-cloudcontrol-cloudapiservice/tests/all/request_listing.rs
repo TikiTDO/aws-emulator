@@ -29,7 +29,8 @@ const OPERATION_DELETE: &str = "DELETE";
 
 /// An `OperationStatus` the model declares that no request of THIS suite reaches, because
 /// none of them is canceled, so a filter naming it admits nothing
-/// (`smithy_query(query="shape",shape="OperationStatus")`).
+/// (`smithy_query(query="shape",shape="OperationStatus")`; `request_cancellation` is the
+/// suite about the requests that do reach it).
 const STATUS_CANCEL_COMPLETE: &str = "CANCEL_COMPLETE";
 
 /// The `OperationStatus` values the model declares
