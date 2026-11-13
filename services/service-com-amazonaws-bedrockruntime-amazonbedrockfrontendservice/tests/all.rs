@@ -53,6 +53,8 @@ mod guardrail_checks_scores;
 mod inference_generation_and_refusal_wording;
 #[path = "all/inference_stop_sequences.rs"]
 mod inference_stop_sequences;
+#[path = "all/inline_guardrail_error_taxonomy.rs"]
+mod inline_guardrail_error_taxonomy;
 #[path = "all/invoke_model_malformed_body_refusal.rs"]
 mod invoke_model_malformed_body_refusal;
 #[path = "all/resource_reference_refusals.rs"]
