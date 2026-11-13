@@ -426,7 +426,7 @@ async fn last_update_timestamp_is_reported_from_create_and_moves_with_a_change()
 /// Whether `token` satisfies `ConditionalToken` (len 1..512, pattern
 /// `^[a-zA-Z0-9-_+/=]+$`, `smithy_query(query="shape",shape="ConditionalToken")`), which
 /// is every requirement the model places on a token's form.
-fn is_modeled_token(token: &str) -> bool {
+pub(crate) fn is_modeled_token(token: &str) -> bool {
     !token.is_empty()
         && token.len() <= 512
         && token
@@ -441,7 +441,7 @@ fn is_modeled_token(token: &str) -> bool {
 /// application updates", handed back as received. A value punctuated as a UUID invites a
 /// client to parse it as one, which it is not; this service's server-assigned IDS are
 /// written that way, and a token is not an id.
-fn is_uuid_layout(token: &str) -> bool {
+pub(crate) fn is_uuid_layout(token: &str) -> bool {
     let groups: Vec<&str> = token.split('-').collect();
     groups.len() == 5
         && groups
@@ -522,7 +522,7 @@ async fn a_conditional_token_is_stable_per_version_and_rotates_with_it() {
 }
 
 /// The `ConditionalToken` of an `ApplicationDetail`.
-fn token_of(detail: &Value, case: &str) -> String {
+pub(crate) fn token_of(detail: &Value, case: &str) -> String {
     detail["ConditionalToken"]
         .as_str()
         .unwrap_or_else(|| panic!("case {case:?}: expected a ConditionalToken, got {detail}"))

@@ -45,5 +45,7 @@ mod stated_enum_value_set;
 mod studio_notebook_catalog;
 #[path = "all/tags_versions_and_snapshots.rs"]
 mod tags_versions_and_snapshots;
+#[path = "all/update_application_detail_echo.rs"]
+mod update_application_detail_echo;
 #[path = "all/version_history_summaries.rs"]
 mod version_history_summaries;
