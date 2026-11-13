@@ -79,7 +79,7 @@ pub fn expected_url(name: &str) -> String {
 
 /// The same, for a queue created against `region`'s endpoint.
 pub fn expected_url_in(region: &str, name: &str) -> String {
-    format!("https://{}/{}/{name}", host_in(region), account())
+    format!("https://emulator.invalid/sqs/{region}/{}/{name}", account())
 }
 
 /// The ARN a queue named `name` must report.

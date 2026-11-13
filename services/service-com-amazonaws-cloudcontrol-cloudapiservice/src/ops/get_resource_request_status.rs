@@ -155,7 +155,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut store = state.lock();
         // What the clock already owes the store, so a request whose work has fallen due
         // is reported in the status it has reached rather than the one it started in.
-        let native = crate::state::native::NativeResources::for_engine(&*self.engine);
+        let native =
+            crate::state::native::NativeResources::for_engine(&*self.engine, ctx.endpoint());
         store.materialise_due(::std::time::SystemTime::now(), &native);
         let Some(record) = store.request(&input.request_token) else {
             return Err(not_found());

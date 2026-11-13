@@ -36,7 +36,7 @@ const QUEUE: &str = "AWS::SQS::Queue";
 /// (`primaryIdentifier: ["/properties/QueueUrl"]`).
 fn queue_url(name: &str) -> String {
     format!(
-        "https://sqs.{SIGNING_REGION}.amazonaws.com/{}/{name}",
+        "https://emulator.invalid/sqs/{SIGNING_REGION}/{}/{name}",
         engine::emulator_account_id()
     )
 }
