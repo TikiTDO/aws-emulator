@@ -194,7 +194,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if !state.functions.contains_key(&name) {
             return Err(DeleteResourcePolicyErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
-                    message: format!("The web function {} doesn't exist.", input.resource_arn),
+                    message: crate::state::function_not_found_message(&input.resource_arn),
                     resource_id: Some(input.resource_arn.clone()),
                     resource_type: Some("WebFunction".to_string()),
                 },

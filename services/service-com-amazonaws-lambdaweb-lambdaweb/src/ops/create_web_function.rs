@@ -248,8 +248,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // create any more than on `TagResource`, and the check runs before
         // anything is stored so a refused create creates nothing at all.
         if let Some(tags) = &input.tags {
-            if let Some(message) =
-                crate::state::tag_map_violation("tags", tags.keys().map(String::as_str))
+            if let Some(message) = crate::state::tag_map_violation(tags.keys().map(String::as_str))
             {
                 return Err(CreateWebFunctionErrorModeled::ValidationException(
                     ValidationException { message },

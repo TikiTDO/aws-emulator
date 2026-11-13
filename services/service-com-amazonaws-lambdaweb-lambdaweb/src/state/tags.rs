@@ -11,8 +11,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use aws_smithy_schema_server::constraints::path;
-
 use super::ComAmazonawsLambdawebLambdawebState;
 
 /// The tag key namespace a caller may not write to.
@@ -25,10 +23,19 @@ use super::ComAmazonawsLambdawebLambdawebState;
 /// passes such a key and the handlers apply the rule themselves.
 pub const RESERVED_TAG_KEY_PREFIX: &str = "aws:";
 
-/// What a tag key a CALLER names has to satisfy, as a refusal's clause states the
-/// requirement: it is outside the namespace AWS reserves for the tags it applies
-/// itself ([`RESERVED_TAG_KEY_PREFIX`]).
-const TAG_KEY_REQUIREMENT: &str = "Member must not begin with the reserved prefix aws:";
+/// AWS's `ValidationException` message for a tag key set this service refuses
+/// itself.
+///
+/// One FIXED sentence with no variable parts: it covers every rule it lists —
+/// the reserved key namespace ([`RESERVED_TAG_KEY_PREFIX`]), an empty key and a
+/// key named twice — and it names neither the offending key nor the member it
+/// arrived in. That is deliberately NOT the framework's per-violation clause,
+/// which quotes the value and its member path: those rules are the request
+/// boundary's, judged against the model, while this one is the service's own and
+/// is stated in the service's own words.
+pub const INVALID_TAG_KEYS_MESSAGE: &str = "One or more of your tags are invalid. Please ensure \
+     none of your tag keys start with \"aws:\", none are empty, and there are no duplicate tag \
+     keys.";
 
 /// The most tags one web function holds.
 ///
@@ -44,60 +51,26 @@ pub fn is_reserved_tag_key(key: &str) -> bool {
     key.starts_with(RESERVED_TAG_KEY_PREFIX)
 }
 
-/// AWS's `ValidationException` message for ONE rule this service applies itself,
-/// stating `requirement` of the value the caller sent at `member_path`.
-///
-/// The clause is the framework's own spelling for a violation that quotes its
-/// value (`aws_smithy_schema_server::constraints::Violation::message`:
-/// `Value '<value>' at '<path>' failed to satisfy constraint: <requirement>`), so
-/// a rule the service applies reads exactly like a rule the request boundary
-/// refuses; the envelope around it is `service_common`'s, which owns the count
-/// word every service states a refusal with. The framework carries no
-/// `ViolationKind` for a rule only this service can state — the enum is
-/// `#[non_exhaustive]` and lives in that crate — which is why the requirement
-/// after the clause is this service's own text.
-fn stated_requirement(member_path: &str, submitted: &str, requirement: &str) -> String {
-    let clause = format!(
-        "Value '{submitted}' at '{member_path}' failed to satisfy constraint: {requirement}"
-    );
-    ::service_common::validation_message::envelope_over(std::slice::from_ref(&clause))
-        .unwrap_or(clause)
-}
-
 /// Why a tag MAP a request carries may not be applied, or `None` when every key
 /// of it is the caller's to write.
 ///
-/// `member` is the model's name for the map member the keys arrived in, so the
-/// clause names the member the caller sent. The keys are judged in KEY order
-/// rather than in the order a hash map happens to yield them, so one request is
-/// always refused for the same key, and the whole set is judged before anything
-/// is written: a request carrying one reserved key among valid ones applies none
-/// of them.
-pub fn tag_map_violation<'a>(
-    member: &str,
-    keys: impl IntoIterator<Item = &'a str>,
-) -> Option<String> {
-    let mut reserved: Vec<&str> = keys.into_iter().filter(|key| is_reserved_tag_key(key)).collect();
-    reserved.sort_unstable();
-    let key = reserved.first()?;
-    // A map entry is named by the map member and the entry's own key, the way the
-    // framework's validating walk names one.
-    let entry = path::join(&[path::member(member), (*key).to_string()]);
-    Some(stated_requirement(&entry, key, TAG_KEY_REQUIREMENT))
+/// The WHOLE key set is judged before anything is written, so a request carrying
+/// one reserved key among valid ones applies none of them — and, since the
+/// refusal states one fixed sentence, which key tripped it changes neither the
+/// answer nor the order the keys are looked at in.
+pub fn tag_map_violation<'a>(keys: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    keys.into_iter()
+        .any(is_reserved_tag_key)
+        .then(|| INVALID_TAG_KEYS_MESSAGE.to_string())
 }
 
 /// Why a tag KEY LIST a request carries may not be applied, or `None` when every
 /// element of it is the caller's to remove.
 ///
-/// The elements are judged in the order they arrived, because a list element is
-/// named by its position: the clause names where the key sat.
-pub fn tag_key_list_violation(member: &str, keys: &[String]) -> Option<String> {
-    let (index, key) = keys
-        .iter()
-        .enumerate()
-        .find(|(_, key)| is_reserved_tag_key(key))?;
-    let element = path::join(&[path::member(member), path::element(index + 1)]);
-    Some(stated_requirement(&element, key, TAG_KEY_REQUIREMENT))
+/// The same rule and the same sentence as the map path: the removal path reads
+/// the keys from a list rather than from a map, and nothing else differs.
+pub fn tag_key_list_violation(keys: &[String]) -> Option<String> {
+    tag_map_violation(keys.iter().map(String::as_str))
 }
 
 /// The stored map as the modelled `Tags` shape: `HashMap`, since that is what the

@@ -610,6 +610,22 @@ pub fn resolve_function_name(value: &str) -> &str {
         .map_or(value, |(_, name)| name)
 }
 
+/// AWS's `ResourceNotFoundException` message for a web function this store does
+/// not hold, naming it by `identifier` — the value the request addressed it by,
+/// verbatim, whether that was the name or the ARN.
+///
+/// The model fixes the status (404), the code and `message` being `@required`, but
+/// not the text, so the sentence is the service's recorded behaviour: AWS reports
+/// the absent FUNCTION in one sentence, from every operation that resolves one —
+/// including the readers and writers of a function's sub-resources (its
+/// resource-based policy, its tags), so a sub-resource call addressed at a
+/// function that is gone reports the FUNCTION as absent rather than the
+/// sub-resource or an empty answer. One function serves every such branch so the
+/// wording cannot drift between them.
+pub fn function_not_found_message(identifier: &str) -> String {
+    format!("The function {identifier} does not exist.")
+}
+
 /// Why `name` is not a legal `functionName`, or `None` when it is.
 ///
 /// The model bounds the member's length (1..256) only; this is the narrower rule

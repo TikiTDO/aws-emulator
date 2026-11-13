@@ -11,6 +11,8 @@
 // `tests/all.rs` is a test-target CRATE ROOT, so a bare `mod` resolves to a SIBLING
 // (`tests/state_roundtrip.rs`) — which the layout check refuses. The `#[path]` is what
 // points it into `tests/all/`.
+#[path = "all/absent_function_message.rs"]
+mod absent_function_message;
 #[path = "all/endpoint_data_plane.rs"]
 mod endpoint_data_plane;
 #[path = "all/enum_constraint_message.rs"]

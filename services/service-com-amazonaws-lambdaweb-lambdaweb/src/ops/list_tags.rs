@@ -169,7 +169,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(tags) = state.tags(&name) else {
             return Err(ListTagsErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
-                    message: format!("The web function {} doesn't exist.", input.resource),
+                    message: crate::state::function_not_found_message(&input.resource),
                     resource_id: Some(input.resource.clone()),
                     resource_type: Some("WebFunction".to_string()),
                 },

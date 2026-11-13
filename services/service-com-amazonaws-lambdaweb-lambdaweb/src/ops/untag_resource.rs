@@ -182,7 +182,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     ) -> Result<Self::Output, Self::Error> {
         // The reserved namespace is not the caller's to delete from either, and the
         // whole key set is checked before anything is removed.
-        if let Some(message) = crate::state::tag_key_list_violation("tagKeys", &input.tag_keys) {
+        if let Some(message) = crate::state::tag_key_list_violation(&input.tag_keys) {
             return Err(
                 UntagResourceErrorModeled::ValidationException(ValidationException { message })
                     .into(),
@@ -205,7 +205,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         else {
             return Err(UntagResourceErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
-                    message: format!("The web function {} doesn't exist.", input.resource),
+                    message: crate::state::function_not_found_message(&input.resource),
                     resource_id: Some(input.resource.clone()),
                     resource_type: Some("WebFunction".to_string()),
                 },

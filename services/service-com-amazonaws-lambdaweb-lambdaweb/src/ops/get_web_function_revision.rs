@@ -188,7 +188,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(function) = state.functions.get(name) else {
             return Err(GetWebFunctionRevisionErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
-                    message: format!("The web function {} doesn't exist.", input.function_name),
+                    message: crate::state::function_not_found_message(&input.function_name),
                     resource_id: Some(input.function_name.clone()),
                     resource_type: Some("WebFunction".to_string()),
                 },

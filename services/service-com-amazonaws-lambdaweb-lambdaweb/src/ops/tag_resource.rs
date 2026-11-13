@@ -190,7 +190,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // store is touched: a request carrying one reserved key among valid ones
         // applies none of them.
         if let Some(message) =
-            crate::state::tag_map_violation("tags", input.tags.keys().map(String::as_str))
+            crate::state::tag_map_violation(input.tags.keys().map(String::as_str))
         {
             return Err(
                 TagResourceErrorModeled::ValidationException(ValidationException { message })
@@ -214,7 +214,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         else {
             return Err(TagResourceErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
-                    message: format!("The web function {} doesn't exist.", input.resource),
+                    message: crate::state::function_not_found_message(&input.resource),
                     resource_id: Some(input.resource.clone()),
                     resource_type: Some("WebFunction".to_string()),
                 },

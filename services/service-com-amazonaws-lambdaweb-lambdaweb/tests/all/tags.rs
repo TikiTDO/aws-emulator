@@ -37,18 +37,12 @@ const TAG_VALUE_MAX_CHARS: usize = 256;
 /// its own reader can report (source: `smithy_query(query="shape", shape="Tags")`).
 const MAX_TAGS_PER_FUNCTION: usize = 200;
 
-/// The envelope AWS states a single constraint violation in.
-const ONE_ERROR: &str = "1 validation error detected: ";
-
-/// The requirement clause a tag key in the reserved namespace failed.
-const TAG_KEY_REQUIREMENT: &str = "Member must not begin with the reserved prefix aws:";
-
-/// The whole message a tag path refuses a reserved key with: the envelope, the
-/// key the request sent, the path it sat at, and the requirement — written out
-/// here rather than taken from the handler's helper, so the test pins the format.
-fn reserved_key_message(value: &str, member_path: &str) -> String {
-    format!("{ONE_ERROR}Value '{value}' at '{member_path}' failed to satisfy constraint: {TAG_KEY_REQUIREMENT}")
-}
+/// The whole message every tag path refuses a key set it may not apply with: ONE
+/// fixed sentence covering the rules it lists, with no part taken from the
+/// request — written out here rather than taken from the handler's helper, so the
+/// test pins the wording.
+const INVALID_TAGS_MESSAGE: &str = "One or more of your tags are invalid. Please ensure none of \
+     your tag keys start with \"aws:\", none are empty, and there are no duplicate tag keys.";
 
 /// A tag map as the JSON body `TagResource` carries (`tags` is `jsonName: "Tags"`).
 fn tags_body(tags: &BTreeMap<String, String>) -> Value {
@@ -332,10 +326,12 @@ async fn untag_resource_removes_exactly_the_named_keys_and_ignores_the_rest() {
 async fn a_key_in_the_reserved_namespace_is_refused_and_changes_no_tag() {
     // RULE: a tag key beginning with the reserved `aws:` prefix is not the caller's
     // to create, change or delete: every tag path refuses the whole request with a
-    // 400 `ValidationException` and applies none of the keys it carried. The rows
-    // span how the reserved key arrives — alone, mixed with valid keys, with
-    // different suffixes — and which path carries it. Keys that merely start with
-    // the letters `aws` are NOT in that namespace and are accepted.
+    // 400 `ValidationException`, states the one fixed tag-validation sentence —
+    // which carries no part of the request, so every row below reads identically —
+    // and applies none of the keys it carried. The rows span how the reserved key
+    // arrives — alone, mixed with valid keys, with different suffixes — and which
+    // path carries it. Keys that merely start with the letters `aws` are NOT in that
+    // namespace and are accepted.
     let emulator = Emulator::new();
     let stored = map(&[("env", "prod")]);
     let arn = create_function(&emulator, "tag-reserved", Some(&stored)).await;
@@ -374,9 +370,9 @@ async fn a_key_in_the_reserved_namespace_is_refused_and_changes_no_tag() {
             );
             assert_eq!(
                 refused.string("message").as_deref(),
-                Some(reserved_key_message(key, &format!("tags.{key}")).as_str()),
-                "case TagResource with {key:?} ({shape}): expected the reserved-prefix \
-                 clause naming the key's own entry, got {:?}",
+                Some(INVALID_TAGS_MESSAGE),
+                "case TagResource with {key:?} ({shape}): expected the tag-validation sentence, \
+                 naming neither the key nor its member path, got {:?}",
                 refused.body
             );
             let got = reported_tags("after the refused tag call", &list_tags(&emulator, &arn).await);
@@ -400,13 +396,12 @@ async fn a_key_in_the_reserved_namespace_is_refused_and_changes_no_tag() {
             "case UntagResource with {key:?}: expected ValidationException, got {:?}",
             refused.body
         );
-        // A list element is named by its POSITION, so the clause names where the
-        // key sat: the reserved key is the first of the two sent.
+        // The removal path states the same sentence: it names neither the key nor
+        // the position it arrived at.
         assert_eq!(
             refused.string("message").as_deref(),
-            Some(reserved_key_message(key, "tagKeys.1.member").as_str()),
-            "case UntagResource with {key:?}: expected the reserved-prefix clause naming the \
-             element's position, got {:?}",
+            Some(INVALID_TAGS_MESSAGE),
+            "case UntagResource with {key:?}: expected the tag-validation sentence, got {:?}",
             refused.body
         );
         let got = reported_tags("after the refused untag call", &list_tags(&emulator, &arn).await);
@@ -434,8 +429,8 @@ async fn a_key_in_the_reserved_namespace_is_refused_and_changes_no_tag() {
         );
         assert_eq!(
             create.string("message").as_deref(),
-            Some(reserved_key_message(key, &format!("tags.{key}")).as_str()),
-            "case CreateWebFunction with {key:?}: expected the same reserved-prefix clause as \
+            Some(INVALID_TAGS_MESSAGE),
+            "case CreateWebFunction with {key:?}: expected the same tag-validation sentence as \
              the tagging path, got {:?}",
             create.body
         );
