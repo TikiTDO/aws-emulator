@@ -62,9 +62,47 @@ pub const OPS_ITEM_STATUS_OPEN: &str = "Open";
 /// Both are values of the modelled enum.
 pub const OPS_ITEM_TERMINAL_STATUSES: &[&str] = &["Resolved", "Closed"];
 
-/// `OpsItem$Version`'s value for an OpsItem no edit has touched: "Each time the OpsItem
-/// is edited the version number increments by one", counting from this one.
-pub const FIRST_OPS_ITEM_VERSION: u64 = 1;
+/// How long a delete of an OpsItem takes to settle, after which the record is gone.
+///
+/// `DeleteOpsItem` "uses an eventual consistency model, which means the system can take a
+/// few minutes to complete this operation. If you delete an OpsItem and immediately call,
+/// for example, GetOpsItem, the deleted OpsItem might still appear in the response", and
+/// an OpsItem being deleted is the state `OpsItemConflictException` ("The specified OpsItem
+/// is in the process of being deleted") reports. That doc bounds the wait at "a few
+/// minutes" without naming one, so this is the emulator's CHOSEN window inside it: ten
+/// seconds, long enough that a caller reading an OpsItem straight after deleting it is
+/// served what the real service serves it, and short enough that a caller waiting for the
+/// delete to confirm does not wait minutes for it. The removal is materialised from the
+/// stored due instant
+/// ([`ComAmazonawsSsmAmazonssmState::settle_ops_item_deletions_due`]) rather than by any
+/// call, and nothing sleeps for it.
+pub const OPS_ITEM_DELETE_SETTLES_AFTER: ::std::time::Duration =
+    ::std::time::Duration::from_secs(10);
+
+/// The `Version` token a write of an OpsItem leaves on the record.
+///
+/// `OpsItem$Version` is "the version of this OpsItem. Each time the OpsItem is edited the
+/// version number increments by one", and what Systems Manager mints for it is a token of
+/// the instant of the write — the milliseconds of `at` since the epoch — so a later write
+/// always carries a greater token than the write before it and a client can tell one
+/// version of an OpsItem from the next by comparing them.
+///
+/// `previous` is the token the record already carries, when a write is editing one: two
+/// writes of the same millisecond would otherwise leave the one token, so the token is
+/// advanced past the previous one instead. The result is therefore STRICTLY increasing per
+/// write of one OpsItem, whatever the clock's resolution, which is what a client comparing
+/// versions to detect its own edit relies on.
+pub fn minted_ops_item_version(at: SystemTime, previous: Option<u64>) -> u64 {
+    let since_epoch = at
+        .duration_since(::std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let minted = u64::try_from(since_epoch).unwrap_or(u64::MAX);
+    match previous {
+        Some(previous) if previous >= minted => previous.saturating_add(1),
+        _ => minted,
+    }
+}
 
 /// The strings a `Source` may not contain: "The source name can't contain the following
 /// strings: aws, amazon, and amzn" (`CreateOpsItem`'s `Source` doc).
@@ -137,11 +175,38 @@ pub const OPS_ITEM_CATEGORIES: &[&str] = &[
 /// past it however it reached the store.
 pub const MAX_OPS_ITEMS: usize = 10_000;
 
-/// The sentence a client reads for an id the Region holds no OpsItem under, which is
-/// `OpsItemNotFoundException`'s own documentation — stated once here so every operation
-/// that cannot resolve an OpsItem id serves one wording.
-pub const OPS_ITEM_NOT_FOUND_MESSAGE: &str =
-    "The specified OpsItem ID doesn't exist. Verify the ID and try again.";
+/// The fixed sentence a client reads for an id the Region holds no OpsItem under, stated
+/// once here so every operation that cannot resolve an OpsItem id serves one wording.
+///
+/// This is the sentence Systems Manager words the class with, not
+/// `OpsItemNotFoundException`'s Smithy documentation: a refusal is read by clients and SDKs
+/// as the service words it, and the service words this one as the whole of
+/// [`ops_item_not_found_message`].
+pub const OPS_ITEM_NOT_FOUND_BODY: &str = "OpsItem not found.";
+
+/// The error code that refusal is reported under, which is the modelled exception's own
+/// shape name (`com.amazonaws.ssm#OpsItemNotFoundException`), and so what the envelope
+/// below names as its code.
+pub const OPS_ITEM_NOT_FOUND_CODE: &str = "OpsItemNotFoundException";
+
+/// The HTTP status that refusal carries, which is the status the model declares for it
+/// (`OpsItemNotFoundException`, httpError 400), and so what the envelope below names as its
+/// status.
+pub const OPS_ITEM_NOT_FOUND_STATUS: u16 = 400;
+
+/// How this service reports an OpsItem id the Region holds no OpsItem under:
+/// [`OPS_ITEM_NOT_FOUND_BODY`] followed by the envelope this service appends to a refusal it
+/// words itself ([`super::with_sdk_error_envelope`]), whose only variable part is the serving
+/// response's own request id.
+///
+/// A function rather than a constant because that request id is minted per call.
+pub fn ops_item_not_found_message() -> String {
+    super::with_sdk_error_envelope(
+        OPS_ITEM_NOT_FOUND_BODY,
+        OPS_ITEM_NOT_FOUND_STATUS,
+        OPS_ITEM_NOT_FOUND_CODE,
+    )
+}
 
 /// Which member of a create was refused, and why — the payload of
 /// `OpsItemInvalidParameterException`, whose `ParameterNames` names the member and whose
@@ -400,8 +465,15 @@ pub struct OpsItemRecord {
     /// "The date and time the OpsItem was last updated".
     pub last_modified_time: SystemTime,
     /// "The version of this OpsItem. Each time the OpsItem is edited the version number
-    /// increments by one", from [`FIRST_OPS_ITEM_VERSION`].
+    /// increments by one" — the token the last write of this record left
+    /// ([`minted_ops_item_version`]).
     pub version: u64,
+    /// The instant this OpsItem's delete is owed to have settled at, once one has been
+    /// asked for: a delete is eventually consistent ([`OPS_ITEM_DELETE_SETTLES_AFTER`]), so
+    /// the record is still reported until then and is removed at it
+    /// ([`ComAmazonawsSsmAmazonssmState::settle_ops_item_deletions_due`]). `None` for an
+    /// OpsItem no delete has been asked for.
+    pub delete_due: Option<SystemTime>,
 }
 
 impl OpsItemRecord {
@@ -418,6 +490,13 @@ impl OpsItemRecord {
     /// that carries its dedup string ([`OPS_ITEM_TERMINAL_STATUSES`]).
     pub fn is_open(&self) -> bool {
         !OPS_ITEM_TERMINAL_STATUSES.contains(&self.status.as_str())
+    }
+
+    /// Whether a delete of this OpsItem has been asked for and has not settled yet, which
+    /// is the state no edit of it is served in: "the specified OpsItem is in the process of
+    /// being deleted".
+    pub fn is_deleting(&self) -> bool {
+        self.delete_due.is_some()
     }
 
     /// The modelled `OpsItem` for this record — every member projected from what was
@@ -517,6 +596,55 @@ impl ComAmazonawsSsmAmazonssmState {
         self.ops_items.insert(key, record);
         Ok(())
     }
+
+    /// Ask for the OpsItem `ops_item_id` names in `region` to be deleted, reporting whether
+    /// that Region held one.
+    ///
+    /// "Deleting an OpsItem is irreversible. You can't restore a deleted OpsItem", and the
+    /// delete is eventually consistent: the record is marked as owed removal at
+    /// `at` + [`OPS_ITEM_DELETE_SETTLES_AFTER`] and is still reported until then, which is
+    /// what a read made straight after the delete is served. The removal itself is
+    /// materialised from that due instant ([`Self::settle_ops_item_deletions_due`]).
+    ///
+    /// Idempotent in both directions: "the system doesn't throw an exception if you
+    /// repeatedly call this operation for the same OpsItem. If the first call is successful,
+    /// all additional calls return the same successful response as the first call" — so a
+    /// repeated delete keeps the due instant the FIRST one set rather than putting the
+    /// removal off, and a delete of an id the Region holds no OpsItem under marks nothing.
+    pub fn delete_ops_item(&mut self, region: &str, ops_item_id: &str, at: SystemTime) -> bool {
+        let due = at + OPS_ITEM_DELETE_SETTLES_AFTER;
+        match self.ops_item_mut(region, ops_item_id) {
+            Some(record) => {
+                record.delete_due = Some(record.delete_due.map_or(due, |held| held.min(due)));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Remove every OpsItem whose delete was already owed to have settled at `now`,
+    /// together with the related-item associations held against it: an association is
+    /// reached only through the OpsItem it belongs to, so one of an OpsItem nothing holds
+    /// any more is a related item of nothing.
+    ///
+    /// The removal was due at that instant whether or not anybody called, so this is what
+    /// a read materialises before it resolves anything against the store
+    /// ([`ComAmazonawsSsmAmazonssmState::materialize_due`]).
+    pub fn settle_ops_item_deletions_due(&mut self, now: SystemTime) {
+        let settled: Vec<(String, String)> = self
+            .ops_items
+            .iter()
+            .filter(|(_, held)| held.delete_due.is_some_and(|due| due <= now))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for (region, ops_item_id) in settled {
+            self.ops_items.remove(&(region.clone(), ops_item_id.clone()));
+            self.ops_item_related_items
+                .retain(|(held_region, held_ops_item, _), _| {
+                    held_region != &region || held_ops_item != &ops_item_id
+                });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -552,7 +680,8 @@ mod tests {
             created_time: UNIX_EPOCH,
             last_modified_by: "tests".to_string(),
             last_modified_time: UNIX_EPOCH,
-            version: FIRST_OPS_ITEM_VERSION,
+            version: minted_ops_item_version(UNIX_EPOCH, None),
+            delete_due: None,
         }
     }
 
@@ -682,5 +811,125 @@ mod tests {
                 "case {raw:?}: expected {expected:?}, got {actual:?}"
             );
         }
+    }
+
+    /// A minted version token is the instant of the write in milliseconds, and a write of
+    /// an OpsItem that already carries one leaves a STRICTLY greater token however close
+    /// together the two writes are — including two writes of the one millisecond.
+    #[test]
+    fn a_minted_version_advances_past_the_one_it_replaces() {
+        let at = UNIX_EPOCH + ::std::time::Duration::from_millis(1_762_240_284_123);
+        let cases: &[(&str, Option<u64>, u64)] = &[
+            ("a create", None, 1_762_240_284_123),
+            // An edit a whole millisecond later than the write before it: the clock alone
+            // already orders the two.
+            ("an edit of an older version", Some(1_762_240_284_122), 1_762_240_284_123),
+            // An edit in the SAME millisecond as the write before it, and one the clock
+            // cannot order at all: the token is advanced past the one held instead.
+            ("an edit in the same millisecond", Some(1_762_240_284_123), 1_762_240_284_124),
+            ("an edit against a newer version", Some(1_900_000_000_000), 1_900_000_000_001),
+        ];
+        for (case, previous, expected) in cases {
+            let actual = minted_ops_item_version(at, *previous);
+            assert_eq!(
+                actual, *expected,
+                "case {case}: expected version {expected}, got {actual}"
+            );
+        }
+    }
+
+    /// A delete settles at its due instant: until then the OpsItem is still reported and is
+    /// marked as being deleted, at it the record and the related items held against it are
+    /// gone, every other OpsItem and its related items are untouched, and a repeated delete
+    /// settles when the FIRST one was due rather than putting the removal off.
+    #[test]
+    fn a_delete_settles_at_its_due_instant() {
+        let mut store = ComAmazonawsSsmAmazonssmState::default();
+        let related = |region: &str, ops_item_id: &str| {
+            crate::state::ops_item_related_items::RelatedItemRecord {
+                association_id: format!("{ops_item_id}-association"),
+                ops_item_id: ops_item_id.to_string(),
+                region: region.to_string(),
+                resource_type: "AWS::SSM::Document".to_string(),
+                association_type: "RelatesTo".to_string(),
+                resource_uri: format!("arn:aws:ssm:{region}:123456789012:document/{ops_item_id}"),
+                created_by: "tests".to_string(),
+                created_time: UNIX_EPOCH,
+                last_modified_by: "tests".to_string(),
+                last_modified_time: UNIX_EPOCH,
+            }
+        };
+        for (region, id) in [
+            ("us-west-2", "oi-00000000000a"),
+            ("us-west-2", "oi-00000000000b"),
+            ("eu-central-1", "oi-00000000000a"),
+        ] {
+            store
+                .insert_ops_item(record(region, id))
+                .unwrap_or_else(|limit| panic!("case {region}/{id}: the store took {limit}"));
+            store
+                .insert_related_item(related(region, id))
+                .unwrap_or_else(|limit| panic!("case {region}/{id}: the store took {limit}"));
+        }
+
+        let asked_at = UNIX_EPOCH + ::std::time::Duration::from_secs(1_700_000_000);
+        assert!(
+            store.delete_ops_item("us-west-2", "oi-00000000000a", asked_at),
+            "case a held OpsItem: expected the delete to report the record it marked"
+        );
+        // Every instant before the delete is due: the OpsItem is still there, and says it
+        // is being deleted.
+        for before in [
+            asked_at,
+            asked_at + OPS_ITEM_DELETE_SETTLES_AFTER / 2,
+            asked_at + OPS_ITEM_DELETE_SETTLES_AFTER - ::std::time::Duration::from_millis(1),
+        ] {
+            store.settle_ops_item_deletions_due(before);
+            let held = store.ops_item("us-west-2", "oi-00000000000a");
+            assert!(
+                held.is_some_and(super::OpsItemRecord::is_deleting),
+                "case {before:?}: expected an OpsItem being deleted, got {held:?}"
+            );
+        }
+        // A repeated delete does not put the removal off.
+        assert!(
+            store.delete_ops_item(
+                "us-west-2",
+                "oi-00000000000a",
+                asked_at + OPS_ITEM_DELETE_SETTLES_AFTER
+            ),
+            "case a repeated delete: expected it to report the record it marked"
+        );
+
+        store.settle_ops_item_deletions_due(asked_at + OPS_ITEM_DELETE_SETTLES_AFTER);
+        assert!(
+            store.ops_item("us-west-2", "oi-00000000000a").is_none(),
+            "case the due instant: expected the OpsItem to be gone"
+        );
+        assert_eq!(
+            store
+                .related_items_in_region("us-west-2")
+                .map(|held| held.ops_item_id.clone())
+                .collect::<Vec<String>>(),
+            vec!["oi-00000000000b".to_string()],
+            "case the due instant: only the deleted OpsItem's related items go"
+        );
+        assert!(
+            store.ops_item("eu-central-1", "oi-00000000000a").is_some(),
+            "case another Region: an OpsItem of another Region is untouched"
+        );
+        assert_eq!(
+            store.related_items_in_region("eu-central-1").count(),
+            1,
+            "case another Region: its related items are untouched"
+        );
+        assert!(
+            !store.delete_ops_item("us-west-2", "oi-00000000000a", asked_at),
+            "case a delete of a settled id: expected it to report that it marked nothing"
+        );
+        assert!(
+            !store.delete_ops_item("us-west-2", "oi-ffffffffffff", asked_at),
+            "case an id nothing is held under: expected it to report that it marked nothing"
+        );
     }
 }

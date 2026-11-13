@@ -133,6 +133,18 @@ fn number(item: &Value, member: &str) -> f64 {
         .unwrap_or_else(|| panic!("{member} is reported as a number, got {item}"))
 }
 
+/// The `Version` token a read reported, as the number it carries.
+///
+/// `OpsItem$Version` is a String, and what the service mints for it is a token that grows
+/// with every write of the record, so two versions of one OpsItem are ordered by comparing
+/// the numbers they spell rather than by counting edits.
+fn version(item: &Value, case: &str) -> u64 {
+    item["Version"]
+        .as_str()
+        .and_then(|token| token.parse().ok())
+        .unwrap_or_else(|| panic!("case {case}: Version is reported as a number, got {item}"))
+}
+
 /// The events `ListOpsItemEvents` reports about ONE OpsItem, newest first.
 async fn events_of(router: &MultiServiceRouter, case: &str, ops_item_id: &str) -> Vec<Value> {
     let request = json!({
@@ -317,10 +329,9 @@ async fn an_edit_writes_the_members_it_names_and_leaves_the_rest() {
                 before[member], after[member]
             );
         }
-        assert_eq!(
-            after["Version"].as_str(),
-            Some("2"),
-            "case {case}: one edit of a version-{} OpsItem leaves version 2, got {}",
+        assert!(
+            version(&after, case) > version(&before, case),
+            "case {case}: one edit must leave a version past the one it replaced, was {}, now {}",
             before["Version"],
             after["Version"]
         );
@@ -372,10 +383,10 @@ async fn every_modelled_status_is_an_edit_the_service_persists() {
             "case {status}: expected the status the edit named, got {}",
             after["Status"]
         );
-        assert_eq!(
-            after["Version"].as_str(),
-            Some("2"),
-            "case {status}: the status edit advances the version to 2, got {}",
+        assert!(
+            version(&after, status) > version(&before, status),
+            "case {status}: the status edit must advance the version past {}, got {}",
+            before["Version"],
             after["Version"]
         );
     }
@@ -391,6 +402,7 @@ async fn a_status_the_model_does_not_declare_is_refused() {
     for status in ["Resolving", "inprogress", "OPEN", "Done", "CompletedWithWarning"] {
         let created = create_ok(&router, status, &minimal(&format!("Not {status}"))).await;
         let id = ops_item_id(&created);
+        let before = get_ok(&router, status, &id).await;
         let (code, response) = update(&router, &json!({ "OpsItemId": id, "Status": status })).await;
         assert_ne!(
             code, 200,
@@ -403,15 +415,69 @@ async fn a_status_the_model_does_not_declare_is_refused() {
             "case {status}: a refused edit writes nothing, got {read}"
         );
         assert_eq!(
-            read["Version"].as_str(),
-            Some("1"),
-            "case {status}: a refused edit is no edit, so the version stands at 1, got {read}"
+            version(&read, status),
+            version(&before, status),
+            "case {status}: a refused edit is no edit, so the version stands at {}, got {read}",
+            before["Version"]
         );
     }
 }
 
-/// Consecutive edits each advance the version by one and each leave the OpsItem in the
-/// status that edit named, however many of them there are.
+/// The `Version` an OpsItem reports is a token the service re-derives at every write of the
+/// record: a read either side of an edit reports two tokens and the later one is the
+/// greater, whatever members the edit named — while a read on its own moves nothing.
+#[tokio::test]
+async fn the_version_token_is_re_derived_at_every_write() {
+    let router = router();
+    // Each row is one edit along the axis the rule generalises over: which member it
+    // writes, how many it writes at once, an edit that only removes operational data, an
+    // edit that writes a member back to the value the OpsItem already holds, and an edit
+    // that names no member at all.
+    let edits = [
+        json!({ "Status": "InProgress" }),
+        json!({ "Title": "The same OpsItem, retitled" }),
+        json!({
+            "OperationalData": { "pager": { "Value": "page the on-call", "Type": "String" } }
+        }),
+        json!({ "OperationalDataToDelete": ["pager"] }),
+        json!({ "Priority": 1, "Category": "Recovery", "Severity": "1" }),
+        json!({ "Status": "InProgress" }),
+        json!({}),
+    ];
+    let created = create_ok(
+        &router,
+        "a versioned OpsItem",
+        &fully_populated("A versioned OpsItem"),
+    )
+    .await;
+    let id = ops_item_id(&created);
+    let mut previous = version(&get_ok(&router, "the create", &id).await, "the create");
+    for (step, patch) in edits.iter().enumerate() {
+        let case = format!("edit {} naming {patch}", step + 1);
+        let mut body = patch.clone();
+        body["OpsItemId"] = json!(id);
+        update_ok(&router, &case, &body).await;
+        let reported = version(&get_ok(&router, &case, &id).await, &case);
+        assert!(
+            reported > previous,
+            "case {case}: expected a version token past {previous}, got {reported}"
+        );
+        previous = reported;
+    }
+    // Reading an OpsItem is not a write of it, so the token a read reports stands until the
+    // next edit.
+    for attempt in 1..=3 {
+        let case = format!("read {attempt} with no edit between");
+        let reported = version(&get_ok(&router, &case, &id).await, &case);
+        assert_eq!(
+            reported, previous,
+            "case {case}: expected the version token to stand at {previous}, got {reported}"
+        );
+    }
+}
+
+/// Consecutive edits each advance the version past the one before it and each leave the
+/// OpsItem in the status that edit named, however many of them there are.
 #[tokio::test]
 async fn consecutive_edits_advance_the_version_once_each() {
     let router = router();
@@ -422,6 +488,7 @@ async fn consecutive_edits_advance_the_version_once_each() {
     )
     .await;
     let id = ops_item_id(&created);
+    let mut previous = version(&get_ok(&router, "the create", &id).await, "the create");
     // A walk through the statuses a work item passes through, each one an edit.
     for (step, status) in ["InProgress", "Pending", "InProgress", "Resolved", "Closed"]
         .iter()
@@ -430,19 +497,18 @@ async fn consecutive_edits_advance_the_version_once_each() {
         let case = format!("edit {} to {status}", step + 1);
         update_ok(&router, &case, &json!({ "OpsItemId": id, "Status": status })).await;
         let read = get_ok(&router, &case, &id).await;
-        let expected_version = (step + 2).to_string();
         assert_eq!(
             read["Status"].as_str(),
             Some(*status),
             "case {case}: expected the status this edit named, got {}",
             read["Status"]
         );
-        assert_eq!(
-            read["Version"].as_str(),
-            Some(expected_version.as_str()),
-            "case {case}: expected version {expected_version}, got {}",
-            read["Version"]
+        let reported = version(&read, &case);
+        assert!(
+            reported > previous,
+            "case {case}: expected a version past {previous}, got {reported}"
         );
+        previous = reported;
     }
 }
 
@@ -609,6 +675,10 @@ async fn each_edit_appends_one_event_to_the_trail() {
     // Each row is one more edit on the same OpsItem, so the trail is checked at every
     // length rather than only at its last.
     let statuses = ["InProgress", "Resolved", "Open", "Closed"];
+    // The version token each edit left on the OpsItem, which is what the event that edit
+    // appended records: read back through `GetOpsItem` rather than counted, because the
+    // token is the service's to mint.
+    let mut versions: Vec<u64> = Vec::new();
     for (step, status) in statuses.iter().enumerate() {
         let case = format!("after {} edit(s)", step + 1);
         update_ok(
@@ -617,6 +687,7 @@ async fn each_edit_appends_one_event_to_the_trail() {
             &json!({ "OpsItemId": edited, "Status": status }),
         )
         .await;
+        versions.push(version(&get_ok(&router, &case, &edited).await, &case));
 
         let trail = events_of(&router, &case, &edited).await;
         assert_eq!(
@@ -626,7 +697,7 @@ async fn each_edit_appends_one_event_to_the_trail() {
         );
         // Newest first, so the trail reads as the reverse of the edits made.
         for (age, event) in trail.iter().enumerate() {
-            let version = (step + 2 - age) as u64;
+            let version = versions[step - age];
             let wrote = statuses[step - age];
             assert_eq!(
                 event["Detail"].as_str(),
@@ -876,6 +947,7 @@ async fn an_ops_item_is_edited_only_through_its_own_region() {
     let router = router();
     let created = create_ok(&router, "the OpsItem under test", &minimal("A regional OpsItem")).await;
     let held = ops_item_id(&created);
+    let before = get_ok(&router, "the OpsItem under test", &held).await;
     for region in ["us-east-1", "eu-central-1", "ap-southeast-2"] {
         let (status, response) = call_in_region(
             &router,
@@ -901,8 +973,8 @@ async fn an_ops_item_is_edited_only_through_its_own_region() {
         "an edit refused at another Region's endpoint leaves this one untouched, got {read}"
     );
     assert_eq!(
-        read["Version"].as_str(),
-        Some("1"),
+        version(&read, "the OpsItem under test"),
+        version(&before, "the OpsItem under test"),
         "an edit refused at another Region's endpoint is no edit, got {read}"
     );
 }

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetOpsItem
-//! Reports the OpsItem an id names, projected from the record `CreateOpsItem` persisted
-//! in [`crate::state::ops_items`]. A reporting operation: it writes nothing.
+//! Reports the OpsItem an id names, projected from the record the last write of it
+//! persisted in [`crate::state::ops_items`]. A reporting operation: the only write it makes
+//! is materialising what the clock already owed — the removal of an OpsItem whose delete
+//! had settled by the time this read ran.
 //!
 //! ---
 //!
@@ -153,14 +155,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let region = crate::state::request_region(ctx.parts());
-        let store = state.lock();
-        // `OpsItemNotFoundException`'s own documentation is the sentence a client reads
-        // for an id this Region holds no OpsItem under, stated once beside the store
-        // (`crate::state::ops_items::OPS_ITEM_NOT_FOUND_MESSAGE`): "The specified OpsItem
-        // ID doesn't exist. Verify the ID and try again."
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+        // A delete that had settled by now was owed whether or not anybody called, so the
+        // OpsItem it removed is gone before this read resolves the id.
+        store.materialize_due(now);
+        // How Systems Manager words a refusal of an id this Region holds no OpsItem under,
+        // stated once beside the store
+        // (`crate::state::ops_items::ops_item_not_found_message`).
         let not_found = || {
             GetOpsItemErrorModeled::OpsItemNotFoundException(OpsItemNotFoundException {
-                message: Some(crate::state::ops_items::OPS_ITEM_NOT_FOUND_MESSAGE.to_string()),
+                message: Some(crate::state::ops_items::ops_item_not_found_message()),
             })
         };
         let Some(record) = store.ops_item(&region, &input.ops_item_id) else {

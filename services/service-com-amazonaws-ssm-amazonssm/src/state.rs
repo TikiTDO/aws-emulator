@@ -3405,6 +3405,9 @@ impl ComAmazonawsSsmAmazonssmState {
         // So was the instant an execution preview the service had worked out became
         // reportable (`execution_previews`).
         self.advance_execution_previews(now);
+        // And so was the removal of an OpsItem whose delete had settled by then
+        // (`ops_items::OPS_ITEM_DELETE_SETTLES_AFTER`).
+        self.settle_ops_item_deletions_due(now);
     }
 
     /// The command `command_id` names in `region`, or `None` when that Region holds none.

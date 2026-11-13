@@ -164,7 +164,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .filter(|token| !token.is_empty());
 
         let region = crate::state::request_region(ctx.parts());
-        let store = state.lock();
+        let mut store = state.lock();
+        // The removal of an OpsItem whose delete had settled by now was owed whether or not
+        // anybody called, and the associations held against it went with it, so this listing
+        // reports them neither.
+        store.materialize_due(::std::time::SystemTime::now());
         // Systems Manager is regional, and an association belongs to the OpsItem it was
         // created against: a listing reports this Region's associations, narrowed to the
         // one OpsItem when the request names one and spanning every OpsItem of the Region

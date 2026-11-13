@@ -209,14 +209,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx.parts());
         let now = ::std::time::SystemTime::now();
         let mut store = state.lock();
+        // A delete that had settled by now was owed whether or not anybody called, so an
+        // OpsItem it removed is gone before this edit resolves the id.
+        store.materialize_due(now);
 
-        // `OpsItemNotFoundException`'s own documentation is the sentence a client reads for
-        // an id this Region holds no OpsItem under, stated once beside the store
-        // (`crate::state::ops_items::OPS_ITEM_NOT_FOUND_MESSAGE`).
+        // How Systems Manager words a refusal of an id this Region holds no OpsItem under,
+        // stated once beside the store
+        // (`crate::state::ops_items::ops_item_not_found_message`).
         let not_found = || {
             UpdateOpsItemError::from(UpdateOpsItemErrorModeled::OpsItemNotFoundException(
                 OpsItemNotFoundException {
-                    message: Some(ops_items::OPS_ITEM_NOT_FOUND_MESSAGE.to_string()),
+                    message: Some(ops_items::ops_item_not_found_message()),
                 },
             ))
         };
@@ -231,6 +234,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .is_some_and(|arn| arn != held.arn())
         {
             return Err(not_found());
+        }
+        // An OpsItem whose delete has been asked for and has not settled yet is still
+        // reported, but there is nothing left to edit about it: "the specified OpsItem is in
+        // the process of being deleted", which is what `OpsItemConflictException` reports.
+        if held.is_deleting() {
+            return Err(UpdateOpsItemErrorModeled::OpsItemConflictException(
+                OpsItemConflictException {
+                    message: Some(
+                        "The specified OpsItem is in the process of being deleted.".to_string(),
+                    ),
+                },
+            )
+            .into());
         }
         let mut record = held.clone();
 
@@ -332,11 +348,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             record.planned_end_time = Some(at);
         }
 
-        // "Each time the OpsItem is edited the version number increments by one", and the
-        // edit is what "the ARN of the Amazon Web Services account that last updated the
-        // OpsItem" and "the date and time the OpsItem was last updated" then report.
+        // An edit re-derives the OpsItem's version token, so a read either side of it
+        // reports two versions and the later one is the greater
+        // (`crate::state::ops_items::minted_ops_item_version`); the edit is also what "the
+        // ARN of the Amazon Web Services account that last updated the OpsItem" and "the
+        // date and time the OpsItem was last updated" then report.
         let edited_by = ::service_common::caller_principal::ambient_user_arn();
-        record.version = record.version.saturating_add(1);
+        record.version = ops_items::minted_ops_item_version(now, Some(record.version));
         record.last_modified_by = edited_by.clone();
         record.last_modified_time = now;
         let (version, status) = (record.version, record.status.clone());

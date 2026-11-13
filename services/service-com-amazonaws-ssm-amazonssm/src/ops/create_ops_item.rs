@@ -257,6 +257,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx.parts());
         let now = ::std::time::SystemTime::now();
         let mut store = state.lock();
+        // A delete that had settled by now was owed whether or not anybody called, so an
+        // OpsItem it removed does not collide with this create's dedup string.
+        store.materialize_due(now);
 
         // The `/aws/dedup` key is how a caller says "this is the same work item": an
         // OpsItem already OPEN in this Region under the same dedup string is that work
@@ -322,10 +325,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             tags: crate::state::to_btree_map(input.tags.clone()),
             created_by: created_by.clone(),
             created_time: now,
-            // Nothing has edited this OpsItem yet, so its last edit IS its create.
+            // Nothing has edited this OpsItem yet, so its last edit IS its create, and the
+            // version token this create mints is the one a later edit advances past.
             last_modified_by: created_by.clone(),
             last_modified_time: now,
-            version: ops_items::FIRST_OPS_ITEM_VERSION,
+            version: ops_items::minted_ops_item_version(now, None),
+            // Nothing has asked for this OpsItem to be deleted.
+            delete_due: None,
         };
         let (ops_item_id, ops_item_arn) = (record.ops_item_id.clone(), record.arn());
         store.insert_ops_item(record).map_err(limit_exceeded)?;

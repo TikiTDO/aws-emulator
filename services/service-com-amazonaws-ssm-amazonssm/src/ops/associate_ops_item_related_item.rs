@@ -165,18 +165,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx.parts());
         let now = ::std::time::SystemTime::now();
         let mut store = state.lock();
+        // A delete that had settled by now was owed whether or not anybody called, so an
+        // OpsItem it removed is gone before this association resolves the id.
+        store.materialize_due(now);
 
         // An association hangs off an OpsItem, so there has to BE one: an id this Region
-        // holds no OpsItem under is reported with that exception's own documentation, the
-        // one sentence every read of an OpsItem id serves
-        // (`crate::state::ops_items::OPS_ITEM_NOT_FOUND_MESSAGE`).
+        // holds no OpsItem under is refused the way every operation that cannot resolve an
+        // OpsItem id refuses it
+        // (`crate::state::ops_items::ops_item_not_found_message`).
         if store.ops_item(&region, &input.ops_item_id).is_none() {
             return Err(
                 AssociateOpsItemRelatedItemErrorModeled::OpsItemNotFoundException(
                     OpsItemNotFoundException {
-                        message: Some(
-                            crate::state::ops_items::OPS_ITEM_NOT_FOUND_MESSAGE.to_string(),
-                        ),
+                        message: Some(crate::state::ops_items::ops_item_not_found_message()),
                     },
                 )
                 .into(),

@@ -79,10 +79,8 @@ pub const NOT_ENABLED_MESSAGE: &str = "Just-In-Time Node Access service is not e
 /// names no access request the Region's endpoint issued.
 ///
 /// Only the error CLASS of this refusal is observed (`ValidationException`), so the sentence
-/// is worded the way this service words every other id it holds no record for — the `OpsItem`
-/// id an access request's own id is of the form of ("The specified OpsItem ID doesn't exist.
-/// Verify the ID and try again.", [`super::ops_items::OPS_ITEM_NOT_FOUND_MESSAGE`]) — and is
-/// likewise fixed text that echoes nothing of the request.
+/// is worded the way a Systems Manager id that names no record is worded — fixed text that
+/// echoes nothing of the request.
 pub const ACCESS_REQUEST_NOT_FOUND_MESSAGE: &str =
     "The specified access request ID doesn't exist. Verify the ID and try again.";
 

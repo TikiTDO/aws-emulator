@@ -265,10 +265,14 @@ async fn created_ops_items_round_trip_through_get() {
             "case {case}: expected a created OpsItem to be Open, got {}",
             read["Status"]
         );
-        assert_eq!(
-            read["Version"].as_str(),
-            Some("1"),
-            "case {case}: expected the first version, got {}",
+        // `OpsItem$Version` is a token the service derives at every write of the record,
+        // so a create reports one of its own rather than a value the request could predict.
+        // What the token does either side of an edit is `all/ops_item_updates.rs`'s.
+        assert!(
+            read["Version"]
+                .as_str()
+                .is_some_and(|token| token.parse::<u64>().is_ok_and(|value| value > 0)),
+            "case {case}: expected a minted version token, got {}",
             read["Version"]
         );
         assert_eq!(
