@@ -20,6 +20,11 @@ tokio = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
+# `DecodedClaims` in `src/state/token.rs`: a presented token's body is DESERIALIZED into
+# the claim set this service reads one as, so a body that is not that claim set is
+# reported by the deserializer — the claim at fault and its position in that body —
+# rather than by prose of this service's own.
+serde = { workspace = true }
 tracing = { workspace = true }
 # `json_document::minified`: the ONE minification of a JSON document a service takes
 # as an opaque string member and reports back, which this service's stored Cedar

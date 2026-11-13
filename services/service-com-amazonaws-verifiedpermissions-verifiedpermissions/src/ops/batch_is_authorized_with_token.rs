@@ -34,7 +34,10 @@
 //! A token the service cannot verify is refused with the modelled `ValidationException`,
 //! worded as the sentence AWS answers for it — `Failed to verify <member>: <reason>` —
 //! rather than every result being answered with a `DENY`, which would read as "evaluated
-//! and denied"; an audience none of the source's clients match is that same exception
+//! and denied"; a token whose BODY is not a claim set at all never reached that
+//! verification and is refused as the stage that did fail — `Failed to decode <member>:
+//! <reason>`, carrying what the claim-set deserialization reported. An audience none of the
+//! source's clients match is that same exception
 //! worded as the one fixed sentence AWS answers for it ([`AUDIENCE_NOT_ACCEPTED`]). A
 //! token whose ISSUER is no identity source of the store is the modelled
 //! `ResourceNotFoundException`, and a signature of an issuer this emulator HOSTS that it
@@ -511,6 +514,12 @@ fn refused_by_cedar(refusal: crate::state::cedar::Refusal) -> BatchIsAuthorizedW
 /// identity source does not accept is the exception the service words as fixed text instead
 /// ([`AUDIENCE_NOT_ACCEPTED`]).
 ///
+/// A token whose BODY did not DECODE into a claim set is the same bad request worded for the
+/// stage it failed at — `Failed to decode IdentityToken: <what the deserialization
+/// reported>` — because nothing about such a token was verified: a client reading the
+/// message is told to repair the token it presented, where the verify sentence would send it
+/// to the trust its policy store configures.
+///
 /// A token whose issuer is no identity source of the store is the other kind of answer:
 /// nothing about the token is wrong, and what the call referenced — an identity source for
 /// that issuer IN this policy store — does not exist, so it is the modelled not-found,
@@ -524,6 +533,16 @@ fn refused_token(
     refusal: crate::state::token::TokenRefusal,
 ) -> BatchIsAuthorizedWithTokenError {
     match refusal {
+        crate::state::token::TokenRefusal::NotDecoded { kind, reason } => {
+            BatchIsAuthorizedWithTokenErrorModeled::ValidationException(ValidationException {
+                message: format!("Failed to decode {}: {reason}", kind.reported_name()),
+                field_list: Some(vec![ValidationExceptionField {
+                    path: kind.path().to_string(),
+                    message: reason,
+                }]),
+            })
+            .into()
+        }
         crate::state::token::TokenRefusal::NotVerified { kind, reason } => {
             BatchIsAuthorizedWithTokenErrorModeled::ValidationException(ValidationException {
                 message: format!("Failed to verify {}: {reason}", kind.reported_name()),

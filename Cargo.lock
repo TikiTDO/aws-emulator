@@ -19928,6 +19928,7 @@ dependencies = [
  "cedar-policy",
  "hex",
  "http",
+ "serde",
  "serde_json",
  "service-com-amazonaws-cognitoidentityprovider-awscognitoidentityproviderservice",
  "service-common",

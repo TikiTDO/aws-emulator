@@ -39,7 +39,7 @@ const AUDIENCE_NOT_ACCEPTED: &str = "Token audience claim contains no valid audi
 
 /// `bytes` as one base64url segment, unpadded, as a compact JWS carries it
 /// (RFC 7515 §2).
-fn base64url(bytes: &[u8]) -> String {
+pub(crate) fn base64url(bytes: &[u8]) -> String {
     aws_smithy_types::base64::encode(bytes)
         .trim_end_matches('=')
         .replace('+', "-")

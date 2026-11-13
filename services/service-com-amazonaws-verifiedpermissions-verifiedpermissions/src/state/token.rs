@@ -26,6 +26,13 @@
 //!   value settles: the form (nothing unsecured), the issuer it claims, the member it
 //!   arrived in, the client it was issued to and its validity window.
 //!
+//! Reading a presented token takes two stages, and a refusal says WHICH of them the token
+//! failed at, because the two send a caller to different repairs: the body is first DECODED
+//! into the claim set this reading requires ([`DecodedClaims`], a token the caller has to
+//! repair), and only a token that decoded is then VERIFIED against the policy store's
+//! identity sources — signature, kind, client and window (a token the caller presented in
+//! good faith, which the store's trust configuration does not accept).
+//!
 //! Everything here is a READ: no token is recorded, consumed or counted, so two calls
 //! presenting one token are answered alike.
 
@@ -45,6 +52,12 @@ use crate::ops::paths;
 /// caller — the issuer did not sign this token — rather than a report of which key the
 /// service looked for.
 const SIGNATURE_INVALID: &str = "signature is invalid";
+
+/// The clause a token whose BODY is not a claim set is refused with, in front of what the
+/// claim-set deserialization itself reported: which half of the token failed to decode —
+/// its body, where the claims are, rather than its header — and that what failed was
+/// reading JSON out of it.
+const INVALID_BODY: &str = "Invalid body: JSON error";
 
 /// The claim naming the issuer that minted a token (RFC 7519 §4.1.1), which is what says
 /// WHICH identity source — and so which published key set — a presented token belongs to.
@@ -243,6 +256,15 @@ fn uid_json(entity_type: &str, entity_id: &str) -> Value {
 /// Why a presented token was refused.
 #[derive(Debug, Clone)]
 pub enum TokenRefusal {
+    /// The token's BODY is not the claim set this service reads one as: a claim it has to
+    /// carry is absent, or one it carries is not of that claim's type. Nothing about the
+    /// token was verified — the claim set a verification reads is not there to read — so
+    /// the refusal reports the stage that failed, which is DECODING the token rather than
+    /// verifying it: a caller repairs the TOKEN, not the trust the policy store configures.
+    /// `kind` is the member it arrived in, and `reason` what deserializing that body
+    /// reported: the claim at fault and its position in the body, which is what says where
+    /// to repair it.
+    NotDecoded { kind: TokenKind, reason: String },
     /// The token did not verify. `kind` is the member it arrived in, and `reason` the
     /// clause saying what about it failed; the operation words the sentence those two make
     /// and answers the modelled `ValidationException`.
@@ -279,13 +301,62 @@ impl TokenRefusal {
             reason: reason.into(),
         }
     }
+
+    /// Refuse the token in `kind` because its body is not a claim set, as `error` — the
+    /// report of the deserialization that read that body — says.
+    fn not_decoded(kind: TokenKind, error: &::serde_json::Error) -> Self {
+        Self::NotDecoded {
+            kind,
+            reason: format!("{INVALID_BODY}: {error}"),
+        }
+    }
+}
+
+/// The claim set a presented token's body is DECODED into, before a single rule is applied
+/// to what it claims.
+///
+/// The ISSUER is what this reading requires, because it is the one claim read before any
+/// identity source is known: it says WHICH source — and so which published key set, which
+/// accepted clients and which principal type — a presented token belongs to, so there is
+/// nothing to read the remaining claims under until it is in hand. Every other claim is
+/// read under the rule of the source the issuer selects ([`verify`]), so a token missing one
+/// of those HAS decoded, and is refused by the rule that wanted it.
+///
+/// Deserialization is what REPORTS a body that is not this claim set, and its report is the
+/// refusal's reason: serde names the claim at fault and `serde_json` the position of it in
+/// the body being read. A token mostly carries claims this service does not require, so
+/// every other member is ignored here and read later as an attribute of the principal.
+#[derive(::serde::Deserialize)]
+struct DecodedClaims {
+    /// [`ISSUER_CLAIM`], under the name it travels under on the wire (an attribute takes a
+    /// literal, so that claim's own constant cannot be named here).
+    #[serde(rename = "iss")]
+    issuer: String,
+}
+
+/// The bytes of a presented token's BODY: the middle segment of a compact JWS, base64url
+/// decoded, which is the JSON a claim set is read out of.
+///
+/// The octets the CALLER sent, because the position a deserialization reports is a position
+/// in them — re-encoding the claims this service already parsed would report a position in
+/// that re-encoding instead. A value whose body cannot be isolated or decoded is no token
+/// at all, which [`::service_common::jwt::read`] refuses before this is reached; it reads
+/// here as an empty body, which is no claim set either.
+fn token_body(presented: &str) -> Vec<u8> {
+    presented
+        .trim()
+        .split('.')
+        .nth(1)
+        .and_then(::service_common::jwt::decode_base64url)
+        .unwrap_or_default()
 }
 
 /// Verify one presented token against the policy store's identity sources and report the
 /// identity it names.
 ///
-/// The order is the one a verifier has to apply: the value is a token at all, it names an
-/// issuer this store trusts, the issuer SIGNED it where that signature can be checked at
+/// The order is the one a verifier has to apply: the value is a token at all, its body
+/// DECODES into the claim set this reading requires ([`DecodedClaims`]), it names an issuer
+/// this store trusts, the issuer SIGNED it where that signature can be checked at
 /// all — and only then are its remaining claims read. `engine` is the shared engine the
 /// issuer's published key set is read from.
 ///
@@ -310,9 +381,13 @@ pub fn verify<Eng: Send + Sync + 'static>(
     let read = ::service_common::jwt::read(presented.value)
         .map_err(|defect| refuse(defect.to_string()))?;
 
-    let issuer = read
-        .claim_str(ISSUER_CLAIM)
-        .map(str::trim)
+    // The body is DECODED into the claim set this service reads one as before any rule is
+    // applied to the claims: a body that is not that claim set failed to DECODE, and is
+    // refused as such rather than as a token that failed to verify.
+    let decoded: DecodedClaims = ::serde_json::from_slice(&token_body(presented.value))
+        .map_err(|error| TokenRefusal::not_decoded(kind, &error))?;
+
+    let issuer = Some(decoded.issuer.trim())
         .filter(|issuer| !issuer.is_empty())
         .ok_or_else(|| refuse("the token names no issuer".to_string()))?
         .to_string();

@@ -133,6 +133,8 @@ mod tagging;
 mod template_linked_policies;
 #[path = "all/template_placeholder_immutability.rs"]
 mod template_placeholder_immutability;
+#[path = "all/token_body_decode_refusal.rs"]
+mod token_body_decode_refusal;
 #[path = "all/update_and_delete_lifecycle.rs"]
 mod update_and_delete_lifecycle;
 #[path = "all/validation_exception_contents.rs"]
