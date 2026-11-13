@@ -69,7 +69,8 @@ const TELEMETRY_PROJECT_ID: &str = "proj-a85d506b35244f71850223e92be29acb";
 const EMULATOR_HOME_DIR: &str = ".aws/emulator";
 
 /// The telemetry configuration endpoint. `None` leaves the client inert.
-const TELEMETRY_CONFIG_ENDPOINT: Option<&str> = Some("https://aws-emulator-telemetry.us-west-2.api.aws/v1/config");
+const TELEMETRY_CONFIG_ENDPOINT: Option<&str> =
+    Some("https://aws-emulator-telemetry.us-west-2.api.aws/v1/config");
 
 /// Environment variable overriding [`EMULATOR_STACK_SIZE`], in BYTES, for a host that
 /// refuses a large thread stack. A malformed or too-small value falls back to the
@@ -108,17 +109,18 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     }
-    let options = match emulator_server::cli::parse_command_line(std::env::args().skip(1), BUILD_INFO) {
-        Ok(Command::Run(options)) => options,
-        Ok(Command::Print(text)) => {
-            let _ = writeln!(std::io::stdout(), "{text}"); // closed stdout (`-v | head -1`) is fine
-            return;
-        }
-        Err(message) => {
-            eprintln!("{message}");
-            std::process::exit(2);
-        }
-    };
+    let options =
+        match emulator_server::cli::parse_command_line(std::env::args().skip(1), BUILD_INFO) {
+            Ok(Command::Run(options)) => options,
+            Ok(Command::Print(text)) => {
+                let _ = writeln!(std::io::stdout(), "{text}"); // closed stdout (`-v | head -1`) is fine
+                return;
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(2);
+            }
+        };
     emulator_server::set_authentication(options.authentication);
     emulator_server::cli::listen_on(options.bind_address, options.port);
     let stack_bytes = emulator_stack_size();
@@ -171,8 +173,7 @@ fn run(options: RunOptions) {
 async fn build_and_serve(options: RunOptions) {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .json()
         .init();
@@ -183,6 +184,10 @@ async fn build_and_serve(options: RunOptions) {
         eprintln!("emulator bootstrap failed: {error}");
         std::process::exit(1);
     });
+    if let Err(error) = emulator_server::transport::prepare() {
+        eprintln!("emulator transport configuration refused: {error}");
+        std::process::exit(1);
+    }
     if let Err(error) = profile.prepare_identity() {
         eprintln!("emulator identity selection failed: {error}");
         std::process::exit(1);
@@ -246,11 +251,17 @@ async fn build_and_serve(options: RunOptions) {
                 }
             });
             let served = emulator_server::serve_emulator_until_shutdown(
-                aws_emulator_router::persistence::PersistingRouter::new(router, persistence.clone()),
+                aws_emulator_router::persistence::PersistingRouter::new(
+                    router,
+                    persistence.clone(),
+                ),
             )
             .await;
             if let Err(not_durable) = persistence.save_changed().await {
-                eprintln!("emulator state not written at shutdown: {:?}", not_durable.failed);
+                eprintln!(
+                    "emulator state not written at shutdown: {:?}",
+                    not_durable.failed
+                );
             }
             served
         }
@@ -305,7 +316,8 @@ fn start_telemetry(switch: Option<bool>) -> Option<&'static emulator_telemetry::
     if switch == Some(false) {
         options.embedding_opt_out = true;
     }
-    let telemetry = emulator_telemetry::init_global(emulator_telemetry::TelemetryClient::start(options));
+    let telemetry =
+        emulator_telemetry::init_global(emulator_telemetry::TelemetryClient::start(options));
     telemetry.install_panic_hook();
     Some(telemetry)
 }
