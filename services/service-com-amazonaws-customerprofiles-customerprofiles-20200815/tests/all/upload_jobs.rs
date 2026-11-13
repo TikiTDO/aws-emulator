@@ -16,7 +16,7 @@
 
 use serde_json::{json, Value};
 
-use crate::domain_profile_lifecycle::{error_code, Emulator};
+use crate::domain_profile_lifecycle::{error_code, upload_job_fields, Emulator};
 
 /// `CreateUploadJobRequest$DataExpiry`: "If not provided, the system default of 2 weeks
 /// is used."
@@ -25,37 +25,6 @@ const DEFAULT_DATA_EXPIRY_DAYS: i64 = 14;
 /// The status `GetUploadJobResponse$Status` documents for a job that has not started:
 /// "CREATED: The upload job has been created, but has not started processing yet."
 const CREATED: &str = "CREATED";
-
-/// `CreateUploadJob` over the wire: `POST /domains/{DomainName}/upload-jobs`.
-async fn create(emulator: &Emulator, domain: &str, body: Value) -> (u16, Value) {
-    emulator
-        .send("POST", &format!("/domains/{domain}/upload-jobs"), Some(body))
-        .await
-}
-
-/// `GetUploadJob` over the wire: `GET /domains/{DomainName}/upload-jobs/{JobId}`.
-async fn get(emulator: &Emulator, domain: &str, job_id: &str) -> (u16, Value) {
-    emulator
-        .send(
-            "GET",
-            &format!("/domains/{domain}/upload-jobs/{job_id}"),
-            None,
-        )
-        .await
-}
-
-/// A `Fields` map: `ObjectTypeField`'s three members, with a `ContentType` out of the
-/// modelled `FieldContentType` enum (STRING | NUMBER | PHONE_NUMBER | EMAIL_ADDRESS |
-/// NAME).
-fn fields(column: &str, content_type: &str, target: &str) -> Value {
-    json!({
-        column: {
-            "ContentType": content_type,
-            "Source": format!("_source.{column}"),
-            "Target": target,
-        },
-    })
-}
 
 /// Whether `job_id` is the 32 lowercase hex characters `uuid`'s modelled pattern
 /// `^[a-f0-9]{32}$` requires.
@@ -76,7 +45,7 @@ async fn a_create_persists_the_job_and_the_read_reports_it() {
             "no DataExpiry, so the documented default applies",
             json!({
                 "DisplayName": "contacts.csv",
-                "Fields": fields("email", "EMAIL_ADDRESS", "_profile.EmailAddress"),
+                "Fields": upload_job_fields("email", "EMAIL_ADDRESS", "_profile.EmailAddress"),
                 "UniqueKey": "email",
             }),
             DEFAULT_DATA_EXPIRY_DAYS,
@@ -85,7 +54,7 @@ async fn a_create_persists_the_job_and_the_read_reports_it() {
             "a DataExpiry at the modelled minimum",
             json!({
                 "DisplayName": "one-day.csv",
-                "Fields": fields("phone", "PHONE_NUMBER", "_profile.PhoneNumber"),
+                "Fields": upload_job_fields("phone", "PHONE_NUMBER", "_profile.PhoneNumber"),
                 "UniqueKey": "phone",
                 "DataExpiry": 1,
             }),
@@ -95,7 +64,7 @@ async fn a_create_persists_the_job_and_the_read_reports_it() {
             "a DataExpiry at the modelled maximum",
             json!({
                 "DisplayName": "d",
-                "Fields": fields("account", "STRING", "_profile.AccountNumber"),
+                "Fields": upload_job_fields("account", "STRING", "_profile.AccountNumber"),
                 "UniqueKey": "account",
                 "DataExpiry": 1098,
             }),
@@ -130,7 +99,7 @@ async fn a_create_persists_the_job_and_the_read_reports_it() {
 
     let mut minted: Vec<String> = Vec::new();
     for (case, body, expected_expiry) in rows {
-        let (status, response) = create(&emulator, "uploaddom", body.clone()).await;
+        let (status, response) = emulator.create_upload_job("uploaddom", body.clone()).await;
         assert_eq!(
             status, 200,
             "case {case:?}: expected HTTP 200 for {body:?}, got {status} {response:?}"
@@ -151,7 +120,7 @@ async fn a_create_persists_the_job_and_the_read_reports_it() {
         );
         minted.push(job_id.clone());
 
-        let (status, read) = get(&emulator, "uploaddom", &job_id).await;
+        let (status, read) = emulator.get_upload_job("uploaddom", &job_id).await;
         assert_eq!(
             status, 200,
             "case {case:?}: expected GetUploadJob 200, got {status} {read:?}"
@@ -181,21 +150,28 @@ async fn a_create_persists_the_job_and_the_read_reports_it() {
             Some(CREATED),
             "case {case:?}: a job nobody started must report {CREATED}, got {read:?}"
         );
-        // Nothing has processed this job, so it reports no completion and no results.
-        for member in ["CompletedAt", "ResultsSummary", "StatusReason"] {
+        // Nothing has processed this job, so it reports no completion and no reason.
+        for member in ["CompletedAt", "StatusReason"] {
             assert_eq!(
                 read.get(member),
                 None,
                 "case {case:?}: a job nobody started must not report {member}, got {read:?}"
             );
         }
+        // `ResultsSummary` is part of the stored job, so a read of it always reports the
+        // structure; it is the counters inside that a job nobody started leaves unset.
+        // Asserted in full by `upload_job_results_summary`.
+        assert!(
+            read.get("ResultsSummary").is_some_and(Value::is_object),
+            "case {case:?}: expected a ResultsSummary object, got {read:?}"
+        );
         assert!(
             read.get("CreatedAt").is_some(),
             "case {case:?}: expected CreatedAt, got {read:?}"
         );
 
         // The read changed nothing a later caller sees.
-        let (status, again) = get(&emulator, "uploaddom", &job_id).await;
+        let (status, again) = emulator.get_upload_job("uploaddom", &job_id).await;
         assert_eq!(
             (status, &again),
             (200, &read),
@@ -215,10 +191,10 @@ async fn a_job_is_reachable_only_through_the_domain_that_holds_it() {
 
     let request = json!({
         "DisplayName": "scoped.csv",
-        "Fields": fields("email", "EMAIL_ADDRESS", "_profile.EmailAddress"),
+        "Fields": upload_job_fields("email", "EMAIL_ADDRESS", "_profile.EmailAddress"),
         "UniqueKey": "email",
     });
-    let (status, response) = create(&emulator, "owningdom", request.clone()).await;
+    let (status, response) = emulator.create_upload_job("owningdom", request.clone()).await;
     assert_eq!(
         status, 200,
         "case \"the create\": expected 200, got {status} {response:?}"
@@ -229,13 +205,13 @@ async fn a_job_is_reachable_only_through_the_domain_that_holds_it() {
         .expect("a minted JobId")
         .to_string();
 
-    let (status, read) = get(&emulator, "owningdom", &job_id).await;
+    let (status, read) = emulator.get_upload_job("owningdom", &job_id).await;
     assert_eq!(
         status, 200,
         "case \"a read through the owning domain\": expected 200, got {status} {read:?}"
     );
 
-    let (status, read) = get(&emulator, "otherdom", &job_id).await;
+    let (status, read) = emulator.get_upload_job("otherdom", &job_id).await;
     assert_eq!(
         (status, error_code(&read)),
         (404, "ResourceNotFoundException"),
@@ -253,11 +229,11 @@ async fn the_upload_job_operations_refuse_an_absent_resource_and_invalid_input()
 
     let valid = json!({
         "DisplayName": "valid.csv",
-        "Fields": fields("email", "EMAIL_ADDRESS", "_profile.EmailAddress"),
+        "Fields": upload_job_fields("email", "EMAIL_ADDRESS", "_profile.EmailAddress"),
         "UniqueKey": "email",
     });
 
-    let (status, body) = create(&emulator, "nosuchdomain", valid.clone()).await;
+    let (status, body) = emulator.create_upload_job("nosuchdomain", valid.clone()).await;
     assert_eq!(
         (status, error_code(&body)),
         (404, "ResourceNotFoundException"),
@@ -266,14 +242,14 @@ async fn the_upload_job_operations_refuse_an_absent_resource_and_invalid_input()
 
     // A well-formed id (32 hex characters) no create minted.
     let absent_id = "0".repeat(32);
-    let (status, body) = get(&emulator, "nosuchdomain", &absent_id).await;
+    let (status, body) = emulator.get_upload_job("nosuchdomain", &absent_id).await;
     assert_eq!(
         (status, error_code(&body)),
         (404, "ResourceNotFoundException"),
         "case \"a read in a domain that is not stored\": expected 404, got {status} {body:?}"
     );
 
-    let (status, body) = get(&emulator, "boundsjobdom", &absent_id).await;
+    let (status, body) = emulator.get_upload_job("boundsjobdom", &absent_id).await;
     assert_eq!(
         (status, error_code(&body)),
         (404, "ResourceNotFoundException"),
@@ -286,22 +262,22 @@ async fn the_upload_job_operations_refuse_an_absent_resource_and_invalid_input()
     let constraints: Vec<(&str, Value, u16)> = vec![
         (
             "a DisplayName at the minimum length",
-            json!({ "DisplayName": "d", "Fields": fields("email", "STRING", "_profile.EmailAddress"), "UniqueKey": "email" }),
+            json!({ "DisplayName": "d", "Fields": upload_job_fields("email", "STRING", "_profile.EmailAddress"), "UniqueKey": "email" }),
             200,
         ),
         (
             "a DisplayName one past the maximum length",
-            json!({ "DisplayName": "n".repeat(256), "Fields": fields("email", "STRING", "_profile.EmailAddress"), "UniqueKey": "email" }),
+            json!({ "DisplayName": "n".repeat(256), "Fields": upload_job_fields("email", "STRING", "_profile.EmailAddress"), "UniqueKey": "email" }),
             400,
         ),
         (
             "a DisplayName below the minimum length",
-            json!({ "DisplayName": "", "Fields": fields("email", "STRING", "_profile.EmailAddress"), "UniqueKey": "email" }),
+            json!({ "DisplayName": "", "Fields": upload_job_fields("email", "STRING", "_profile.EmailAddress"), "UniqueKey": "email" }),
             400,
         ),
         (
             "no DisplayName at all",
-            json!({ "Fields": fields("email", "STRING", "_profile.EmailAddress"), "UniqueKey": "email" }),
+            json!({ "Fields": upload_job_fields("email", "STRING", "_profile.EmailAddress"), "UniqueKey": "email" }),
             400,
         ),
         (
@@ -311,38 +287,38 @@ async fn the_upload_job_operations_refuse_an_absent_resource_and_invalid_input()
         ),
         (
             "no UniqueKey at all",
-            json!({ "DisplayName": "nokey.csv", "Fields": fields("email", "STRING", "_profile.EmailAddress") }),
+            json!({ "DisplayName": "nokey.csv", "Fields": upload_job_fields("email", "STRING", "_profile.EmailAddress") }),
             400,
         ),
         (
             "a UniqueKey below the minimum length",
-            json!({ "DisplayName": "emptykey.csv", "Fields": fields("email", "STRING", "_profile.EmailAddress"), "UniqueKey": "" }),
+            json!({ "DisplayName": "emptykey.csv", "Fields": upload_job_fields("email", "STRING", "_profile.EmailAddress"), "UniqueKey": "" }),
             400,
         ),
         (
             "a UniqueKey one past the maximum length",
-            json!({ "DisplayName": "longkey.csv", "Fields": fields("email", "STRING", "_profile.EmailAddress"), "UniqueKey": "k".repeat(1001) }),
+            json!({ "DisplayName": "longkey.csv", "Fields": upload_job_fields("email", "STRING", "_profile.EmailAddress"), "UniqueKey": "k".repeat(1001) }),
             400,
         ),
         (
             "a DataExpiry below the modelled minimum",
-            json!({ "DisplayName": "zeroexpiry.csv", "Fields": fields("email", "STRING", "_profile.EmailAddress"), "UniqueKey": "email", "DataExpiry": 0 }),
+            json!({ "DisplayName": "zeroexpiry.csv", "Fields": upload_job_fields("email", "STRING", "_profile.EmailAddress"), "UniqueKey": "email", "DataExpiry": 0 }),
             400,
         ),
         (
             "a DataExpiry one past the modelled maximum",
-            json!({ "DisplayName": "pastexpiry.csv", "Fields": fields("email", "STRING", "_profile.EmailAddress"), "UniqueKey": "email", "DataExpiry": 1099 }),
+            json!({ "DisplayName": "pastexpiry.csv", "Fields": upload_job_fields("email", "STRING", "_profile.EmailAddress"), "UniqueKey": "email", "DataExpiry": 1099 }),
             400,
         ),
         (
             "a ContentType outside the modelled enum",
-            json!({ "DisplayName": "badtype.csv", "Fields": fields("email", "TELEPHONE", "_profile.EmailAddress"), "UniqueKey": "email" }),
+            json!({ "DisplayName": "badtype.csv", "Fields": upload_job_fields("email", "TELEPHONE", "_profile.EmailAddress"), "UniqueKey": "email" }),
             400,
         ),
     ];
 
     for (case, body, expected_status) in constraints {
-        let (status, response) = create(&emulator, "boundsjobdom", body.clone()).await;
+        let (status, response) = emulator.create_upload_job("boundsjobdom", body.clone()).await;
         assert_eq!(
             status, expected_status,
             "case {case:?}: expected HTTP {expected_status} for {body:?}, got {status} \

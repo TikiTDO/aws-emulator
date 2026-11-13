@@ -45,5 +45,7 @@ mod state_roundtrip;
 mod update_domain;
 #[path = "all/update_profile.rs"]
 mod update_profile;
+#[path = "all/upload_job_results_summary.rs"]
+mod upload_job_results_summary;
 #[path = "all/upload_jobs.rs"]
 mod upload_jobs;

@@ -123,6 +123,23 @@ impl Emulator {
             .to_string()
     }
 
+    /// `CreateUploadJob`: `POST /domains/{DomainName}/upload-jobs`. Shared by every
+    /// upload-job suite, so the route is spelled for a call exactly once.
+    pub(crate) async fn create_upload_job(&self, domain: &str, body: Value) -> (u16, Value) {
+        self.send("POST", &format!("/domains/{domain}/upload-jobs"), Some(body))
+            .await
+    }
+
+    /// `GetUploadJob`: `GET /domains/{DomainName}/upload-jobs/{JobId}`.
+    pub(crate) async fn get_upload_job(&self, domain: &str, job_id: &str) -> (u16, Value) {
+        self.send(
+            "GET",
+            &format!("/domains/{domain}/upload-jobs/{job_id}"),
+            None,
+        )
+        .await
+    }
+
     /// `SearchProfiles` for one key, with optional query parameters.
     pub(crate) async fn search(&self, domain: &str, body: Value, query: &str) -> (u16, Value) {
         self.post(&format!("/domains/{domain}/profiles/search{query}"), body)
@@ -144,6 +161,24 @@ impl Emulator {
 /// The wire error code restJson1 carries in the body's `__type` discriminator.
 pub(crate) fn error_code(body: &Value) -> &str {
     body.get("__type").and_then(Value::as_str).unwrap_or("")
+}
+
+/// The `Message` member of a modelled error body.
+pub(crate) fn error_message(body: &Value) -> &str {
+    body.get("Message").and_then(Value::as_str).unwrap_or("")
+}
+
+/// A `FieldMap` carrying one column: `ObjectTypeField`'s three members, with a
+/// `ContentType` out of the modelled `FieldContentType` enum (STRING | NUMBER |
+/// PHONE_NUMBER | EMAIL_ADDRESS | NAME).
+pub(crate) fn upload_job_fields(column: &str, content_type: &str, target: &str) -> Value {
+    json!({
+        column: {
+            "ContentType": content_type,
+            "Source": format!("_source.{column}"),
+            "Target": target,
+        },
+    })
 }
 
 /// The `ProfileId`s of a `SearchProfiles` response's `Items`.

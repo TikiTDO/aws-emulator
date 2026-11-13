@@ -171,7 +171,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // A read: it answers out of the stored job and writes nothing.
         let store = state.lock();
         let domain = store.domains.get(&input.domain_name).ok_or_else(|| {
-            not_found(crate::state::domain_not_found(&input.domain_name))
+            not_found(crate::state::upload_job_domain_not_found(&input.domain_name))
         })?;
         let job = domain.upload_jobs.get(&input.job_id).ok_or_else(|| {
             not_found(format!(
@@ -189,7 +189,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             completed_at: job.completed_at.map(crate::state::to_date_time),
             fields: Some(job.fields.clone()),
             unique_key: Some(job.unique_key.clone()),
-            results_summary: job.results_summary.clone(),
+            // Always reported for a job that is stored: the summary is part of the
+            // record, and it is its counters that are unset until the job has processed
+            // records.
+            results_summary: Some(job.results_summary.clone()),
             data_expiry: Some(job.data_expiry),
         })
     }

@@ -419,9 +419,12 @@ pub struct StoredUploadJob {
     pub created_at: SystemTime,
     /// `CompletedAt`: when the job finished processing, so unset until it has.
     pub completed_at: Option<SystemTime>,
-    /// `ResultsSummary`: the records the job processed, so unset until it has processed
-    /// any.
-    pub results_summary: Option<ResultsSummary>,
+    /// `ResultsSummary`: "The summary of results for the upload job, including the
+    /// number of updated, created, and failed records." The summary itself is part of
+    /// every job record from the moment it is created — a reader of a stored job always
+    /// gets the structure — and it is its three counters that stay unset until the job
+    /// has processed records.
+    pub results_summary: ResultsSummary,
 }
 
 impl StoredUploadJob {
@@ -445,7 +448,9 @@ impl StoredUploadJob {
             status_reason: None,
             created_at: now,
             completed_at: None,
-            results_summary: None,
+            // Nothing has been processed yet, so the summary is present with none of
+            // its three counters populated.
+            results_summary: ResultsSummary::default(),
         }
     }
 }
@@ -1846,6 +1851,15 @@ pub fn clear_if_empty(value: String) -> Option<String> {
 /// same whichever of them was called.
 pub fn domain_not_found(domain_name: &str) -> String {
     format!("Domain {domain_name} is not found")
+}
+
+/// The `ResourceNotFoundException` message the UPLOAD-JOB operations word an absent
+/// domain with: the service reports that absence from its upload-job path in its own
+/// fixed sentence, whose only variable part is the `DomainName` the request's URI label
+/// carried. Shared by every operation on the upload-job surface, so the same absent name
+/// reads the same whichever of them was called.
+pub fn upload_job_domain_not_found(domain_name: &str) -> String {
+    format!("Domain with name {domain_name} could not be found")
 }
 
 /// The `ResourceNotFoundException` message for a profile a domain does not hold, as the
