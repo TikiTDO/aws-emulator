@@ -2,12 +2,14 @@
 
 //! @op GetEndpoint
 //!
-//! Reports the Device Advisor host a device under test connects to: the ACCOUNT-LEVEL
-//! host for a request that names no device, and the DEVICE-LEVEL host for one that names
-//! a device by its thing, its certificate or the role it assumes. A pure read — the host
-//! is derived from the account, the request's signing region and the device named, by
-//! [`crate::state::endpoint_for`], the single derivation `StartSuiteRun` also reports its
-//! run's endpoint from, so nothing is written and the endpoint a run carries for its
+//! Reports WHERE a device under test connects: the endpoint this request reached the
+//! emulator on, which is the one address a client configured with it can dial, and — for a
+//! caller that resolves AWS's own hostnames instead — the host AWS itself vends, the
+//! ACCOUNT-LEVEL one for a request that names no device and that DEVICE's own one for a
+//! request that names a device by its thing, its certificate or the role it assumes. A pure
+//! read: the answer is derived from the request, the account and the device named, by
+//! [`crate::state::announced_endpoint`], the single derivation `StartSuiteRun` also reports
+//! its run's endpoint from, so nothing is written and the endpoint a run carries for its
 //! primary device and the one this vends for that device cannot disagree.
 //!
 //! ## Shape of an operation
@@ -195,7 +197,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The region the host names is the one the request was signed for, the same region
         // this service scopes a minted ARN to.
         let region = crate::state::request_region(ctx.parts());
-        let endpoint = crate::state::endpoint_for(&region, &device);
+        // `endpoint` is the address the device under test then DIALS, so what is announced
+        // is the endpoint THIS request reached, and the host AWS itself vends only for a
+        // client that resolves AWS's own names and has no own address to be sent to. See
+        // `crate::state::endpoint_addressing`.
+        let endpoint = crate::state::announced_endpoint(
+            ctx.parts(),
+            ctx.endpoint().as_str(),
+            &region,
+            &device,
+        );
         Ok(GetEndpointOutput {
             endpoint: Some(endpoint),
         })

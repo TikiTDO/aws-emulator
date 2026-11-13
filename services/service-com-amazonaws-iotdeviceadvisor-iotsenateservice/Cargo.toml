@@ -21,9 +21,13 @@ bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-# Used in `src/state.rs`: a device-level endpoint's DNS label is a SHA-256 digest of the
-# account, the region and the device identity, mapped onto the label alphabet.
+# Used in `src/state.rs`: an endpoint's DNS label is a SHA-256 digest of the account, the
+# region and the device identity, mapped onto the label alphabet.
 sha2 = { workspace = true }
+# `service-common` carries the ONE reading of how a client ADDRESSES a data plane, which
+# the endpoint this service announces is resolved through
+# (`src/state/endpoint_addressing.rs`).
+service-common = { path = "../common" }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

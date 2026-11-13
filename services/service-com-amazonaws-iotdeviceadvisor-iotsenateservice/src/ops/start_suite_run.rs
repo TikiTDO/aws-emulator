@@ -315,13 +315,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             || crate::state::arn(run_region, &resource),
             |scope| scope.arn(&resource),
         );
-        // The host this run reports is the host its PRIMARY DEVICE connects to, taken from
-        // the one derivation in `crate::state::endpoint_for` that `GetEndpoint` answers
-        // from: a run names a device, so what it reports is that device's own host, and a
-        // client told this host by the start call is told the same one when it asks
-        // `GetEndpoint` where that device should connect — in the run's own region, which
-        // is the region of the scope it was minted in.
-        let endpoint = crate::state::endpoint_for(
+        // The host this run reports is the host its PRIMARY DEVICE connects to, announced
+        // the one way `GetEndpoint` announces it (`crate::state::announced_endpoint`): the
+        // endpoint THIS request reached, so the device is sent somewhere it can reach, and
+        // the host AWS itself vends for that device only for a client that resolves AWS's
+        // own names. A client told this host by the start call is told the same one when it
+        // asks `GetEndpoint` where that device should connect — in the run's own region,
+        // which is the region of the scope it was minted in. Resolved once, here, and
+        // persisted, so every later read of the run reports the address the start published.
+        let endpoint = crate::state::announced_endpoint(
+            ctx.parts(),
+            ctx.endpoint().as_str(),
             run_region,
             &crate::state::DeviceIdentity::of(&input.suite_run_configuration.primary_device),
         );

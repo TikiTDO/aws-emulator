@@ -537,7 +537,7 @@ async fn a_named_device_gets_its_own_stable_endpoint() {
         let label = assert_host_shape(case, &endpoint, region);
         assert_eq!(
             label.len(),
-            iotdeviceadvisor::state::DEVICE_LABEL_LENGTH,
+            iotdeviceadvisor::state::ENDPOINT_LABEL_LENGTH,
             "case {case:?}: a device label is one fixed-length DNS label, got {label:?}"
         );
         assert!(

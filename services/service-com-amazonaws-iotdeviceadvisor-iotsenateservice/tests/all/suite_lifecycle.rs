@@ -206,6 +206,21 @@ impl Emulator {
         host: Option<&[u8]>,
         authority: Option<&str>,
     ) -> Answer {
+        self.call_addressed_with_body(method, path_and_query, region, host, authority, None)
+            .await
+    }
+
+    /// The same request, carrying `body` as its JSON payload — what a POST addressed
+    /// through a chosen endpoint needs, where [`Emulator::call_addressed`] sends none.
+    pub(crate) async fn call_addressed_with_body(
+        &self,
+        method: &str,
+        path_and_query: &str,
+        region: &str,
+        host: Option<&[u8]>,
+        authority: Option<&str>,
+        body: Option<Value>,
+    ) -> Answer {
         let uri = match authority {
             Some(authority) => format!("https://{authority}{path_and_query}"),
             None => path_and_query.to_string(),
@@ -221,9 +236,10 @@ impl Emulator {
                 http::HeaderValue::from_bytes(host).expect("the Host header value is sendable"),
             );
         }
-        let request = request
-            .body(bytes::Bytes::new())
-            .expect("the request builds");
+        let payload = body.map_or_else(bytes::Bytes::new, |value| {
+            bytes::Bytes::from(serde_json::to_vec(&value).expect("the request body serializes"))
+        });
+        let request = request.body(payload).expect("the request builds");
 
         self.dispatch(request).await
     }
