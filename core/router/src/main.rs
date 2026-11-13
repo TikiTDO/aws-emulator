@@ -257,13 +257,22 @@ async fn build_and_serve(options: RunOptions) {
                 ),
             )
             .await;
-            if let Err(not_durable) = persistence.save_changed().await {
-                eprintln!(
-                    "emulator state not written at shutdown: {:?}",
-                    not_durable.failed
-                );
+            match persistence.save_changed().await {
+                Ok(_) => served,
+                Err(not_durable) => {
+                    eprintln!(
+                        "emulator state not written at shutdown: {:?}",
+                        not_durable.failed
+                    );
+                    // Preserve an earlier serve error; otherwise this failed final save
+                    // must take the nonzero/flush branch, not report a clean shutdown.
+                    served.and_then(|()| {
+                        Err(emulator_server::ServeError::Io(std::io::Error::other(
+                            "final emulator state snapshot was not durable",
+                        )))
+                    })
+                }
             }
-            served
         }
         None => emulator_server::serve_emulator_until_shutdown(router).await,
     };
