@@ -698,12 +698,12 @@ async fn a_registry_request_that_addresses_nothing_is_refused_in_the_registry_en
             "the operation is unsupported",
         ),
         (
-            "an upload session this registry does not serve",
+            "an upload session this registry never opened",
             "GET",
             "/v2/refusal-probe/blobs/uploads/abcdef".to_string(),
-            405,
-            "UNSUPPORTED",
-            "the operation is unsupported",
+            404,
+            "BLOB_UPLOAD_UNKNOWN",
+            "blob upload unknown",
         ),
         (
             "a method this plane does not serve",
@@ -741,7 +741,7 @@ async fn a_registry_request_that_addresses_nothing_is_refused_in_the_registry_en
         );
         if *status == 405 {
             assert_eq!(
-                fetched.allow, "GET, HEAD",
+                fetched.allow, if *method == "POST" { "GET, HEAD, PUT" } else { "GET, HEAD" },
                 "case {case:?}: a 405 must state the methods served, got {:?}",
                 fetched.allow
             );

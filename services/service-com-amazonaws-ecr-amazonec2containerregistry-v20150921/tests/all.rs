@@ -97,6 +97,8 @@ mod registry_replication_configuration;
 mod registry_resource_reads;
 #[path = "all/registry_scanning_configuration.rs"]
 mod registry_scanning_configuration;
+#[path = "all/registry_v2_push.rs"]
+mod registry_v2_push;
 #[path = "all/registry_v2_pull.rs"]
 mod registry_v2_pull;
 #[path = "all/repository_access_authorization.rs"]

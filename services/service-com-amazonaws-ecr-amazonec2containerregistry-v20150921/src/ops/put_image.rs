@@ -266,7 +266,7 @@ impl<Eng> PutImage<Eng> {
     ///
     /// Everything this operation writes happens here, under the store's lock; the caller
     /// publishes the action once that lock is gone.
-    fn store_pushed_image(
+    pub(crate) fn store_pushed_image(
         state: &::engine::ServiceState<
             crate::state::ComAmazonawsEcrAmazonec2containerregistryV20150921State,
         >,
@@ -275,6 +275,11 @@ impl<Eng> PutImage<Eng> {
         now: ::std::time::SystemTime,
         planned_signings: Vec<crate::state::signing::ImageSigning>,
     ) -> Result<(PutImageOutput, crate::state::image_events::ImageAction), PutImageError> {
+        let capacity = emulator_server::ecr_capacity::configured().map_err(|_| {
+            PutImageError::from(PutImageErrorModeled::ServerException(ServerException {
+                message: Some("invalid ECR capacity configuration".to_string()),
+            }))
+        })?;
         let mut store = state.lock();
 
         // The repository the push addresses has to exist before anything is charged
@@ -302,7 +307,7 @@ impl<Eng> PutImage<Eng> {
                     message: Some(format!(
                         "this registry holds at most {} bytes of stored image manifests \
                          and in-flight layer uploads together",
-                        crate::state::MAX_REGISTRY_CALLER_BYTES
+                        capacity.store_bytes
                     )),
                 })
                 .into(),
@@ -342,6 +347,15 @@ impl<Eng> PutImage<Eng> {
             );
         }
 
+        // A native index push and an API PutImage share this atomic store cut.
+        // Recheck referenced images here, not only before acquiring this lock.
+        if let crate::state::ManifestContent::List(children) = crate::state::manifest_content(&input.image_manifest) {
+            if children.iter().any(|child| !repo.images.contains_key(child)) {
+                return Err(PutImageErrorModeled::ReferencedImagesNotFoundException(
+                    ReferencedImagesNotFoundException { message: Some("manifest references an image not present in the repository".to_string()) }
+                ).into());
+            }
+        }
         match input.image_tag.as_deref() {
             // The very same manifest under the very same tag is already in the
             // repository, so there is nothing to push.

@@ -89,6 +89,7 @@
 /// [`Service::can_handle`] and served by [`Service::override_routing_error`] the same way
 /// the layer download plane is.
 mod registry_v2;
+mod registry_v2_push;
 
 use aws_smithy_runtime_api::http::{Request as RtRequest, Response as RtResponse, StatusCode};
 use aws_smithy_types::body::SdkBody;

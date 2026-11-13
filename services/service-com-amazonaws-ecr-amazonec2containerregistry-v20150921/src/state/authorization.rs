@@ -593,3 +593,46 @@ mod tests {
         }
     }
 }
+
+/// Decide a native registry action from the authenticated token's principal, not
+/// from a forged SigV4 header. Policies are re-read on every write. This does not
+/// turn possession of any registry token into permission to push every repository.
+pub(crate) fn registry_write_allowed<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    principal: &str,
+    repository_name: &str,
+    operation: &str,
+) -> bool {
+    let mut principals = vec![principal.to_string()];
+    let mut documents = Vec::new();
+    let mut unbounded = principal == sts_store::ambient_identity().arn;
+    if let Some(state) = iam_store::service_state(engine) {
+        let store = state.lock();
+        let entity = assumed_role_name(principal)
+            .and_then(|name| store.roles.get(&iam_store::name_key(name)))
+            .map(|role| role.arn.as_str())
+            .unwrap_or(principal);
+        if entity != principal {
+            principals.push(entity.to_string());
+        }
+        if let Some(policies) = store.principal_policies(entity) {
+            documents = policies.documents;
+            unbounded |= !policies.uncarried.is_empty();
+        }
+    }
+    principals.extend(iam::account_principals(principal));
+    let Some(state) = crate::state::service_state(engine) else { return false; };
+    let (resource, policy) = {
+        let store = state.lock();
+        match store.repository(repository_name) {
+            Ok(repo) => (repo.arn.clone(), repo.policy_text.clone()),
+            Err(_) => (crate::state::repository_arn(crate::state::DEFAULT_REGION, repository_name), None),
+        }
+    };
+    let action = action_for(operation);
+    let request = iam::Request::new(&action, &resource, &principals);
+    let identity = iam::identity_decision(&documents, &request);
+    let shared = policy.as_deref().map_or(Decision::NotStated, |policy| iam::resource_decision(policy, &request));
+    iam::is_allowed(identity, shared)
+        || (unbounded && identity != Decision::Denied && shared != Decision::Denied)
+}

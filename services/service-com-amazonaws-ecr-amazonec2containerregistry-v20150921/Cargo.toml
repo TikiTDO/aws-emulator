@@ -68,3 +68,8 @@ emulator-core-build-support = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# Opt-in harmless real Docker publication witness; no host credentials inherited.
+reqwest = { workspace = true }
+tempfile = "3"
