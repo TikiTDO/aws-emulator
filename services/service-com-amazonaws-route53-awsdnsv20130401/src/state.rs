@@ -51,6 +51,10 @@ pub mod monitored_alarm;
 /// against.
 pub mod account_vpcs;
 
+/// The DNSSEC key material a key-signing key publishes, computed from the public
+/// half of the customer managed key the KSK was created from.
+pub mod signing_key;
+
 use crate::ops::types::create_cidr_collection_types::CidrCollection;
 use crate::ops::types::list_cidr_blocks_types::CidrBlockSummary;
 use crate::ops::types::create_reusable_delegation_set_types::HostedZoneNotFound;
@@ -128,12 +132,26 @@ pub const SERVE_SIGNATURE_NOT_SIGNING: &str = "NOT_SIGNING";
 /// for signing."
 pub const SIGNING_KEY_STATUS_ACTIVE: &str = "ACTIVE";
 
+/// The `Status` of a key-signing key Route 53 does not sign with.
+///
+/// `KeySigningKey$Status`'s own documentation: "INACTIVE: The KSK is not being
+/// used for signing."
+pub const SIGNING_KEY_STATUS_INACTIVE: &str = "INACTIVE";
+
 /// The `Status` of a key-signing key a failed request left in error.
 ///
 /// `KeySigningKey$Status`'s own documentation: "INTERNAL_FAILURE: There was an
 /// error during a request. Before you can continue to work with DNSSEC signing,
 /// including actions that involve this KSK, you must correct the problem."
 pub const SIGNING_KEY_STATUS_INTERNAL_FAILURE: &str = "INTERNAL_FAILURE";
+
+/// The most key-signing keys one hosted zone may hold.
+///
+/// `CreateKeySigningKey`'s own model documentation: "You can only have two KSKs
+/// per hosted zone", and the model declares `TooManyKeySigningKeys` for exactly
+/// that refusal: "You've reached the limit for the number of key-signing keys
+/// (KSKs). Remove at least one KSK, and then try again."
+pub const MAX_KEY_SIGNING_KEYS_PER_ZONE: usize = 2;
 
 /// The most hosted zones the account may hold.
 ///
@@ -853,11 +871,9 @@ pub struct StoredZone {
     /// A zone is created with signing OFF: `CreateHostedZone` carries no DNSSEC
     /// input, so a new zone is one "DNSSEC signing is not enabled for"
     /// (`DNSSECStatus$ServeSignature`'s `NOT_SIGNING`). `EnableHostedZoneDNSSEC`
-    /// turns it on and `DisableHostedZoneDNSSEC` turns it back off; both are
-    /// still scaffolds, so every zone this store holds reports it off, exactly
-    /// as Route 53 reports a zone nobody enabled signing for. It is held on the
-    /// zone rather than answered as a constant by the read, so the day one of
-    /// those operations sets it, the read already reports what was set.
+    /// turns it on and `DisableHostedZoneDNSSEC` turns it back off. It is held on
+    /// the zone rather than answered as a constant by the read, so what those
+    /// operations set is what every DNSSEC read reports.
     pub dnssec_signing_enabled: bool,
     /// This zone's key-signing keys (KSKs), keyed — and therefore ordered — by
     /// the `Name` that is unique within one zone (`KeySigningKey$Name`: "Name
@@ -866,9 +882,8 @@ pub struct StoredZone {
     /// Held ON the zone, like the record sets and tags beside it, so deleting
     /// the zone takes its KSKs with it and no second map can disagree about
     /// which zone they belong to. `CreateKeySigningKey` is the operation that
-    /// adds one and `DeleteKeySigningKey` the one that removes it; both are
-    /// still scaffolds, so a zone in this store holds none of them, exactly as
-    /// Route 53 reports a zone no KSK was created for.
+    /// adds one and `DeleteKeySigningKey` the one that removes it, and the zone
+    /// holds at most [`MAX_KEY_SIGNING_KEYS_PER_ZONE`] of them.
     pub key_signing_keys: BTreeMap<String, KeySigningKey>,
     /// Whether deletion protection is enabled for this zone, as a hosted-zone
     /// read reports it.
@@ -1018,6 +1033,18 @@ impl StoredZone {
             _ => return None,
         };
         Some((count_as_i64(limit), count_as_i64(count)))
+    }
+
+    /// Whether this zone already holds a key-signing key created from the
+    /// customer managed key `kms_arn`.
+    ///
+    /// "The `KmsArn` must be unique for each key-signing key (KSK) in a single
+    /// hosted zone" (`KeySigningKey$KmsArn`), so this is one half of what
+    /// `KeySigningKeyAlreadyExists` reports; the `Name` half is the map's own key.
+    pub fn holds_key_signing_key_for(&self, kms_arn: &str) -> bool {
+        self.key_signing_keys
+            .values()
+            .any(|ksk| ksk.kms_arn.as_deref() == Some(kms_arn))
     }
 
     /// Whether this zone holds a key-signing key Route 53 could sign with: one
@@ -2649,6 +2676,28 @@ pub fn canonical_dns_name(name: &str) -> String {
         canonical.push('.');
     }
     canonical
+}
+
+/// A DNS name in the canonical WIRE form a DNSSEC digest is computed over: each
+/// label's octet count followed by the label's own octets, lower-cased, ended by
+/// the zero-length root label.
+///
+/// This is the "canonical form" of an owner name RFC 4034 § 6.2 defines, which
+/// RFC 4034 § 5.1.4 makes the first half of a delegation signer digest ("digest
+/// = digest_algorithm( DNSKEY owner name | DNSKEY RDATA )"), so it is read off
+/// the same labels every other name in this store is identified by — one parse,
+/// so the name a digest is computed over is the name the zone is known by.
+pub fn dns_wire_name(name: &str) -> Vec<u8> {
+    let mut wire = Vec::with_capacity(name.len() + 2);
+    for label in dns_lower_labels(name) {
+        // A label is at most `MAX_DNS_LABEL_OCTETS` octets, so its count always
+        // fits the single octet the wire form spells it in.
+        let octets = &label[..label.len().min(MAX_DNS_LABEL_OCTETS)];
+        wire.push(u8::try_from(octets.len()).unwrap_or(0));
+        wire.extend_from_slice(octets);
+    }
+    wire.push(0);
+    wire
 }
 
 /// A name's labels, lower-cased, as [`dns_labels`] resolves them.

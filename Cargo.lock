@@ -17820,8 +17820,10 @@ dependencies = [
  "serde_json",
  "service-com-amazonaws-cloudwatch-graniteserviceversion20100801",
  "service-com-amazonaws-ec2-amazonec2",
+ "service-com-amazonaws-kms-trentservice",
  "service-common",
  "sha2 0.10.9",
+ "spki 0.7.3",
  "tokio",
  "tracing",
 ]

@@ -27,8 +27,16 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 # `state::new_request_id`'s mixing function: a maintained digest, so the request
 # id the error envelope carries is mixed by a reviewed implementation rather than
-# a hand-written one.
+# a hand-written one. `state::signing_key` computes a delegation signer digest
+# (SHA-256) with the same one.
 sha2 = { workspace = true }
+# `state::signing_key` presents that digest as the upper-case hexadecimal a DS
+# record carries, through the maintained codec rather than a hand-written one.
+hex = { workspace = true }
+# `state::signing_key` reads the X.509 `SubjectPublicKeyInfo` a KMS key's public
+# half is encoded as, to take the elliptic-curve point a DNSKEY record publishes,
+# with the maintained decoder rather than by slicing the DER here.
+spki = "0.7"
 # The request-schema check (`service::xml_schema`) reads the request body with a
 # maintained XML reader rather than looking at the text, and takes the position a
 # schema violation names from that reader's own progress through the body.
@@ -47,12 +55,13 @@ service-com-amazonaws-cloudwatch-graniteserviceversion20100801 = { workspace = t
 # answers from — so the VPC a Route 53 request names is resolved against that store through
 # the shared engine, which needs the owning service's state TYPE.
 service-com-amazonaws-ec2-amazonec2 = { workspace = true }
+# A key-signing key publishes the PUBLIC half of the customer managed key it names, which
+# lives in the KMS emulator's own key store: it is reached through the shared engine and
+# needs the owning service's state TYPE.
+service-com-amazonaws-kms-trentservice = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
-
-[dev-dependencies]
-hex = { workspace = true }
 
 [lints]
 workspace = true

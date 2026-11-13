@@ -72,6 +72,7 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+use crate::state::signing_key::INVALID_KEY_SIGNING_KEY_STATUS_MESSAGE;
 use crate::state::{no_such_hosted_zone, normalize_zone_id};
 
 /// The modelled `KeySigningKeyWithActiveStatusNotFound` (HTTP 400) for a zone
@@ -89,12 +90,10 @@ fn no_active_key_signing_key(requested_id: &str) -> KeySigningKeyWithActiveStatu
     }
 }
 
-/// The refusal for a zone holding a key-signing key left in
-/// `INTERNAL_FAILURE`, in `InvalidKeySigningKeyStatus`'s own wording: "The
-/// key-signing key (KSK) status isn't valid or another KSK has the status
-/// INTERNAL_FAILURE."
-const INVALID_KEY_SIGNING_KEY_STATUS_MESSAGE: &str =
-    "The key-signing key (KSK) status isn't valid or another KSK has the status INTERNAL_FAILURE.";
+// The refusal for a zone holding a key-signing key left in `INTERNAL_FAILURE`
+// is the service's one `InvalidKeySigningKeyStatus` sentence, which lives beside
+// the other key-signing-key vocabulary
+// (`crate::state::signing_key::INVALID_KEY_SIGNING_KEY_STATUS_MESSAGE`).
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the

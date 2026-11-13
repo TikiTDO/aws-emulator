@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateKeySigningKey
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateKeySigningKey`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateKeySigningKey::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -105,6 +96,59 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+use crate::state::signing_key::{self, INVALID_KEY_SIGNING_KEY_STATUS_MESSAGE};
+use crate::state::{
+    no_such_hosted_zone, normalize_zone_id, now_millis, resource_location,
+    MAX_KEY_SIGNING_KEYS_PER_ZONE, SIGNING_KEY_STATUS_ACTIVE, SIGNING_KEY_STATUS_INACTIVE,
+};
+
+/// The two statuses a key-signing key may be CREATED in.
+///
+/// `CreateKeySigningKeyRequest$Status`'s own documentation: "A string specifying
+/// the initial status of the key-signing key (KSK). You can set the value to
+/// ACTIVE or INACTIVE." The other values of `KeySigningKey$Status` describe a key
+/// that is being deleted or that a request left in error, so none of them is an
+/// initial status a caller may ask for.
+const CREATABLE_STATUSES: [&str; 2] = [SIGNING_KEY_STATUS_ACTIVE, SIGNING_KEY_STATUS_INACTIVE];
+
+/// Whether `name` is spelled the way a key-signing key's name may be.
+///
+/// `KeySigningKey$Name`: "Name can include numbers, letters, and underscores
+/// (_)." The modelled length (3..128) is already enforced before the handler
+/// runs, so what is left to read is the alphabet.
+fn names_a_key_signing_key(name: &str) -> bool {
+    name.chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+/// The refusal of a name outside the alphabet above, in
+/// `InvalidKeySigningKeyName`'s own wording: "The key-signing key (KSK) name that
+/// you specified isn't a valid name."
+const INVALID_KEY_SIGNING_KEY_NAME_MESSAGE: &str =
+    "The key-signing key (KSK) name that you specified isn't a valid name.";
+
+/// The refusal of an ARN this emulator cannot sign a zone with, in
+/// `InvalidKMSArn`'s own wording: "The KeyManagementServiceArn that you specified
+/// isn't valid to use with DNSSEC signing."
+const INVALID_KMS_ARN_MESSAGE: &str =
+    "The KeyManagementServiceArn that you specified isn't valid to use with DNSSEC signing.";
+
+/// The refusal of a second key-signing key over a name or a customer managed key
+/// the zone already holds one for, in `KeySigningKeyAlreadyExists`'s own wording:
+/// "You've already created a key-signing key (KSK) with this name or with the
+/// same customer managed key ARN."
+const KEY_SIGNING_KEY_ALREADY_EXISTS_MESSAGE: &str =
+    "You've already created a key-signing key (KSK) with this name or with the same customer \
+     managed key ARN.";
+
+/// The refusal of a key-signing key past the per-zone quota, in
+/// `TooManyKeySigningKeys`'s own wording: "You've reached the limit for the
+/// number of key-signing keys (KSKs). Remove at least one KSK, and then try
+/// again."
+const TOO_MANY_KEY_SIGNING_KEYS_MESSAGE: &str =
+    "You've reached the limit for the number of key-signing keys (KSKs). Remove at least one \
+     KSK, and then try again.";
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -182,18 +226,145 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateKeySigningKey` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateKeySigningKeyErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateKeySigningKey"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            // Unreachable under the router, which always mounts this service on
+            // the shared `InMemoryEngine`.
+            CreateKeySigningKeyErrorModeled::InvalidInput(InvalidInput {
+                message: Some("the Route 53 emulator's state store is unavailable".to_string()),
+            })
+        })?;
+
+        // What the request says about the key itself, read before anything is
+        // looked up: neither depends on the store.
+        if !names_a_key_signing_key(&input.name) {
+            return Err(CreateKeySigningKeyErrorModeled::InvalidKeySigningKeyName(
+                InvalidKeySigningKeyName {
+                    message: Some(INVALID_KEY_SIGNING_KEY_NAME_MESSAGE.to_string()),
+                },
+            )
+            .into());
+        }
+        if !CREATABLE_STATUSES.contains(&input.status.as_str()) {
+            return Err(
+                CreateKeySigningKeyErrorModeled::InvalidKeySigningKeyStatus(
+                    InvalidKeySigningKeyStatus {
+                        message: Some(INVALID_KEY_SIGNING_KEY_STATUS_MESSAGE.to_string()),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // The caller may pass the bare id or the `/hostedzone/`-prefixed `Id` a
+        // HostedZone handed it back; both name the same zone.
+        let zone_id = normalize_zone_id(&input.hosted_zone_id);
+        // The zone's own name, which is the owner name of the DNSKEY record this
+        // key publishes and so part of the delegation signer digest below. Read
+        // in its own scope: the KMS store is read next, and this service never
+        // holds two stores' locks at once.
+        let zone_name = {
+            let store = state.lock();
+            let zone = store.zones.get(zone_id).ok_or_else(|| {
+                CreateKeySigningKeyErrorModeled::NoSuchHostedZone(no_such_hosted_zone(
+                    &input.hosted_zone_id,
+                ))
+            })?;
+            zone.name.clone()
+        };
+
+        // A KSK publishes the PUBLIC half of the customer managed key it names,
+        // so the key material is computed from that key rather than minted here;
+        // an ARN that names no key this emulator can sign a zone with is the one
+        // `InvalidKMSArn` is about.
+        let material = signing_key::signing_key_material(
+            &*self.engine,
+            &input.key_management_service_arn,
+            &zone_name,
+        )
+        .ok_or_else(|| {
+            CreateKeySigningKeyErrorModeled::InvalidKMSArn(InvalidKMSArn {
+                message: Some(INVALID_KMS_ARN_MESSAGE.to_string()),
+            })
+        })?;
+
+        let created = ::aws_smithy_types::DateTime::from_millis(now_millis());
+        let key_signing_key = KeySigningKey {
+            name: Some(input.name.clone()),
+            kms_arn: Some(input.key_management_service_arn.clone()),
+            flag: i32::from(signing_key::KEY_SIGNING_KEY_FLAG),
+            signing_algorithm_mnemonic: Some(signing_key::SIGNING_ALGORITHM_MNEMONIC.to_string()),
+            signing_algorithm_type: i32::from(signing_key::SIGNING_ALGORITHM_TYPE),
+            digest_algorithm_mnemonic: Some(signing_key::DIGEST_ALGORITHM_MNEMONIC.to_string()),
+            digest_algorithm_type: i32::from(signing_key::DIGEST_ALGORITHM_TYPE),
+            key_tag: i32::from(material.key_tag),
+            digest_value: Some(material.digest_value),
+            public_key: Some(material.public_key),
+            ds_record: Some(material.ds_record),
+            dnskey_record: Some(material.dnskey_record),
+            // The initial status the request asked for, which is what makes the
+            // new key one the zone can be signed with or one it cannot yet.
+            status: Some(input.status.clone()),
+            // "The status message provided for the following key-signing key
+            // (KSK) statuses: ACTION_NEEDED or INTERNAL_FAILURE"
+            // (`KeySigningKey$StatusMessage`) — neither is a status a key is
+            // created in, so there is no message to report.
+            status_message: None,
+            created_date: Some(created),
+            // A key nothing has changed yet was last changed when it was created.
+            last_modified_date: Some(created),
+        };
+
+        let mut store = state.lock();
+        // Re-read the zone: the lock was released for the KMS read above, so the
+        // zone, its keys and its quota are judged as they are NOW rather than as
+        // they were before that read.
+        let zone = store.zones.get_mut(zone_id).ok_or_else(|| {
+            CreateKeySigningKeyErrorModeled::NoSuchHostedZone(no_such_hosted_zone(
+                &input.hosted_zone_id,
+            ))
+        })?;
+        // "Name must be unique for each key-signing key in the same hosted zone"
+        // (`KeySigningKey$Name`) and "the KmsArn must be unique for each
+        // key-signing key (KSK) in a single hosted zone"
+        // (`CreateKeySigningKeyRequest$KeyManagementServiceArn`), so a request
+        // repeating either names a key the zone already holds.
+        if zone.key_signing_keys.contains_key(&input.name)
+            || zone.holds_key_signing_key_for(&input.key_management_service_arn)
+        {
+            return Err(
+                CreateKeySigningKeyErrorModeled::KeySigningKeyAlreadyExists(
+                    KeySigningKeyAlreadyExists {
+                        message: Some(KEY_SIGNING_KEY_ALREADY_EXISTS_MESSAGE.to_string()),
+                    },
+                )
+                .into(),
+            );
+        }
+        if zone.key_signing_keys.len() >= MAX_KEY_SIGNING_KEYS_PER_ZONE {
+            return Err(CreateKeySigningKeyErrorModeled::TooManyKeySigningKeys(
+                TooManyKeySigningKeys {
+                    message: Some(TOO_MANY_KEY_SIGNING_KEYS_MESSAGE.to_string()),
+                },
+            )
+            .into());
+        }
+        zone.key_signing_keys
+            .insert(input.name.clone(), key_signing_key.clone());
+        // Adding a key the zone publishes is a change to the zone's records, so
+        // it propagates like any other: the caller polls the returned change
+        // through GetChange.
+        let change = store.submit_change(None);
+
+        Ok(CreateKeySigningKeyOutput {
+            change_info: change.to_change_info(),
+            key_signing_key,
+            // The path the operations that read this key back are bound to
+            // (`/2013-04-01/keysigningkey/{HostedZoneId}/{Name}`), so the URL is
+            // one the caller can follow.
+            location: resource_location(
+                ctx,
+                &format!("keysigningkey/{zone_id}/{}", input.name),
+            ),
+        })
     }
 }

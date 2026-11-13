@@ -19,12 +19,15 @@
 //! the key-signing keys are read back over several counts (none, one, three) and
 //! statuses rather than the single case a recording happened to carry.
 //!
-//! `CreateKeySigningKey` — the operation that adds a KSK to a zone — is still a
-//! scaffold, so the only way to give a zone a key to sign with is to write it
-//! into the store the handlers read, which is what `seed_dnssec` does. Nothing
-//! else is seeded: signing is turned on and off through the API, and the
-//! assertions stay end-to-end on the HTTP/restXml responses a Route 53 client
-//! sees, through the same harness the hosted-zone suites use.
+//! The tables below put a zone into a signing state by WRITING the store the
+//! handlers read, which is what `seed_dnssec` does: a seeded key is the only way
+//! to reach a status no API operation creates (`INTERNAL_FAILURE`) and to hold a
+//! zone's key population fixed independently of the customer managed keys a
+//! create derives one from — `CreateKeySigningKey` is covered end to end by the
+//! sibling `key_signing_keys` suite. Nothing else is seeded: signing is turned on
+//! and off through the API, and the assertions stay end-to-end on the
+//! HTTP/restXml responses a Route 53 client sees, through the same harness the
+//! hosted-zone suites use.
 
 use std::sync::Arc;
 
@@ -55,7 +58,10 @@ fn router_with_store() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
 }
 
 /// `GetDNSSEC` for one hosted zone.
-async fn get_dnssec(router: &MultiServiceRouter, zone_id: &str) -> Reply {
+///
+/// `pub(crate)` so the sibling key-signing-key suite reads a zone's DNSSEC state
+/// back through the SAME call rather than growing a second copy of it.
+pub(crate) async fn get_dnssec(router: &MultiServiceRouter, zone_id: &str) -> Reply {
     call(
         router,
         "GET",
@@ -66,7 +72,9 @@ async fn get_dnssec(router: &MultiServiceRouter, zone_id: &str) -> Reply {
 }
 
 /// `EnableHostedZoneDNSSEC` for one hosted zone.
-async fn enable_dnssec(router: &MultiServiceRouter, zone_id: &str) -> Reply {
+///
+/// `pub(crate)` for the same reason [`get_dnssec`] is.
+pub(crate) async fn enable_dnssec(router: &MultiServiceRouter, zone_id: &str) -> Reply {
     call(
         router,
         "POST",
@@ -186,7 +194,7 @@ fn assert_refusal_names_the_zone(case: &str, code: &str, zone: &str, reply: &Rep
     );
 }
 
-/// A key-signing key as `CreateKeySigningKey` will persist one.
+/// A key-signing key as `CreateKeySigningKey` persists one.
 ///
 /// The constants are the model's own: `KeySigningKey$Flag` — "For key-signing
 /// key (KSK), this value is always 257" — and the algorithm members, whose
@@ -219,9 +227,10 @@ fn key_signing_key(name: &str, status: &str) -> KeySigningKey {
 /// Put `zone_id` into the DNSSEC state the row asks for, by writing the store the
 /// handler reads.
 ///
-/// Stands in for `EnableHostedZoneDNSSEC` and `CreateKeySigningKey`, which are
-/// still scaffolds: without it no test could reach the signing state at all, and
-/// a reader that answered a constant would pass unnoticed.
+/// Stands in for a key population no create reaches: a status only a failed
+/// request leaves, and a fixed set of keys. `EnableHostedZoneDNSSEC` and
+/// `CreateKeySigningKey` are driven through the API by the suites that cover
+/// them.
 fn seed_dnssec(
     engine: &engine::InMemoryEngine,
     zone_id: &str,
