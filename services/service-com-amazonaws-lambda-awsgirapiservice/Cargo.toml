@@ -106,6 +106,14 @@ aws-sdk-s3 = { version = "1", default-features = false }
 # INVALIDATES a distribution's cache after writing the object behind it is the shape that
 # needs it. Only the generated client is needed: the emulator supplies the transport.
 aws-sdk-cloudfront = { version = "1", default-features = false }
+# Amazon SNS's model declares `awsQuery`: an operation travels as the `Action` parameter of a
+# form-encoded body with its input flattened into the parameters beside it, and the answer is
+# an XML document, so a handler's `boto3.client("sns")` call cannot be built by the JSON paths
+# the other reachable services share: this is the client that builds, signs and parses it
+# (`state::execution::aws_sns`), over the same in-process callback. A function that PUBLISHES
+# what it just handled, or SUBSCRIBES a queue to the topic it publishes to, is the shape that
+# needs it. Only the generated client is needed: the emulator supplies the transport.
+aws-sdk-sns = { version = "1", default-features = false }
 # A function whose environment variables are encrypted with a customer managed key can
 # only be invoked while that key can decrypt them, and the key's state belongs to the key
 # service: it is asked over the same in-process callback
@@ -268,6 +276,11 @@ service-com-amazonaws-secretsmanager-secretsmanager = { workspace = true }
 # bucket policy and the role policies that decide such a read are written with S3's and
 # IAM's own operations.
 service-com-amazonaws-s3-amazons3 = { workspace = true }
+# The topic a handler's own Amazon SNS call publishes to and subscribes a queue to, mounted
+# beside lambda on ONE engine: a publication is asserted where a client sees it — off the queue
+# the subscription delivers to — and the subscription and tags the handler wrote are read back
+# through that service's own reads.
+service-com-amazonaws-sns-amazonsimplenotificationservice = { workspace = true }
 # The Parameter Store a handler's own Systems Manager call reads and writes, mounted beside
 # lambda on ONE engine: a parameter a handler wrote is asserted where a client reads it,
 # through that service's own GetParameter.

@@ -105,6 +105,15 @@ mod aws_s3;
 /// binds a request per operation rather than carrying an input document in a JSON body.
 mod aws_cloudfront;
 
+/// The Amazon SNS half of it, for the same reason: that service's model declares `awsQuery`,
+/// so a request to it is a form-encoded action and its answer is an XML document rather than
+/// the input and output documents a JSON protocol carries.
+mod aws_sns;
+
+/// What every half of that seam bound by an AWS SDK CLIENT shares: how a call's input document
+/// is read, what the answer carried, and how a refusal is handed back.
+mod sdk_call;
+
 /// Binding one of those calls to HTTP for a service whose protocol is `restJson1`.
 pub mod rest_json;
 

@@ -245,6 +245,8 @@ mod handler_db_auth_token;
 mod handler_logging_facility;
 #[path = "all/handler_metric_timestamp.rs"]
 mod handler_metric_timestamp;
+#[path = "all/handler_notification_sdk.rs"]
+mod handler_notification_sdk;
 #[path = "all/handler_object_store_sdk.rs"]
 mod handler_object_store_sdk;
 #[path = "all/handler_parameter_store_sdk.rs"]

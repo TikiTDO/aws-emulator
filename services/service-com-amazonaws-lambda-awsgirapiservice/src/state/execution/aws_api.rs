@@ -159,6 +159,12 @@ pub enum Protocol {
     /// to a path and an XML document, built by the CloudFront client this crate holds
     /// ([`super::aws_cloudfront`]).
     CloudFrontRest,
+    /// Amazon SNS's `awsQuery`: the operation travels as an `Action` parameter of a
+    /// form-encoded body with the input flattened into the parameters beside it, and the
+    /// answer is an XML document — so the request is built, signed and parsed by the Amazon
+    /// SNS client this crate holds ([`super::aws_sns`]) rather than by either JSON path
+    /// above.
+    SnsQuery,
 }
 
 impl Api {
@@ -173,9 +179,10 @@ impl Api {
             Protocol::AwsJson { json_version, .. } => {
                 format!("application/x-amz-json-{json_version}")
             }
-            Protocol::RestJson(_) | Protocol::S3Rest | Protocol::CloudFrontRest => {
-                "application/json".to_string()
-            }
+            Protocol::RestJson(_)
+            | Protocol::S3Rest
+            | Protocol::CloudFrontRest
+            | Protocol::SnsQuery => "application/json".to_string(),
         }
     }
 }
@@ -207,6 +214,28 @@ pub const APIS: &[Api] = &[
             query_compatible: true,
         },
         answer_model: Some(&SQS),
+    },
+    // `services/service-com-amazonaws-sns-amazonsimplenotificationservice/smithy-model/
+    // com-amazonaws-sns-amazonsimplenotificationservice.json`: awsQuery, sigv4Name `sns`,
+    // endpointPrefix `sns`, sdkId `SNS`. Its operations carry their input as the parameters of
+    // a form-encoded `Action` and answer an XML document rather than a JSON one, so the
+    // request is built by [`super::aws_sns`].
+    //
+    // PUBLISHING A NOTIFICATION is what a function that exists to tell the rest of a system
+    // about the event it just handled does, and SUBSCRIBING a queue, a function or an endpoint
+    // to a topic is what makes that fan-out exist at all — so a handler that cannot reach this
+    // service cannot be the glue between two services, which is the shape most Lambda code
+    // has.
+    Api {
+        sdk_token: "sns",
+        signing_name: "sns",
+        endpoint_prefix: "sns",
+        model: Some(SNS_MODEL),
+        protocol: Protocol::SnsQuery,
+        // The answer of such a call is read by that client out of the XML the service sent,
+        // and the document this seam hands the guest is built from the output members it
+        // reported ([`super::aws_sns`]); none of them carries bytes.
+        answer_model: None,
     },
     // `services/service-com-amazonaws-eventbridge-awsevents/smithy-model/
     // com-amazonaws-eventbridge-awsevents.json`: awsJson1_1, sigv4Name `events`,
@@ -691,6 +720,10 @@ pub(super) const SQS_MODEL: &str = include_str!(
     "../../../../service-com-amazonaws-sqs-amazonsqs/smithy-model/\
      com-amazonaws-sqs-amazonsqs.json"
 );
+pub(super) const SNS_MODEL: &str = include_str!(
+    "../../../../service-com-amazonaws-sns-amazonsimplenotificationservice/smithy-model/\
+     com-amazonaws-sns-amazonsimplenotificationservice.json"
+);
 pub(super) const EVENTBRIDGE_MODEL: &str = include_str!(
     "../../../../service-com-amazonaws-eventbridge-awsevents/smithy-model/\
      com-amazonaws-eventbridge-awsevents.json"
@@ -1147,6 +1180,16 @@ impl AwsAccess {
                 )
                 .await
             }
+            Protocol::SnsQuery => {
+                super::aws_sns::call(
+                    &self.callback,
+                    self.identity.as_ref(),
+                    region,
+                    operation,
+                    body,
+                )
+                .await
+            }
         }
     }
 
@@ -1376,10 +1419,11 @@ async fn sent(
             }
             bound.body
         }
-        // Amazon S3's own protocol is bound by the client [`super::aws_s3`] holds, and
-        // CloudFront's by the one [`super::aws_cloudfront`] holds, which is where a call to
-        // either is dispatched ([`AwsAccess::dispatched`]): no request to them is built here.
-        Protocol::S3Rest | Protocol::CloudFrontRest => {
+        // Amazon S3's own protocol is bound by the client [`super::aws_s3`] holds,
+        // CloudFront's by the one [`super::aws_cloudfront`] holds and Amazon SNS's by the one
+        // [`super::aws_sns`] holds, which is where a call to each is dispatched
+        // ([`AwsAccess::dispatched`]): no request to them is built here.
+        Protocol::S3Rest | Protocol::CloudFrontRest | Protocol::SnsQuery => {
             return Err(Sent::NotMade(format!(
                 "{} binds its requests with its own protocol rather than with a JSON one",
                 api.sdk_token
@@ -1728,6 +1772,12 @@ mod tests {
                 super::Protocol::CloudFrontRest => assert_eq!(
                     api.signing_name, "cloudfront",
                     "case {:?}: expected CloudFront's own signing name on its protocol entry",
+                    api.sdk_token
+                ),
+                // Amazon SNS's `awsQuery`, the same way, in `super::super::aws_sns`.
+                super::Protocol::SnsQuery => assert_eq!(
+                    api.signing_name, "sns",
+                    "case {:?}: expected Amazon SNS's own signing name on its protocol entry",
                     api.sdk_token
                 ),
             }

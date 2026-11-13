@@ -69,6 +69,7 @@ const MUST_REACH: &[&str] = &[
     "secretsmanager",
     "sesv2",
     "sfn",
+    "sns",
     "sqs",
     "xray",
 ];
@@ -159,6 +160,11 @@ fn rows() -> Vec<Row> {
         Row {
             case: "the content delivery service, whose protocol is the other XML one",
             token: "cloudfront",
+            reachable: true,
+        },
+        Row {
+            case: "the notification service, whose protocol is a form-encoded action",
+            token: "sns",
             reachable: true,
         },
         Row {

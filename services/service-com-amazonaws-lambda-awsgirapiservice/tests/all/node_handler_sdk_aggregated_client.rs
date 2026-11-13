@@ -562,9 +562,9 @@ struct Probe {
 }
 
 /// The probes, one per thing the rule generalises over: a read of a table that is there, a read
-/// of one that is not, a name that is no operation of a service whose model is held, and two
-/// services whose models this emulator holds no entry for — the one the report named and one it
-/// did not.
+/// of one that is not, a name that is no operation of a service whose model is held, a service
+/// this emulator holds no model for, and one whose model it holds and whose protocol is neither
+/// of the JSON ones.
 fn probes() -> Vec<Probe> {
     vec![
         Probe {
@@ -612,7 +612,10 @@ fn probes() -> Vec<Probe> {
             outcome: "raised",
         },
         Probe {
-            case: "a publication to a service this emulator holds no model for",
+            // Amazon SNS's model declares `awsQuery`, which the host binds through its own
+            // client seam: the method is the model's operation, and the call reaches the
+            // service, which refuses a publication to a topic it does not hold.
+            case: "a publication to a topic no topic answers to",
             service: "sns",
             exported: "SNS",
             method: "publish",
