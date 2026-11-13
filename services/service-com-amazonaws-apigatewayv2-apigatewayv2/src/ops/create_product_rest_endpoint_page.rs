@@ -190,11 +190,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // The display content is resolved from the request's overrides and the identified
         // endpoint ONCE, here, so the page a later reader reports carries exactly the
-        // content this call stored.
+        // content this call stored — the endpoint among it announced on the address this
+        // emulator serves that REST stage at, for the endpoint THIS request reached.
         let display_content = crate::state::resolve_endpoint_display_content(
             &region,
             parts,
             input.display_content.as_ref(),
+            ctx.parts(),
+            ctx.endpoint().as_str(),
         )
         .map_err(bad_request)?;
 

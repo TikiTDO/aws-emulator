@@ -261,9 +261,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             let parts =
                 crate::state::rest_endpoint_identifier_parts(&updated.rest_endpoint_identifier)
                     .map_err(bad_request)?;
-            updated.display_content =
-                crate::state::resolve_endpoint_display_content(&updated.region, parts, Some(requested))
-                    .map_err(bad_request)?;
+            updated.display_content = crate::state::resolve_endpoint_display_content(
+                &updated.region,
+                parts,
+                Some(requested),
+                ctx.parts(),
+                ctx.endpoint().as_str(),
+            )
+            .map_err(bad_request)?;
             modified = true;
         }
 

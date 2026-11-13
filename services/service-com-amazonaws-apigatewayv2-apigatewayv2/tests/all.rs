@@ -201,6 +201,8 @@ mod product_rest_endpoint_page_deletion;
 mod product_rest_endpoint_page_generation;
 #[path = "all/product_rest_endpoint_page_lifecycle.rs"]
 mod product_rest_endpoint_page_lifecycle;
+#[path = "all/product_rest_endpoint_page_published_endpoint.rs"]
+mod product_rest_endpoint_page_published_endpoint;
 #[path = "all/product_rest_endpoint_page_update.rs"]
 mod product_rest_endpoint_page_update;
 #[path = "all/protocol_restricted_member_message.rs"]

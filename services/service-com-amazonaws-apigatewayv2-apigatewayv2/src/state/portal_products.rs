@@ -489,17 +489,37 @@ pub fn rest_endpoint_identifier_parts(
 /// The URL a consumer invokes the REST API a page documents on.
 ///
 /// "The URL to invoke your REST API" (`EndpointDisplayContentResponse$Endpoint`): what a
-/// page reports is the INVOKE URL OF THE STAGE — the API's default execute-api endpoint,
-/// the host `{api-id}.execute-api.{region}.amazonaws.com` [`execute_api_endpoint`] builds
-/// for every api, followed by the stage the endpoint is deployed to. The remaining parts of
+/// page reports is the INVOKE URL OF THE STAGE — the endpoint the identified API is
+/// ANNOUNCED on, followed by the stage the endpoint is deployed to. The remaining parts of
 /// an `IdentifierParts` select WHICH endpoint of that API the page documents rather than
 /// where the API is served: neither the method (which is not part of a URL at all) nor the
 /// endpoint's own `Path` is appended, so what is reported is the base a client calls the
 /// API on, as every portal page of one stage reports the same base.
-pub fn rest_endpoint_invoke_url(parts: &wire::IdentifierParts, region: &str) -> String {
+///
+/// The endpoint is the one a consumer DIALS — it is the address a published portal sends
+/// them to — so which address it names follows the one reading this service applies to
+/// every value it announces for a client to reach ([`announced_execute_api_endpoint`]): the
+/// emulator's own endpoint with the API behind the [`LOCAL_ENDPOINT_PREFIX`] marker for a
+/// client that resolves nothing else, and the `{api-id}.execute-api.{region}.amazonaws.com`
+/// host for a client that resolves AWS's own hosts. A REST (API Gateway v1) stage of this
+/// emulator is served at exactly that marker
+/// (`/_aws/execute-api/{api-id}/{stage}/{resource-path}`), so the address published for the
+/// page is the one its stage answers on.
+pub fn rest_endpoint_invoke_url(
+    parts: &wire::IdentifierParts,
+    region: &str,
+    request: &::http::request::Parts,
+    served_base: &str,
+) -> String {
     format!(
         "{}/{}",
-        execute_api_endpoint(&parts.rest_api_id, region, HTTP_PROTOCOL_TYPE),
+        announced_execute_api_endpoint(
+            &parts.rest_api_id,
+            region,
+            HTTP_PROTOCOL_TYPE,
+            request,
+            served_base,
+        ),
         parts.stage
     )
 }
@@ -521,11 +541,17 @@ pub fn rest_endpoint_invoke_url(parts: &wire::IdentifierParts, region: &str) -> 
 ///
 /// `requested` is the request's `DisplayContent`, absent for a request that named none —
 /// which says the same as its `None` alternative: this endpoint carries no overrides.
-/// `Err` carries the message for the operation's `BadRequestException`.
+/// `request` and `served_base` are the WRITING request's parts and this emulator's own
+/// endpoint base, which is what a derived endpoint is announced on (see
+/// [`rest_endpoint_invoke_url`]); an overriding endpoint is the caller's own value and
+/// names whatever the caller named. `Err` carries the message for the operation's
+/// `BadRequestException`.
 pub fn resolve_endpoint_display_content(
     region: &str,
     parts: &wire::IdentifierParts,
     requested: Option<&wire::EndpointDisplayContent>,
+    request: &::http::request::Parts,
+    served_base: &str,
 ) -> Result<wire::EndpointDisplayContentResponse, String> {
     let overrides = match requested {
         None => None,
@@ -544,7 +570,7 @@ pub fn resolve_endpoint_display_content(
     let endpoint = match overrides.and_then(|overrides| overrides.endpoint.clone()) {
         Some(endpoint) => endpoint,
         None => {
-            let derived = rest_endpoint_invoke_url(parts, region);
+            let derived = rest_endpoint_invoke_url(parts, region, request, served_base);
             // An overriding `Endpoint` is bounded by the model (len 1..1024) and refused
             // at the boundary, but a DERIVED one is this service's own value: the parts
             // it is built from are bounded far wider (a `Path` alone is len 1..4096), so

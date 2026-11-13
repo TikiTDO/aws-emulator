@@ -53,7 +53,7 @@ const UNRESOLVED_MESSAGE: &str = "Invalid restEndpointIdentifier stage or restAp
 /// This service and the API Gateway (v1) service that owns REST APIs, on ONE shared engine
 /// — the arrangement the router assembles, and the one the resolution under test reads the
 /// account's REST APIs through.
-fn emulator() -> MultiServiceRouter {
+pub(crate) fn emulator() -> MultiServiceRouter {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     // Signatures are not the subject of these tests; the requests still carry the SigV4
