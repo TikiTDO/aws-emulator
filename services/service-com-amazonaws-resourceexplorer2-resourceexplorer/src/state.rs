@@ -18,6 +18,9 @@
 //!   [`ComAmazonawsResourceexplorer2ResourceexplorerState::insert_view`] — the ONE
 //!   place an index or a view is created, so the operations that create one cannot
 //!   disagree about its ARN or its stored shape.
+//! * [`ComAmazonawsResourceexplorer2ResourceexplorerState::index_for_new_view`] — the
+//!   index a new view is queried through, and the account-level setup a Region nothing
+//!   has acted on is served as already having.
 //! * [`IndexEntry::to_wire`] / [`ViewEntry::to_wire`] — the modelled `Index` and
 //!   `View` structures, so `CreateView` and `GetView` cannot disagree about what a
 //!   stored view looks like.
@@ -120,6 +123,15 @@ pub const DEFAULT_VIEW_NAME: &str = "all-resources";
 /// no endpoint, and an account's indexes are bounded by that list.
 pub fn is_servable_region(region: &str) -> bool {
     ::emulator_telemetry::Region::new(region).is_ok()
+}
+
+/// How a refusal reads when the Region a request is addressed to is not an Amazon Web
+/// Services Region at all, with that token as its only variable part.
+///
+/// Shared, because every operation that keys something on the request's Region refuses
+/// the same way and they may not word it differently.
+pub fn not_a_region_message(region: &str) -> String {
+    format!("{region} is not an Amazon Web Services Region.")
 }
 
 /// The lifecycle of an index, as the `IndexState` enum names it on the wire.
@@ -665,6 +677,39 @@ impl ComAmazonawsResourceexplorer2ResourceexplorerState {
         })
     }
 
+    /// The index a view created in `region` is queried through: the one the Region
+    /// holds, else the one the account's own setup already gave a Region no call has
+    /// ever acted on.
+    ///
+    /// Turning Resource Explorer on in a Region is ACCOUNT setup, performed outside the
+    /// operations modelled here (the console's one-click setup, an organization-wide
+    /// rollout), so a client reaching this emulator may well have it on in a Region
+    /// nothing created an index in through this API. A Region with no index record at
+    /// all is therefore a Region nobody has acted on, and it is served as one that is
+    /// already turned on: its index is materialised here, together with the default view
+    /// [`Self::insert_index`] gives every Region that is turned on, and it is
+    /// materialised ACTIVE because setup the account already did is not work that starts
+    /// now — nothing is owed on the clock for it.
+    ///
+    /// A Region whose index record is PRESENT is a Region this account has acted on,
+    /// including the terminal record a finished deletion leaves behind, so it keeps
+    /// exactly the state those calls left it in: a Region that was turned off stays off,
+    /// and answers `None` like one whose index is still being torn down. A token that is
+    /// no Region this emulator serves can key no index either, and answers `None` too.
+    pub fn index_for_new_view(&mut self, region: &str, now: SystemTime) -> Option<&IndexEntry> {
+        if !is_servable_region(region) {
+            return None;
+        }
+        if !self.indexes.contains_key(region) {
+            self.insert_index(region, INDEX_TYPE_LOCAL, HashMap::new(), None, now);
+            if let Some(index) = self.indexes.get_mut(region) {
+                index.state = IndexLifecycle::Active;
+                index.settles_at = None;
+            }
+        }
+        self.live_index(region)
+    }
+
     /// The index record that still OCCUPIES `region`, in whatever state.
     ///
     /// The one place "this Region already has an index" is decided, so a Region whose
@@ -925,6 +970,14 @@ pub fn is_own_arn(arn: &str) -> bool {
 /// that the principal is not permitted to perform the operation, so it carries nothing
 /// from the request.
 pub const UNAUTHORIZED_MESSAGE: &str = "Unauthorized";
+
+/// How a `ValidationException` from this service reads when the request carries no
+/// member the refusal could name: the shape's OWN documented wording
+/// (`smithy_query(query="doc",shape="ValidationException")`), which states the class
+/// and nothing from the request or the store.
+pub const VALIDATION_MESSAGE: &str = "You provided an invalid value for one of the \
+                                      operation's parameters. Check the syntax for the \
+                                      operation, and try again.";
 
 /// The `ConflictException` message for the view-conflict class, the one the shape's own
 /// documentation describes: "you specified parameters that didn't match the original

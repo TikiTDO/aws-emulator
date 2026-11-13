@@ -9,6 +9,13 @@
 //! produce a view ARN authorization can match, so the refusal is this operation's
 //! modelled 401 `UnauthorizedException` rather than a 400 parameter validation.
 //!
+//! Turning Resource Explorer on in a Region is ACCOUNT setup, made outside the
+//! operations modelled here, so a well-formed request addressed to a Region no call has
+//! acted on is served as one the account already turned it on in: the Region's index and
+//! default view are materialised with the view
+//! (`crate::state::...::index_for_new_view`). Only a Region this account turned off, or
+//! a credential scope naming no Amazon Web Services Region, keeps a refusal here.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -214,20 +221,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        // A view is queried through the Region's index, so the Region must have one.
-        // This operation models no ResourceNotFoundException, so the refusal is the
-        // modelled 400 ValidationException naming the condition.
-        if guard.live_index(&region).is_none() {
-            return Err(CreateViewErrorModeled::ValidationException(ValidationException {
-                message: format!(
-                    "Resource Explorer is not turned on in Region {region}: create an index \
-                     in this Region with CreateIndex before creating a view."
-                ),
-                field_list: None,
-            })
-            .into());
-        }
-
         let scope = input
             .scope
             .clone()
@@ -257,6 +250,35 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         {
             return Err(CreateViewErrorModeled::ValidationException(ValidationException {
                 message: crate::state::unsupported_property_message(unsupported),
+                field_list: None,
+            })
+            .into());
+        }
+
+        // Every member of the request has been judged, so the Region's own state is next:
+        // a view is queried through its Region's index, so the Region has to have one.
+        // Turning Resource Explorer on in a Region is account setup made outside this
+        // API, so a Region no call has acted on is served as one the account already
+        // turned on (`index_for_new_view` materialises it, which is also what gives the
+        // Region the default view a query that names none uses); a Region this account
+        // turned off stays off, and a credential scope naming no Amazon Web Services
+        // Region keys no index at all. Neither refusal belongs to another modelled class,
+        // so both are the modelled 400 — the one that names the token at fault where the
+        // request carries one, and the class's own documented wording where it does not.
+        //
+        // It runs BEFORE the name and quota rules below, because those are judged against
+        // the views the Region holds — which, for a Region that is turned on, include the
+        // one it was turned on with.
+        if !crate::state::is_servable_region(&region) {
+            return Err(CreateViewErrorModeled::ValidationException(ValidationException {
+                message: crate::state::not_a_region_message(&region),
+                field_list: None,
+            })
+            .into());
+        }
+        if guard.index_for_new_view(&region, now).is_none() {
+            return Err(CreateViewErrorModeled::ValidationException(ValidationException {
+                message: crate::state::VALIDATION_MESSAGE.to_string(),
                 field_list: None,
             })
             .into());

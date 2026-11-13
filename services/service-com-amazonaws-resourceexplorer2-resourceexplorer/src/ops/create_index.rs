@@ -203,7 +203,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // so only a Region this emulator actually serves can get an index.
         if !crate::state::is_servable_region(&region) {
             return Err(CreateIndexErrorModeled::ValidationException(ValidationException {
-                message: format!("{region} is not an Amazon Web Services Region."),
+                message: crate::state::not_a_region_message(&region),
                 field_list: None,
             })
             .into());

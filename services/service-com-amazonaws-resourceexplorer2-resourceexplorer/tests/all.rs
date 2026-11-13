@@ -13,6 +13,8 @@
 // points it into `tests/all/`.
 #[path = "all/batch_get_view.rs"]
 mod batch_get_view;
+#[path = "all/create_view_region_setup.rs"]
+mod create_view_region_setup;
 #[path = "all/default_view_and_refusal_classes.rs"]
 mod default_view_and_refusal_classes;
 #[path = "all/index_and_view_lifecycle.rs"]

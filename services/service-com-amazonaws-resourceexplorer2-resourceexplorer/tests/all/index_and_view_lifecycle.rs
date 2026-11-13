@@ -345,13 +345,21 @@ async fn the_index_settles_from_creating_to_active_and_deleting_to_gone() {
     fresh.ok("re-create");
 }
 
-/// A Region with no index has no views to create: the refusal is the modelled 400, not
-/// a 501 and not a success.
+/// A Region this account TURNED OFF holds no views and can be given none: the refusal
+/// is the modelled 400, not a 501 and not a success. A Region nothing has ever acted on
+/// is a different case — the account's own setup is what turns a Region on, so an
+/// untouched Region is served (see the `create_view_region_setup` suite).
 #[tokio::test]
-async fn create_view_is_refused_in_a_region_with_no_index() {
+async fn create_view_is_refused_in_a_region_whose_index_was_deleted() {
     let emulator = Emulator::new();
-    create_index(&emulator, "us-east-1", "only-region").await;
     for region in ["eu-west-1", "ap-northeast-1"] {
+        let arn = create_index(&emulator, region, "to-be-turned-off").await;
+        emulator
+            .call(region, "DeleteIndex", json!({ "Arn": arn }))
+            .await
+            .ok(region);
+        // Whether the teardown has settled or not, the Region was turned off by this
+        // account and holds no index a view could be queried through.
         emulator
             .call(region, "CreateView", json!({ "ViewName": "no-index-here" }))
             .await
