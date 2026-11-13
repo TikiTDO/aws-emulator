@@ -61,6 +61,22 @@ use crate::ops::types::{ErrorInfo, ExecutionResult, S3DestinationProperties, S3S
 /// acts on the caller's buckets through its own service principal, not as the caller.
 pub const APPFLOW_SERVICE_PRINCIPAL: &str = "appflow.amazonaws.com";
 
+/// How AppFlow names the request it refused, in the envelope a definition-time refusal's
+/// message opens with (see [`request_failed`]): the operation spelled as the service
+/// spells it, so every operation that stores a definition names ITSELF rather than the
+/// one whose validation they share.
+pub const CREATE_FLOW_REQUEST: &str = "Create Flow";
+pub const UPDATE_FLOW_REQUEST: &str = "Update Flow";
+
+/// The envelope a definition-time refusal is stated in: the request AppFlow could not
+/// serve, then the reason it could not, in brackets.
+///
+/// AppFlow validates a whole definition and reports what it found wrapped in the request
+/// it was validating, so a client reads which call failed and why from the one sentence.
+fn request_failed(request: &str, reason: &str) -> String {
+    format!("{request} request failed: [{reason}]")
+}
+
 /// The IAM actions a run performs on a SOURCE location: it lists the bucket to find the
 /// objects under the flow's prefix and reads each one. Both are part of the source bucket
 /// policy AppFlow publishes for an Amazon S3 source.
@@ -602,10 +618,13 @@ type Location<'definition> = (
 /// endpoint, which no bucket policy governs.
 ///
 /// Shared by every operation that stores a definition (`CreateFlow`, `UpdateFlow`), so one
-/// cannot accept a flow the other would refuse. The object store's guard is held only to
-/// copy the policy documents; the decision over them is made after it is dropped.
+/// cannot accept a flow the other would refuse; `request` is how the refusal names the
+/// call it refused ([`CREATE_FLOW_REQUEST`], [`UPDATE_FLOW_REQUEST`]). The object store's
+/// guard is held only to copy the policy documents; the decision over them is made after
+/// it is dropped.
 pub fn unusable_s3_location<Eng: ::std::marker::Send + ::std::marker::Sync + 'static>(
     engine: &Eng,
+    request: &str,
     flow_name: &str,
     flow_arn: &str,
     source_flow_config: &crate::ops::types::SourceFlowConfig,
@@ -652,11 +671,25 @@ pub fn unusable_s3_location<Eng: ::std::marker::Send + ::std::marker::Sync + 'st
                 "Amazon S3 bucket {bucket} does not exist. Create the bucket and try again."
             ));
         };
-        if !admits(policy.as_deref(), actions, bucket, &key, flow_arn) {
-            return Some(format!(
-                "Amazon AppFlow is not authorized to access the Amazon S3 bucket {bucket}. Add a \
-                 bucket policy that grants {APPFLOW_SERVICE_PRINCIPAL} the permissions the flow \
-                 needs and try again."
+        let missing = missing_actions(policy.as_deref(), actions, bucket, &key, flow_arn);
+        if !missing.is_empty() {
+            // What the caller has to repair, named as AppFlow names it: the bucket, the
+            // actions its policy still does not grant, the principal they have to be
+            // granted to, and the two resources the grant has to cover — the bucket itself
+            // (a listing) and every object in it (a read or a write).
+            return Some(request_failed(
+                request,
+                &format!(
+                    "The provided S3 Bucket [{bucket}] is missing the following permitted \
+                     actions: [{missing}]\n. These policies must be applied to the \
+                     [{APPFLOW_SERVICE_PRINCIPAL}] service principal and must be attached to \
+                     all the following resources: [{bucket_arn}, {objects_arn}]",
+                    missing = missing.join(", "),
+                    bucket_arn =
+                        ::service_com_amazonaws_s3_amazons3::state::bucket_arn(bucket),
+                    objects_arn =
+                        ::service_com_amazonaws_s3_amazons3::state::object_arn(bucket, "*"),
+                ),
             ));
         }
     }
@@ -682,17 +715,7 @@ fn failed(message: &str) -> ExecutionOutcome {
 }
 
 /// Whether the bucket policy `policy` grants the AppFlow service principal every action a
-/// run takes on that location.
-///
-/// The decision is the tree's one evaluation of a resource-based policy against a request
-/// (`service_common::iam_authorization`), so AppFlow reads a bucket policy exactly as the
-/// object store itself does: an explicit `Deny` wins, and a policy that says nothing about
-/// the action grants nothing — which is what makes a bucket with NO policy at all a
-/// location AppFlow cannot use.
-///
-/// The request carries the two condition keys AppFlow answers when it acts on a caller's
-/// bucket — the account the flow belongs to and the flow's own ARN — so a policy that
-/// confines its grant to this account's flows still grants it.
+/// run takes on that location — that is, whether [`missing_actions`] finds none missing.
 fn admits(
     policy: Option<&str>,
     actions: &[(&str, Addressed)],
@@ -700,8 +723,35 @@ fn admits(
     key: &str,
     flow_arn: &str,
 ) -> bool {
+    missing_actions(policy, actions, bucket, key, flow_arn).is_empty()
+}
+
+/// Which of `actions` the bucket policy `policy` does NOT grant the AppFlow service
+/// principal on that location, in the order a run takes them, each as IAM spells it in a
+/// policy but lowercased — the form AppFlow enumerates a missing grant in.
+///
+/// Each action is decided on its own, by the tree's one evaluation of a resource-based
+/// policy against a request (`service_common::iam_authorization`) over the resource that
+/// action is taken on, so AppFlow reads a bucket policy exactly as the object store itself
+/// does: an explicit `Deny` wins, and a policy that says nothing about the action grants
+/// nothing — which is what makes every action missing at a bucket with NO policy at all,
+/// and only the rest missing at one whose policy covers part of what a run does.
+///
+/// The request carries the two condition keys AppFlow answers when it acts on a caller's
+/// bucket — the account the flow belongs to and the flow's own ARN — so a policy that
+/// confines its grant to this account's flows still grants it.
+fn missing_actions(
+    policy: Option<&str>,
+    actions: &[(&str, Addressed)],
+    bucket: &str,
+    key: &str,
+    flow_arn: &str,
+) -> Vec<String> {
     let Some(document) = policy else {
-        return false;
+        return actions
+            .iter()
+            .map(|(action, _)| action.to_lowercase())
+            .collect();
     };
     let principals = [APPFLOW_SERVICE_PRINCIPAL.to_string()];
     let context = [
@@ -711,19 +761,25 @@ fn admits(
         ),
         ("aws:SourceArn".to_string(), flow_arn.to_string()),
     ];
-    actions.iter().all(|(action, addressed)| {
-        let resource = match addressed {
-            Addressed::Bucket => ::service_com_amazonaws_s3_amazons3::state::bucket_arn(bucket),
-            Addressed::Object => {
-                ::service_com_amazonaws_s3_amazons3::state::object_arn(bucket, key)
-            }
-        };
-        let request =
-            ::service_common::iam_authorization::Request::new(action, &resource, &principals)
-                .with_context(&context);
-        ::service_common::iam_authorization::resource_decision(document, &request)
-            == ::service_common::iam_authorization::Decision::Allowed
-    })
+    actions
+        .iter()
+        .filter(|(action, addressed)| {
+            let resource = match addressed {
+                Addressed::Bucket => {
+                    ::service_com_amazonaws_s3_amazons3::state::bucket_arn(bucket)
+                }
+                Addressed::Object => {
+                    ::service_com_amazonaws_s3_amazons3::state::object_arn(bucket, key)
+                }
+            };
+            let request =
+                ::service_common::iam_authorization::Request::new(action, &resource, &principals)
+                    .with_context(&context);
+            ::service_common::iam_authorization::resource_decision(document, &request)
+                != ::service_common::iam_authorization::Decision::Allowed
+        })
+        .map(|(action, _)| action.to_lowercase())
+        .collect()
 }
 
 /// The object a run writes at a destination location.

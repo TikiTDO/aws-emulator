@@ -1254,7 +1254,31 @@ struct UnusableLocation {
     buckets: &'static [(&'static str, Option<&'static [&'static str]>)],
     source_bucket: &'static str,
     destination_bucket: &'static str,
-    message: &'static str,
+    message: String,
+}
+
+/// How AppFlow names the flow-definition request a refusal refused, in the envelope the
+/// refusal's message opens with.
+const CREATE_FLOW_REQUEST: &str = "Create Flow";
+const UPDATE_FLOW_REQUEST: &str = "Update Flow";
+
+/// AppFlow's message for a flow-definition request it refused because the policy on a
+/// bucket the definition names does not grant the AppFlow service principal every action
+/// a run takes on that end of the transfer.
+///
+/// The fixed text is the service's own and is written out once, here; everything else is
+/// taken from the request and from the bucket's policy state — the bucket the definition
+/// named, the actions that bucket's policy still leaves ungranted (lowercased, in the
+/// order a run takes them), the service principal the grants have to name, and the two
+/// resource ARNs derived from the bucket name: the bucket itself and every object in it.
+fn missing_actions_refusal(request: &str, bucket: &str, missing: &[&str]) -> String {
+    format!(
+        "{request} request failed: [The provided S3 Bucket [{bucket}] is missing the \
+         following permitted actions: [{missing}]\n. These policies must be applied to the \
+         [appflow.amazonaws.com] service principal and must be attached to all the \
+         following resources: [arn:aws:s3:::{bucket}, arn:aws:s3:::{bucket}/*]]",
+        missing = missing.join(", "),
+    )
 }
 
 /// A definition naming an Amazon S3 location AppFlow could not use is refused when the
@@ -1269,7 +1293,8 @@ async fn a_definition_naming_an_unusable_s3_location_is_refused() {
             buckets: &[("usable-out", Some(&EVERY_RUN_ACTION))],
             source_bucket: "absent-in",
             destination_bucket: "usable-out",
-            message: "Amazon S3 bucket absent-in does not exist. Create the bucket and try again.",
+            message: "Amazon S3 bucket absent-in does not exist. Create the bucket and try again."
+                .to_string(),
         },
         UnusableLocation {
             case: "the destination bucket does not exist",
@@ -1277,7 +1302,8 @@ async fn a_definition_naming_an_unusable_s3_location_is_refused() {
             source_bucket: "usable-in",
             destination_bucket: "absent-out",
             message: "Amazon S3 bucket absent-out does not exist. Create the bucket and try \
-                      again.",
+                      again."
+                .to_string(),
         },
         UnusableLocation {
             case: "the source bucket carries no policy",
@@ -1287,9 +1313,11 @@ async fn a_definition_naming_an_unusable_s3_location_is_refused() {
             ],
             source_bucket: "unpolicied-in",
             destination_bucket: "usable-out",
-            message: "Amazon AppFlow is not authorized to access the Amazon S3 bucket \
-                      unpolicied-in. Add a bucket policy that grants appflow.amazonaws.com the \
-                      permissions the flow needs and try again.",
+            message: missing_actions_refusal(
+                CREATE_FLOW_REQUEST,
+                "unpolicied-in",
+                &["s3:listbucket", "s3:getobject"],
+            ),
         },
         UnusableLocation {
             case: "the destination bucket carries no policy",
@@ -1299,9 +1327,11 @@ async fn a_definition_naming_an_unusable_s3_location_is_refused() {
             ],
             source_bucket: "usable-in",
             destination_bucket: "unpolicied-out",
-            message: "Amazon AppFlow is not authorized to access the Amazon S3 bucket \
-                      unpolicied-out. Add a bucket policy that grants appflow.amazonaws.com the \
-                      permissions the flow needs and try again.",
+            message: missing_actions_refusal(
+                CREATE_FLOW_REQUEST,
+                "unpolicied-out",
+                &["s3:putobject"],
+            ),
         },
         UnusableLocation {
             case: "the source policy grants the destination's actions instead of the source's",
@@ -1311,9 +1341,11 @@ async fn a_definition_naming_an_unusable_s3_location_is_refused() {
             ],
             source_bucket: "mispolicied-in",
             destination_bucket: "usable-out",
-            message: "Amazon AppFlow is not authorized to access the Amazon S3 bucket \
-                      mispolicied-in. Add a bucket policy that grants appflow.amazonaws.com the \
-                      permissions the flow needs and try again.",
+            message: missing_actions_refusal(
+                CREATE_FLOW_REQUEST,
+                "mispolicied-in",
+                &["s3:listbucket", "s3:getobject"],
+            ),
         },
         UnusableLocation {
             case: "the destination policy grants the source's actions instead of its own",
@@ -1323,9 +1355,11 @@ async fn a_definition_naming_an_unusable_s3_location_is_refused() {
             ],
             source_bucket: "usable-in",
             destination_bucket: "mispolicied-out",
-            message: "Amazon AppFlow is not authorized to access the Amazon S3 bucket \
-                      mispolicied-out. Add a bucket policy that grants appflow.amazonaws.com the \
-                      permissions the flow needs and try again.",
+            message: missing_actions_refusal(
+                CREATE_FLOW_REQUEST,
+                "mispolicied-out",
+                &["s3:putobject"],
+            ),
         },
     ];
 
@@ -1388,19 +1422,30 @@ async fn re_defining_a_flow_onto_an_unusable_s3_location_is_refused() {
             "a bucket that does not exist",
             "never-created-bucket",
             "Amazon S3 bucket never-created-bucket does not exist. Create the bucket and try \
-             again.",
+             again."
+                .to_string(),
         ),
         (
             "a bucket that carries no policy",
             "unpolicied-target",
-            "Amazon AppFlow is not authorized to access the Amazon S3 bucket \
-             unpolicied-target. Add a bucket policy that grants appflow.amazonaws.com the \
-             permissions the flow needs and try again.",
+            missing_actions_refusal(UPDATE_FLOW_REQUEST, "unpolicied-target", &["s3:putobject"]),
+        ),
+        (
+            "a bucket whose policy grants only what a SOURCE needs",
+            "read-only-target",
+            missing_actions_refusal(UPDATE_FLOW_REQUEST, "read-only-target", &["s3:putobject"]),
         ),
     ] {
         let emulator = Emulator::new();
         emulator.stand_up(&["update-source", "update-target"]).await;
         emulator.create_bucket("unpolicied-target").await;
+        emulator.create_bucket("read-only-target").await;
+        emulator
+            .put_bucket_policy(
+                "read-only-target",
+                &appflow_bucket_policy("read-only-target", &SOURCE_POLICY_ACTIONS),
+            )
+            .await;
         let flow_name = "update-location-flow";
         let created = emulator
             .appflow(
@@ -1467,6 +1512,201 @@ async fn re_defining_a_flow_onto_an_unusable_s3_location_is_refused() {
                 .and_then(Value::as_str),
             Some("update-target"),
             "case {case:?}: expected the stored definition to be untouched, got {destination:?}"
+        );
+    }
+}
+
+/// One row of the missing-grant table: what each end's bucket policy grants, and the
+/// bucket and the actions AppFlow's refusal has to name.
+struct PolicyGap {
+    case: &'static str,
+    source_bucket: &'static str,
+    source_granted: Granted,
+    destination_bucket: &'static str,
+    destination_granted: Granted,
+    /// The bucket the refusal names, and the actions it enumerates as missing.
+    named_bucket: &'static str,
+    missing: &'static [&'static str],
+}
+
+/// What a row's bucket policy grants the AppFlow service principal.
+enum Granted {
+    /// No bucket policy at all.
+    Nothing,
+    /// An `Allow` of exactly these actions.
+    Allow(&'static [&'static str]),
+    /// An `Allow` of every action a run takes, with these ones explicitly denied.
+    AllowAllExcept(&'static [&'static str]),
+}
+
+impl Granted {
+    /// The policy document to place on `bucket`, or `None` to leave it unpolicied.
+    fn document(&self, bucket: &str) -> Option<Value> {
+        match self {
+            Granted::Nothing => None,
+            Granted::Allow(actions) => Some(appflow_bucket_policy(bucket, actions)),
+            Granted::AllowAllExcept(denied) => {
+                let mut policy = appflow_bucket_policy(bucket, &EVERY_RUN_ACTION);
+                policy["Statement"]
+                    .as_array_mut()
+                    .expect("the policy carries its statements")
+                    .push(json!({
+                        "Sid": "DenyAppFlow",
+                        "Effect": "Deny",
+                        "Principal": { "Service": "appflow.amazonaws.com" },
+                        "Action": denied,
+                        "Resource": [
+                            format!("arn:aws:s3:::{bucket}"),
+                            format!("arn:aws:s3:::{bucket}/*"),
+                        ],
+                    }));
+                Some(policy)
+            }
+        }
+    }
+}
+
+/// A definition naming a bucket whose policy does not grant the AppFlow service principal
+/// every action a run takes on that end is refused in AppFlow's own words: the
+/// request-failed envelope naming the call, the bucket the definition named, the actions
+/// that bucket's policy still leaves ungranted, the principal they have to be granted to
+/// and the two resources the grant has to cover.
+///
+/// The rows differ along which end carries the gap, how the gap arises (no policy at all,
+/// a policy granting the other end's actions, a partial grant, an explicit `Deny` over an
+/// otherwise complete grant), how many actions are missing and the shape of the bucket
+/// name the ARNs are derived from — so what is pinned is the template and the values it
+/// takes from the request and from the policy state, not one case's text.
+#[tokio::test]
+async fn a_bucket_policy_missing_a_run_action_is_refused_in_appflows_words() {
+    // The actions a run takes on each end, which are what a policy has to grant: a source
+    // is LISTED and READ, a destination is WRITTEN.
+    const LIST_ONLY: [&str; 1] = ["s3:ListBucket"];
+    const READ_ONLY: [&str; 1] = ["s3:GetObject"];
+
+    let rows = [
+        PolicyGap {
+            case: "the source bucket carries no policy at all",
+            source_bucket: "gap-src-none",
+            source_granted: Granted::Nothing,
+            destination_bucket: "gap-dst-ok",
+            destination_granted: Granted::Allow(&EVERY_RUN_ACTION),
+            named_bucket: "gap-src-none",
+            missing: &["s3:listbucket", "s3:getobject"],
+        },
+        PolicyGap {
+            case: "the source policy grants the listing but not the read",
+            source_bucket: "gap-src-list",
+            source_granted: Granted::Allow(&LIST_ONLY),
+            destination_bucket: "gap-dst-ok",
+            destination_granted: Granted::Allow(&EVERY_RUN_ACTION),
+            named_bucket: "gap-src-list",
+            missing: &["s3:getobject"],
+        },
+        PolicyGap {
+            case: "the source policy grants the read but not the listing",
+            source_bucket: "gap-src-read",
+            source_granted: Granted::Allow(&READ_ONLY),
+            destination_bucket: "gap-dst-ok",
+            destination_granted: Granted::Allow(&EVERY_RUN_ACTION),
+            named_bucket: "gap-src-read",
+            missing: &["s3:listbucket"],
+        },
+        PolicyGap {
+            case: "the source policy denies the read it otherwise grants",
+            source_bucket: "gap-src-denied-read",
+            source_granted: Granted::AllowAllExcept(&READ_ONLY),
+            destination_bucket: "gap-dst-ok",
+            destination_granted: Granted::Allow(&EVERY_RUN_ACTION),
+            named_bucket: "gap-src-denied-read",
+            missing: &["s3:getobject"],
+        },
+        PolicyGap {
+            case: "the source policy denies both actions it otherwise grants",
+            source_bucket: "gap-src-denied-both",
+            source_granted: Granted::AllowAllExcept(&SOURCE_POLICY_ACTIONS),
+            destination_bucket: "gap-dst-ok",
+            destination_granted: Granted::Allow(&EVERY_RUN_ACTION),
+            named_bucket: "gap-src-denied-both",
+            missing: &["s3:listbucket", "s3:getobject"],
+        },
+        PolicyGap {
+            case: "a dotted source bucket name the resource ARNs are derived from",
+            source_bucket: "gap.src.dotted-10",
+            source_granted: Granted::Nothing,
+            destination_bucket: "gap-dst-ok",
+            destination_granted: Granted::Allow(&EVERY_RUN_ACTION),
+            named_bucket: "gap.src.dotted-10",
+            missing: &["s3:listbucket", "s3:getobject"],
+        },
+        PolicyGap {
+            case: "the destination bucket carries no policy at all",
+            source_bucket: "gap-src-ok",
+            source_granted: Granted::Allow(&EVERY_RUN_ACTION),
+            destination_bucket: "gap-dst-none",
+            destination_granted: Granted::Nothing,
+            named_bucket: "gap-dst-none",
+            missing: &["s3:putobject"],
+        },
+        PolicyGap {
+            case: "the destination policy grants only what a source needs",
+            source_bucket: "gap-src-ok",
+            source_granted: Granted::Allow(&EVERY_RUN_ACTION),
+            destination_bucket: "gap-dst-read",
+            destination_granted: Granted::Allow(&SOURCE_POLICY_ACTIONS),
+            named_bucket: "gap-dst-read",
+            missing: &["s3:putobject"],
+        },
+        PolicyGap {
+            case: "the destination policy denies the write it otherwise grants",
+            source_bucket: "gap-src-ok",
+            source_granted: Granted::Allow(&EVERY_RUN_ACTION),
+            destination_bucket: "gap-dst-denied-write",
+            destination_granted: Granted::AllowAllExcept(&["s3:PutObject"]),
+            named_bucket: "gap-dst-denied-write",
+            missing: &["s3:putobject"],
+        },
+    ];
+
+    for row in rows {
+        let case = row.case;
+        let emulator = Emulator::new();
+        for (bucket, granted) in [
+            (row.source_bucket, &row.source_granted),
+            (row.destination_bucket, &row.destination_granted),
+        ] {
+            emulator.create_bucket(bucket).await;
+            if let Some(document) = granted.document(bucket) {
+                emulator.put_bucket_policy(bucket, &document).await;
+            }
+        }
+
+        let refused = emulator
+            .appflow(
+                "/create-flow",
+                &json!({
+                    "flowName": "policy-gap-flow",
+                    "triggerConfig": on_demand_trigger(),
+                    "sourceFlowConfig": s3_source_at(row.source_bucket, "input", Some("CSV")),
+                    "destinationFlowConfigList": [s3_destination_at(
+                        row.destination_bucket, "output", None)],
+                    "tasks": [map_all_task(&[])],
+                }),
+            )
+            .await;
+        assert_eq!(
+            (refused.status, refused.error.as_str()),
+            (400, "ValidationException"),
+            "case {case:?}: expected a 400 ValidationException, got {} {:?}",
+            refused.status,
+            refused.json()
+        );
+        let expected = missing_actions_refusal(CREATE_FLOW_REQUEST, row.named_bucket, row.missing);
+        assert_eq!(
+            refused.string("message"),
+            expected,
+            "case {case:?}: expected the refusal to read {expected:?}, got {:?}",
+            refused.string("message")
         );
     }
 }

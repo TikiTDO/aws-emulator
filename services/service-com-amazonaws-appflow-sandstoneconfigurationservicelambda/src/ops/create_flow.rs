@@ -218,6 +218,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         .or_else(|| {
             crate::state::unusable_s3_location(
                 &*self.engine,
+                crate::state::CREATE_FLOW_REQUEST,
                 &input.flow_name,
                 &crate::state::flow_arn(&region, &input.flow_name),
                 &input.source_flow_config,
