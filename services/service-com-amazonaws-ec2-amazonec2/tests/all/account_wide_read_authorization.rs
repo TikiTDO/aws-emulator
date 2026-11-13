@@ -93,25 +93,13 @@ fn emulator() -> MultiServiceRouter {
     router
 }
 
-/// Percent-encode one `application/x-www-form-urlencoded` component, leaving only RFC
-/// 3986's unreserved characters literal — a policy document is JSON, so every brace, quote
-/// and colon in it has to survive the round trip.
-fn form_encode(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(char::from(byte));
-            }
-            other => encoded.push_str(&format!("%{other:02X}")),
-        }
-    }
-    encoded
-}
-
 /// One query-protocol call to `service`, presented as signed by the access key id `akid` —
 /// the only place the credential appears on the wire, and so what the service reads the
 /// caller's identity from.
+///
+/// The request itself is built by the harness every suite shares
+/// ([`super::ec2_query::query_call_as`]), so this suite carries no second copy of the
+/// envelope or of its encoding.
 async fn call_as(
     router: &MultiServiceRouter,
     service: &str,
@@ -120,33 +108,8 @@ async fn call_as(
     action: &str,
     params: &[(&str, &str)],
 ) -> (u16, String) {
-    let mut body = format!("Action={action}&Version={api_version}");
-    for (name, value) in params {
-        body.push('&');
-        body.push_str(&form_encode(name));
-        body.push('=');
-        body.push_str(&form_encode(value));
-    }
-    let request = http::Request::builder()
-        .method("POST")
-        .uri(format!("https://{service}.{REGION}.amazonaws.com/"))
-        .header("host", format!("{service}.{REGION}.amazonaws.com"))
-        .header("content-type", "application/x-www-form-urlencoded")
-        .header(
-            "authorization",
-            format!(
-                "AWS4-HMAC-SHA256 Credential={akid}/20260101/{REGION}/{service}/aws4_request, \
-                 SignedHeaders=host, Signature=0"
-            ),
-        )
-        .body(bytes::Bytes::from(body))
-        .expect("a well-formed query request");
-    let response = router.dispatch(request).await;
-    let status = response.status().as_u16();
-    (
-        status,
-        String::from_utf8_lossy(response.body()).to_string(),
-    )
+    super::ec2_query::query_call_as(router, REGION, service, api_version, akid, action, params)
+        .await
 }
 
 /// One EC2 call signed by `akid`.

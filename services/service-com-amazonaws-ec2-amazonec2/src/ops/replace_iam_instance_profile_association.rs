@@ -8,8 +8,10 @@
 //! — the association the request names is swapped for a NEW one over the same instance,
 //! carrying the profile the request names and the `associating` state the clock then moves
 //! to `associated`, so the instance runs as the new profile "without having to disassociate
-//! the existing IAM instance profile first". An association id this account holds no
-//! association for is refused, as is a profile reference naming neither an ARN nor a name.
+//! the existing IAM instance profile first". The profile is reported as the account's IAM
+//! records hold it, by ARN and by IAM's own id for it. An association id this account holds
+//! no association for is refused, as is a profile reference naming neither an ARN nor a
+//! name.
 //! This is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
@@ -149,7 +151,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // request naming a profile this service cannot act on is refused without the store
         // being locked and without the association it named being disturbed.
         let iam_instance_profile =
-            crate::state::resolve_iam_instance_profile(&input.iam_instance_profile)?;
+            crate::state::resolve_iam_instance_profile(&*self.engine, &input.iam_instance_profile)?;
 
         let state = crate::state::require_service_state(&*self.engine)?;
         let mut store = state.lock();
@@ -171,9 +173,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     iam_instance_profile_association: Some(association),
                 })
             }
-            crate::state::IamInstanceProfileAssociationReplacement::NoSuchAssociation => Err(
-                crate::state::invalid_iam_instance_profile_association_id(&input.association_id),
-            ),
+            crate::state::IamInstanceProfileAssociationReplacement::NoSuchAssociation => {
+                Err(store.unresolvable_iam_instance_profile_association_id(&input.association_id))
+            }
             crate::state::IamInstanceProfileAssociationReplacement::NoRoom => {
                 Err(crate::scaffolded::Scaffolded::request_limit_exceeded(
                     format!(

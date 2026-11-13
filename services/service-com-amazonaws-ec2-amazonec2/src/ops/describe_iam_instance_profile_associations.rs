@@ -263,15 +263,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // An id that names no association of the account is an error, not an absent row —
-        // and EC2 answers the one refusal it has for an association id it cannot resolve,
-        // whatever the shape of the value.
+        // and EC2 answers it through the one seam this crate refuses an association id it
+        // cannot resolve with.
         if let Some(unknown) = requested
             .iter()
             .find(|id| !store.iam_instance_profile_associations.contains_key(id.as_str()))
         {
-            return Err(crate::state::invalid_iam_instance_profile_association_id(
-                unknown,
-            ));
+            return Err(store.unresolvable_iam_instance_profile_association_id(unknown));
         }
         // A set, so narrowing below costs one lookup per association rather than a scan of
         // the asked-for list; repeats of one id therefore name one association.

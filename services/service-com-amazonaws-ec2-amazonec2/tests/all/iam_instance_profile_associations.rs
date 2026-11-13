@@ -23,9 +23,10 @@
 //!    the non-terminal `disassociating` state, the instance stops running as the profile at
 //!    once, and the clock removes the association a span later — after which the instance can
 //!    be given a profile again;
-//! 6. an association id this account holds no association for is REFUSED — one code and one
-//!    sentence, built from the id the request named, whatever the shape of that value — by
-//!    EVERY operation that resolves one;
+//! 6. an association id this account holds no association for is REFUSED by EVERY operation
+//!    that resolves one, as the pair this service reads every id kind by: a value it could
+//!    have ISSUED is reported not-found, and a value outside that id space is refused as an
+//!    id it cannot read at all;
 //! 7. the describe REPORTS THE STORE, narrowed by the `AssociationIds` and `Filters` the
 //!    request names and cut into `MaxResults`-sized pages — a page size the published range
 //!    bounds, walked by a `NextToken` this operation minted and nothing else — and it is a
@@ -85,6 +86,10 @@ const INCORRECT_STATE: &str = "IncorrectState";
 
 /// The EC2 code for an instance id the account holds no instance for.
 const INVALID_INSTANCE_ID_NOT_FOUND: &str = "InvalidInstanceID.NotFound";
+
+/// The EC2 code for an association id this service could have issued and holds no
+/// association for.
+const INVALID_ASSOCIATION_ID_NOT_FOUND: &str = "InvalidAssociationID.NotFound";
 
 /// The EC2 code for a `NextToken` this service did not issue.
 const INVALID_PAGINATION_TOKEN: &str = "InvalidPaginationToken";
@@ -360,9 +365,10 @@ async fn associate_records_the_profile_the_request_names() {
                 .is_some_and(|timestamp| !timestamp.is_empty()),
             "case {case:?}: expected the association to carry a timestamp, got {recorded:?}"
         );
-        // `IamInstanceProfile$Id` is IAM's own id for the profile, which EC2's state holds
-        // no record of, so the association reports the ARN and no id rather than an invented
-        // one.
+        // `IamInstanceProfile$Id` is IAM's own id for the profile, and this account's IAM
+        // records hold no profile under any of these references, so the association reports
+        // the ARN and no id rather than an invented one. The rows where IAM DOES hold the
+        // profile are in `iam_instance_profile_identity`.
         assert_eq!(
             recorded.profile_id, None,
             "case {case:?}: expected no profile id, got {recorded:?}"
@@ -739,9 +745,15 @@ async fn disassociate_takes_the_profile_away_and_the_clock_removes_the_associati
             "case {case:?}: expected the id of a removed association to be refused, got \
              {status}: {body}"
         );
+        // The id was ISSUED by this service, so what it names is GONE rather than unreadable.
+        assert_eq!(
+            error_code(&body),
+            INVALID_ASSOCIATION_ID_NOT_FOUND,
+            "case {case:?}: expected {INVALID_ASSOCIATION_ID_NOT_FOUND}, got {body}"
+        );
         assert_eq!(
             error_message(&body),
-            format!("Invalid Id: {}", recorded.id),
+            format!("An invalid association-id of '{}' was given", recorded.id),
             "case {case:?}: expected the refusal to name the id, got {body}"
         );
 
@@ -884,16 +896,21 @@ async fn replace_swaps_the_profile_under_a_new_association() {
             vec![replaced.id.clone()],
             "case {case:?}: the replacement must be the account's only association"
         );
-        // So the replaced id names no association any more, and is refused the one way every
-        // operation that resolves an association id refuses an id it cannot resolve.
+        // So the replaced id names no association any more: an id this service DID issue,
+        // which is reported as an association that cannot be found.
         let (status, body) = replace(&router, &recorded.id, &by_name("third-profile")).await;
         assert_eq!(
             status, 400,
             "case {case:?}: expected the replaced id to be refused, got {status}: {body}"
         );
         assert_eq!(
+            error_code(&body),
+            INVALID_ASSOCIATION_ID_NOT_FOUND,
+            "case {case:?}: expected {INVALID_ASSOCIATION_ID_NOT_FOUND}, got {body}"
+        );
+        assert_eq!(
             error_message(&body),
-            format!("Invalid Id: {}", recorded.id),
+            format!("An invalid association-id of '{}' was given", recorded.id),
             "case {case:?}: expected the refusal to name the id, got {body}"
         );
 
@@ -1012,23 +1029,6 @@ async fn replace_refuses_a_profile_reference_it_cannot_act_on() {
 
 #[tokio::test]
 async fn an_association_id_that_names_no_association_is_refused() {
-    // One refusal, built from the id the request named, whatever shape the value takes —
-    // and the SAME refusal from every operation that resolves an association id.
-    let rows: Vec<(&str, &str)> = vec![
-        (
-            "a well-formed id the account holds no association for",
-            "iip-assoc-0123456789abcdef0",
-        ),
-        ("the short id form", "iip-assoc-01234567"),
-        ("the null id", "iip-assoc-00000000000000000"),
-        ("an id of another resource kind", "eipassoc-0123456789abcdef0"),
-        ("a value that is not an id at all", "not-an-association"),
-        (
-            "an id whose suffix is not lowercase hexadecimal",
-            "iip-assoc-0123456789ABCDEF0",
-        ),
-    ];
-
     let router = emulator();
     // The account DOES hold an association, so no row is answered by an empty store.
     let instance_id = launch("the held association", &router).await;
@@ -1036,7 +1036,69 @@ async fn an_association_id_that_names_no_association_is_refused() {
     assert_eq!(status, 200, "the held association must be recorded: {body}");
     let held = one_association("the held association", &body);
 
-    for (case, association_id) in rows {
+    // One association of this service's OWN id space, taken away again, so its id is a value
+    // the mint DID hand out and the store now resolves to nothing.
+    let retired_instance = launch("a retired association", &router).await;
+    let (status, body) = associate(&router, &retired_instance, &by_name("retired-profile")).await;
+    assert_eq!(status, 200, "the retired association must be recorded: {body}");
+    let retired = one_association("a retired association", &body).id;
+    let (status, body) = disassociate(&router, &retired).await;
+    assert_eq!(status, 200, "the disassociate must succeed, got {status}: {body}");
+    past_the_transition().await;
+
+    // Which refusal a value takes is the pair this service reads every id kind by: a value
+    // it could have ISSUED names an association that cannot be found, while anything outside
+    // that id space is a value it cannot read as an association id at all. Each row differs
+    // along the shape of the value — its prefix, the form and alphabet of its suffix, and
+    // whether the mint has reached it — and every operation that resolves an association id
+    // answers each the same way.
+    let rows: Vec<(&str, String, &str, String)> = vec![
+        (
+            "an id of this service's own id space that names no association any more",
+            retired.clone(),
+            INVALID_ASSOCIATION_ID_NOT_FOUND,
+            format!("An invalid association-id of '{retired}' was given"),
+        ),
+        (
+            "a long-form id far above every value the mint has reached",
+            "iip-assoc-0123456789abcdef0".to_string(),
+            INVALID_PARAMETER_VALUE,
+            "Invalid Id: iip-assoc-0123456789abcdef0".to_string(),
+        ),
+        (
+            "the short id form",
+            "iip-assoc-01234567".to_string(),
+            INVALID_PARAMETER_VALUE,
+            "Invalid Id: iip-assoc-01234567".to_string(),
+        ),
+        (
+            "the null id",
+            "iip-assoc-00000000000000000".to_string(),
+            INVALID_PARAMETER_VALUE,
+            "Invalid Id: iip-assoc-00000000000000000".to_string(),
+        ),
+        (
+            "an id of another resource kind",
+            "eipassoc-0123456789abcdef0".to_string(),
+            INVALID_PARAMETER_VALUE,
+            "Invalid Id: eipassoc-0123456789abcdef0".to_string(),
+        ),
+        (
+            "a value that is not an id at all",
+            "not-an-association".to_string(),
+            INVALID_PARAMETER_VALUE,
+            "Invalid Id: not-an-association".to_string(),
+        ),
+        (
+            "an id whose suffix is not lowercase hexadecimal",
+            "iip-assoc-0123456789ABCDEF0".to_string(),
+            INVALID_PARAMETER_VALUE,
+            "Invalid Id: iip-assoc-0123456789ABCDEF0".to_string(),
+        ),
+    ];
+
+    for (case, association_id, expected_code, expected_message) in rows {
+        let association_id = association_id.as_str();
         for action in [
             "DisassociateIamInstanceProfile",
             "ReplaceIamInstanceProfileAssociation",
@@ -1063,12 +1125,12 @@ async fn an_association_id_that_names_no_association_is_refused() {
             );
             assert_eq!(
                 error_code(&body),
-                INVALID_PARAMETER_VALUE,
-                "case {case:?}: expected {INVALID_PARAMETER_VALUE} from {action}, got {body}"
+                expected_code,
+                "case {case:?}: expected {expected_code} from {action}, got {body}"
             );
             assert_eq!(
                 error_message(&body),
-                format!("Invalid Id: {association_id}"),
+                expected_message,
                 "case {case:?}: expected {action} to name the id it could not resolve, got \
                  {body}"
             );

@@ -443,6 +443,12 @@ mod modify_local_gateway_route;
 // describes report of it, and what the disassociate takes away. Declared beside
 #[path = "all/iam_instance_profile_associations.rs"]
 mod iam_instance_profile_associations;
+// WHICH instance profile an association is over: the ARN and the id the account's IAM
+// records hold it under, on every report of one. Declared beside `prefix_lists` for the
+// reason the note above gives: the sorted neighbourhood is where every new ec2 suite
+// inserts its two lines.
+#[path = "all/iam_instance_profile_identity.rs"]
+mod iam_instance_profile_identity;
 // What `DeleteVolume` removes, what it refuses, and what a dry run of it performs. Declared
 // beside `prefix_lists` for the reason the note above gives: the sorted neighbourhood is where
 // every new ec2 suite inserts its two lines.

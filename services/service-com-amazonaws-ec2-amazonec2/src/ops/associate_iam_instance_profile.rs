@@ -144,7 +144,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // is read BEFORE the store is touched, so a request that names no profile this
         // service can act on is refused without the store being locked.
         let iam_instance_profile =
-            crate::state::resolve_iam_instance_profile(&input.iam_instance_profile)?;
+            crate::state::resolve_iam_instance_profile(&*self.engine, &input.iam_instance_profile)?;
 
         let state = crate::state::require_service_state(&*self.engine)?;
         let mut store = state.lock();

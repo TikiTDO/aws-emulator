@@ -625,7 +625,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // is touched. A reference this service cannot act on refuses the whole launch
         // rather than being accepted and dropped.
         let iam_instance_profile = match input.iam_instance_profile.as_ref() {
-            Some(specification) => Some(resolve_iam_instance_profile(specification)?),
+            Some(specification) => Some(resolve_iam_instance_profile(&*self.engine, specification)?),
             None => None,
         };
 

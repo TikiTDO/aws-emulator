@@ -125,6 +125,72 @@ pub async fn call_raw(
     (status, content_type, String::from_utf8_lossy(response.body()).to_string())
 }
 
+/// Percent-encode one `application/x-www-form-urlencoded` component, leaving only RFC
+/// 3986's unreserved characters literal.
+///
+/// Stricter than [`form_value`], which leaves a value's `:` and `/` as a client's own
+/// encoder would: a component that carries JSON (an IAM policy document) or a path (an IAM
+/// instance profile's) has to survive the round trip whole, so every reserved byte goes
+/// through. The ONE encoder the suites that drive ANOTHER emulated service share.
+pub fn form_encode(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(char::from(byte));
+            }
+            other => encoded.push_str(&format!("%{other:02X}")),
+        }
+    }
+    encoded
+}
+
+/// One query-protocol call to `service` in `region`, presented as signed by the access key
+/// id `akid` — the only place the credential appears on the wire, and so what a service
+/// reads the caller's identity from.
+///
+/// The ONE hop for a suite that has to drive another emulated service beside EC2 — IAM for
+/// the identities EC2's authorization gate reads and for the instance profiles it resolves a
+/// reference against — so the envelope, the credential scope and the encoding are built
+/// once rather than per suite. Both names and values are encoded through [`form_encode`].
+pub async fn query_call_as(
+    router: &MultiServiceRouter,
+    region: &str,
+    service: &str,
+    api_version: &str,
+    akid: &str,
+    action: &str,
+    params: &[(&str, &str)],
+) -> (u16, String) {
+    let mut body = format!("Action={action}&Version={api_version}");
+    for (name, value) in params {
+        body.push('&');
+        body.push_str(&form_encode(name));
+        body.push('=');
+        body.push_str(&form_encode(value));
+    }
+    let request = http::Request::builder()
+        .method("POST")
+        .uri(format!("https://{service}.{region}.amazonaws.com/"))
+        .header("host", format!("{service}.{region}.amazonaws.com"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header(
+            "authorization",
+            format!(
+                "AWS4-HMAC-SHA256 Credential={akid}/20260101/{region}/{service}/aws4_request, \
+                 SignedHeaders=host, Signature=0"
+            ),
+        )
+        .body(bytes::Bytes::from(body))
+        .expect("a well-formed query request");
+    let response = router.dispatch(request).await;
+    let status = response.status().as_u16();
+    (
+        status,
+        String::from_utf8_lossy(response.body()).to_string(),
+    )
+}
+
 /// `vec!["a".to_string(), …]` for a slice of string literals — a table's expected values,
 /// as owned `String`s, for comparing against the values a response reported.
 pub fn owned(values: &[&str]) -> Vec<String> {

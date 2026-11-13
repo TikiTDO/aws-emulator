@@ -157,11 +157,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // (`DisassociateIamInstanceProfile`): the instance stops running as the profile
         // here, and the association is reported in the non-terminal `disassociating` state
         // the clock then takes away.
-        let association = store
+        let association = match store
             .start_iam_instance_profile_disassociation(&input.association_id)
-            .ok_or_else(|| {
-                crate::state::invalid_iam_instance_profile_association_id(&input.association_id)
-            })?;
+        {
+            Some(association) => association,
+            None => {
+                return Err(
+                    store.unresolvable_iam_instance_profile_association_id(&input.association_id)
+                );
+            }
+        };
 
         Ok(DisassociateIamInstanceProfileOutput {
             iam_instance_profile_association: Some(association),

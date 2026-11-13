@@ -39,6 +39,15 @@
 //! ([`ComAmazonawsEc2Amazonec2State::replace_iam_instance_profile_association`]), so the old
 //! association is gone at once and the new one starts its own `associating` span.
 //!
+//! The PROFILE an association reports is read from the account's IAM records
+//! ([`resolve_iam_instance_profile`]): both members [`IamInstanceProfile`] carries — the ARN
+//! and the unique id IAM minted for the profile — belong to the service that owns instance
+//! profiles, so neither is derived from the reference the request named.
+//!
+//! An association id this store resolves to nothing is refused through ONE seam
+//! ([`ComAmazonawsEc2Amazonec2State::unresolvable_iam_instance_profile_association_id`]), as
+//! the malformed/not-found pair every id kind of this crate is read by.
+//!
 //! [`ComAmazonawsEc2Amazonec2State::iam_instance_profile_association_due_at`] is when that
 //! move falls due, on the same monotonic clock as
 //! [`ComAmazonawsEc2Amazonec2State::vpc_available_at`], and
@@ -48,6 +57,8 @@
 //! to one resource and reaches the rest of the store through `use super::*`.
 
 use std::time::{Instant, SystemTime};
+
+use ::service_com_amazonaws_iam_awsidentitymanagementv20100508::state as iam_store;
 
 use crate::ops::types::{
     IamInstanceProfile, IamInstanceProfileAssociation, IamInstanceProfileSpecification,
@@ -383,17 +394,56 @@ impl ComAmazonawsEc2Amazonec2State {
     }
 }
 
-/// Refuse a request that named an IAM instance profile association id this account holds no
-/// association for: HTTP 400 `InvalidParameterValue`, with the message EC2 builds from the
-/// id the request named.
+/// Refuse a request whose association id this service cannot READ as one of its own: HTTP
+/// 400 `InvalidParameterValue`, with the message EC2 builds from the value the request
+/// named.
 ///
-/// EC2 answers this ONE refusal for every association id it cannot resolve, whether the
-/// value is not an association id at all or merely names none — unlike the resource kinds
-/// that answer an `Invalid<Kind>ID.Malformed` / `.NotFound` pair
-/// ([`invalid_network_interface_permission_id_malformed`]) — so there is no second wording
-/// here to choose between.
+/// The malformed half of the pair every association-id reader of this resource answers
+/// ([`ComAmazonawsEc2Amazonec2State::unresolvable_iam_instance_profile_association_id`]): an
+/// id reaches EC2 encoded rather than as the identifier it stands for, so a value no issue
+/// of this kind could have produced is refused BEFORE any lookup rather than reported as an
+/// association that does not exist.
 pub fn invalid_iam_instance_profile_association_id<E>(association_id: &str) -> Scaffolded<E> {
     invalid_parameter_value(format!("Invalid Id: {association_id}"))
+}
+
+/// Refuse a request that named an association id this service could have ISSUED but holds
+/// no association for: HTTP 400 [`INVALID_ASSOCIATION_ID_NOT_FOUND`], with the sentence EC2
+/// words for an IAM instance profile association it cannot find.
+///
+/// The not-found half of that pair. The wording is this resource's own — recorded as "An
+/// invalid association-id of '<id>' was given" rather than the `The <kind> '<id>' does not
+/// exist` template [`invalid_association_id_not_found`] builds for a route table
+/// association — so the id the request named is the only part of it that varies.
+pub fn iam_instance_profile_association_id_not_found<E>(association_id: &str) -> Scaffolded<E> {
+    Scaffolded::service_error(
+        INVALID_ASSOCIATION_ID_NOT_FOUND,
+        400,
+        format!("An invalid association-id of '{association_id}' was given"),
+    )
+}
+
+impl ComAmazonawsEc2Amazonec2State {
+    /// Refuse an `IamInstanceProfileAssociationId` this store resolves to no association —
+    /// the ONE reading of that failure, shared by every operation of this crate that
+    /// resolves one, so two of them cannot classify one value differently.
+    ///
+    /// Which of the two refusals a value takes is the pair this crate reads every id kind
+    /// by ([`Self::id_was_issued`]): a value the mint could have handed out is looked up and
+    /// answered `InvalidAssociationID.NotFound` — the association an issued id named may
+    /// since have gone, which is what a replacement of it leaves behind — while a value
+    /// outside the issued id space is refused as an id this service cannot read at all
+    /// ([`invalid_iam_instance_profile_association_id`]).
+    pub fn unresolvable_iam_instance_profile_association_id<E>(
+        &self,
+        association_id: &str,
+    ) -> Scaffolded<E> {
+        if self.id_was_issued(IAM_INSTANCE_PROFILE_ASSOCIATION_ID_PREFIX, association_id) {
+            iam_instance_profile_association_id_not_found(association_id)
+        } else {
+            invalid_iam_instance_profile_association_id(association_id)
+        }
+    }
 }
 
 /// Refuse giving an instance a second IAM instance profile: HTTP 400
@@ -430,6 +480,34 @@ pub fn iam_instance_profile_name_is_well_formed(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"+=,.@_-".contains(&byte))
 }
 
+/// The instance profile the account's IAM records hold under `name`, as EC2 reports a
+/// profile.
+///
+/// `IamInstanceProfile$Id` is "The ID of the instance profile" — IAM's own
+/// `InstanceProfile$InstanceProfileId`, which no EC2 call mints — so both members an
+/// association reports come from the component that OWNS instance profiles, through IAM's
+/// own read of one ([`iam_store::ComAmazonawsIamAwsidentitymanagementv20100508State::instance_profile_report`]),
+/// the way this crate's authorization gate reads that store rather than keeping a second
+/// copy of it. The ARN comes from the same record, so a profile IAM holds under a PATH is
+/// reported under the ARN that path gives it.
+///
+/// `None` when this account's IAM records hold no profile under that name: a profile this
+/// emulator has no record of is reported as the request spelled it and with NO id, rather
+/// than with one invented here.
+fn iam_held_instance_profile<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    name: &str,
+) -> Option<IamInstanceProfile> {
+    let iam = iam_store::service_state(engine)?;
+    let held = iam
+        .lock()
+        .instance_profile_report(&iam_store::name_key(name))?;
+    Some(IamInstanceProfile {
+        arn: Some(held.arn),
+        id: Some(held.instance_profile_id),
+    })
+}
+
 /// The instance profile an `IamInstanceProfileSpecification` names, as an association
 /// reports it (`IamInstanceProfileAssociation$IamInstanceProfile`).
 ///
@@ -437,17 +515,16 @@ pub fn iam_instance_profile_name_is_well_formed(name: &str) -> bool {
 /// (`IamInstanceProfileSpecification$Arn`) or "the name of the instance profile"
 /// (`IamInstanceProfileSpecification$Name`) — two spellings of ONE profile, so exactly one
 /// of them identifies it: both together are an `InvalidParameterCombination` and neither is
-/// a `MissingParameter`. A name is reported as the ARN the profile of THIS account holds
-/// under that name, so an association records one spelling of the profile however the
-/// request named it.
+/// a `MissingParameter`. Whichever spelling the request took, the profile is resolved
+/// against the account's IAM records ([`iam_held_instance_profile`]), so an association
+/// reports the ARN and the unique id IAM holds that profile under — and a reference IAM has
+/// no record of is reported as the request spelled it, with no id, rather than refused: this
+/// service holds no record of what IAM does and does not have.
 ///
 /// The ONE reading of that member, shared by every operation that takes one, so two of them
-/// cannot accept different values for one profile. The reference is stored as the request
-/// named it rather than resolved against IAM's own records, which is how this service treats
-/// every IAM reference a request carries (`CreateLaunchTemplate` stores a launch template's
-/// `IamInstanceProfile` verbatim); `IamInstanceProfile$Id` is IAM's own id for the profile,
-/// which this service holds no record of, so an association reports the ARN and no id.
-pub fn resolve_iam_instance_profile<E>(
+/// cannot accept different values for one profile.
+pub fn resolve_iam_instance_profile<E, Eng: Send + Sync + 'static>(
+    engine: &Eng,
     specification: &IamInstanceProfileSpecification,
 ) -> Result<IamInstanceProfile, Scaffolded<E>> {
     // ec2Query carries an omitted member and an empty one identically, and an empty value
@@ -474,10 +551,17 @@ pub fn resolve_iam_instance_profile<E>(
                      Invalid IAM Instance Profile ARN"
                 )));
             }
-            Ok(IamInstanceProfile {
-                arn: Some(arn.to_string()),
-                id: None,
-            })
+            // An ARN names the profile IAM holds under exactly that ARN: the name is the
+            // last segment of it, and the record is read only when the ARN IAM holds that
+            // profile under is the one the request sent, so an ARN whose path names no
+            // profile of this account is not quietly answered with another profile's id.
+            Ok(::service_common::iam_role::instance_profile_name(arn)
+                .and_then(|name| iam_held_instance_profile(engine, name))
+                .filter(|held| held.arn.as_deref() == Some(arn))
+                .unwrap_or_else(|| IamInstanceProfile {
+                    arn: Some(arn.to_string()),
+                    id: None,
+                }))
         }
         (None, Some(name)) => {
             if !iam_instance_profile_name_is_well_formed(name) {
@@ -486,14 +570,16 @@ pub fn resolve_iam_instance_profile<E>(
                      Invalid IAM Instance Profile name"
                 )));
             }
-            Ok(IamInstanceProfile {
-                arn: Some(::engine::emulator_arn(
-                    "iam",
-                    "",
-                    &format!("{IAM_INSTANCE_PROFILE_RESOURCE_PREFIX}{name}"),
-                )),
-                id: None,
-            })
+            Ok(
+                iam_held_instance_profile(engine, name).unwrap_or_else(|| IamInstanceProfile {
+                    arn: Some(::engine::emulator_arn(
+                        "iam",
+                        "",
+                        &format!("{IAM_INSTANCE_PROFILE_RESOURCE_PREFIX}{name}"),
+                    )),
+                    id: None,
+                }),
+            )
         }
     }
 }
