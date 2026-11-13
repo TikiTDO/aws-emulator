@@ -7,8 +7,10 @@
 //!
 //! A console is a device of the INSTANCE, so what it shows is derived from the stored
 //! instance on every call ([`crate::state::instance_console_text`], the one definition
-//! `GetConsoleScreenshot` draws as an image): two reads of an instance nothing has moved
-//! answer exactly the same bytes, and reading a console writes nothing.
+//! `GetConsoleScreenshot` draws as an image), and the instant it reports as last updated is
+//! derived from that same console ([`crate::state::instance_console_updated_at`]): two reads
+//! of an instance nothing has moved answer exactly the same bytes and the same instant, and
+//! reading a console writes nothing.
 //!
 //! ## Shape of an operation
 //!
@@ -76,8 +78,8 @@ use super::types::*;
 use ::base64::Engine as _;
 
 use crate::state::{
-    instance_console_text, require_console_instance, require_service_state,
-    system_time_to_date_time,
+    instance_console_text, instance_console_updated_at, require_console_instance,
+    require_service_state, system_time_to_date_time,
 };
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
@@ -186,21 +188,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // is no older captured block for a request that leaves the member out to get instead.
         let _ = input.latest;
 
-        // "The time at which the output was last updated" (`$Timestamp`): the instance wrote
-        // its console when it booted, and again each time it was rebooted or interrupted —
-        // "the interrupt crashes and reboots the instance's operating system"
-        // (`SendDiagnosticInterrupt`) — so the latest of those three instants is when the
-        // output last changed. Read off the stored instance, so two reads report the same
-        // instant.
-        let updated_at = [
-            Some(instance.launch_time),
-            instance.last_reboot_queued_at,
-            instance.last_diagnostic_interrupt_at,
-        ]
-        .into_iter()
-        .flatten()
-        .max()
-        .unwrap_or(instance.launch_time);
+        // "The time at which the output was last updated" (`$Timestamp`): read off the SAME
+        // stored console the text is derived from ([`crate::state::instance_console_updated_at`]),
+        // so the instant reported is the latest one the output it is served beside shows it
+        // was written at — the instance's launch, and each boot its guest has had. An event
+        // that has written nothing to the buffer yet reports no update of it, and two reads
+        // of an instance nothing has moved answer the same instant.
+        let updated_at = instance_console_updated_at(instance);
 
         Ok(GetConsoleOutputOutput {
             // The id read back off the stored record rather than echoed from the request, so

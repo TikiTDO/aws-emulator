@@ -13,6 +13,8 @@
 //! holds reports the facts that instance actually has, and an instance the record carries no
 //! value for gets no line at all rather than a line with a placeholder in it.
 
+use std::time::SystemTime;
+
 use super::{InstanceRecord, iso8601_utc};
 
 /// Resolve the instance whose CONSOLE a request asks for, or refuse the id: HTTP 400
@@ -106,4 +108,28 @@ pub fn instance_console_text(instance: &InstanceRecord) -> String {
         .into_iter()
         .map(|line| format!("{line}\n"))
         .collect()
+}
+
+/// When one instance's console was last WRITTEN: the latest instant the console
+/// [`instance_console_lines`] renders says it was written at — the instance's launch, and the
+/// instant each boot its guest has had came up ([`super::instance_boots`], which is what
+/// appends a block to the buffer).
+///
+/// What `GetConsoleOutput` reports as "the time at which the output was last updated"
+/// (`GetConsoleOutputResult$Timestamp`). Derived from the SAME stored console the text is,
+/// so the instant a client reads is the latest one the output it was handed shows, and an
+/// instant nothing wrote the console at is never reported as an update of it: a reboot that
+/// is only QUEUED — `RebootInstances` "only queues a request to reboot the specified
+/// instances", so the guest comes up a moment later — has written nothing yet, and the
+/// buffer still reads exactly as it did.
+///
+/// Derived on every call rather than kept beside the console, so two reads of an instance
+/// nothing has moved report the same instant and reading one writes nothing.
+pub fn instance_console_updated_at(instance: &InstanceRecord) -> SystemTime {
+    super::instance_boots(instance)
+        .iter()
+        .map(|boot| boot.booted_at)
+        .chain(::std::iter::once(instance.launch_time))
+        .max()
+        .unwrap_or(instance.launch_time)
 }

@@ -22,7 +22,13 @@
 //!    it does not, or a value that is no id at all — and writes nothing;
 //! 5. the operation is a READ: two calls about one instance answer the same bytes, neither
 //!    moves the instance, and `Latest` — the console this service derives from the stored
-//!    instance IS the latest — changes nothing either.
+//!    instance IS the latest — changes nothing either;
+//! 6. the `Timestamp` beside the output is read off the SAME console that output is: "the
+//!    time at which the output was last updated" (`GetConsoleOutputResult$Timestamp`) is the
+//!    latest instant the served output itself shows it was written at — the instance's launch
+//!    and each boot its guest has had — so it advances exactly when the guest writes the
+//!    buffer, never goes backwards, and reports no update for an event that has written
+//!    nothing yet (a reboot `RebootInstances` has only QUEUED).
 //!
 //! Each table row is a distinct input along what the rule generalises over — the instance
 //! type and how many instances share a launch, and for the id rule every way an id can fall
@@ -435,4 +441,267 @@ async fn a_dry_run_answers_the_probe_whatever_the_id_names() {
         !decoded_output("DryRun=false", &body).is_empty(),
         "DryRun=false must serve the console, got {body}"
     );
+}
+
+/// The width of a console line's label column, as the service's own console renders it.
+/// Spelled out here rather than imported, so a changed rendering fails this suite.
+const CONSOLE_LABEL_WIDTH: usize = 20;
+
+/// How long a wait for something the CLOCK owes may take before this suite gives up.
+/// Generous on purpose: the condition is what is waited for, so a loaded host cannot fail a
+/// wait for a move the service owes in a moment.
+const POLL_DEADLINE: Duration = Duration::from_secs(60);
+
+/// How long to leave between two polls of a condition the clock owes.
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Every value the console line `label` names, in the order the console wrote them.
+///
+/// A line is the label padded out to the console's own label column, then the value — so the
+/// label is matched on the WHOLE column, and `boot` never reads a `boot-id` line.
+fn console_column(text: &str, label: &str) -> Vec<String> {
+    text.lines()
+        .filter(|line| line.len() > CONSOLE_LABEL_WIDTH)
+        .filter(|line| line[..CONSOLE_LABEL_WIDTH].trim() == label)
+        .map(|line| line[CONSOLE_LABEL_WIDTH..].trim().to_string())
+        .collect()
+}
+
+/// One observation of an instance's console: the text served, the instant the response
+/// reported the output was last updated at, and that instant as a number.
+#[derive(Debug)]
+struct Observation {
+    text: String,
+    reported: String,
+    at: f64,
+}
+
+/// How many boots the observed console carries.
+fn observed_boots(seen: &Observation) -> usize {
+    console_column(&seen.text, "boot-id").len()
+}
+
+/// Read one instance's console, pinning the invariant that ties the two members of the answer
+/// together: the instant reported as "the time at which the output was last updated" IS the
+/// latest instant the output served beside it shows it was written at — the instance's
+/// `launch-time`, and the `boot-time` of each boot its guest has had.
+async fn observe(router: &MultiServiceRouter, case: &str, instance_id: &str) -> Observation {
+    let body = output_body(router, case, instance_id, &[]).await;
+    let text = decoded_output(case, &body);
+    let reported = member(&body, "timestamp")
+        .unwrap_or_else(|| panic!("case {case:?}: the response must carry a timestamp: {body}"));
+    let at = as_timestamp(&reported).unwrap_or_else(|| {
+        panic!("case {case:?}: expected an instant as the timestamp, got {reported:?}")
+    });
+
+    let written: Vec<(String, f64)> = console_column(&text, "launch-time")
+        .into_iter()
+        .chain(console_column(&text, "boot-time"))
+        .map(|line| {
+            let secs = as_timestamp(&line).unwrap_or_else(|| {
+                panic!("case {case:?}: every instant the console names must parse, got {line:?}")
+            });
+            (line, secs)
+        })
+        .collect();
+    let latest = written
+        .iter()
+        .max_by(|left, right| left.1.total_cmp(&right.1))
+        .map(|(line, _)| line.clone())
+        .unwrap_or_else(|| {
+            panic!("case {case:?}: the console must say when it was written, got {text:?}")
+        });
+    assert_eq!(
+        reported.as_str(),
+        latest.as_str(),
+        "case {case:?}: expected the latest instant the output itself shows, {latest:?}, got \
+         {reported:?} for console {text:?}"
+    );
+    Observation { text, reported, at }
+}
+
+/// Read the console until the guest has had `want` boots, answering that observation.
+///
+/// A boot is owed to the CLOCK, so the CONDITION is waited for rather than a span slept
+/// through — and every poll on the way checks the invariant [`observe`] pins, which is what
+/// covers the window after a reboot has been queued and before its boot has come up.
+async fn console_once_booted(
+    router: &MultiServiceRouter,
+    case: &str,
+    instance_id: &str,
+    want: usize,
+) -> Observation {
+    let deadline = tokio::time::Instant::now() + POLL_DEADLINE;
+    loop {
+        let seen = observe(router, case, instance_id).await;
+        let boots = observed_boots(&seen);
+        if boots >= want {
+            assert_eq!(
+                boots, want,
+                "case {case:?}: expected {want} boot(s) on the console, got {boots}: {:?}",
+                seen.text
+            );
+            return seen;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "case {case:?}: expected {want} boot(s) on the console, got {boots}: {:?}",
+            seen.text
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// Wait until the instance reports the state `want`, which the clock owes it.
+async fn once_in_state(router: &MultiServiceRouter, case: &str, instance_id: &str, want: &str) {
+    let deadline = tokio::time::Instant::now() + POLL_DEADLINE;
+    loop {
+        let state = super::ec2_query::described_instance_state(router, REGION, instance_id).await;
+        if state == want {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "case {case:?}: expected the instance {want:?}, got {state:?}"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// What is asked of an instance between two reads of its console: each path its guest can
+/// start again by, and the two events that ask it for no restart at all.
+#[derive(Debug, Clone, Copy)]
+enum Step {
+    /// Nothing at all: the console is read again as it stands.
+    Nothing,
+    /// `RebootInstances`, which "only queues a request to reboot the specified instances" —
+    /// so the guest comes up a moment later, not during the call.
+    Reboot,
+    /// A stop, and then a start once the instance has stopped: the guest comes up again.
+    StopStart,
+    /// `SendDiagnosticInterrupt`, which crashes the guest's operating system.
+    Interrupt,
+}
+
+/// One call that must succeed, as the steps below ask for one.
+async fn succeeds(
+    router: &MultiServiceRouter,
+    case: &str,
+    action: &str,
+    params: &[(String, String)],
+) {
+    let (status, body) = api(router, action, params).await;
+    assert_eq!(
+        status, 200,
+        "case {case:?}: {action} must succeed, got {status}: {body}"
+    );
+}
+
+/// Carry `step` out against `instance_id`.
+async fn apply(router: &MultiServiceRouter, case: &str, step: Step, instance_id: &str) {
+    match step {
+        Step::Nothing => {}
+        Step::Reboot => {
+            succeeds(
+                router,
+                case,
+                "RebootInstances",
+                &[p("InstanceId.1", instance_id)],
+            )
+            .await;
+        }
+        Step::StopStart => {
+            succeeds(
+                router,
+                case,
+                "StopInstances",
+                &[p("InstanceId.1", instance_id)],
+            )
+            .await;
+            once_in_state(router, case, instance_id, "stopped").await;
+            succeeds(
+                router,
+                case,
+                "StartInstances",
+                &[p("InstanceId.1", instance_id)],
+            )
+            .await;
+            once_in_state(router, case, instance_id, "running").await;
+        }
+        Step::Interrupt => {
+            succeeds(
+                router,
+                case,
+                "SendDiagnosticInterrupt",
+                &[p("InstanceId", instance_id)],
+            )
+            .await;
+        }
+    }
+}
+
+/// RULE 6: the reported instant is the latest one the served output shows it was written at,
+/// so it advances exactly when the guest writes the console and never goes backwards.
+#[tokio::test]
+async fn the_timestamp_is_when_the_console_was_last_written() {
+    let (router, image_id) = emulator();
+    let instance_id = launch(&router, &image_id, "t3.micro", 1).await.remove(0);
+
+    // The steps differ along what the rule generalises over: WHETHER the guest writes the
+    // console between two reads, and WHAT asks it to — nothing at all, a reboot the service
+    // only queues, a stop/start cycle, and an interrupt that asks for no boot of its own.
+    // `boots` is how many boots the guest must then have had, left open for a step the
+    // service owes no boot for.
+    let steps: [(&str, Step, Option<usize>); 4] = [
+        // The launch's own boot: owed to the clock, so it lands after the first read.
+        ("nothing asked the guest to restart", Step::Nothing, Some(1)),
+        ("a queued reboot", Step::Reboot, Some(2)),
+        ("a stop and a start", Step::StopStart, Some(3)),
+        ("a diagnostic interrupt", Step::Interrupt, None),
+    ];
+
+    let mut previous = observe(&router, "straight after the launch", &instance_id).await;
+    for (case, step, boots) in steps {
+        apply(&router, case, step, &instance_id).await;
+        let seen = match boots {
+            Some(want) => console_once_booted(&router, case, &instance_id, want).await,
+            None => observe(&router, case, &instance_id).await,
+        };
+
+        assert!(
+            seen.at >= previous.at,
+            "case {case:?}: the reported instant must never go backwards, got {:?} after {:?}",
+            seen.reported,
+            previous.reported
+        );
+        if observed_boots(&seen) > observed_boots(&previous) {
+            // The guest wrote the console, so the instant it reports is that write's.
+            assert!(
+                seen.at > previous.at,
+                "case {case:?}: a boot must advance the reported instant, got {:?} after {:?}",
+                seen.reported,
+                previous.reported
+            );
+            let boot_times = console_column(&seen.text, "boot-time");
+            assert_eq!(
+                Some(seen.reported.as_str()),
+                boot_times.last().map(String::as_str),
+                "case {case:?}: expected the newest boot's own instant, got {:?} for console \
+                 {:?}",
+                seen.reported,
+                seen.text
+            );
+        } else {
+            // Nothing wrote the console, so it reads as it did and reports no update of it.
+            assert_eq!(
+                seen.text, previous.text,
+                "case {case:?}: an unwritten console must answer the same bytes"
+            );
+            assert_eq!(
+                seen.reported, previous.reported,
+                "case {case:?}: an unwritten console must report no update of itself"
+            );
+        }
+        previous = seen;
+    }
 }
