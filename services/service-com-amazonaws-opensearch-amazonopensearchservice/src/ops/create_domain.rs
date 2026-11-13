@@ -369,6 +369,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // does not admit: an INPUT constraint, so it is stated before the options are
             // judged against each other.
             crate::state::log_type_key_refusal(input.log_publishing_options.as_ref()),
+            // And a custom endpoint outside its member's FQDN syntax is a value that
+            // member does not admit — the one input constraint of these options the
+            // request boundary cannot apply ([`crate::state::custom_endpoint`]), stated
+            // here for the same reason and by the same rule the update path applies.
+            crate::state::custom_endpoint::custom_endpoint_refusal(
+                input.domain_endpoint_options.as_ref(),
+            ),
             crate::state::log_publishing_refusal(input.log_publishing_options.iter().flatten()),
             // And the group that ARN names has to be one CloudWatch Logs holds: a
             // create that enables publishing to a group nobody created configures a

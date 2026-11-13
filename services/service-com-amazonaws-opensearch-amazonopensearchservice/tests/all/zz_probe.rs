@@ -9,8 +9,11 @@
 //! The sibling suite [`super::constraint_refusal_messages`] asserts the whole message for
 //! the enums small enough to write out; this one asserts the same rule over the LARGEST
 //! enum of this model by reading the set back out of the clause: it is the member's whole
-//! declared set, stated in lexicographic order, in the envelope and clause every other
-//! constraint refusal of this service states.
+//! declared set, stated in the order this front door walks its own hash table over those
+//! values, in the envelope and clause every other constraint refusal of this service
+//! states.
+
+use service_common::validation_message::enum_value_bucket;
 
 use super::domain_lifecycle::{error_code, Emulator, PREFIX};
 
@@ -43,10 +46,10 @@ fn stated_set(message: &str, case: &str) -> Vec<String> {
 }
 
 /// RULE: a value outside an enumerated member's declared set is refused with the standard
-/// constraint report, over that member's WHOLE declared set, stated in lexicographic
-/// order.
+/// constraint report, over that member's WHOLE declared set, stated in the order this
+/// front door walks its own hash table over those values.
 #[tokio::test]
-async fn a_large_enum_states_its_whole_set_in_sorted_order() {
+async fn a_large_enum_states_its_whole_set_in_the_order_the_front_door_walks_it() {
     let emulator = Emulator::new();
 
     // (case, uri) — the member travels as a URI LABEL on one operation and as a query
@@ -98,11 +101,27 @@ async fn a_large_enum_states_its_whole_set_in_sorted_order() {
             "case {case:?}: expected the clause to open {opening:?}, got {message:?}"
         );
         let stated = stated_set(&message, case);
+        // The ORDER is the hash table's: each value sits in the bucket its own text hashes
+        // to ([`enum_value_bucket`], the rule's one home), and the set is listed bucket by
+        // bucket — so the buckets of the stated set never decrease. Asserted as that
+        // property rather than against a rebuilt list, because two values of a set this
+        // large share a bucket and the chain they are read off is the front door's.
+        let buckets: Vec<u32> = stated
+            .iter()
+            .map(|value| enum_value_bucket(value))
+            .collect();
+        assert!(
+            buckets.windows(2).all(|pair| pair[0] <= pair[1]),
+            "case {case:?}: expected the set listed bucket by bucket, got {:?}",
+            stated.iter().zip(&buckets).collect::<Vec<_>>()
+        );
+        // And that order is NOT the sort, which a set listed alphabetically would also
+        // satisfy above were the two the same.
         let mut sorted = stated.clone();
         sorted.sort_unstable();
-        assert_eq!(
+        assert_ne!(
             stated, sorted,
-            "case {case:?}: expected the declared set in lexicographic order, got {stated:?}"
+            "case {case:?}: the order stated must differ from the sort, got {stated:?}"
         );
         for declared in DECLARED_INSTANCE_TYPES {
             assert!(

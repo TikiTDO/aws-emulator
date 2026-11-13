@@ -72,6 +72,32 @@ fn members_stated_without_their_value(refusal: &Refusal) -> BTreeSet<String> {
     several
 }
 
+/// `refusal` with every enumerated value set it reports listed in the order this front
+/// door states one.
+///
+/// The ORDER is the order a hash table over the admitted values is walked
+/// ([`::service_common::validation_message::in_hashed_enum_order`], the fleet's one home
+/// for it), which is the order a recorded refusal of this surface lists a set in — the
+/// model declares `EngineType` `[OpenSearch, Elasticsearch]`
+/// (`smithy_query(query="shape",shape="EngineType")`) and codegen hands the walk the
+/// values sorted, so neither of those orders is what a clause states. MEMBERSHIP is
+/// untouched, and so is every other part of the violation: only the order inside the
+/// bracketed set changes.
+///
+/// Anything that is not a constraint report is handed back as it came, so the entry point
+/// above still answers `None` for it.
+fn in_hashed_value_set_order(refusal: &Refusal) -> Refusal {
+    let Refusal::Invalid(violations) = refusal else {
+        return refusal.clone();
+    };
+    Refusal::Invalid(
+        violations
+            .iter()
+            .map(::service_common::validation_message::in_hashed_enum_order)
+            .collect(),
+    )
+}
+
 /// Whether the request these `parts` came from resolves to this service's signing name
 /// AND addresses a first URI path segment this model publishes
 /// (`crate::ROUTE_PATH_SEGMENTS`).
@@ -176,6 +202,14 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // member the request broke SEVERAL constraints of is stated without the value it
         // submitted ([`members_stated_without_their_value`]).
         //
+        // And one ORDER: an enumerated type's value set is listed the way this front door
+        // walks its own hash table over the admitted values
+        // ([`in_hashed_enum_order`]) — neither the order the model declares them in nor
+        // lexicographic. The order belongs to the TYPE and is COMPUTED from the values, so
+        // a type the model gains is listed in its own place with no table naming it, and
+        // the set a caller is refused on by the boundary reads like the one a HANDLER
+        // states for a map key it cannot reach (`crate::state::request_constraints`).
+        //
         // The words are the fleet's one home for them rather than a copy here, so this
         // service's refusals cannot drift from another's.
         //
@@ -183,7 +217,7 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // input-constraint failure.
         let without_value = members_stated_without_their_value(refusal);
         ::service_common::validation_message::aws_validation_refusal_withholding_with(
-            refusal,
+            &in_hashed_value_set_order(refusal),
             crate::state::quoted_pattern,
             |path| without_value.contains(path),
         )

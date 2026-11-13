@@ -56,18 +56,27 @@
 //!   wrapping ([`::service_common::validation::unanchored_keeping_inner_anchors`], this
 //!   tree's home for that rendering). The CHECK is unchanged — the boundary runs the
 //!   model's pattern as written — so only the quoting drops the pair;
-//! * an enumerated type's value set the walk reported is stated in lexicographic order
-//!   ([`::service_common::validation_message::in_sorted_enum_order`]), which is how this
-//!   service lists a set the MODEL declares in an order of its own — except for the sets
-//!   this service's own refusals are recorded stating in another order, which are listed
-//!   in [`STATED_VALUE_SET_ORDERS`] and stated in that order. A set an OPERATION
-//!   declares itself, for a member the model types as a plain string, is stated in the
-//!   order that operation states it: that order is part of what it states, and there is no
-//!   model order to normalise;
+//! * an enumerated type's value set the walk reported is stated in the order this
+//!   service's front door walks its own hash table over the admissible values
+//!   ([`::service_common::validation_message::in_hashed_enum_order`], this tree's home for
+//!   that order), which is neither the order the MODEL declares them in nor lexicographic.
+//!   The order belongs to the enumerated TYPE and is COMPUTED from the values themselves,
+//!   so a type the model gains is stated in its own place and no table names it. The same
+//!   order is what `crate::state`'s own refusal of a map KEY outside its key shape's set
+//!   states, so the one set a caller may be refused on two paths is listed one way. A set
+//!   an OPERATION declares itself, for a member the model types as a plain string, is
+//!   stated in the order that operation states it: that order is part of what it states,
+//!   and there is no model order to normalise;
 //! * a member whose live validation surface the model has not caught up with states THAT
 //!   surface ([`STATED`]): the expression the service quotes, and a bound it states a
 //!   clause of its own for. Which members those are, and why each is there, is recorded
 //!   on that table.
+//!
+//! One thing about a clause's VALUE half is the service's as well: a member the request
+//! broke SEVERAL constraints of is stated without the value it submitted
+//! ([`members_stated_without_their_value`]) — this front door echoes a member's value while
+//! it has ONE thing to say about that member, and names the member and its requirements
+//! alone once it has several.
 //!
 //! Two things about the message as a WHOLE are the service's too: the order the clauses
 //! are stated in ([`STATED_FIRST`]), and one refusal that replaces the report entirely —
@@ -84,7 +93,7 @@
 //! what the MODEL declares, so they are applied to the requirements the model declared and
 //! not to the ones the stating code already stated.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::LazyLock;
 
 use aws_smithy_schema::{Schema, ShapeId, TraitMap};
@@ -93,7 +102,7 @@ use aws_smithy_schema_server::constraints::{
 };
 use aws_smithy_schema_server::{Violation, ViolationKind};
 use service_common::validation::unanchored_keeping_inner_anchors;
-use service_common::validation_message::in_sorted_enum_order;
+use service_common::validation_message::{in_hashed_enum_order, valueless_clause};
 use smithy_server_runtime::{Refusal, Refused};
 
 /// The error code AWS answers a constraint refusal with on the JSON protocols, and the
@@ -198,63 +207,32 @@ fn restated(violation: &Violation) -> Violation {
 }
 
 // =============================================================================
-// The order an enumerated value set is stated in
+// The value half of a clause
 // =============================================================================
 
-/// The enumerated value sets this service states in an order neither the model's
-/// declaration order nor the sort gives, each written in the order its own refusals
-/// state it.
+/// The members of `violations` whose clauses state NO submitted value: the ones the
+/// request broke SEVERAL constraints of.
 ///
-/// Source: the refusals recorded for this service. A set is recognised by the values it
-/// ADMITS and by nothing about the request, because the order belongs to the enumerated
-/// TYPE — one set, one order, whatever member or operation carried the value — so every
-/// member targeting that type states it the same way.
+/// This front door echoes the value a member submitted while it has ONE thing to say about
+/// that member, and states the member and its requirements alone once it has several: what
+/// distinguishes the clauses of such a report is the requirement each names, and the value
+/// is the same in all of them. A member with one violation keeps the echo, whatever it
+/// carried and wherever it was bound — a URI label, a query parameter, a body member
+/// nested in a structure.
 ///
-/// Every other set of this model takes the sorted order
-/// ([`::service_common::validation_message::in_sorted_enum_order`]), so this table holds
-/// only what that rule does not already produce.
-const STATED_VALUE_SET_ORDERS: &[&[&str]] = &[
-    // `com.amazonaws.opensearch#ActionType`, which the model declares
-    // `SERVICE_SOFTWARE_UPDATE, JVM_HEAP_SIZE_TUNING, JVM_YOUNG_GEN_TUNING`
-    // (`smithy_query(query="shape",shape="ActionType")`).
-    &[
-        "JVM_YOUNG_GEN_TUNING",
-        "SERVICE_SOFTWARE_UPDATE",
-        "JVM_HEAP_SIZE_TUNING",
-    ],
-];
-
-/// One violation with its enumerated value set in the order this service states it: the
-/// order [`STATED_VALUE_SET_ORDERS`] records for that set when it records one, else the
-/// sorted order. Everything else about the violation — the member path, the value
-/// echoed, every other requirement — is untouched.
-fn in_stated_value_order(violation: &Violation) -> Violation {
-    let sorted = in_sorted_enum_order(violation);
-    let ViolationKind::EnumValue(declared) = &sorted.kind else {
-        return sorted;
-    };
-    match stated_value_order(declared) {
-        Some(stated) => Violation {
-            kind: ViolationKind::EnumValue(stated),
-            ..sorted
-        },
-        None => sorted,
+/// Read off the violations the validating WALK reported, before this module restates any of
+/// them: whether the front door had several things to say about a member is a fact of the
+/// request it read, not of the clauses a surface the model lags adds afterwards ([`STATED`],
+/// whose own recorded refusals echo the value in each clause they add).
+fn members_stated_without_their_value(violations: &[Violation]) -> BTreeSet<String> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut several: BTreeSet<String> = BTreeSet::new();
+    for violation in violations {
+        if !seen.insert(violation.path.as_str()) {
+            several.insert(violation.path.clone());
+        }
     }
-}
-
-/// The order [`STATED_VALUE_SET_ORDERS`] states the set `declared` in, or `None` for a
-/// set it does not name — which is every set this service's refusals are not recorded
-/// stating out of sorted order.
-fn stated_value_order(declared: &[String]) -> Option<Vec<String>> {
-    STATED_VALUE_SET_ORDERS
-        .iter()
-        .find(|stated| {
-            stated.len() == declared.len()
-                && stated
-                    .iter()
-                    .all(|value| declared.iter().any(|admitted| admitted == value))
-        })
-        .map(|stated| stated.iter().map(|value| (*value).to_string()).collect())
+    several
 }
 
 // =============================================================================
@@ -722,7 +700,11 @@ impl Clause {
 /// framework's own envelope states.
 ///
 /// `None` only when there is nothing to state.
-fn envelope(violations: &[Violation]) -> Option<String> {
+///
+/// `without_value` names the members whose clauses state no submitted value
+/// ([`members_stated_without_their_value`]); a clause of any other member keeps the value
+/// half the framework wrote.
+fn envelope(violations: &[Violation], without_value: &BTreeSet<String>) -> Option<String> {
     // The element constraint set a collection member's clause states, resolved ONCE per
     // member from every requirement its elements broke (see [`element_constraint_set`]):
     // every element violation of that member then states the same requirement, which is
@@ -755,8 +737,15 @@ fn envelope(violations: &[Violation]) -> Option<String> {
             .map(|failing| nested(element_sets.get(path).unwrap_or(&failing), depth));
         let Some(requirement) = collection else {
             // Not a violation on a collection's element: the framework's own clause,
-            // kept exactly as it words it.
-            let clause = violation.message();
+            // kept exactly as it words it — with the value half dropped for a member this
+            // report states without it (the drop itself is
+            // [`::service_common::validation_message::valueless_clause`], so the
+            // requirement, the member path and the punctuation around them stay the
+            // framework's).
+            let clause = match without_value.contains(&violation.path) {
+                true => valueless_clause(violation).unwrap_or_else(|| violation.message()),
+                false => violation.message(),
+            };
             if clauses
                 .insert(clause.clone(), Clause::Verbatim(clause.clone()))
                 .is_none()
@@ -813,11 +802,14 @@ fn envelope(violations: &[Violation]) -> Option<String> {
 ///
 /// THE ONE wording of a refusal, so nothing can word one constraint two ways. Everything
 /// a CALLER decides happens before it, and only where the requirement came FROM decides
-/// it (see [`stated_report`] and [`aws_validation_refusal`]).
-fn worded(violations: Vec<Violation>) -> Option<Refused> {
+/// it (see [`stated_report`] and [`aws_validation_refusal`]). `without_value` is the one
+/// thing a caller passes in, because which members a report states without their value is
+/// decided from the violations the walk REPORTED rather than from the clauses worded here
+/// ([`members_stated_without_their_value`]).
+fn worded(violations: Vec<Violation>, without_value: &BTreeSet<String>) -> Option<Refused> {
     Some(Refused {
         code: VALIDATION_EXCEPTION.to_owned(),
-        message: envelope(&in_stated_order(violations))?,
+        message: envelope(&in_stated_order(violations), without_value)?,
     })
 }
 
@@ -833,7 +825,38 @@ fn worded(violations: Vec<Violation>) -> Option<Refused> {
 /// requirement here. Which value set and which expression those violations carry is the
 /// stating code's own, recorded where that code's rule lives.
 pub(crate) fn stated_report(violations: &[Violation]) -> Option<Refused> {
-    worded(violations.iter().map(restated).collect())
+    worded(
+        violations.iter().map(restated).collect(),
+        &members_stated_without_their_value(violations),
+    )
+}
+
+/// The `ValidationException` message for ONE constraint a HANDLER found broken whose
+/// requirement is an expression this service PUBLISHES as the model writes it, anchors and
+/// all.
+///
+/// The clause, the member path and the envelope are [`stated_report`]'s, so a caller cannot
+/// tell this refusal from a boundary one; what differs is the one thing this entry point
+/// decides, and the reason it exists: the pair-dropping rendering every requirement read
+/// off a model `@pattern` goes through ([`restated`]) recovers an expression the service
+/// advertises from the text a model wrapped, and `expression` is already the text this
+/// member's own refusals are recorded quoting, so there is nothing to recover from it.
+/// `path` is the member path as a clause spells one (`constraints::path`), which for a
+/// member inside a structure is the whole dotted path.
+pub(crate) fn published_pattern_report(path: &str, value: &str, expression: &str) -> String {
+    let violation = Violation {
+        path: path.to_owned(),
+        kind: ViolationKind::Pattern(expression.to_owned()),
+        value: Some(value.to_owned()),
+        sensitive: false,
+    };
+    // One violation always states one clause, so a message is always rendered; the clause
+    // alone is the fallback rather than an empty message.
+    worded(
+        vec![violation.clone()],
+        &members_stated_without_their_value(std::slice::from_ref(&violation)),
+    )
+    .map_or_else(|| violation.message(), |refused| refused.message)
 }
 
 /// State `refusal` the way this service states it, or `None` to keep the framework's own
@@ -848,10 +871,13 @@ pub(crate) fn stated_report(violations: &[Violation]) -> Option<Refused> {
 /// role ARN cannot be read as one is answered with [`invalid_role_arn`] alone, because
 /// that step runs before the input's constraints are reported on; every enumerated type's
 /// value set the walk reported is stated in the order this service states it
-/// ([`in_stated_value_order`]); every `@pattern` is
+/// ([`in_hashed_enum_order`]); every `@pattern` is
 /// quoted as the service advertises it ([`restated`]); and every member [`STATED`] records
 /// a surface for states that surface instead of the model's. The clauses are then worded
-/// by [`worded`], the one wording every refusal of this service goes through.
+/// by [`worded`], the one wording every refusal of this service goes through, over the
+/// members this report states without their value
+/// ([`members_stated_without_their_value`], read off the violations as the walk reported
+/// them).
 ///
 /// `None` for anything that is not a constraint refusal (an unauthenticated caller keeps
 /// the framework's 403 code and wording), and `None` when there is nothing to state.
@@ -868,10 +894,11 @@ pub(super) fn aws_validation_refusal(refusal: &Refusal) -> Option<Refused> {
     worded(
         violations
             .iter()
-            .map(in_stated_value_order)
+            .map(in_hashed_enum_order)
             .map(|violation| restated(&violation))
             .flat_map(|violation| stated_violations(&violation))
             .collect(),
+        &members_stated_without_their_value(violations),
     )
 }
 

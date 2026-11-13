@@ -327,7 +327,13 @@ pub fn quoting_the_whole_submitted_value(
 /// clause here, so the requirement, the member path and the punctuation around them stay
 /// single-homed in the framework and cannot drift. `None` when the framework's clause does
 /// not start with the value half this would remove.
-fn valueless_clause(violation: &Violation) -> Option<String> {
+///
+/// `pub` for the same reason [`envelope_over`] is: a service that assembles the clauses of
+/// its own report — because it GROUPS some of them, which no entry point here can do for it
+/// — still drops the value half of a clause that states none, and a second spelling of that
+/// drop per crate is how one service comes to word it differently from another.
+#[must_use]
+pub fn valueless_clause(violation: &Violation) -> Option<String> {
     let value_half = match violation.value.as_deref() {
         Some(stored) => format!("Value '{stored}' "),
         // How the framework writes a member that was not there at all.

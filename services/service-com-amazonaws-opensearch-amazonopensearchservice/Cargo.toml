@@ -78,6 +78,11 @@ stop-words = "0.8"
 # `state::vpc_network` resolves what a request names against EC2. Only the generated
 # client is needed — the emulator supplies the transport.
 aws-sdk-ec2 = { version = "1", default-features = false }
+# A look-around-capable regex engine, for the one modelled `@pattern` of this service
+# the request boundary cannot apply: a custom endpoint's FQDN syntax opens each label
+# with a negative lookahead (`state::custom_endpoint`), which the engine that boundary
+# compiles a `@pattern` with has no support for.
+fancy-regex = "0.16"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

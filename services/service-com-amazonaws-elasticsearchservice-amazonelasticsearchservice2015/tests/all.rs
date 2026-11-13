@@ -21,6 +21,8 @@ mod describe_domains_batch;
 mod domain_lifecycle;
 #[path = "all/domain_tags.rs"]
 mod domain_tags;
+#[path = "all/enum_value_set_order.rs"]
+mod enum_value_set_order;
 #[path = "all/handler_input_constraint_order.rs"]
 mod handler_input_constraint_order;
 #[path = "all/harness.rs"]

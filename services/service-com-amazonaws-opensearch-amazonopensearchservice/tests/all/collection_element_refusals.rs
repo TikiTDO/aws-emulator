@@ -24,8 +24,11 @@
 //! contrast.
 
 use serde_json::{json, Value};
+use service_com_amazonaws_opensearch_amazonopensearchservice::ops::types::PACKAGE_SCOPE_OPERATION_ENUM_VALUES;
 use service_com_amazonaws_opensearch_amazonopensearchservice::state::PACKAGE_NOT_FOUND;
+use service_common::validation_message::hashed_enum_order;
 
+use super::constraint_refusal_messages::value_set;
 use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX};
 
 /// `UpdatePackageScope`: `POST /2021-01-01/packages/updateScope`.
@@ -222,7 +225,14 @@ async fn a_member_that_is_not_a_collection_element_keeps_its_own_clause() {
     // (case, the body, the whole message). A scalar member states the value it held at
     // its own path with the one requirement it broke, and two offending members are two
     // validation errors — neither is folded into a collection's clause.
-    let rows: Vec<(&str, Value, &str)> = vec![
+    //
+    // The enumerated row's value set is the member's whole declared set
+    // (`PackageScopeOperationEnum`, `smithy_query(query="shape",
+    // shape="PackageScopeOperationEnum")`) listed by the rule this service states one by
+    // — the order its front door walks its own hash table over those values, which is the
+    // sibling suite's subject.
+    let operations = value_set(&hashed_enum_order(PACKAGE_SCOPE_OPERATION_ENUM_VALUES));
+    let rows: Vec<(&str, Value, String)> = vec![
         (
             "a scalar outside its pattern",
             json!({
@@ -232,7 +242,8 @@ async fn a_member_that_is_not_a_collection_element_keeps_its_own_clause() {
             }),
             "1 validation error detected: Value 'not-a-package-id' at 'packageID' failed to \
              satisfy constraint: Member must satisfy regular expression pattern: \
-             ^([FG][0-9]+)$|^(pkg-[a-f0-9]+)$",
+             ^([FG][0-9]+)$|^(pkg-[a-f0-9]+)$"
+                .to_string(),
         ),
         (
             "a scalar outside its enum",
@@ -241,8 +252,10 @@ async fn a_member_that_is_not_a_collection_element_keeps_its_own_clause() {
                 "Operation": "NOT_AN_OPERATION",
                 "PackageUserList": ["GLOBAL"],
             }),
-            "1 validation error detected: Value 'NOT_AN_OPERATION' at 'operation' failed to \
-             satisfy constraint: Member must satisfy enum value set: [ADD, OVERRIDE, REMOVE]",
+            format!(
+                "1 validation error detected: Value 'NOT_AN_OPERATION' at 'operation' failed \
+                 to satisfy constraint: {operations}"
+            ),
         ),
     ];
 

@@ -63,6 +63,11 @@ pub mod cognito_authentication;
 /// log group that exists — the check the create path and the update path share.
 pub mod log_destinations;
 
+/// Whether the custom endpoint a domain's endpoint options name is a fully qualified
+/// domain name — the one input constraint of those options the request boundary cannot
+/// apply, so the create path and the update path apply it before they resolve anything.
+pub mod custom_endpoint;
+
 /// Whether the KMS key an enabled encryption-at-rest configuration names is one the domain
 /// can be encrypted with — the check the create path and the update path share.
 pub mod encryption_at_rest;

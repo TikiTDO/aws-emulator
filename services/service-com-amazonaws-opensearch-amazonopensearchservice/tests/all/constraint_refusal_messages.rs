@@ -17,9 +17,10 @@
 //! 2. a member whose live validation surface the model has not caught up with states THAT
 //!    surface: the expression the service validates it against, and a length bound it
 //!    states a clause of its own for;
-//! 3. an enumerated type's value set is stated in lexicographic order — asserted over
-//!    four enums, including two the model declares in an order of its own and one it
-//!    declares sorted already;
+//! 3. an enumerated type's value set is stated in the order this front door walks its own
+//!    hash table over the admitted values — neither the model's declaration order nor
+//!    lexicographic — asserted over four enums, two of which the model declares in an
+//!    order of its own and one of which has two values in one bucket;
 //! 4. a role ARN that cannot be read as one replaces the whole constraint report, and
 //!    only when it is the role ARN that cannot be read;
 //! 5. a member whose shape the boundary cannot check — a `GUID`, whose `@length` the
@@ -31,7 +32,12 @@
 //!    own order, and serves a request it refuses nothing in.
 
 use serde_json::{json, Value};
+use service_com_amazonaws_opensearch_amazonopensearchservice::ops::types::{
+    INSIGHT_FEEDBACK_THUMBS_VALUES, INSIGHT_SORT_ORDER_VALUES, MAINTENANCE_STATUS_VALUES,
+    MAINTENANCE_TYPE_VALUES,
+};
 use service_com_amazonaws_opensearch_amazonopensearchservice::state::published_engine_versions;
+use service_common::validation_message::hashed_enum_order;
 
 use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX};
 
@@ -373,15 +379,20 @@ async fn a_member_the_model_lags_states_the_surface_the_service_validates() {
     }
 }
 
-/// RULE 3: an enumerated type's value set is stated in lexicographic order, whatever
-/// order the model declares its members in.
+/// RULE 3: an enumerated type's value set is stated in the order this front door walks its
+/// own hash table over the admitted values, whatever order the model declares its members
+/// in and whatever order codegen hands the walk them in.
 #[tokio::test]
-async fn an_enum_value_set_is_stated_in_sorted_order() {
+async fn an_enum_value_set_is_stated_in_the_order_the_front_door_walks_it() {
     let emulator = Emulator::new();
 
-    // Every set is read off the model (`smithy_query(query="shape",shape=…)`); two of the
-    // four are declared in an order of the model's own and one is declared sorted already,
-    // so sorting changes nothing about what it states.
+    // Every set is the member's WHOLE declared set, read off the generated constant the
+    // model produced (`smithy_query(query="shape",shape=…)`); the ORDER is the rule's one
+    // home (`service_common::validation_message::hashed_enum_order`), so what each row
+    // pins is the membership and that the clause is listed by that rule rather than
+    // sorted. Two of the four are declared in an order of the model's own, and the last
+    // one's two values share a bucket — which is what pins that a collision is listed the
+    // way the table's own chain is read rather than alphabetically.
     let rows: Vec<OneClause> = vec![
         OneClause {
             // `InsightFeedbackThumbs`, declared `[Up, Down]`.
@@ -395,7 +406,7 @@ async fn an_enum_value_set_is_stated_in_sorted_order() {
             })),
             value: "Sideways",
             path: "thumbs",
-            requirement: value_set(&["Down", "Up"]),
+            requirement: value_set(&hashed_enum_order(INSIGHT_FEEDBACK_THUMBS_VALUES)),
         },
         OneClause {
             // `MaintenanceType`, declared
@@ -409,11 +420,7 @@ async fn an_enum_value_set_is_stated_in_sorted_order() {
             body: None,
             value: "RESTART_EVERYTHING",
             path: "action",
-            requirement: value_set(&[
-                "REBOOT_NODE",
-                "RESTART_DASHBOARD",
-                "RESTART_SEARCH_PROCESS",
-            ]),
+            requirement: value_set(&hashed_enum_order(MAINTENANCE_TYPE_VALUES)),
         },
         OneClause {
             // `MaintenanceStatus`, declared
@@ -427,17 +434,11 @@ async fn an_enum_value_set_is_stated_in_sorted_order() {
             body: None,
             value: "HALF_DONE",
             path: "status",
-            requirement: value_set(&[
-                "COMPLETED",
-                "FAILED",
-                "IN_PROGRESS",
-                "PENDING",
-                "TIMED_OUT",
-            ]),
+            requirement: value_set(&hashed_enum_order(MAINTENANCE_STATUS_VALUES)),
         },
         OneClause {
-            // `InsightSortOrder`, declared `[ASC, DESC]`.
-            case: "a set the model declares sorted already",
+            // `InsightSortOrder`, declared `[ASC, DESC]` — two values in one bucket.
+            case: "a set whose two values share a bucket",
             method: "POST",
             uri: format!("{PREFIX}/opensearch/insights"),
             body: Some(json!({
@@ -446,9 +447,20 @@ async fn an_enum_value_set_is_stated_in_sorted_order() {
             })),
             value: "SIDEWAYS",
             path: "sortOrder",
-            requirement: value_set(&["ASC", "DESC"]),
+            requirement: value_set(&hashed_enum_order(INSIGHT_SORT_ORDER_VALUES)),
         },
     ];
+
+    // The order is the rule's, and it is NOT the sort: a set listed alphabetically would
+    // satisfy the rows above only if the two agreed, so one row states both.
+    let bucketed = hashed_enum_order(MAINTENANCE_STATUS_VALUES);
+    let mut sorted = bucketed.clone();
+    sorted.sort_unstable();
+    assert_ne!(
+        bucketed, sorted,
+        "case MaintenanceStatus: the order under test must differ from the sort, got \
+         {bucketed:?}"
+    );
 
     each_states_one_clause(&emulator, rows).await;
 }

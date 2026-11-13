@@ -445,14 +445,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let now = ::std::time::SystemTime::now();
         let name = input.domain_name.clone();
 
-        // THE INPUT CONSTRAINT FIRST, before the domain this change addresses is
+        // THE INPUT CONSTRAINTS FIRST, before the domain this change addresses is
         // resolved: a `LogPublishingOptions` key outside the modelled `LogType` set is a
-        // value the map's own key shape does not admit, and an input constraint is stated
-        // by naming the member rather than reported as a domain that does not exist. The
-        // walk in front of this handler cannot state it — it treats a map's key as a path
-        // segment rather than as a constrained leaf — so the handler does, before the
-        // lookup.
-        if let Some(refusal) = crate::state::log_type_key_refusal(input.log_publishing_options.as_ref())
+        // value the map's own key shape does not admit, and a `DomainEndpointOptions`
+        // custom endpoint outside its member's FQDN syntax is a value that member does
+        // not admit. An input constraint is stated by naming the member rather than
+        // reported as a domain that does not exist. The walk in front of this handler can
+        // state neither — it treats a map's key as a path segment rather than as a
+        // constrained leaf, and it cannot compile the FQDN expression at all
+        // ([`crate::state::custom_endpoint`]) — so the handler does, before the lookup.
+        if let Some(refusal) = [
+            crate::state::log_type_key_refusal(input.log_publishing_options.as_ref()),
+            crate::state::custom_endpoint::custom_endpoint_refusal(
+                input.domain_endpoint_options.as_ref(),
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .next()
         {
             return Err(UpdateDomainConfigErrorModeled::ValidationException(refusal).into());
         }

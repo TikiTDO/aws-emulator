@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! End-to-end tests for the ORDER an enumerated member's refusal lists the admitted
-//! values in, for the one enumerated type this service's refusals state out of sorted
-//! order: `ActionType`.
+//! values in, over the one enumerated type of this service whose recorded refusals pin
+//! that order on a set small enough to spell out: `ActionType`.
 //!
 //! Every case drives the real wire path — a `restJson1` HTTP request through the
 //! multi-service router into the mounted service — so what is asserted is what a client
@@ -12,10 +12,10 @@
 //!
 //! RULE: a value outside an enumerated member's set is refused with the standard
 //! constraint report over that member's WHOLE admitted set, and the ORDER the set is
-//! listed in belongs to the enumerated TYPE: `ActionType` is listed as this service
-//! publishes it, and every other type of this model is listed in lexicographic order.
-//! The order is therefore the same whatever value was rejected, and two members of one
-//! request each state their own type's order.
+//! listed in belongs to the enumerated TYPE: the order this front door walks its own hash
+//! table over the admitted values, which is neither the model's declaration order nor
+//! lexicographic. The order is therefore the same whatever value was rejected, and two
+//! members of one request each state their own type's order.
 //!
 //! The table varies what the rule generalises over: the shape of the rejected value (a
 //! near-miss of an admitted value, the same value in another case, a value with the
@@ -26,13 +26,17 @@ use serde_json::{json, Value};
 use service_com_amazonaws_opensearch_amazonopensearchservice::ops::types::{
     ACTION_TYPE_VALUES, SCHEDULE_AT_VALUES,
 };
+use service_common::validation_message::hashed_enum_order;
 
 use super::constraint_refusal_messages::{clause, report};
 use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX};
 
 /// The order `ActionType`'s value set is published in, as the refusals of this service
-/// state it. Spelled out here rather than taken from the crate, so a change to either
-/// one fails this suite.
+/// state it. Spelled out here rather than derived, so a change to either the rule or the
+/// values fails this suite — the model declares the type
+/// `[SERVICE_SOFTWARE_UPDATE, JVM_HEAP_SIZE_TUNING, JVM_YOUNG_GEN_TUNING]`
+/// (`smithy_query(query="shape",shape="ActionType")`) and codegen hands the walk them
+/// sorted, so this is neither of those two orders.
 const PUBLISHED_ACTION_TYPES: [&str; 3] = [
     "JVM_YOUNG_GEN_TUNING",
     "SERVICE_SOFTWARE_UPDATE",
@@ -149,9 +153,9 @@ async fn a_refused_action_type_lists_the_admitted_set_in_the_order_the_service_p
 async fn each_enumerated_member_of_one_request_states_its_own_types_order() {
     let emulator = Emulator::new();
 
-    // Both enumerated members of one request are outside their sets: `ActionType` is
-    // listed as this service publishes it, and `ScheduleAt` — a type its refusals are
-    // not recorded stating out of order — in lexicographic order.
+    // Both enumerated members of one request are outside their sets, and each states its
+    // OWN type's order: `ActionType` as spelled out above, `ScheduleAt` as the same rule
+    // lists its own three values.
     let case = "both enumerated members outside their sets";
     let answer = update(&emulator, "NOT_A_REAL_ACTION_TYPE", "SOMETIME_SOON").await;
     let said = message(&answer, case);
@@ -161,9 +165,12 @@ async fn each_enumerated_member_of_one_request_states_its_own_types_order() {
         "actionType",
         &value_set(&PUBLISHED_ACTION_TYPES),
     );
-    let mut sorted_schedule: Vec<&str> = SCHEDULE_AT_VALUES.to_vec();
-    sorted_schedule.sort_unstable();
-    let schedule_clause = clause("SOMETIME_SOON", "scheduleAt", &value_set(&sorted_schedule));
+    let published_schedule = hashed_enum_order(SCHEDULE_AT_VALUES);
+    let schedule_clause = clause(
+        "SOMETIME_SOON",
+        "scheduleAt",
+        &value_set(&published_schedule),
+    );
     assert!(
         said.contains(&action_clause),
         "case {case:?}: expected the clause {action_clause:?}, got {said:?}"

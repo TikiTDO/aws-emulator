@@ -109,6 +109,8 @@ mod domain_configuration_rules;
 mod domain_endpoint_publication;
 #[path = "all/domain_health.rs"]
 mod domain_health;
+#[path = "all/domain_input_validation.rs"]
+mod domain_input_validation;
 #[path = "all/domain_lifecycle.rs"]
 mod domain_lifecycle;
 #[path = "all/domain_maintenance.rs"]

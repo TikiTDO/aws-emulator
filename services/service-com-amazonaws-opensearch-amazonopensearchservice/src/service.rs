@@ -347,12 +347,15 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // required member, or a value outside a declared bound) to let this service
         // reword it. The words live in [`validation`], which states the framework's own
         // clause for every violation with the renderings this service's refusals use —
-        // the `@pattern` expression it advertises, an enumerated value set in sorted
-        // order, the surface it validates a member against where the model has not caught
-        // up — plus two statements about the message as a whole: a violation on an ELEMENT
+        // the `@pattern` expression it advertises, an enumerated value set in the order
+        // this front door's own hash table over the admitted values is walked, the
+        // surface it validates a member against where the model has not caught up — plus
+        // three statements about the message as a whole: a violation on an ELEMENT
         // of a collection member becomes ONE validation error about that member carrying
-        // the element shape's whole constraint set, and a role ARN that cannot be read as
-        // one replaces the report entirely. The code travels with the message, as it must.
+        // the element shape's whole constraint set, a member the request broke SEVERAL
+        // constraints of is stated without the value it submitted, and a role ARN that
+        // cannot be read as one replaces the report entirely. The code travels with the
+        // message, as it must.
         validation::aws_validation_refusal(refusal)
     }
 
