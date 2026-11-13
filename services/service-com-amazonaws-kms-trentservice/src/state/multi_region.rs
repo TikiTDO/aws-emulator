@@ -23,6 +23,7 @@ use crate::ops::types::{MultiRegionConfiguration, MultiRegionKey};
 /// primary key at any instant; every other Region named here holds a replica of
 /// it, and which is which is what `MultiRegionConfiguration` reports.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MultiRegionTopology {
     /// The Region holding the set's primary key once every move of the designation
     /// the clock owes has taken effect: the Region a `MultiRegion` create minted it
@@ -190,7 +191,7 @@ impl MultiRegionTopology {
 /// both halves of the move: which Region the designation is going to, and the instant
 /// it arrives there, which is also the instant the transient state it put the two keys
 /// in is over.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PendingPromotion {
     /// The Region whose replica key the move makes this set's primary key.
     region: String,
