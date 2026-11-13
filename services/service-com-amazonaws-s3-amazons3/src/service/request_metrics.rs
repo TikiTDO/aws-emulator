@@ -47,6 +47,15 @@
 //!   bytes uploaded that contain a request body, made to an Amazon S3 bucket": observed only
 //!   for a request that carried a body in that direction, because that is the request each
 //!   definition counts.
+//! * [`FIRST_BYTE_LATENCY`] — "the per-request time from the complete request being received by
+//!   an Amazon S3 bucket to when the response starts to be returned" — and
+//!   [`TOTAL_REQUEST_LATENCY`] — "the elapsed per-request time from the first byte received to
+//!   the last byte sent to an Amazon S3 bucket", which "includes the time taken to receive the
+//!   request body and send the response body": one observation each, in `Milliseconds`, of the
+//!   spans [`RequestClock`] MEASURED while this service served that one request. Every request
+//!   takes time to serve, so every counted request observes both, which is what makes a
+//!   client's `Average`/`Maximum` over a period the latency of the requests that period really
+//!   carried.
 //!
 //! # Where the datapoints go
 //!
@@ -76,7 +85,7 @@
 
 use std::borrow::Cow;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ::service_com_amazonaws_cloudwatch_graniteserviceversion20100801 as cloudwatch;
 use ::service_common::front_door::FrontDoor;
@@ -130,12 +139,26 @@ pub const FOUR_XX_ERRORS: &str = "4xxErrors";
 /// Whether a request was answered with a 5xx status: 1 when it was, 0 when it was not.
 pub const FIVE_XX_ERRORS: &str = "5xxErrors";
 
+/// How long the bucket took to begin answering a request.
+pub const FIRST_BYTE_LATENCY: &str = "FirstByteLatency";
+
+/// How long the bucket took to serve a request in full.
+pub const TOTAL_REQUEST_LATENCY: &str = "TotalRequestLatency";
+
 /// The unit a counter of requests is published in: `Count`, the `StandardUnit` value for a
 /// number of things.
 pub const COUNT_UNIT: &str = "Count";
 
 /// The unit the byte counters are published in.
 pub const BYTES_UNIT: &str = "Bytes";
+
+/// The unit the two latencies are published in: milliseconds, the granularity S3 reports a
+/// request's latency at.
+pub const MILLISECONDS_UNIT: &str = "Milliseconds";
+
+/// Milliseconds in a second: the conversion between a measured span and the unit a latency is
+/// published in.
+const MILLIS_PER_SECOND: f64 = 1_000.0;
 
 /// The value a request contributes to the counter of its own class: it was one request.
 const ONE_REQUEST: f64 = 1.0;
@@ -192,6 +215,68 @@ impl RequestKind {
     }
 }
 
+/// How long serving ONE request took, as the two latency series read it.
+///
+/// Both spans are MEASURED on a monotonic clock while the request was served ([`RequestClock`]),
+/// never derived from what the request asked for: a latency series is a measurement of this
+/// server or it is nothing.
+#[derive(Debug, Clone, Copy)]
+pub struct ServedLatency {
+    /// Up to the first byte of the answer: "the per-request time from the complete request being
+    /// received by an Amazon S3 bucket to when the response starts to be returned".
+    pub to_first_byte: Duration,
+    /// The request as a whole: "the elapsed per-request time from the first byte received to the
+    /// last byte sent", so never shorter than the span up to the first byte.
+    pub total: Duration,
+}
+
+/// The clock one request this service is serving is timed on.
+///
+/// Started where serving that request begins ([`RequestClock::started`]) and marked at the
+/// instant its answer's first byte exists ([`RequestClock::first_byte`]); the whole span is read
+/// last, once the answer including its body is complete. A request arrives here with its body
+/// already received in full and is answered with a buffered body, so both marks are taken around
+/// the work this service does for the request: the whole-request span covers the answer up to
+/// and including its last byte being in hand, and not what the transport then spends handing
+/// that buffer over.
+#[derive(Debug, Clone, Copy)]
+pub struct RequestClock {
+    /// When serving the request began.
+    started: Instant,
+    /// What had elapsed when its answer's first byte existed.
+    to_first_byte: Duration,
+}
+
+impl RequestClock {
+    /// Start timing a request that is about to be served.
+    #[must_use]
+    pub fn started() -> Self {
+        Self {
+            started: Instant::now(),
+            to_first_byte: Duration::ZERO,
+        }
+    }
+
+    /// Mark the instant the answer's first byte exists.
+    #[must_use]
+    pub fn first_byte(self) -> Self {
+        Self {
+            to_first_byte: self.started.elapsed(),
+            ..self
+        }
+    }
+
+    /// The two latencies this request publishes, the whole-request span read at this instant:
+    /// call it once the answer, body included, is complete.
+    #[must_use]
+    pub fn latency(self) -> ServedLatency {
+        ServedLatency {
+            to_first_byte: self.to_first_byte,
+            total: self.started.elapsed(),
+        }
+    }
+}
+
 /// ONE request this service served, as these series read it.
 #[derive(Debug)]
 pub struct ServedRequest {
@@ -203,14 +288,17 @@ pub struct ServedRequest {
     pub bytes_downloaded: Option<usize>,
     /// How many bytes of body the request carried, for a request that carried one.
     pub bytes_uploaded: Option<usize>,
+    /// How long serving it took.
+    pub latency: ServedLatency,
 }
 
 impl ServedRequest {
     /// What this one request contributes to each of the bucket's series: the metric, the
     /// value, and the unit the value is published under.
     ///
-    /// The four counters every request contributes to come first, and the two byte counters
-    /// only for the direction this request really carried a body in.
+    /// The four counters every request contributes to come first, then the two latencies every
+    /// request also observes, and the two byte counters only for the direction this request
+    /// really carried a body in.
     fn observations(&self) -> Vec<(&'static str, f64, &'static str)> {
         let four_xx = (CLIENT_ERROR_STATUS..SERVER_ERROR_STATUS).contains(&self.status);
         let five_xx = (SERVER_ERROR_STATUS..PAST_SERVER_ERROR_STATUS).contains(&self.status);
@@ -219,6 +307,16 @@ impl ServedRequest {
             (self.kind.counter(), ONE_REQUEST, COUNT_UNIT),
             (FOUR_XX_ERRORS, of_the_class(four_xx), COUNT_UNIT),
             (FIVE_XX_ERRORS, of_the_class(five_xx), COUNT_UNIT),
+            (
+                FIRST_BYTE_LATENCY,
+                as_millis(self.latency.to_first_byte),
+                MILLISECONDS_UNIT,
+            ),
+            (
+                TOTAL_REQUEST_LATENCY,
+                as_millis(self.latency.total),
+                MILLISECONDS_UNIT,
+            ),
         ];
         if let Some(bytes) = self.bytes_downloaded {
             observations.push((BYTES_DOWNLOADED, as_bytes(bytes), BYTES_UNIT));
@@ -245,6 +343,12 @@ fn as_bytes(bytes: usize) -> f64 {
     // A body longer than f64's exact integers cannot arise: this service buffers every body
     // it serves in memory, under the byte budget its own store enforces.
     bytes as f64
+}
+
+/// `span` as the value a latency carries: the measurement, in the milliseconds the two latency
+/// series are published in.
+fn as_millis(span: Duration) -> f64 {
+    span.as_secs_f64() * MILLIS_PER_SECOND
 }
 
 /// One modelled operation, served with its answers COUNTED into the request metrics of the
@@ -286,10 +390,16 @@ where
         ctx: &'r OperationContext<'r>,
     ) -> BoxFuture<'r, RtResponse> {
         Box::pin(async move {
+            // Serving this request begins here, which is where the span both latency series
+            // measure begins: the request has been received in full by the time an operation is
+            // reached.
+            let clock = RequestClock::started();
             let response = self.operation.run(svc, req, ctx).await;
+            // The answer's first byte exists the moment the operation hands its response back.
+            let clock = clock.first_byte();
             // Nothing borrowed from either store is held across an await: the whole fold runs
             // after the answer exists and before it is handed back.
-            count_served_request(&*self.engine, req, &response, self.kind);
+            count_served_request(&*self.engine, req, &response, self.kind, clock);
             response
         })
     }
@@ -312,6 +422,7 @@ pub fn count_served_request<Eng: Send + Sync + 'static>(
     req: &RtRequest,
     response: &RtResponse,
     kind: RequestKind,
+    clock: RequestClock,
 ) {
     let path = path_style_path(engine, req);
     let Some(bucket) = super::addressed_bucket_name(&path) else {
@@ -328,6 +439,9 @@ pub fn count_served_request<Eng: Send + Sync + 'static>(
         status: response.status().as_u16(),
         bytes_downloaded: carried_bytes(response.body().bytes()),
         bytes_uploaded: carried_bytes(req.body().bytes()),
+        // Read once the whole answer, its body included, is in hand: that is the last byte of
+        // the request the whole-request latency is measured to.
+        latency: clock.latency(),
     };
     publish(engine, &bucket, &filter_ids, &served, SystemTime::now());
 }
@@ -676,6 +790,14 @@ mod tests {
         }
     }
 
+    /// A measured pair of spans, as a clock hands them over.
+    fn took(to_first_byte_micros: u64, total_micros: u64) -> ServedLatency {
+        ServedLatency {
+            to_first_byte: Duration::from_micros(to_first_byte_micros),
+            total: Duration::from_micros(total_micros),
+        }
+    }
+
     #[test]
     fn an_error_counter_is_one_for_its_own_class_and_zero_for_every_other() {
         // Rows span the status classes the error counters split requests into, including the
@@ -696,6 +818,7 @@ mod tests {
                 status,
                 bytes_downloaded: None,
                 bytes_uploaded: None,
+                latency: took(400, 650),
             };
             assert_eq!(
                 value_of(&served, FOUR_XX_ERRORS),
@@ -740,6 +863,7 @@ mod tests {
                 status: 200,
                 bytes_downloaded: None,
                 bytes_uploaded: None,
+                latency: took(400, 650),
             };
             for candidate in every_counter {
                 let expected = (candidate == counter).then_some(1.0);
@@ -768,6 +892,7 @@ mod tests {
                 status: 200,
                 bytes_downloaded: downloaded,
                 bytes_uploaded: uploaded,
+                latency: took(400, 650),
             };
             let expected_down = downloaded.map(as_bytes);
             let actual_down = value_of(&served, BYTES_DOWNLOADED);
@@ -780,6 +905,83 @@ mod tests {
             assert_eq!(
                 actual_up, expected_up,
                 "case {case:?}: expected BytesUploaded {expected_up:?}, got {actual_up:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_request_observes_both_latencies_as_the_milliseconds_they_were_measured_in() {
+        // Rows span the spans a measurement can be: sub-millisecond, whole milliseconds, a
+        // fraction of one, and a slow request — each with a whole-request span of its own.
+        let cases: [(&str, u64, u64); 5] = [
+            ("a sub-millisecond request", 120, 180),
+            ("a whole millisecond", 1_000, 2_000),
+            ("a fraction over a millisecond", 1_500, 1_750),
+            ("a slow request", 250_000, 400_000),
+            ("one span the whole request is", 900, 900),
+        ];
+        for (case, to_first_byte, total) in cases {
+            let served = ServedRequest {
+                kind: RequestKind::Get,
+                status: 200,
+                bytes_downloaded: Some(4),
+                bytes_uploaded: None,
+                latency: took(to_first_byte, total),
+            };
+            // Micros in a millisecond: the rows are written in the finer unit, the series are
+            // published in the coarser one.
+            const MICROS_PER_MILLI: f64 = 1_000.0;
+            // The slack a millisecond read out of a span of micros is compared within: a
+            // conversion between two binary fractions, not a wall-clock allowance.
+            const SLACK_MS: f64 = 1e-9;
+            #[allow(clippy::cast_precision_loss)]
+            let expected = [
+                (FIRST_BYTE_LATENCY, to_first_byte as f64 / MICROS_PER_MILLI),
+                (TOTAL_REQUEST_LATENCY, total as f64 / MICROS_PER_MILLI),
+            ];
+            for (metric, expected) in expected {
+                let actual = value_of(&served, metric);
+                assert!(
+                    actual.is_some_and(|actual| (actual - expected).abs() < SLACK_MS),
+                    "case {case:?}: expected {metric} to be {expected} ms, got {actual:?}"
+                );
+            }
+            for metric in [FIRST_BYTE_LATENCY, TOTAL_REQUEST_LATENCY] {
+                let unit = served
+                    .observations()
+                    .into_iter()
+                    .find(|(name, _, _)| *name == metric)
+                    .map(|(_, _, unit)| unit);
+                assert_eq!(
+                    unit,
+                    Some(MILLISECONDS_UNIT),
+                    "case {case:?}: expected {metric} in {MILLISECONDS_UNIT}, got {unit:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_clock_measures_the_first_byte_span_inside_the_whole_request_span() {
+        // The clock is the only source of a latency, so what it hands over is what a published
+        // observation can be: a first-byte span no longer than the whole-request span, and a
+        // published value of each that a reader can window and aggregate.
+        let clock = RequestClock::started().first_byte();
+        let latency = clock.latency();
+        assert!(
+            latency.to_first_byte <= latency.total,
+            "the first-byte span must lie inside the whole-request span, got \
+             {latency:?}"
+        );
+        for (metric, span) in [
+            (FIRST_BYTE_LATENCY, latency.to_first_byte),
+            (TOTAL_REQUEST_LATENCY, latency.total),
+        ] {
+            let published = as_millis(span);
+            assert!(
+                published.is_finite() && published >= 0.0,
+                "case {metric}: a measured span publishes a finite, non-negative number of \
+                 milliseconds, got {published} from {span:?}"
             );
         }
     }

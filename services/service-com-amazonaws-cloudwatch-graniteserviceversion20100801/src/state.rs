@@ -3133,7 +3133,7 @@ impl ComAmazonawsCloudwatchGraniteserviceversion20100801State {
                     alarm_type: Some(kind.to_string()),
                     timestamp: Some(to_timestamp(now_secs)),
                     history_item_type: Some("ConfigurationUpdate".to_string()),
-                    history_summary: Some("Alarm updated from configuration".to_string()),
+                    history_summary: Some(configuration_update_history_summary(&name, true)),
                     history_data: Some(data),
                     alarm_contributor_attributes: None,
                 },
@@ -3848,6 +3848,24 @@ fn configuration_history_data(
             .collect(),
         )),
     ])
+}
+
+/// The `HistorySummary` of a `ConfigurationUpdate` item: "A summary of the alarm history, in
+/// text format." (`AlarmHistoryItem$HistorySummary`).
+///
+/// A summary NAMES the alarm it is about, in double quotes, and says what the write did to it:
+/// a write that stored an alarm of a name the store held none of CREATED it, and one that
+/// replaced an alarm that already existed UPDATED it. The name is the variable part, so the one
+/// reading of that wording is shared by every writer that records such an item, whatever kind of
+/// alarm it writes — a page of history that mixes several alarms (`DescribeAlarmHistory` can be
+/// called with no `AlarmName`) attributes each item to its own alarm from the summary alone.
+///
+/// Bounded like every other summary this store writes: an alarm name is `@length 1..255`
+/// (`AlarmName`) while the summary holding it is `@length 1..255` too, so a name long enough to
+/// overrun the bound is cut at it rather than dropping the whole summary.
+pub fn configuration_update_history_summary(alarm_name: &str, is_update: bool) -> String {
+    let what_the_write_did = if is_update { "updated" } else { "created" };
+    alarm_actions::bounded(format!("Alarm \"{alarm_name}\" {what_the_write_did}"))
 }
 
 /// The JSON record of a METRIC alarm's configuration write.

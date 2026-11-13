@@ -48,10 +48,10 @@ const CLOUDWATCH_TARGET_PREFIX: &str = "GraniteServiceVersion20100801";
 /// How many seconds either side of the requests a metric read spans, and the period it folds
 /// them into: one window wide enough that every datapoint of the suite falls in the span
 /// whichever minute the clock is in when it runs.
-const WINDOW_SECS: f64 = 300.0;
+pub(crate) const WINDOW_SECS: f64 = 300.0;
 
 /// The same span as the period a read asks for.
-const PERIOD_SECS: i64 = 300;
+pub(crate) const PERIOD_SECS: i64 = 300;
 
 /// The aggregation period the alarms of the last test below are configured with, which is the
 /// granularity S3 publishes request metrics at.
@@ -326,7 +326,7 @@ fn rows() -> Vec<Row> {
 /// The emulator under test: the production router with S3 and CloudWatch mounted on ONE
 /// engine, which is what makes the metric store the served requests write the same one
 /// CloudWatch reads.
-fn emulator() -> MultiServiceRouter {
+pub(crate) fn emulator() -> MultiServiceRouter {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
@@ -340,7 +340,7 @@ fn emulator() -> MultiServiceRouter {
 }
 
 /// Wall-clock now as epoch seconds, the clock a metric window is measured against.
-fn now_secs() -> f64 {
+pub(crate) fn now_secs() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0.0, |since| since.as_secs_f64())
@@ -348,7 +348,7 @@ fn now_secs() -> f64 {
 
 /// One `awsJson1_0` CloudWatch call, requiring a 200 — the protocol and target prefix that
 /// service serves.
-async fn cloudwatch(router: &MultiServiceRouter, operation: &str, body: &Value) -> Value {
+pub(crate) async fn cloudwatch(router: &MultiServiceRouter, operation: &str, body: &Value) -> Value {
     let request = http::Request::builder()
         .method("POST")
         .uri("https://monitoring.us-east-1.amazonaws.com/")

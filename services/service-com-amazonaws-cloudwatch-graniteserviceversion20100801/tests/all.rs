@@ -29,6 +29,8 @@ mod alarm_closed_period_grading;
 mod alarm_configuration;
 #[path = "all/alarm_configuration_refusal_messages.rs"]
 mod alarm_configuration_refusal_messages;
+#[path = "all/alarm_configuration_update_summaries.rs"]
+mod alarm_configuration_update_summaries;
 #[path = "all/alarm_contributors.rs"]
 mod alarm_contributors;
 #[path = "all/alarm_delete_semantics.rs"]

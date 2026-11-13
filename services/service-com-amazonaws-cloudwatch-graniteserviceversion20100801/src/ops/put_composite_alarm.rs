@@ -502,11 +502,10 @@ fn write_composite_alarm(
             alarm_type: Some(crate::state::ALARM_TYPE_COMPOSITE.to_string()),
             timestamp: Some(crate::state::to_timestamp(now)),
             history_item_type: Some("ConfigurationUpdate".to_string()),
-            history_summary: Some(if is_update {
-                "Alarm updated from configuration".to_string()
-            } else {
-                "Alarm created".to_string()
-            }),
+            history_summary: Some(crate::state::configuration_update_history_summary(
+                &input.alarm_name,
+                is_update,
+            )),
             history_data: Some(history_data),
             alarm_contributor_attributes: None,
         },
