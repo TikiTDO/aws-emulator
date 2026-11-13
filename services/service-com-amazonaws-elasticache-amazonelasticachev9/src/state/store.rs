@@ -198,6 +198,11 @@ impl ComAmazonawsElasticacheAmazonelasticachev9State {
             notification_topic_status: NOTIFICATION_STATUS_ACTIVE.to_string(),
             auth_token_enabled: new.auth_token_enabled,
             auth_token_last_modified: new.auth_token_enabled.then_some(new.now),
+            auth_token_digests: new.auth_token_digests,
+            // A created cluster is not served yet: the handler opens its socket
+            // once the record is stored and writes the address it answers on
+            // then (`crate::state::serve_cache_cluster`).
+            served_endpoint: None,
             transit_encryption_enabled: new.transit_encryption_enabled,
             transit_encryption_mode: new.transit_encryption_mode,
             at_rest_encryption_enabled: new.at_rest_encryption_enabled,
@@ -870,6 +875,9 @@ impl ComAmazonawsElasticacheAmazonelasticachev9State {
 
         for cluster_id in &drop_clusters {
             self.cache_clusters.remove(cluster_id);
+            // The socket that member was served on closes with it: the port and
+            // every connection on it go with the handle.
+            close_cache_cluster_data_plane(self, cluster_id, Some(group_id));
         }
         for (cluster_id, zone) in &add {
             let _ = self.insert_cluster(NewCluster {
@@ -893,6 +901,9 @@ impl ComAmazonawsElasticacheAmazonelasticachev9State {
                 security_group_ids: Vec::new(),
                 notification_topic_arn: None,
                 auth_token_enabled: template.auth_token_enabled,
+                // A member minted into an existing group authenticates its
+                // clients exactly as the group does.
+                auth_token_digests: template.auth_token_digests.clone(),
                 transit_encryption_enabled: Some(template.transit_encryption_enabled),
                 transit_encryption_mode: template.transit_encryption_mode.clone(),
                 at_rest_encryption_enabled: Some(template.at_rest_encryption_enabled),
@@ -1320,6 +1331,7 @@ impl ComAmazonawsElasticacheAmazonelasticachev9State {
                         security_group_ids: new.security_group_ids.clone(),
                         notification_topic_arn: new.notification_topic_arn.clone(),
                         auth_token_enabled: new.auth_token_enabled,
+                        auth_token_digests: new.auth_token_digests.clone(),
                         transit_encryption_enabled: Some(new.transit_encryption_enabled),
                         transit_encryption_mode: new.transit_encryption_mode.clone(),
                         at_rest_encryption_enabled: Some(new.at_rest_encryption_enabled),
@@ -1390,6 +1402,7 @@ impl ComAmazonawsElasticacheAmazonelasticachev9State {
             snapshot_window: new.snapshot_window,
             auth_token_enabled: new.auth_token_enabled,
             auth_token_last_modified: new.auth_token_enabled.then_some(new.now),
+            auth_token_digests: new.auth_token_digests,
             transit_encryption_enabled: new.transit_encryption_enabled,
             transit_encryption_mode: new.transit_encryption_mode,
             at_rest_encryption_enabled: new.at_rest_encryption_enabled,

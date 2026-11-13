@@ -420,6 +420,10 @@ async fn a_modify_is_refused_with_the_rule_it_broke() {
             "CacheSubnetQuotaExceededFault",
         ),
         (
+            // A subnet of ANOTHER VPC is not a subnet this group can take, so it
+            // is the invalid subnet the modelled `InvalidSubnet` names;
+            // `SubnetNotAllowedFault` is the regional-AZ against Outpost
+            // mismatch, which this is not.
             "subnets spanning two VPCs",
             GROUP.to_string(),
             Some(spanning.clone()),

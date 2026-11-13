@@ -16,7 +16,7 @@ emulator-server = { workspace = true }
 emulator-telemetry = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }
 aws-smithy-types = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net", "time"] }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
@@ -54,6 +54,11 @@ aws-sdk-sns = { version = "1", default-features = false, features = ["rt-tokio",
 # `arn::region_label`: the ONE reading of a caller-supplied Region as a Region
 # LABEL, which is what the endpoint the EC2 call above is made at is built from.
 service-common = { path = "../common" }
+# The RESP wire format (RESP2/RESP3) a cache's own clients speak, decoded and
+# encoded by the protocol's own implementation rather than by a reading of it
+# written here: `src/state/cache_data_plane/resp_frame.rs` frames every command a
+# client sends and every reply the cache answers with.
+redis-protocol = { version = "6.0.0", default-features = false, features = ["std", "resp2", "resp3"] }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -81,6 +86,12 @@ service-com-amazonaws-sns-amazonsimplenotificationservice = { workspace = true }
 service-com-amazonaws-sqs-amazonsqs = { workspace = true }
 # The SQS client that harness drives the subscriber's end with.
 aws-sdk-sqs = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# The data-plane suite drives a real RESP client against a cache's own socket in ONE
+# process: `rustls` / `tokio-rustls` run the client side of the TLS a cache with
+# in-transit encryption is served over, which the core terminates. Both are the versions
+# this workspace already builds.
+rustls = { workspace = true }
+tokio-rustls = "0.26"
 
 [lints]
 workspace = true

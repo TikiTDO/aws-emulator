@@ -484,6 +484,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // is stored (`crate::state::kms_key`) — before the store is locked,
         // because resolving it is a call into KMS.
         let kms_key_id = crate::state::kms_key::stored_key_id(ctx, &region, input.kms_key_id).await;
+        // Everything this create writes happens under ONE lock, and the socket the
+        // cache is served on is opened after it: opening one is async, and no await
+        // may happen while the store is held.
+        let (cache_name, serverless_cache) = {
         let mut store = state.lock();
         // A user group that has become active since it was created is active
         // now, so the status read below is the settled one.
@@ -586,6 +590,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             "Serverless cache created",
             now,
         );
+        (cache_name, serverless_cache)
+        };
+        // The cache's own data plane: the `Endpoint` this cache publishes has to be
+        // one a client can reach, so the socket is opened here and its address
+        // written onto the record (`crate::state::serve_serverless_cache`).
+        crate::state::serve_serverless_cache(&*self.engine, &state, &cache_name).await;
+        // Read back once the socket is open, so this answer publishes the address
+        // the cache really answers on rather than the one its record carried before
+        // it was served.
+        let serverless_cache = state
+            .lock()
+            .serverless_caches
+            .get(&cache_name)
+            .map(crate::state::ServerlessCacheRecord::to_modeled)
+            .unwrap_or(serverless_cache);
         Ok(CreateServerlessCacheOutput {
             serverless_cache: Some(serverless_cache),
         })

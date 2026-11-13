@@ -177,6 +177,9 @@ impl ComAmazonawsElasticacheAmazonelasticachev9State {
                     security_group_ids: Vec::new(),
                     notification_topic_arn: None,
                     auth_token_enabled: template.auth_token_enabled,
+                    // A member minted into an existing group authenticates its clients
+                    // exactly as the group does.
+                    auth_token_digests: template.auth_token_digests.clone(),
                     transit_encryption_enabled: Some(template.transit_encryption_enabled),
                     transit_encryption_mode: template.transit_encryption_mode.clone(),
                     at_rest_encryption_enabled: Some(template.at_rest_encryption_enabled),

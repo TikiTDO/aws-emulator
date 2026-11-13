@@ -689,21 +689,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
-        // Automatic failover promotes a replica, so it needs one: "If
-        // AutomaticFailoverEnabled is true, the value of [NumCacheClusters] must
-        // be at least 2." And it "must be enabled for Valkey or Redis OSS
-        // (cluster mode enabled) replication groups", which is why a sharded
-        // group that has replicas cannot turn it off.
+        // Automatic failover promotes a replica, so a cluster mode DISABLED
+        // group needs one: "If AutomaticFailoverEnabled is true, the value of
+        // [NumCacheClusters] must be at least 2." A cluster mode ENABLED group
+        // is governed by the OTHER half of that member's contract —
+        // AutomaticFailoverEnabled "must be enabled for Valkey or Redis OSS
+        // (cluster mode enabled) replication groups" — which holds whatever each
+        // shard's replica count is: shards without replicas are a supported
+        // cluster mode shape, so enabling failover on them is accepted and
+        // disabling it is what is refused.
         let every_shard_has_replica = shard_replicas.iter().all(|replicas| *replicas >= 1);
         let automatic_failover = match input.automatic_failover_enabled {
-            Some(true) if !every_shard_has_replica => {
+            Some(true) if !cluster_enabled && !every_shard_has_replica => {
                 return Err(invalid_combination(
                     "AutomaticFailoverEnabled requires at least one replica in every node group \
                      (shard) to promote."
                         .to_string(),
                 ))
             }
-            Some(false) if cluster_enabled && every_shard_has_replica => {
+            Some(false) if cluster_enabled => {
                 return Err(invalid_combination(
                     "AutomaticFailoverEnabled must be enabled for a cluster mode enabled \
                      replication group."
@@ -712,8 +716,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             Some(enabled) => enabled,
             // "Default: false" for a cluster mode disabled group; a cluster mode
-            // enabled group with a replica in every shard has it enabled.
-            None => cluster_enabled && every_shard_has_replica,
+            // enabled group has it enabled, because that is the only setting
+            // that mode takes.
+            None => cluster_enabled,
         };
         // Multi-AZ enhances fault tolerance by failing the primary over to a
         // replica in another zone, which is the automatic failover above.
@@ -799,6 +804,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let kms_key_id =
             crate::state::kms_key::stored_key_id(ctx, &region, input.kms_key_id).await;
         let now = ::std::time::SystemTime::now();
+        // Everything this create writes happens under ONE lock, and the sockets the
+        // group's members are served on are opened after it: opening one is async,
+        // and no await may happen while the store is held.
+        let replication_group = {
         let mut store = state.lock();
         // Whether the primary cluster below is `available` depends on the status
         // change the clock may already owe it, so that is materialised first.
@@ -1292,7 +1301,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             multi_az,
             shards,
             cache_subnet_group_name,
+            // The token itself is a secret and is NOT stored; only the fact that
+            // one was set and the one-way digest each member's socket checks a
+            // client's `AUTH` against (`crate::state::credential_digest`).
             auth_token_enabled: input.auth_token.is_some(),
+            auth_token_digests: input
+                .auth_token
+                .as_deref()
+                .map(crate::state::credential_digest)
+                .into_iter()
+                .collect(),
             transit_encryption_enabled,
             transit_encryption_mode: input.transit_encryption_mode,
             at_rest_encryption_enabled,
@@ -1343,6 +1361,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             "Replication group created",
             now,
         );
+        replication_group
+        };
+        // The group's own data plane: one socket per MEMBER over the one keyspace
+        // the group holds, so the primary and reader endpoints the group publishes
+        // are addresses a client can reach and a replica answers what the primary
+        // wrote (`crate::state::serve_replication_group`).
+        crate::state::serve_replication_group(&*self.engine, &state, &replication_group_id).await;
+        // Read back once the sockets are open, so this answer publishes the
+        // addresses the group really answers on rather than the ones its record
+        // carried before its members were served.
+        let replication_group = state
+            .lock()
+            .modeled_replication_group(&replication_group_id)
+            .unwrap_or(replication_group);
         Ok(CreateReplicationGroupOutput {
             replication_group: Some(replication_group),
         })

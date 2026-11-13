@@ -17,7 +17,7 @@
 use crate::cache_cluster_lifecycle::{
     create_available_cluster, create_cluster, describe_cluster,
 };
-use crate::harness::{params, Emulator, RefusalCase, Reply, PAST_TRANSITION};
+use crate::harness::{params, poll_until, Emulator, RefusalCase, Reply, PAST_TRANSITION, REGION};
 
 /// One filter row: the case name, the filter's form pairs, and the snapshots it
 /// selects in the order the describe reports them.
@@ -66,7 +66,6 @@ struct SnapshotCase {
     snapshot_extra: &'static [(&'static str, &'static str)],
     engine: &'static str,
     engine_version: &'static str,
-    port: &'static str,
     num_cache_nodes: &'static str,
     parameter_group: &'static str,
     /// `Snapshot$SnapshotRetentionLimit` "reflects the SnapshotRetentionLimit
@@ -92,7 +91,6 @@ async fn a_created_snapshot_is_read_back_from_persisted_state() {
             snapshot_extra: &[],
             engine: "redis",
             engine_version: "7.1",
-            port: "6379",
             num_cache_nodes: "1",
             parameter_group: "default.redis7",
             // "Default: 0 (i.e., automatic backups are disabled for this cache
@@ -114,7 +112,6 @@ async fn a_created_snapshot_is_read_back_from_persisted_state() {
             snapshot_extra: &[("KmsKeyId", "alias/aws-elasticache")],
             engine: "valkey",
             engine_version: "9.0",
-            port: "7000",
             num_cache_nodes: "1",
             parameter_group: "default.valkey9",
             retention_limit: "5",
@@ -129,7 +126,6 @@ async fn a_created_snapshot_is_read_back_from_persisted_state() {
             snapshot_extra: &[("Tags.Tag.1.Key", "team"), ("Tags.Tag.1.Value", "cache")],
             engine: "redis",
             engine_version: "6.2",
-            port: "6379",
             num_cache_nodes: "1",
             // Redis OSS 6 is the one published parameter group family whose
             // version line is `<major>.x` rather than `<major>`
@@ -176,10 +172,16 @@ async fn a_created_snapshot_is_read_back_from_persisted_state() {
             created.body
         );
 
-        std::thread::sleep(PAST_TRANSITION);
-        let described = describe_snapshots(
+        // Read back once the clock owes the snapshot `available` — waited for by looking
+        // again at the condition rather than for a fixed time.
+        let described = poll_until(
             &emulator,
-            &[("SnapshotName", case.requested_name), ("MaxRecords", "20")],
+            REGION,
+            case.requested_name,
+            "the snapshot reaching available",
+            "DescribeSnapshots",
+            &params(&[("SnapshotName", case.requested_name), ("MaxRecords", "20")]),
+            |reply| reply.text("Snapshot/SnapshotStatus") == Some("available"),
         )
         .await;
         assert_eq!(
@@ -204,13 +206,18 @@ async fn a_created_snapshot_is_read_back_from_persisted_state() {
         );
 
         let expected_arn = format!(":snapshot:{}", case.stored_name);
+        // The port the SOURCE cluster publishes, which is what the snapshot of it reports:
+        // read back from that cluster's own describe rather than assumed.
+        let source_port = crate::cache_cluster_lifecycle::describe_cluster(&emulator, case.cluster)
+            .await
+            .text("ConfigurationEndpoint/Port")
+            .map(str::to_string);
         for (phase, reply) in [("create", &created), ("describe", &described)] {
             for (element, expected) in [
                 ("Snapshot/CacheClusterId", Some(case.cluster)),
                 ("Snapshot/SnapshotSource", Some("manual")),
                 ("Snapshot/Engine", Some(case.engine)),
                 ("Snapshot/EngineVersion", Some(case.engine_version)),
-                ("Snapshot/Port", Some(case.port)),
                 ("Snapshot/NumCacheNodes", Some(case.num_cache_nodes)),
                 (
                     "Snapshot/CacheParameterGroupName",
@@ -231,6 +238,19 @@ async fn a_created_snapshot_is_read_back_from_persisted_state() {
                     reply.body
                 );
             }
+            // `Snapshot$Port` is "the port number used by each cache nodes in the
+            // source cluster", which for a cluster this emulator serves a RESP
+            // data plane for is the port its own socket answers on — so it is
+            // asserted against the port the SOURCE CLUSTER publishes, read back
+            // from that cluster's own describe, rather than as a literal.
+            assert_eq!(
+                reply.text("Snapshot/Port"),
+                source_port.as_deref(),
+                "case {} ({phase}): expected the source cluster's own port {source_port:?}, got \
+                 {:?}",
+                case.requested_name,
+                reply.text("Snapshot/Port")
+            );
             assert!(
                 reply
                     .text("Snapshot/ARN")

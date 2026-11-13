@@ -300,6 +300,14 @@ mod deferred_change_reporting;
 #[path = "all/fixed_refusal_sentences.rs"]
 mod fixed_refusal_sentences;
 
+// Appended for the same reason: the DATA-PLANE suite (the address a cache publishes, the
+// RESP session a client opens on it, and what that session may do) and the suite about the
+// three membership rules — which user name is unique and where, which replication-group
+// shapes a create takes, and which member a delete may take.
+#[path = "all/cache_data_plane.rs"]
+mod cache_data_plane;
+#[path = "all/cache_membership_rules.rs"]
+mod cache_membership_rules;
 // Appended for the same reason: the suite about the network types a cache subnet group and
 // its subnets publish, the suite about the engine-version catalog's two description strings,
 // and the suite about WHICH refusal a parameter this service cannot take gets.

@@ -289,6 +289,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             "Serverless cache deleted",
             now,
         );
+        // The socket this cache was served on closes with it: dropping the handle
+        // closes the port and severs every connection on it, so a client cannot
+        // keep reaching a cache that is going away.
+        crate::state::close_serverless_cache_data_plane(&mut store, &name);
 
         Ok(DeleteServerlessCacheOutput {
             serverless_cache: Some(serverless_cache),

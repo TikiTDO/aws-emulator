@@ -236,6 +236,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let key = input.replication_group_id.to_ascii_lowercase();
         let now = ::std::time::SystemTime::now();
+        // Everything this call writes happens under ONE lock, and the sockets the
+        // members it adds are served on are opened after it: opening one is async,
+        // and no await may happen while the store is held.
+        let answer = {
         let mut store = state.lock();
 
         let Some(group) = store.settled_replication_group_mut(&key, now) else {
@@ -307,15 +311,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the clusters this scaling would mint are counted against the
         // ACCOUNT's cluster quota — the same `CLUSTER_QUOTA` that bounds
         // `CreateCacheCluster` — before any of them is created.
-        let added: i32 = requested
+        //
+        // Counted in `i64` and compared with checked arithmetic, so a request
+        // naming many large per-shard targets cannot overflow the sum and slip
+        // past the bound: a count that does not fit is past the quota by
+        // definition and is refused here.
+        let added: i64 = requested
             .iter()
             .map(|(node_group_id, target)| {
-                target - group.shard_replica_count(node_group_id).unwrap_or_default()
+                i64::from(*target)
+                    - i64::from(group.shard_replica_count(node_group_id).unwrap_or_default())
             })
-            .sum();
-        if store.cache_clusters.len() + usize::try_from(added).unwrap_or(0)
-            > crate::state::CLUSTER_QUOTA
-        {
+            .fold(0i64, i64::saturating_add);
+        let past_the_quota = usize::try_from(added.max(0))
+            .ok()
+            .and_then(|added| store.cache_clusters.len().checked_add(added))
+            .is_none_or(|total| total > crate::state::CLUSTER_QUOTA);
+        if past_the_quota {
             return Err(
                 IncreaseReplicaCountErrorModeled::NodeQuotaForCustomerExceededFault(
                     NodeQuotaForCustomerExceededFault {
@@ -352,6 +364,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 crate::state::STORE_UNAVAILABLE,
             ));
         };
+        answer
+        };
+        // A member this call minted is served exactly as the ones the create made:
+        // its own socket, over the group's one keyspace, and its address published
+        // as its node endpoint (`crate::state::serve_replication_group`).
+        crate::state::serve_replication_group(&*self.engine, &state, &key).await;
+        let answer = state
+            .lock()
+            .modeled_replication_group(&key)
+            .unwrap_or(answer);
         Ok(IncreaseReplicaCountOutput {
             replication_group: Some(answer),
         })

@@ -12,7 +12,36 @@
 //! port, zone placement, keyspace partition, page size), and a single
 //! `CreateReplicationGroup` call is only one row.
 
-use crate::harness::{params, Emulator, RefusalCase, Reply, PAST_TRANSITION, REGION};
+use crate::harness::{
+    assert_own_endpoint, is_own_host, params, poll_until, Emulator, RefusalCase, Reply,
+    PAST_TRANSITION, REGION,
+};
+
+/// The ADDRESS and PORT one member cluster reports as its own node endpoint —
+/// which is where this emulator serves that member's data plane, and so what the
+/// group's primary or reader endpoint for it has to be.
+async fn describe_cluster_endpoint(
+    emulator: &Emulator,
+    cache_cluster_id: &str,
+) -> (Option<String>, Option<String>) {
+    let reply = emulator
+        .call(
+            "DescribeCacheClusters",
+            &params(&[
+                ("CacheClusterId", cache_cluster_id),
+                ("ShowCacheNodeInfo", "true"),
+            ]),
+        )
+        .await;
+    (
+        reply
+            .text("CacheNodes/CacheNode/Endpoint/Address")
+            .map(str::to_string),
+        reply
+            .text("CacheNodes/CacheNode/Endpoint/Port")
+            .map(str::to_string),
+    )
+}
 
 /// Create one replication group with `ReplicationGroupId`, a description, and
 /// whatever else `extra` names.
@@ -82,7 +111,6 @@ struct GroupCase {
     multi_az: &'static str,
     at_rest_encryption: &'static str,
     storage_encryption_type: &'static str,
-    port: &'static str,
 }
 
 #[tokio::test]
@@ -109,7 +137,6 @@ async fn a_created_replication_group_is_read_back_from_persisted_state() {
             multi_az: "disabled",
             at_rest_encryption: "false",
             storage_encryption_type: "none",
-            port: "6379",
         },
         GroupCase {
             id: "Mixed-Case-RG",
@@ -127,7 +154,6 @@ async fn a_created_replication_group_is_read_back_from_persisted_state() {
             // "Default: true when using Valkey, false when using Redis OSS."
             at_rest_encryption: "true",
             storage_encryption_type: "sse-elasticache",
-            port: "6379",
         },
         GroupCase {
             id: "sharded-rg",
@@ -152,7 +178,6 @@ async fn a_created_replication_group_is_read_back_from_persisted_state() {
             multi_az: "disabled",
             at_rest_encryption: "false",
             storage_encryption_type: "none",
-            port: "6379",
         },
         GroupCase {
             id: "one-shard-enabled",
@@ -165,12 +190,14 @@ async fn a_created_replication_group_is_read_back_from_persisted_state() {
             cluster_mode: "enabled",
             members: &["one-shard-enabled-0001-001"],
             slots: &["0-16383"],
-            // No replica to promote, so failover stays off.
-            automatic_failover: "disabled",
+            // Automatic failover "must be enabled for Valkey or Redis OSS
+            // (cluster mode enabled) replication groups", whatever each shard's
+            // replica count is — so a cluster mode enabled group that names no
+            // setting gets the only one that mode takes.
+            automatic_failover: "enabled",
             multi_az: "disabled",
             at_rest_encryption: "false",
             storage_encryption_type: "none",
-            port: "6379",
         },
         GroupCase {
             id: "max-replicas-rg",
@@ -201,7 +228,6 @@ async fn a_created_replication_group_is_read_back_from_persisted_state() {
             at_rest_encryption: "true",
             // "sse-kms if a customer-managed KMS key is used."
             storage_encryption_type: "sse-kms",
-            port: "7000",
         },
     ];
 
@@ -223,7 +249,20 @@ async fn a_created_replication_group_is_read_back_from_persisted_state() {
         );
         creates.push(created);
     }
-    std::thread::sleep(PAST_TRANSITION);
+    // Each row is read back once the clock owes it `available` — waited for by looking
+    // again at the condition, not by waiting a fixed time.
+    for case in &cases {
+        poll_until(
+            &emulator,
+            REGION,
+            case.id,
+            "the group reaching available",
+            "DescribeReplicationGroups",
+            &params(&[("ReplicationGroupId", case.id)]),
+            |reply| reply.text("ReplicationGroup/Status") == Some("available"),
+        )
+        .await;
+    }
 
     for (case, created) in cases.iter().zip(&creates) {
         let described = describe_group(&emulator, case.id).await;
@@ -329,11 +368,9 @@ async fn a_created_replication_group_is_read_back_from_persisted_state() {
                 "case {case:?}: a cluster mode enabled group reports no CurrentRole, got {roles:?}"
             );
             assert!(
-                endpoint.is_some_and(|address| address.contains("cfg")
-                    && address.starts_with(&format!("{}.", case.stored_id))
-                    && address.ends_with(&format!("{REGION}.cache.amazonaws.com"))),
-                "case {case:?}: the configuration endpoint must name the group and carry .cfg, \
-                 got {endpoint:?}"
+                endpoint.is_some_and(is_own_host),
+                "case {case:?}: the configuration endpoint of a group this emulator serves must \
+                 be an address it answers on, got {endpoint:?}"
             );
             assert!(
                 primary_endpoint.is_none(),
@@ -356,19 +393,28 @@ async fn a_created_replication_group_is_read_back_from_persisted_state() {
                 "case {case:?}: a cluster mode disabled group has no configuration endpoint, got \
                  {endpoint:?}"
             );
-            assert!(
-                primary_endpoint.is_some_and(|address| address
-                    .starts_with(&format!("master.{}.", case.stored_id))
-                    && address.ends_with(&format!("{REGION}.cache.amazonaws.com"))),
-                "case {case:?}: the shard's primary endpoint is the group's master name, got \
-                 {primary_endpoint:?}"
+            // The group's primary endpoint is the address of the member holding
+            // the primary role, which for a group this emulator serves is the
+            // socket that member answers on; its reader endpoint is a replica's.
+            assert_own_endpoint(
+                case.stored_id,
+                "the shard's primary endpoint",
+                primary_endpoint.unwrap_or_default(),
+                described.text("NodeGroup/PrimaryEndpoint/Port"),
             );
             let reader = described.text("NodeGroup/ReaderEndpoint/Address");
             if case.members.len() > 1 {
-                assert!(
-                    reader.is_some_and(|address| address
-                        .starts_with(&format!("replica.{}.", case.stored_id))),
-                    "case {case:?}: a shard with a replica has a reader endpoint, got {reader:?}"
+                assert_own_endpoint(
+                    case.stored_id,
+                    "the shard's reader endpoint",
+                    reader.unwrap_or_default(),
+                    described.text("NodeGroup/ReaderEndpoint/Port"),
+                );
+                assert_ne!(
+                    described.text("NodeGroup/ReaderEndpoint/Port"),
+                    described.text("NodeGroup/PrimaryEndpoint/Port"),
+                    "case {case:?}: a shard with a replica reads at another member's socket than \
+                     it writes at, got {reader:?}"
                 );
             } else {
                 assert!(
@@ -378,12 +424,31 @@ async fn a_created_replication_group_is_read_back_from_persisted_state() {
             }
         }
 
-        // Every port reported anywhere in the group is the group's port.
+        // Every port reported anywhere in the group is a port the emulator's own
+        // socket for that member answers on: one per member, and each reported
+        // the same wherever it appears.
         let ports = described.all("Port");
         assert!(
-            !ports.is_empty() && ports.iter().all(|port| *port == case.port),
-            "case {case:?}: every endpoint listens on {}, got {ports:?}",
-            case.port
+            !ports.is_empty()
+                && ports
+                    .iter()
+                    .all(|port| port.parse::<u16>().is_ok_and(|port| port > 0)),
+            "case {case:?}: every endpoint must carry the port its member answers on, got \
+             {ports:?}"
+        );
+        let distinct: std::collections::BTreeSet<&&str> = ports.iter().collect();
+        // A cluster mode ENABLED group is reached at its configuration endpoint
+        // alone, so one socket is reported; a cluster mode disabled one reports a
+        // primary and a reader endpoint per member, which is one socket each.
+        let expected_sockets = if case.cluster_enabled {
+            1
+        } else {
+            case.members.len()
+        };
+        assert_eq!(
+            distinct.len(),
+            expected_sockets,
+            "case {case:?}: the group is reached at {expected_sockets} socket(s), got {ports:?}"
         );
 
         // The create response and the describe response must agree on every
@@ -547,7 +612,18 @@ async fn a_group_built_on_an_existing_primary_cluster_adopts_it() {
         too_early.body
     );
 
-    std::thread::sleep(PAST_TRANSITION);
+    // Waited for by looking again at the CONDITION the create needs — the primary
+    // reaching `available` — rather than by waiting a fixed time.
+    poll_until(
+        &emulator,
+        REGION,
+        "legacy-primary",
+        "the primary cluster reaching available",
+        "DescribeCacheClusters",
+        &params(&[("CacheClusterId", "legacy-primary")]),
+        |reply| reply.text("CacheCluster/CacheClusterStatus") == Some("available"),
+    )
+    .await;
     let created = create_group(
         &emulator,
         "adopting-rg",
@@ -560,9 +636,16 @@ async fn a_group_built_on_an_existing_primary_cluster_adopts_it() {
         created.status,
         created.body
     );
-    std::thread::sleep(PAST_TRANSITION);
-
-    let described = describe_group(&emulator, "adopting-rg").await;
+    let described = poll_until(
+        &emulator,
+        REGION,
+        "adopting-rg",
+        "the group reaching available",
+        "DescribeReplicationGroups",
+        &params(&[("ReplicationGroupId", "adopting-rg")]),
+        |reply| reply.text("ReplicationGroup/Status") == Some("available"),
+    )
+    .await;
     assert_eq!(
         described.all("MemberClusters/ClusterId"),
         vec!["legacy-primary"],
@@ -571,17 +654,25 @@ async fn a_group_built_on_an_existing_primary_cluster_adopts_it() {
     );
     // The group takes the primary's configuration wherever the request named
     // none.
-    for (field, expected) in [
-        ("ReplicationGroup/Engine", "valkey"),
-        ("NodeGroup/PrimaryEndpoint/Port", "7111"),
-    ] {
-        assert_eq!(
-            described.text(field),
-            Some(expected),
-            "{field} must be inherited from the primary cluster, got {:?}",
-            described.text(field)
-        );
-    }
+    assert_eq!(
+        described.text("ReplicationGroup/Engine"),
+        Some("valkey"),
+        "the engine must be inherited from the primary cluster, got {:?}",
+        described.text("ReplicationGroup/Engine")
+    );
+    // The group is reached at the ADDRESS the adopted primary answers on — the
+    // socket this emulator serves that member's data plane at, which is also what
+    // the member cluster reports as its own node endpoint.
+    let member_endpoint = describe_cluster_endpoint(&emulator, "legacy-primary").await;
+    assert_eq!(
+        (
+            described.text("NodeGroup/PrimaryEndpoint/Address"),
+            described.text("NodeGroup/PrimaryEndpoint/Port")
+        ),
+        (member_endpoint.0.as_deref(), member_endpoint.1.as_deref()),
+        "the group's primary endpoint must be the adopted member's own address, got {:?}",
+        described.text("NodeGroup/PrimaryEndpoint/Address")
+    );
     // The adopted cluster now names its group.
     let member = emulator
         .call(

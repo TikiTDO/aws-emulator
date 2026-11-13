@@ -186,6 +186,7 @@ mod store;
 mod parameters;
 mod reserved_nodes;
 mod cache_clusters;
+mod cache_data_plane;
 mod replication_groups;
 mod shard_configuration;
 mod engine_versions;
@@ -201,6 +202,7 @@ pub use engine_versions::*;
 pub use replication_groups::*;
 pub use shard_configuration::*;
 pub use cache_clusters::*;
+pub use cache_data_plane::*;
 pub use reserved_nodes::*;
 pub use parameters::*;
 pub use event_notifications::*;
@@ -2747,6 +2749,16 @@ pub mod input_authentication_type {
 /// operation has to write it into existence.
 pub const DEFAULT_USER_ID: &str = "default";
 
+/// The user NAME every user group must hold a member carrying.
+///
+/// "Redis user group needs to contain a user with the user name default"
+/// ([`DEFAULT_USER_REQUIRED_MESSAGE`]) is a rule about the NAME, not about which
+/// user holds it: the built-in user ([`DEFAULT_USER_ID`]) carries it, and so may
+/// a user of the caller's own, which is how a caller takes the engine's
+/// unauthenticated access away from the built-in user. It is also the name no
+/// two members of one group may share.
+pub const DEFAULT_USER_NAME: &str = "default";
+
 /// How ElastiCache words a `DefaultUserRequired` refusal — "You must add default
 /// user to a user group."
 ///
@@ -3458,11 +3470,15 @@ pub enum AuthRefusal {
 }
 
 /// How a stored user authenticates: `Authentication`'s "Type" and, for a
-/// password user, "The number of passwords belonging to the user".
+/// password user, "The number of passwords belonging to the user" — plus the
+/// one-way DIGEST of each password, which is what a cache's own socket checks an
+/// `AUTH` against.
 ///
 /// The passwords THEMSELVES are never stored: ElastiCache reports only the count
 /// (`Authentication$PasswordCount`), and a secret the API never reads back has no
-/// business sitting in emulator state.
+/// business sitting in emulator state. What is kept is
+/// [`credential_digest`] of each, because a cache that authenticates a client has
+/// to be able to check what the client sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthenticationRecord {
     /// An `AuthenticationType` token — see [`authentication_type`].
@@ -3470,6 +3486,9 @@ pub struct AuthenticationRecord {
     /// How many passwords the user holds, for a password user; `None` for one
     /// that authenticates with IAM or without a password.
     pub password_count: Option<i32>,
+    /// The digest of each password the user holds, in the order they were given;
+    /// see [`credential_digest`]. Empty for a user that holds none.
+    pub password_digests: Vec<String>,
 }
 
 impl AuthenticationRecord {
@@ -3543,6 +3562,9 @@ fn password_authentication(passwords: &[String]) -> Result<AuthenticationRecord,
     Ok(AuthenticationRecord {
         r#type: authentication_type::PASSWORD.to_string(),
         password_count: Some(count),
+        // What a cache's socket checks an `AUTH` against: the digest of each
+        // password, never the password.
+        password_digests: passwords.iter().map(|password| credential_digest(password)).collect(),
     })
 }
 
@@ -3643,6 +3665,9 @@ pub fn authentication_from_request(
                         authentication_type::NO_PASSWORD.to_string()
                     },
                     password_count: None,
+                    // A user that holds no password has none to check an `AUTH`
+                    // against.
+                    password_digests: Vec::new(),
                 })
             }
         };
@@ -3656,6 +3681,7 @@ pub fn authentication_from_request(
         return Ok(AuthenticationRecord {
             r#type: authentication_type::NO_PASSWORD.to_string(),
             password_count: None,
+            password_digests: Vec::new(),
         });
     }
     if !passwords.is_empty() {
@@ -3774,6 +3800,9 @@ pub fn built_in_users() -> BTreeMap<String, UserRecord> {
             authentication: AuthenticationRecord {
                 r#type: authentication_type::NO_PASSWORD.to_string(),
                 password_count: None,
+                // The built-in user holds no password, which is what makes it the
+                // user a cache serves unauthenticated traffic as.
+                password_digests: Vec::new(),
             },
             status: USER_STATUS_ACTIVE.to_string(),
             arn: user_arn(DEFAULT_REGION, DEFAULT_USER_ID),
@@ -3906,6 +3935,14 @@ pub struct ComAmazonawsElasticacheAmazonelasticachev9State {
     /// and the ones that have left the window are dropped (see
     /// [`Self::test_failovers_in_window`]).
     pub test_failovers: Vec<SystemTime>,
+    /// The SOCKETS this emulator has open for its caches, one per served cache —
+    /// the data plane of each, keyed by the cache it serves; see
+    /// [`cache_data_plane`].
+    ///
+    /// Kept beside the cache records rather than on them, because a record is a
+    /// cloneable value and a live socket is not. A cache's entry is opened by its
+    /// create and dropped by its delete, and dropping it closes the port.
+    pub cache_data_planes: CacheDataPlanes,
 }
 
 impl Default for ComAmazonawsElasticacheAmazonelasticachev9State {
@@ -3949,6 +3986,8 @@ impl Default for ComAmazonawsElasticacheAmazonelasticachev9State {
             engine_default_parameters: published_engine_default_parameters(),
             reserved_cache_nodes: BTreeMap::new(),
             test_failovers: Vec::new(),
+            // No cache exists yet, so no socket is open: a create opens one.
+            cache_data_planes: CacheDataPlanes::default(),
         }
     }
 }
@@ -3976,6 +4015,9 @@ pub struct NewCluster {
     pub security_group_ids: Vec<String>,
     pub notification_topic_arn: Option<String>,
     pub auth_token_enabled: bool,
+    /// The digests of the auth tokens a client of this cluster authenticates with;
+    /// see [`CacheClusterRecord::auth_token_digests`].
+    pub auth_token_digests: Vec<String>,
     pub transit_encryption_enabled: Option<bool>,
     /// See [`CacheClusterRecord::transit_encryption_mode`].
     pub transit_encryption_mode: Option<String>,

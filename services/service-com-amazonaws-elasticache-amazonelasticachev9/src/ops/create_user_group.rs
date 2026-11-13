@@ -284,6 +284,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // named twice, so the stored member list is at most as long as the
         // user store, which `crate::state::USER_QUOTA` bounds.
         let mut members: Vec<String> = Vec::new();
+        // The user NAME of each member, beside its id: the name is what the
+        // engine's ACL calls a member of this group by, so the group is what the
+        // name has to be unique within.
+        let mut member_names: Vec<(String, String)> = Vec::new();
         for requested in input.user_ids.clone().unwrap_or_default() {
             // `UserId` "is stored as a lowercase string", so that is what a
             // membership resolves against.
@@ -310,14 +314,38 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
                 .into());
             }
+            // Two members cannot share a user name: `DuplicateUserNameFault` is
+            // "a user with this username already exists", and inside a group a
+            // second user carrying a name already taken is a name the engine's
+            // ACL could not resolve to one member.
+            if let Some((existing_id, name)) = member_names
+                .iter()
+                .find(|(_, name)| *name == user.user_name)
+            {
+                return Err(CreateUserGroupErrorModeled::DuplicateUserNameFault(
+                    DuplicateUserNameFault {
+                        message: Some(format!(
+                            "User {existing_id} already has the username {name}."
+                        )),
+                    },
+                )
+                .into());
+            }
+            member_names.push((user.user_id.clone(), user.user_name.clone()));
             members.push(user.user_id.clone());
         }
-        // "A user group must contain the default user": the user every account
-        // starts with, see `crate::state::DEFAULT_USER_ID`. The refusal reads as
-        // the service words this error class — the same one sentence
-        // `ModifyUserGroup` answers with
-        // (`crate::state::DEFAULT_USER_REQUIRED_MESSAGE`).
-        if !members.iter().any(|id| id == crate::state::DEFAULT_USER_ID) {
+        // A user group "needs to contain a user with the user name default"
+        // (`crate::state::DEFAULT_USER_REQUIRED_MESSAGE`), which is a rule about
+        // the NAME a member carries and not about which user holds it: the
+        // built-in user ([`crate::state::DEFAULT_USER_ID`]) satisfies it, and so
+        // does a user of the caller's own created with that name — the member a
+        // caller that wants the engine's unauthenticated traffic refused puts in
+        // the group instead. The refusal reads as the service words this error
+        // class, the same one sentence `ModifyUserGroup` answers with.
+        if !member_names
+            .iter()
+            .any(|(_, name)| name == crate::state::DEFAULT_USER_NAME)
+        {
             return Err(CreateUserGroupErrorModeled::DefaultUserRequired(
                 DefaultUserRequired {
                     message: Some(crate::state::DEFAULT_USER_REQUIRED_MESSAGE.to_string()),

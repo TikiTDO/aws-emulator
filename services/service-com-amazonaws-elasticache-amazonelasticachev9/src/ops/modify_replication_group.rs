@@ -720,10 +720,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "Determines whether a read replica is automatically promoted to
         // read/write primary if the existing primary encounters a failure":
-        // promotion needs a replica to promote, the same rule
-        // `CreateReplicationGroup` enforces, and automatic failover "must be
-        // enabled for Valkey or Redis OSS (cluster mode enabled) replication
-        // groups".
+        // promotion needs a replica to promote in a cluster mode DISABLED group,
+        // the same rule `CreateReplicationGroup` enforces, while a cluster mode
+        // ENABLED group takes only the enabled setting whatever its shards hold
+        // (automatic failover "must be enabled for Valkey or Redis OSS (cluster
+        // mode enabled) replication groups").
         let every_shard_has_replica = !group.node_groups.is_empty()
             && group.node_groups.iter().all(|shard| {
                 group
@@ -732,14 +733,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     >= 1
             });
         match input.automatic_failover_enabled {
-            Some(true) if !every_shard_has_replica => {
+            Some(true) if !group.cluster_enabled && !every_shard_has_replica => {
                 return Err(invalid_combination(
                     "AutomaticFailoverEnabled requires at least one replica in every node group \
                      (shard) to promote."
                         .to_string(),
                 ))
             }
-            Some(false) if group.cluster_enabled && every_shard_has_replica => {
+            Some(false) if group.cluster_enabled => {
                 return Err(invalid_combination(
                     "AutomaticFailoverEnabled must be enabled for a cluster mode enabled \
                      replication group."
@@ -1127,6 +1128,39 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if let Some(enabled) = auth_token_applied {
             group.auth_token_enabled = enabled;
             group.auth_token_last_modified = Some(now);
+        }
+        // What a client's `AUTH` is checked against follows the STRATEGY, because
+        // that is what the strategies are about: `ROTATE` "is used to propagate the
+        // AuthToken … without interrupting access", so the token being replaced
+        // stays live beside the new one; `SET` "is used to change the AuthToken",
+        // which leaves the new one alone; and `DELETE` takes the cache's
+        // authentication away. Only the one-way digest of the token is held; see
+        // `crate::state::credential_digest`.
+        if let Some(strategy) = auth_token_strategy.as_deref() {
+            let added = input
+                .auth_token
+                .as_deref()
+                .map(crate::state::credential_digest);
+            match (strategy, added) {
+                (crate::state::AUTH_TOKEN_DELETE, _) => group.auth_token_digests.clear(),
+                (crate::state::AUTH_TOKEN_ROTATE, Some(digest)) if !deferred => {
+                    // A rotation leaves exactly TWO live tokens: the one being replaced
+                    // and the new one. A second rotation replaces the older of the two
+                    // rather than adding to them, so the list a client's `AUTH` is checked
+                    // against is bounded at two however often a caller rotates.
+                    let replaced = group
+                        .auth_token_digests
+                        .last()
+                        .filter(|held| **held != digest)
+                        .cloned();
+                    group.auth_token_digests = replaced
+                        .into_iter()
+                        .chain(::std::iter::once(digest))
+                        .collect();
+                }
+                (_, Some(digest)) if !deferred => group.auth_token_digests = vec![digest],
+                _ => {}
+            }
         }
         // The strategy is remembered on acceptance, because the documented order
         // between the strategies ("SET - allowed only after ROTATE") is about the

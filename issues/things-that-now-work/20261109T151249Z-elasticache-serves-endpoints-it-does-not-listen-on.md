@@ -94,3 +94,23 @@ Cause 3: CreateUser(UserId='<fresh>', UserName='default', Engine='valkey', Acces
 Cause 4: CreateReplicationGroup(ReplicationGroupId='<id>', Engine='redis', CacheNodeType='cache.m5.large', NumNodeGroups=2, ReplicasPerNodeGroup=0, AutomaticFailoverEnabled=True, CacheSubnetGroupName='<sng>'). Expect acceptance; the emulator answers 400 InvalidParameterCombination. (Then ModifyReplicationGroupShardConfiguration(NodeGroupCount=3, ApplyImmediately=True) must report Status 'modifying' and converge to 3 shards.)
 Cause 5: CreateReplicationGroup(NumCacheClusters=3, AutomaticFailoverEnabled=True); wait 'available'; find the member whose CurrentRole is 'primary'; DeleteCacheCluster(CacheClusterId=<that primary>). Expect 400 InvalidCacheClusterState and an unchanged group; the emulator returns 200 with the primary 'deleting'. Positive control: the same call on a non-primary member succeeds.
 Cause 6: CreateCacheSubnetGroup in VPC A, then ModifyCacheSubnetGroup(CacheSubnetGroupName=<that group>, SubnetIds=[<subnet in VPC A>, <subnet in VPC B>]). Expect Error.Code InvalidSubnet; the emulator answers SubnetNotAllowedFault.
+
+## Resolution
+
+Causes 1, 3, 4, 5 and 6 are fixed: every cache (cache cluster, replication-group member,
+serverless cache) is now served on a core-owned socket of the emulator's own and publishes
+that address, with a RESP server over a real keyspace behind it; `CreateUser` enforces
+uniqueness on `UserId` and the user-name rules on the GROUP; a cluster-mode-enabled
+replication group takes shards without replicas; `DeleteCacheCluster` refuses a member
+serving as a primary; and a cross-VPC subnet list is refused `InvalidSubnet`.
+
+Cause 2 is NOT fixed and is not this service's: the in-VPC RESP probe those checks deploy
+runs inside the emulator's Lambda, whose interpreter registers an allow-list of native
+modules that deliberately excludes `_socket` and `_ssl`
+(`services/service-com-amazonaws-lambda-awsgirapiservice/src/state/execution/python.rs`,
+`ALLOWED_NATIVE_MODULES` and the containment note above it), so guest code can open no
+connection at all. Giving that runtime a socket and TLS extension is a change to another
+service's crate and is tracked by the two open issues this report names
+(20261108T152921Z-elasticache-in-vpc-data-plane-unverifiable-the-emulator.md and
+20261105T090541Z-elasticache-every-in-vpc-data-plane-check-is.md). The ten probe-based
+data-plane checks now get past the published-endpoint cause and stop at that runtime.

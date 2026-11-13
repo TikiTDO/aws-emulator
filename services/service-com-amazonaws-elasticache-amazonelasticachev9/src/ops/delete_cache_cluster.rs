@@ -200,6 +200,34 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         }
+        // Which replication group this cluster is a member of, if any — read
+        // while the cluster is still in hand, so the role check below needs no
+        // second lookup of it.
+        let replication_group_id = cluster.replication_group_id.clone();
+
+        // "This operation is not valid for … a cluster that is the primary node
+        // of a replication group": the group owns its primary, so the only way
+        // to take it is to take the group. The refusal names the cluster the
+        // request asked for and the group that holds it as primary, and the
+        // group is left exactly as it was.
+        if let Some(group_id) = replication_group_id.as_deref() {
+            if store
+                .replication_groups
+                .get(group_id)
+                .is_some_and(|group| group.is_shard_primary(&cache_cluster_id))
+            {
+                return Err(DeleteCacheClusterErrorModeled::InvalidCacheClusterStateFault(
+                    InvalidCacheClusterStateFault {
+                        message: Some(format!(
+                            "Cache cluster {cache_cluster_id} is serving as primary for \
+                             replication group {group_id} and cannot be deleted. To delete the \
+                             entire replication group, use DeleteReplicationGroup."
+                        )),
+                    },
+                )
+                .into());
+            }
+        }
 
         // A final snapshot cannot be taken here: `CreateSnapshot` /
         // `DescribeSnapshots` are scaffolded 501s and own that gap, so this
@@ -225,6 +253,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The cluster is leaving: the snapshot the caller is handed back reports
         // it `deleting`, with its nodes in the same state, and the record is
         // removed so a following describe answers `CacheClusterNotFoundFault`.
+        // Taken in hand again here, because reading the group above gave the
+        // store back.
+        let Some(cluster) = store.cache_clusters.get_mut(&cache_cluster_id) else {
+            return Err(DeleteCacheClusterErrorModeled::CacheClusterNotFoundFault(
+                CacheClusterNotFoundFault {
+                    message: Some(crate::state::cache_cluster_not_found_message(
+                        &input.cache_cluster_id,
+                    )),
+                },
+            )
+            .into());
+        };
         cluster.status = crate::state::STATUS_DELETING.to_string();
         cluster.pending_status = None;
         cluster.pending_event = None;
@@ -244,6 +284,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .cache_clusters
             .remove(&cache_cluster_id)
             .map(|cluster| cluster.to_modeled(true));
+        // A replica this delete took is no longer a member of its group: the
+        // membership `DescribeReplicationGroups` reports is the clusters the
+        // account HAS, so the shard it belonged to loses it here rather than
+        // keeping a member nothing resolves to. (The primary is never here —
+        // deleting it is refused above.)
+        if let Some(group) = replication_group_id
+            .as_deref()
+            .and_then(|group_id| store.replication_groups.get_mut(group_id))
+        {
+            for shard in &mut group.node_groups {
+                shard
+                    .members
+                    .retain(|member| member.cache_cluster_id != cache_cluster_id);
+            }
+        }
+        // The socket this cluster was served on closes with it: dropping the
+        // handle closes the port and severs every connection on it.
+        crate::state::close_cache_cluster_data_plane(
+            &mut store,
+            &cache_cluster_id,
+            replication_group_id.as_deref(),
+        );
 
         Ok(DeleteCacheClusterOutput {
             cache_cluster: deleted,

@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use service_com_amazonaws_elasticache_amazonelasticachev9::state;
 
-use crate::harness::{params, Emulator, Reply};
+use crate::harness::{params, poll_until, Emulator, Reply, REGION};
 
 /// Long enough past [`state::SERVERLESS_CACHE_TRANSITION`] that the clock owes a
 /// serverless cache its next status; the handlers never sleep, so only the test
@@ -143,31 +143,46 @@ fn assert_reports_case(
             reply.all(member)
         );
     }
-    // Both endpoints name the cache and carry the engine's port, and the writer
-    // and reader endpoints are distinct names.
+    // Both endpoints are addresses this emulator answers on and carry the port
+    // its own socket for this cache was assigned. A serverless cache is served by
+    // ONE socket, so the writer and the reader endpoint are the same address —
+    // the one a client can reach. A MEMCACHED cache is served by nothing here (its
+    // clients speak another protocol), so it keeps the name ElastiCache's own zone
+    // would carry and the port its engine's clients connect to.
     let endpoints = reply.all("Address");
     assert_eq!(
         endpoints.len(),
         2,
         "case {name} ({where_from}): expected a writer and a reader endpoint, got {endpoints:?}"
     );
-    assert_ne!(
-        endpoints[0], endpoints[1],
-        "case {name} ({where_from}): the reader endpoint must differ from the writer's, got \
-         {endpoints:?}"
-    );
+    let serves_resp = case.engine != "memcached";
     for address in &endpoints {
-        assert!(
-            address.starts_with(&format!("{}-", case.stored_name)),
-            "case {name} ({where_from}): endpoint {address:?} must name the cache"
-        );
+        if serves_resp {
+            assert!(
+                crate::harness::is_own_host(address),
+                "case {name} ({where_from}): endpoint {address:?} must be an address the emulator \
+                 answers on"
+            );
+        } else {
+            assert!(
+                address.starts_with(&format!("{}-", case.stored_name)),
+                "case {name} ({where_from}): endpoint {address:?} must name the cache"
+            );
+        }
     }
     for port in reply.all("Port") {
-        assert_eq!(
-            port, case.port,
-            "case {name} ({where_from}): expected port {}, got {port}",
-            case.port
-        );
+        if serves_resp {
+            assert!(
+                port.parse::<u16>().is_ok_and(|port| port > 0),
+                "case {name} ({where_from}): expected the port the cache answers on, got {port}"
+            );
+        } else {
+            assert_eq!(
+                port, case.port,
+                "case {name} ({where_from}): expected port {}, got {port}",
+                case.port
+            );
+        }
     }
     let reported_subnets = reply.all("SubnetId");
     // The subnets a cache reports are subnets the account HAS: the ones the
@@ -388,9 +403,17 @@ async fn a_created_serverless_cache_is_read_back_from_persisted_state() {
 
         // The round trip: everything the create reported comes back out of the
         // store, under the stored (lowercased) identity, once the clock has
-        // moved the cache on.
-        std::thread::sleep(PAST_TRANSITION);
-        let described = describe_cache(&emulator, case.stored_name).await;
+        // moved the cache on — waited for by looking again at that condition.
+        let described = poll_until(
+            &emulator,
+            REGION,
+            case.name,
+            "the cache reaching available",
+            "DescribeServerlessCaches",
+            &params(&[("ServerlessCacheName", case.stored_name)]),
+            |reply| reply.text("member/Status") == Some(state::SERVERLESS_STATUS_AVAILABLE),
+        )
+        .await;
         assert_eq!(
             described.status,
             200,
@@ -1054,10 +1077,14 @@ async fn arns_endpoints_and_default_subnets_follow_the_signing_region() {
             "case {region}: the ARN must carry the signing region, got {:?}",
             created.text("ServerlessCache/ARN")
         );
+        // The ENDPOINT is not regional: a cache this emulator serves is reached at
+        // the address its own socket answers on, which is where the emulator runs
+        // rather than where the request was signed. The ARN above and the subnets
+        // below are what the signing region decides.
         for address in created.all("Address") {
             assert!(
-                address.ends_with(&format!("{region}.cache.amazonaws.com")),
-                "case {region}: endpoint {address:?} must carry the signing region"
+                crate::harness::is_own_host(address),
+                "case {region}: endpoint {address:?} must be an address the emulator answers on"
             );
         }
         assert_eq!(

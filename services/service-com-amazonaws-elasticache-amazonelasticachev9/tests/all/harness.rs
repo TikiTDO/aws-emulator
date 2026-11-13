@@ -82,6 +82,35 @@ pub type RefusalCase = (
     &'static str,
 );
 
+/// Whether `address` is an address of the EMULATOR's OWN — which is what every
+/// endpoint a cache publishes has to be.
+///
+/// A client dials exactly the address it was handed, and nothing on the machine
+/// this emulator runs on resolves a name under ElastiCache's own DNS zone; the
+/// core binds its resource listeners on the operator-chosen interface (loopback
+/// by default), so an address a cache publishes is an IP literal or a loopback
+/// name. The suites that read an endpoint assert this rather than a hostname
+/// shape, because the port is assigned by the core and the host is wherever the
+/// operator bound it.
+pub fn is_own_host(address: &str) -> bool {
+    let unbracketed = address.trim_start_matches('[').trim_end_matches(']');
+    unbracketed.parse::<::std::net::IpAddr>().is_ok() || address == "localhost"
+}
+
+/// Assert that `address` and `port` are an endpoint of this emulator's own: a
+/// host it answers on and a port the core assigned.
+pub fn assert_own_endpoint(case: &str, what: &str, address: &str, port: Option<&str>) {
+    assert!(
+        is_own_host(address),
+        "case {case}: {what} must be an address of the emulator's own, got {address:?}"
+    );
+    let parsed = port.and_then(|port| port.parse::<u16>().ok());
+    assert!(
+        parsed.is_some_and(|port| port > 0),
+        "case {case}: {what} must carry the port the cache answers on, got {port:?}"
+    );
+}
+
 /// One wire answer, reduced to what a client branches on: the status, and every
 /// text node in the XML body keyed by its element path.
 #[derive(Debug)]

@@ -383,7 +383,7 @@ async fn create_refuses_a_user_the_service_could_not_serve() {
     // The axes: the identity that collides, the engine, the ACL rule that is not
     // one, and each combination of the three authentication members that cannot
     // hold together.
-    let cases: [Refusal; 18] = [
+    let cases: [Refusal; 16] = [
         (
             "the same id again",
             &[
@@ -408,30 +408,11 @@ async fn create_refuses_a_user_the_service_could_not_serve() {
             400,
             "UserAlreadyExists",
         ),
-        (
-            "a username another user already has",
-            &[
-                ("UserId", "other-user"),
-                ("UserName", "taken-name"),
-                ("Engine", "redis"),
-                ("AccessString", "on ~* +@all"),
-                ("NoPasswordRequired", "true"),
-            ],
-            400,
-            "DuplicateUserName",
-        ),
-        (
-            "the built-in default user's name",
-            &[
-                ("UserId", "second-default"),
-                ("UserName", "default"),
-                ("Engine", "redis"),
-                ("AccessString", "on ~* +@all"),
-                ("NoPasswordRequired", "true"),
-            ],
-            400,
-            "DuplicateUserName",
-        ),
+        // A user NAME another user already has is NOT a refusal: uniqueness is on
+        // `UserId`, and a user group needs a member whose name is `default`, which
+        // a caller creates its own user for. See
+        // `a_user_name_is_unique_within_a_group_and_not_across_the_account` in
+        // `tests/all/cache_membership_rules.rs`.
         (
             // A legal CLUSTER engine, but RBAC is a Valkey / Redis OSS feature.
             "engine memcached",

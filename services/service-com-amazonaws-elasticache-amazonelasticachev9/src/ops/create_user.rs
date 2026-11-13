@@ -313,24 +313,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         }
-        // `DuplicateUserNameFault`: "A user with this username already exists."
-        // The username is what the engine's ACL names the user by, so two users
-        // cannot share one.
-        if let Some(existing) = store
-            .users
-            .values()
-            .find(|user| user.user_name == input.user_name)
-        {
-            return Err(CreateUserErrorModeled::DuplicateUserNameFault(
-                DuplicateUserNameFault {
-                    message: Some(format!(
-                        "User {} already has the username {}.",
-                        existing.user_id, existing.user_name
-                    )),
-                },
-            )
-            .into());
-        }
+        // The user NAME is not the user's identity and is not unique in the
+        // account: `UserId` is ("A user with this ID already exists" is the only
+        // collision a create of a fresh id can have), and the name is what the
+        // engine's ACL calls the user once it is in a user group. Which is why
+        // ElastiCache takes a user named `default` — a user group "needs to
+        // contain a user with the user name default"
+        // (`crate::state::DEFAULT_USER_REQUIRED_MESSAGE`), and a caller that
+        // wants that member to be its own user rather than the built-in one
+        // creates a second user carrying that name. The collision
+        // `DuplicateUserNameFault` answers is therefore the one a GROUP can have
+        // — two of its members sharing a name, which `CreateUserGroup` and
+        // `ModifyUserGroup` refuse — not one the account can.
         // The store is bounded; see `crate::state::USER_QUOTA`.
         if store.users.len() >= crate::state::USER_QUOTA {
             return Err(CreateUserErrorModeled::UserQuotaExceededFault(

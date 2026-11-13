@@ -27,7 +27,7 @@ use std::time::SystemTime;
 
 use service_com_amazonaws_elasticache_amazonelasticachev9::state;
 
-use crate::harness::{params, Emulator, RefusalCase, Reply, PAST_TRANSITION, REGION};
+use crate::harness::{is_own_host, params, Emulator, RefusalCase, Reply, PAST_TRANSITION, REGION};
 
 /// One table row that drives an operation and asserts a count: the case name,
 /// the form pairs the request carries, and what the answer must hold that many
@@ -1787,7 +1787,10 @@ async fn create_user_enforces_the_published_password_rules() {
         assert_refused(engine, &reply, 400, "InvalidParameterValue");
     }
 
-    // A user id and a user name each identify a user, so neither can be reused.
+    // A user ID identifies a user, so it cannot be reused. A user NAME does not:
+    // uniqueness is on the id, and a group needs a member whose name is `default`
+    // (see `tests/all/cache_membership_rules.rs`), so a second user may carry a
+    // name another holds.
     let duplicate_id = create_user(&emulator, "user-0", &password_of(20)).await;
     assert_refused("duplicate user id", &duplicate_id, 400, "UserAlreadyExists");
     let duplicate_name = emulator
@@ -1802,11 +1805,10 @@ async fn create_user_enforces_the_published_password_rules() {
             ]),
         )
         .await;
-    assert_refused(
-        "duplicate user name",
-        &duplicate_name,
-        400,
-        "DuplicateUserName",
+    assert_eq!(
+        duplicate_name.status, 200,
+        "case a name another user holds: expected HTTP 200, got {} with {}",
+        duplicate_name.status, duplicate_name.body
     );
 }
 
@@ -2141,10 +2143,9 @@ async fn create_serverless_cache_enforces_the_usage_limit_rules() {
             "case {case:?}: a ready cache has a write and a read endpoint, got {addresses:?}"
         );
         assert!(
-            addresses
-                .iter()
-                .all(|address| address.ends_with(&format!("{REGION}.cache.amazonaws.com"))),
-            "case {case:?}: the endpoints must be in the request's region, got {addresses:?}"
+            addresses.iter().all(|address| is_own_host(address)),
+            "case {case:?}: the endpoints must be addresses the emulator answers on, got \
+             {addresses:?}"
         );
         assert_eq!(
             read_back.text("StorageEncryptionType"),

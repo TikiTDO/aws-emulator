@@ -432,14 +432,10 @@ impl NodeGroupRecord {
         NodeGroup {
             node_group_id: Some(self.node_group_id.clone()),
             status: Some(self.status.clone()),
-            primary_endpoint: per_node_endpoints.then(|| Endpoint {
-                address: Some(group.primary_endpoint_address()),
-                port: Some(group.port),
-            }),
-            reader_endpoint: (per_node_endpoints && has_replica).then(|| Endpoint {
-                address: Some(group.reader_endpoint_address()),
-                port: Some(group.port),
-            }),
+            primary_endpoint: per_node_endpoints.then(|| self.primary_endpoint(group, clusters)),
+            reader_endpoint: (per_node_endpoints && has_replica)
+                .then(|| self.reader_endpoint(group, clusters))
+                .flatten(),
             slots: self.slots.clone(),
             node_group_members: Some(
                 self.members
@@ -449,6 +445,64 @@ impl NodeGroupRecord {
             ),
         }
     }
+
+    /// The endpoint a WRITER of this shard connects to.
+    ///
+    /// It is the address of the member currently holding the primary role: where this
+    /// emulator serves that member's data plane, the socket it answers on
+    /// ([`CacheClusterRecord::served_endpoint`]), because a published endpoint has to be
+    /// one a client can reach. A group this emulator serves no data plane for keeps the
+    /// `master.` name ElastiCache's own zone would carry.
+    pub(super) fn primary_endpoint(
+        &self,
+        group: &ReplicationGroupRecord,
+        clusters: &BTreeMap<String, CacheClusterRecord>,
+    ) -> Endpoint {
+        self.members
+            .iter()
+            .find(|member| member.current_role == ROLE_PRIMARY)
+            .and_then(|member| served_member_endpoint(member, clusters))
+            .unwrap_or_else(|| Endpoint {
+                address: Some(group.primary_endpoint_address()),
+                port: Some(group.port),
+            })
+    }
+
+    /// The endpoint a READER of this shard connects to: one of its replicas' sockets, by
+    /// the same reading as [`Self::primary_endpoint`]. `None` for a shard whose replicas
+    /// are not provisioned yet, which reports no reader endpoint.
+    pub(super) fn reader_endpoint(
+        &self,
+        group: &ReplicationGroupRecord,
+        clusters: &BTreeMap<String, CacheClusterRecord>,
+    ) -> Option<Endpoint> {
+        let replica = self
+            .members
+            .iter()
+            .find(|member| member.current_role != ROLE_PRIMARY)?;
+        Some(
+            served_member_endpoint(replica, clusters).unwrap_or_else(|| Endpoint {
+                address: Some(group.reader_endpoint_address()),
+                port: Some(group.port),
+            }),
+        )
+    }
+}
+
+/// The address this emulator's own socket for the member cluster `member` answers on, or
+/// `None` when it serves no data plane for it.
+fn served_member_endpoint(
+    member: &NodeGroupMemberRecord,
+    clusters: &BTreeMap<String, CacheClusterRecord>,
+) -> Option<Endpoint> {
+    let served = clusters
+        .get(&member.cache_cluster_id)?
+        .served_endpoint
+        .as_ref()?;
+    Some(Endpoint {
+        address: Some(served.host.clone()),
+        port: Some(served.port),
+    })
 }
 
 /// The changes a `ModifyReplicationGroup` deferred past this call: the members
@@ -568,6 +622,13 @@ pub struct ReplicationGroupRecord {
     /// stored. See [`CacheClusterRecord::auth_token_enabled`].
     pub auth_token_enabled: bool,
     pub auth_token_last_modified: Option<SystemTime>,
+    /// The digests of the auth tokens that authenticate a client of this group;
+    /// see [`crate::state::credential_digest`]. At most TWO: a rotation leaves the
+    /// token being replaced live beside the new one, which is what makes a
+    /// rotation not interrupt access, and a `SET` leaves only the new one. A
+    /// second rotation replaces the older of the two rather than adding to them,
+    /// so no number of calls grows this list.
+    pub auth_token_digests: Vec<String>,
     pub transit_encryption_enabled: bool,
     pub transit_encryption_mode: Option<String>,
     pub at_rest_encryption_enabled: bool,
@@ -728,6 +789,19 @@ impl ReplicationGroupRecord {
             })
     }
 
+    /// Whether `cache_cluster_id` is the PRIMARY of the shard it belongs to:
+    /// the member `DeleteCacheCluster` cannot delete, because the group is what
+    /// owns it.
+    pub fn is_shard_primary(&self, cache_cluster_id: &str) -> bool {
+        self.node_groups
+            .iter()
+            .flat_map(|shard| shard.members.iter())
+            .any(|member| {
+                member.current_role == ROLE_PRIMARY
+                    && member.cache_cluster_id == cache_cluster_id
+            })
+    }
+
     /// Whether `cache_cluster_id` is a member cluster of this group — what
     /// `PrimaryClusterId` and `SnapshottingClusterId` have to name.
     pub fn is_member_cluster(&self, cache_cluster_id: &str) -> bool {
@@ -801,9 +875,17 @@ impl ReplicationGroupRecord {
             // group": the sharded group's one endpoint. A cluster mode disabled
             // group is reached through its shard's primary and reader
             // endpoints instead.
-            configuration_endpoint: self.cluster_enabled.then(|| Endpoint {
-                address: Some(self.configuration_endpoint_address()),
-                port: Some(self.port),
+            configuration_endpoint: self.cluster_enabled.then(|| {
+                // The sharded group's clients reach it at the socket of a
+                // primary, where this emulator serves one; see
+                // [`NodeGroupRecord::primary_endpoint`].
+                self.node_groups
+                    .first()
+                    .map(|shard| shard.primary_endpoint(self, clusters))
+                    .unwrap_or_else(|| Endpoint {
+                        address: Some(self.configuration_endpoint_address()),
+                        port: Some(self.port),
+                    })
             }),
             snapshot_retention_limit: self.snapshot_retention_limit,
             snapshot_window: self.snapshot_window.clone(),
@@ -886,6 +968,9 @@ pub struct NewReplicationGroup {
     pub snapshot_retention_limit: Option<i32>,
     pub snapshot_window: Option<String>,
     pub auth_token_enabled: bool,
+    /// The digests of the auth tokens a client of this group authenticates with;
+    /// see [`ReplicationGroupRecord::auth_token_digests`].
+    pub auth_token_digests: Vec<String>,
     pub transit_encryption_enabled: bool,
     pub transit_encryption_mode: Option<String>,
     pub at_rest_encryption_enabled: bool,

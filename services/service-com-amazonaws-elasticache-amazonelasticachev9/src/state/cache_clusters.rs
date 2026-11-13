@@ -210,6 +210,19 @@ pub struct CacheClusterRecord {
     pub dns_token: String,
     pub endpoint_address: String,
     pub endpoint_port: i32,
+    /// The address this emulator's OWN socket for this cluster answers on, when
+    /// it opened one — the data plane [`crate::state::cache_data_plane`] serves.
+    ///
+    /// Every endpoint of this cluster is that address: a published endpoint has
+    /// to be one a client can reach, and this is the only one it can. `None` for
+    /// a cluster this emulator serves no data plane for (a Memcached cluster,
+    /// whose clients speak another protocol, or an engine that vends no
+    /// listeners), which keeps the name ElastiCache's own zone would carry.
+    pub served_endpoint: Option<ServedEndpoint>,
+    /// The digests of the auth tokens that authenticate a client of this cluster;
+    /// see [`crate::state::credential_digest`]. Empty for a cluster with no
+    /// token, which is what `auth_token_enabled` reports.
+    pub auth_token_digests: Vec<String>,
     pub arn: String,
     /// The pool a NEW node's Availability Zone is taken from, in order: one zone
     /// for `single-az`, one per node for `cross-az` or an explicit
@@ -290,11 +303,37 @@ impl CacheClusterRecord {
 
     /// The endpoint address of one node, which names the node rather than the
     /// cluster's configuration endpoint.
+    ///
+    /// The ADDRESS of a cluster this emulator serves a data plane for is the one
+    /// its own socket answers on ([`CacheClusterRecord::served_endpoint`]): an
+    /// endpoint a service advertises is an address the service answers on, and a
+    /// name under ElastiCache's own DNS zone is not one on the machine this
+    /// emulator runs on. The zone name is what a cluster this emulator serves no
+    /// data plane for keeps.
     pub(super) fn node_endpoint_address(&self, cache_node_id: &str) -> String {
+        if let Some(served) = &self.served_endpoint {
+            return served.host.clone();
+        }
         format!(
             "{}-{cache_node_id}.{}.{}.cache.amazonaws.com",
             self.cache_cluster_id, self.dns_token, self.region
         )
+    }
+
+    /// Publish `served` as the address this cluster is reached at: its
+    /// configuration endpoint, and the endpoint of every node it holds.
+    ///
+    /// Called once the socket is open ([`crate::state::serve_cache_cluster`]).
+    /// A node added later takes the same address, because
+    /// [`Self::node_endpoint_address`] reads it off this record.
+    pub fn publish_served_endpoint(&mut self, served: &ServedEndpoint) {
+        self.served_endpoint = Some(served.clone());
+        self.endpoint_address = served.host.clone();
+        self.endpoint_port = served.port;
+        for node in &mut self.nodes {
+            node.endpoint_address = served.host.clone();
+            node.endpoint_port = served.port;
+        }
     }
 
     /// A node of this cluster with the 4-digit id `ordinal` names, in the status

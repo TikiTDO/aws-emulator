@@ -24,7 +24,10 @@ use std::time::Duration;
 
 use service_com_amazonaws_elasticache_amazonelasticachev9::state;
 
-use crate::harness::{params, Emulator, RefusalCase, Reply, PAST_TRANSITION, REGION};
+use crate::harness::{
+    assert_own_endpoint, is_own_host, params, poll_until, Emulator, RefusalCase, Reply,
+    PAST_TRANSITION, REGION,
+};
 
 
 /// One refusal row whose request has to be BUILT rather than listed, because a
@@ -221,7 +224,20 @@ async fn a_created_cluster_is_read_back_from_persisted_state() {
         );
         creates.push(created);
     }
-    std::thread::sleep(PAST_TRANSITION);
+    // Each row is read back once the clock owes it `available` — waited for by looking
+    // again at the condition, not by waiting a fixed time.
+    for case in &cases {
+        poll_until(
+            &emulator,
+            REGION,
+            case.id,
+            "the cluster reaching available",
+            "DescribeCacheClusters",
+            &params(&[("CacheClusterId", case.id), ("ShowCacheNodeInfo", "true")]),
+            |reply| reply.text("CacheCluster/CacheClusterStatus") == Some("available"),
+        )
+        .await;
+    }
 
     for (case, created) in cases.iter().zip(&creates) {
         // The round trip: everything the response claims must come back out of
@@ -236,7 +252,6 @@ async fn a_created_cluster_is_read_back_from_persisted_state() {
             ("CacheCluster/CacheClusterId", case.stored_id),
             ("CacheCluster/Engine", case.engine),
             ("CacheCluster/EngineVersion", case.engine_version),
-            ("ConfigurationEndpoint/Port", case.port),
             (
                 "CacheParameterGroup/CacheParameterGroupName",
                 case.parameter_group,
@@ -247,6 +262,29 @@ async fn a_created_cluster_is_read_back_from_persisted_state() {
                 Some(expected),
                 "case {case:?}: {field} must report the stored value, got {:?}",
                 described.text(field)
+            );
+        }
+        // WHERE the cluster is reached. A Valkey / Redis OSS cluster is served by
+        // this emulator's own RESP socket, so its endpoint is the address that
+        // socket answers on and the port is the one the core assigned it; a
+        // Memcached cluster is served by nothing here, so it keeps the name
+        // ElastiCache's own zone would carry and the port the request asked for.
+        let serves_resp = case.engine != "memcached";
+        if serves_resp {
+            assert_own_endpoint(
+                case.stored_id,
+                "the configuration endpoint",
+                described
+                    .text("ConfigurationEndpoint/Address")
+                    .unwrap_or_default(),
+                described.text("ConfigurationEndpoint/Port"),
+            );
+        } else {
+            assert_eq!(
+                described.text("ConfigurationEndpoint/Port"),
+                Some(case.port),
+                "case {case:?}: ConfigurationEndpoint/Port must report the stored value, got {:?}",
+                described.text("ConfigurationEndpoint/Port")
             );
         }
         assert_eq!(
@@ -290,16 +328,27 @@ async fn a_created_cluster_is_read_back_from_persisted_state() {
             "case {case:?}: the ARN must name the cluster, got {:?}",
             described.text("CacheCluster/ARN")
         );
-        assert!(
-            described
-                .text("ConfigurationEndpoint/Address")
-                .is_some_and(|address| address.starts_with(&format!("{}.", case.stored_id))
-                    && address.contains(".cfg.")
-                    && address.ends_with(&format!("{REGION}.cache.amazonaws.com"))),
-            "case {case:?}: the configuration endpoint must name the cluster and carry .cfg, \
-             got {:?}",
-            described.text("ConfigurationEndpoint/Address")
-        );
+        if serves_resp {
+            assert!(
+                described
+                    .text("ConfigurationEndpoint/Address")
+                    .is_some_and(is_own_host),
+                "case {case:?}: the configuration endpoint of a cache this emulator serves must \
+                 be an address it answers on, got {:?}",
+                described.text("ConfigurationEndpoint/Address")
+            );
+        } else {
+            assert!(
+                described
+                    .text("ConfigurationEndpoint/Address")
+                    .is_some_and(|address| address.starts_with(&format!("{}.", case.stored_id))
+                        && address.contains(".cfg.")
+                        && address.ends_with(&format!("{REGION}.cache.amazonaws.com"))),
+                "case {case:?}: the configuration endpoint must name the cluster and carry .cfg, \
+                 got {:?}",
+                described.text("ConfigurationEndpoint/Address")
+            );
+        }
 
         // `ShowCacheNodeInfo=true`, so the node list is reported, one node per
         // stored node with the 4-digit ids the model documents.
@@ -316,10 +365,13 @@ async fn a_created_cluster_is_read_back_from_persisted_state() {
             "case {case:?}: node ids are 4-digit and start at 0001, got {node_ids:?}"
         );
         let node_ports = described.all("CacheNodes/CacheNode/Endpoint/Port");
+        let cluster_port = described
+            .text("ConfigurationEndpoint/Port")
+            .unwrap_or_default();
         assert!(
-            node_ports.iter().all(|port| *port == case.port),
-            "case {case:?}: every node listens on the cluster's port {}, got {node_ports:?}",
-            case.port
+            node_ports.iter().all(|port| *port == cluster_port),
+            "case {case:?}: every node listens on the cluster's port {cluster_port}, got \
+             {node_ports:?}"
         );
     }
 }
@@ -2329,11 +2381,40 @@ async fn the_documented_identifier_port_and_tag_constraints_are_enforced() {
                 "case port {port}: must be accepted, got {} {}",
                 reply.status, reply.body
             );
+            // A `Port` inside the range is ACCEPTED; what the cluster then
+            // publishes is the port its own socket answers on, which the core
+            // assigns (see `a_created_cluster_is_read_back_from_persisted_state`).
+            // A `Port` inside the range is ACCEPTED; what the cluster then
+            // publishes is the port its own socket answers on, which the core
+            // assigns — the same port every later read of the cluster reports,
+            // which is what this asserts rather than any port at all.
+            let published = reply
+                .text("ConfigurationEndpoint/Port")
+                .map(str::to_string);
+            assert!(
+                published
+                    .as_deref()
+                    .and_then(|port| port.parse::<u16>().ok())
+                    .is_some_and(|port| port > 0),
+                "case port {port}: the endpoint must carry the port the cache answers on, got \
+                 {published:?}"
+            );
+            let described = describe_cluster(&emulator, &id).await;
             assert_eq!(
-                reply.text("ConfigurationEndpoint/Port"),
-                Some(*port),
-                "case port {port}: the stored port is what was asked for, got {:?}",
-                reply.text("ConfigurationEndpoint/Port")
+                described.text("ConfigurationEndpoint/Port"),
+                published.as_deref(),
+                "case port {port}: every read must report the one port the cache answers on, got \
+                 {:?} then {:?}",
+                published,
+                described.text("ConfigurationEndpoint/Port")
+            );
+            assert!(
+                described
+                    .all("CacheNodes/CacheNode/Endpoint/Port")
+                    .iter()
+                    .all(|node| Some(*node) == published.as_deref()),
+                "case port {port}: every node must report that same port, got {:?}",
+                described.all("CacheNodes/CacheNode/Endpoint/Port")
             );
         } else {
             assert_eq!(
@@ -2575,11 +2656,15 @@ async fn arns_and_endpoints_name_the_region_the_request_was_signed_for() {
             "case {region}: the ARN must carry the signing region, got {:?}",
             created.text("CacheCluster/ARN")
         );
+        // The ENDPOINT is not regional: a cache this emulator serves a RESP data
+        // plane for is reached at the address its own socket answers on, which is
+        // where the emulator runs rather than where the request was signed. What
+        // the signing region decides is the ARN above and the zone below.
         assert!(
             created
                 .text("ConfigurationEndpoint/Address")
-                .is_some_and(|address| address.ends_with(&format!("{region}.cache.amazonaws.com"))),
-            "case {region}: the endpoint must carry the signing region, got {:?}",
+                .is_some_and(is_own_host),
+            "case {region}: the endpoint must be an address the emulator answers on, got {:?}",
             created.text("ConfigurationEndpoint/Address")
         );
         assert!(

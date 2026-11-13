@@ -586,6 +586,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         };
         let now = ::std::time::SystemTime::now();
+        // Everything this create writes happens under ONE lock, and the socket the
+        // cluster is served on is opened after it: opening one is async, and no
+        // await may happen while the store is held.
+        let (cache_cluster_id, cache_cluster) = {
         let mut store = state.lock();
 
         // The parameter group the cluster joins has to be one this account
@@ -890,8 +894,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             security_group_ids: input.security_group_ids.unwrap_or_default(),
             notification_topic_arn: input.notification_topic_arn,
             // The token itself is a secret and is NOT stored; only the fact that
-            // one was set, which is all the model reports.
+            // one was set, which is all the model reports, and the one-way digest
+            // the cluster's own socket checks a client's `AUTH` against
+            // (`crate::state::credential_digest`).
             auth_token_enabled: input.auth_token.is_some(),
+            auth_token_digests: input
+                .auth_token
+                .as_deref()
+                .map(crate::state::credential_digest)
+                .into_iter()
+                .collect(),
             transit_encryption_enabled: input.transit_encryption_enabled,
             // `CreateCacheCluster` has no member for the in-transit encryption
             // mode or for at-rest encryption; a replication group's member
@@ -928,6 +940,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // provisioning this call starts, which the clock raises when the cluster
         // reaches `available` (see `crate::state::insert_cluster`).
         store.record_cluster_event(&cache_cluster_id, None, "Cache cluster created", now);
+        (cache_cluster_id, cache_cluster)
+        };
+        // The cluster's own data plane: the address `DescribeCacheClusters`
+        // publishes for it has to be one a client can reach, so the socket is
+        // opened here and its address written onto the record
+        // (`crate::state::serve_cache_cluster`). The answer above reports no
+        // endpoint — a cluster still `creating` has no provisioned node to report
+        // one for — so the address is published before any reader can see one.
+        crate::state::serve_cache_cluster(&*self.engine, &state, &cache_cluster_id).await;
+        // Read back once the socket is open, so this answer publishes the address
+        // the cluster really answers on rather than the one its record carried
+        // before it was served.
+        let cache_cluster = state
+            .lock()
+            .cache_clusters
+            .get(&cache_cluster_id)
+            .map(|cluster| cluster.to_modeled(true))
+            .unwrap_or(cache_cluster);
         Ok(CreateCacheClusterOutput {
             cache_cluster: Some(cache_cluster),
         })

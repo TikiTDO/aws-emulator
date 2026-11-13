@@ -398,12 +398,48 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             removals.push(user.user_id.clone());
         }
-        // "A user group must contain the default user", so the membership this
-        // change leaves behind has to keep it — see
-        // `crate::state::DEFAULT_USER_ID`. The refusal reads as the service
-        // words this error class, which is one sentence for every handler that
-        // raises it (`crate::state::DEFAULT_USER_REQUIRED_MESSAGE`).
-        if removals.iter().any(|id| id == crate::state::DEFAULT_USER_ID) {
+        // The membership this change leaves behind: what the group holds now,
+        // less what is being removed, plus what is being added.
+        let remaining: Vec<String> = members
+            .iter()
+            .filter(|id| !removals.contains(id))
+            .chain(additions.iter())
+            .cloned()
+            .collect();
+        // The user NAME of each member the change leaves, which is what the
+        // engine's ACL calls that member by: two members cannot share one, and
+        // `DuplicateUserNameFault` is "a user with this username already
+        // exists".
+        let mut remaining_names: Vec<(String, String)> = Vec::new();
+        for id in &remaining {
+            let Some(user) = store.users.get(id) else {
+                continue;
+            };
+            if let Some((existing_id, name)) = remaining_names
+                .iter()
+                .find(|(_, name)| *name == user.user_name)
+            {
+                return Err(ModifyUserGroupErrorModeled::DuplicateUserNameFault(
+                    DuplicateUserNameFault {
+                        message: Some(format!(
+                            "User {existing_id} already has the username {name}."
+                        )),
+                    },
+                )
+                .into());
+            }
+            remaining_names.push((id.clone(), user.user_name.clone()));
+        }
+        // A user group "needs to contain a user with the user name default", so
+        // the membership this change leaves behind has to keep a member carrying
+        // that name — the built-in user (`crate::state::DEFAULT_USER_ID`) or a
+        // user of the caller's own created with it. The refusal reads as the
+        // service words this error class, which is one sentence for every
+        // handler that raises it (`crate::state::DEFAULT_USER_REQUIRED_MESSAGE`).
+        if !remaining_names
+            .iter()
+            .any(|(_, name)| name == crate::state::DEFAULT_USER_NAME)
+        {
             return Err(ModifyUserGroupErrorModeled::DefaultUserRequired(
                 DefaultUserRequired {
                     message: Some(crate::state::DEFAULT_USER_REQUIRED_MESSAGE.to_string()),

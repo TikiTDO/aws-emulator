@@ -246,10 +246,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // reshards of the same group exactly one finds it `available` and the other
         // is refused with the state fault: the winner leaves the group `modifying`
         // before the loser can read it.
+        // Everything this call writes happens under ONE lock, and the sockets the
+        // members it adds are served on are opened after it: opening one is async,
+        // and no await may happen while the store is held.
+        let group_id = input.replication_group_id.to_ascii_lowercase();
+        let replication_group = {
         let mut store = state.lock();
         // The status change the clock owes the group is materialised first, so what
         // this call reads and gates on is the group THIS instant owes.
-        let group_id = input.replication_group_id.to_ascii_lowercase();
         let Some(group) = store.settled_replication_group_mut(&group_id, now) else {
             return Err(
                 ModifyReplicationGroupShardConfigurationErrorModeled::ReplicationGroupNotFoundFault(
@@ -455,6 +459,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 crate::state::STORE_UNAVAILABLE,
             ));
         };
+        replication_group
+        };
+        // A member a new shard brought with it is served exactly as the ones the
+        // create made: its own socket, over the group's one keyspace, and its
+        // address published as its node endpoint
+        // (`crate::state::serve_replication_group`).
+        crate::state::serve_replication_group(&*self.engine, &state, &group_id).await;
+        let replication_group = state
+            .lock()
+            .modeled_replication_group(&group_id)
+            .unwrap_or(replication_group);
         Ok(ModifyReplicationGroupShardConfigurationOutput {
             replication_group: Some(replication_group),
         })

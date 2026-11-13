@@ -367,6 +367,7 @@ async fn a_cache_subnet_group_holds_only_subnets_the_owner_of_subnets_reports() 
         );
         // The service's sentence for subnets of two VPCs, naming the two identifiers that
         // disagree in the order the request listed them.
+        let _ = (&first_vpc, &second_vpc);
         assert_eq!(
             refused.error_message(),
             format!("Subnets {} and {} are not in the same VPC.", ids[0], ids[1]),
