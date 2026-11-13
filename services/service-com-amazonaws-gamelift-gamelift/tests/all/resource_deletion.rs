@@ -1225,7 +1225,7 @@ async fn deleting_a_matchmaking_configuration_removes_the_one_it_resolves_to() {
                     operation,
                     json!({"Name": &probe}),
                     "NotFoundException",
-                    &format!("The matchmaking configuration {probe} was not found."),
+                    &format!("Configuration with name {probe} does not exist"),
                     label,
                 )
                 .await;

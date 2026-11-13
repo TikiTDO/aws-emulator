@@ -1971,10 +1971,14 @@ pub fn matchmaking_rule_set_not_found_message(name_or_arn: &str) -> String {
 /// configuration, so the same missing matchmaker reads the same way whichever of them was
 /// called.
 ///
+/// Fixed text `"Configuration with name "` and `" does not exist"`, with no trailing
+/// period — the same sentence shape the matchmaking family words a missing rule set with
+/// (`RuleSet with name <name> does not exist`), for the resource this one names.
+///
 /// The identifier the CALLER supplied is the sentence's one variable part, for the same
 /// reason as in [`matchmaking_rule_set_not_found_message`].
 pub fn matchmaking_configuration_not_found_message(name_or_arn: &str) -> String {
-    format!("The matchmaking configuration {name_or_arn} was not found.")
+    format!("Configuration with name {name_or_arn} does not exist")
 }
 
 /// A FlexMatch rule set, as `CreateMatchmakingRuleSet` persisted it.
