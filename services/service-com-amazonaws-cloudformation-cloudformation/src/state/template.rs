@@ -2617,7 +2617,19 @@ fn required_name_suffix(
 /// what a change set needs, since a resource's physical name is fixed when it is created
 /// (every name property's "Update requires" in the resource and property types reference is
 /// `Replacement`).
+///
+/// A CUSTOM RESOURCE has NONE: its physical id is "a required custom resource
+/// provider-defined physical ID that is unique for that provider", so no property of such a
+/// declaration names the resource — a property spelled `Name` is one more value passed
+/// through to the provider, exactly like every other ("This field contains the contents of
+/// the custom resource's `Properties` section of the template"). Reading one as the
+/// resource's name would make a template that changes it ask for a DIFFERENT resource, when
+/// what AWS does with such a change is send the provider an `Update` and let the provider's
+/// own answer decide whether that update replaced anything.
 pub fn name_property_candidates(resource_type: &str) -> Vec<String> {
+    if crate::state::resource_types::is_custom_resource(resource_type) {
+        return Vec::new();
+    }
     let segment = resource_type.rsplit("::").next().unwrap_or_default();
     declared_name_property(resource_type)
         .map(ToString::to_string)

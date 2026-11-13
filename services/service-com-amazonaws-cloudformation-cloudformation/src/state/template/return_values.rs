@@ -4030,13 +4030,21 @@ pub fn unsupported_attribute_reason(logical_id: &str, attribute: &str) -> String
 }
 
 /// Every resource of `template` whose declaration reads an attribute the resource it names
-/// does not publish, with the error that is ([`unsupported_attribute_reason`]).
+/// does not publish, as `(the resource named, the attribute read)` keyed by the resource whose
+/// declaration reads it.
 ///
 /// `Fn::GetAtt` "returns the value of an attribute from a resource in the template", and the
 /// attributes a resource publishes are the ones its record carries — for a CUSTOM RESOURCE
 /// that is the `Data` its provider answered with. So this is only asked once the records are
 /// settled: a resource whose attributes are not published YET reads as publishing none, and
 /// a reader of this answers for the resources whose attributes are final.
+///
+/// What the reader REPORTS for such a read is not this module's to say: CloudFormation words
+/// it one way for an attribute a type does not publish ([`unsupported_attribute_reason`]) and
+/// another for a member a custom resource's own provider left out of its answer
+/// ([`crate::state::provisioning::custom_resource::vendor_response_missing_attribute`]), and
+/// which it is depends on the resource NAMED — so both names travel to the caller that knows
+/// the type.
 ///
 /// Only an attribute of a resource `scope` KNOWS is judged: a `GetAtt` naming a logical id
 /// the scope does not carry is a reference to nothing rather than to an attribute nothing
@@ -4045,16 +4053,11 @@ pub fn unresolved_attributes(
     template: &Template,
     scope: &Scope<'_>,
     budget: &mut Budget,
-) -> BTreeMap<String, String> {
+) -> BTreeMap<String, (String, String)> {
     let mut unresolved = BTreeMap::new();
     for declared in &template.resources {
-        if let Some((logical_id, attribute)) =
-            missing_attribute(&declared.properties, scope, 0, budget)
-        {
-            unresolved.insert(
-                declared.logical_id.clone(),
-                unsupported_attribute_reason(&logical_id, &attribute),
-            );
+        if let Some(read) = missing_attribute(&declared.properties, scope, 0, budget) {
+            unresolved.insert(declared.logical_id.clone(), read);
         }
     }
     unresolved

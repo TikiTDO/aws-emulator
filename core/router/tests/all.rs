@@ -504,6 +504,11 @@ mod chime_family_signing_name_routing;
 mod cloudformation_canceled_delete_keeps_exported_resources;
 #[path = "all/cloudformation_cdk_bucket_notifications_custom_resource.rs"]
 mod cloudformation_cdk_bucket_notifications_custom_resource;
+// Declared in this quiet span of the sorted list, beside the other custom-resource suite,
+// rather than appended at the end of this file: the tail is the contended region every
+// concurrently landing suite appends to.
+#[path = "all/cloudformation_sns_custom_resource_protocol.rs"]
+mod cloudformation_sns_custom_resource_protocol;
 // Declared in this span of the sorted list rather than appended at the end of this file,
 // for the reason the notes here give: the tail is the region every concurrently landing
 // suite appends to.

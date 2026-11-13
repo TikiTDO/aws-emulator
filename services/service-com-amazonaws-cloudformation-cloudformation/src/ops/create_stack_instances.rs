@@ -732,6 +732,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // follows from them below, so nothing reports a success for work that did not
         // complete.
         let mut failed_instances: Vec<(String, String, String)> = Vec::new();
+        // How this emulator is reached, kept for the work a provider's answer owes once it
+        // lands out of band ([`crate::state::provider_driver`]): an instance's stack can
+        // declare a custom resource, whose answer arrives at a plane that is not a handler,
+        // and what that answer makes due is a call only a handler can make. Remembered
+        // BEFORE the walks below publish anything.
+        state.lock().remember_provisioning_reach(ctx);
         for deployment in deployments {
             let materialised = crate::state::provisioning::reconcile(
                 ctx,

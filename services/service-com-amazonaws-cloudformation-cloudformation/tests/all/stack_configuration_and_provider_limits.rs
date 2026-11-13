@@ -31,7 +31,6 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 use service_com_amazonaws_cloudformation_cloudformation::state::provisioning::custom_resource;
-use service_com_amazonaws_cloudformation_cloudformation::state::template;
 use smithy_server_runtime::MultiServiceRouter;
 
 use super::custom_resource_providers::{
@@ -327,13 +326,10 @@ async fn a_response_document_past_the_bound_fails_the_resource() {
              with {body}"
         );
         let reason = recorded_reason(&router, stack_name, "Thing", "CREATE_FAILED").await;
-        // The resource reports the FAILED response CloudFormation read for a document it
-        // would not read: the response-too-long message, under the request that document
-        // answered.
-        let expected = custom_resource::answered_failure_reason(
-            custom_resource::RESPONSE_TOO_LONG_REASON,
-            &request.request_id,
-        );
+        // A document past the bound is not READ, so nothing the provider sent is quoted as
+        // having been returned: what the resource reports is CloudFormation's own diagnostic
+        // of the document, on its own.
+        let expected = custom_resource::RESPONSE_TOO_LONG_REASON;
         assert_eq!(
             reason, expected,
             "case {case:?}: expected the response-too-long reason {expected:?}, got {reason:?}"
@@ -427,10 +423,20 @@ async fn a_consumer_of_a_providers_data_is_created_from_the_answer() {
                  {status} with {body}"
             );
             let reason = recorded_reason(&router, stack_name, "Consumer", "CREATE_FAILED").await;
+            // A custom resource publishes whatever its provider's answer carried, so a key
+            // that answer left out is a fault of the VENDOR's response: the diagnostic names
+            // the attribute and the response object it was read from — the request this stack
+            // sent that provider.
+            let expected = custom_resource::vendor_response_missing_attribute(
+                attribute,
+                &stack_id,
+                "Provider",
+                &request.request_id,
+            );
             assert_eq!(
-                reason,
-                template::unsupported_attribute_reason("Provider", attribute),
-                "case {case:?}: expected CloudFormation's attribute error, got {reason:?}"
+                reason, expected,
+                "case {case:?}: expected the vendor-response attribute error {expected:?}, got \
+                 {reason:?}"
             );
             continue;
         }

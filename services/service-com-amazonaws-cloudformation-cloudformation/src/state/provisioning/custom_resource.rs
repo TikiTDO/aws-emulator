@@ -208,6 +208,32 @@ pub fn answered_failure_reason(message: &str, request_id: &str) -> String {
 /// itself is never read.
 pub const RESPONSE_TOO_LONG_REASON: &str = "Response object is too long.";
 
+/// What CloudFormation reports as the failure of a custom resource whose `Fn::GetAtt` names a
+/// key the provider's answer does NOT carry.
+///
+/// CloudFormation does not word this as a template error: the template is well formed and the
+/// resource exists — what is missing is a member of the VENDOR's own response, so the
+/// diagnostic names the attribute that response lacks and the response OBJECT it was read
+/// from, which is the stack, the resource and the request that answer answered
+/// ([`response_path`] addresses the same three).
+///
+/// Recorded behaviour: the custom-resource response protocol is not in the Smithy model, and
+/// this is the sentence CloudFormation writes — its fixed text verbatim, with the attribute
+/// read and the three parts of the response object as its only variable parts, each taken
+/// from the template's own `Fn::GetAtt` and from the request this emulator sent.
+pub fn vendor_response_missing_attribute(
+    attribute: &str,
+    stack_id: &str,
+    logical_id: &str,
+    request_id: &str,
+) -> String {
+    format!(
+        "CustomResource attribute error: Vendor response doesn't contain {attribute} attribute \
+         in object {stack_id}{RESPONSE_PATH_SEPARATOR}{logical_id}{RESPONSE_PATH_SEPARATOR}\
+         {request_id}"
+    )
+}
+
 /// The provider request ONE stack operation sent about ONE custom resource: which operation
 /// it was for and the id it is answered under.
 ///
@@ -251,6 +277,14 @@ pub struct ProviderResponse {
     /// response. You can access the values provided here by name in the template with
     /// `Fn::GetAtt`."
     pub data: BTreeMap<String, String>,
+    /// Whether the document this answer stands for is one CloudFormation DID NOT READ — a
+    /// response past [`MAX_RESPONSE_BODY_BYTES`] ([`Self::too_long`]).
+    ///
+    /// What the resource's failure reads turns on it: the reason an answer CloudFormation read
+    /// gives is the message that answer returned ([`answered_failure_reason`] quotes it), while
+    /// a document it would not read returned no message at all, so what it reports is its own
+    /// diagnostic ([`RESPONSE_TOO_LONG_REASON`]).
+    pub unread: bool,
 }
 
 impl ProviderResponse {
@@ -268,6 +302,18 @@ impl ProviderResponse {
         }
     }
 
+    /// What the RESOURCE's failure reads for this answer, under the request it answered: the
+    /// response status CloudFormation received from the custom resource and the message that
+    /// response returned ([`answered_failure_reason`]) — or, for a document CloudFormation did
+    /// not read at all, its own diagnostic of the document, which quotes no message because
+    /// none was read ([`Self::unread`]).
+    pub fn reported_failure(&self, request_id: &str) -> String {
+        if self.unread {
+            return self.failure_reason();
+        }
+        answered_failure_reason(&self.failure_reason(), request_id)
+    }
+
     /// The answer CloudFormation reads for a document past [`MAX_RESPONSE_BODY_BYTES`]: the
     /// resource FAILED with [`RESPONSE_TOO_LONG_REASON`], whatever the document says.
     ///
@@ -280,6 +326,7 @@ impl ProviderResponse {
             physical_resource_id: String::new(),
             reason: Some(RESPONSE_TOO_LONG_REASON.to_string()),
             data: BTreeMap::new(),
+            unread: true,
         }
     }
 
@@ -315,6 +362,7 @@ impl ProviderResponse {
                 .and_then(Value::as_str)
                 .map(str::to_string),
             data,
+            unread: false,
         })
     }
 }

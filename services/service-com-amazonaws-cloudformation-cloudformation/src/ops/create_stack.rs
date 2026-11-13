@@ -915,6 +915,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 stack.fail_pending_transition(status::CREATE_FAILED, reason);
             }
             let stack_id = stack.stack_id.clone();
+            // How this emulator is reached, kept for the work a provider's answer owes once
+            // it lands out of band ([`crate::state::provider_driver`]): the requests this
+            // create is about to publish are answered at a plane that is not a handler, and
+            // what the answer then makes due — the next resource in dependency order, the
+            // rollback of a resource the provider failed — is a call only a handler can
+            // make. Remembered BEFORE the walk below publishes anything, so a provider that
+            // answers the very first request of a stack nobody has read yet still drives
+            // what that answer owes.
+            store.remember_provisioning_reach(ctx);
             // What the template declared, as the deployment computed it: the resources
             // whose owning services now have to create them, and the stack identity and
             // tags CloudFormation tags each of them with.

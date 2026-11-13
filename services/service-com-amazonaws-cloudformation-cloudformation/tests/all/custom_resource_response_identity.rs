@@ -419,45 +419,53 @@ async fn a_failed_answer_fails_the_action_its_request_was_for() {
 /// The rows differ in what the answer's `Reason` member is.
 #[tokio::test]
 async fn the_reason_a_failed_answer_states_is_the_resources_failure_reason() {
-    // (case, stack name, the `Reason` the answer carries, the reason the resource reports)
+    // (case, stack name, the `Reason` the answer carries, the reason the resource reports,
+    //  whether CloudFormation READ the document that reason came in)
     let longest: String = "n".repeat(custom_resource::MAX_REASON_CHARS + 64);
-    let rows: Vec<(&str, &str, Option<String>, String)> = vec![
+    let rows: Vec<(&str, &str, Option<String>, String, bool)> = vec![
         (
             "a stated reason",
             "reason-stated",
             Some(STATED_REASON.to_string()),
             STATED_REASON.to_string(),
+            true,
         ),
         (
             "a stated reason with surrounding whitespace",
             "reason-padded",
             Some(format!("  {STATED_REASON}\n")),
             STATED_REASON.to_string(),
+            true,
         ),
         (
             "an empty reason",
             "reason-empty",
             Some(String::new()),
             custom_resource::UNSTATED_REASON.to_string(),
+            true,
         ),
         (
             "no reason at all",
             "reason-absent",
             None,
             custom_resource::UNSTATED_REASON.to_string(),
+            true,
         ),
         (
             // A `Reason` this long cannot reach CloudFormation at all: the document
             // carrying it is past the size a response may be, and such a document is not
             // read ([`custom_resource::MAX_RESPONSE_BODY_BYTES`]) — the resource fails with
-            // the response-too-long reason instead of with the provider's own.
+            // the response-too-long reason instead of with the provider's own. Nothing was
+            // read, so nothing is quoted as having been returned either: what the resource
+            // reports is CloudFormation's own diagnostic of the document, on its own.
             "a reason longer than a response may carry",
             "reason-longest",
             Some(longest.clone()),
             custom_resource::RESPONSE_TOO_LONG_REASON.to_string(),
+            false,
         ),
     ];
-    for (case, stack_name, stated, expected) in rows {
+    for (case, stack_name, stated, expected, was_read) in rows {
         let (router, engine) = emulator(case).await;
         let (status_code, created) = create_stack(
             &router,
@@ -492,8 +500,11 @@ async fn the_reason_a_failed_answer_states_is_the_resources_failure_reason() {
             "case {case:?}: a FAILED answer must fail the create, got {described}"
         );
         let reason = recorded_event_reason(&router, stack_name, "Thing", "CREATE_FAILED").await;
-        let expected_reason =
-            custom_resource::answered_failure_reason(&expected, &request.request_id);
+        let expected_reason = if was_read {
+            custom_resource::answered_failure_reason(&expected, &request.request_id)
+        } else {
+            expected.clone()
+        };
         assert_eq!(
             reason, expected_reason,
             "case {case:?}: expected the resource to report the provider's answer as \

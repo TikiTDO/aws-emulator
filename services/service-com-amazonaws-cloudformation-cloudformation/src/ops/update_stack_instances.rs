@@ -701,6 +701,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
             let prepared = {
                 let mut store = state.lock();
+                // How this emulator is reached, kept for the work a provider's answer owes
+                // once it lands out of band ([`crate::state::provider_driver`]): an
+                // instance's stack can declare a custom resource, whose answer arrives at a
+                // plane that is not a handler, and what that answer makes due is a call only
+                // a handler can make. Remembered BEFORE the walk below publishes anything.
+                store.remember_provisioning_reach(ctx);
                 let exports = exports_by_region.get(&plan.region).unwrap_or(&no_exports);
                 let stack_outputs = stack_outputs_by_region
                     .get(&plan.region)

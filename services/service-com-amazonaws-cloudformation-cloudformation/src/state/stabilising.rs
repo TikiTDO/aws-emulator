@@ -177,6 +177,18 @@ pub struct StabilisationBarrier {
     /// The answer the provider PUT to that request's `ResponseURL`, once it has
     /// ([`super::ComAmazonawsCloudformationCloudformationState::record_provider_response`]).
     pub provider_response: Option<ProviderResponse>,
+    /// The instant a pass CLAIMED the creation this barrier is WITHHOLDING
+    /// ([`Awaited::Deferred`]), or `None` while none has.
+    ///
+    /// What keeps a withheld resource from being created twice: the pass that resumes it is
+    /// driven by every operation that reports a stack's progress, and by the task a landed
+    /// provider answer starts ([`super::provider_driver`]), so two of them can read the same
+    /// released wait. Creating the resource is not something a second pass may add to — it
+    /// would send the provider a second request, and the stack would then hold a wait no
+    /// answer releases — so the pass marks the wait it is acting on while it holds the store's
+    /// lock, and a pass that finds it marked leaves it alone
+    /// ([`super::provisioning::deferred`]).
+    pub resumed_at: Option<SystemTime>,
 }
 
 impl StabilisationBarrier {
@@ -202,6 +214,7 @@ impl StabilisationBarrier {
             released_at: None,
             provider_request: pending.provider_request.clone(),
             provider_response: None,
+            resumed_at: None,
         }
     }
 

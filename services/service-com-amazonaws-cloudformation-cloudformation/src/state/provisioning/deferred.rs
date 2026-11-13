@@ -232,6 +232,12 @@ fn resumption_of(
             expired.push((barrier, reason));
             continue;
         }
+        // A withheld resource ANOTHER PASS is already creating is not this one's to create:
+        // the two passes would send its provider two requests, and the stack would hold a
+        // wait nothing answers ([`crate::state::stabilising::StabilisationBarrier::resumed_at`]).
+        if barrier.resumed_at.is_some() {
+            continue;
+        }
         if !awaits_a_dependency(&barrier.logical_id, &dependencies, &waiting) {
             resumable.push(barrier);
         }
@@ -258,6 +264,18 @@ fn resumption_of(
                 }
                 resumed.push(barrier);
             }
+        }
+    }
+    // This pass's creations are CLAIMED while the lock is still held, so a pass running
+    // beside it leaves them alone — the one place that mark is set, beside the one place it
+    // is read above.
+    for barrier in &resumed {
+        if let Some(held) = stack
+            .stabilisations
+            .iter_mut()
+            .find(|held| held.is_the_same_wait(barrier) && !held.released())
+        {
+            held.resumed_at = Some(now);
         }
     }
     Some(Resumption {

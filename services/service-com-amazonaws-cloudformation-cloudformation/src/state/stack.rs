@@ -883,9 +883,15 @@ impl StoredStack {
     /// deployment used, with the recorded attributes in place.
     ///
     /// The returned map is one entry per resource whose declaration STILL reads an attribute
-    /// the resource it names does not publish, with the error that is
-    /// ([`template::unsupported_attribute_reason`]): the answer is in hand and does not carry
-    /// the key, so the consuming resource cannot be created at all.
+    /// the resource it names does not publish, with the error that is: the answer is in hand
+    /// and does not carry the key, so the consuming resource cannot be created at all.
+    ///
+    /// WHICH error depends on the resource NAMED. A type that does not publish the attribute
+    /// at all is a template error ([`template::unsupported_attribute_reason`]); a CUSTOM
+    /// RESOURCE publishes whatever its provider's answer carried, so a key that answer left
+    /// out is a fault of the VENDOR's response, named with the response object it was read
+    /// from ([`provisioning::custom_resource::vendor_response_missing_attribute`]) — the
+    /// request this stack sent that provider, which the barrier that wait was held at carries.
     pub fn resolve_deferred_declarations(&mut self) -> BTreeMap<String, String> {
         let Some((declared, parameters)) = self.template_scope() else {
             return BTreeMap::new();
@@ -925,6 +931,38 @@ impl StoredStack {
             deployment.resources = resources;
         }
         unresolved
+            .into_iter()
+            .map(|(logical_id, (named, attribute))| {
+                (logical_id, self.unresolved_read_reason(&named, &attribute))
+            })
+            .collect()
+    }
+
+    /// What a resource's declaration reading `attribute` of the resource `named` fails with
+    /// ([`Self::resolve_deferred_declarations`] words every unresolved read through this).
+    fn unresolved_read_reason(&self, named: &str, attribute: &str) -> String {
+        let answered = self
+            .current_resources()
+            .iter()
+            .find(|resource| resource.logical_id == named)
+            .filter(|resource| {
+                provisioning::custom_resource::is_custom_resource(&resource.resource_type)
+            })
+            .and_then(|_| {
+                self.stabilisations
+                    .iter()
+                    .filter(|barrier| barrier.logical_id == named)
+                    .find_map(|barrier| barrier.provider_request.as_ref())
+            });
+        match answered {
+            Some(request) => provisioning::custom_resource::vendor_response_missing_attribute(
+                attribute,
+                &self.stack_id,
+                named,
+                &request.request_id,
+            ),
+            None => template::unsupported_attribute_reason(named, attribute),
+        }
     }
 
     /// The stack's `Description`: the template's own `Description`, which is where
@@ -1561,6 +1599,15 @@ impl StoredStack {
             // not owed either: what releases it is that service's own answer
             // ([`provisioning::advance_stabilisations`]), which a read of the store cannot
             // ask for.
+            return;
+        }
+        if self.owes_a_teardown() {
+            // The teardown in flight has not asked about every resource the stack holds
+            // yet: it left what a resource still being removed depends on alone, and those
+            // resources are asked about once that removal answers
+            // ([`provisioning::advance_stabilisations`] drives that pass too). A deletion
+            // that still owes a resource a call is not one the clock can complete — the
+            // resource is still there.
             return;
         }
         if self.owed_rollback.is_some() {
@@ -2252,6 +2299,13 @@ impl StoredStack {
     }
 
     /// The one writer of both rewrites above.
+    ///
+    /// The rewritten event reports the identifier the resource is known by NOW, not the one
+    /// the walk planned the event with: a CUSTOM RESOURCE's physical id is the one its
+    /// provider answered with ([`Self::adopt_provider_identity`], which the answer that ended
+    /// the wait records before the failure is), so the event that reports the failure names
+    /// the physical resource the provider is responsible for rather than the stand-in the
+    /// naming rules had computed.
     fn rewrite_planned_resource_event(
         &mut self,
         logical_id: &str,
@@ -2259,6 +2313,12 @@ impl StoredStack {
         reason: &str,
         reported: Reported,
     ) {
+        let in_force = self
+            .current_resources()
+            .iter()
+            .find(|resource| resource.logical_id == logical_id)
+            .map(|resource| resource.physical_resource_id.clone())
+            .filter(|id| !id.is_empty());
         let Some(walk) = self.resource_timeline.as_mut() else {
             return;
         };
@@ -2275,6 +2335,9 @@ impl StoredStack {
                 event.status = status.to_string();
                 event.reason = Some(reason.to_string());
                 event.recorded = reported == Reported::Already;
+                if let Some(id) = &in_force {
+                    event.physical_resource_id = Some(id.clone());
+                }
             }
         }
     }

@@ -437,6 +437,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // instance's own Region, with the store unlocked — every one of those calls reaches
         // another service's handler, which takes that service's lock.
         let mut failed_instances: Vec<(String, String, String)> = Vec::new();
+        // How this emulator is reached, kept for the work a provider's answer owes once it
+        // lands out of band ([`crate::state::provider_driver`]): an instance's stack can
+        // declare a custom resource, whose `Delete` the provider answers at a plane that is
+        // not a handler, and what that answer makes due is a call only a handler can make.
+        // Remembered BEFORE the teardowns below publish anything.
+        state.lock().remember_provisioning_reach(ctx);
         for removal in removals {
             let deleted = crate::state::provisioning::delete(
                 ctx,

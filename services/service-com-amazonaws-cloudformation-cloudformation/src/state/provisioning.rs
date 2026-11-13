@@ -274,6 +274,11 @@ pub use in_process_calls::*;
 /// they read had not published its attributes yet, created once that resource has.
 mod deferred;
 
+/// The rest of a TEARDOWN: the resources a deletion left alone because something that
+/// depends on them was still being removed, asked about once that removal has answered
+/// ([`outstanding_teardown`]).
+mod outstanding_teardown;
+
 /// Where each of this algorithm's questions is PUT to the module that owns a resource type
 /// ([`Owner`]'s own methods, moved out so adding a type's arms does not grow this file).
 mod owner;
@@ -1075,14 +1080,12 @@ pub async fn advance_stabilisations_in(
                 // The provider says it did not carry the request out, so nothing is going to
                 // bring the resource up — or take it away — and what CloudFormation reports
                 // is the FAILED response it received from the resource, carrying the message
-                // that response stated and the request it answered
-                // ([`custom_resource::answered_failure_reason`]).
-                Some((request_id, Some(response))) => Ok(Readiness::Failed(
-                    custom_resource::answered_failure_reason(
-                        &response.failure_reason(),
-                        request_id,
-                    ),
-                )),
+                // that response stated and the request it answered — or its own diagnostic of
+                // a document it would not read
+                // ([`custom_resource::ProviderResponse::reported_failure`]).
+                Some((request_id, Some(response))) => {
+                    Ok(Readiness::Failed(response.reported_failure(request_id)))
+                }
                 Some((_, None)) => Ok(Readiness::Pending(barrier.reported_state.clone())),
                 None => match owner_for(&barrier.resource_type) {
                     Some(provisioner) => match barrier.awaited {
@@ -1184,20 +1187,27 @@ pub async fn advance_stabilisations_in(
                 let Some(stack) = store.resolve_mut(region, &stack_id) else {
                     continue;
                 };
+                // What the PROVIDER of a custom resource answered is that resource's real
+                // identity: the `PhysicalResourceId` it reports is what `Ref` resolves to
+                // from here on, whatever identifier the naming rules had computed for the
+                // record — and whichever `Status` the answer carried. A provider that could
+                // not carry the request out still names the physical resource it is
+                // responsible for, and that is the resource CloudFormation then addresses:
+                // the `Delete` a rollback sends about it carries the id the provider chose,
+                // never one of CloudFormation's own. An answer naming NO physical resource
+                // changes nothing ([`super::StoredStack::adopt_provider_identity`]), which
+                // is the case of a document this service did not read at all
+                // ([`custom_resource::ProviderResponse::too_long`]).
+                if barrier.awaited.awaits_readiness() {
+                    if let Some(response) = barrier.provider_response.as_ref() {
+                        stack.adopt_provider_identity(
+                            &barrier.logical_id,
+                            &response.physical_resource_id,
+                        );
+                    }
+                }
                 let taken = match readiness {
                     Ok(Readiness::Ready) => {
-                        // What the PROVIDER of a custom resource answered is that resource's
-                        // real identity: the `PhysicalResourceId` it reports is what `Ref`
-                        // resolves to from here on, whatever identifier the naming rules had
-                        // computed for the record.
-                        if barrier.awaited.awaits_readiness() {
-                            if let Some(response) = barrier.provider_response.as_ref() {
-                                stack.adopt_provider_identity(
-                                    &barrier.logical_id,
-                                    &response.physical_resource_id,
-                                );
-                            }
-                        }
                         stack.record_ready_attributes(&barrier.logical_id, &ready_attributes);
                         // The cleanup of a replaced resource holds the operation exactly as
                         // the update itself did — recorded BEFORE this wait is released, so
@@ -1323,6 +1333,15 @@ pub async fn advance_stabilisations_in(
     // work a READ of this service performs, so its whole state is held off this function's
     // own future rather than on the stack of the request that asked.
     Box::pin(deferred::resume(ctx, state, region)).await;
+    // ...and the resources a TEARDOWN in flight left alone because something that depends on
+    // them was still being removed: asked about now that those removals have answered
+    // ([`outstanding_teardown`]), which is what finishes the teardown.
+    //
+    // BOXED for the same reason: the pass asks the services that own those resources.
+    Box::pin(outstanding_teardown::settle_outstanding_teardowns(
+        ctx, state, region,
+    ))
+    .await;
     // Last: the notifications the stack events OWE to the stack's `NotificationARNs`. Here
     // for the same reason everything above is — the publish was due the instant the event
     // was recorded, and it reaches another service, which nothing under this store's lock
@@ -3481,11 +3500,16 @@ async fn delete_pass(
                     &outcome.resources[index].physical_resource_id,
                 );
                 if on_refusal == OnRefusal::Abandon {
+                    // ABANDONED: the stack has RELEASED the resource, exactly as a `Retain`
+                    // policy releases one, so the record stops carrying `materialised` —
+                    // this teardown owes no further call about it and the stack's deletion
+                    // completes with it left exactly as it is.
                     outcome.transitions.push(ResourceTransition::finished(
                         resource,
                         super::resource_status::DELETE_SKIPPED,
                         Some(reason),
                     ));
+                    outcome.resources[index].materialised = false;
                     continue;
                 }
                 refused.push(resource.logical_id.clone());
@@ -3578,6 +3602,14 @@ async fn delete_pass(
                         reported_state: state,
                         provider_request,
                     });
+                    // ...and the resource is STILL THERE until that answer comes, so
+                    // everything it depends on is left alone exactly as a refusal leaves it:
+                    // "CloudFormation deletes the resources in reverse order", and a resource
+                    // whose removal has only been ACCEPTED has not been removed — deleting
+                    // what it depends on now would take away something still in use. The
+                    // teardown asks about them once this wait releases
+                    // ([`settle_outstanding_teardowns`]).
+                    still_needed.extend(needed_by(needs, &resource.logical_id));
                 }
                 outcome.resources[index].materialised = false;
                 let resource = &outcome.resources[index];
@@ -3599,12 +3631,16 @@ async fn delete_pass(
                     // The record reports that its deletion was SKIPPED, carrying why, and
                     // the walk carries on with the resources declared before it — the
                     // teardown has no failure of its own, so the stack's deletion completes.
+                    // The stack has RELEASED the resource, exactly as a `Retain` policy
+                    // releases one, so the record stops carrying `materialised`: this
+                    // teardown owes no further call about it.
                     let resource = &outcome.resources[index];
                     outcome.transitions.push(ResourceTransition::finished(
                         resource,
                         super::resource_status::DELETE_SKIPPED,
                         Some(reason),
                     ));
+                    outcome.resources[index].materialised = false;
                     continue;
                 }
                 // The refusal is this teardown's FAILURE, and the resource is reported as the
