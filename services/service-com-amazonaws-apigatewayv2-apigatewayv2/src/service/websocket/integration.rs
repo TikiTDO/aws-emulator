@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use ::smithy_server_runtime::EmbeddedEmulator;
 
-use super::dispatch::{self, MessageCall, Unserved};
+use super::dispatch::{self, TemplateCall, Unserved};
 use super::event::{self, Call, Connection};
 use crate::service::invoke::{lambda, proxy_response};
 use crate::state::{Api, ComAmazonawsApigatewayv2Apigatewayv2State as ServiceStore};
@@ -118,13 +118,24 @@ pub async fn perform(
         .as_ref()
         .ok_or(Unserved::NoIntegration)?;
     if integration.integration_type == dispatch::MOCK_INTEGRATION_TYPE {
+        // The template is rendered against the CALL: the `$context` the gateway reports
+        // about it and the serving stage's own variables, whichever of the three calls it
+        // is, and the frame's payload for the one call that carries a frame.
+        let context = event::template_context(connection, &selected.route_key, call);
         let frame = match call {
-            Call::Message(body) => Some(MessageCall::new(&connection.connection_id, body)),
-            // A connection request and a close carry no message of their own — and a
-            // connection request a `MOCK` integration fronts has no decision to be admitted
-            // by at all ([`dispatch::no_connection_decision`]).
+            Call::Message(body) => Some(TemplateCall::new(
+                &context,
+                &connection.stage_variables,
+                Some(body),
+            )),
+            // A connection request a `MOCK` integration fronts has no decision to be
+            // admitted by at all ([`dispatch::no_connection_decision`]).
             Call::Connect => return Err(dispatch::no_connection_decision()),
-            Call::Disconnect { .. } => None,
+            // A close carries no frame of its own, so a template rendered for it reads the
+            // call's context and nothing of a payload.
+            Call::Disconnect { .. } => {
+                Some(TemplateCall::new(&context, &connection.stage_variables, None))
+            }
         };
         let reply = dispatch::mock_reply(integration, frame)?;
         return Ok(Answered {

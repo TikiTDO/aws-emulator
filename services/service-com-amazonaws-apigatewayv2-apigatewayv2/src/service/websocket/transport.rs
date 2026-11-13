@@ -780,6 +780,15 @@ async fn carry_frames<S>(
                             ),
                             None => (None, None),
                         });
+                        // RFC 6455 §5.5.1: on receiving a Close frame "an endpoint MUST
+                        // send a Close frame in response", and the closing handshake is
+                        // what a client waits for before it reports the connection ended
+                        // normally — a socket that simply stops is an abnormal close it
+                        // would otherwise retry through. The implementation QUEUED that
+                        // reply (echoing the status the client sent) when it read the
+                        // client's frame; closing the write half is what writes it, so
+                        // nothing about the protocol is stated here.
+                        let _ = outgoing.close().await;
                         break;
                     }
                     // Ping, Pong and Frame are the protocol's own: the implementation answers

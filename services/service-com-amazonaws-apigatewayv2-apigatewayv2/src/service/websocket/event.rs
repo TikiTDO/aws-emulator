@@ -229,6 +229,70 @@ pub fn event(connection: &Connection, route_key: &str, call: &Call) -> Value {
     Value::Object(event)
 }
 
+/// The `$context` values of one call, keyed by the member path a MAPPING TEMPLATE writes
+/// them (`routeKey`, `connectionId`, `identity.sourceIp`, `authorizer.<key>`, …).
+///
+/// The same set the event's own `requestContext` reports — "`$context` … contains the
+/// contextual information of your request" is one set of values per call, whether the call
+/// is handed to a function as an event or read by a template — so it is FLATTENED out of
+/// [`request_context`] rather than listed a second time: a template and a handler cannot
+/// disagree about what the gateway knows about a call.
+pub fn template_context(
+    connection: &Connection,
+    route_key: &str,
+    call: &Call,
+) -> BTreeMap<String, String> {
+    let request_id = proxy_event::mint_request_id();
+    let mut values = BTreeMap::new();
+    flattened(
+        "",
+        &request_context(connection, route_key, call, &request_id),
+        MAX_CONTEXT_DEPTH,
+        &mut values,
+    );
+    values
+}
+
+/// How deep the walk below descends, which is how deep a `$context` member path goes: the
+/// members the gateway reports are values, beside the two MAPS one level inside the context
+/// (`identity`, and the `authorizer` an authorized connection carries), and an authorizer's
+/// own context carries no object or array as a value — so nothing deeper is a member path a
+/// template can name. Bounded rather than open because that authorizer context is a value a
+/// caller's own function returned.
+const MAX_CONTEXT_DEPTH: usize = 3;
+
+/// `value` written into `values` under the member path a template names it by: a nested
+/// object's members are reached through the dotted path their nesting gives them
+/// (`identity.sourceIp`), and a member the call has no value for at all (`null`) is left out
+/// rather than written as the empty string — a template reference to it then resolves to
+/// nothing, the way a reference to a member the gateway does not report does.
+fn flattened(path: &str, value: &Value, depth: usize, values: &mut BTreeMap<String, String>) {
+    match value {
+        Value::Object(members) => {
+            let Some(deeper) = depth.checked_sub(1) else {
+                return;
+            };
+            for (name, member) in members {
+                let nested = if path.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{path}.{name}")
+                };
+                flattened(&nested, member, deeper, values);
+            }
+        }
+        Value::Null => {}
+        // A string's own characters, and every other scalar as the text its JSON spells —
+        // which is what a template renders a number or a boolean of the context as.
+        Value::String(text) => {
+            values.insert(path.to_string(), text.clone());
+        }
+        other => {
+            values.insert(path.to_string(), other.to_string());
+        }
+    }
+}
+
 /// The `requestContext` of one call: what the gateway reports about the connection and
 /// about this call of it.
 fn request_context(
@@ -495,6 +559,86 @@ mod tests {
                 "case {case:?}: expected the principal the authorizer named, got {event}"
             );
         }
+    }
+
+    #[test]
+    fn the_template_context_is_the_same_set_the_events_request_context_reports() {
+        // An authorized connection, so the `authorizer` map an authorizer returned is part of
+        // the context a template reads.
+        let connection = connection(Some(json!({ "tier": "gold" })));
+        let call = Call::Message(r#"{"action":"ping"}"#.to_string());
+        let context = template_context(&connection, "ping", &call);
+        let event = event(&connection, "ping", &call);
+        // The rows span what the flattening generalises over: a member the gateway reports as
+        // text, one it reports as a number, a member of a nested map, a member of the map an
+        // authorizer returned, and a path no member of the context has.
+        let cases: [(&str, &str, Option<&str>); 6] = [
+            ("the route that served the call", "routeKey", Some("ping")),
+            ("the kind of call", "eventType", Some("MESSAGE")),
+            ("the connection", "connectionId", Some("L0SM9cOFyjUCIhA=")),
+            ("a nested member", "identity.sourceIp", Some("127.0.0.1")),
+            ("a member the authorizer returned", "authorizer.tier", Some("gold")),
+            ("a member no call has", "nothingHere", None),
+        ];
+        for (what, path, expected) in cases {
+            assert_eq!(
+                context.get(path).map(String::as_str),
+                expected,
+                "case {what:?}: expected {path} to be {expected:?}, got {context:?}"
+            );
+        }
+        // A number is rendered as the text its JSON spells, and it is the SAME value the
+        // event reports for that member — one context per call.
+        let reported = event
+            .pointer("/requestContext/connectedAt")
+            .map(::serde_json::Value::to_string);
+        assert_eq!(
+            context.get("connectedAt").cloned(),
+            reported,
+            "case \"an instant of the connection\": expected the event's own value, got \
+             {context:?}"
+        );
+        // Every member the event's `requestContext` reports is a path of the context, so the
+        // two cannot disagree about WHICH members the gateway knows about (the ids and the
+        // instants each call mints are its own, so what is compared is the set of paths).
+        if let Some(Value::Object(members)) = event.pointer("/requestContext") {
+            for (name, value) in members {
+                let reported = match value {
+                    Value::Object(_) => context.keys().any(|path| {
+                        path.strip_prefix(name)
+                            .is_some_and(|rest| rest.starts_with('.'))
+                    }),
+                    _ => context.contains_key(name),
+                };
+                assert!(
+                    reported,
+                    "case {name:?}: every member the event reports is a path of the context, \
+                     got {context:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_authorizer_context_nested_deeper_than_a_member_path_is_left_out() {
+        // The value a caller's own authorizer function returned, nested past the one level
+        // `$context.authorizer.<key>` names.
+        let connection = connection(Some(json!({
+            "flat": "value",
+            "deep": { "deeper": { "deepest": "value" } }
+        })));
+        let context = template_context(&connection, "ping", &Call::Message("{}".to_string()));
+        assert_eq!(
+            context.get("authorizer.flat").map(String::as_str),
+            Some("value"),
+            "a member of the authorizer's context is a member path, got {context:?}"
+        );
+        assert!(
+            context
+                .keys()
+                .all(|path| !path.starts_with("authorizer.deep.deeper")),
+            "a value nested deeper than a member path is left out, got {context:?}"
+        );
     }
 
     #[test]

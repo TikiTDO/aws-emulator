@@ -60,6 +60,7 @@ const KEY: &str = "orders/one.txt";
 /// protocol is bound, but whose token the inventory omits, is one no handler can call at all.
 const MUST_REACH: &[&str] = &[
     "apigateway",
+    "apigatewaymanagementapi",
     "dynamodb",
     "events",
     "logs",
@@ -108,6 +109,11 @@ fn rows() -> Vec<Row> {
         Row {
             case: "another restJson1 service, signing under a different name",
             token: "sesv2",
+            reachable: true,
+        },
+        Row {
+            case: "the data plane of a WebSocket api, whose backend pushes to its connections",
+            token: "apigatewaymanagementapi",
             reachable: true,
         },
         Row {

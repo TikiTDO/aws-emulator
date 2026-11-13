@@ -8901,6 +8901,7 @@ dependencies = [
  "httparse",
  "hyper",
  "hyper-util",
+ "percent-encoding",
  "quick-xml",
  "regex",
  "serde_json",

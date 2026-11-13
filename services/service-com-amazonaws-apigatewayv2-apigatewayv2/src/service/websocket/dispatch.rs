@@ -238,41 +238,36 @@ pub fn is_two_way(route: &Route) -> bool {
     !route.route_responses.is_empty()
 }
 
-/// The message a template is rendered against, when there is one: a connection request
-/// carries no message of its own.
+/// The call a mapping template is rendered against, when there is one to render against: a
+/// reading of the api's records that has no connection in hand renders none.
+///
+/// It carries the WHOLE context of the call rather than one member of it: a template reads
+/// `$context.<member>` for any member the gateway reports about the call it is rendered for
+/// ([`super::event::template_context`] is the one owner of that set), `$stageVariables.<name>`
+/// for the serving stage's own variables, and `$input` over the frame's payload — which only a
+/// call that CARRIES a frame has, so the body is optional the way a close's is.
 #[derive(Debug, Clone, Copy)]
-pub struct MessageCall<'c> {
-    connection_id: &'c str,
-    body: &'c str,
+pub struct TemplateCall<'c> {
+    context: &'c BTreeMap<String, String>,
+    stage_variables: &'c BTreeMap<String, String>,
+    body: Option<&'c str>,
 }
 
-impl<'c> MessageCall<'c> {
-    /// The call one frame of `connection_id` is, as a template reads it.
-    pub fn new(connection_id: &'c str, body: &'c str) -> Self {
+impl<'c> TemplateCall<'c> {
+    /// One call of a connection, as a template reads it: its `$context` values, the serving
+    /// stage's variables, and the frame it carries when it carries one.
+    pub fn new(
+        context: &'c BTreeMap<String, String>,
+        stage_variables: &'c BTreeMap<String, String>,
+        body: Option<&'c str>,
+    ) -> Self {
         Self {
-            connection_id,
+            context,
+            stage_variables,
             body,
         }
     }
 }
-
-impl MessageCall<'_> {
-    /// The `$context` values a frame has, keyed by the member path a template writes: the
-    /// connection it arrived on, which is the one piece of the call's context that is the
-    /// connection's own identity.
-    fn context(self) -> BTreeMap<String, String> {
-        [(
-            CONTEXT_CONNECTION_ID.to_string(),
-            self.connection_id.to_string(),
-        )]
-        .into_iter()
-        .collect()
-    }
-}
-
-/// The `$context` member path a template reads a connection's id through:
-/// `$context.connectionId` is "the connection ID" of the call's own socket.
-const CONTEXT_CONNECTION_ID: &str = "connectionId";
 
 /// The reply `route`'s integration produces for this call WITHOUT reaching a backend; see
 /// the module docs for the rule a `MOCK` integration's follows.
@@ -283,7 +278,7 @@ const CONTEXT_CONNECTION_ID: &str = "connectionId";
 fn integration_reply(
     deployed: &DeployedConfiguration,
     route: &Route,
-    call: Option<MessageCall<'_>>,
+    call: Option<TemplateCall<'_>>,
 ) -> Result<Reply, Unserved> {
     let integration = targeted_integration(deployed, route).ok_or(Unserved::NoIntegration)?;
     if integration.integration_type != MOCK_INTEGRATION_TYPE {
@@ -303,7 +298,7 @@ fn integration_reply(
 /// records: the rule the module docs state, in the order API Gateway computes it.
 pub fn mock_reply(
     integration: &Integration,
-    call: Option<MessageCall<'_>>,
+    call: Option<TemplateCall<'_>>,
 ) -> Result<Reply, Unserved> {
     let status = match keyed_template(&integration.request_templates) {
         Some(template) => {
@@ -354,15 +349,16 @@ fn keyed_template(templates: &BTreeMap<String, String>) -> Option<&str> {
 /// EXECUTED — rather than passing it through as if it were a literal body
 /// (`service_com_amazonaws_apigateway_backplanecontrolservice::service::mapping_template`).
 /// What this function owns is the BINDING of that renderer's inputs to a WebSocket call: the
-/// message is the payload `$input.body`, `$input.json(…)` and `$input.path(…)` read, and the
-/// context is the one a frame has ([`MessageCall`]).
+/// frame is the payload `$input.body`, `$input.json(…)` and `$input.path(…)` read, and the
+/// `$context` and `$stageVariables` are the call's own ([`TemplateCall`]).
 ///
 /// A template carrying no reference IS the body and renders to itself, which is what a
 /// `MOCK` integration's `{"statusCode": 200}` is.
-fn rendered_template(template: &str, call: Option<MessageCall<'_>>) -> Result<String, Unserved> {
+fn rendered_template(template: &str, call: Option<TemplateCall<'_>>) -> Result<String, Unserved> {
     let inputs = ::service_com_amazonaws_apigateway_backplanecontrolservice::service::mapping_template::TemplateInputs {
-        payload: call.map(|call| call.body.as_bytes().to_vec()),
-        context: call.map(MessageCall::context).unwrap_or_default(),
+        payload: call.and_then(|call| call.body).map(|body| body.as_bytes().to_vec()),
+        context: call.map(|call| call.context.clone()).unwrap_or_default(),
+        stage_variables: call.map(|call| call.stage_variables.clone()).unwrap_or_default(),
         ..Default::default()
     };
     ::service_com_amazonaws_apigateway_backplanecontrolservice::service::mapping_template::rendered_without_directives(template, &inputs)
@@ -468,22 +464,32 @@ mod tests {
 
     #[test]
     fn a_template_renders_its_literal_text_and_the_references_a_call_has_values_for() {
-        let call = MessageCall {
-            connection_id: "L0SM9cOFyjUCIhA=",
-            body: r#"{"action":"ping"}"#,
-        };
+        // The `$context` of the call is the one the gateway reports about it, keyed by the
+        // member path a template writes (`super::super::event::template_context`).
+        let context = BTreeMap::from([
+            ("connectionId".to_string(), "L0SM9cOFyjUCIhA=".to_string()),
+            ("routeKey".to_string(), "ping".to_string()),
+            ("identity.sourceIp".to_string(), "127.0.0.1".to_string()),
+        ]);
+        let stage_variables = BTreeMap::from([("tenant".to_string(), "acme".to_string())]);
+        let call = TemplateCall::new(&context, &stage_variables, Some(r#"{"action":"ping"}"#));
         // The rows span what the binding generalises over: a template with no reference at
-        // all, each reference a frame has a value for, both spellings of a reference, a
-        // query of the message, and a `$` that opens none.
+        // all, each kind of reference a frame has a value for (a member of the context, a
+        // nested one, a stage variable), both spellings of a reference, a query of the
+        // message, and a `$` that opens none.
         let cases: &[(&str, Option<&str>)] = &[
             (r#"{"statusCode": 200}"#, Some(r#"{"statusCode": 200}"#)),
             ("$input.body", Some(r#"{"action":"ping"}"#)),
             ("${input.body}", Some(r#"{"action":"ping"}"#)),
             ("id=$context.connectionId", Some("id=L0SM9cOFyjUCIhA=")),
+            ("$context.routeKey", Some("ping")),
+            ("$context.identity.sourceIp", Some("127.0.0.1")),
+            ("$stageVariables.tenant", Some("acme")),
             ("$input.json('$.action')", Some("\"ping\"")),
             ("price $9", Some("price $9")),
             // Not rendered: a reference this call has no value for, and a directive.
             ("$stageVariables.where", None),
+            ("$context.nothing", None),
             ("#set($x = 1)", None),
         ];
         for (template, expected) in cases {

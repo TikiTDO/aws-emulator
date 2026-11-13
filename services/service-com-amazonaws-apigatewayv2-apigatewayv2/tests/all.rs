@@ -277,6 +277,8 @@ mod vpc_link_listing;
 mod vpc_link_subnet_resolution;
 #[path = "all/vpc_link_update.rs"]
 mod vpc_link_update;
+#[path = "all/websocket_call_context.rs"]
+mod websocket_call_context;
 #[path = "all/websocket_connect_authorization.rs"]
 mod websocket_connect_authorization;
 #[path = "all/websocket_connect_backend.rs"]

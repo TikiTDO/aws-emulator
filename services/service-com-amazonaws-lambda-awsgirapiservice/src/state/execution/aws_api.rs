@@ -317,6 +317,25 @@ pub const APIS: &[Api] = &[
         protocol: Protocol::RestJson(&APIGATEWAY),
         answer_model: Some(&APIGATEWAY_ANSWERS),
     },
+    // `services/service-com-amazonaws-apigatewaymanagementapi-apigatewaymanagementapi/
+    // smithy-model/com-amazonaws-apigatewaymanagementapi-apigatewaymanagementapi.json`:
+    // restJson1, sigv4Name `execute-api`, endpointPrefix `execute-api`, sdkId
+    // `ApiGatewayManagementApi`. Its requests are bound per operation out of that same model
+    // ([`APIGATEWAYMANAGEMENTAPI`]).
+    //
+    // A WEBSOCKET API'S BACKEND is one of the functions AWS documents as calling the service
+    // that invoked it: the `@connections` API is how a handler pushes a payload to a
+    // connection that is not the one it is answering (a fan-out, a broadcast) and how it
+    // learns that a connection is gone, so a handler that cannot reach it cannot serve a
+    // WebSocket api's server-to-client half at all.
+    Api {
+        sdk_token: "apigatewaymanagementapi",
+        signing_name: "execute-api",
+        endpoint_prefix: "execute-api",
+        model: Some(APIGATEWAYMANAGEMENTAPI_MODEL),
+        protocol: Protocol::RestJson(&APIGATEWAYMANAGEMENTAPI),
+        answer_model: Some(&APIGATEWAYMANAGEMENTAPI_ANSWERS),
+    },
     // `services/service-com-amazonaws-secretsmanager-secretsmanager/smithy-model/
     // com-amazonaws-secretsmanager-secretsmanager.json`: awsJson1_1, sigv4Name
     // `secretsmanager`, endpointPrefix `secretsmanager`, sdkId `Secrets Manager`, service
@@ -700,6 +719,10 @@ pub(super) const APIGATEWAY_MODEL: &str = include_str!(
     "../../../../service-com-amazonaws-apigateway-backplanecontrolservice/smithy-model/\
      com-amazonaws-apigateway-backplanecontrolservice.json"
 );
+pub(super) const APIGATEWAYMANAGEMENTAPI_MODEL: &str = include_str!(
+    "../../../../service-com-amazonaws-apigatewaymanagementapi-apigatewaymanagementapi/\
+     smithy-model/com-amazonaws-apigatewaymanagementapi-apigatewaymanagementapi.json"
+);
 pub(super) const SESV2_MODEL: &str = include_str!(
     "../../../../service-com-amazonaws-sesv2-simpleemailservice-v2/smithy-model/\
      com-amazonaws-sesv2-simpleemailservice-v2.json"
@@ -808,6 +831,11 @@ static APIGATEWAY_ANSWERS: super::blob_members::ServiceModel = super::blob_membe
     source: APIGATEWAY_MODEL,
     plan: ::std::sync::OnceLock::new(),
 };
+static APIGATEWAYMANAGEMENTAPI_ANSWERS: super::blob_members::ServiceModel =
+    super::blob_members::ServiceModel {
+        source: APIGATEWAYMANAGEMENTAPI_MODEL,
+        plan: ::std::sync::OnceLock::new(),
+    };
 static OPENSEARCH_ANSWERS: super::blob_members::ServiceModel = super::blob_members::ServiceModel {
     source: OPENSEARCH_MODEL,
     plan: ::std::sync::OnceLock::new(),
@@ -853,6 +881,15 @@ static CODEDEPLOY_ANSWERS: super::blob_members::ServiceModel = super::blob_membe
 static APIGATEWAY: super::rest_json::RestApi = super::rest_json::RestApi {
     model: APIGATEWAY_MODEL,
     namespace: "com.amazonaws.apigateway",
+    parsed: ::std::sync::OnceLock::new(),
+};
+
+/// The `@connections` management API of an API Gateway WebSocket api, which a call to it is
+/// bound by — embedded exactly as [`APIGATEWAY`] is, and for the same reason: the wire facts
+/// of its three operations are that model's, so this seam states none of them.
+static APIGATEWAYMANAGEMENTAPI: super::rest_json::RestApi = super::rest_json::RestApi {
+    model: APIGATEWAYMANAGEMENTAPI_MODEL,
+    namespace: "com.amazonaws.apigatewaymanagementapi",
     parsed: ::std::sync::OnceLock::new(),
 };
 

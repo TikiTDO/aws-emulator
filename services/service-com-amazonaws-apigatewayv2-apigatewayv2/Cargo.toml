@@ -136,6 +136,10 @@ quick-xml = "0.41"
 # writes lands in a log group that service holds, and `tests/all/http_api_access_logging.rs`
 # reads the delivery back through its own `FilterLogEvents`. DEV-ONLY.
 service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
+# Percent-encodes the `ConnectionId` a test addresses a `@connections` operation by, the way
+# an SDK client encodes a path label: a minted id is base64, whose alphabet carries `/` and
+# `+`. DEV-ONLY.
+percent-encoding = "2"
 
 [lints]
 workspace = true

@@ -602,7 +602,11 @@ _DB_AUTH_TOKEN_SERVICES = ("rds",)
 # before the call is made; a `str` is encoded as UTF-8 first, which is what a client does
 # with a text body. The members of the ANSWER that carry bytes are named by the answer
 # itself, so nothing about them is listed here.
-_BLOB_PARAMETERS = {"s3": ("Body",), "appconfig": ("Content",)}
+_BLOB_PARAMETERS = {
+    "s3": ("Body",),
+    "appconfig": ("Content",),
+    "apigatewaymanagementapi": ("Data",),
+}
 
 
 def _operation_name(method):

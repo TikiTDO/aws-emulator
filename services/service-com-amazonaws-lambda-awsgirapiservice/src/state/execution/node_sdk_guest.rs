@@ -216,6 +216,7 @@ fn client_name(token: &str) -> String {
         ("cloudfront", "CloudFront"),
         ("api-gateway", "APIGateway"),
         ("apigatewayv2", "ApiGatewayV2"),
+        ("apigatewaymanagementapi", "ApiGatewayManagementApi"),
         ("secrets-manager", "SecretsManager"),
         ("step-functions", "SFN"),
         ("service-catalog", "ServiceCatalog"),
