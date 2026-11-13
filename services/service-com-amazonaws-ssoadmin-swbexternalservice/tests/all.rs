@@ -149,6 +149,8 @@ mod list_application_access_scopes;
 mod list_instances_pagination;
 #[path = "all/listed_instance_projection_matches_describe.rs"]
 mod listed_instance_projection_matches_describe;
+#[path = "all/listed_instance_state_across_read_edge_cases.rs"]
+mod listed_instance_state_across_read_edge_cases;
 #[path = "all/listed_instance_state_after_instance_writes.rs"]
 mod listed_instance_state_after_instance_writes;
 #[path = "all/listed_instance_state_every_entry.rs"]
@@ -223,6 +225,8 @@ mod system_tag_mutations;
 mod tag_resource_resolution;
 #[path = "all/tags_from_creates.rs"]
 mod tags_from_creates;
+#[path = "all/test_target_manifest.rs"]
+mod test_target_manifest;
 #[path = "all/trusted_token_issuer_list.rs"]
 mod trusted_token_issuer_list;
 #[path = "all/trusted_token_issuer_update.rs"]
@@ -239,13 +243,7 @@ mod unknown_instance_message;
 mod validation_message_wording;
 #[path = "all/withdrawn_assignment_copy_in_place.rs"]
 mod withdrawn_assignment_copy_in_place;
-#[path = "all/listed_instance_state_across_read_edge_cases.rs"]
-mod listed_instance_state_across_read_edge_cases;
-// `listed_instance_state_every_entry` is declared above, in its sorted position; a second
-// declaration of the same module here is what the name-collision error named.
-// `listed_instance_state_every_entry` is declared once, in the sorted list
-// above: two branches each added a declaration of it, and the merge of both
-// left the file loaded as a module twice.
-// `listed_instance_state_every_entry` is declared ONCE, in the sorted run above: a second
-// `mod` item for the same file loads it twice, which the lint the build denies
-// (`clippy::duplicate_mod`) refuses, so the duplicate that stood here is gone.
+// Every declaration stands in the one run above, beside its own name: that is what keeps a
+// suite about to be declared twice visible as a repeated name, since a second `mod` item
+// for a file already declared is a redefinition that stops this whole target compiling. A
+// new suite goes into that run, never into a tail at the end of this file.
