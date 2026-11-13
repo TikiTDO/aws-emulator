@@ -23,12 +23,32 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 # Encodes/decodes ListTasks' opaque NextToken cursor.
 hex = { workspace = true }
+# The tree's shared readings this service needs: the one in-process Amazon S3 client and
+# object read a task execution moves objects through, the one question put to IAM about
+# what a location's bucket access role allows, and the one ARN parse.
+service-common = { path = "../common" }
+# The AWS SDK for Amazon S3, driven over the in-process callback
+# (`OperationContext::callback`): a task execution between two Amazon S3 locations lists,
+# reads, writes and deletes the objects of THIS emulator's own object store
+# (`state::transfer`). Only the generated client is needed — the emulator supplies the
+# transport, so the SDK's own HTTPS stack and runtime are left out.
+aws-sdk-s3 = { version = "1", default-features = false }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
 sha2 = { workspace = true }
+# Both sides of a transfer between Amazon S3 locations are buckets of this emulator's own
+# object store, and the role a location names is a record of its own IAM, so the suite
+# that drives an execution end to end mounts those two services beside this one on ONE
+# engine: the objects the destination ends up holding are real objects, and the access the
+# prepare step resolves is a real role policy.
+service-com-amazonaws-s3-amazons3 = { workspace = true }
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+# The AWS SDK for IAM, driven over the same in-process callback: that suite creates the
+# bucket access role and changes its inline policy through IAM's own API.
+aws-sdk-iam = { version = "1", default-features = false }
 
 [lints]
 workspace = true

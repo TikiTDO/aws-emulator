@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListTaskExecutions
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListTaskExecutions`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListTaskExecutions::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Pages over the executions this service holds, in the order they were started: every
+//! one of them, or only those of the task the request names.
 //!
 //! ## Shape of an operation
 //!
@@ -148,18 +142,90 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListTaskExecutions` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListTaskExecutionsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListTaskExecutions"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(ListTaskExecutionsErrorModeled::InternalException(
+                InternalException {
+                    message: Some(
+                        "the DataSync emulator could not reach its state store".to_string(),
+                    ),
+                    error_code: None,
+                },
+            )
+            .into());
+        };
+
+        let after_seq = crate::state::listing::resume_after(input.next_token.as_deref())
+            .map_err(|refusal| -> ListTaskExecutionsError {
+                ListTaskExecutionsErrorModeled::InvalidRequestException(
+                    refusal.into_invalid_request(),
+                )
+                .into()
+            })?;
+        let page_size = crate::state::listing::page_size(input.max_results);
+
+        // Each entry reports its execution's status, and an execution's phases are work
+        // the clock owes, materialised before the page is built.
+        let now = ::std::time::SystemTime::now();
+        crate::state::transfer::advance_transfers(&*self.engine, ctx.callback(), now).await;
+        let mut store = state.lock();
+        store.advance_clock(now);
+
+        // A `TaskArn` the account holds no task under names no executions, which is a
+        // client error rather than an empty page — the same reading every operation of
+        // this service that resolves a `TaskArn` takes of one.
+        if let Some(task_arn) = input.task_arn.as_deref() {
+            if !store.tasks.contains_key(task_arn) {
+                return Err(ListTaskExecutionsErrorModeled::InvalidRequestException(
+                    InvalidRequestException {
+                        message: Some(format!("Task {task_arn} is not found.")),
+                        error_code: None,
+                        datasync_error_code: None,
+                    },
+                )
+                .into());
+            }
+        }
+
+        // Every execution the request asks for, in the order they were started, from the
+        // cursor on. `TaskArn` is optional, and a request that names none asks about
+        // every execution this account holds.
+        let mut matching: Vec<(u64, TaskExecutionListEntry)> = Vec::new();
+        for execution in store.executions_in_creation_order() {
+            if execution.seq <= after_seq {
+                continue;
+            }
+            if input
+                .task_arn
+                .as_deref()
+                .is_some_and(|task_arn| task_arn != execution.task_arn)
+            {
+                continue;
+            }
+            matching.push((
+                execution.seq,
+                TaskExecutionListEntry {
+                    task_execution_arn: Some(execution.arn.clone()),
+                    status: Some(execution.status.as_str().to_string()),
+                    task_mode: Some(execution.task_mode.clone()),
+                },
+            ));
+        }
+        drop(store);
+
+        let truncated = matching.len() > page_size;
+        matching.truncate(page_size);
+        let page_ended_after = matching.last().map(|(seq, _)| *seq);
+        let task_executions: Vec<TaskExecutionListEntry> =
+            matching.into_iter().map(|(_, entry)| entry).collect();
+
+        Ok(ListTaskExecutionsOutput {
+            task_executions: Some(task_executions),
+            // Only a truncated page has a next one; the final page carries no token.
+            next_token: if truncated {
+                page_ended_after.map(crate::state::listing::encode_cursor)
+            } else {
+                None
+            },
+        })
     }
 }

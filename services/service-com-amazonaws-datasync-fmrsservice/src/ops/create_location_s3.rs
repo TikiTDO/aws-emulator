@@ -179,13 +179,42 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx);
         let now = ::std::time::SystemTime::now();
 
-        let bucket = s3_resource_name(&input.s3_bucket_arn);
+        let bucket = crate::state::s3_bucket_name(&input.s3_bucket_arn);
         let location_uri = crate::state::LocationKind::S3
             .location_uri(&bucket, input.subdirectory.as_deref());
         let s3_storage_class = input
             .s3_storage_class
             .clone()
             .unwrap_or_else(|| default_storage_class(&input.s3_bucket_arn).to_string());
+
+        // The access test DataSync performs before it stores a location: it acts under
+        // the bucket access role the request named and lists the bucket, so a role whose
+        // policies do not allow that listing is refused here rather than discovered when
+        // a task execution first needs the bucket. IAM answers the question
+        // ([`crate::state::transfer::bucket_listing_withheld`]) and a role it holds no
+        // record of withholds nothing.
+        if crate::state::transfer::bucket_listing_withheld(
+            ctx.callback(),
+            &region,
+            &input.s3_config.bucket_access_role_arn,
+            &input.s3_bucket_arn,
+        )
+        .await
+        {
+            return Err(CreateLocationS3ErrorModeled::InvalidRequestException(
+                InvalidRequestException {
+                    message: Some(format!(
+                        "DataSync location access test failed: could not perform \
+                         s3:ListObjectsV2 on bucket {bucket}. Access denied. Ensure bucket \
+                         access role has {action} permission.",
+                        action = crate::state::transfer::BUCKET_LIST_ACTION,
+                    )),
+                    error_code: None,
+                    datasync_error_code: None,
+                },
+            )
+            .into());
+        }
 
         let location_arn = {
             let mut store = state.lock();
@@ -225,20 +254,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             location_arn: Some(location_arn),
         })
     }
-}
-
-/// The bucket or access-point name an `S3BucketArn` addresses.
-///
-/// The member's three modelled ARN forms all put the name last in the resource
-/// segment: `arn:<p>:s3:::<bucket>`, `arn:<p>:s3:<region>:<account>:accesspoint/<name>`
-/// and `arn:<p>:s3-outposts:<region>:<account>:outpost/<outpost>/accesspoint/<name>`.
-fn s3_resource_name(bucket_arn: &str) -> String {
-    let resource = bucket_arn.splitn(6, ':').nth(5).unwrap_or(bucket_arn);
-    resource
-        .split(['/', ':'])
-        .next_back()
-        .unwrap_or(resource)
-        .to_string()
 }
 
 /// The storage class a request that declared none ends up with.

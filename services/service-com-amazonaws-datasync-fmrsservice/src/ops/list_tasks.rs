@@ -143,7 +143,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(ListTasksErrorModeled::InternalException(InternalException {
                 message: Some(
@@ -159,8 +158,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let page_size = crate::state::listing::page_size(input.max_results);
 
         let filters = input.filters.unwrap_or_default();
+        // Each entry reports its task's status, and a task stops being `RUNNING` when the
+        // run it is on finishes — work the clock owes, materialised before the page is
+        // built.
+        let now = ::std::time::SystemTime::now();
+        crate::state::transfer::advance_transfers(&*self.engine, ctx.callback(), now).await;
         let mut store = state.lock();
-        store.advance_clock(::std::time::SystemTime::now());
+        store.advance_clock(now);
 
         // Every task the request asks for, in creation order, from the cursor on.
         let mut matching: Vec<(u64, TaskListEntry)> = Vec::new();

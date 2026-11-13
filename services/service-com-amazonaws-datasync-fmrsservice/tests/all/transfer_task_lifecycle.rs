@@ -615,6 +615,7 @@ async fn created_s3_locations_are_reported_from_state() {
 async fn create_task_refuses_location_arns_that_resolve_to_nothing() {
     let router = service();
     let known = create_bucket_location(&router, "known-bucket", "/in", "setup").await;
+    let other_known = create_bucket_location(&router, "other-known-bucket", "/in", "setup").await;
     let unknown =
         format!("arn:aws:datasync:{SIGNED_REGION}:{ACCOUNT}:location/loc-aaaaaaaaaaaaaaaaa");
     let also_unknown =
@@ -644,7 +645,7 @@ async fn create_task_refuses_location_arns_that_resolve_to_nothing() {
         "CreateTask",
         serde_json::json!({
             "SourceLocationArn": known,
-            "DestinationLocationArn": known,
+            "DestinationLocationArn": other_known,
         }),
         "both known",
     )
@@ -781,6 +782,9 @@ async fn list_tasks_applies_modelled_filters() {
     let router = service();
     let alpha = create_bucket_location(&router, "alpha-bucket", "/in", "setup").await;
     let beta = create_bucket_location(&router, "beta-bucket", "/in", "setup").await;
+    // A task copies one location onto another, so each task below needs a second side;
+    // this one is the side none of the rows filters on.
+    let gamma = create_bucket_location(&router, "gamma-bucket", "/in", "setup").await;
 
     let on_alpha = string(
         &ok(
@@ -788,7 +792,7 @@ async fn list_tasks_applies_modelled_filters() {
             "CreateTask",
             serde_json::json!({
                 "SourceLocationArn": alpha,
-                "DestinationLocationArn": alpha,
+                "DestinationLocationArn": gamma,
                 "Name": "alpha-only",
             }),
             "setup",
@@ -818,7 +822,7 @@ async fn list_tasks_applies_modelled_filters() {
             "CreateTask",
             serde_json::json!({
                 "SourceLocationArn": beta,
-                "DestinationLocationArn": beta,
+                "DestinationLocationArn": gamma,
                 "Name": "beta-only",
             }),
             "setup",
@@ -828,7 +832,7 @@ async fn list_tasks_applies_modelled_filters() {
         "setup",
     );
 
-    // `beta` is the destination of one task and both sides of another, so an
+    // `beta` is the destination of one task and the source of another, so an
     // either-side match is observable.
     let rows: Vec<(&str, serde_json::Value, Vec<String>)> = vec![
         (
@@ -1021,11 +1025,13 @@ async fn task_options_resolve_to_the_modelled_defaults_and_overlays() {
 
     let router = service();
     let location = create_bucket_location(&router, "options-bucket", "/in", "setup").await;
+    let destination =
+        create_bucket_location(&router, "options-destination-bucket", "/out", "setup").await;
 
     for (index, row) in rows.iter().enumerate() {
         let mut request = serde_json::json!({
             "SourceLocationArn": location,
-            "DestinationLocationArn": location,
+            "DestinationLocationArn": destination,
             "Name": format!("options-row-{index}"),
         });
         if let Some(task_mode) = row.task_mode {

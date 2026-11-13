@@ -276,7 +276,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(DescribeTaskExecutionErrorModeled::InternalException(
                 InternalException {
@@ -289,8 +288,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
+        // What this execution's phases did is work the clock already made due, so it is
+        // materialised before anything is reported: a report of a phase is a report of
+        // what that phase found.
+        let now = ::std::time::SystemTime::now();
+        crate::state::transfer::advance_transfers(&*self.engine, ctx.callback(), now).await;
         let mut store = state.lock();
-        store.advance_clock(::std::time::SystemTime::now());
+        store.advance_clock(now);
         let Some(execution) = store.task_executions.get(&input.task_execution_arn) else {
             return Err(DescribeTaskExecutionErrorModeled::InvalidRequestException(
                 InvalidRequestException {
@@ -353,47 +357,49 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 /// `Result`: each phase's status and, once the phase is behind the execution, how long
 /// it took.
 ///
-/// Both come from the instants stored when the execution started, so a phase the
-/// execution has not reached reports the modelled `PhaseStatus` `PENDING` with no
-/// duration, and one it has finished reports `SUCCESS` with the elapsed milliseconds
-/// between its own two boundaries. `TotalDuration` is only known once the execution
-/// has ended.
+/// A phase reports what its own work established ([`crate::state::ExecutionProgress`])
+/// once the execution is past it, and the modelled `PhaseStatus` `PENDING` until then —
+/// which is also what a phase that never ran reports, because an execution that failed
+/// in an earlier step never starts it. The durations come from the instants stored when
+/// the execution started, and `TotalDuration` is only known once the execution has
+/// ended. `ErrorCode`/`ErrorDetail` describe an execution that failed, so they are
+/// reported exactly when one has.
 fn phase_result(execution: &crate::state::TaskExecution) -> TaskExecutionResultDetail {
     let schedule = execution.schedule;
     let status = execution.status;
-    let reached = |phase: crate::state::TaskExecutionStatus| {
-        status.phase_index() > phase.phase_index()
+    let progress = &execution.progress;
+    // A phase is behind the execution once the execution's own status sits past it.
+    let behind = |phase: u8| status.phase_index() > phase + 1;
+    let reported = |phase: u8| {
+        if behind(phase) {
+            progress
+                .phases
+                .get(phase as usize)
+                .copied()
+                .unwrap_or_default()
+        } else {
+            crate::state::PhaseStatus::Pending
+        }
     };
-
-    let prepare_done = reached(crate::state::TaskExecutionStatus::Preparing);
-    let transfer_done = reached(crate::state::TaskExecutionStatus::Transferring);
-    let verify_done = reached(crate::state::TaskExecutionStatus::Verifying);
+    // A phase that has not run took no time, whether because the execution has not
+    // reached it or because an earlier phase ended the execution.
+    let duration = |phase: u8, from, to| {
+        (reported(phase) != crate::state::PhaseStatus::Pending)
+            .then(|| crate::state::millis_between(from, to))
+    };
+    let failed = status == crate::state::TaskExecutionStatus::Error;
 
     TaskExecutionResultDetail {
-        prepare_duration: prepare_done.then(|| {
-            crate::state::millis_between(schedule.launched_at, schedule.transfer_at)
-        }),
-        prepare_status: Some(phase_status(prepare_done).to_string()),
+        prepare_duration: duration(0, schedule.launched_at, schedule.transfer_at),
+        prepare_status: Some(reported(0).as_str().to_string()),
         total_duration: execution
             .end_time
             .map(|end| crate::state::millis_between(execution.start_time, end)),
-        transfer_duration: transfer_done
-            .then(|| crate::state::millis_between(schedule.transfer_at, schedule.verify_at)),
-        transfer_status: Some(phase_status(transfer_done).to_string()),
-        verify_duration: verify_done
-            .then(|| crate::state::millis_between(schedule.verify_at, schedule.finished_at)),
-        verify_status: Some(phase_status(verify_done).to_string()),
-        // `ErrorCode`/`ErrorDetail` describe an execution that failed; this one did not.
-        error_code: None,
-        error_detail: None,
-    }
-}
-
-/// A phase's `PhaseStatus`: `SUCCESS` once it is behind the execution, else `PENDING`.
-fn phase_status(done: bool) -> &'static str {
-    if done {
-        "SUCCESS"
-    } else {
-        "PENDING"
+        transfer_duration: duration(1, schedule.transfer_at, schedule.verify_at),
+        transfer_status: Some(reported(1).as_str().to_string()),
+        verify_duration: duration(2, schedule.verify_at, schedule.finished_at),
+        verify_status: Some(reported(2).as_str().to_string()),
+        error_code: failed.then(|| progress.error_code.clone()).flatten(),
+        error_detail: failed.then(|| progress.error_detail.clone()).flatten(),
     }
 }

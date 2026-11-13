@@ -10,6 +10,9 @@
 //!   transitions the clock has already made due (a task leaving `CREATING`, an
 //!   execution walking its phases). Every handler calls it before reading or writing,
 //!   so a reporting operation reports what the clock already owed and nothing more.
+//! * the WORK each phase of a task execution does, and what it established
+//!   ([`transfer`]): the objects the two locations hold, the bytes moved between them
+//!   and the per-phase outcome every observer of an execution reads.
 //! * the modelled defaults ([`default_options`]) and the per-execution overlay
 //!   ([`overlay_options`]) that `CreateTask`, `StartTaskExecution` and the two
 //!   `Describe*` operations must agree on.
@@ -24,6 +27,7 @@
 //! service hands out is also stored here and can be resolved again.
 
 pub mod listing;
+pub mod transfer;
 
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
@@ -405,8 +409,8 @@ pub struct Task {
 
 /// A task execution's status, as the modelled `TaskExecutionStatus` enum spells it.
 ///
-/// `QUEUED`, `CANCELLING` and `ERROR` belong to task queueing, `CancelTaskExecution`
-/// and transfer failure — none of which an implemented operation drives yet.
+/// `QUEUED` and `CANCELLING` belong to task queueing and `CancelTaskExecution`, neither
+/// of which an implemented operation drives yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskExecutionStatus {
     Launching,
@@ -414,6 +418,9 @@ pub enum TaskExecutionStatus {
     Transferring,
     Verifying,
     Success,
+    /// A phase of this execution failed, so the execution ended without finishing the
+    /// work: the phase that failed reports its own `ERROR` in the result detail.
+    Error,
 }
 
 impl TaskExecutionStatus {
@@ -425,24 +432,110 @@ impl TaskExecutionStatus {
             Self::Transferring => "TRANSFERRING",
             Self::Verifying => "VERIFYING",
             Self::Success => "SUCCESS",
+            Self::Error => "ERROR",
         }
     }
 
     /// Whether no further transition is owed from this status.
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Success)
+        matches!(self, Self::Success | Self::Error)
     }
 
     /// This status's position in the phase sequence an execution walks, so a reader
-    /// can ask whether a given phase is already behind the execution.
+    /// can ask whether a given phase is already behind the execution. Both terminal
+    /// statuses sit past every phase.
     pub fn phase_index(self) -> u8 {
         match self {
             Self::Launching => 0,
             Self::Preparing => 1,
             Self::Transferring => 2,
             Self::Verifying => 3,
-            Self::Success => 4,
+            Self::Success | Self::Error => 4,
         }
+    }
+
+    /// The status an execution whose clock sits at `index` phases is in.
+    fn at_index(index: u8) -> Self {
+        match index {
+            0 => Self::Launching,
+            1 => Self::Preparing,
+            2 => Self::Transferring,
+            3 => Self::Verifying,
+            _ => Self::Success,
+        }
+    }
+}
+
+/// One phase of a task execution's status, as the modelled `PhaseStatus` enum spells
+/// it.
+///
+/// A phase is `PENDING` until it has RUN — the clock has not reached the end of its
+/// span yet, or an earlier phase failed and this one never starts — and then reports
+/// what its work established.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PhaseStatus {
+    #[default]
+    Pending,
+    Success,
+    Error,
+}
+
+impl PhaseStatus {
+    /// The wire value, one of the modelled `PhaseStatus` values.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "PENDING",
+            Self::Success => "SUCCESS",
+            Self::Error => "ERROR",
+        }
+    }
+}
+
+/// What the phases of a task execution that have already RUN established.
+///
+/// The phases are ordered — `PREPARING`, then `TRANSFERRING`, then `VERIFYING` — and
+/// each one's work happens when the clock has made its span due
+/// ([`transfer::advance_transfers`]). Keeping the outcome here is what lets every
+/// observer of an execution read ONE record of what happened rather than deriving an
+/// outcome of its own: the per-phase `PhaseStatus` the result detail reports, and the
+/// `ErrorCode`/`ErrorDetail` of the phase that failed.
+///
+/// A phase runs only once every phase BEFORE it is recorded here, so no observer can see
+/// a later phase's outcome before an earlier phase has done its work, however many of
+/// them are advancing the same execution at the same time.
+#[derive(Debug, Clone, Default)]
+pub struct ExecutionProgress {
+    /// The three phases' statuses, in the order they run.
+    pub phases: [PhaseStatus; 3],
+    /// `Result.ErrorCode`: the error the failed phase reports.
+    pub error_code: Option<String>,
+    /// `Result.ErrorDetail`: that error's description.
+    pub error_detail: Option<String>,
+}
+
+impl ExecutionProgress {
+    /// Record `status` as the outcome of the phase at `index`.
+    pub fn record(&mut self, index: u8, status: PhaseStatus) {
+        if let Some(phase) = self.phases.get_mut(index as usize) {
+            *phase = status;
+        }
+    }
+
+    /// The index of the phase that failed, if one has.
+    pub fn failed_phase(&self) -> Option<u8> {
+        self.phases
+            .iter()
+            .position(|phase| *phase == PhaseStatus::Error)
+            .map(|index| index as u8)
+    }
+
+    /// How many phases, counting from the first, have already run — which is also the
+    /// index of the phase that runs next.
+    pub fn settled(&self) -> u8 {
+        self.phases
+            .iter()
+            .take_while(|phase| **phase != PhaseStatus::Pending)
+            .count() as u8
     }
 }
 
@@ -476,10 +569,10 @@ impl ExecutionSchedule {
 
 /// The file and byte counters `DescribeTaskExecution` reports.
 ///
-/// The emulator has no S3 data plane behind a transfer location, so no bytes or files
-/// are ever moved and these stay at the zero the model declares as each member's
-/// default. They are a record field rather than literals in the handler so that a
-/// future data plane reports from the same place.
+/// Every one of them is what the phases of this execution actually DID — the objects
+/// the `PREPARING` step found on each side, the bytes the `TRANSFERRING` step moved,
+/// the objects the `VERIFYING` step compared ([`transfer`]) — so a counter is zero only
+/// where no work of that kind happened.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ExecutionCounters {
     pub estimated_files_to_transfer: i64,
@@ -499,6 +592,9 @@ pub struct ExecutionCounters {
 #[derive(Debug, Clone)]
 pub struct TaskExecution {
     pub arn: String,
+    /// The creation sequence this execution was minted with — the order
+    /// `ListTaskExecutions` pages over, and what its opaque cursor resumes after.
+    pub seq: u64,
     pub task_arn: String,
     pub status: TaskExecutionStatus,
     /// The options actually in effect: the task's options overlaid with this
@@ -515,21 +611,63 @@ pub struct TaskExecution {
     pub end_time: Option<SystemTime>,
     pub schedule: ExecutionSchedule,
     pub counters: ExecutionCounters,
+    /// What the phases that have already run established. See [`ExecutionProgress`].
+    pub progress: ExecutionProgress,
 }
 
 impl TaskExecution {
-    /// The phase this execution is in at `now`, from the stored schedule.
-    pub fn phase_at(&self, now: SystemTime) -> TaskExecutionStatus {
+    /// The status this execution is in at `now`.
+    ///
+    /// Two things decide it, and both are already recorded: the schedule stored when the
+    /// execution started says how far the CLOCK has carried it, and
+    /// [`ExecutionProgress`] says what the phases whose work has run established. The
+    /// execution never reports a phase as behind it until that phase's work is recorded,
+    /// and it ends in `ERROR` once the clock passes the end of a phase that failed.
+    pub fn status_at(&self, now: SystemTime) -> TaskExecutionStatus {
+        let clock = self.clock_index(now);
+        if let Some(failed) = self.progress.failed_phase() {
+            // A failed phase ends the execution at the end of its own span; before that
+            // instant the execution is still in it.
+            if clock > failed + 1 {
+                return TaskExecutionStatus::Error;
+            }
+            return TaskExecutionStatus::at_index(clock.min(failed + 1));
+        }
+        // A phase whose work has not been materialised yet holds the execution at that
+        // phase: nothing reports a step as finished before it ran.
+        TaskExecutionStatus::at_index(clock.min(self.progress.settled() + 1))
+    }
+
+    /// How many phase boundaries the clock has carried this execution past at `now`: 0
+    /// while it is still launching, 4 once its last phase's span has elapsed.
+    pub fn clock_index(&self, now: SystemTime) -> u8 {
         if now >= self.schedule.finished_at {
-            TaskExecutionStatus::Success
+            4
         } else if now >= self.schedule.verify_at {
-            TaskExecutionStatus::Verifying
+            3
         } else if now >= self.schedule.transfer_at {
-            TaskExecutionStatus::Transferring
+            2
         } else if now >= self.schedule.launched_at {
-            TaskExecutionStatus::Preparing
+            1
         } else {
-            TaskExecutionStatus::Launching
+            0
+        }
+    }
+
+    /// How many of this execution's phases the clock has made DUE at `now` — a phase
+    /// falls due at the END of its own span, which is where its work becomes observable.
+    pub fn phases_due(&self, now: SystemTime) -> u8 {
+        self.clock_index(now).saturating_sub(1).min(3)
+    }
+
+    /// When this execution ended, if it has: the end of its last phase, or the end of
+    /// the phase that failed.
+    pub fn ended_at(&self) -> Option<SystemTime> {
+        match self.progress.failed_phase() {
+            Some(0) => Some(self.schedule.transfer_at),
+            Some(1) => Some(self.schedule.verify_at),
+            Some(_) => Some(self.schedule.finished_at),
+            None => (self.progress.settled() == 3).then_some(self.schedule.finished_at),
         }
     }
 }
@@ -579,12 +717,14 @@ impl ComAmazonawsDatasyncFmrsserviceState {
         )
     }
 
-    /// Mint the next `TaskExecutionArn`, which the model nests under its task's ARN.
-    pub fn mint_execution_arn(&mut self, task_arn: &str) -> String {
+    /// Mint the next `TaskExecutionArn`, which the model nests under its task's ARN, and
+    /// its creation sequence — the order `ListTaskExecutions` pages over.
+    pub fn mint_execution_arn(&mut self, task_arn: &str) -> (String, u64) {
         self.next_execution_seq += 1;
-        format!(
-            "{task_arn}/execution/exec-{seq:017x}",
-            seq = self.next_execution_seq
+        let seq = self.next_execution_seq;
+        (
+            format!("{task_arn}/execution/exec-{seq:017x}"),
+            seq,
         )
     }
 
@@ -604,12 +744,12 @@ impl ComAmazonawsDatasyncFmrsserviceState {
         // belongs to: a task stops being RUNNING when its current execution finishes.
         let mut finished: Vec<(String, String)> = Vec::new();
         for execution in self.task_executions.values_mut() {
-            execution.status = execution.phase_at(now);
+            execution.status = execution.status_at(now);
             if execution.launch_time.is_none() && now >= execution.schedule.launched_at {
                 execution.launch_time = Some(execution.schedule.launched_at);
             }
             if execution.status.is_terminal() && execution.end_time.is_none() {
-                execution.end_time = Some(execution.schedule.finished_at);
+                execution.end_time = execution.ended_at();
                 finished.push((execution.task_arn.clone(), execution.arn.clone()));
             }
         }
@@ -796,6 +936,13 @@ impl ComAmazonawsDatasyncFmrsserviceState {
         let mut locations: Vec<&Location> = self.locations.values().collect();
         locations.sort_by_key(|location| location.seq);
         locations
+    }
+
+    /// Task executions in creation order — the order `ListTaskExecutions` pages over.
+    pub fn executions_in_creation_order(&self) -> Vec<&TaskExecution> {
+        let mut executions: Vec<&TaskExecution> = self.task_executions.values().collect();
+        executions.sort_by_key(|execution| execution.seq);
+        executions
     }
 }
 
@@ -1039,6 +1186,114 @@ pub fn overlay_options(base: &Options, requested: Option<&Options>) -> Options {
             .clone()
             .or_else(|| base.object_metadata.clone()),
     }
+}
+
+/// The bucket or access-point name an `S3BucketArn` addresses.
+///
+/// The member's three modelled ARN forms all put the name last in the resource
+/// segment: `arn:<p>:s3:::<bucket>`, `arn:<p>:s3:<region>:<account>:accesspoint/<name>`
+/// and `arn:<p>:s3-outposts:<region>:<account>:outpost/<outpost>/accesspoint/<name>`.
+pub fn s3_bucket_name(bucket_arn: &str) -> String {
+    let resource = bucket_arn.splitn(6, ':').nth(5).unwrap_or(bucket_arn);
+    resource
+        .split(['/', ':'])
+        .next_back()
+        .unwrap_or(resource)
+        .to_string()
+}
+
+/// A pair of `Options` members whose values are each legal on its own and which
+/// contradict each other, so a request carrying both is refused.
+///
+/// The modelled enums admit each value independently; what the pairs here state is the
+/// dependency BETWEEN two members that no shape can state, which is why every one of
+/// them is grounded in what the service documents or does rather than in the model's
+/// enum domains.
+struct OptionConflict {
+    /// The first member and the value of it that takes part in the conflict.
+    first: (&'static str, &'static str),
+    /// The second member and its conflicting value.
+    second: (&'static str, &'static str),
+    /// Whether the dependency applies only to a `BASIC` mode task, as the members whose
+    /// documentation scopes it that way ("The following applies only to Basic mode
+    /// tasks") require.
+    basic_mode_only: bool,
+}
+
+/// Every `Options` combination this service refuses.
+///
+/// * `TransferMode ALL` with `OverwriteMode NEVER`: a transfer that "copies everything
+///   in the source to the destination without comparing differences between the
+///   locations" cannot at the same time "not overwrite data in the destination", so the
+///   two options cancel each other out and DataSync refuses the pair.
+/// * `TransferMode ALL` with `PreserveDeletedFiles REMOVE`: "If you set this parameter
+///   to REMOVE, you can't set TransferMode to ALL. When you transfer all data, DataSync
+///   doesn't scan your destination location and doesn't know what to delete"
+///   (`PreserveDeletedFiles`' own documentation).
+/// * `Atime BEST_EFFORT` with `Mtime NONE`, and `Atime NONE` with `Mtime PRESERVE`:
+///   "If Atime is set to BEST_EFFORT, Mtime must be set to PRESERVE… If Atime is set to
+///   NONE, Mtime must also be NONE" (`Atime`'s own documentation), which applies to
+///   Basic mode tasks.
+const OPTION_CONFLICTS: &[OptionConflict] = &[
+    OptionConflict {
+        first: ("TransferMode", "ALL"),
+        second: ("OverwriteMode", "NEVER"),
+        basic_mode_only: false,
+    },
+    OptionConflict {
+        first: ("TransferMode", "ALL"),
+        second: ("PreserveDeletedFiles", "REMOVE"),
+        basic_mode_only: false,
+    },
+    OptionConflict {
+        first: ("Atime", "BEST_EFFORT"),
+        second: ("Mtime", "NONE"),
+        basic_mode_only: true,
+    },
+    OptionConflict {
+        first: ("Atime", "NONE"),
+        second: ("Mtime", "PRESERVE"),
+        basic_mode_only: true,
+    },
+];
+
+/// The refusal the EFFECTIVE options of a task or of a task execution earn for naming a
+/// contradictory combination, if they do.
+///
+/// `Some` is the message the calling operation reports through its own modelled client
+/// error, with the members and their values named the way DataSync names them, so every
+/// operation that resolves a set of options words this refusal identically. The options
+/// passed in are the resolved ones — the request's values over the defaults — because a
+/// combination is contradictory whether the caller spelled both halves of it or took one
+/// from a default.
+pub fn conflicting_options(options: &Options, task_mode: &str) -> Option<String> {
+    let value = |member: &str| -> &str {
+        match member {
+            "TransferMode" => options.transfer_mode.as_deref(),
+            "OverwriteMode" => options.overwrite_mode.as_deref(),
+            "PreserveDeletedFiles" => options.preserve_deleted_files.as_deref(),
+            "Atime" => options.atime.as_deref(),
+            "Mtime" => options.mtime.as_deref(),
+            _ => None,
+        }
+        .unwrap_or_default()
+    };
+    OPTION_CONFLICTS
+        .iter()
+        .find(|conflict| {
+            (!conflict.basic_mode_only || task_mode != "ENHANCED")
+                && value(conflict.first.0) == conflict.first.1
+                && value(conflict.second.0) == conflict.second.1
+        })
+        .map(|conflict| {
+            format!(
+                "Invalid SyncOption value. Option: {first},{second}, Value: {first_value},{second_value}.",
+                first = conflict.first.0,
+                second = conflict.second.0,
+                first_value = conflict.first.1,
+                second_value = conflict.second.1,
+            )
+        })
 }
 
 /// This service's store in the shared engine: call it with a handler's `&*self.engine`.

@@ -374,6 +374,7 @@ fn filler_execution(arn: &str, task_arn: &str) -> state::TaskExecution {
     let now = SystemTime::now();
     state::TaskExecution {
         arn: arn.to_string(),
+        seq: 0,
         task_arn: task_arn.to_string(),
         status: state::TaskExecutionStatus::Launching,
         options: state::default_options("BASIC"),
@@ -388,5 +389,5 @@ fn filler_execution(arn: &str, task_arn: &str) -> state::TaskExecution {
         end_time: None,
         schedule: state::ExecutionSchedule::starting_at(now),
         counters: state::ExecutionCounters::default(),
-    }
-}
+        progress: state::ExecutionProgress::default(),
+    }}

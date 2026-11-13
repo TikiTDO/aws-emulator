@@ -188,7 +188,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(DescribeTaskErrorModeled::InternalException(InternalException {
                 message: Some(
@@ -199,8 +198,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
+        // A task stops being `RUNNING` when the run it is on finishes, which is work
+        // the clock owes: the phases it has made due run before this task's status is
+        // read.
+        let now = ::std::time::SystemTime::now();
+        crate::state::transfer::advance_transfers(&*self.engine, ctx.callback(), now).await;
         let mut store = state.lock();
-        store.advance_clock(::std::time::SystemTime::now());
+        store.advance_clock(now);
         let Some(task) = store.tasks.get(&input.task_arn) else {
             return Err(DescribeTaskErrorModeled::InvalidRequestException(
                 InvalidRequestException {

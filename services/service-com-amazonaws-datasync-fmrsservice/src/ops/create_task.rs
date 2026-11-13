@@ -229,6 +229,34 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
+        // Two cross-member rules the shapes cannot state, each refused before anything is
+        // stored. A task copies one location onto another, so the two `LocationArn`
+        // members must name two locations; and the options in effect must not name a
+        // combination this service refuses, whichever half of it the request spelled.
+        if input.source_location_arn == input.destination_location_arn {
+            let code = Some(crate::state::INVALID_PARAMETER_CODE.to_string());
+            return Err(CreateTaskErrorModeled::InvalidRequestException(
+                InvalidRequestException {
+                    message: Some("Destination location cannot be same as source location.".to_string()),
+                    error_code: code.clone(),
+                    datasync_error_code: code,
+                },
+            )
+            .into());
+        }
+
+        if let Some(message) = crate::state::conflicting_options(&options, &task_mode) {
+            let code = Some(crate::state::INVALID_PARAMETER_CODE.to_string());
+            return Err(CreateTaskErrorModeled::InvalidRequestException(
+                InvalidRequestException {
+                    message: Some(message),
+                    error_code: code.clone(),
+                    datasync_error_code: code,
+                },
+            )
+            .into());
+        }
+
         if let Some(message) = store.at_capacity(crate::state::ResourceStore::Tasks) {
             return Err(CreateTaskErrorModeled::InvalidRequestException(
                 InvalidRequestException {

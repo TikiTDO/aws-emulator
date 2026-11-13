@@ -174,7 +174,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(StartTaskExecutionErrorModeled::InternalException(InternalException {
                 message: Some(
@@ -186,6 +185,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let now = ::std::time::SystemTime::now();
+        // A task is only free to start a run once the run it is already on has finished,
+        // which is work the clock owes: the phases of every execution it has made due run
+        // before this request reads any task's status.
+        crate::state::transfer::advance_transfers(&*self.engine, ctx.callback(), now).await;
         let mut store = state.lock();
         store.advance_clock(now);
 
@@ -230,6 +233,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .or_else(|| task.task_report_config.clone());
         let task_mode = task.task_mode.clone();
 
+        // The options in effect for this run are the ones the execution is judged by, so
+        // an override that makes them contradictory is refused here for the same reason
+        // `CreateTask` refuses one: the run would have two options that cancel out.
+        if let Some(message) = crate::state::conflicting_options(&options, &task_mode) {
+            let code = Some(crate::state::INVALID_PARAMETER_CODE.to_string());
+            return Err(StartTaskExecutionErrorModeled::InvalidRequestException(
+                InvalidRequestException {
+                    message: Some(message),
+                    error_code: code.clone(),
+                    datasync_error_code: code,
+                },
+            )
+            .into());
+        }
+
         if let Some(message) = store.at_capacity(crate::state::ResourceStore::TaskExecutions) {
             return Err(StartTaskExecutionErrorModeled::InvalidRequestException(
                 InvalidRequestException {
@@ -241,11 +259,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        let execution_arn = store.mint_execution_arn(&input.task_arn);
+        let (execution_arn, seq) = store.mint_execution_arn(&input.task_arn);
         store.task_executions.insert(
             execution_arn.clone(),
             crate::state::TaskExecution {
                 arn: execution_arn.clone(),
+                seq,
                 task_arn: input.task_arn.clone(),
                 status: crate::state::TaskExecutionStatus::Launching,
                 options,
@@ -260,6 +279,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 end_time: None,
                 schedule: crate::state::ExecutionSchedule::starting_at(now),
                 counters: crate::state::ExecutionCounters::default(),
+                progress: crate::state::ExecutionProgress::default(),
             },
         );
 

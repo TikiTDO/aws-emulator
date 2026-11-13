@@ -25,6 +25,8 @@ mod location_deletion;
 mod location_listing;
 #[path = "all/object_storage_location.rs"]
 mod object_storage_location;
+#[path = "all/s3_transfer_execution.rs"]
+mod s3_transfer_execution;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/transfer_task_lifecycle.rs"]
