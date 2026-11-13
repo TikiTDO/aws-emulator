@@ -769,6 +769,26 @@ pub async fn serve<Eng: Send + Sync + 'static>(
                     };
                     super::lambda_target::served(ctx, &forwarded, &request, body).await
                 }
+                // Proxied with no lock of this service's held, like an invocation.
+                Performed::Proxy(forwarded) => {
+                    let address = host_workloads(engine)
+                        .and_then(|workloads| forwarded.address(&workloads.lock()));
+                    match (address, req.body().bytes()) {
+                        (Some(address), Some(body)) => {
+                            super::host_target::served(address, &forwarded, &request, body).await
+                        }
+                        (None, _) => {
+                            tracing::info!(
+                                load_balancer = %load_balancer_arn,
+                                port = forwarded.port,
+                                "no host workload published the target's port, so the \
+                                 connection to it cannot be made"
+                            );
+                            Served::status(TARGET_UNREACHABLE_STATUS)
+                        }
+                        (Some(_), None) => Served::status(TARGET_UNREACHABLE_STATUS),
+                    }
+                }
             }
         }
     };
@@ -1114,6 +1134,9 @@ enum Performed {
     /// The action forwards to a `lambda` target group, so the client is answered from an
     /// INVOCATION of the function registered with it ([`super::lambda_target`]).
     Invoke(Box<super::lambda_target::Forwarded>),
+    /// The action forwards to an `ip` or `instance` target whose workload runs on the host,
+    /// so the request is PROXIED to it ([`super::host_target`]).
+    Proxy(Box<super::host_target::Forwarded>),
 }
 
 /// Perform the matched action list: the terminating action answers the client, and an
@@ -1416,6 +1439,34 @@ fn forward(
             }),
         }));
     }
+    if ::service_common::host_workloads::enabled() {
+        // Host workloads are on, so the scheduler that started this target's workload
+        // published where its ports are dialled: try the workload it registered the target
+        // for, then the target id itself.
+        if let Some(port) = target.port.or(group.port) {
+            let keys = target
+                .registered_for
+                .iter()
+                .cloned()
+                .map(::service_common::host_workloads::WorkloadKey::Workload)
+                .chain(std::iter::once(
+                    ::service_common::host_workloads::WorkloadKey::Target(target.id.clone()),
+                ))
+                .collect();
+            return Performed::Proxy(Box::new(super::host_target::Forwarded {
+                keys,
+                port,
+                protocol: listener.protocol.clone(),
+                listener_port: listener.port,
+                set_cookie: (distribution.sticky && pinned.is_none()).then(|| {
+                    super::target_group_selection::set_cookie(
+                        &group.arn,
+                        distribution.sticky_duration_seconds,
+                    )
+                }),
+            }));
+        }
+    }
     tracing::warn!(
         "the target group's healthy target is a registration with no server of this \
          emulator's behind it, so the connection to it cannot be made"
@@ -1703,4 +1754,14 @@ mod tests {
             "a host naming no port leaves the listener to be chosen by the load balancer"
         );
     }
+}
+
+/// The shared host-workload registry ([`::service_common::host_workloads`]) in the SAME engine
+/// the scheduler writes it in; `None` on an engine that carries no shared state.
+fn host_workloads<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+) -> Option<::engine::ServiceState<::service_common::host_workloads::HostWorkloads>> {
+    (engine as &dyn ::std::any::Any)
+        .downcast_ref::<::engine::InMemoryEngine>()
+        .map(::engine::InMemoryEngine::state::<::service_common::host_workloads::HostWorkloads>)
 }
