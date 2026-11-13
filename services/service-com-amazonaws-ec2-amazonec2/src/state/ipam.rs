@@ -1444,45 +1444,50 @@ pub const INVALID_IPAM_PREFIX_LIST_RESOLVER_ID_NOT_FOUND: &str =
 pub const INVALID_IPAM_PREFIX_LIST_RESOLVER_TARGET_ID_NOT_FOUND: &str =
     "InvalidIpamPrefixListResolverTargetId.NotFound";
 
-/// The sentence this family's `NotFound` refusal is worded with: the resource as the API
-/// documents it, the id from the REQUEST IN PARENTHESES, and `does not exist.`
+/// The sentence this family's `NotFound` refusal is worded with: `The specified <resource> does
+/// not exist.`, where `<resource>` is the resource's own name as the API spells it.
 ///
-/// That is how the IPAM family of resources words this refusal — "The IPAM (…) does not
-/// exist." ([`invalid_ipam_id_not_found`]) and "The IPAM scope (…) does not exist."
-/// ([`invalid_ipam_scope_id_not_found`]), the two sentences the wire corpus records for it —
-/// rather than the quoted `The <kind> '<id>' does not exist` the rest of EC2 answers
-/// ([`id_not_found`]). Only the resource's name differs between the two refusals below, so the
-/// template lives here once.
+/// The sentence is FIXED: this pair of resources is refused with the "specified" wording and
+/// names NO id — neither the id the request sent nor any other value varies in it — which is
+/// why the id a caller asked about is not a parameter of this template. That is what separates
+/// it both from the parenthesised `The IPAM (…) does not exist.` the IPAM and its scopes answer
+/// ([`invalid_ipam_id_not_found`], [`invalid_ipam_scope_id_not_found`]) and from the quoted
+/// `The <kind> '<id>' does not exist` the rest of EC2 answers ([`id_not_found`]). Only the
+/// resource's name differs between the two refusals below, so the template lives here once.
 pub(super) fn ipam_prefix_list_resolver_family_not_found<E>(
     code: &'static str,
     resource: &str,
-    id: &str,
 ) -> Scaffolded<E> {
     Scaffolded::service_error(
         code,
         400,
-        format!("The {resource} ({}) does not exist.", echoed_resource_id(id)),
+        format!("The specified {resource} does not exist."),
     )
 }
 
+/// The resource name this family's resolver refusal spells, which is the resource as the API
+/// titles it rather than the lower-case prose the rest of this module's sentences use.
+const IPAM_PREFIX_LIST_RESOLVER_REFUSAL_NAME: &str = "IPAM Prefix List Resolver";
+
+/// The same for the resolver TARGET: the resolver's own name with the target's word on the end.
+const IPAM_PREFIX_LIST_RESOLVER_TARGET_REFUSAL_NAME: &str = "IPAM Prefix List Resolver Target";
+
 /// Refuse a prefix list resolver id this account holds no resolver for: HTTP 400
 /// [`INVALID_IPAM_PREFIX_LIST_RESOLVER_ID_NOT_FOUND`], worded by the template above.
-pub fn invalid_ipam_prefix_list_resolver_id_not_found<E>(resolver_id: &str) -> Scaffolded<E> {
+pub fn invalid_ipam_prefix_list_resolver_id_not_found<E>() -> Scaffolded<E> {
     ipam_prefix_list_resolver_family_not_found(
         INVALID_IPAM_PREFIX_LIST_RESOLVER_ID_NOT_FOUND,
-        "IPAM prefix list resolver",
-        resolver_id,
+        IPAM_PREFIX_LIST_RESOLVER_REFUSAL_NAME,
     )
 }
 
 /// Refuse a resolver target id this account holds no target for: HTTP 400
 /// [`INVALID_IPAM_PREFIX_LIST_RESOLVER_TARGET_ID_NOT_FOUND`], worded by that same template with
 /// the target's own name.
-pub fn invalid_ipam_prefix_list_resolver_target_id_not_found<E>(target_id: &str) -> Scaffolded<E> {
+pub fn invalid_ipam_prefix_list_resolver_target_id_not_found<E>() -> Scaffolded<E> {
     ipam_prefix_list_resolver_family_not_found(
         INVALID_IPAM_PREFIX_LIST_RESOLVER_TARGET_ID_NOT_FOUND,
-        "IPAM prefix list resolver target",
-        target_id,
+        IPAM_PREFIX_LIST_RESOLVER_TARGET_REFUSAL_NAME,
     )
 }
 

@@ -268,9 +268,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // this account holds none of is refused with that resource's own `NotFound` code, so a
         // target can never name a resolver the store does not hold.
         if !store.ipam_prefix_list_resolvers.contains_key(resolver_id) {
-            return Err(state::invalid_ipam_prefix_list_resolver_id_not_found(
-                resolver_id,
-            ));
+            return Err(state::invalid_ipam_prefix_list_resolver_id_not_found());
         }
 
         // "The ID of the managed prefix list that will be synchronized with CIDRs selected by

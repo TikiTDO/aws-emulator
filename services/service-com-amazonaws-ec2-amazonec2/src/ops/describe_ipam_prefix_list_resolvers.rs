@@ -256,13 +256,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // whole store per id.
         let wanted_ids: ::std::collections::BTreeSet<&str> =
             requested.iter().map(String::as_str).collect();
-        if let Some(unknown) = wanted_ids
+        if wanted_ids
             .iter()
-            .find(|id| !store.ipam_prefix_list_resolvers.contains_key(**id))
+            .any(|id| !store.ipam_prefix_list_resolvers.contains_key(*id))
         {
-            return Err(crate::state::invalid_ipam_prefix_list_resolver_id_not_found(
-                unknown,
-            ));
+            return Err(crate::state::invalid_ipam_prefix_list_resolver_id_not_found());
         }
 
         // Everything the account holds, narrowed to the ids named, with every filter then

@@ -266,14 +266,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // (`DescribeIpamPrefixListResolverTargetsRequest$IpamPrefixListResolverId`): a resolver
         // the account holds none of is an error, not an empty page — the same answer the
         // creating operation gives for one.
-        if let Some(resolver_id) = input
+        if input
             .ipam_prefix_list_resolver_id
             .as_deref()
-            .filter(|resolver_id| !store.ipam_prefix_list_resolvers.contains_key(*resolver_id))
+            .is_some_and(|resolver_id| {
+                !store.ipam_prefix_list_resolvers.contains_key(resolver_id)
+            })
         {
-            return Err(crate::state::invalid_ipam_prefix_list_resolver_id_not_found(
-                resolver_id,
-            ));
+            return Err(crate::state::invalid_ipam_prefix_list_resolver_id_not_found());
         }
 
         // An id that names no target of the account is an error, not an absent row. The ids are
@@ -281,13 +281,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // store per id.
         let wanted_ids: ::std::collections::BTreeSet<&str> =
             requested.iter().map(String::as_str).collect();
-        if let Some(unknown) = wanted_ids
+        if wanted_ids
             .iter()
-            .find(|id| !store.ipam_prefix_list_resolver_targets.contains_key(**id))
+            .any(|id| !store.ipam_prefix_list_resolver_targets.contains_key(*id))
         {
-            return Err(
-                crate::state::invalid_ipam_prefix_list_resolver_target_id_not_found(unknown),
-            );
+            return Err(crate::state::invalid_ipam_prefix_list_resolver_target_id_not_found());
         }
 
         // "If not specified, all targets in your account are described"

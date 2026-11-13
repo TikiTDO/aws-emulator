@@ -21,7 +21,9 @@
 //! * one `ClientToken` names the one resolver it minted: a replay answers that resolver, and a
 //!   replay asking for anything else is refused;
 //! * every member of the created resolver reads back through `DescribeIpamPrefixListResolvers`,
-//!   which also narrows by id, by the documented filters and by the page size;
+//!   which also narrows by id, by the documented filters and by the page size, and refuses an id
+//!   the account holds no resolver for with that resource's `NotFound` code and the one fixed
+//!   sentence this family words that refusal with;
 //! * the IPAM facts the resolver reports are the STORED IPAM's own — its ARN and the Region it
 //!   is located in — whichever Region the create itself was signed for.
 //!
@@ -43,7 +45,7 @@ use ec2::state::{
 use service_com_amazonaws_ec2_amazonec2 as ec2;
 use smithy_server_runtime::MultiServiceRouter;
 
-use super::ec2_query::{call, element, error_code, filters, indexed};
+use super::ec2_query::{call, element, error_code, error_message, filters, indexed};
 use super::wire::{child, child_text, document, is_long_id, param, Param};
 
 /// The Region every call here is signed for, which is therefore each IPAM's home Region.
@@ -1178,6 +1180,56 @@ async fn the_describe_pages_in_a_stable_order() {
             row.code,
             "case {case:?}: expected {}, got {body}",
             row.code
+        );
+    }
+
+    // The refusal for an id the account holds no resolver for names the RESOURCE and nothing
+    // else, in the one sentence this family words it with: `The specified <resource> does not
+    // exist.` — the same sentence whatever id the request sent, in whatever form, and however
+    // many of them, since no part of it comes from the request.
+    let unknown_ids: Vec<(&str, Vec<Param>)> = vec![
+        (
+            "one id of the form this service mints",
+            indexed(
+                "IpamPrefixListResolverId",
+                &["ipam-plr-0ffffffffffffffff"],
+            ),
+        ),
+        (
+            "one id in a form this service does not mint",
+            indexed("IpamPrefixListResolverId", &["resolver-one"]),
+        ),
+        (
+            "two ids, neither naming a resolver",
+            indexed(
+                "IpamPrefixListResolverId",
+                &["ipam-plr-0ffffffffffffffff", "ipam-plr-0eeeeeeeeeeeeeeee"],
+            ),
+        ),
+        (
+            "a held id beside one naming no resolver",
+            indexed(
+                "IpamPrefixListResolverId",
+                &[seeded[0].id.as_str(), "ipam-plr-0ffffffffffffffff"],
+            ),
+        ),
+    ];
+    let wanted_message = "The specified IPAM Prefix List Resolver does not exist.";
+    for (case, params) in &unknown_ids {
+        let (status, body) = invoke(&router, DESCRIBE, params).await;
+        assert_eq!(
+            status, 400,
+            "case {case:?}: expected HTTP 400, got {status} with body {body}"
+        );
+        assert_eq!(
+            error_code(&body),
+            "InvalidIpamPrefixListResolverId.NotFound",
+            "case {case:?}: expected InvalidIpamPrefixListResolverId.NotFound, got {body}"
+        );
+        assert_eq!(
+            error_message(&body),
+            wanted_message,
+            "case {case:?}: expected the refusal {wanted_message:?}, got {body}"
         );
     }
 

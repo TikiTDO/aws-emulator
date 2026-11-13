@@ -1232,24 +1232,45 @@ async fn the_describe_pages_in_a_stable_order() {
         );
     }
 
-    // The refusal NAMES the resource and the id the request asked for, in the sentence the
-    // IPAM family words this refusal with: `The <resource> (<id>) does not exist.`
+    // The refusal names the RESOURCE and nothing else, in the one sentence this family words it
+    // with: `The specified <resource> does not exist.` — the same sentence whatever id the
+    // request sent, and in whatever form it sent it.
     let unknown_ids = [
-        ("a target id", "ipam-plrt-0ffffffffffffffff", "IPAM prefix list resolver target"),
-        ("a resolver id", "ipam-plr-0ffffffffffffffff", "IPAM prefix list resolver"),
+        (
+            "a target id of the form this service mints",
+            indexed("IpamPrefixListResolverTargetId", &["ipam-plrt-0ffffffffffffffff"]),
+            "The specified IPAM Prefix List Resolver Target does not exist.",
+        ),
+        (
+            "a target id in a form this service does not mint",
+            indexed("IpamPrefixListResolverTargetId", &["target-one"]),
+            "The specified IPAM Prefix List Resolver Target does not exist.",
+        ),
+        (
+            "two target ids, neither naming a target",
+            indexed(
+                "IpamPrefixListResolverTargetId",
+                &["ipam-plrt-0ffffffffffffffff", "ipam-plrt-0eeeeeeeeeeeeeeee"],
+            ),
+            "The specified IPAM Prefix List Resolver Target does not exist.",
+        ),
+        (
+            "a resolver id of the form this service mints",
+            vec![param("IpamPrefixListResolverId", "ipam-plr-0ffffffffffffffff")],
+            "The specified IPAM Prefix List Resolver does not exist.",
+        ),
+        (
+            "a resolver id in a form this service does not mint",
+            vec![param("IpamPrefixListResolverId", "resolver-one")],
+            "The specified IPAM Prefix List Resolver does not exist.",
+        ),
     ];
-    for (case, unknown, resource) in unknown_ids {
-        let params = if resource.ends_with("target") {
-            indexed("IpamPrefixListResolverTargetId", &[unknown])
-        } else {
-            vec![param("IpamPrefixListResolverId", unknown)]
-        };
+    for (case, params, wanted) in unknown_ids {
         let (_status, body) = invoke(&router, DESCRIBE, &params).await;
         assert_eq!(
             error_message(&body),
-            format!("The {resource} ({unknown}) does not exist."),
-            "case {case:?}: the refusal names the resource and the id the request sent, \
-             got {body}"
+            wanted,
+            "case {case:?}: expected the refusal {wanted:?}, got {body}"
         );
     }
 
