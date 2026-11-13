@@ -181,5 +181,8 @@ brush-parser = { version = "0.4", default-features = false }
 # by the maintained encoder the URL parser itself uses.
 percent-encoding = "2"
 
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["user"] }
+
 [lints]
 workspace = true

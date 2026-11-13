@@ -144,22 +144,40 @@ impl StateDir {
         self.root.join(&self.namespace)
     }
 
-    /// Create this namespace's directory if it is missing, readable by this user only (it holds
-    /// KMS key material), and check that what is there is a real directory, not a link to
-    /// somewhere else. Boot calls this once, before any snapshot is read or written.
+    /// Create this namespace's directory if it is missing, private to this user (it holds KMS
+    /// key material), and refuse one that is already there but is not this instance's to use:
+    /// a link rather than a directory, owned by another user, or open to group or others. A
+    /// refused directory is left exactly as found: never re-permissioned, never adopted.
+    ///
+    /// The root itself is the operator's choice and is trusted as given, links included (on a
+    /// Mac `/blobs` is one); the boundary checked here is the namespace directory inside it.
+    /// Boot calls this once, before any snapshot is read or written.
     pub fn admit(&self) -> Result<PathBuf, PersistError> {
         let dir = self.dir();
+        let refuse = |detail: &str| PersistError::Io {
+            path: dir.clone(),
+            error: std::io::Error::new(std::io::ErrorKind::PermissionDenied, detail.to_string()),
+        };
         let io = |error| PersistError::Io {
             path: dir.clone(),
             error,
         };
         private_dirs(&dir).map_err(io)?;
-        let kind = std::fs::symlink_metadata(&dir).map_err(io)?.file_type();
-        if !kind.is_dir() {
-            return Err(io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "the namespace's state path is not a plain directory",
-            )));
+        let found = std::fs::symlink_metadata(&dir).map_err(io)?;
+        if !found.file_type().is_dir() {
+            return Err(refuse("the namespace's state path is not a plain directory"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if found.uid() != nix::unistd::geteuid().as_raw() {
+                return Err(refuse("the namespace's state directory belongs to another user"));
+            }
+            if found.mode() & 0o077 != 0 {
+                return Err(refuse(
+                    "the namespace's state directory is open to group or others (expected 0700)",
+                ));
+            }
         }
         Ok(dir)
     }
@@ -628,6 +646,15 @@ mod tests {
             let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode(&dir), 0o700);
             assert_eq!(mode(&path), 0o600);
+
+            let open = root.join("open");
+            std::fs::create_dir_all(&open).unwrap();
+            std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(matches!(
+                StateDir::new(&root, "open").unwrap().admit(),
+                Err(PersistError::Io { .. })
+            ));
+            assert_eq!(mode(&open), 0o755, "a refused directory is left as found");
 
             let elsewhere = scratch("admit-elsewhere");
             std::fs::create_dir_all(&elsewhere).unwrap();

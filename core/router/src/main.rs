@@ -234,14 +234,17 @@ async fn build_and_serve(options: RunOptions) {
                 let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
                 loop {
                     tick.tick().await;
-                    periodic.save_changed().await;
+                    // A failure is logged by save_changed and retried on the next tick.
+                    let _ = periodic.save_changed().await;
                 }
             });
             let served = emulator_server::serve_emulator_until_shutdown(
                 aws_emulator_router::persistence::PersistingRouter::new(router, persistence.clone()),
             )
             .await;
-            persistence.save_changed().await;
+            if let Err(not_durable) = persistence.save_changed().await {
+                eprintln!("emulator state not written at shutdown: {:?}", not_durable.failed);
+            }
             served
         }
         None => emulator_server::serve_emulator_until_shutdown(router).await,

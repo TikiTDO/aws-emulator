@@ -105,14 +105,14 @@ async fn an_acknowledged_change_is_on_disk_before_the_answer_and_comes_back_afte
     let ciphertext = sealed["CiphertextBlob"].as_str().unwrap().to_string();
     let role = iam(
         &before,
-        "Action=CreateRole&Version=2010-05-08&RoleName=DeployRole&AssumeRolePolicyDocument=%7B%7D",
+        "Action=CreateRole&Version=2010-05-08&RoleName=DeployRole&AssumeRolePolicyDocument=%7B%22Version%22%3A%222012-10-17%22%2C%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Principal%22%3A%7B%22Service%22%3A%22ecs-tasks.amazonaws.com%22%7D%2C%22Action%22%3A%22sts%3AAssumeRole%22%7D%5D%7D",
     )
     .await;
     assert!(role.contains("<RoleName>DeployRole</RoleName>"), "{role}");
 
     // A read changes nothing, so nothing is rewritten.
     kms(&before, "DescribeKey", json!({ "KeyId": key_id })).await;
-    assert_eq!(persistence.save_changed().await, Vec::<&str>::new());
+    assert_eq!(persistence.save_changed().await.unwrap(), Vec::<&str>::new());
 
     // The crash: no shutdown save, the old engine simply gone.
     drop(before);
@@ -127,5 +127,39 @@ async fn an_acknowledged_change_is_on_disk_before_the_answer_and_comes_back_afte
     let read = iam(&after, "Action=GetRole&Version=2010-05-08&RoleName=DeployRole").await;
     assert!(read.contains("<RoleName>DeployRole</RoleName>"), "{read}");
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_change_that_cannot_be_written_is_not_answered_as_success() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("aws-emulator-not-durable-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let state_dir = service_common::persist::StateDir::new(&dir, "default").unwrap();
+    let engine = Arc::new(engine::InMemoryEngine::new());
+    let persistence = Arc::new(Persistence::all(Arc::clone(&engine), state_dir.clone()).unwrap());
+    persistence.restore().unwrap();
+    let router = PersistingRouter::new(router_over(&engine), Arc::clone(&persistence));
+
+    // The namespace directory stops accepting files: the next write fails.
+    std::fs::set_permissions(state_dir.dir(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/")
+        .header("host", format!("kms.{REGION}.amazonaws.com"))
+        .header("content-type", "application/x-amz-json-1.1")
+        .header("x-amz-target", "TrentService.CreateKey")
+        .header("authorization", authorization("kms"))
+        .body(Bytes::from_static(b"{}"))
+        .unwrap();
+    let response = router.handle_request(request).await;
+    let text = String::from_utf8_lossy(response.body()).to_string();
+    assert_eq!(response.status(), 500, "{text}");
+    assert!(text.contains("InternalFailure") && text.contains("kms"), "{text}");
+
+    // Writable again: the change still in memory is written by the next save.
+    std::fs::set_permissions(state_dir.dir(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(persistence.save_changed().await.unwrap(), vec!["kms"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
