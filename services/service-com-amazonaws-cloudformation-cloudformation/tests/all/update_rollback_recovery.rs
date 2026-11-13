@@ -277,9 +277,9 @@ async fn continuing_a_rollback_is_refused_unless_the_rollback_failed() {
     );
 
     // While the create is still in flight, and once it has completed: neither is a status a
-    // rollback can be continued from, and the stack is left exactly where it is. The refusal
-    // names the call that cannot be made and the status the stack IS in, so the two rows
-    // differ in the status the sentence reports.
+    // rollback can be continued from, and neither is a status an update's failure left the
+    // stack in, so both are refused by the control plane's own status gate and the stack is
+    // left exactly where it is.
     for (case, reported) in [
         ("while the create is in progress", status::CREATE_IN_PROGRESS),
         ("after the create completed", status::CREATE_COMPLETE),
@@ -294,8 +294,9 @@ async fn continuing_a_rollback_is_refused_unless_the_rollback_failed() {
             http_status, 400,
             "case {case:?}: expected the call to be refused with 400, got {http_status} {body}"
         );
-        // The status gate words ONE sentence whatever status it refused from, so the status
-        // the stack is really in (`reported`) reaches no part of it.
+        // Neither row's status is one an update's failure left the stack in, so the gate
+        // that refuses the call is the control plane's own: its sentence names the internal
+        // operation and carries no part of this run, the stack's real status included.
         let expected = CANNOT_CONTINUE_UPDATE_ROLLBACK;
         assert!(
             body.contains(expected),

@@ -49,13 +49,13 @@
 //! refused ([`refuse_unapplied_properties`]).
 //!
 //! `CreateTable` answers a table whose `TableStatus` is `CREATING` — "You can perform read
-//! and write operations only on an ACTIVE table" — but the table EXISTS from that moment, so
-//! the resource's creation is not held open on it ([`readiness`]): that span is DynamoDB's
-//! own transition, exactly as the `creating` of an `AWS::RDS::DBInstance` is Amazon RDS's.
-//! What DOES hold the resource open is a declared SETTING that service has not put into
-//! force yet: the declaration is not applied while it is still being applied, so a client
-//! that reads the setting back the instant the stack completes is answered what the template
-//! declared.
+//! and write operations only on an ACTIVE table" — so the resource's creation IS held open on
+//! that window ([`readiness`]): a table in it takes none of the calls the stack published it
+//! for, and a client acting on the stack's output the instant the stack completes is answered
+//! as if the table were not there. What ALSO holds the resource open is a declared SETTING
+//! that service has not put into force yet: the declaration is not applied while it is still
+//! being applied, so a client that reads the setting back the instant the stack completes is
+//! answered what the template declared.
 
 use std::collections::BTreeMap;
 
@@ -173,7 +173,7 @@ const PUBLISHED_ATTRIBUTES: &[(&str, &str)] = &[
 ];
 
 /// The member a description reports the table's lifecycle state in, read by
-/// [`await_settled`].
+/// [`await_settled`] and [`creation_window`].
 const TABLE_STATUS_MEMBER: &str = "TableStatus";
 
 /// Create the table an `AWS::DynamoDB::Table` declares, in Amazon DynamoDB itself — so a
@@ -248,17 +248,20 @@ pub(super) async fn create(
     )))
 }
 
-/// Whether DynamoDB reports the table this create made ready.
+/// Whether DynamoDB reports the table this create or change made ready.
 ///
-/// The table itself is not waited for: it EXISTS from the moment `CreateTable` answers —
-/// `DescribeTable` resolves it, `ListTables` reports it, and the stream its specification
-/// enabled is already registered under the ARN the create answered — and the `CREATING`
-/// window its own `TableStatus` reports ("You can perform read and write operations only on
-/// an ACTIVE table") is DynamoDB's own transition, not a resource that has yet to come into
-/// being. It is the case an `AWS::RDS::DBInstance` states for a database: the resource the
-/// create answered exists and takes the calls made on it.
+/// The TABLE itself is waited for: `CreateTable` answers a table whose `TableStatus` is
+/// `CREATING`, and "you can perform read and write operations only on an ACTIVE table", so a
+/// table in that window takes none of the calls its declaring stack published it for — a
+/// client handed the table's name or ARN by a completed stack is answered as if the table
+/// were not there. That is the same case Amazon EC2's `pending` is for an instance
+/// ([`super::ec2_instance::readiness`]): the stack holds the resource's creation open until
+/// the owning service reports the resource out of its own creation window, so a client that
+/// reads the stack as complete finds a table it can really read and write. `UPDATING` is
+/// that window for a CHANGE: the declaration is not in force while that service is still
+/// putting it there.
 ///
-/// What IS waited for is a SETTING the DECLARATION asked for that this arm applied through a
+/// Also waited for is a SETTING the DECLARATION asked for that this arm applied through a
 /// call of its own ([`settings`]): until that service's own read reports the setting in
 /// force, the configuration the declaration asked for is not the configuration the table
 /// has, and a resource reported created is one whose whole declared configuration a client
@@ -266,16 +269,36 @@ pub(super) async fn create(
 /// and nothing is asked about them. `declared` is `None` where the records do not say what
 /// the resource was declared with, and every setting of the type is then asked about, since
 /// nothing says which of them this resource's creation owes.
+///
+/// A read DynamoDB refuses, and a table it reports none of, say nothing about either
+/// question — one unanswered read is no evidence about the table — so neither holds the
+/// resource open, exactly as [`settings::settling`] treats a refused read.
 pub(super) async fn readiness(
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
     physical_resource_id: &str,
     declared: Option<&Value>,
 ) -> Readiness {
+    if let Some(status) = creation_window(ctx, region, physical_resource_id).await {
+        return Readiness::Pending(status);
+    }
     match settings::settling(ctx, region, physical_resource_id, declared).await {
         Some(status) => Readiness::Pending(status),
         None => Readiness::Ready,
     }
+}
+
+/// The `TableStatus` DynamoDB reports for a table it has not finished creating or changing
+/// ([`in_change_window`]), or `None` where it reports the table out of both windows — or
+/// reports nothing this can read.
+async fn creation_window(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    physical_resource_id: &str,
+) -> Option<String> {
+    let description = describe(ctx, region, physical_resource_id).await.ok()??;
+    let status = description.get(TABLE_STATUS_MEMBER)?.as_str()?;
+    in_change_window(status).then(|| status.to_string())
 }
 
 /// Apply a CHANGED declaration to the table the stack already has, through DynamoDB's own
@@ -404,9 +427,10 @@ async fn delete_table(
 ///
 /// Nothing is asked, and nothing waits: `DeleteTable` takes the table away as it answers —
 /// "DynamoDB immediately returns a response with a TableStatus of DELETING", and from that
-/// moment the table takes no further call and the name is free again — so the `DELETING`
-/// window is DynamoDB's own transition, exactly as the `CREATING` one [`readiness`] states
-/// is.
+/// moment the table takes no further call and the name is free again, so the stack's
+/// resource is already gone. That is the OPPOSITE of the `CREATING` window [`readiness`]
+/// holds a create open on: there the table exists and serves nothing yet, here it serves
+/// nothing and is no longer there to wait for.
 pub(super) fn removal() -> Removal {
     Removal::Gone
 }
@@ -414,9 +438,19 @@ pub(super) fn removal() -> Removal {
 /// The `TableStatus` values DynamoDB refuses a further change of the table in: "attempt to
 /// recreate an existing table, or tried to delete a table currently in the CREATING state"
 /// is its `ResourceInUseException`, and the same holds while an earlier change is still
-/// being applied.
+/// being applied. They are the same windows a table serves no item call in ("You can perform
+/// read and write operations only on an ACTIVE table"), which is why [`readiness`] holds the
+/// resource open on them as well.
 const TABLE_STATUS_CREATING: &str = "CREATING";
 const TABLE_STATUS_UPDATING: &str = "UPDATING";
+
+/// Whether `status` is one of those windows — the ONE reading of a `TableStatus` in this
+/// module, so the wait before a further call ([`await_settled`]) and the readiness of a
+/// created or changed resource ([`creation_window`]) cannot come to disagree about which
+/// statuses they are.
+fn in_change_window(status: &str) -> bool {
+    status == TABLE_STATUS_CREATING || status == TABLE_STATUS_UPDATING
+}
 
 /// How long [`await_settled`] waits between asking DynamoDB whether the table is out of
 /// those windows, and how many times it asks.
@@ -453,7 +487,7 @@ async fn await_settled(
             .get(TABLE_STATUS_MEMBER)
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if status != TABLE_STATUS_CREATING && status != TABLE_STATUS_UPDATING {
+        if !in_change_window(status) {
             return;
         }
         ::tokio::time::sleep(SETTLED_CHECK_INTERVAL).await;

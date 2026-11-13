@@ -228,11 +228,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // roll back all changes after a failed stack update": that is the one state a
             // rollback can be continued from, so a stack in any other one is refused and
             // left exactly where it is. The refusal names the call that cannot be made and
-            // says the current status is not one it can be made from
-            // ([`crate::state::CANNOT_CONTINUE_UPDATE_ROLLBACK`]).
+            // the status the stack is in
+            // ([`crate::state::cannot_continue_update_rollback`]).
             if previous.status != status::UPDATE_ROLLBACK_FAILED {
                 return Err(crate::scaffolded::Scaffolded::validation_error(
-                    crate::state::CANNOT_CONTINUE_UPDATE_ROLLBACK,
+                    crate::state::cannot_continue_update_rollback(&previous.status),
                 ));
             }
             // "A client request token already exists": the token identifies ONE request, so

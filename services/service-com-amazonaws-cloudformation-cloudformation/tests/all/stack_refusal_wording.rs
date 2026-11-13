@@ -76,10 +76,11 @@ fn labelled(name: &str) -> String {
     format!("Stack: {name} does not exist")
 }
 
-/// The fixed sentence `ContinueUpdateRollback` answers for a stack whose status the
-/// continuation cannot be started from: the call CloudFormation's control plane makes for it,
-/// and that the current status is not one the call can be made from — which status that is
-/// reaches no part of it.
+/// The sentence `ContinueUpdateRollback` answers for a stack whose status the continuation
+/// cannot be started from AND whose last update did not fail: the control plane's own status
+/// gate, which names the internal operation and no part of the stack. (A stack an update's
+/// FAILURE parked is refused by this operation's own precondition instead, which
+/// `continue_update_rollback_status_gate.rs` pins.)
 const CANNOT_CONTINUE: &str = "RollbackUpdatedStack cannot be called from current stack status";
 
 /// The fixed sentence `RollbackStack` answers for a stack whose status a rollback cannot be
@@ -575,7 +576,8 @@ async fn a_status_gated_rollback_refusal_carries_no_part_of_the_stack_it_refused
     // NEITHER sentence carries any part of this run's state: neither names the stack — not by
     // id and not by the name the request sent. `RollbackStack`'s states the statuses the call
     // CAN be made from, so it names the stack's current status no more than it names the
-    // stack.
+    // stack, and the gate `ContinueUpdateRollback` is refused by here carries no status
+    // either.
     let (status, described) = describe_stack(&router, "wording-status").await;
     assert_eq!(
         status, 200,

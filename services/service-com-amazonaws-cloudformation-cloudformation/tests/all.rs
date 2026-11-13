@@ -121,6 +121,8 @@ mod duplicate_resource_identifiers;
 mod dynamic_reference_names;
 #[path = "all/dynamic_references.rs"]
 mod dynamic_references;
+#[path = "all/dynamodb_table_creation_window.rs"]
+mod dynamodb_table_creation_window;
 #[path = "all/dynamodb_table_resources.rs"]
 mod dynamodb_table_resources;
 #[path = "all/dynamodb_table_settings.rs"]

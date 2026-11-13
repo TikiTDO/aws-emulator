@@ -26,7 +26,7 @@
 //!    `PutResourcePolicy` doc): a stream holds a policy of its own, independent of its
 //!    table's, every statement names actions of the resource it is attached to, an Allow
 //!    may not name a public principal, and the document is stored as the request stated
-//!    it — nothing is added to it, the `Version` it is read under included.
+//!    it, with the `Version` it is read under stated where it stated none.
 //!
 //! Every test drives the operations over the wire (`POST /` with
 //! `X-Amz-Target: DynamoDB_20120810.<OperationName>`) through the same
@@ -706,7 +706,7 @@ async fn a_stream_holds_a_policy_of_its_own_and_every_statement_names_the_resour
 }
 
 #[tokio::test]
-async fn a_policy_document_is_stored_as_the_request_stated_it() {
+async fn a_policy_document_is_stored_as_the_request_stated_it_under_the_version_it_is_read_under() {
     let router = emulator();
     let table = "PolicyVersions";
     ok(
@@ -723,24 +723,28 @@ async fn a_policy_document_is_stored_as_the_request_stated_it() {
     let described = crate::emulator::describe_when_active(&router, "policy versions", table).await;
     let arn = described["TableArn"].as_str().unwrap_or_default().to_string();
 
-    // Rows differ along the version the document states: a document that states one
-    // keeps it, and one that states none is stored and reported WITHOUT one — the
-    // `Version` such a document is read under ("if you do not include a Version element,
-    // the value defaults to 2008-10-17") is a reading of the document, not a member of
-    // it, so nothing is added to what the request stated.
-    for (case, document, expected_version) in [
+    // Rows differ along the version the document states: a document that states one keeps
+    // it, and one that states none is stored under the version it is READ under ("if you do
+    // not include a Version element, the value defaults to 2008-10-17"), which is the
+    // version every reading of it applies. `reported` is the whole document a read answers,
+    // so nothing else may change on the way into the store either.
+    for (case, document, reported) in [
         (
             "a document with no Version",
             json!({"Statement": [{"Effect": "Deny", "Principal": {"AWS": "*"},
                                   "Action": "dynamodb:GetItem", "Resource": &arn}]}),
-            Value::Null,
+            json!({"Version": "2008-10-17",
+                   "Statement": [{"Effect": "Deny", "Principal": {"AWS": "*"},
+                                  "Action": "dynamodb:GetItem", "Resource": &arn}]}),
         ),
         (
             "a document that states one",
             json!({"Version": "2012-10-17",
                    "Statement": [{"Effect": "Deny", "Principal": {"AWS": "*"},
                                   "Action": "dynamodb:PutItem", "Resource": &arn}]}),
-            json!("2012-10-17"),
+            json!({"Version": "2012-10-17",
+                   "Statement": [{"Effect": "Deny", "Principal": {"AWS": "*"},
+                                  "Action": "dynamodb:PutItem", "Resource": &arn}]}),
         ),
     ] {
         ok(
@@ -755,16 +759,17 @@ async fn a_policy_document_is_stored_as_the_request_stated_it() {
         let read = ok(&router, "GetResourcePolicy", json!({"ResourceArn": &arn})).await;
         assert_eq!(
             read["Policy"],
-            json!(document.to_string()),
-            "case {case:?}: expected the document the request stated, got {read}"
+            json!(reported.to_string()),
+            "case {case:?}: expected the document the store holds, got {read}"
         );
         let stored: Value = serde_json::from_str(read["Policy"].as_str().unwrap_or("null"))
             .unwrap_or(Value::Null);
         assert_eq!(
             stored["Version"],
-            expected_version,
+            reported["Version"],
             "case {case:?}: expected the stored document to state Version \
-             {expected_version:?}, got {stored}"
+             {:?}, got {stored}",
+            reported["Version"]
         );
         assert_eq!(
             stored["Statement"],

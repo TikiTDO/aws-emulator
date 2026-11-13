@@ -4159,18 +4159,56 @@ pub fn stack_cannot_be_rolled_back() -> String {
     )
 }
 
+/// The operation the CALLER invokes to continue a rollback, and the name CloudFormation's
+/// own control plane dispatches it as.
+const CONTINUE_UPDATE_ROLLBACK_CALL: &str = "ContinueUpdateRollback";
+
+/// The statuses in which a stack's FAILED UPDATE is still awaiting its rollback: the one a
+/// continuation is served from, where the rollback ran and failed, and the one where the
+/// failed update's rollback has not been performed at all.
+///
+/// These are the statuses CloudFormation's update-rollback machinery takes the call for; a
+/// stack whose rollback is already running, already finished, or was never owed one has
+/// nothing for a continuation to resume, and the call never reaches that machinery
+/// ([`cannot_continue_update_rollback`]).
+pub const UPDATE_ROLLBACK_RECOVERY_STATUSES: [&str; 2] =
+    [status::UPDATE_ROLLBACK_FAILED, status::UPDATE_FAILED];
+
+/// The sentence the control plane's own status gate answers for the internal operation it
+/// dispatches `ContinueUpdateRollback` as: entirely FIXED text, naming that operation and
+/// saying the stack's current status is not one the call can be made from. Neither the
+/// status nor the stack reaches any part of it — the same shape
+/// `crate::ops::cancel_update_stack::CANNOT_CANCEL_UPDATE_STACK` has for the call that
+/// cancels an update.
+pub const CANNOT_CONTINUE_UPDATE_ROLLBACK: &str =
+    "RollbackUpdatedStack cannot be called from current stack status";
+
 /// The message CloudFormation answers when `ContinueUpdateRollback` names a stack whose
 /// current status is not one a rollback can be continued from.
 ///
-/// Entirely FIXED text, the way every status gate of this service's control plane words its
-/// refusal (`CANNOT_CANCEL_UPDATE_STACK` of `crate::ops::cancel_update_stack` is the same
-/// sentence for the call that cancels an update): the gate names the CALL it refused —
-/// `RollbackUpdatedStack`, the name of this operation in CloudFormation's own control plane
-/// — and says the stack's current status is not one it can be made from. WHICH status that
-/// is reaches no part of the sentence, and neither does the stack's id or name: the status
-/// is this run's own state, and `DescribeStacks` is what reports it.
-pub const CANNOT_CONTINUE_UPDATE_ROLLBACK: &str =
-    "RollbackUpdatedStack cannot be called from current stack status";
+/// WHICH sentence that is depends on which gate refused the call, and the two gates word
+/// their refusals differently:
+///
+/// * a stack whose failed update is still AWAITING its rollback is one the update-rollback
+///   machinery takes the call for ([`UPDATE_ROLLBACK_RECOVERY_STATUSES`]), so what refuses
+///   it is this operation's own precondition — continuing is defined only from
+///   `UPDATE_ROLLBACK_FAILED`, the one of those statuses where a rollback was attempted —
+///   and that refusal names the operation the CALLER invoked and the status the stack is in,
+///   which is the status a client recovering a stuck stack branches on;
+/// * a stack outside those statuses has no rollback for a continuation to resume, so the
+///   control plane's status gate for the internal operation refuses the call before it
+///   reaches that machinery, with that gate's invariant sentence
+///   ([`CANNOT_CONTINUE_UPDATE_ROLLBACK`]).
+///
+/// Neither sentence carries the stack's id or the name the request spelled.
+pub fn cannot_continue_update_rollback(status: &str) -> String {
+    if UPDATE_ROLLBACK_RECOVERY_STATUSES.contains(&status) {
+        return format!(
+            "{CONTINUE_UPDATE_ROLLBACK_CALL} cannot be called from stack with {status} status."
+        );
+    }
+    CANNOT_CONTINUE_UPDATE_ROLLBACK.to_string()
+}
 
 /// `Err(message)` for a request that names a change set by NAME without the stack it
 /// belongs to.

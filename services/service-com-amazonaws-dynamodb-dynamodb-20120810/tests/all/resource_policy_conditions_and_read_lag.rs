@@ -138,7 +138,8 @@ struct DocumentCase {
 /// The document a read reports is the one the request stated, in the canonical form: the
 /// same members, in the order they were written, with every value's own type kept — and an
 /// element the IAM grammar states as "either a single string or an array of strings" as
-/// the one string it lists. Nothing is added to it and nothing is dropped from it.
+/// the one string it lists. Nothing is dropped from it, and the only thing added is the
+/// `Version` the document is read under where it stated none.
 #[tokio::test]
 async fn the_stored_document_is_the_one_the_request_stated() {
     let router = emulator();
@@ -255,8 +256,8 @@ async fn the_stored_document_is_the_one_the_request_stated() {
         },
         DocumentCase {
             case: "a document that states no Version",
-            // The `Version` such a document is READ under is no member of it, so the
-            // read reports the document without one.
+            // A document stating no `Version` is READ under 2008-10-17, and the stored
+            // document states that version ahead of the members it stated.
             stated: json!({
                 "Statement": [{
                     "Effect": "Deny",
@@ -267,6 +268,7 @@ async fn the_stored_document_is_the_one_the_request_stated() {
             })
             .to_string(),
             reported: json!({
+                "Version": "2008-10-17",
                 "Statement": [{
                     "Effect": "Deny",
                     "Principal": {"AWS": "*"},

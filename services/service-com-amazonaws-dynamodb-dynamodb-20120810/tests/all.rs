@@ -175,6 +175,8 @@ mod regions_indexes_and_capacity;
 mod replica_auto_scaling;
 #[path = "all/resource_policy_conditions_and_read_lag.rs"]
 mod resource_policy_conditions_and_read_lag;
+#[path = "all/resource_policy_default_version.rs"]
+mod resource_policy_default_version;
 #[path = "all/resource_policy_not_found_messages.rs"]
 mod resource_policy_not_found_messages;
 #[path = "all/resource_policy_revision_tokens.rs"]

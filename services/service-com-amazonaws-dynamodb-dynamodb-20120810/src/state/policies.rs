@@ -50,14 +50,21 @@ pub(super) fn invalid_policy_document(detail: &str) -> PolicyFault {
 /// service could never be decided by it.
 const POLICY_ACTION_SERVICE: &str = "dynamodb";
 
+/// The element a policy document states its language version in, and the version a
+/// document stating none is read under: "if you do not include a Version element, the value
+/// defaults to 2008-10-17" (the IAM policy grammar reference).
+const POLICY_VERSION_ELEMENT: &str = "Version";
+const DEFAULT_POLICY_VERSION: &str = "2008-10-17";
+
 /// A resource-based policy attached to a table or to its stream.
 ///
 /// The document is kept as the service READ it, because `GetResourcePolicy` "returns the
 /// resource-based policy document attached to the resource ... in JSON format": the same
 /// JSON document in the compact form a read reports it in — insignificant whitespace is
 /// not part of a document, while every member it states, the order they were written in
-/// and every value's own type are kept exactly as they arrived, and nothing is added to
-/// it. It is read ONCE here — into the statements the ATTACH path holds a document to, and
+/// and every value's own type are kept exactly as they arrived, and the one thing added to
+/// it is the version the document is READ under where it states none
+/// ([`DEFAULT_POLICY_VERSION`]). It is read ONCE here — into the statements the ATTACH path holds a document to, and
 /// into the document the DECISION is made from ([`Self::decision`]) — so neither re-reads
 /// it per request. The document is capped at [`MAX_RESOURCE_POLICY_BYTES`] before it is
 /// read, which is what bounds the statements, values and patterns one request can ask for.
@@ -118,13 +125,13 @@ impl AttachedPolicy {
         // an array of strings" is the same element either way, so a one-element array is
         // kept as the one string it lists ([`canonical_elements`]); every member the
         // document states, the order they were written in and every other value's own
-        // type are kept exactly as they arrived. Nothing is ADDED either: the `Version` a
-        // document stating none is read under ("if you do not include a Version element,
-        // the value defaults to 2008-10-17" — the IAM policy grammar reference) is a
-        // READING of the document and not a member of it, so it is not written into the
-        // document the next read reports.
+        // type are kept exactly as they arrived. The one thing the stored document gains
+        // is the VERSION it is read under where it states none ([`default_version`]): the
+        // version decides how the whole document is read, so the document the resource
+        // carries states the one in force rather than leaving a reader to supply it.
         let mut canonical = parsed.clone();
         canonical_elements(&mut canonical);
+        default_version(&mut canonical);
         let document = canonical.to_string();
         Ok(Self {
             prepared: iam::PreparedDocument::read(&document),
@@ -559,6 +566,33 @@ fn canonical_elements(document: &mut serde_json::Value) {
             }
         }
     }
+}
+
+/// State the version a document that states none is READ under, as the first element of
+/// the document the resource carries: "if you do not include a Version element, the value
+/// defaults to 2008-10-17" (the IAM policy grammar reference), and that default is what
+/// every reading of the document — this service's own decision included — applies, so the
+/// stored document states it.
+///
+/// A document that states a version keeps it, wherever it wrote it and whatever it says.
+/// The element is placed FIRST because the grammar states it first, ahead of `Id` and
+/// `Statement`.
+fn default_version(document: &mut serde_json::Value) {
+    let Some(object) = document.as_object_mut() else {
+        return;
+    };
+    if object.contains_key(POLICY_VERSION_ELEMENT) {
+        return;
+    }
+    let mut filled = serde_json::Map::new();
+    filled.insert(
+        POLICY_VERSION_ELEMENT.to_string(),
+        serde_json::Value::String(DEFAULT_POLICY_VERSION.to_string()),
+    );
+    for (element, value) in ::std::mem::take(object) {
+        filled.insert(element, value);
+    }
+    *object = filled;
 }
 
 /// Replace a one-element array of a string with that string, leaving every other value
