@@ -13,8 +13,9 @@
 //! serves `AWSCURRENT`. `WithDecryption` is what asks for those bytes, Parameter Store
 //! holding no ciphertext of its own for a reference. The reserved hierarchy is not the
 //! account's, so no hierarchy read enumerates it, and a reference nothing resolves — no such
-//! secret, no such label, another Region's secret, a secret scheduled for deletion — is the
-//! same miss a name no parameter is held for is. WHETHER the caller may read it is Secrets
+//! secret, no such label, another Region's secret, a secret scheduled for deletion — is
+//! `ParameterNotFound` whose message names the reference and carries the SOURCE's own
+//! sentence about why nothing was reported for it. WHETHER the caller may read it is Secrets
 //! Manager's decision, on its own `GetSecretValue` action for that secret.
 //!
 //! Every case goes through the wire a client uses: `POST /` with `X-Amz-Target:
@@ -560,10 +561,41 @@ async fn a_reference_read_without_decryption_serves_no_secret_bytes() {
     }
 }
 
-/// RULE: a reference that resolves to nothing is the same miss a name no parameter is held
-/// for is — `ParameterNotFound`, with no message at all.
+/// The sentence Secrets Manager itself words for a `SecretId` it holds no secret for, which
+/// a reference nothing resolves carries through.
+const SOURCE_NO_SUCH_SECRET: &str = "Secrets Manager can't find the specified secret.";
+
+/// The sentence it words for a secret that is inside its recovery window.
+const SOURCE_MARKED_FOR_DELETION: &str =
+    "You can't perform this operation on the secret because it was marked for deletion.";
+
+/// The sentence it words for a staging label no version of the secret carries.
+fn source_no_such_label(label: &str) -> String {
+    format!("Secrets Manager can't find the specified secret value for staging label: {label}")
+}
+
+/// The message `ParameterNotFound` carries for a read of the reserved hierarchy nothing
+/// resolved, as AWS words it: the reference named CANONICALLY (no leading `/`, selector
+/// stripped), and the source's own sentence about why it reported nothing.
+fn expected_reference_miss(asked: &str, source: &str) -> String {
+    let canonical = asked.trim_start_matches('/');
+    let named = match canonical.rsplit_once(':') {
+        Some((before, _)) if !before.is_empty() => before,
+        _ => canonical,
+    };
+    format!(
+        "An error occurred (ParameterNotFound) when referencing Secrets Manager: Secret \
+         {named} not found. {source}"
+    )
+}
+
+/// RULE: a reference that resolves to nothing is `ParameterNotFound`, and that refusal STATES
+/// why — it names the reference and carries the source's own sentence about the secret, the
+/// staging label or the scheduled deletion that left it with nothing to report. A name in the
+/// `/aws` hierarchy that references no secret at all is the ordinary miss instead, which
+/// carries no message.
 #[tokio::test]
-async fn unresolvable_references_are_the_ordinary_miss() {
+async fn unresolvable_references_name_the_reference_and_the_sources_sentence() {
     let router = emulator();
     let secret = &SECRETS[0];
     let staged = stage(&router, secret).await;
@@ -604,38 +636,52 @@ async fn unresolvable_references_are_the_ordinary_miss() {
     )
     .await;
 
-    let cases: &[(&str, String)] = &[
+    // Each row is one way a reference resolves to nothing, and WHICH sentence the source
+    // words for it; `None` is a name that references no secret at all, which is the ordinary
+    // miss and carries no message.
+    let cases: &[(&str, String, Option<String>)] = &[
         (
             "a name no secret is held under",
             format!("{REFERENCE_ROOT}/nobody-created-this"),
+            Some(SOURCE_NO_SUCH_SECRET.to_string()),
         ),
         (
             "a staging label no version carries",
             format!("{}:AWSPENDING", staged.path),
+            Some(source_no_such_label("AWSPENDING")),
         ),
         (
             "a label nothing attached",
             format!("{}:NOSUCHLABEL", staged.path),
+            Some(source_no_such_label("NOSUCHLABEL")),
         ),
         (
             "a version id of another secret",
             format!("{}:{}", staged.path, version_id("other-")),
+            Some(source_no_such_label(&version_id("other-"))),
         ),
-        ("the reserved hierarchy itself", REFERENCE_ROOT.to_string()),
+        (
+            "the reserved hierarchy itself",
+            REFERENCE_ROOT.to_string(),
+            None,
+        ),
         (
             "the hierarchy level above it",
             "/aws/reference".to_string(),
+            None,
         ),
         (
             "another Region's secret",
             format!("{REFERENCE_ROOT}/elsewhere-only"),
+            Some(SOURCE_NO_SUCH_SECRET.to_string()),
         ),
         (
             "a secret scheduled for deletion",
             format!("{REFERENCE_ROOT}/going-away"),
+            Some(SOURCE_MARKED_FOR_DELETION.to_string()),
         ),
     ];
-    for (case, asked) in cases {
+    for (case, asked, source) in cases {
         let (status, body) = call(
             &router,
             "GetParameter",
@@ -652,10 +698,14 @@ async fn unresolvable_references_are_the_ordinary_miss() {
             "case {case:?}: expected ParameterNotFound, got {code} with {body}"
         );
         let message = error_message(&body);
-        assert!(
-            message.is_empty(),
-            "case {case:?}: a read of a name nothing resolves carries no message, got \
-             {message:?}"
+        let expected = source
+            .as_deref()
+            .map(|source| expected_reference_miss(asked, source))
+            .unwrap_or_default();
+        assert_eq!(
+            message, expected,
+            "case {case:?}: expected the refusal to carry {expected:?}, got {message:?} in \
+             {body}"
         );
     }
 }

@@ -290,9 +290,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .await
             {
                 Ok(parameter) => referenced.push((name, parameter)),
-                // Nothing resolved it, so the name is one this read reports rather than
-                // refuses — the arm the loop below takes for it.
-                Err(crate::state::secretsmanager_reference::Refusal::NotFound) => {}
+                // Nothing resolved it, so the name is one this read reports among the
+                // unresolvable ones rather than refuses — the arm the loop below takes for
+                // it, which carries no message of its own.
+                Err(crate::state::secretsmanager_reference::Refusal::NotFound(_)) => {}
                 Err(refusal) => return Err(reference_refusal(refusal)),
             }
         }
@@ -421,9 +422,11 @@ fn reference_refusal(
             .into()
         }
         // A miss never reaches here: the caller reports it among the unresolvable names.
-        Refusal::NotFound => GetParametersErrorModeled::InternalServerError(InternalServerError {
-            message: Some("a secret reference resolved to nothing".to_string()),
-        })
-        .into(),
+        Refusal::NotFound(_) => {
+            GetParametersErrorModeled::InternalServerError(InternalServerError {
+                message: Some("a secret reference resolved to nothing".to_string()),
+            })
+            .into()
+        }
     }
 }

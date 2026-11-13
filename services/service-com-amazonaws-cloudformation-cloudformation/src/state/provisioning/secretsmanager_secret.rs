@@ -71,6 +71,14 @@ pub(super) const SECRETSMANAGER_SECRET: &str = "AWS::SecretsManager::Secret";
 /// which is what says a delete has nothing left to remove and a read nothing to report.
 const SECRET_NOT_FOUND: &str = "ResourceNotFoundException";
 
+/// The read that says whether Secrets Manager still holds a secret, and what it holds of it
+/// ([`removal`], [`actual_configuration`]).
+const DESCRIBE_SECRET: &str = "DescribeSecret";
+
+/// `DeleteSecret`'s member asking for the secret to be removed with no recovery window,
+/// which is what this type's removal states (see [`delete`]).
+const FORCE_DELETE_WITHOUT_RECOVERY: &str = "ForceDeleteWithoutRecovery";
+
 /// The code a refusal of this module's own carries for a declaration that describes no
 /// resource this emulator can create: the same one the catalogue's arms use.
 const NOT_IMPLEMENTED: &str = "NotImplemented";
@@ -233,10 +241,31 @@ pub(super) fn readiness() -> Readiness {
     Readiness::Ready
 }
 
-/// `DeleteSecret` answers once the secret is scheduled for deletion, so there is nothing for
-/// a later read to wait on.
-pub(super) fn removal() -> Removal {
-    Removal::Gone
+/// Whether AWS Secrets Manager has finished removing the secret the stack deleted.
+///
+/// The removal skips the recovery window ([`delete`]), but it is not instantaneous:
+/// "Secrets Manager performs the actual deletion with an asynchronous background process, so
+/// there might be a short delay before the secret is permanently deleted."
+/// (`DeleteSecret$ForceDeleteWithoutRecovery`). So the secret is gone only once that service
+/// no longer answers for the ARN — its own read, never a span this crate assumed — and the
+/// stack's deletion is held open until then, because CloudFormation does not report an
+/// operation complete while a resource it deleted is still there.
+pub(super) async fn removal(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    physical_resource_id: &str,
+) -> Result<Removal, Refusal> {
+    let request = serde_json::json!({ "SecretId": physical_resource_id });
+    match call_secretsmanager(ctx, region, DESCRIBE_SECRET, &request).await {
+        // Secrets Manager still holds the secret, marked for deletion: it reports no status
+        // of its own for one, so what the resource is still in is CloudFormation's own
+        // deleting state.
+        Ok(_) => Ok(Removal::Pending(
+            crate::state::resource_status::DELETE_IN_PROGRESS.to_string(),
+        )),
+        Err(refusal) if refusal.code == SECRET_NOT_FOUND => Ok(Removal::Gone),
+        Err(refusal) => Err(refusal),
+    }
 }
 
 /// Apply a CHANGED declaration to the secret the stack already has, through `UpdateSecret` —
@@ -302,18 +331,24 @@ pub(super) async fn update(
 
 /// Delete the secret a stack created, addressed by the ARN it is known by.
 ///
-/// `DeleteSecret` with no recovery window stated is what CloudFormation makes of this type's
-/// removal: "you can specify the recovery window … Secrets Manager uses a default recovery
-/// window of 30 days" (`DeleteSecret$RecoveryWindowInDays`), so the secret is scheduled for
-/// deletion exactly as that service's default has it rather than destroyed outright. A
-/// secret it no longer holds is already in the state the delete asks for, judged on the CODE
-/// and never on a message.
+/// The removal of this type takes the secret AWAY rather than leaving it recoverable: a
+/// stack's deletion removes what the stack created, and a secret left scheduled for
+/// deletion is still a secret this account holds — it still answers `DescribeSecret`, it
+/// still occupies its name, and a Parameter Store reference to it still names something.
+/// So the delete states `ForceDeleteWithoutRecovery` — "Specifies whether to delete the
+/// secret without any recovery window" (`DeleteSecret$ForceDeleteWithoutRecovery`) — and
+/// the secret is gone once that service has carried it out ([`removal`]). A secret it no
+/// longer holds is already in the state the delete asks for, judged on the CODE and never
+/// on a message.
 pub(super) async fn delete(
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
     resource: &StoredResource,
 ) -> Result<(), Refusal> {
-    let request = serde_json::json!({ "SecretId": resource.physical_resource_id });
+    let request = serde_json::json!({
+        "SecretId": resource.physical_resource_id,
+        FORCE_DELETE_WITHOUT_RECOVERY: true,
+    });
     match call_secretsmanager(ctx, region, "DeleteSecret", &request).await {
         Ok(_) => Ok(()),
         Err(refusal) if refusal.code == SECRET_NOT_FOUND => Ok(()),
@@ -336,7 +371,7 @@ pub(super) async fn actual_configuration(
     resource: &StoredResource,
 ) -> Result<Option<Value>, Refusal> {
     let request = serde_json::json!({ "SecretId": resource.physical_resource_id });
-    let answered = match call_secretsmanager(ctx, region, "DescribeSecret", &request).await {
+    let answered = match call_secretsmanager(ctx, region, DESCRIBE_SECRET, &request).await {
         Ok(answered) => answered,
         Err(refusal) if refusal.code == SECRET_NOT_FOUND => return Ok(None),
         Err(refusal) => return Err(refusal),

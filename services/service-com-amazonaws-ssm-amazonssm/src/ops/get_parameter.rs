@@ -28,7 +28,9 @@
 //! `ParameterNotFound` — the error code alone, with NO message: the shape's `message` is an
 //! optional member and Parameter Store words none for this refusal, so nothing here invents
 //! a sentence for it. The same holds for every read and delete of this slice that reports a
-//! name it holds no parameter for.
+//! name it holds no parameter for. A read of the RESERVED hierarchy below is the one
+//! exception, because what reported nothing there is another service: that refusal carries
+//! the sentence [`crate::state::secretsmanager_reference::not_found_message`] words.
 //!
 //! ## AWS's own parameters
 //!
@@ -366,10 +368,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
 /// How a read of the reserved Secrets Manager hierarchy that reported no value is refused.
 ///
-/// A reference nothing resolves is the same miss as a name this Region holds no parameter
-/// for, carrying NO message (see the module docs). A read the service this one DEPENDS ON
-/// would not serve — it refused the caller, or the value could not be opened under the
-/// secret's key — is refused as that dependency failing
+/// A reference nothing resolves is `ParameterNotFound`, and that refusal CARRIES a message
+/// (unlike a name this Region simply holds no parameter for): the read is a read of another
+/// service, so the sentence names the reference and carries the source's own account of why
+/// nothing was reported for it
+/// ([`crate::state::secretsmanager_reference::not_found_message`]). A read the service this
+/// one DEPENDS ON would not serve — it refused the caller, or the value could not be opened
+/// under the secret's key — is refused as that dependency failing
 /// ([`crate::state::secretsmanager_reference::DEPENDENCY_FAILURE_MESSAGE`]) rather than
 /// relayed as the other service's own refusal, which this operation models no error for and
 /// states nothing of. An emulator that answered with no Secrets Manager at all resolved
@@ -377,8 +382,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 fn reference_refusal(refusal: crate::state::secretsmanager_reference::Refusal) -> GetParameterError {
     use crate::state::secretsmanager_reference::Refusal;
     match refusal {
-        Refusal::NotFound => {
-            GetParameterErrorModeled::ParameterNotFound(ParameterNotFound { message: None }).into()
+        Refusal::NotFound(message) => {
+            GetParameterErrorModeled::ParameterNotFound(ParameterNotFound {
+                message: Some(message),
+            })
+            .into()
         }
         Refusal::Dependency => crate::scaffolded::Scaffolded::validation(
             crate::state::secretsmanager_reference::DEPENDENCY_FAILURE_MESSAGE,

@@ -408,7 +408,9 @@ impl Owner {
             Self::SecretsManagerRotationSchedule => {
                 Ok(secretsmanager_rotation_schedule::removal())
             }
-            Self::SecretsManagerSecret => Ok(secretsmanager_secret::removal()),
+            Self::SecretsManagerSecret => {
+                secretsmanager_secret::removal(ctx, region, physical_resource_id).await
+            }
             Self::StepFunctionsStateMachine => {
                 step_functions_state_machine::removal(ctx, region, physical_resource_id).await
             }

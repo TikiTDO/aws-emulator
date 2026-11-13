@@ -80,14 +80,36 @@ pub fn referenced_secret(name: &str) -> Option<&str> {
 pub const DEPENDENCY_FAILURE_MESSAGE: &str =
     "An error occurred while calling one AWS dependency service.";
 
+/// The error code a read of the reserved path nothing resolves is refused with, which that
+/// refusal's own message names.
+const NOT_FOUND_CODE: &str = "ParameterNotFound";
+
+/// The message that refusal carries: a read of the reserved path is a read of ANOTHER
+/// service, so what the caller is told is that the reference could not be resolved there —
+/// naming the reserved-path name it asked for, and carrying the SOURCE's own sentence about
+/// why that service reported nothing for it.
+///
+/// So the sentence is computed rather than fixed: `source` is the message Secrets Manager
+/// itself words for the refusal this resolution met — no such secret, a secret marked for
+/// deletion, a staging label nothing carries — and the reference is named CANONICALLY (no
+/// leading `/`), as a parameter name spells it.
+pub fn not_found_message(path: &str, source: &str) -> String {
+    format!(
+        "An error occurred ({NOT_FOUND_CODE}) when referencing Secrets Manager: Secret {} not \
+         found. {source}",
+        canonical_name(path)
+    )
+}
+
 /// Why a read of the reserved path cannot report a value, named by what reports it.
 #[derive(Debug)]
 pub enum Refusal {
     /// There is nothing to report: this Region holds no such secret, it is scheduled for
     /// deletion — "If a secret is scheduled for deletion, then its details, including the
     /// encrypted secret value, is not accessible" — or the selector names no version of it.
-    /// A read of a name nothing resolves is a miss.
-    NotFound,
+    /// A read of a name nothing resolves is a miss, carrying the message
+    /// [`not_found_message`] words for it.
+    NotFound(String),
     /// The service this read depends on would not serve the value: it refused the caller the
     /// read, or the value could not be opened under the secret's own key. Both are a
     /// downstream call that failed, which is the one class [`DEPENDENCY_FAILURE_MESSAGE`]
@@ -163,11 +185,16 @@ pub async fn resolve<Eng: Send + Sync + 'static>(
                 .to_string(),
         ));
     };
+    // Every miss below is the SOURCE's own account of why it reported nothing, worded into
+    // this service's refusal of the reference ([`not_found_message`]).
+    let not_found = |source: &str| Refusal::NotFound(not_found_message(path, source));
     let resolved = {
         let store = state.lock();
-        let view = store.view(region, secret_id).ok_or(Refusal::NotFound)?;
+        let view = store
+            .view(region, secret_id)
+            .ok_or_else(|| not_found(secrets::SECRET_NOT_FOUND_MESSAGE))?;
         if view.secret.scheduled_for_deletion() {
-            return Err(Refusal::NotFound);
+            return Err(not_found(secrets::MARKED_FOR_DELETION_MESSAGE));
         }
         // The versions are the CONTENT of the secret, which for a replica is the primary's.
         let content = view.content;
@@ -179,7 +206,13 @@ pub async fn resolve<Eng: Send + Sync + 'static>(
                 .version_with_stage(selector)
                 .or_else(|| content.version(selector)),
         }
-        .ok_or(Refusal::NotFound)?;
+        .ok_or_else(|| {
+            // A selector names a STAGING LABEL there, so a selector nothing resolves is the
+            // sentence that service words for a label no version of the secret carries.
+            not_found(&secrets::stage_not_found_message(
+                selector.unwrap_or(secrets::STAGE_CURRENT),
+            ))
+        })?;
         Resolved {
             arn: view.secret.arn.clone(),
             name: view.secret.name.clone(),
