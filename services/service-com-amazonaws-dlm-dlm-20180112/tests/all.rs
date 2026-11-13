@@ -17,6 +17,8 @@ mod archive_creation_frequency;
 mod configuration_kind_from_policy_type;
 #[path = "all/create_policy_kind_materialization.rs"]
 mod create_policy_kind_materialization;
+#[path = "all/custom_policy_only_parameters.rs"]
+mod custom_policy_only_parameters;
 #[path = "all/default_policy_configuration_precedence.rs"]
 mod default_policy_configuration_precedence;
 #[path = "all/default_policy_managed_type.rs"]

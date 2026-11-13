@@ -253,6 +253,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         }
 
+        // And that rule read the other way: the members a CUSTOM policy alone is
+        // configured from may be stated only for a custom policy, so an update
+        // addressing a DEFAULT policy may state none of them inside its
+        // replacement configuration. Also after the lookup (the policy's kind
+        // decides it) and before the first write, so a refused update leaves the
+        // stored policy exactly as it was and no record holds a configuration of
+        // a kind it is not.
+        if let Some(refusal) = crate::state::custom_policy_only_violation(
+            policy.default_policy,
+            input.policy_details.as_ref(),
+        ) {
+            return Err(
+                UpdateLifecyclePolicyErrorModeled::InvalidRequestException(refusal).into(),
+            );
+        }
+
         // The members of the policy's IDENTITY a replacement configuration may
         // not CHANGE: `UpdateLifecyclePolicyRequest$PolicyDetails` is "the
         // configuration of the lifecycle policy. You cannot update the policy

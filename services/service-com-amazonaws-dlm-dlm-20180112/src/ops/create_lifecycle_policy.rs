@@ -220,6 +220,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         }
 
+        // And the same rule read the other way: the configuration members a
+        // CUSTOM policy alone is configured from belong to a custom policy, so a
+        // request creating a DEFAULT policy may state none of them inside its
+        // `PolicyDetails`. Refused before anything is stored, so no record is
+        // left holding a configuration of a kind it is not — a default policy
+        // holding a second copy of its target type inside the structure, beside
+        // the one copy `default_policy_type` keeps.
+        if let Some(refusal) =
+            crate::state::custom_policy_only_violation(is_default, input.policy_details.as_ref())
+        {
+            return Err(
+                CreateLifecyclePolicyErrorModeled::InvalidRequestException(refusal).into(),
+            );
+        }
+
         // The documented numeric domain of a default policy's cadence, which the
         // members' `@range(min: 1)` cannot express: the creation frequency's
         // 1-to-7 days, the retention period's 2-to-14 days, and a retention

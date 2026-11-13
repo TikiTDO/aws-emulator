@@ -533,7 +533,11 @@ pub fn materialized_policy_details(
 ) -> PolicyDetails {
     if let PolicyKind::Default { resource_type } = kind {
         // A DEFAULT policy's configuration, which carries none of the custom
-        // members stamped below. Its type is the one the kind of default policy
+        // members stamped below — and none of the members a custom policy alone
+        // is configured from either: a request stating one of those for a
+        // default policy is refused before anything is stored
+        // ([`custom_policy_only_violation`]), so nothing of the kind reaches
+        // here to be stamped or dropped. Its type is the one the kind of default policy
         // it is manages, which is also the type its reads report, so the stored
         // configuration states that type however the request stated it: a
         // request may name the type or the kind, and one naming a type the kind
@@ -859,17 +863,23 @@ impl LifecyclePolicyRecord {
     /// A DEFAULT policy targets the one type [`Self::default_policy_type`] holds
     /// — the single stored copy of it, which is also the one every read reports —
     /// and a CUSTOM policy the types its configuration's `ResourceTypes` names.
+    /// The two are ALTERNATIVES, by the kind of policy this record is: which of
+    /// the two members states the target is itself decided by that kind
+    /// (`ResourceType` is `[Default policies only]` and `ResourceTypes` is
+    /// documented for a custom policy alone, and a request stating one for a
+    /// policy of the other kind is refused —
+    /// [`DefaultPolicyOnlyRequest::violation`] and
+    /// [`custom_policy_only_violation`]), so reading both would report one
+    /// policy's single target twice over and name more types than
+    /// `ResourceTypeValuesList`'s `@length(min: 1, max: 1)` admits.
     pub fn target_resource_types(&self) -> Vec<String> {
-        let mut types: Vec<String> = Vec::new();
-        if let Some(default_type) = self.default_policy_type.as_ref() {
-            types.push(default_type.clone());
+        if self.default_policy {
+            return self.default_policy_type.iter().cloned().collect();
         }
-        if let Some(details) = self.policy_details.as_ref() {
-            if let Some(resource_types) = details.resource_types.as_ref() {
-                types.extend(resource_types.iter().cloned());
-            }
-        }
-        types
+        self.policy_details
+            .as_ref()
+            .and_then(|details| details.resource_types.clone())
+            .unwrap_or_default()
     }
 
     /// This policy's target tags as the `key=value` strings the `targetTags`
@@ -1683,16 +1693,117 @@ pub fn carry_over_policy_type(policy: &LifecyclePolicyRecord, details: &mut Poli
 /// `InvalidRequestException` for. The message is built from the request — it
 /// names the parameters refused and the constraint they fall outside.
 pub fn default_policy_only_parameters_refused(parameters: &[String]) -> InvalidRequestException {
+    parameters_supported_for_one_kind_only(parameters, DEFAULT_POLICY_KIND)
+}
+
+/// How Amazon Data Lifecycle Manager states the refusal of parameters that
+/// belong to ONE kind of policy, stated by a request for a policy of the other
+/// kind: the fixed text below, naming the parameters refused and the kind of
+/// policy that takes them.
+///
+/// The two directions of that rule say it the same way, so the wording lives
+/// here once — see [`default_policy_only_parameters_refused`] and
+/// [`custom_policy_only_parameters_refused`].
+fn parameters_supported_for_one_kind_only(
+    parameters: &[String],
+    policy_kind: &str,
+) -> InvalidRequestException {
+    let (parameter, is) = plural(parameters.len());
     invalid_request(format!(
-        "The {} {} {} supported for default policies only.",
-        if parameters.len() == 1 {
-            "parameter"
-        } else {
-            "parameters"
-        },
+        "The {parameter} {} {is} supported for {policy_kind} policies only.",
         parameters.join(", "),
-        if parameters.len() == 1 { "is" } else { "are" },
     ))
+}
+
+/// How the refusal above names the kind of policy the `[Default policies only]`
+/// members belong to.
+const DEFAULT_POLICY_KIND: &str = "default";
+
+/// How it names the other kind: `PolicyDetails$PolicyLanguage` documents
+/// `STANDARD` as "To create a custom policy", so every policy that is not a
+/// default policy is a custom one, whichever type it manages.
+const CUSTOM_POLICY_KIND: &str = "custom";
+
+/// The `PolicyDetails` members a CUSTOM policy alone is configured from that
+/// `details` states, by their own wire names — empty when it states none.
+///
+/// `PolicyDetails` declares the members of every kind of policy at once, and the
+/// documentation is what says which kind each one belongs to. These are the
+/// members documented for a kind of CUSTOM policy only: `ResourceTypes`
+/// ("[Custom snapshot policies only]"), `ResourceLocations`, `TargetTags`,
+/// `Schedules` and `Parameters` ("[Custom snapshot and AMI policies only]"), and
+/// `EventSource` and `Actions` ("[Event-based policies only]"). Every kind of
+/// policy those sentences name is a custom policy — `DefaultPolicy` offers two
+/// kinds of default policy and both are configured from the `[Default policies
+/// only]` members ([`DefaultPolicyOnlyParameters`]) — so a default policy has
+/// nowhere to carry one of them and no read of one could report it.
+///
+/// The names come back in the order `PolicyDetails` declares them, each
+/// qualified by [`POLICY_DETAILS_PREFIX`]: the configuration structure is the
+/// only place a request can state them, neither request body declaring a member
+/// for any of them.
+///
+/// Source: `smithy_query(query="shape", shape="PolicyDetails")`.
+pub fn custom_policy_only_parameters_in_policy_details(
+    details: Option<&PolicyDetails>,
+) -> Vec<String> {
+    let Some(details) = details else {
+        return Vec::new();
+    };
+    [
+        (RESOURCE_TYPES_MEMBER, details.resource_types.is_some()),
+        ("ResourceLocations", details.resource_locations.is_some()),
+        ("TargetTags", details.target_tags.is_some()),
+        (SCHEDULES_MEMBER, details.schedules.is_some()),
+        ("Parameters", details.parameters.is_some()),
+        ("EventSource", details.event_source.is_some()),
+        ("Actions", details.actions.is_some()),
+    ]
+    .into_iter()
+    .filter(|(_, stated)| *stated)
+    .map(|(name, _)| format!("{POLICY_DETAILS_PREFIX}{name}"))
+    .collect()
+}
+
+/// Why Amazon Data Lifecycle Manager refuses the configuration a request states
+/// for a DEFAULT policy, or `None` when it states only members such a policy
+/// carries.
+///
+/// The mirror image of the `[Default policies only]` rule
+/// ([`DefaultPolicyOnlyRequest::violation`]): a configuration member the
+/// documentation gives to one kind of policy is accepted only by a request for a
+/// policy of that kind, so a request creating or updating a DEFAULT policy may
+/// state none of the members a custom policy alone is configured from
+/// ([`custom_policy_only_parameters_in_policy_details`]). Refused rather than
+/// dropped or stored: storing one would leave the record holding a configuration
+/// of a kind it is not — a second copy of the target type beside
+/// [`LifecyclePolicyRecord::default_policy_type`] for `ResourceTypes` — and
+/// dropping it would report a configuration other than the one the caller
+/// stated.
+///
+/// `default_policy` is the kind of policy the request is for, which is the write
+/// path's to state: a create reads it off the request and an update off the
+/// policy it addresses, whose kind it cannot change
+/// ([`immutable_member_changed`]).
+pub fn custom_policy_only_violation(
+    default_policy: bool,
+    details: Option<&PolicyDetails>,
+) -> Option<InvalidRequestException> {
+    if !default_policy {
+        return None;
+    }
+    let refused = custom_policy_only_parameters_in_policy_details(details);
+    (!refused.is_empty()).then(|| custom_policy_only_parameters_refused(&refused))
+}
+
+/// The `InvalidRequestException` for members a CUSTOM policy alone is configured
+/// from, stated by a request for a DEFAULT policy.
+///
+/// The message is built from the request — it names the parameters refused and
+/// the kind of policy that takes them — exactly as
+/// [`default_policy_only_parameters_refused`] does for the other direction.
+pub fn custom_policy_only_parameters_refused(parameters: &[String]) -> InvalidRequestException {
+    parameters_supported_for_one_kind_only(parameters, CUSTOM_POLICY_KIND)
 }
 
 /// The first tag key in `keys` that begins with the reserved [`aws:`
