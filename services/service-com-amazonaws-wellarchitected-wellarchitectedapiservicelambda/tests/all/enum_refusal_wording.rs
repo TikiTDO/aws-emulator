@@ -13,8 +13,8 @@
 //! client that matches the text, or parses the permitted set out of it, always can.
 //!
 //! A value bound to the URI rather than to the body does not travel through that layer, so
-//! its refusal is the service's own field validation and still names the member; the last
-//! suite pins that split.
+//! its refusal is the service's own field validation and names the enumerated TYPE it was
+//! parsed into; the last suites pin that split.
 //!
 //! Requests go through the real `MultiServiceRouter`, so routing, restJson1
 //! (de)serialization, boundary constraint validation and the handler all run as they do in
@@ -246,10 +246,10 @@ async fn every_published_member_of_the_enum_is_accepted() {
 
 /// The other side of the split: a value bound to the URI's query string does not travel
 /// through the body layer, so its refusal is the service's own field validation — it names
-/// the member the caller must fix and is NOT the schema finding. Rows differ along the
-/// value sent.
+/// the enumerated TYPE the value was parsed into and is NOT the schema finding. Rows differ
+/// along the value sent.
 #[tokio::test]
-async fn an_out_of_enum_query_value_is_refused_naming_its_member() {
+async fn an_out_of_enum_query_value_is_refused_naming_its_type() {
     let client = Client::new();
     for sent in ["SIM2REAL", "draft", "EVERYTHING"] {
         let answer = client
@@ -270,30 +270,27 @@ async fn an_out_of_enum_query_value_is_refused_naming_its_member() {
             answer.error_code, "ValidationException",
             "case {sent:?}: expected ValidationException, got {answer:?}"
         );
-        let message = answer
-            .body
-            .get("Message")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        assert!(
-            message.to_lowercase().contains("lensstatus"),
-            "case {sent:?}: a refusal of a URI-bound value must name its member, got {answer:?}"
+        assert_eq!(
+            answer.body.get("Message").and_then(Value::as_str),
+            Some("[Validation] The LensStatusType that was passed in is invalid."),
+            "case {sent:?}: a refusal of a URI-bound value must name its type, got {answer:?}"
         );
         assert_ne!(
-            message,
-            expected_message(sent, LENS_STATUS_TYPE),
+            answer.body.get("Message").and_then(Value::as_str),
+            Some(expected_message(sent, LENS_STATUS_TYPE).as_str()),
             "case {sent:?}: a URI-bound value is not reported as a body schema finding, got \
              {answer:?}"
         );
     }
 }
 
-/// A request whose body breaks an enumerated set AND a member's `@length` is not reported
-/// half in one voice and half in the other: the finding layer states a message only when
-/// every violation it would report belongs to it. Pinned so the all-or-nothing rule cannot
-/// regress into a mixed message.
+/// A request whose body breaks an enumerated set AND a member's `@length` is reported
+/// wholly in the finding layer's voice: that layer measures both classes, so it lists both
+/// findings inside the one pair of brackets, in the order the validating walk found them.
+/// Pinned so a message can never come back half in this layer's voice and half in the
+/// framework's.
 #[tokio::test]
-async fn a_body_breaking_two_classes_at_once_is_not_reported_half_as_a_finding() {
+async fn a_body_breaking_two_classes_at_once_lists_both_findings() {
     let client = Client::new();
     let mut body = minimal_create("ab", "tok-mixed");
     body["Environment"] = json!("STAGING");
@@ -306,15 +303,21 @@ async fn a_body_breaking_two_classes_at_once_is_not_reported_half_as_a_finding()
         answer.error_code, "ValidationException",
         "expected ValidationException, got {answer:?}"
     );
-    let message = answer
-        .body
-        .get("Message")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    assert!(
-        !message.contains("instance value"),
-        "a message half in the finding layer's voice is worse than one wholly in the \
-         framework's, got {answer:?}"
+    assert_eq!(
+        answer.body.get("Message").and_then(Value::as_str),
+        Some(
+            format!(
+                "[Validation] [string \"ab\" is too short (length: 2, required minimum: 3), \
+                 instance value (\"STAGING\") not found in enum (possible values: [{}])]",
+                WORKLOAD_ENVIRONMENT
+                    .iter()
+                    .map(|admitted| format!("\"{admitted}\""))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+            .as_str()
+        ),
+        "both findings must be listed once, got {answer:?}"
     );
     // Nothing was recorded: the refusal is about the request, not about the store.
     let listed = client.list(json!({})).await;

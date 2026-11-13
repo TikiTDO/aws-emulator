@@ -245,9 +245,14 @@ async fn a_create_with_an_unpublished_industry_type_is_refused_and_stores_nothin
 async fn the_length_maximum_and_the_value_set_are_refused_as_different_rules() {
     let client = Client::new();
     let sentence = expected_sentence();
-    // The boundary states a length failure as `Member must have length less than or equal to
-    // <max>` (`vendor/smithy-schema-server` constraint walk), naming the published maximum.
-    let length_clause = format!("Member must have length less than or equal to {INDUSTRY_TYPE_MAX}");
+    // The layer that reads the body states a length failure as the finding it found — the
+    // string it measured, its length, and the published maximum — rather than as a sentence
+    // naming the member.
+    let too_long = "i".repeat(INDUSTRY_TYPE_MAX + 1);
+    let length_clause = format!(
+        "string \"{too_long}\" is too long (length: {}, maximum allowed: {INDUSTRY_TYPE_MAX})",
+        INDUSTRY_TYPE_MAX + 1
+    );
 
     for (case, value, expected_clause) in [
         (
@@ -257,7 +262,7 @@ async fn the_length_maximum_and_the_value_set_are_refused_as_different_rules() {
         ),
         (
             "one-past-the-maximum",
-            "i".repeat(INDUSTRY_TYPE_MAX + 1),
+            too_long.clone(),
             length_clause.as_str(),
         ),
     ] {

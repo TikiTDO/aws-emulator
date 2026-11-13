@@ -706,6 +706,16 @@ pub fn order_by_pillar_priority(questions: &mut [ReviewQuestion], pillar_priorit
     });
 }
 
+/// The sentence this service states for a parameter value it could not accept as the type
+/// the parameter is read as: the subject that was passed in, and nothing about the value.
+///
+/// `subject` is what the caller has to fix as the service names it — the enumerated type a
+/// query parameter is parsed into, say. [`INVALID_NEXT_TOKEN_MESSAGE`] is the same sentence
+/// over the opaque cursor's own subject.
+pub fn invalid_parameter_sentence(subject: &str) -> String {
+    format!("The {subject} that was passed in is invalid.")
+}
+
 /// `ValidationExceptionReason$FIELD_VALIDATION_FAILED` — the modelled classification for
 /// a request whose members were read but whose values the service refused. See
 /// `VALIDATION_EXCEPTION_REASON_VALUES` for the enum's whole value set.
@@ -786,6 +796,45 @@ pub fn unclassified_exception(message: String) -> crate::ops::types::ValidationE
         reason: None,
         fields: None,
     }
+}
+
+/// The modelled `ValidationException` for a refusal this service CARRIES `Reason` on
+/// without classifying it: the member is emitted holding no value, which tells a client
+/// reading it that the failure is none of the modelled classifications — as opposed to
+/// leaving the member out, which tells it nothing. No `Fields`, because no per-field rule
+/// produced the finding.
+///
+/// The one place that empty classification is written, so every refusal of the class words
+/// its envelope identically.
+pub fn unstated_reason_exception(message: String) -> crate::ops::types::ValidationException {
+    crate::ops::types::ValidationException {
+        message: tagged_message(VALIDATION_TAG, &message),
+        reason: Some(String::new()),
+        fields: None,
+    }
+}
+
+/// The refusal for a request that does not carry a property the shape it is read as
+/// requires: the finding the layer that READS the request reports, which names the
+/// property as the schema declares it and no member path.
+///
+/// That layer is what fails — the request never became the shape, so no field rule ran —
+/// so the refusal is [`unstated_reason_exception`]'s envelope over that finding.
+pub fn missing_property_exception(property: &str) -> crate::ops::types::ValidationException {
+    unstated_reason_exception(service_common::validation_message::bracketed_findings(&[
+        service_common::validation_message::missing_required_properties(&[property]),
+    ]))
+}
+
+/// The refusal for a member whose value is a DOCUMENT the service could not read at all:
+/// the member named as invalid, and nothing else.
+///
+/// No parser diagnostic reaches the message: where a decoder stopped is an artefact of the
+/// decoder rather than an API contract, and a caller cannot act on it — the value has to be
+/// replaced whole. Classified as [`missing_property_exception`] is, for the same reason:
+/// the request never became what it had to be.
+pub fn unparsable_document_exception(member: &str) -> crate::ops::types::ValidationException {
+    unstated_reason_exception(format!("Invalid {member}"))
 }
 
 /// The failure class every `ValidationException` message this service words opens with
@@ -1205,6 +1254,25 @@ pub fn too_many_lens_aliases_exception(named: usize) -> crate::ops::types::Valid
             "{LENS_ALIASES_MEMBER} must name at most {MAX_LENS_ALIASES_PER_REQUEST} lenses; \
              {named} were named."
         ),
+    )])
+}
+
+/// The field a refusal of the lenses a workload may not lose names: `Lenses`, the member
+/// the workload carries its lens list in (`Workload$Lenses`) — the collection the request
+/// asks to change, as opposed to [`LENS_ALIASES_MEMBER`], the member one request happens to
+/// name the lenses in.
+pub const LENSES_MEMBER: &str = "Lenses";
+
+/// The refusal for a request that asks for a DEFAULT lens — one a workload is always
+/// reviewed against and cannot lose — to be disassociated from a workload.
+///
+/// `lens_alias` is the alias AS SENT, so the caller reads back the name it used however it
+/// spelled the lens. The rule is about the workload's lens collection, so the finding names
+/// [`LENSES_MEMBER`].
+pub fn default_lens_refusal(lens_alias: &str) -> crate::ops::types::ValidationException {
+    field_validation_exception(&[(
+        LENSES_MEMBER.to_string(),
+        format!("Cannot disassociate default lens: {lens_alias}."),
     )])
 }
 
@@ -1889,12 +1957,12 @@ pub fn share_invitation_answered_conflict(
     )
 }
 
-/// The refusal for a member the request had to carry and did not: the required
-/// `Message`, worded exactly as the framework words an absent modelled member, so a
+/// The refusal for a member the request had to carry and did not, whether the MODEL
+/// requires it or this operation's own documentation does: the property-level finding the
+/// layer that reads a request reports for either ([`missing_property_exception`]), so a
 /// member this service requires by documentation reads like one the model requires.
-/// No `Reason` and no `Fields` — see [`unclassified_exception`].
 pub fn absent_member_exception(member: &str) -> crate::ops::types::ValidationException {
-    unclassified_exception(::aws_smithy_schema_server::missing_member_message(member))
+    missing_property_exception(member)
 }
 
 /// The refusal for a workload that names neither `AwsRegions` nor `NonAwsRegions`:

@@ -376,9 +376,10 @@ fn field_validation(member: &str, constraint: &str) -> ImportLensError {
     .into()
 }
 
-/// A refused lens document, as the modelled `ValidationException`: `CANNOT_PARSE` when
-/// the payload is not JSON at all, `FIELD_VALIDATION_FAILED` when it is JSON but breaks
-/// a rule of the lens format, naming the member and the rule it broke.
+/// A refused lens document, as the modelled `ValidationException`: the envelope this
+/// service answers a request it could not read with — `Reason` carried unclassified, no
+/// field finding — naming the member when the payload is not JSON at all and stating the
+/// rule of the lens format the document broke when it is.
 fn rejected(rejection: crate::state::LensJsonRejection) -> ImportLensError {
     ImportLensErrorModeled::ValidationException(crate::state::lens_json_exception(&rejection)).into()
 }

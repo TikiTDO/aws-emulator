@@ -60,7 +60,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use aws_smithy_schema::Schema;
+use aws_smithy_schema::{Schema, ShapeType};
 use aws_smithy_schema_server::constraints::{self, RangeTrait, Violation, ViolationKind};
 use smithy_server_runtime::{
     http, BoxFuture, DeserializableStruct, ErasedOperation, Operation, OperationContext, Refusal,
@@ -428,12 +428,14 @@ fn modelled_refusal<Op: Operation>(
         match <Op::Input as DeserializableStruct>::deserialize(&mut *deserializer) {
             Ok(input) => input,
             // A member the shape requires is absent. It is found while READING the
-            // request, so no field rule was evaluated and there is no per-member
-            // finding to report: the answer carries the required `Message` alone.
+            // request — the layer that reads it reports the PROPERTY the object does not
+            // carry, not a per-member field finding — so the answer is the schema report
+            // for a request that could not be read as its shape requires.
             Err(aws_smithy_schema::serde::SerdeError::MissingMember { member_name }) => {
-                return Some(crate::state::unclassified_exception(
-                    aws_smithy_schema_server::missing_member_message(&member_name),
-                ))
+                return Some(crate::state::absent_member_exception(&missing_property(
+                    &member_name,
+                    Op::INPUT_SCHEMA,
+                )));
             }
             // Any other codec failure is not a refusal this service rewords.
             Err(_) => return None,
@@ -443,22 +445,40 @@ fn modelled_refusal<Op: Operation>(
     (!violations.is_empty()).then(|| constraint_refusal(&violations, Op::INPUT_SCHEMA))
 }
 
+/// The property an absent-member finding names: the member as the SCHEMA declares it
+/// (`ReviewOwner`), which is what a caller would have had to send.
+///
+/// The deserializer reports the member by the path it unwound to, spelled lowerCamel the
+/// way every member path is, so the declared name is recovered from the input shape. A path
+/// into a NESTED shape is named by its last segment, the member of that shape: the input's
+/// own members are the only ones its schema declares.
+fn missing_property(member_path: &str, input_schema: &Schema) -> String {
+    let segment = member_path.split('.').next_back().unwrap_or(member_path);
+    top_level_member(segment, input_schema)
+        .and_then(Schema::member_name)
+        .unwrap_or(segment)
+        .to_string()
+}
+
 /// How this service states a value that broke a modelled input constraint.
 ///
-/// A value outside a modelled numeric `@range` is a service LIMIT the caller can act
-/// on, so it is classified: `Reason` `FIELD_VALIDATION_FAILED` plus one `Fields` entry
-/// naming the member and its published bounds. A value outside the set an enumerated type
-/// admits is stated as the schema finding the front door reports for the BODY it read
-/// ([`enum_findings`]), with the required `Message` alone. Every other constraint (a
-/// string's `@length` or `@pattern`) is refused while the request is still being
-/// validated as a shape, and is stated with the required `Message` alone — the same
-/// facts the framework's envelope carried, in the modelled shape.
+/// A value the request BODY carried is measured by the layer that READ the body, and that
+/// layer reports what it found rather than naming the member: such a refusal is stated as
+/// its findings ([`schema_findings`]), with the required `Message` alone. A value bound
+/// OUTSIDE the body is parsed by the service itself, so a value outside the set its
+/// enumerated type admits is a field validation naming that TYPE
+/// ([`enumerated_type_fields`]), and a value outside a modelled numeric `@range` is a
+/// service LIMIT naming the member and its published bounds. Every other constraint keeps
+/// the facts the framework's envelope carried, in the modelled shape.
 fn constraint_refusal(
     violations: &[Violation],
     input_schema: &Schema,
 ) -> crate::ops::types::ValidationException {
-    if let Some(findings) = enum_findings(violations, input_schema) {
+    if let Some(findings) = schema_findings(violations, input_schema) {
         return crate::state::unclassified_exception(findings);
+    }
+    if let Some(fields) = enumerated_type_fields(violations, input_schema) {
+        return crate::state::field_validation_exception(&fields);
     }
     let bounded: Vec<(String, String)> = violations
         .iter()
@@ -476,47 +496,200 @@ fn constraint_refusal(
     }
 }
 
-/// The whole message this service states for a request whose only fault is a value
-/// outside the set an enumerated type admits: the schema findings a JSON-schema layer
-/// lists, one per offending value, in the order the validating walk found them.
+/// The whole message this service states for a request whose BODY broke the rules the
+/// layer that reads it measures: the schema findings that layer lists, one per offending
+/// value, in the order the validating walk found them.
 ///
-/// The service reads a request BODY through such a layer, and that layer reports what it
-/// found rather than naming the member: the finding quotes the value the request carried
-/// and the values the MODEL declares for that member's type, in the declared order the
-/// walk carries them. Both halves therefore come from the request and the model, never
-/// from a table here.
+/// The service reads a request BODY through a JSON-schema layer, and that layer reports
+/// what it FOUND rather than naming the member: a finding quotes the value the request
+/// carried and the rule it was measured against — the values the MODEL declares for that
+/// member's type, the expression the member's `@pattern` declares, or the `@length` bound
+/// it broke with the length that was counted. Every half therefore comes from the request
+/// and the model, never from a table here, and each sentence is the shared renderer's.
 ///
 /// ALL OR NOTHING, for the reason the shared renderer's own report gives: `None` when a
-/// violation is of another class, when it is about a value bound to the URI or a header
-/// rather than to the body — those travel outside the layer that words findings this way —
-/// or when the value is withheld (a `@sensitive` member), so a message is never half in
-/// one voice and half in the framework's.
-fn enum_findings(violations: &[Violation], input_schema: &Schema) -> Option<String> {
+/// violation is of a class this layer states no finding for, when it is about a value
+/// bound to the URI or a header rather than to the body — those travel outside the layer
+/// that words findings this way — or when the value is withheld (a `@sensitive` member),
+/// so a message is never half in one voice and half in the framework's.
+fn schema_findings(violations: &[Violation], input_schema: &Schema) -> Option<String> {
     if violations.is_empty() {
         return None;
     }
     let findings: Vec<String> = violations
         .iter()
-        .map(|violation| enum_finding(violation, input_schema))
+        .map(|violation| schema_finding(violation, input_schema))
         .collect::<Option<Vec<_>>>()?;
     Some(service_common::validation_message::bracketed_findings(
         &findings,
     ))
 }
 
-/// One finding of [`enum_findings`], or `None` when `violation` is not a body member's
-/// value outside its enumerated type's set.
-fn enum_finding(violation: &Violation, input_schema: &Schema) -> Option<String> {
-    let ViolationKind::EnumValue(permitted) = &violation.kind else {
-        return None;
-    };
+/// One finding of [`schema_findings`], or `None` when `violation` is not one that layer
+/// reports about a value the request body carried.
+fn schema_finding(violation: &Violation, input_schema: &Schema) -> Option<String> {
     if !service_common::front_door::binds_to_body(input_schema, &violation.path) {
         return None;
     }
-    Some(service_common::validation_message::enum_value_not_found(
-        violation.value.as_deref()?,
-        permitted,
+    let value = violation.value.as_deref()?;
+    match &violation.kind {
+        // The values the MODEL declares for the enumerated type, in its declared order —
+        // the order the validating walk carries them in — and the value the caller sent.
+        // Reached through the member, so a member at any depth of the body is stated the
+        // same way.
+        ViolationKind::EnumValue(permitted) => Some(
+            service_common::validation_message::enum_value_not_found(value, permitted),
+        ),
+        // The expression the member declares, as the model writes it, and the string the
+        // caller submitted. `@pattern` applies to a string shape, so a pattern finding
+        // always describes one at whatever depth it was found.
+        ViolationKind::Pattern(pattern) => Some(
+            service_common::validation_message::pattern_mismatch(pattern, value),
+        ),
+        // `@length` counts a STRING's characters here. `@length` also bounds a list or a
+        // map, which that layer reports as the collection it is rather than as a string,
+        // and whose shape is only knowable for a member of the input itself
+        // ([`is_string_member`]) — so a bound broken by anything but a string member of the
+        // input keeps the framework's wording.
+        ViolationKind::MinLength(min) => {
+            if !is_string_member(&violation.path, input_schema) {
+                return None;
+            }
+            let length = value.chars().count();
+            ((length as i64) < *min)
+                .then(|| service_common::validation_message::string_too_short(value, length, *min))
+        }
+        ViolationKind::MaxLength(max) => {
+            if !is_string_member(&violation.path, input_schema) {
+                return None;
+            }
+            // The quoted value is the framework's echo of it, which elides a value past
+            // its ceiling: a finding is stated only while the value it quotes still shows
+            // the length it states, so no message states a length its own text contradicts.
+            let length = value.chars().count();
+            ((length as i64) > *max)
+                .then(|| service_common::validation_message::string_too_long(value, length, *max))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `path` names a member the input itself declares as a STRING shape — the one
+/// position where a length clause is known to describe a string, because a member schema
+/// carries no target and so says nothing about the shapes of a nested path's segments.
+fn is_string_member(path: &str, input_schema: &Schema) -> bool {
+    path.split('.').count() == 1
+        && top_level_member(path, input_schema)
+            .is_some_and(|member| matches!(member.shape_type(), ShapeType::String))
+}
+
+/// Every enumerated type a request of this service binds OUTSIDE its body, by the value
+/// set the model declares for it.
+///
+/// A value bound to the query string is parsed by the SERVICE into the type the member
+/// targets, rather than read through the schema layer that measures the body, so a value
+/// outside the set is reported as that TYPE's own failure and the type has to be named.
+/// A member schema carries the member's name and not its target's
+/// (`Schema::new_member`), so the type is recognised by the value set the violation
+/// carries — the one the model declares for it — against the generated value sets below.
+///
+/// SOURCE: the members these operations bind outside the body
+/// (`smithy_query(query="operation", operation="DeleteLens,ListLenses,ListLensShares,ListTemplateShares,ListWorkloadShares,ListProfileShares,ListShareInvitations,GetConsolidatedReport,ListAnswers,ListLensReviewImprovements,ListProfiles,ListAgentRecommendations,ListAgentRecommendationItems,ListAgentRecommendationGenerations,GetAgentRecommendation")`):
+/// `LensStatus` -> `LensStatusType`, `LensType` -> `LensType`, `Status` -> `ShareStatus`,
+/// `ShareResourceType` -> `ShareResourceType`, `Format` -> `ReportFormat`,
+/// `QuestionPriority` -> `QuestionPriority`, `ProfileOwnerType` -> `ProfileOwnerType`,
+/// `state` -> `RecommendationState`, `pillar` -> `Pillar`, `type` ->
+/// `RecommendationItemType`, `RecommendationType` -> `RecommendationType`,
+/// `remediationType` -> `RemediationType`. No two of them declare the same value set, so
+/// the set identifies the type.
+const ENUMERATED_TYPES_OUTSIDE_THE_BODY: &[(&str, &[&str])] = &[
+    ("LensStatusType", crate::ops::types::LENS_STATUS_TYPE_VALUES),
+    ("LensType", crate::ops::types::LENS_TYPE_VALUES),
+    ("ShareStatus", crate::ops::types::SHARE_STATUS_VALUES),
+    (
+        "ShareResourceType",
+        crate::ops::types::SHARE_RESOURCE_TYPE_VALUES,
+    ),
+    ("ReportFormat", crate::ops::types::REPORT_FORMAT_VALUES),
+    (
+        "QuestionPriority",
+        crate::ops::types::QUESTION_PRIORITY_VALUES,
+    ),
+    (
+        "ProfileOwnerType",
+        crate::ops::types::PROFILE_OWNER_TYPE_VALUES,
+    ),
+    (
+        "RecommendationState",
+        crate::ops::types::RECOMMENDATION_STATE_VALUES,
+    ),
+    ("Pillar", crate::ops::types::PILLAR_VALUES),
+    (
+        "RecommendationItemType",
+        crate::ops::types::RECOMMENDATION_ITEM_TYPE_VALUES,
+    ),
+    (
+        "RecommendationType",
+        crate::ops::types::RECOMMENDATION_TYPE_VALUES,
+    ),
+    (
+        "RemediationType",
+        crate::ops::types::REMEDIATION_TYPE_VALUES,
+    ),
+];
+
+/// The `(field, message)` findings for the values bound OUTSIDE the body that are outside
+/// the set their enumerated type admits, or `None` when the refusal holds anything else.
+///
+/// ALL OR NOTHING for the same reason [`schema_findings`] is: a refusal reported half as a
+/// field validation and half in the framework's envelope sends a client looking in
+/// `Fields` for a finding that is not there.
+fn enumerated_type_fields(
+    violations: &[Violation],
+    input_schema: &Schema,
+) -> Option<Vec<(String, String)>> {
+    if violations.is_empty() {
+        return None;
+    }
+    violations
+        .iter()
+        .map(|violation| enumerated_type_field(violation, input_schema))
+        .collect::<Option<Vec<_>>>()
+}
+
+/// One finding of [`enumerated_type_fields`]: the enumerated TYPE the value was parsed
+/// into, which is both the field a client attributes the failure to and the subject of the
+/// sentence that states it.
+fn enumerated_type_field(
+    violation: &Violation,
+    input_schema: &Schema,
+) -> Option<(String, String)> {
+    let ViolationKind::EnumValue(permitted) = &violation.kind else {
+        return None;
+    };
+    if service_common::front_door::binds_to_body(input_schema, &violation.path) {
+        return None;
+    }
+    let declared = enumerated_type_name(permitted)?;
+    Some((
+        declared.to_string(),
+        crate::state::invalid_parameter_sentence(declared),
     ))
+}
+
+/// The enumerated type whose declared value set is `permitted`, or `None` when no type
+/// this service binds outside its body declares that set.
+fn enumerated_type_name(permitted: &[String]) -> Option<&'static str> {
+    let mut sent: Vec<&str> = permitted.iter().map(String::as_str).collect();
+    sent.sort_unstable();
+    ENUMERATED_TYPES_OUTSIDE_THE_BODY
+        .iter()
+        .find(|(_, declared)| {
+            let mut declared: Vec<&str> = declared.to_vec();
+            declared.sort_unstable();
+            declared == sent
+        })
+        .map(|(name, _)| *name)
 }
 
 /// The `(member, message)` finding for a value outside a modelled numeric `@range`, or

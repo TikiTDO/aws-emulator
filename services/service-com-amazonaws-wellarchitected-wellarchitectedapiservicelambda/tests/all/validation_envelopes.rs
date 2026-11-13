@@ -7,7 +7,8 @@
 //! `ValidationException` — the `@required` `Message` always, `Reason` only when the
 //! service classifies the failure with a modelled `ValidationExceptionReason`
 //! (`FIELD_VALIDATION_FAILED` for a member value the service refused,
-//! `CANNOT_PARSE` for a value it could not decode), and one `Fields` entry per member a
+//! `CANNOT_PARSE` for a value it could not decode) or carries it unclassified for a
+//! request it could not READ as the shape requires, and one `Fields` entry per member a
 //! field validation names.
 //!
 //! Every request goes through the real `MultiServiceRouter`, so the boundary walk
@@ -135,20 +136,21 @@ async fn out_of_range_page_size_names_the_member_and_its_bounds() {
 }
 
 /// A value that fails a string shape's constraint (`@length`, `@pattern`, an enum value
-/// set) is refused while the request is still being read as a shape: the modelled
-/// `Message` states what was violated — the member for a `@length` or `@pattern`, the
-/// schema finding for a value outside an enumerated set — and nothing is classified: no
-/// `Reason`, no `Fields`.
+/// set) is measured by the layer that READ the request body, so the modelled `Message` is
+/// that layer's finding — what it found, not the member it was found on — and nothing is
+/// classified: no `Reason`, no `Fields`.
 ///
 /// Rows differ along the constraint class, the operation (one of the four is still
-/// scaffolded, so the envelope cannot come from a handler), and the member's binding.
+/// scaffolded, so the envelope cannot come from a handler), and the member's binding;
+/// `super::schema_finding_wording` pins the whole message of each class over a wider table.
 #[tokio::test]
 async fn string_constraint_refusals_carry_the_message_alone() {
     // Bounds and value sets from `smithy_query(query="operation", ...)`:
     // CreateWorkload WorkloadName @length(3..100) / Description @length(3..250),
     // CreateMilestone MilestoneName @length(3..100),
     // CreateReviewTemplate TemplateName @pattern("^[A-Za-z0-9-_.,:/()@!&?#+'’\\s]+$"),
-    // UpdateAnswer Reason -> AnswerReason enum.
+    // UpdateAnswer Reason -> AnswerReason enum. The last element of a row is a fragment the
+    // finding has to carry: the value the layer measured, or the enum form it reports.
     let cases: Vec<(&str, &str, String, Value, &str)> = vec![
         (
             "workload-name-below-min",
@@ -159,14 +161,14 @@ async fn string_constraint_refusals_carry_the_message_alone() {
                 request["WorkloadName"] = json!("ab");
                 request
             },
-            "workloadName",
+            "string \"ab\" is too short (length: 2, required minimum: 3)",
         ),
         (
             "workload-name-above-max",
             "POST",
             "/workloads".to_string(),
             minimal_create(&"n".repeat(101), "tok-name-long"),
-            "workloadName",
+            "is too long (length: 101, maximum allowed: 100)",
         ),
         (
             "description-below-min",
@@ -177,7 +179,7 @@ async fn string_constraint_refusals_carry_the_message_alone() {
                 request["Description"] = json!("ab");
                 request
             },
-            "description",
+            "string \"ab\" is too short (length: 2, required minimum: 3)",
         ),
         (
             "review-owner-below-min",
@@ -188,14 +190,14 @@ async fn string_constraint_refusals_carry_the_message_alone() {
                 request["ReviewOwner"] = json!("ab");
                 request
             },
-            "reviewOwner",
+            "string \"ab\" is too short (length: 2, required minimum: 3)",
         ),
         (
             "milestone-name-below-min",
             "POST",
             format!("/workloads/{WORKLOAD_ID}/milestones"),
             json!({ "MilestoneName": "ab", "ClientRequestToken": "tok-milestone" }),
-            "milestoneName",
+            "string \"ab\" is too short (length: 2, required minimum: 3)",
         ),
         (
             "template-name-outside-the-pattern",
@@ -207,7 +209,7 @@ async fn string_constraint_refusals_carry_the_message_alone() {
                 "Lenses": ["wellarchitected"],
                 "ClientRequestToken": "tok-template",
             }),
-            "templateName",
+            "does not match input string \"probe*template*name\"",
         ),
         (
             // A value outside an enumerated type's set is reported as the schema finding
@@ -223,7 +225,7 @@ async fn string_constraint_refusals_carry_the_message_alone() {
     ];
 
     let client = Client::new();
-    for (case, method, path, request, member) in cases {
+    for (case, method, path, request, finding) in cases {
         let answer = client.send(method, &path, Some(request)).await;
         let body = refused(&answer, case);
         let message = body
@@ -231,8 +233,8 @@ async fn string_constraint_refusals_carry_the_message_alone() {
             .and_then(Value::as_str)
             .unwrap_or_default();
         assert!(
-            message.to_lowercase().contains(&member.to_lowercase()),
-            "case {case:?}: Message must state {member:?}, got {message:?}"
+            message.contains(finding),
+            "case {case:?}: Message must state the finding {finding:?}, got {message:?}"
         );
         assert_eq!(
             body.get("Reason"),
@@ -247,9 +249,10 @@ async fn string_constraint_refusals_carry_the_message_alone() {
     }
 }
 
-/// A member the request had to carry and did not is answered with the `Message` alone,
-/// and is answered BEFORE any rule over the members the request DID carry — so the
-/// caller is told about the member it omitted, not a different one.
+/// A member the request had to carry and did not is answered with the property-level
+/// finding the layer that READS a request reports, and is answered BEFORE any rule over the
+/// members the request DID carry — so the caller is told about the member it omitted, not a
+/// different one.
 #[tokio::test]
 async fn absent_required_member_is_reported_before_any_other_rule() {
     let client = Client::new();
@@ -271,18 +274,19 @@ async fn absent_required_member_is_reported_before_any_other_rule() {
             .remove(member);
         let answer = client.create(request).await;
         let body = refused(&answer, case);
-        let message = body
-            .get("Message")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        assert!(
-            message.to_lowercase().contains(&member.to_lowercase()),
-            "case {case:?}: Message must name the absent member {member:?}, got {message:?}"
+        assert_eq!(
+            body.get("Message").and_then(Value::as_str),
+            Some(
+                format!("[Validation] [object has missing required properties ([\"{member}\"])]")
+                    .as_str()
+            ),
+            "case {case:?}: Message must name the absent property {member:?}, got {body:?}"
         );
         assert_eq!(
             body.get("Reason"),
-            None,
-            "case {case:?}: ValidationExceptionReason has no value for an absent member, got {body:?}"
+            Some(&json!("")),
+            "case {case:?}: the request was never read, so Reason is carried unclassified, got \
+             {body:?}"
         );
         assert_eq!(
             body.get("Fields"),

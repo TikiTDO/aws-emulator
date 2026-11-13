@@ -47,7 +47,8 @@
 //! about a member's length. [`property_count_refusal`] states that one, for a service
 //! whose recordings show it, and is asked before the envelope.
 //!
-//! [`too_many_properties`], [`missing_required_properties`], [`pattern_mismatch`],
+//! [`too_many_properties`], [`missing_required_properties`], [`instance_type_mismatch`],
+//! [`array_too_short`], [`pattern_mismatch`],
 //! [`string_too_long`], [`string_too_short`], [`numeric_above_maximum`],
 //! [`numeric_below_minimum`] and [`enum_value_not_found`] are the SENTENCES that layer states
 //! for the constraint classes it reports on a member it read from the request BODY. A service whose front door words
@@ -403,6 +404,39 @@ pub fn missing_required_properties<S: AsRef<str>>(properties: &[S]) -> String {
     format!(
         "object has missing required properties ([{}])",
         quoted.join(",")
+    )
+}
+
+/// The finding that layer states for an instance that is not of a type its schema admits:
+/// the type the instance HAS, then every type the schema allows, each double-quoted and
+/// separated by a bare comma inside one pair of brackets.
+///
+/// `found` and `allowed` are spelled in JSON's own type vocabulary — `null`, `boolean`,
+/// `integer`, `number`, `string`, `array`, `object` — which is what a schema declares a type
+/// in and therefore what the finding reports. A service that validates a DOCUMENT it was
+/// handed (rather than a modelled member) states the same sentence about that document's
+/// own schema.
+#[must_use]
+pub fn instance_type_mismatch<S: AsRef<str>>(found: &str, allowed: &[S]) -> String {
+    let quoted: Vec<String> = allowed
+        .iter()
+        .map(|admitted| format!("\"{}\"", admitted.as_ref()))
+        .collect();
+    format!(
+        "instance type ({found}) does not match any allowed primitive type (allowed: [{}])",
+        quoted.join(",")
+    )
+}
+
+/// The finding that layer states for an ARRAY carrying fewer elements than its schema
+/// admits: the minimum the schema declares and the count the instance carries.
+///
+/// The mirror of [`string_too_short`] for the other shape a length minimum bounds: an array
+/// has no scalar rendering to quote, so the finding states the two counts and no value.
+#[must_use]
+pub fn array_too_short(found: usize, min: i64) -> String {
+    format!(
+        "array is too short: must have at least {min} elements but instance has {found} elements"
     )
 }
 
@@ -1888,13 +1922,15 @@ pub fn envelope_over(clauses: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        api_parameter_path, aws_validation_refusal, aws_validation_refusal_over_elements,
+        api_parameter_path, array_too_short, aws_validation_refusal,
+        aws_validation_refusal_over_elements,
         aws_validation_refusal_over_elements_stating_withholding, aws_validation_refusal_with,
         aws_validation_refusal_withholding, aws_validation_refusal_withholding_violations,
         aws_validation_refusal_withholding_with, element_set_requirement, enum_value_bucket,
         enum_value_not_found,
         envelope_over, float_value_text, hashed_enum_order, in_float_value_rendering,
-        in_hashed_enum_order, in_pattern_first_order, in_stated_enum_order, map_key_refusal,
+        in_hashed_enum_order, in_pattern_first_order, in_stated_enum_order,
+        instance_type_mismatch, map_key_refusal,
         map_key_refusal_quoting, map_key_requirements_refusal, must_be_at_least, must_be_at_most,
         must_be_one_of,
         must_match_pattern, parameter_pattern_mismatch, parameter_pattern_refusal,
@@ -3006,6 +3042,55 @@ mod tests {
                 r#"string "{value}" is too short (length: {length}, required minimum: {min})"#
             );
             let actual = string_too_short(value, length, min);
+            assert_eq!(
+                actual, expected,
+                "case {case:?}: expected {expected:?}, got {actual:?}"
+            );
+        }
+
+        // (case, the type the instance has, the types the schema admits, the finding)
+        let types: [(&str, &str, &[&str], &str); 3] = [
+            (
+                "an array where an object is admitted",
+                "array",
+                &["object"],
+                "instance type (array) does not match any allowed primitive type (allowed: \
+                 [\"object\"])",
+            ),
+            (
+                "a number where a string is admitted",
+                "integer",
+                &["string"],
+                "instance type (integer) does not match any allowed primitive type (allowed: \
+                 [\"string\"])",
+            ),
+            (
+                "two admitted types",
+                "null",
+                &["string", "array"],
+                "instance type (null) does not match any allowed primitive type (allowed: \
+                 [\"string\",\"array\"])",
+            ),
+        ];
+        for (case, found, allowed, expected) in types {
+            let actual = instance_type_mismatch(found, allowed);
+            assert_eq!(
+                actual, expected,
+                "case {case:?}: expected {expected:?}, got {actual:?}"
+            );
+        }
+
+        // (case, the elements the instance carries, the minimum the schema declares)
+        let arrays: [(&str, usize, i64); 2] = [
+            ("an empty array where one element is required", 0, 1),
+            ("one element short of the minimum", 2, 3),
+        ];
+        for (case, found, min) in arrays {
+            let expected = format!(
+                "array is too short: must have at least {min} elements but instance has {found} \
+                 elements"
+            );
+            let actual = array_too_short(found, min);
             assert_eq!(
                 actual, expected,
                 "case {case:?}: expected {expected:?}, got {actual:?}"

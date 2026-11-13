@@ -2900,33 +2900,39 @@ pub struct CreateLensVersionToken {
 
 /// Why a lens document was refused.
 ///
-/// The lens JSON format specification the `ImportLens` doc points at is what a document
-/// is checked against; this carries the rule it broke, worded from the document itself
-/// so the caller can fix it. [`lens_json_exception`] turns it into the modelled
-/// `ValidationException`.
+/// The lens JSON format specification the `ImportLens` doc points at is a SCHEMA, so a
+/// document is reported the way a schema layer reports what it read: a document the service
+/// cannot read as JSON at all is [`LensJsonRejection::Unparsable`] — there is nothing to
+/// report about a document that was never read — and one it did read carries the FINDING its
+/// content produced, in the same voice this service states a finding about the request's own
+/// content in ([`service_common::validation_message`]). [`lens_json_exception`] turns either
+/// into the modelled `ValidationException`.
 #[derive(Debug, Clone)]
-pub struct LensJsonRejection {
-    /// `ValidationException$Reason` — [`REASON_CANNOT_PARSE`] for a payload that is not
-    /// JSON at all, [`REASON_FIELD_VALIDATION_FAILED`] for one that is JSON but not a
-    /// lens.
-    pub reason: &'static str,
-    /// The constraint the document failed, naming where in the document it failed.
-    pub constraint: String,
+pub enum LensJsonRejection {
+    /// The document is not parsable JSON, so none of the format's rules were reached.
+    Unparsable,
+    /// What the format's schema found in the document the service read.
+    Finding(String),
 }
 
-/// The modelled `ValidationException` (HTTP 400) for a refused lens document: the
-/// service's `CANNOT_PARSE` envelope when the payload is not JSON at all, and its
-/// field-validation envelope naming [`LENS_JSON_MEMBER`] otherwise. Built through the
-/// same constructors every other refusal in this service uses, so the envelope cannot
-/// drift.
+/// The modelled `ValidationException` (HTTP 400) for a refused lens document.
+///
+/// Either way the request carried a document and the document is not a lens, so the request
+/// never became what it had to be: the envelope is the one this service answers a request it
+/// could not READ with ([`unstated_reason_exception`]) — `Reason` carried unclassified, and
+/// no field finding. What they state differs with what the service knows: a document it
+/// could not read at all is answered by naming the member
+/// ([`unparsable_document_exception`]), and one it read states what the format's schema
+/// found in it, listed the way every finding of this service is listed. Built through the
+/// same constructors every other refusal in this service uses, so the envelope cannot drift.
 pub fn lens_json_exception(
     rejection: &LensJsonRejection,
 ) -> crate::ops::types::ValidationException {
-    let sentence = constraint_sentence(LENS_JSON_MEMBER, &rejection.constraint);
-    if rejection.reason == REASON_CANNOT_PARSE {
-        cannot_parse_exception(LENS_JSON_MEMBER, &sentence)
-    } else {
-        field_validation_exception(&[(LENS_JSON_MEMBER.to_string(), sentence)])
+    match rejection {
+        LensJsonRejection::Unparsable => unparsable_document_exception(LENS_JSON_MEMBER),
+        LensJsonRejection::Finding(finding) => unstated_reason_exception(
+            service_common::validation_message::bracketed_findings(std::slice::from_ref(finding)),
+        ),
     }
 }
 
@@ -2938,73 +2944,110 @@ const LENS_NAME_LENGTH: (usize, usize) = (1, 128);
 /// document's `description` becomes.
 const LENS_DESCRIPTION_LENGTH: (usize, usize) = (1, 1024);
 
-fn lens_json_field(pointer: &str, constraint: &str) -> LensJsonRejection {
-    let at = if pointer.is_empty() {
-        "the lens document".to_string()
-    } else {
-        format!("the lens document member {pointer}")
-    };
-    LensJsonRejection {
-        reason: REASON_FIELD_VALIDATION_FAILED,
-        constraint: format!("{at} {constraint}"),
+/// The properties the lens JSON format requires of the document itself, in the order a
+/// finding about the object lists them — `description` is optional, so it is not one of
+/// them.
+const LENS_JSON_REQUIRED_PROPERTIES: [&str; 3] = ["name", "pillars", "schemaVersion"];
+
+/// The type an instance HAS, in the vocabulary a schema declares a type in — what a finding
+/// about a type names the instance by.
+fn lens_json_type(value: &::serde_json::Value) -> &'static str {
+    match value {
+        ::serde_json::Value::Null => "null",
+        ::serde_json::Value::Bool(_) => "boolean",
+        ::serde_json::Value::Number(number) => {
+            if number.is_f64() {
+                "number"
+            } else {
+                "integer"
+            }
+        }
+        ::serde_json::Value::String(_) => "string",
+        ::serde_json::Value::Array(_) => "array",
+        ::serde_json::Value::Object(_) => "object",
     }
+}
+
+/// The member `member` of `object`, or the finding that reports the document does not carry
+/// it: the property as the format SPELLS it, which is what the caller would have had to send.
+fn lens_json_member<'doc>(
+    object: &'doc ::serde_json::Value,
+    member: &str,
+) -> Result<&'doc ::serde_json::Value, LensJsonRejection> {
+    match object.get(member) {
+        Some(::serde_json::Value::Null) | None => Err(LensJsonRejection::Finding(
+            service_common::validation_message::missing_required_properties(&[member]),
+        )),
+        Some(value) => Ok(value),
+    }
+}
+
+/// The finding for an instance of another type than the format admits there.
+fn lens_json_type_finding(value: &::serde_json::Value, allowed: &str) -> LensJsonRejection {
+    LensJsonRejection::Finding(service_common::validation_message::instance_type_mismatch(
+        lens_json_type(value),
+        &[allowed],
+    ))
 }
 
 /// A required string member of a lens document, within `bounds` characters.
 fn lens_json_string(
     object: &::serde_json::Value,
     member: &str,
-    pointer: &str,
     bounds: (usize, usize),
 ) -> Result<String, LensJsonRejection> {
-    let pointer = format!("{pointer}/{member}");
-    let value = object
-        .get(member)
-        .and_then(::serde_json::Value::as_str)
-        .ok_or_else(|| lens_json_field(&pointer, "must be a string"))?;
+    let value = lens_json_member(object, member)?;
+    let text = value
+        .as_str()
+        .ok_or_else(|| lens_json_type_finding(value, "string"))?;
     let (min, max) = bounds;
-    let length = value.chars().count();
-    if length < min || length > max {
-        return Err(lens_json_field(
-            &pointer,
-            &format!("must have length between {min} and {max}, inclusive"),
+    // The format bounds a string in CHARACTERS, as every modelled `@length` does, and the
+    // finding states the count that was checked.
+    let length = text.chars().count();
+    if length < min {
+        return Err(LensJsonRejection::Finding(
+            service_common::validation_message::string_too_short(text, length, min as i64),
         ));
     }
-    Ok(value.to_string())
+    if length > max {
+        return Err(LensJsonRejection::Finding(
+            service_common::validation_message::string_too_long(text, length, max as i64),
+        ));
+    }
+    Ok(text.to_string())
 }
 
 /// A required, non-empty array member of a lens document.
 fn lens_json_array<'doc>(
     object: &'doc ::serde_json::Value,
     member: &str,
-    pointer: &str,
 ) -> Result<&'doc Vec<::serde_json::Value>, LensJsonRejection> {
-    let pointer = format!("{pointer}/{member}");
-    let items = object
-        .get(member)
-        .and_then(::serde_json::Value::as_array)
-        .ok_or_else(|| lens_json_field(&pointer, "must be an array"))?;
+    let value = lens_json_member(object, member)?;
+    let items = value
+        .as_array()
+        .ok_or_else(|| lens_json_type_finding(value, "array"))?;
     if items.is_empty() {
-        return Err(lens_json_field(
-            &pointer,
-            "must have length greater than or equal to 1",
+        return Err(LensJsonRejection::Finding(
+            service_common::validation_message::array_too_short(items.len(), 1),
         ));
     }
     Ok(items)
 }
 
 /// Record `id` as taken within `scope`, or refuse it as a duplicate.
+///
+/// A schema cannot state that the ids of an array's objects differ, so this finding is the
+/// lens FORMAT's own rule rather than one the schema layer words: a rule, an answer and a
+/// report all name a question or a choice by its id, so two of them cannot share one.
 fn lens_json_unique(
     seen: &mut std::collections::BTreeSet<String>,
     id: &str,
-    pointer: &str,
     scope: &str,
 ) -> Result<(), LensJsonRejection> {
     if !seen.insert(id.to_string()) {
-        return Err(lens_json_field(
-            pointer,
-            &format!("must be unique within its {scope}"),
-        ));
+        return Err(LensJsonRejection::Finding(format!(
+            "array must not carry a duplicate id (\"{id}\") within one {scope}"
+        )));
     }
     Ok(())
 }
@@ -3025,29 +3068,47 @@ fn lens_json_unique(
 /// is a modelled constraint, so the boundary validator refuses an oversized document
 /// before any of this runs.
 pub fn parse_lens_json(document: &str) -> Result<LensDefinition, LensJsonRejection> {
+    // A document that is not JSON is refused by naming the member alone: the decoder's own
+    // diagnostic is not part of the API contract, so it is not built into a message.
     let value: ::serde_json::Value =
-        ::serde_json::from_str(document).map_err(|err| LensJsonRejection {
-            reason: REASON_CANNOT_PARSE,
-            constraint: format!("the lens document is not JSON: {err}"),
-        })?;
+        ::serde_json::from_str(document).map_err(|_| LensJsonRejection::Unparsable)?;
     if !value.is_object() {
-        return Err(lens_json_field("", "must be a JSON object"));
+        return Err(lens_json_type_finding(&value, "object"));
     }
-
-    let schema_version = lens_json_string(&value, "schemaVersion", "", (1, 32))?;
-    if schema_version != LENS_SCHEMA_VERSION {
-        return Err(lens_json_field(
-            "/schemaVersion",
-            &format!("must be {LENS_SCHEMA_VERSION}"),
+    // Every property the document is missing, in ONE finding: the sentence that layer
+    // states is about the object and lists each property it did not find, so a caller is
+    // told everything it has to add rather than one property per attempt.
+    let missing: Vec<&str> = LENS_JSON_REQUIRED_PROPERTIES
+        .iter()
+        .copied()
+        .filter(|property| {
+            matches!(
+                value.get(property),
+                None | Some(::serde_json::Value::Null)
+            )
+        })
+        .collect();
+    if !missing.is_empty() {
+        return Err(LensJsonRejection::Finding(
+            service_common::validation_message::missing_required_properties(&missing),
         ));
     }
-    let name = lens_json_string(&value, "name", "", LENS_NAME_LENGTH)?;
+
+    let schema_version = lens_json_string(&value, "schemaVersion", (1, 32))?;
+    if schema_version != LENS_SCHEMA_VERSION {
+        return Err(LensJsonRejection::Finding(
+            service_common::validation_message::enum_value_not_found(
+                &schema_version,
+                &[LENS_SCHEMA_VERSION],
+            ),
+        ));
+    }
+    let name = lens_json_string(&value, "name", LENS_NAME_LENGTH)?;
     let description = match value.get("description") {
         None | Some(::serde_json::Value::Null) => None,
         Some(_) => Some(lens_json_string(
             &value,
             "description",
-            "",
             LENS_DESCRIPTION_LENGTH,
         )?),
     };
@@ -3055,87 +3116,54 @@ pub fn parse_lens_json(document: &str) -> Result<LensDefinition, LensJsonRejecti
     let mut pillar_ids = std::collections::BTreeSet::new();
     let mut question_ids = std::collections::BTreeSet::new();
     let mut pillars = Vec::new();
-    for (pillar_index, pillar_value) in lens_json_array(&value, "pillars", "")?
-        .iter()
-        .enumerate()
-    {
-        let pillar_pointer = format!("/pillars/{pillar_index}");
-        let pillar_id = lens_json_string(pillar_value, "id", &pillar_pointer, (1, 128))?;
-        lens_json_unique(
-            &mut pillar_ids,
-            &pillar_id,
-            &format!("{pillar_pointer}/id"),
-            "lens",
-        )?;
-        let pillar_name = lens_json_string(pillar_value, "name", &pillar_pointer, LENS_NAME_LENGTH)?;
+    for pillar_value in lens_json_array(&value, "pillars")? {
+        let pillar_id = lens_json_string(pillar_value, "id", (1, 128))?;
+        lens_json_unique(&mut pillar_ids, &pillar_id, "lens")?;
+        let pillar_name = lens_json_string(pillar_value, "name", LENS_NAME_LENGTH)?;
 
         let mut questions = Vec::new();
-        for (question_index, question_value) in
-            lens_json_array(pillar_value, "questions", &pillar_pointer)?
-                .iter()
-                .enumerate()
-        {
-            let question_pointer = format!("{pillar_pointer}/questions/{question_index}");
-            let question_id = lens_json_string(question_value, "id", &question_pointer, (1, 128))?;
-            lens_json_unique(
-                &mut question_ids,
-                &question_id,
-                &format!("{question_pointer}/id"),
-                "lens",
-            )?;
-            let title = lens_json_string(question_value, "title", &question_pointer, (1, 1024))?;
+        for question_value in lens_json_array(pillar_value, "questions")? {
+            let question_id = lens_json_string(question_value, "id", (1, 128))?;
+            lens_json_unique(&mut question_ids, &question_id, "lens")?;
+            let title = lens_json_string(question_value, "title", (1, 1024))?;
 
             let mut choice_ids = std::collections::BTreeSet::new();
             let mut choices = Vec::new();
-            for (choice_index, choice_value) in
-                lens_json_array(question_value, "choices", &question_pointer)?
-                    .iter()
-                    .enumerate()
-            {
-                let choice_pointer = format!("{question_pointer}/choices/{choice_index}");
-                let choice_id = lens_json_string(choice_value, "id", &choice_pointer, (1, 128))?;
-                lens_json_unique(
-                    &mut choice_ids,
-                    &choice_id,
-                    &format!("{choice_pointer}/id"),
-                    "question",
-                )?;
+            for choice_value in lens_json_array(question_value, "choices")? {
+                let choice_id = lens_json_string(choice_value, "id", (1, 128))?;
+                lens_json_unique(&mut choice_ids, &choice_id, "question")?;
                 choices.push(LensChoice {
                     id: choice_id,
-                    title: lens_json_string(choice_value, "title", &choice_pointer, (1, 1024))?,
+                    title: lens_json_string(choice_value, "title", (1, 1024))?,
                     // The lens JSON format specification carries no per-choice prose, so
                     // an imported lens publishes none.
                     description: None,
                 });
             }
 
-            let rule_values = lens_json_array(question_value, "riskRules", &question_pointer)?;
+            let rule_values = lens_json_array(question_value, "riskRules")?;
             let mut risk_rules = Vec::new();
             for (rule_index, rule_value) in rule_values.iter().enumerate() {
-                let rule_pointer = format!("{question_pointer}/riskRules/{rule_index}");
-                let condition = lens_json_string(rule_value, "condition", &rule_pointer, (1, 1024))?;
-                let risk = lens_json_string(rule_value, "risk", &rule_pointer, (1, 32))?;
+                let condition = lens_json_string(rule_value, "condition", (1, 1024))?;
+                let risk = lens_json_string(rule_value, "risk", (1, 32))?;
                 if !LENS_JSON_RISK_VALUES.contains(&risk.as_str()) {
-                    return Err(lens_json_field(
-                        &format!("{rule_pointer}/risk"),
-                        &format!(
-                            "must satisfy enum value set: [{}]",
-                            LENS_JSON_RISK_VALUES.join(", ")
+                    return Err(LensJsonRejection::Finding(
+                        service_common::validation_message::enum_value_not_found(
+                            &risk,
+                            LENS_JSON_RISK_VALUES,
                         ),
                     ));
                 }
                 // The last rule is the one that applies when no other matched, so it
-                // carries the default condition and no other rule may.
+                // carries the default condition and no other rule may. A schema cannot
+                // state that, so this finding is the lens FORMAT's own rule.
                 let is_last = rule_index + 1 == rule_values.len();
                 let is_default = condition == LENS_JSON_DEFAULT_CONDITION;
                 if is_last != is_default {
-                    return Err(lens_json_field(
-                        &format!("{rule_pointer}/condition"),
-                        &format!(
-                            "must be {LENS_JSON_DEFAULT_CONDITION} on the last risk rule of a \
-                             question and on no other"
-                        ),
-                    ));
+                    return Err(LensJsonRejection::Finding(format!(
+                        "array must carry the \"{LENS_JSON_DEFAULT_CONDITION}\" condition on \
+                         its last risk rule and on no other"
+                    )));
                 }
                 risk_rules.push(LensRiskRule { condition, risk });
             }

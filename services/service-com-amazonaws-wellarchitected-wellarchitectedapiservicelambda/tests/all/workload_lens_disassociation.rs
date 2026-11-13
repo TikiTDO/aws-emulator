@@ -15,8 +15,9 @@
 //! bounds ONE request, checked before any per-entry work since the member publishes no
 //! modelled maximum, and "The Amazon Web Services Well-Architected Framework lens
 //! (`wellarchitected`) cannot be removed from a workload" refuses a request naming it —
-//! each answered with the modelled 400 `ValidationException` naming `LensAliases`, because
-//! the operation models no other error for a request the service will not serve.
+//! each answered with the modelled 400 `ValidationException`, because the operation models
+//! no other error for a request the service will not serve; the quota names the member that
+//! carried the aliases and the default lens names the workload's own `Lenses`.
 //!
 //! Every workload and custom lens is minted over HTTP and everything asserted crosses the
 //! HTTP boundary: requests go through the real `MultiServiceRouter`, so routing, restJson1
@@ -466,8 +467,8 @@ async fn a_lens_the_workload_does_not_review_is_refused_and_removes_nothing() {
 
 /// "The Amazon Web Services Well-Architected Framework lens (`wellarchitected`) cannot be
 /// removed from a workload" (`DisassociateLenses` doc): a request naming it is the modelled
-/// 400 naming `LensAliases` and removes nothing, however the name is spelled, wherever it
-/// sits in the list, and whether or not the workload reviews that lens.
+/// 400 naming the workload's `Lenses` and removes nothing, however the name is spelled,
+/// wherever it sits in the list, and whether or not the workload reviews that lens.
 #[tokio::test]
 async fn the_framework_lens_cannot_be_removed_from_a_workload() {
     let client = Client::new();
@@ -492,12 +493,15 @@ async fn the_framework_lens_cannot_be_removed_from_a_workload() {
     .await;
 
     // The rows differ along the spelling that names the framework lens, its position in the
-    // list, and whether the rest of the list names lenses the workload does review.
-    let rows: Vec<(&str, &str, Vec<String>)> = vec![
+    // list, and whether the rest of the list names lenses the workload does review. The last
+    // element is the alias the refusal must quote: the one the request named the default lens
+    // by.
+    let rows: Vec<(&str, &str, Vec<String>, String)> = vec![
         (
             "bare-alias",
             reviewing_framework.as_str(),
             vec![state::FRAMEWORK_LENS_ALIAS.to_string()],
+            state::FRAMEWORK_LENS_ALIAS.to_string(),
         ),
         (
             "official-arn",
@@ -506,6 +510,7 @@ async fn the_framework_lens_cannot_be_removed_from_a_workload() {
                 "us-east-1",
                 state::FRAMEWORK_LENS_ALIAS,
             )],
+            official_lens_arn("us-east-1", state::FRAMEWORK_LENS_ALIAS),
         ),
         (
             "last-of-a-list",
@@ -514,6 +519,7 @@ async fn the_framework_lens_cannot_be_removed_from_a_workload() {
                 "serverless".to_string(),
                 state::FRAMEWORK_LENS_ALIAS.to_string(),
             ],
+            state::FRAMEWORK_LENS_ALIAS.to_string(),
         ),
         (
             "first-of-a-list",
@@ -522,11 +528,13 @@ async fn the_framework_lens_cannot_be_removed_from_a_workload() {
                 state::FRAMEWORK_LENS_ALIAS.to_string(),
                 "iot".to_string(),
             ],
+            state::FRAMEWORK_LENS_ALIAS.to_string(),
         ),
         (
             "a-workload-that-does-not-review-it",
             without_framework.as_str(),
             vec![state::FRAMEWORK_LENS_ALIAS.to_string()],
+            state::FRAMEWORK_LENS_ALIAS.to_string(),
         ),
         // Any name the crate's one lens identity rule resolves to the framework lens names
         // it here too: `state::lens_alias` reads the alias off an ARN's trailing
@@ -540,15 +548,32 @@ async fn the_framework_lens_cannot_be_removed_from_a_workload() {
                 "arn:aws:wellarchitected:us-west-2:999999999999:lens/{}",
                 state::FRAMEWORK_LENS_ALIAS
             )],
+            format!(
+                "arn:aws:wellarchitected:us-west-2:999999999999:lens/{}",
+                state::FRAMEWORK_LENS_ALIAS
+            ),
         ),
     ];
 
-    for (case, workload_id, lenses) in rows {
+    for (case, workload_id, lenses, quoted) in rows {
         age_workload(&client, workload_id, AGE);
         let (before, updated_before) = stored_lenses(&client, workload_id, case).await;
 
         let answer = disassociate_lenses(&client, workload_id, &lenses).await;
-        assert_refused(case, &answer);
+        assert_refused(case, &answer, state::LENSES_MEMBER);
+        // The sentence states the alias the request named the default lens by, once, in
+        // `Message` and in the one `Fields` entry.
+        let sentence = format!("Cannot disassociate default lens: {quoted}.");
+        assert_eq!(
+            member(&answer, "Message"),
+            format!("[Validation] {sentence}"),
+            "case {case:?}: expected the default-lens sentence, got {answer:?}"
+        );
+        assert_eq!(
+            answer.body.get("Fields").cloned().unwrap_or(Value::Null),
+            json!([{ "Name": state::LENSES_MEMBER, "Message": sentence }]),
+            "case {case:?}: the finding must carry the same sentence, got {answer:?}"
+        );
 
         let (after, updated_after) = stored_lenses(&client, workload_id, case).await;
         assert_eq!(
@@ -633,7 +658,7 @@ async fn the_lens_aliases_quota_bounds_one_request() {
                 "case {case:?}: every named lens must be dropped, got {after:?}"
             );
         } else {
-            assert_refused(case, &answer);
+            assert_refused(case, &answer, state::LENS_ALIASES_MEMBER);
             let (after, updated_after) = stored_lenses(&client, &workload_id, case).await;
             assert_eq!(
                 after, before,
@@ -885,10 +910,10 @@ async fn disassociating_a_lens_drops_the_answers_and_notes_of_its_review() {
 }
 
 /// The refusal a request the service will not serve gets: the modelled 400
-/// `ValidationException` naming the member that carried the aliases. `DisassociateLenses`
-/// models no `ServiceQuotaExceededException` and no error for an unremovable lens, so both
-/// are reported as a bad request.
-fn assert_refused(case: &str, answer: &Answer) {
+/// `ValidationException` naming, in `member`, the field the rule it broke is about.
+/// `DisassociateLenses` models no `ServiceQuotaExceededException` and no error for an
+/// unremovable lens, so both are reported as a bad request.
+fn assert_refused(case: &str, answer: &Answer, member_name: &str) {
     assert_eq!(
         answer.status, 400,
         "case {case:?}: expected HTTP 400, got {answer:?}"
@@ -904,7 +929,7 @@ fn assert_refused(case: &str, answer: &Answer) {
     );
     assert_eq!(
         field_names(answer),
-        vec![state::LENS_ALIASES_MEMBER.to_string()],
-        "case {case:?}: the refusal must name the offending member, got {answer:?}"
+        vec![member_name.to_string()],
+        "case {case:?}: the refusal must name the offending field, got {answer:?}"
     );
 }

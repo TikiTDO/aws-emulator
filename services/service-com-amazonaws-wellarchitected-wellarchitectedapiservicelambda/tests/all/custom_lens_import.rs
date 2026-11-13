@@ -363,11 +363,78 @@ async fn the_recorded_definition_matches_the_document_that_was_imported() {
 }
 
 /// Rule 2. A payload that is not a lens is refused with the modelled
-/// `ValidationException`, naming `JSONString` and the rule it broke — and it imports
-/// nothing, which the reused `ClientRequestToken` below proves: a refused request
-/// recorded no token, so the same token still imports a valid document.
+/// `ValidationException` — and it imports nothing, which the reused `ClientRequestToken`
+/// below proves: a refused request recorded no token, so the same token still imports a
+/// valid document.
+///
+/// Either way the request carried a document that is not a lens, so it never became what it
+/// had to be: `Reason` is carried unclassified and no field finding is reported. A document
+/// the service cannot read as JSON at all is answered by naming `JSONString` alone; one it
+/// DID read is answered with what the lens format's schema found in it, in the same voice a
+/// finding about the request's own body is stated in — the property that is missing, the
+/// type the instance has against the types admitted, the string that was measured with its
+/// character count and the published bound, the value against the set the format declares.
+/// The rows below state each of those findings in full.
 #[tokio::test]
 async fn a_payload_that_is_not_a_lens_is_refused_and_imports_nothing() {
+    /// The whole `Message` a row expects for a document the service could not read as JSON
+    /// at all: the member named as invalid, with nothing about the document in it.
+    const UNPARSABLE: &str = "[Validation] Invalid JSONString";
+
+    /// The whole `Message` for a document the service read: the finding, listed the way
+    /// every finding of this service is listed, behind the failure-class tag.
+    fn finding(found: &str) -> String {
+        format!("[Validation] [{found}]")
+    }
+
+    /// The finding for a property the document does not carry.
+    fn missing(property: &str) -> String {
+        finding(&format!(
+            "object has missing required properties ([\"{property}\"])"
+        ))
+    }
+
+    /// The finding for an instance of another type than the format admits there.
+    fn wrong_type(found: &str, allowed: &str) -> String {
+        finding(&format!(
+            "instance type ({found}) does not match any allowed primitive type (allowed: \
+             [\"{allowed}\"])"
+        ))
+    }
+
+    /// The finding for a value outside the set the format declares, which lists that set in
+    /// the order the format declares it.
+    fn not_in_set(value: &str, permitted: &[&str]) -> String {
+        let quoted: Vec<String> = permitted
+            .iter()
+            .map(|admitted| format!("\"{admitted}\""))
+            .collect();
+        finding(&format!(
+            "instance value (\"{value}\") not found in enum (possible values: [{}])",
+            quoted.join(",")
+        ))
+    }
+
+    /// The two findings for a string outside the bounds the format publishes for it.
+    fn too_short(value: &str, min: usize) -> String {
+        finding(&format!(
+            "string \"{value}\" is too short (length: {}, required minimum: {min})",
+            value.chars().count()
+        ))
+    }
+
+    fn too_long(value: &str, max: usize) -> String {
+        finding(&format!(
+            "string \"{value}\" is too long (length: {}, maximum allowed: {max})",
+            value.chars().count()
+        ))
+    }
+
+    /// The finding for an array the format requires an element of.
+    fn empty_array() -> String {
+        finding("array is too short: must have at least 1 elements but instance has 0 elements")
+    }
+
     let valid = lens_document("Valid lens", None, &[("governance", 1, 2)]);
     // Rows: each a document breaking ONE rule of the lens JSON format specification,
     // plus the two payloads that are not lens documents at all.
@@ -397,75 +464,110 @@ async fn a_payload_that_is_not_a_lens_is_refused_and_imports_nothing() {
     let mut name_not_a_string = valid.clone();
     name_not_a_string["name"] = json!(7);
 
-    let cases: Vec<(&str, String, &str)> = vec![
+    let cases: Vec<(&str, String, String)> = vec![
+        // The two documents the service cannot read as JSON at all: no rule of the format
+        // was reached, so nothing about the document is reported.
         (
             "not-json-at-all",
             "this is not a lens document".to_string(),
-            "CANNOT_PARSE",
+            UNPARSABLE.to_string(),
         ),
         (
             "truncated-json",
             "{\"schemaVersion\": ".to_string(),
-            "CANNOT_PARSE",
+            UNPARSABLE.to_string(),
         ),
         (
             "json-but-not-an-object",
             json!([valid.clone()]).to_string(),
-            "FIELD_VALIDATION_FAILED",
+            wrong_type("array", "object"),
         ),
         (
             "missing-schema-version",
             json!({ "name": "No version", "pillars": valid["pillars"].clone() }).to_string(),
-            "FIELD_VALIDATION_FAILED",
+            missing("schemaVersion"),
         ),
         (
             "wrong-schema-version",
             wrong_schema.to_string(),
-            "FIELD_VALIDATION_FAILED",
+            not_in_set("2020-07-02", &[state::LENS_SCHEMA_VERSION]),
         ),
         (
             "missing-name",
             json!({ "schemaVersion": "2021-11-01", "pillars": valid["pillars"].clone() })
                 .to_string(),
-            "FIELD_VALIDATION_FAILED",
+            missing("name"),
         ),
         (
             "name-not-a-string",
             name_not_a_string.to_string(),
-            "FIELD_VALIDATION_FAILED",
+            wrong_type("integer", "string"),
         ),
         // `LensName` is @length(1, 128) and `LensDescription` @length(1, 1024)
         // (smithy_query: shape Lens), so one character past each is refused.
-        ("name-below-the-minimum", empty_name.to_string(), "FIELD_VALIDATION_FAILED"),
-        ("name-above-the-maximum", long_name.to_string(), "FIELD_VALIDATION_FAILED"),
+        (
+            "name-below-the-minimum",
+            empty_name.to_string(),
+            too_short("", 1),
+        ),
+        (
+            "name-above-the-maximum",
+            long_name.to_string(),
+            too_long(&"n".repeat(129), 128),
+        ),
         (
             "description-above-the-maximum",
             long_description.to_string(),
-            "FIELD_VALIDATION_FAILED",
+            too_long(&"d".repeat(1025), 1024),
         ),
-        ("no-pillars", no_pillars.to_string(), "FIELD_VALIDATION_FAILED"),
+        ("no-pillars", no_pillars.to_string(), empty_array()),
         (
             "missing-pillars",
             json!({ "schemaVersion": "2021-11-01", "name": "No pillars" }).to_string(),
-            "FIELD_VALIDATION_FAILED",
+            missing("pillars"),
         ),
-        ("pillar-without-questions", no_questions.to_string(), "FIELD_VALIDATION_FAILED"),
-        ("question-without-choices", no_choices.to_string(), "FIELD_VALIDATION_FAILED"),
         (
+            "pillar-without-questions",
+            no_questions.to_string(),
+            empty_array(),
+        ),
+        (
+            "question-without-choices",
+            no_choices.to_string(),
+            empty_array(),
+        ),
+        (
+            // A rule the format states that no schema can: the condition that applies when
+            // no other matched belongs to the last rule and to no other.
             "default-risk-rule-not-last",
             broken_default.to_string(),
-            "FIELD_VALIDATION_FAILED",
+            finding(
+                "array must carry the \"default\" condition on its last risk rule and on no \
+                 other",
+            ),
         ),
-        ("unmodelled-risk", unmodelled_risk.to_string(), "FIELD_VALIDATION_FAILED"),
-        ("duplicate-choice-id", duplicate_choice.to_string(), "FIELD_VALIDATION_FAILED"),
+        (
+            "unmodelled-risk",
+            unmodelled_risk.to_string(),
+            not_in_set("LOW_RISK", state::LENS_JSON_RISK_VALUES),
+        ),
+        (
+            // The other rule of that kind: an id names one choice of a question and one
+            // question of a lens, so two of them cannot share it.
+            "duplicate-choice-id",
+            duplicate_choice.to_string(),
+            finding(
+                "array must not carry a duplicate id (\"governance_q0_c0\") within one question",
+            ),
+        ),
         (
             "duplicate-question-id",
             duplicate_question.to_string(),
-            "FIELD_VALIDATION_FAILED",
+            finding("array must not carry a duplicate id (\"governance_q0\") within one lens"),
         ),
     ];
 
-    for (case, document, expected_reason) in cases {
+    for (case, document, expected_message) in cases {
         let client = Client::new();
         let answer = import(&client, &document, None, "tok-refused", None).await;
         assert_eq!(
@@ -476,21 +578,23 @@ async fn a_payload_that_is_not_a_lens_is_refused_and_imports_nothing() {
             answer.error_code, "ValidationException",
             "case {case:?}: expected ValidationException, got {answer:?}"
         );
+        // The request carried a document and the document is not a lens, so the request
+        // never became what it had to be: `Reason` is carried unclassified and there is no
+        // field finding, whichever rule the document broke.
         assert_eq!(
-            member(&answer, "Reason"),
-            expected_reason,
-            "case {case:?}: expected Reason {expected_reason}, got {answer:?}"
+            answer.body.get("Reason"),
+            Some(&json!("")),
+            "case {case:?}: Reason must be carried unclassified, got {answer:?}"
         );
         assert_eq!(
-            answer
-                .body
-                .get("Fields")
-                .and_then(Value::as_array)
-                .and_then(|fields| fields.first())
-                .and_then(|field| field.get("Name"))
-                .and_then(Value::as_str),
-            Some("JSONString"),
-            "case {case:?}: the refusal must name the member that failed, got {answer:?}"
+            answer.body.get("Fields"),
+            None,
+            "case {case:?}: no field rule ran, so no field finding is reported, got {answer:?}"
+        );
+        assert_eq!(
+            member(&answer, "Message"),
+            expected_message,
+            "case {case:?}: unexpected Message, got {answer:?}"
         );
         assert_eq!(
             answer.body.get("LensArn"),

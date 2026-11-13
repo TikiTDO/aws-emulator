@@ -71,20 +71,18 @@ fn tagged(sentence: &str) -> String {
 /// IDENTICALLY, because the service does not tell the caller which of them it is.
 pub fn unapplicable_lenses(refusal: state::LensesRefusal) -> ValidationException {
     match refusal {
-        state::LensesRefusal::NotFound(unresolved) => ValidationException {
-            // The store reports the entry it could not resolve as that lookup's
-            // `ResourceId`, which is the alias AS SENT — how the caller named the lens.
-            message: tagged(&format!(
+        // The store reports the entry it could not resolve as that lookup's `ResourceId`,
+        // which is the alias AS SENT — how the caller named the lens. This refusal is not a
+        // per-member finding: the service carries `Reason` without classifying it
+        // ([`state::unstated_reason_exception`]), so a client branching on the member reads
+        // "no classification" rather than a field validation it would then look in `Fields`
+        // for.
+        state::LensesRefusal::NotFound(unresolved) => {
+            state::unstated_reason_exception(format!(
                 "Failed to get lenses {}. User might be not authorized to access lens.",
                 unresolved.resource_id
-            )),
-            // This refusal is not a per-member finding: the service carries `Reason`
-            // without classifying it, so a client branching on the member reads "no
-            // classification" rather than a field validation it would then look in
-            // `Fields` for.
-            reason: Some(String::new()),
-            fields: None,
-        },
+            ))
+        }
     }
 }
 

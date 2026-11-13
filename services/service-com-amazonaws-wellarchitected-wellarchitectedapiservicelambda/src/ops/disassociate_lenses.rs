@@ -193,15 +193,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // identity rule ([`crate::state::lens_alias`]), the same rule the reviews below are
         // resolved by, so no name that would reach the framework lens's review gets past
         // this.
-        if input
+        if let Some(default_lens) = input
             .lens_aliases
             .iter()
-            .any(|lens| crate::state::lens_alias(lens) == crate::state::FRAMEWORK_LENS_ALIAS)
+            .find(|lens| crate::state::lens_alias(lens) == crate::state::FRAMEWORK_LENS_ALIAS)
         {
-            return Err(
-                DisassociateLensesErrorModeled::ValidationException(framework_lens_refusal())
-                    .into(),
-            );
+            return Err(DisassociateLensesErrorModeled::ValidationException(
+                framework_lens_refusal(default_lens),
+            )
+            .into());
         }
 
         // Every lens the request names is resolved against the workload's OWN reviews
@@ -248,17 +248,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 }
 
 /// The refusal for a request that asks for the Well-Architected Framework lens to be
-/// removed: the modelled 400 naming the member that carried the aliases, because this
-/// operation models no other error for a request the service will not serve. Built through
-/// the one place a member-constraint failure is worded, so it reads like the constraint
-/// refusals the request boundary itself raises.
-fn framework_lens_refusal() -> ValidationException {
-    crate::state::member_constraint_exception(
-        crate::state::LENS_ALIASES_MEMBER,
-        &format!(
-            "must not name the Well-Architected Framework lens ({}), which cannot be removed \
-             from a workload",
-            crate::state::FRAMEWORK_LENS_ALIAS
-        ),
-    )
+/// removed: the modelled 400, because this operation models no other error for a request
+/// the service will not serve.
+///
+/// The Framework lens is the lens every workload is reviewed against by default, so the
+/// refusal is the one this service states for a default lens
+/// ([`crate::state::default_lens_refusal`]) — naming the workload's lens collection, which
+/// is what the request asks to change, and the alias the request named it by. A request
+/// naming it more than once is one request, so it is refused once, by the first alias that
+/// names it.
+fn framework_lens_refusal(lens_alias: &str) -> ValidationException {
+    crate::state::default_lens_refusal(lens_alias)
 }

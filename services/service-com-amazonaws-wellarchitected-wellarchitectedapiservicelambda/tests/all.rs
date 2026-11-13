@@ -352,3 +352,7 @@ mod enum_refusal_wording;
 // suite falls in a crowded run of this list.
 #[path = "all/pillar_filter_refusal.rs"]
 mod pillar_filter_refusal;
+// Appended at the end for the reason the notes above give: an insertion into this list's
+// sorted middle is what repeatedly refused to merge.
+#[path = "all/schema_finding_wording.rs"]
+mod schema_finding_wording;
