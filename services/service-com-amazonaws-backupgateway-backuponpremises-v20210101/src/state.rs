@@ -1218,19 +1218,28 @@ fn system_tag_list(created_by: &str, created_time: SystemTime) -> Vec<Tag> {
 }
 
 /// A creation instant as [`CREATED_DATE_TAG_KEY`]'s value spells it: a tag value is a
-/// string, so the instant is rendered as an ISO-8601 `date-time` (RFC 3339, as
-/// `aws_smithy_types` writes a `DateTime`), truncated to WHOLE SECONDS — the granularity a
-/// creation date is reported at.
+/// string, so the instant is rendered as the whole number of MILLISECONDS since the Unix
+/// epoch, in decimal digits and nothing else — the form the recorded wire of a tag read
+/// carries.
 ///
-/// An instant built from whole seconds has no rendering a formatter can refuse, and this
-/// runs on a request path, so the unreachable arm answers the empty string rather than
-/// panicking and costing every caller the store.
+/// The fixed part of the value is that layout (decimal epoch milliseconds); the variable
+/// part is the record's own creation instant, read off the record and never off the
+/// request.
 fn created_date(created_time: SystemTime) -> String {
-    // Through the crate's one `SystemTime` -> `DateTime` conversion, then truncated: `secs`
-    // is the whole-second part of that instant.
-    ::aws_smithy_types::DateTime::from_secs(date_time(created_time).secs())
-        .fmt(::aws_smithy_types::date_time::Format::DateTime)
-        .unwrap_or_default()
+    match created_time.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(since_epoch) => epoch_millis(since_epoch).to_string(),
+        Err(before_epoch) => (-epoch_millis(before_epoch.duration())).to_string(),
+    }
+}
+
+/// A span as whole milliseconds: the arithmetic behind the epoch milliseconds
+/// [`created_date`] reports.
+///
+/// A creation instant is stamped from the clock when a record is minted, so a span this wide
+/// is unreachable on a request path; it saturates rather than wrapping, because a renderer
+/// that runs while a caller waits must not panic.
+fn epoch_millis(span: ::std::time::Duration) -> i64 {
+    i64::try_from(span.as_millis()).unwrap_or(i64::MAX)
 }
 
 /// One persisted hypervisor.

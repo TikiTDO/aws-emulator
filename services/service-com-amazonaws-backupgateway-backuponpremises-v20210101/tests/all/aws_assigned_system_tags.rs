@@ -97,7 +97,7 @@ fn rows() -> Vec<Row> {
     ]
 }
 
-fn tag_body(pairs: &[(&str, &str)]) -> Value {
+pub(crate) fn tag_body(pairs: &[(&str, &str)]) -> Value {
     Value::Array(
         pairs
             .iter()
@@ -107,7 +107,10 @@ fn tag_body(pairs: &[(&str, &str)]) -> Value {
 }
 
 /// Create one resource of `kind`, carrying `tags`, and hand back the ARN the store minted.
-async fn create_resource(
+///
+/// Shared with the sibling `system_tag_created_date_form` suite, so both read the system
+/// tags of resources minted the one way.
+pub(crate) async fn create_resource(
     router: &MultiServiceRouter,
     kind: &str,
     nonce: usize,
@@ -164,7 +167,7 @@ async fn list_tags(router: &MultiServiceRouter, arn: &str) -> Reply {
 
 /// The whole `Tags` list `ListTagsForResource` reports for `arn`, in the order it reported
 /// it, asserting the call was served.
-async fn reported_tags(
+pub(crate) async fn reported_tags(
     router: &MultiServiceRouter,
     case: &str,
     arn: &str,
@@ -225,13 +228,11 @@ async fn a_tag_read_reports_the_system_tags_ahead_of_the_client_tags() {
             row.case
         );
 
-        // `aws:createdDate` is a non-empty instant, and each resource has its own.
+        // `aws:createdDate` reports the record's creation instant, in the one form the
+        // `system_tag_created_date_form` suite states the rule for — asserted here through
+        // that suite's own check, so neither suite carries a second copy of the rule.
         let created_date = reported[1].1.clone();
-        assert!(
-            created_date.contains('T') && created_date.ends_with('Z'),
-            "case {:?}: aws:createdDate must report a date-time, got {created_date:?}",
-            row.case
-        );
+        crate::system_tag_created_date_form::assert_epoch_millis_form(row.case, &created_date);
         creation_dates.insert(created_date);
 
         // Everything after the first two is the client's own, exactly the pairs the create
