@@ -48,8 +48,13 @@
 //! What is published to a destination that takes events, and when, lives beside this:
 //! [`outcome`] decides what each recipient of an accepted message did with it and what the
 //! account's suppression list gains from that, and [`notification`] builds the documents
-//! those reactions produce and publishes each to every destination that matches it.
+//! those reactions produce and publishes each to every destination that matches it — as a
+//! document for the destination kinds that take one, and as the datapoint a
+//! `CloudWatchDestination` counts the event as ([`cloudwatch`]).
 
+/// The CloudWatch destination kind: the datapoint one event becomes, and the dimensions
+/// the destination declared for it.
+pub mod cloudwatch;
 /// The Firehose destination kind: the role its events are sent under, and the record each
 /// event is put on the stream as.
 pub mod firehose;

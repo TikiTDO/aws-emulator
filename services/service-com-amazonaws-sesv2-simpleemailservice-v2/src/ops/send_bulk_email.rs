@@ -393,6 +393,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .to_string();
         let mut results = Vec::new();
         let mut publications = Vec::new();
+        // The CloudWatch store a destination that counts events appends to, read once for
+        // the whole request: every message of a bulk send publishes into the same store.
+        let metric_store = event_publication::cloudwatch::metric_store(&*self.engine);
         let mut store = state.lock();
         let quota = store.send_counters.max_24h;
         let mut charged = store.send_counters.sent_last_24h;
@@ -469,6 +472,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 destinations,
                 message: published,
                 outcomes,
+                // A destination that COUNTS this message's events appends its datapoints
+                // to the CloudWatch store in this same engine, which is the store
+                // CloudWatch's own reads answer from.
+                metric_store: metric_store.clone(),
             });
             results.push(BulkEmailEntryResult {
                 status: Some(STATUS_SUCCESS.to_string()),

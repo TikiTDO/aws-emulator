@@ -504,6 +504,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             destinations,
             message: published,
             outcomes,
+            // A destination that COUNTS the events of this send appends its datapoints to
+            // the CloudWatch store in this same engine, which is the store CloudWatch's
+            // own reads answer from.
+            metric_store: event_publication::cloudwatch::metric_store(&*self.engine),
         };
         // RELEASE the lock before the events are published: each publication reaches the
         // service that owns the destination through this same emulator, and the message

@@ -21,8 +21,11 @@
 //! no mail server, because none was asked.
 //!
 //! The destination kinds served here are the ones this service reaches through a grant
-//! this emulator can read ([`super`]): the SNS topic a destination publishes to, and the
-//! Firehose stream a destination puts its events on as records ([`super::firehose`]).
+//! this emulator can read ([`super`]): the SNS topic a destination publishes to, the
+//! Firehose stream a destination puts its events on as records ([`super::firehose`]), and
+//! the CloudWatch dimensions a destination counts the event under
+//! ([`super::cloudwatch`]) — which is the one kind that takes no document, because what a
+//! CloudWatch destination receives is one datapoint of the metric named after the event.
 //! Every other kind an event destination may carry is reached through a grant of its own
 //! and is not published to from here.
 //!
@@ -53,6 +56,11 @@ const BOUNCE: (&str, &str) = ("BOUNCE", "Bounce");
 /// The same pair for a message a recipient reported as unwanted.
 const COMPLAINT: (&str, &str) = ("COMPLAINT", "Complaint");
 
+/// The message tag SES applies to every send made through a configuration set: the set
+/// itself. A destination publishes it as a CloudWatch dimension only where its own
+/// configuration declares a dimension of this name ([`super::cloudwatch`]).
+const CONFIGURATION_SET_TAG: &str = "ses:configuration-set";
+
 /// The header names whose values make up the `commonHeaders` of a published document,
 /// matched without regard to case the way a mail header name compares.
 const COMMON_HEADER_NAMES: [&str; 3] = ["Subject", "Message-ID", "Date"];
@@ -67,6 +75,10 @@ const DELIVERY_STATUS_MTA_TYPE: &str = "dsn";
 pub struct Notification {
     /// The modelled `EventType` this notification is of.
     pub event_type: &'static str,
+    /// The name of the `AWS/SES` metric this event is counted as one observation of by a
+    /// destination that counts it ([`super::cloudwatch`]), which is the event's published
+    /// spelling.
+    pub metric_name: &'static str,
     /// The published document.
     pub document: Value,
 }
@@ -77,7 +89,7 @@ pub struct Notification {
 /// Assembled by the send under the store lock and published once the lock is released: the
 /// publish is an in-process call into another service, and no store lock is held across
 /// one.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PublishedSend {
     /// The Region the send executed in, which is the Region of the ARNs a document names.
     pub region: String,
@@ -90,12 +102,36 @@ pub struct PublishedSend {
     pub message: crate::state::SentMessage,
     /// What each recipient did with the message.
     pub outcomes: Vec<RecipientOutcome>,
+    /// The CloudWatch store a destination that counts events appends its datapoints to
+    /// ([`super::cloudwatch`]), or `None` when this emulator carries no CloudWatch at all.
+    pub metric_store: Option<::engine::ServiceState<super::cloudwatch::CloudWatchState>>,
+}
+
+impl ::std::fmt::Debug for PublishedSend {
+    /// The send itself, which is all of this that is not the store its datapoints are
+    /// appended to (a store handle has no rendering of its own).
+    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        formatter
+            .debug_struct("PublishedSend")
+            .field("region", &self.region)
+            .field("account_id", &self.account_id)
+            .field("destinations", &self.destinations)
+            .field("message", &self.message)
+            .field("outcomes", &self.outcomes)
+            .field("counts_events", &self.metric_store.is_some())
+            .finish()
+    }
 }
 
 impl PublishedSend {
     /// Deliver every event this send produced to every destination that matches it.
     async fn deliver(&self, callback: &::smithy_server_runtime::EmbeddedEmulator) {
         let notifications = self.notifications();
+        // What a destination that COUNTS events resolves its declared dimensions from,
+        // resolved ONCE for the whole delivery rather than per destination and per event:
+        // the message's headers are read off the message as it was accepted, and one send
+        // is one message however many destinations count its events.
+        let counted = self.counted_events();
         for destination in &self.destinations {
             // "`EventDestinationDefinition$Enabled`: whether SES publishes to this
             // destination at all" — a destination that is off receives nothing, including
@@ -120,8 +156,35 @@ impl PublishedSend {
                 if let Some(stream) = &destination.kinesis_firehose_destination {
                     super::firehose::put_event(callback, stream, &notification.document).await;
                 }
+                // A CloudWatch destination takes no document: the event is counted as one
+                // observation of the metric named after it, under exactly the dimensions
+                // that destination declared.
+                if let (Some(declared), Some(counted)) =
+                    (&destination.cloud_watch_destination, counted.as_ref())
+                {
+                    counted.count(declared, notification.metric_name);
+                }
             }
         }
+    }
+
+    /// What this send's events are counted FROM, or `None` when nothing of this send is
+    /// counted at all — this emulator carries no CloudWatch store, or no destination of
+    /// the set counts events.
+    ///
+    /// Nothing being counted is the same outcome as a destination of another kind that
+    /// cannot be reached: the publication is best effort, and what the caller was told
+    /// about its send does not depend on it.
+    fn counted_events(&self) -> Option<CountedEvents<'_>> {
+        let store = self.metric_store.as_ref()?;
+        self.destinations
+            .iter()
+            .any(|destination| destination.cloud_watch_destination.is_some())
+            .then(|| CountedEvents {
+                store,
+                message_tags: self.message_tags(),
+                headers: self.headers(),
+            })
     }
 
     /// Every notification this send produced, in the order the events happened: the
@@ -138,6 +201,7 @@ impl PublishedSend {
         let mail = self.mail();
         let mut notifications = vec![Notification {
             event_type: SEND.0,
+            metric_name: SEND.1,
             document: document(SEND.1, &mail, "send", json!({})),
         }];
 
@@ -184,6 +248,7 @@ impl PublishedSend {
             }
             notifications.push(Notification {
                 event_type: BOUNCE.0,
+                metric_name: BOUNCE.1,
                 document,
             });
         }
@@ -208,6 +273,7 @@ impl PublishedSend {
             }
             notifications.push(Notification {
                 event_type: DELIVERY.0,
+                metric_name: DELIVERY.1,
                 document: document(DELIVERY.1, &mail, "delivery", delivery),
             });
         }
@@ -238,6 +304,7 @@ impl PublishedSend {
             }
             notifications.push(Notification {
                 event_type: COMPLAINT.0,
+                metric_name: COMPLAINT.1,
                 document: document(COMPLAINT.1, &mail, "complaint", complaint),
             });
         }
@@ -355,22 +422,34 @@ impl PublishedSend {
         Value::Object(common)
     }
 
-    /// The `tags` of the published document: the tags the send supplied
-    /// (`SendEmailRequest$EmailTags`, "to apply to an email that you send … so that you
-    /// can publish email sending events"), and the configuration set the message named,
-    /// which SES tags every event of such a send with.
+    /// The MESSAGE TAGS of this send, in the order they apply: the configuration set the
+    /// message named, which SES applies as a message tag to every send through a set, and
+    /// then the tags the send supplied (`SendEmailRequest$EmailTags`, "to apply to an email
+    /// that you send … so that you can publish email sending events").
+    ///
+    /// One reading for every consumer of a send's tags, so the tags a published document
+    /// reports and the ones a declared dimension is resolved from
+    /// ([`super::cloudwatch`]) cannot disagree.
+    fn message_tags(&self) -> Vec<(String, String)> {
+        let mut tags: Vec<(String, String)> = Vec::new();
+        if let Some(set) = &self.message.configuration_set_name {
+            tags.push((CONFIGURATION_SET_TAG.to_string(), set.clone()));
+        }
+        tags.extend(self.message.email_tags.iter().cloned());
+        tags
+    }
+
+    /// The `tags` of the published document: the message tags of this send
+    /// ([`Self::message_tags`]).
     ///
     /// Each value is a LIST, because one tag name may be applied more than once.
     fn tags(&self) -> Value {
         let mut tags: Map<String, Value> = Map::new();
-        if let Some(set) = &self.message.configuration_set_name {
-            tags.insert("ses:configuration-set".to_string(), json!([set]));
-        }
-        for (name, value) in &self.message.email_tags {
-            match tags.get_mut(name) {
+        for (name, value) in self.message_tags() {
+            match tags.get_mut(&name) {
                 Some(Value::Array(values)) => values.push(json!(value)),
                 _ => {
-                    tags.insert(name.clone(), json!([value]));
+                    tags.insert(name, json!([value]));
                 }
             }
         }
@@ -404,6 +483,32 @@ impl PublishedSend {
     fn feedback_id(&self, about: &[&RecipientOutcome]) -> String {
         let first = about.first().map_or("", |out| out.address.as_str());
         super::outcome::feedback_id(&self.message.message_id, first)
+    }
+}
+
+/// What one send's events are COUNTED from, for the destinations of its configuration set
+/// that count them ([`super::cloudwatch`]): the store the datapoints go to, and the two
+/// places a declared dimension's value is resolved from — the send's message tags and the
+/// message's headers.
+///
+/// Held for the whole delivery of one send, so the message is read once however many
+/// destinations count its events.
+struct CountedEvents<'a> {
+    /// The CloudWatch store the datapoints are appended to.
+    store: &'a ::engine::ServiceState<super::cloudwatch::CloudWatchState>,
+    /// The message tags of the send, in the order they apply.
+    message_tags: Vec<(String, String)>,
+    /// The headers of the message, in the order they were written.
+    headers: Vec<(String, String)>,
+}
+
+impl CountedEvents<'_> {
+    /// Count ONE event, named by the metric `metric_name`, under exactly the dimensions
+    /// `declared` declares.
+    fn count(&self, declared: &crate::ops::types::CloudWatchDestination, metric_name: &str) {
+        let dimensions =
+            super::cloudwatch::dimension_set(declared, &self.message_tags, &self.headers);
+        super::cloudwatch::count_event(self.store, metric_name, dimensions, SystemTime::now());
     }
 }
 

@@ -31,6 +31,8 @@ mod blacklist_reports;
 mod boundary_validation_message;
 #[path = "all/cloud_watch_dimension_source.rs"]
 mod cloud_watch_dimension_source;
+#[path = "all/cloud_watch_event_destination_delivery.rs"]
+mod cloud_watch_event_destination_delivery;
 #[path = "all/configuration_set_deletion.rs"]
 mod configuration_set_deletion;
 #[path = "all/configuration_set_event_destination_capacity.rs"]
