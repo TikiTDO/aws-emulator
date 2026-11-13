@@ -1642,3 +1642,10 @@ mod cloudformation_lambda_function_log_destination;
 // both ends of it.
 #[path = "all/ebs_refused_block_write_then_ec2_snapshot_completion.rs"]
 mod ebs_refused_block_write_then_ec2_snapshot_completion;
+// RUNNING function's own Amazon SQS message-plane call is authorized against spans
+// CloudFormation (which deploys the queue, the role and the relay together), IAM (the role and
+// its document), STS (the session the call is signed with), AWS Lambda (the handler and the SDK
+// it is given) and Amazon SQS (the decision) at once, so no single service crate's test target
+// can ask it.
+#[path = "all/lambda_in_function_sqs_authorization.rs"]
+mod lambda_in_function_sqs_authorization;
