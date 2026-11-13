@@ -78,6 +78,10 @@ sha2 = { workspace = true }
 # client sees it: on the queue the schedule's target names, and against the
 # execution role IAM holds.
 service-com-amazonaws-sqs-amazonsqs = { workspace = true }
+# Lambda, mounted beside this one on that same engine: a schedule whose target is a
+# FUNCTION is asserted where the function sees it — in the asynchronous invocation Lambda
+# holds for it, which is what carries the payload the occurrence handed over.
+service-com-amazonaws-lambda-awsgirapiservice = { workspace = true }
 # The token service, mounted beside this one so a suite can present the credential of an
 # assumed ROLE session — the identity a least-privilege policy is attached to — rather
 # than only a long-term key.

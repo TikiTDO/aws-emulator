@@ -21,6 +21,8 @@ mod list_tags_for_resource_bounds;
 mod occurrence_timing;
 #[path = "all/pass_role_authorization.rs"]
 mod pass_role_authorization;
+#[path = "all/per_schedule_target_input.rs"]
+mod per_schedule_target_input;
 #[path = "all/reserved_schedule_group.rs"]
 mod reserved_schedule_group;
 #[path = "all/resource_tags.rs"]
