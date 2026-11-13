@@ -127,7 +127,7 @@ fn expected(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 /// spell them (`smithy_query(query="closure",operation="CreateAutomatedReasoningPolicy")`:
 /// a type name is `^\p{L}[\p{L}\p{M}0-9_]*( [\p{L}\p{M}0-9_]+)*$`, a rule id is
 /// `^[A-Z][0-9A-Z]{11}$`).
-fn definition(count: usize) -> Value {
+pub(crate) fn definition(count: usize) -> Value {
     let types: Vec<Value> = (0..count)
         .map(|index| {
             json!({
@@ -158,7 +158,7 @@ fn definition(count: usize) -> Value {
 }
 
 /// Create a policy and hand back `(policyArn, the definitionHash the create reported)`.
-async fn given_policy(emu: &Emulator, body: Value) -> (String, String) {
+pub(crate) async fn given_policy(emu: &Emulator, body: Value) -> (String, String) {
     let created = emu
         .call("POST", "/automated-reasoning-policies", Some(body))
         .await;
@@ -183,7 +183,7 @@ async fn get_policy(emu: &Emulator, policy_arn: &str) -> Reply {
 /// Cut a version of `policy_arn` with `tags` attached, feeding back the `definitionHash` a
 /// READ of that policy reports — the concurrency token
 /// `CreateAutomatedReasoningPolicyVersion` documents — and hand back the versioned ARN.
-async fn given_version(emu: &Emulator, policy_arn: &str, tags: &[(&str, &str)]) -> String {
+pub(crate) async fn given_version(emu: &Emulator, policy_arn: &str, tags: &[(&str, &str)]) -> String {
     let read = get_policy(emu, policy_arn).await;
     assert_eq!(
         read.status, 200,

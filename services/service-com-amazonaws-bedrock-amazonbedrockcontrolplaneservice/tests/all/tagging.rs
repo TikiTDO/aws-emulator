@@ -37,7 +37,7 @@ use crate::support::{emulator, label, Emulator, Reply, ACCOUNT, REGION};
 
 /// The most tags one resource of this service may carry, as `TooManyTagsException`
 /// documents it ("50 tags per resource") and the handler enforces it.
-const MAX_TAGS: usize =
+pub(crate) const MAX_TAGS: usize =
     service_com_amazonaws_bedrock_amazonbedrockcontrolplaneservice::state::MAX_TAGS_PER_RESOURCE;
 
 /// How long after a create a model import job's move to `Completed` is owed, as the
@@ -68,7 +68,7 @@ const ROLE_ARN: &str = "arn:aws:iam::000000000000:role/bedrock-tagging";
 
 /// `TagResource` is bound to `POST /tagResource`
 /// (`smithy_query(query="operation",operation="TagResource")`).
-async fn tag(emu: &Emulator, resource_arn: &str, tags: Value) -> Reply {
+pub(crate) async fn tag(emu: &Emulator, resource_arn: &str, tags: Value) -> Reply {
     emu.call(
         "POST",
         "/tagResource",
@@ -78,7 +78,7 @@ async fn tag(emu: &Emulator, resource_arn: &str, tags: Value) -> Reply {
 }
 
 /// `ListTagsForResource` is bound to `POST /listTagsForResource`.
-async fn list_tags(emu: &Emulator, resource_arn: &str) -> Reply {
+pub(crate) async fn list_tags(emu: &Emulator, resource_arn: &str) -> Reply {
     emu.call(
         "POST",
         "/listTagsForResource",
@@ -88,7 +88,7 @@ async fn list_tags(emu: &Emulator, resource_arn: &str) -> Reply {
 }
 
 /// A `TagList` out of `(key, value)` pairs.
-fn tag_list(pairs: &[(&str, &str)]) -> Value {
+pub(crate) fn tag_list(pairs: &[(&str, &str)]) -> Value {
     Value::Array(
         pairs
             .iter()
@@ -111,7 +111,7 @@ fn many_tags(n: usize) -> Value {
 // ---------------------------------------------------------------------------------------
 
 /// The tags a listing reported, in the order it reported them, as `(key, value)` pairs.
-fn listed(case: &str, reply: &Reply) -> Vec<(String, String)> {
+pub(crate) fn listed(case: &str, reply: &Reply) -> Vec<(String, String)> {
     assert_eq!(
         reply.status, 200,
         "case {case:?}: ListTagsForResource must answer 200, got {} {:?}",
@@ -155,7 +155,7 @@ fn expected(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 // ---------------------------------------------------------------------------------------
 
 /// Create a guardrail and hand back its `guardrailArn`.
-async fn given_guardrail(emu: &Emulator, name: &str) -> String {
+pub(crate) async fn given_guardrail(emu: &Emulator, name: &str) -> String {
     let reply = emu
         .create(json!({
             "name": name,

@@ -173,6 +173,8 @@ mod service_claim;
 mod state_roundtrip;
 #[path = "all/support.rs"]
 mod support;
+#[path = "all/tag_quota_across_resource_families.rs"]
+mod tag_quota_across_resource_families;
 #[path = "all/tagging.rs"]
 mod tagging;
 #[path = "all/use_case_for_model_access.rs"]
