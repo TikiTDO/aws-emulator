@@ -422,6 +422,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let queue = state::Queue::created(
+            &ctx.endpoint(),
             &region,
             &input.queue_name,
             attributes,

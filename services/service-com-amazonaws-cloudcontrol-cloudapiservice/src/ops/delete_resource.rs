@@ -260,7 +260,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the owning service holds one namespace per Region, this is the Region the
         // resource is resolved in and the one it is removed from.
         let region = crate::state::request_region(ctx.parts());
-        let native = crate::state::native::NativeResources::for_engine(&*self.engine);
+        let native =
+            crate::state::native::NativeResources::for_engine(&*self.engine, ctx.endpoint());
         let mut store = state.lock();
         store.materialise_due(now, &native);
 

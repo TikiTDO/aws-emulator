@@ -1515,9 +1515,12 @@ pub(super) async fn create_queue(
     if let Some(url) = reported.get("QueueUrl").and_then(Value::as_str) {
         attributes.insert("QueueUrl".to_string(), url.to_string());
     }
-    // The queue was created under the name CloudFormation decided, and its url is built
-    // from that name.
-    Ok(Created::attributes(attributes))
+    // Ref and QueueUrl must name the same queue the owning service actually created,
+    // not the public-AWS URL template preparation used as a provisional identity.
+    Ok(Created {
+        physical_resource_id: attributes.get("QueueUrl").cloned(),
+        attributes,
+    })
 }
 
 /// Apply a changed `AWS::SQS::Queue` declaration to the queue that already exists.

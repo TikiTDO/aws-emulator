@@ -684,7 +684,10 @@ async fn an_update_that_drops_a_declared_property_is_refused_rather_than_dropped
 
 /// The url a queue named `name` is addressed at in this emulator.
 fn queue_url(name: &str) -> String {
-    format!("https://sqs.{REGION}.amazonaws.com/{ACCOUNT_ID}/{name}")
+    format!(
+        "{}/sqs/{REGION}/{ACCOUNT_ID}/{name}",
+        smithy_server_runtime::UNSERVED_URL_BASE
+    )
 }
 
 /// The ARN a queue named `name` carries.
@@ -1098,4 +1101,207 @@ async fn a_queue_sqs_refuses_to_create_fails_the_stack() {
         "QueueDoesNotExist",
         "case {case:?}: expected QueueDoesNotExist, got {answer}"
     );
+}
+
+/// The owner URL survives reference resolution, an applied update's rollback, and teardown.
+#[tokio::test]
+async fn owner_queue_url_survives_refs_rollback_and_delete() {
+    let router = build_router();
+    let case = "owner-assigned queue URL lifecycle";
+    let stack_name = "owner-url-stack";
+    let queue_name = "owner-url-queue";
+    let original = json!({
+        "Resources": {
+            "Queue": {"Type": "AWS::SQS::Queue", "Properties": {
+                "QueueName": queue_name, "VisibilityTimeout": 90
+            }},
+            "Policy": {"Type": "AWS::SQS::QueuePolicy", "Properties": {
+                "Queues": [{"Ref": "Queue"}],
+                "PolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Id": {"Fn::Join": ["", ["before:", {"Ref": "Queue"}, ":", {"Fn::GetAtt": ["Queue", "QueueUrl"]}]]},
+                    "Statement": [{"Effect": "Allow", "Principal": "*", "Action": "sqs:SendMessage", "Resource": {"Fn::GetAtt": ["Queue", "Arn"]}}]
+                }
+            }}
+        },
+        "Outputs": {
+            "RefUrl": {"Value": {"Ref": "Queue"}},
+            "AttUrl": {"Value": {"Fn::GetAtt": ["Queue", "QueueUrl"]}}
+        }
+    });
+    let body = create_and_settle(&router, case, stack_name, &original.to_string()).await;
+    assert_eq!(
+        xml_text(&body, "StackStatus").as_deref(),
+        Some("CREATE_COMPLETE"),
+        "{body}"
+    );
+    let owner = sqs_ok(
+        &router,
+        case,
+        "GetQueueUrl",
+        json!({"QueueName": queue_name}),
+    )
+    .await;
+    let url = owner["QueueUrl"]
+        .as_str()
+        .expect("owner QueueUrl")
+        .to_string();
+    assert!(
+        url.contains(&format!("/sqs/{REGION}/{ACCOUNT_ID}/{queue_name}")),
+        "{url}"
+    );
+    let expected_outputs = BTreeMap::from([
+        ("RefUrl".to_string(), url.clone()),
+        ("AttUrl".to_string(), url.clone()),
+    ]);
+    assert_eq!(outputs_of(&body), expected_outputs);
+    let attributes = reported_attributes(&router, case, &url).await;
+    let policy: Value =
+        serde_json::from_str(attributes.get("Policy").expect("created policy")).unwrap();
+    assert_eq!(policy["Id"], json!(format!("before:{url}:{url}")));
+    // Retained data distinguishes an in-place rollback from delete/recreate under the same name.
+    sqs_ok(
+        &router,
+        case,
+        "SendMessage",
+        json!({"QueueUrl": url, "MessageBody": "survive-rollback"}),
+    )
+    .await;
+
+    let mut changed = original.clone();
+    changed["Resources"]["Queue"]["Properties"]["VisibilityTimeout"] = json!(120);
+    changed["Resources"]["Policy"]["Properties"]["PolicyDocument"]["Id"]["Fn::Join"][1][0] =
+        json!("after:");
+    // Existing suite's known owning-service refusal, ordered AFTER both real updates.
+    changed["Resources"]["Refused"] = json!({
+        "Type": "AWS::SQS::Queue", "DependsOn": "Policy",
+        "Properties": {"QueueName": "owner-url-refused", "VisibilityTimeout": 99999}
+    });
+    let body = update_and_settle(&router, case, stack_name, &changed.to_string()).await;
+    assert_eq!(
+        xml_text(&body, "StackStatus").as_deref(),
+        Some("UPDATE_ROLLBACK_COMPLETE"),
+        "{body}"
+    );
+    let (status, events) =
+        cloudformation(&router, "DescribeStackEvents", &[("StackName", stack_name)]).await;
+    assert_eq!(status, 200, "{events}");
+    let members = xml_texts(&events, "member");
+    for logical_id in ["Queue", "Policy"] {
+        assert!(
+            members.iter().any(|event| {
+                xml_text(event, "LogicalResourceId").as_deref() == Some(logical_id)
+                    && xml_text(event, "ResourceStatus").as_deref() == Some("UPDATE_COMPLETE")
+            }),
+            "{logical_id} must have updated before the later refusal: {events}"
+        );
+    }
+    assert!(
+        members.iter().any(|event| {
+            xml_text(event, "LogicalResourceId").as_deref() == Some("Refused")
+                && xml_text(event, "ResourceStatusReason")
+                    .is_some_and(|reason| reason.contains("VisibilityTimeout"))
+        }),
+        "the intended owning-service refusal must be witnessed: {events}"
+    );
+    assert_eq!(outputs_of(&body), expected_outputs);
+    let owner = sqs_ok(
+        &router,
+        case,
+        "GetQueueUrl",
+        json!({"QueueName": queue_name}),
+    )
+    .await;
+    assert_eq!(owner["QueueUrl"], json!(url));
+    let attributes = reported_attributes(&router, case, &url).await;
+    assert_eq!(
+        attributes.get("VisibilityTimeout").map(String::as_str),
+        Some("90")
+    );
+    let policy: Value =
+        serde_json::from_str(attributes.get("Policy").expect("restored policy")).unwrap();
+    assert_eq!(policy["Id"], json!(format!("before:{url}:{url}")));
+    let received = sqs_ok(
+        &router,
+        case,
+        "ReceiveMessage",
+        json!({"QueueUrl": url, "MaxNumberOfMessages": 1}),
+    )
+    .await;
+    assert_eq!(received["Messages"][0]["Body"], json!("survive-rollback"));
+
+    let (status, body) = cloudformation(&router, "DeleteStack", &[("StackName", stack_name)]).await;
+    assert_eq!(status, 200, "{body}");
+    tokio::time::sleep(PAST_THE_STACK_SPAN).await;
+    for name in [queue_name, "owner-url-refused"] {
+        let (status, body) = sqs(&router, "GetQueueUrl", &json!({"QueueName": name})).await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(sqs_error_code(&body), "QueueDoesNotExist", "{body}");
+    }
+    let (status, body) = sqs(
+        &router,
+        "GetQueueAttributes",
+        &json!({"QueueUrl": url, "AttributeNames": ["All"]}),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(sqs_error_code(&body), "QueueDoesNotExist", "{body}");
+}
+
+/// Carrying an owner-assigned URL must not turn a FIFO variant change into an
+/// in-place update. Unnamed variants have distinct generated names and real queues.
+#[tokio::test]
+async fn owner_queue_url_preserves_fifo_replacement() {
+    let router = build_router();
+    let case = "owner URL FIFO replacement";
+    let stack_name = "owner-url-fifo-stack";
+    let original = json!({
+        "Resources": {"Queue": {"Type": "AWS::SQS::Queue"}},
+        "Outputs": {
+            "RefUrl": {"Value": {"Ref": "Queue"}},
+            "AttUrl": {"Value": {"Fn::GetAtt": ["Queue", "QueueUrl"]}}
+        }
+    });
+    let body = create_and_settle(&router, case, stack_name, &original.to_string()).await;
+    assert_eq!(
+        xml_text(&body, "StackStatus").as_deref(),
+        Some("CREATE_COMPLETE"),
+        "{body}"
+    );
+    let before = outputs_of(&body);
+    let before_url = before.get("RefUrl").expect("original Ref").clone();
+    assert_eq!(before.get("AttUrl"), Some(&before_url));
+    assert!(!before_url.ends_with(".fifo"), "{before_url}");
+    reported_attributes(&router, case, &before_url).await;
+
+    let mut fifo = original.clone();
+    fifo["Resources"]["Queue"]["Properties"] = json!({"FifoQueue": true});
+    let body = update_and_settle(&router, case, stack_name, &fifo.to_string()).await;
+    assert_eq!(
+        xml_text(&body, "StackStatus").as_deref(),
+        Some("UPDATE_COMPLETE"),
+        "{body}"
+    );
+    let after = outputs_of(&body);
+    let after_url = after.get("RefUrl").expect("replacement Ref").clone();
+    assert_eq!(after.get("AttUrl"), Some(&after_url));
+    assert_ne!(after_url, before_url);
+    assert!(after_url.ends_with(".fifo"), "{after_url}");
+    let attributes = reported_attributes(&router, case, &after_url).await;
+    assert_eq!(
+        attributes.get("FifoQueue").map(String::as_str),
+        Some("true")
+    );
+    let old_name = before_url.rsplit('/').next().unwrap();
+    let (status, body) = sqs(&router, "GetQueueUrl", &json!({"QueueName": old_name})).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(sqs_error_code(&body), "QueueDoesNotExist", "{body}");
+
+    let (status, body) = cloudformation(&router, "DeleteStack", &[("StackName", stack_name)]).await;
+    assert_eq!(status, 200, "{body}");
+    tokio::time::sleep(PAST_THE_STACK_SPAN).await;
+    let new_name = after_url.rsplit('/').next().unwrap();
+    let (status, body) = sqs(&router, "GetQueueUrl", &json!({"QueueName": new_name})).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(sqs_error_code(&body), "QueueDoesNotExist", "{body}");
 }

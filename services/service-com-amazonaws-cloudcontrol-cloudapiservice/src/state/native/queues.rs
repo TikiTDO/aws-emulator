@@ -74,13 +74,18 @@ const TAGS: &str = "Tags";
 pub struct QueueProvider {
     /// The owning service's store. A handle, so every answer is read from the live store.
     state: ::engine::ServiceState<SqsState>,
+    /// Published API base, captured from the operation context, not the caller Host.
+    endpoint: ::smithy_server_runtime::EndpointUrl,
 }
 
 impl QueueProvider {
     /// The provider for the Amazon SQS store THIS engine carries, or `None` when it
     /// carries none.
-    pub fn for_engine<Eng: Send + Sync + 'static>(engine: &Eng) -> Option<Self> {
-        sqs::service_state(engine).map(|state| Self { state })
+    pub fn for_engine<Eng: Send + Sync + 'static>(
+        engine: &Eng,
+        endpoint: ::smithy_server_runtime::EndpointUrl,
+    ) -> Option<Self> {
+        sqs::service_state(engine).map(|state| Self { state, endpoint })
     }
 }
 
@@ -106,11 +111,11 @@ impl NativeResourceProvider for QueueProvider {
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or_else(|| generated_name(properties));
-        Some(sqs::queue_url(region, &name))
+        Some(sqs::queue_url(&self.endpoint, region, &name))
     }
 
     fn read(&self, region: &str, identifier: &str) -> Option<Value> {
-        let name = queue_name(region, identifier)?;
+        let name = queue_name(&self.endpoint, region, identifier)?;
         self.state.lock().queue(region, &name).map(model)
     }
 
@@ -134,10 +139,10 @@ impl NativeResourceProvider for QueueProvider {
         properties: &Value,
         at: SystemTime,
     ) -> Result<Value, NativeRefusal> {
-        let Some(name) = queue_name(region, identifier) else {
+        let Some(name) = queue_name(&self.endpoint, region, identifier) else {
             return Err(NativeRefusal::Invalid(format!(
                 "{IDENTIFIER_PROPERTY} {}",
-                queue_url_requirement()
+                queue_url_requirement(&self.endpoint)
             )));
         };
         // The name a queue is created under is the OWNING service's to accept, so nothing
@@ -145,7 +150,7 @@ impl NativeResourceProvider for QueueProvider {
         let arn = sqs::queue_arn(region, &name);
         // The url the queue will answer to, whichever way the reference that reached this
         // call spelled it: the owning service assigns it from the Region and the name.
-        let url = sqs::queue_url(region, &name);
+        let url = sqs::queue_url(&self.endpoint, region, &name);
         let desired = DesiredModel::read(&name, &arn, &url, properties)?;
         let fifo = desired.designates_fifo();
         if let Some(why) = sqs::queue_name_refusal(&name, fifo) {
@@ -177,7 +182,7 @@ impl NativeResourceProvider for QueueProvider {
         if let Some(why) = redrive_refusal(&store, region, &name, fifo, &desired) {
             return Err(NativeRefusal::Invalid(why));
         }
-        let queue = sqs::Queue::created(region, &name, attributes, desired.tags, at);
+        let queue = sqs::Queue::created(&self.endpoint, region, &name, attributes, desired.tags, at);
         let created = model(&queue);
         store.insert_queue(queue);
         Ok(created)
@@ -190,7 +195,7 @@ impl NativeResourceProvider for QueueProvider {
         properties: &Value,
         at: SystemTime,
     ) -> Result<Value, NativeRefusal> {
-        let name = queue_name(region, identifier).ok_or(NativeRefusal::NotFound)?;
+        let name = queue_name(&self.endpoint, region, identifier).ok_or(NativeRefusal::NotFound)?;
         let mut store = self.state.lock();
         let held = store.queue(region, &name).ok_or(NativeRefusal::NotFound)?;
         let (arn, url, was_fifo) = (held.arn.clone(), held.url.clone(), held.is_fifo());
@@ -245,7 +250,7 @@ impl NativeResourceProvider for QueueProvider {
     }
 
     fn delete(&self, region: &str, identifier: &str, at: SystemTime) -> Result<(), NativeRefusal> {
-        let name = queue_name(region, identifier).ok_or(NativeRefusal::NotFound)?;
+        let name = queue_name(&self.endpoint, region, identifier).ok_or(NativeRefusal::NotFound)?;
         let mut store = self.state.lock();
         if !store.holds_queue(region, &name) {
             return Err(NativeRefusal::NotFound);
@@ -255,7 +260,7 @@ impl NativeResourceProvider for QueueProvider {
         // service keeps a deleted name deferred. Addressed by the url that service assigned
         // the queue, which is what it resolves a removal by.
         store
-            .remove_queue_by_url(region, &sqs::queue_url(region, &name), at)
+            .remove_queue_by_url(region, &sqs::queue_url(&self.endpoint, region, &name), at)
             .map(|_| ())
             .ok_or(NativeRefusal::NotFound)
     }
@@ -319,11 +324,15 @@ fn redrive_refusal(
 /// A value that is none of the three — a url or an ARN of another account or Region, a url
 /// whose path is empty, a name no queue carries — names no queue, which is what a read of
 /// it reports as not found.
-fn queue_name(region: &str, identifier: &str) -> Option<String> {
+fn queue_name(
+    endpoint: &::smithy_server_runtime::EndpointUrl,
+    region: &str,
+    identifier: &str,
+) -> Option<String> {
     // The url: resolved by the `/<accountId>/<QueueName>` path the owning service resolves
     // one by ([`sqs::queue_name_from_url`]), then held to the url THIS Region assigns.
     if let Some(name) = sqs::queue_name_from_url(identifier)
-        .filter(|name| sqs::queue_url(region, name) == identifier)
+        .filter(|name| sqs::queue_url(endpoint, region, name) == identifier)
     {
         return Some(name.to_string());
     }
@@ -342,11 +351,11 @@ fn queue_name(region: &str, identifier: &str) -> Option<String> {
 
 /// How a refusal states what the type's primary identifier has to be, for a create whose
 /// identifier names no queue.
-fn queue_url_requirement() -> String {
+fn queue_url_requirement(endpoint: &::smithy_server_runtime::EndpointUrl) -> String {
     format!(
         "must be the url of a queue of this account in the form {}, or the queue's ARN or \
          name",
-        sqs::queue_url("<region>", "<QueueName>")
+        sqs::queue_url(endpoint, "<region>", "<QueueName>")
     )
 }
 

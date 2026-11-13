@@ -436,7 +436,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // owning service holds one namespace per Region, this is the Region the resource is
         // resolved in and the one the patch is applied in.
         let region = crate::state::request_region(ctx.parts());
-        let native = crate::state::native::NativeResources::for_engine(&*self.engine);
+        let native =
+            crate::state::native::NativeResources::for_engine(&*self.engine, ctx.endpoint());
 
         // Everything this service's own store answers is judged first, under a lock that
         // is DROPPED before the patch below — so no caller waits on the store while

@@ -158,7 +158,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // What the clock already owes the store, so a request whose work has fallen due is
         // seen in the status it has REACHED: the cancel window closes when the request
         // becomes terminal, whether or not anybody polled it.
-        let native = crate::state::native::NativeResources::for_engine(&*self.engine);
+        let native =
+            crate::state::native::NativeResources::for_engine(&*self.engine, ctx.endpoint());
         store.materialise_due(now, &native);
 
         match store.cancel_request(&input.request_token, now) {
