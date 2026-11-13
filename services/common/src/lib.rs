@@ -2270,3 +2270,6 @@ pub mod host_runtime;
 /// Where a workload started on the host is reached: a scheduler publishes it, a load balancer
 /// forwards to it. Off unless `EMULATOR_HOST_WORKLOADS` turns it on.
 pub mod host_workloads;
+/// What a service asks for when it runs something real on the host: desired and observed state,
+/// placed per kind of workload.
+pub mod workload;
