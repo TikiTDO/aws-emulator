@@ -214,7 +214,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // reported most recent first, so a client polling the deployment it just started
         // reads it at the head of the listing — with the `nextToken` being the `jobId` of
         // the first job the page did not return.
-        let mut history: Vec<(String, JobSummary)> = branch
+        let mut history: Vec<(String, JobSummaryProjection)> = branch
             .jobs
             .iter()
             .map(|(job_id, stored)| (job_id.clone(), stored.job.summary.clone()))

@@ -21,16 +21,18 @@
 //!    CreateDeployment call and the StartDeployment call cannot exceed 8 hours. If the
 //!    duration exceeds 8 hours, the StartDeployment call and the associated Job will
 //!    fail" (`smithy_query(query="doc",shape="CreateDeployment")`), so the job is
-//!    readable through `GetJob` under the reserved id, in the `CREATED` status nothing
-//!    has started — while the branch has still STARTED no job.
+//!    readable through `GetJob` under the reserved id, in the `PENDING` status a job
+//!    nothing has started carries and reporting none of the members such a job has no
+//!    value for — while the branch has still STARTED no job.
 //! 4. A deployment is reserved on a branch of an app, so an app id or a branch name
 //!    that names nothing is refused with HTTP 404 and the not-found error type rather
 //!    than created on the way.
 //! 5. One branch's deployments are SERIALIZED: while the branch's last job is
-//!    unfinished — created and unstarted, or started and still running — a further
-//!    `CreateDeployment` is refused with the modelled 400 naming that job, and finishing
-//!    it (by stopping it, or by letting the clock settle it) frees the branch again. The
-//!    rule is per branch: another branch of the same app still reserves.
+//!    unfinished — reserved and unstarted, or started and still running — a further
+//!    `CreateDeployment` is refused with the modelled 400 naming the job number THAT
+//!    call spent, and finishing the branch's last job (by stopping it, or by letting the
+//!    clock settle it) frees the branch again. The rule is per branch: another branch of
+//!    the same app still reserves.
 //!
 //! The harness (`Emulator`, `Reply`) is the one `app_branch_lifecycle` already drives;
 //! only the cases are new.
@@ -39,7 +41,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Value};
 
-use service_com_amazonaws_amplify_amplify::state::{JOB_SETTLE_MILLIS, JOB_STATUS_CREATED};
+use service_com_amazonaws_amplify_amplify::state::JOB_STATUS_PENDING;
 
 use crate::app_branch_lifecycle::{string_member, Emulator, Reply};
 
@@ -91,9 +93,8 @@ async fn get_job(emulator: &Emulator, app_id: &str, branch: &str, job_id: &str) 
         .await
 }
 
-/// `StopJob` over the wire, then wait for the clock to settle the cancellation: a stop
-/// is asynchronous, so the job reaches its terminal status after the service's own
-/// settle span rather than when the call answers.
+/// `StopJob` over the wire. Stopping a job NOTHING HAS STARTED is complete when the
+/// call answers, so the job is terminal from here on without waiting for any clock.
 async fn stop_the_job(emulator: &Emulator, app_id: &str, branch: &str, job_id: &str) {
     let stopped = emulator
         .call(
@@ -106,13 +107,30 @@ async fn stop_the_job(emulator: &Emulator, app_id: &str, branch: &str, job_id: &
         stopped.status, 200,
         "stopping job {job_id:?} on {branch:?}: expected HTTP 200 from StopJob, got {stopped:?}"
     );
-    std::thread::sleep(past_the_settle_span());
 }
 
-/// Long enough for the clock to have settled a job out of its non-terminal status: the
-/// service's own span plus a margin, so the case reads what the clock already owed.
-fn past_the_settle_span() -> std::time::Duration {
-    std::time::Duration::from_millis(u64::try_from(JOB_SETTLE_MILLIS).unwrap_or(500) + 250)
+/// Wait until the clock has settled `job_id` out of its non-terminal status, looking
+/// again until it has or a generous deadline passes: the span the service settles a job
+/// over is its own, so a case waits for the CONDITION rather than for a fixed time.
+///
+/// The pause between reads is a blocking one because this workspace's `tokio` carries no
+/// `time` feature, and a `#[tokio::test]` body owns its runtime thread for the duration
+/// of the case.
+async fn settled_status(emulator: &Emulator, app_id: &str, branch: &str, job_id: &str) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let job = get_job(emulator, app_id, branch, job_id).await;
+        let summary = job.member("job").get("summary").cloned().unwrap_or(Value::Null);
+        let status = string_member(&summary, "status");
+        if ["SUCCEED", "FAILED", "CANCELLED"].contains(&status.as_str()) {
+            return status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "job {job_id:?} on {branch:?} never settled: last read {summary:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }
 
 /// An app with one branch on it.
@@ -376,14 +394,12 @@ async fn a_reserved_job_id_is_spent_and_names_the_deployments_job() {
         let summary = job.member("job").get("summary").cloned().unwrap_or(Value::Null);
         assert_eq!(
             string_member(&summary, "status"),
-            JOB_STATUS_CREATED,
-            "case {request:?}: a deployment nothing started carries the created status, \
-             got {summary:?}"
+            JOB_STATUS_PENDING,
+            "case {request:?}: a deployment nothing started is pending, got {summary:?}"
         );
-        assert_eq!(
-            string_member(&summary, "jobType"),
-            "MANUAL",
-            "case {request:?}: a manual deployment's job is a MANUAL job, got {summary:?}"
+        assert!(
+            summary.get("jobType").is_none(),
+            "case {request:?}: a job nothing has started reports no jobType, got {summary:?}"
         );
 
         reserved.push(job_id.clone());
@@ -533,7 +549,12 @@ async fn a_branch_serializes_its_deployments() {
     let outstanding = string_member(&reserved.body, "jobId");
 
     // One row per shape of the second request: the refusal is about the branch's
-    // unfinished job, not about what the second request asked to upload.
+    // unfinished job, not about what the request asked to upload — and each refused call
+    // spends the branch's next job number, so the refusal names the number IT spent,
+    // which is by then the branch's last job.
+    let mut spent = outstanding
+        .parse::<u64>()
+        .expect("a modelled jobId parses");
     for request in [
         json!({}),
         json!({ "fileMap": {} }),
@@ -550,8 +571,9 @@ async fn a_branch_serializes_its_deployments() {
             "case {request:?}: expected BadRequestException, got {:?}",
             refused.error_code
         );
+        spent += 1;
         let expected = format!(
-            "The last job(deployment) {outstanding} was not finished, please wait until it \
+            "The last job(deployment) {spent} was not finished, please wait until it \
              finish or use StopJob operation to cancel it before creating a new deployment."
         );
         assert_eq!(
@@ -559,6 +581,19 @@ async fn a_branch_serializes_its_deployments() {
             Some(expected.as_str()),
             "case {request:?}: expected {expected:?}, got {:?}",
             refused.message()
+        );
+        // The number the refusal names is a job of the branch: that is what makes the
+        // message actionable, since it tells the caller which job to stop.
+        let job = get_job(&emulator, &app_id, "main", &spent.to_string()).await;
+        assert_eq!(
+            job.status, 200,
+            "case {request:?}: the job the refusal names must be readable, got {job:?}"
+        );
+        let summary = job.member("job").get("summary").cloned().unwrap_or(Value::Null);
+        assert_eq!(
+            string_member(&summary, "status"),
+            JOB_STATUS_PENDING,
+            "case {request:?}: a job nothing started is pending, got {summary:?}"
         );
     }
 
@@ -577,25 +612,27 @@ async fn a_branch_serializes_its_deployments() {
          got {reply:?}"
     );
 
-    // Stopping the outstanding job frees the branch — which is what the refusal told the
-    // caller to do — and the identical request then succeeds.
-    stop_the_job(&emulator, &app_id, "main", &outstanding).await;
+    // Stopping the branch's LAST job frees the branch — which is what the refusal told
+    // the caller to do — and the identical request then succeeds. An earlier job that is
+    // still unfinished does not hold the branch: only the last one does.
+    let last = spent.to_string();
+    stop_the_job(&emulator, &app_id, "main", &last).await;
     let again = create_deployment(&emulator, &app_id, "main", &json!({})).await;
     assert_eq!(
         again.status, 200,
-        "case \"after StopJob\": a finished job frees the branch, got {again:?}"
+        "case \"after StopJob\": a finished last job frees the branch, got {again:?}"
     );
     assert_ne!(
         string_member(&again.body, "jobId"),
-        outstanding,
+        last,
         "case \"after StopJob\": the new deployment gets its own id, got {again:?}"
     );
 
-    // STARTING the outstanding deployment does not free the branch either: its job is
-    // now running, which is the other half of "was not finished". The reservation's
-    // content is uploaded first, because a deployment nothing was uploaded to cannot be
-    // started at all (see `deployment_upload_plane.rs`).
-    let second = string_member(&again.body, "jobId");
+    // STARTING a deployment does not free the branch either: its job is now running,
+    // which is the other half of "was not finished". The reservation's content is
+    // uploaded first, because a deployment nothing was uploaded to cannot be started at
+    // all (see `deployment_upload_plane.rs`).
+    let running = string_member(&again.body, "jobId");
     let upload = http::Request::builder()
         .method("PUT")
         .uri(zip_upload_url(&again))
@@ -610,7 +647,7 @@ async fn a_branch_serializes_its_deployments() {
         .call(
             "POST",
             &format!("/apps/{app_id}/branches/main/deployments/start"),
-            Some(&json!({ "jobId": second })),
+            Some(&json!({ "jobId": running })),
         )
         .await;
     assert_eq!(
@@ -624,22 +661,36 @@ async fn a_branch_serializes_its_deployments() {
         "case \"while the deployment runs\": a running job holds the branch, \
          got {while_running:?}"
     );
+    let named = running
+        .parse::<u64>()
+        .expect("a modelled jobId parses")
+        .saturating_add(1);
     assert!(
         while_running
             .message()
             .unwrap_or_default()
-            .contains(&format!("The last job(deployment) {second} was not finished")),
-        "case \"while the deployment runs\": the refusal must name the running job, \
+            .contains(&format!("The last job(deployment) {named} was not finished")),
+        "case \"while the deployment runs\": the refusal must name the number it spent, \
          got {:?}",
         while_running.message()
     );
 
-    // Once the clock has settled that job, the branch is free again.
-    std::thread::sleep(past_the_settle_span());
+    // Once the clock has settled the branch's last job, the branch is free again: the
+    // refused call above spent the last number, so it is that job's settling — the
+    // closing of its deployment window — that the branch now waits for, and stopping it
+    // is the caller's way out.
+    stop_the_job(&emulator, &app_id, "main", &named.to_string()).await;
     let third = create_deployment(&emulator, &app_id, "main", &json!({})).await;
     assert_eq!(
         third.status, 200,
-        "case \"after the job settles\": a finished job holds the branch no longer, \
+        "case \"after the last job finishes\": a finished job holds the branch no longer, \
          got {third:?}"
+    );
+    // The deployment that was running settles on its own clock, and it settles whatever
+    // the branch did afterwards.
+    let settled = settled_status(&emulator, &app_id, "main", &running).await;
+    assert!(
+        ["SUCCEED", "FAILED"].contains(&settled.as_str()),
+        "case \"while the deployment runs\": the started deployment settles, got {settled:?}"
     );
 }

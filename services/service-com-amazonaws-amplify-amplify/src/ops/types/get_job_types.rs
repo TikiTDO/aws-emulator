@@ -28,7 +28,7 @@ pub struct GetJobOutput {
 #[smithy_macros::smithy(shape = "com.amazonaws.amplify#Job")]
 #[derive(Debug, Clone)]
 pub struct Job {
-    pub summary: JobSummary,
+    pub summary: JobSummaryProjection,
     pub steps: Vec<Step>,
 }
 

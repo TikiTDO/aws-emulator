@@ -189,26 +189,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let mut store = state.lock();
 
-        // The reservation is refused BEFORE anything is minted or stored, so a refused
-        // call leaves the store exactly as it was.
-        let (job_id, branch_arn) = {
+        // Every call spends a job NUMBER: the branch reserves its next one and records a
+        // job under it, and only then is the serialization rule applied — so the refusal
+        // below names the job THIS call reserved, which is by then the branch's last.
+        let (job_id, blocked) = {
             let branch = branch_of(&mut store, &input.app_id, &input.branch_name)?;
             // Deployments of one branch are SERIALIZED: while the branch's last job is
-            // still in flight a further deployment cannot be ordered against it, so it
-            // is refused with the modelled 400 and the id of the job to wait for or
-            // stop. `last_unfinished_job` materialises the clock-owed work first — an
-            // expired reservation, and the job its closing window failed — so nothing
-            // the clock has already ended refuses a deployment.
-            if let Some(unfinished) = branch.last_unfinished_job() {
-                return Err(CreateDeploymentErrorModeled::BadRequestException(
-                    BadRequestException {
-                        message: Some(crate::state::unfinished_job_message(&unfinished)),
-                    },
-                )
-                .into());
-            }
+            // still in flight a further deployment cannot be ordered against it, so this
+            // call is refused with the modelled 400. Read BEFORE this call's own
+            // reservation joins the history, because a reservation cannot be ordered
+            // against itself. `last_unfinished_job` materialises the clock-owed work
+            // first — an expired reservation, and the job its closing window failed — so
+            // nothing the clock has already ended refuses a deployment.
+            let blocked = branch.last_unfinished_job().is_some();
             // A deployment's job is one more job of this branch's BOUNDED history, so
-            // the room for it is made (the oldest finished job retired) first.
+            // the room for it is made (the oldest finished job retired) first. This
+            // precedes the serialization refusal because the number cannot be spent
+            // without somewhere to record its job: a branch holding
+            // `MAX_JOBS_PER_BRANCH` jobs that are all still unfinished has nothing to
+            // retire, so it is answered with the quota error rather than with a
+            // serialization refusal naming a job it could not create.
             if !branch.make_room_for_a_job() {
                 return Err(CreateDeploymentErrorModeled::LimitExceededException(
                     LimitExceededException {
@@ -218,10 +218,33 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into());
             }
             // The id the caller "will supply to start deployment api": it is spent on
-            // this reservation, so no job started on this branch afterwards is handed
-            // it, and the job this call creates runs under it.
-            (branch.reserve_job_id(), branch.branch.branch_arn.clone())
+            // this call, so no job started on this branch afterwards is handed it, and
+            // the job this call creates runs under it.
+            let job_id = branch.reserve_job_id();
+            let branch_arn = branch.branch.branch_arn.clone();
+            // The job of the number just spent, PENDING and holding no work. It is
+            // recorded whether or not this call goes on to answer with the upload
+            // destinations: the number is spent either way, so the branch's history
+            // carries one job per call that asked for a deployment, readable through
+            // `GetJob`, listed by `ListJobs` and cancellable through `StopJob`.
+            branch.jobs.insert(
+                job_id.clone(),
+                crate::state::BranchJob::reserved(
+                    reserved_job_summary(&branch_arn, &job_id, created_at),
+                    created_at.saturating_add(crate::state::DEPLOYMENT_WINDOW_MILLIS),
+                ),
+            );
+            (job_id, blocked)
         };
+
+        if blocked {
+            return Err(CreateDeploymentErrorModeled::BadRequestException(
+                BadRequestException {
+                    message: Some(crate::state::unfinished_job_message(&job_id)),
+                },
+            )
+            .into());
+        }
 
         // One destination per file the request named, or one for the zipped
         // deployment; each carries its own token, so no two uploads share a URL.
@@ -262,28 +285,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Persisted on the branch, because the call that STARTS this deployment is a
         // later one that knows only the job id handed back here — and because the
         // plane serving these destinations writes what is uploaded into this record.
-        // The deployment's JOB is created with it: "the maximum duration between the
-        // CreateDeployment call and the StartDeployment call cannot exceed 8 hours. If
-        // the duration exceeds 8 hours, the StartDeployment call and the associated Job
-        // will fail" — the job is associated with THIS call, so it is readable through
-        // `GetJob`, listed by `ListJobs`, cancellable through `StopJob`, and it is what
-        // the serialization above waits for.
+        // The job of this reservation is already in the branch's history above; the
+        // reservation is what the start call resolves the uploaded content from, and it
+        // is kept only for a deployment this call actually hands destinations to.
         let branch = branch_of(&mut store, &input.app_id, &input.branch_name)?;
         branch
             .deployments
             .insert(pending.job_id.clone(), pending.clone());
-        branch.jobs.insert(
-            pending.job_id.clone(),
-            crate::state::BranchJob::reserved(
-                Job {
-                    summary: reserved_job_summary(&branch_arn, &pending, created_at),
-                    // The steps of a job are what its execution produced, and nothing
-                    // has executed: the deployment has not been started.
-                    steps: Vec::new(),
-                },
-                pending.expires_at,
-            ),
-        );
 
         let answer = CreateDeploymentOutput {
             // The id of the job this deployment runs under once it is started, which
@@ -346,38 +354,30 @@ fn branch_of<'store>(
         .ok_or_else(|| absent(crate::state::BRANCH_ENTITY, branch_name))
 }
 
-/// The `JobSummary` of the job this call creates for the deployment it reserves.
+/// The `JobSummary` of the job this call creates for the number it spends.
 ///
-/// Every member mirrors the one `StartDeployment` reports for the job that deploys the
-/// same content, with the two differences this call's job has: it carries
-/// [`crate::state::JOB_STATUS_CREATED`] rather than a running status, because nothing has
-/// started it, and it names no source URL, because the content of a reserved deployment
-/// is uploaded to the destinations this call hands back.
-fn reserved_job_summary(
-    branch_arn: &str,
-    pending: &crate::state::PendingDeployment,
-    created_at: i64,
-) -> JobSummary {
+/// It is the summary of a job NOTHING HAS RUN: it carries the branch's job ARN for that
+/// number and the `PENDING` status a client polls a deployment through, and no commit
+/// information, start instant, end instant, type or source — the members a job that has
+/// not been started has no value for, which
+/// [`crate::ops::types::JobSummaryProjection::reserved`] leaves out of every answer
+/// carrying this job. The `@required` members among them are bare `String`s and
+/// `DateTime`s in the record, so the one value a timestamp can hold is stored and not
+/// reported.
+fn reserved_job_summary(branch_arn: &str, job_id: &str, created_at: i64) -> JobSummary {
     let created = ::aws_smithy_types::DateTime::from_millis(created_at);
     JobSummary {
-        job_arn: format!("{branch_arn}/jobs/{}", pending.job_id),
-        // A manual deployment deploys content, not a commit of a repository: each
-        // member is @required on `JobSummary` with a length minimum of 0, so the job
-        // carries the empty value rather than none — and `commitTime` has no empty
-        // value, so it records the instant the deployment was created.
+        job_arn: crate::state::job_arn(branch_arn, job_id),
         commit_id: String::new(),
         commit_message: String::new(),
         commit_time: created,
         start_time: created,
-        status: crate::state::JOB_STATUS_CREATED.to_string(),
+        status: crate::state::JOB_STATUS_PENDING.to_string(),
         end_time: None,
-        // "If the value is MANUAL, the job is for a manually deployed app"
-        // (`smithy_query(query="shape",shape="JobSummary",member="jobType")`), which is
-        // the only kind of app this operation reserves a deployment for.
-        job_type: crate::ops::start_deployment::MANUAL_JOB_TYPE.to_string(),
+        job_type: String::new(),
         source_url: None,
         source_url_type: None,
-        job_id: pending.job_id.clone(),
+        job_id: job_id.to_string(),
     }
 }
 

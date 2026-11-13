@@ -31,7 +31,7 @@
 //! only the cases are new.
 
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -106,6 +106,27 @@ async fn get_job(emulator: &Emulator, app_id: &str, branch: &str, job_id: &str) 
             None,
         )
         .await
+}
+
+/// Job `job_id`'s record once the clock has settled it out of the non-terminal status a
+/// start leaves it in — read again until it has, or a generous deadline passes.
+///
+/// The span a job settles over is the service's own, so a case waits for the CONDITION
+/// rather than for a fixed time: the same read on a loaded or a faster host answers the
+/// same way.
+async fn settled_job(emulator: &Emulator, app_id: &str, branch: &str, job_id: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let job = get_job(emulator, app_id, branch, job_id).await.member("job");
+        if string_member(&optional_member(&job, "summary"), "status") != PENDING {
+            return job;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "job {job_id:?} on {branch:?} never settled: last read {job:?}"
+        );
+        sleep(Duration::from_millis(25));
+    }
 }
 
 /// A member that may legitimately be absent, as the value a client sees: JSON `null`
@@ -242,8 +263,9 @@ async fn start_job_records_the_job_and_get_job_answers_the_record() {
         );
         assert_eq!(
             string_member(&summary, "jobArn"),
-            format!("{branch_arn}/jobs/{job_id}"),
-            "case {label:?}: the jobArn must address the job inside its branch, got {summary:?}"
+            format!("{branch_arn}/jobs/{job_id:0>10}"),
+            "case {label:?}: the jobArn must address the job inside its branch, with the \
+             job number in the ten-digit field every job ARN carries, got {summary:?}"
         );
 
         // The job type is the request's, and the commit members are the request's or
@@ -481,14 +503,11 @@ async fn retry_requires_an_existing_job_id_and_re_runs_that_job() {
         );
     }
 
-    // Let the clock settle the seeded job, so the retry has a terminal job to re-run.
-    sleep(past_the_settle_span());
-    let settled = get_job(&emulator, &app_id, branch, "1").await.member("job");
+    // Wait for the clock to settle the seeded job, so the retry has a terminal job to
+    // re-run.
+    let settled = settled_job(&emulator, &app_id, branch, "1").await;
     assert_eq!(
-        string_member(
-            &settled.get("summary").cloned().unwrap_or(Value::Null),
-            "status"
-        ),
+        string_member(&optional_member(&settled, "summary"), "status"),
         FAILED,
         "case \"seed job\": the clock must have settled the job, got {settled:?}"
     );
@@ -515,7 +534,7 @@ async fn retry_requires_an_existing_job_id_and_re_runs_that_job() {
     );
     assert_eq!(
         string_member(&summary, "jobArn"),
-        format!("{branch_arn}/jobs/1"),
+        format!("{branch_arn}/jobs/0000000001"),
         "case \"RETRY of job 1\": the retried job keeps its ARN, got {summary:?}"
     );
     assert_eq!(

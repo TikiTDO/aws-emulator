@@ -196,10 +196,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        // Stopping is ASYNCHRONOUS, like starting: the call answers with the
-        // non-terminal status Amplify spells `CANCELLING` and the clock settles the job
-        // to `CANCELLED` (see `crate::state::BranchJob::cancel`), so a caller that reads
-        // the job straight after this call still observes the cancellation in flight.
+        // Stopping a job whose work has BEGUN is asynchronous, like starting one: the
+        // call answers with the non-terminal status Amplify spells `CANCELLING` and the
+        // clock settles the job to `CANCELLED`, so a caller that reads the job straight
+        // after this call still observes the cancellation in flight. A job NOTHING has
+        // started — a deployment that only reserved its number — has no work to wind
+        // down, so its cancellation is COMPLETE in this call's own answer: the terminal
+        // `CANCELLED` (see `crate::state::BranchJob::cancel`), which leaves the branch
+        // deployable again by the caller's very next call.
         job.cancel();
         // A deployment that was created and never started is cancelled as a whole: its
         // reservation is spent by this call, so the upload destinations

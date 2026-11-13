@@ -23,7 +23,7 @@ pub struct ListJobsInput {
 #[smithy_macros::smithy(shape = "com.amazonaws.amplify#ListJobsResult")]
 #[derive(Debug, Clone, Default)]
 pub struct ListJobsOutput {
-    pub job_summaries: Vec<JobSummary>,
+    pub job_summaries: Vec<JobSummaryProjection>,
     pub next_token: Option<String>,
 }
 

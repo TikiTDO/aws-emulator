@@ -22,6 +22,6 @@ pub struct StopJobInput {
 #[smithy_macros::smithy(shape = "com.amazonaws.amplify#StopJobResult")]
 #[derive(Debug, Clone)]
 pub struct StopJobOutput {
-    pub job_summary: JobSummary,
+    pub job_summary: JobSummaryProjection,
 }
 

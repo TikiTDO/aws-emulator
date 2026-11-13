@@ -57,6 +57,8 @@ mod hosted_site_custom_headers;
 mod hosted_site_custom_rules;
 #[path = "all/job_deletion.rs"]
 mod job_deletion;
+#[path = "all/job_numbering_and_projection.rs"]
+mod job_numbering_and_projection;
 #[path = "all/job_stop_terminal_wording.rs"]
 mod job_stop_terminal_wording;
 #[path = "all/manual_deployment_preconditions.rs"]

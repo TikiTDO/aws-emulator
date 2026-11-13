@@ -191,9 +191,9 @@ async fn list_jobs_answers_the_jobs_the_branch_holds_for_every_history_size() {
             let job_id = string_member(summary, "jobId");
             assert_eq!(
                 string_member(summary, "jobArn"),
-                format!("{branch_arn}/jobs/{job_id}"),
-                "case \"{count} jobs\": a listed job is addressed inside its branch, \
-                 got {summary:?}"
+                format!("{branch_arn}/jobs/{job_id:0>10}"),
+                "case \"{count} jobs\": a listed job is addressed inside its branch, with \
+                 the job number in the ten-digit field every job ARN carries, got {summary:?}"
             );
             let read = get_job(&emulator, &app_id, branch, &job_id).await;
             assert_eq!(

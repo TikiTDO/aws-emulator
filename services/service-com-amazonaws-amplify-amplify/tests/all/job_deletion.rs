@@ -29,13 +29,15 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use service_com_amazonaws_amplify_amplify::state::{
-    JOB_SETTLE_MILLIS, JOB_STATUS_CANCELLED, JOB_STATUS_CREATED, JOB_STATUS_FAILED,
+    JOB_SETTLE_MILLIS, JOB_STATUS_CANCELLED, JOB_STATUS_FAILED,
     JOB_STATUS_SUCCEED,
 };
 
 use crate::app_branch_lifecycle::{list_member, string_member, Emulator, Reply};
 
-/// The non-terminal status a job `StartJob` has just started carries.
+/// The non-terminal status a job carries before the clock settles it: the one `StartJob`
+/// answers with, and the one the job of a reserved deployment holds until something
+/// starts, stops or expires it.
 const PENDING: &str = "PENDING";
 
 /// How long a case waits before expecting the status change the clock already owed.
@@ -223,7 +225,7 @@ async fn a_deleted_job_is_answered_and_leaves_its_branchs_history() {
             "a reserved deployment nothing started",
             "trunk",
             JobState::Reserved,
-            JOB_STATUS_CREATED,
+            PENDING,
         ),
         (
             "a build still in flight",

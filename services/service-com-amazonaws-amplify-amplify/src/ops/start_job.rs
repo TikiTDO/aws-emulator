@@ -263,7 +263,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // records the instant the job was started for.
         let retried = branch.jobs.get(&job_id).map(|stored| stored.job.summary.clone());
         let summary = JobSummary {
-            job_arn: format!("{}/jobs/{job_id}", branch.branch.branch_arn),
+            job_arn: crate::state::job_arn(&branch.branch.branch_arn, &job_id),
             commit_id: input
                 .commit_id
                 .or_else(|| retried.as_ref().map(|summary| summary.commit_id.clone()))
@@ -292,13 +292,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `jobReason` is "a descriptive reason for starting the job"; neither
         // `JobSummary` nor `Job` models a member to report it on, so it is accepted
         // and nothing claims to echo it back.
-        let job = Job {
-            summary: summary.clone(),
-            steps: Vec::new(),
-        };
         branch.jobs.insert(
             summary.job_id.clone(),
-            crate::state::BranchJob::started(job),
+            crate::state::BranchJob::started(summary.clone()),
         );
 
         // The branch's own view of its jobs: the job just started is the active one,
@@ -309,7 +305,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         branch.branch.total_number_of_jobs = branch.jobs_started().to_string();
 
         Ok(StartJobOutput {
-            job_summary: summary,
+            job_summary: JobSummaryProjection::executed(summary),
         })
     }
 }

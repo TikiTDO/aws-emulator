@@ -48,6 +48,11 @@
 //! already has a value for. That projection therefore DROPS a member with no value
 //! instead of completing it.
 //!
+//! A JOB SUMMARY is the same case as a domain association, and
+//! [`JobSummaryProjection`] is what it answers through: a job whose work nothing has
+//! begun has no commit, no start time and no type to report, so those members are left
+//! out rather than sent as the zero value of their type.
+//!
 //! [`ValuedMembers`] is that dropping half on its own, for an ANSWER that leaves a
 //! member out: an operation whose output carries one member or another depending on
 //! the form of the request writes its result through it (see
@@ -288,6 +293,118 @@ impl DeserializableStruct for DomainAssociationProjection {
         )?))
     }
 }
+
+/// A [`JobSummary`] as every operation that answers one writes it: the record, minus
+/// the members the job HAS no value for.
+///
+/// Amplify reports a member of a job summary only where the job has something to report
+/// for it, and a job whose work nothing has begun has nothing to report for most of
+/// them: a deployment that was only reserved has run no commit of a repository, has not
+/// started, and has not been told what kind of job will run under its id. Those members
+/// are `@required` with a `length` minimum of 0, or timestamps
+/// (`smithy_query(query="shape",shape="JobSummary")`), so the generated record holds each
+/// as a bare `String` or `DateTime` and the generated serializer writes that type's zero
+/// value — an empty commit id, an invented commit instant — where Amplify writes no key
+/// at all. A client cannot tell "no commit information" from "an empty commit id", so a
+/// manual deployment would be read as a repository build with a blank commit; this
+/// projection leaves those members out instead.
+///
+/// The record itself is what the service STORES for the job, so one job cannot be
+/// reported one way by `GetJob` and another by `ListJobs`, `StopJob` or `DeleteJob`:
+/// which members it has values for is decided once, where the job record is created.
+#[derive(Debug, Clone)]
+pub struct JobSummaryProjection {
+    /// The summary record, as stored.
+    summary: JobSummary,
+    /// The members this job has no value for, by their modelled names.
+    unvalued: &'static [&'static str],
+}
+
+impl JobSummaryProjection {
+    /// The shape this projects is still `com.amazonaws.amplify#JobSummary`; see
+    /// [`AppProjection::SCHEMA`].
+    pub const SCHEMA: Schema = JobSummary::SCHEMA;
+
+    /// The summary of a job whose work a start call is RUNNING: the service determined
+    /// every member of it when it started the job, so the whole record reaches the wire.
+    pub fn executed(summary: JobSummary) -> Self {
+        Self {
+            summary,
+            unvalued: &[],
+        }
+    }
+
+    /// The summary of a job a `CreateDeployment` only RESERVED: nothing has run under it,
+    /// so it reports neither commit information, nor a start or end time, nor the type of
+    /// job that will run — see [`UNVALUED_ON_A_JOB_NOTHING_RAN`].
+    pub fn reserved(summary: JobSummary) -> Self {
+        Self {
+            summary,
+            unvalued: UNVALUED_ON_A_JOB_NOTHING_RAN,
+        }
+    }
+}
+
+/// The stored record, so the service reads and writes the job's own members — the
+/// status the clock settles, the end instant — through the projection that carries it.
+impl ::std::ops::Deref for JobSummaryProjection {
+    type Target = JobSummary;
+
+    fn deref(&self) -> &Self::Target {
+        &self.summary
+    }
+}
+
+impl ::std::ops::DerefMut for JobSummaryProjection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.summary
+    }
+}
+
+impl SerializableStruct for JobSummaryProjection {
+    fn serialize_members(
+        &self,
+        serializer: &mut dyn ShapeSerializer,
+    ) -> ::std::result::Result<(), SerdeError> {
+        ValuedMembers {
+            record: &self.summary,
+            unsent: self.unvalued,
+            // Which members the job has no value for is the RECORD's property, decided
+            // where the job was created, not something re-read from the values: the
+            // instant a reserved job was reserved is stored (a timestamp has no empty
+            // value) and still not reported.
+            when: Unsent::Always,
+        }
+        .serialize_members(serializer)
+    }
+}
+
+impl DeserializableStruct for JobSummaryProjection {
+    fn deserialize(
+        deserializer: &mut dyn ::aws_smithy_schema::serde::ShapeDeserializer,
+    ) -> ::std::result::Result<Self, SerdeError> {
+        Ok(Self::executed(<JobSummary as DeserializableStruct>::deserialize(deserializer)?))
+    }
+}
+
+/// The members a job NOTHING HAS RUN has no value for, and so leaves out of every answer
+/// carrying it.
+///
+/// `commitId`, `commitMessage` and `commitTime` describe "the commit ... from a
+/// third-party repository provider for the job", which a manually deployed app has none
+/// of; `startTime` is "the start date and time for the job", which has not started; and
+/// `jobType` names what kind of job ran — `MANUAL`, `RELEASE`, `RETRY` or `WEB_HOOK`
+/// (`smithy_query(query="shape",shape="JobSummary")`) — which is settled by the call
+/// that starts the job, not by the one that reserved its id. `endTime`, `sourceUrl` and
+/// `sourceUrlType` are modelled optional, so the record holds no value for them at all
+/// and the generated serializer already leaves them out.
+pub const UNVALUED_ON_A_JOB_NOTHING_RAN: &[&str] = &[
+    "commitId",
+    "commitMessage",
+    "commitTime",
+    "startTime",
+    "jobType",
+];
 
 /// The member a domain-association record never carries without a value, whichever
 /// operation answers it.

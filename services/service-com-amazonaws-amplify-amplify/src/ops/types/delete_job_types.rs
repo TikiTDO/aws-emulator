@@ -22,6 +22,6 @@ pub struct DeleteJobInput {
 #[smithy_macros::smithy(shape = "com.amazonaws.amplify#DeleteJobResult")]
 #[derive(Debug, Clone)]
 pub struct DeleteJobOutput {
-    pub job_summary: JobSummary,
+    pub job_summary: JobSummaryProjection,
 }
 

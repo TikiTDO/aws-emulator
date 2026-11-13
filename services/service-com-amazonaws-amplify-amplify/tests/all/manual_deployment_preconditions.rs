@@ -32,7 +32,7 @@
 use serde_json::{json, Value};
 
 use service_com_amazonaws_amplify_amplify::ops::start_deployment::DEPLOYMENT_FILE_NOT_UPLOADED;
-use service_com_amazonaws_amplify_amplify::state::JOB_STATUS_CREATED;
+use service_com_amazonaws_amplify_amplify::state::JOB_STATUS_PENDING;
 
 use crate::app_branch_lifecycle::{list_member, string_member, Emulator, Reply};
 
@@ -335,7 +335,7 @@ async fn a_deployment_whose_file_never_arrived_is_not_started() {
         let summary = job.member("job").get("summary").cloned().unwrap_or(Value::Null);
         assert_eq!(
             string_member(&summary, "status"),
-            JOB_STATUS_CREATED,
+            JOB_STATUS_PENDING,
             "case {case:?}: a refused start leaves the job nothing has started, \
              got {summary:?}"
         );

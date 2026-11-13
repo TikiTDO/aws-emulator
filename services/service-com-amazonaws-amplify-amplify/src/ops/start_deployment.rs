@@ -285,7 +285,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let summary = JobSummary {
-            job_arn: format!("{branch_arn}/jobs/{job_id}"),
+            job_arn: crate::state::job_arn(&branch_arn, &job_id),
             // A manual deployment deploys content, not a commit of a repository: each
             // member is @required on `JobSummary` with a length minimum of 0, so the
             // job carries the empty value rather than none — and `commitTime` has no
@@ -316,14 +316,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let publishes = deployment.publishes();
         branch.jobs.insert(
             summary.job_id.clone(),
-            crate::state::BranchJob::settling(
-                Job {
-                    summary: summary.clone(),
-                    steps: Vec::new(),
-                },
-                deployment.conclusion,
-                deployed_assets,
-            ),
+            crate::state::BranchJob::settling(summary.clone(), deployment.conclusion, deployed_assets),
         );
         // The files go LIVE when the deployment's job reaches its terminal status, not
         // when this call answers, so they are staged on the branch and published by the
@@ -339,7 +332,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         branch.branch.total_number_of_jobs = branch.jobs_started().to_string();
 
         Ok(StartDeploymentOutput {
-            job_summary: summary,
+            job_summary: JobSummaryProjection::executed(summary),
         })
     }
 }

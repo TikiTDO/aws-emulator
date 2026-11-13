@@ -22,7 +22,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use crate::ops::types::{
-    App, BackendEnvironment, Branch, CustomRule, DomainAssociation, Job, Step, Webhook,
+    App, BackendEnvironment, Branch, CustomRule, DomainAssociation, Job, JobSummary,
+    JobSummaryProjection, Step, Webhook,
 };
 
 /// The access control an app configures on its branches: what a configured
@@ -141,14 +142,15 @@ pub struct AmplifyBranch {
     ///
     /// A deployment is reserved by one call and started by another, so what the first
     /// call minted — the job id and the upload destinations — has to outlive it; this
-    /// is where it lives until `StartDeployment` names that job id. The map holds AT
-    /// MOST ONE reservation, structurally: `CreateDeployment` refuses a deployment while
-    /// the branch's last job is unfinished ([`AmplifyBranch::last_unfinished_job`]), and
-    /// each of the three ways that job reaches a terminal status also spends its
-    /// reservation — `StartDeployment` takes it, `StopJob` cancels it, and the closing of
-    /// its window drops it ([`AmplifyBranch::expire_deployments`]).
+    /// is where it lives until `StartDeployment` names that job id. One entry per
+    /// deployment this branch actually handed destinations to: a `CreateDeployment` the
+    /// serialization rule refuses hands out none and so stores none, and each of the
+    /// three ways a reservation ends spends it — `StartDeployment` takes it, `StopJob`
+    /// cancels it, and the closing of its window drops it
+    /// ([`AmplifyBranch::expire_deployments`]).
     pub deployments: BTreeMap<String, PendingDeployment>,
-    /// The jobs started on this branch, keyed by `jobId`.
+    /// The jobs of this branch, keyed by `jobId`: one per call that started a job on it,
+    /// and one per call that spent a job number reserving a deployment.
     ///
     /// BOUNDED, with an explicit retention policy: the map holds at most
     /// [`MAX_JOBS_PER_BRANCH`] jobs, and starting one more RETIRES the oldest job
@@ -447,6 +449,29 @@ pub fn job_limit_message(branch_name: &str) -> String {
     format!("Number of running jobs exceeds the limit of {MAX_JOBS_PER_BRANCH} for branch {branch_name}")
 }
 
+/// The `jobArn` of one job of a branch: the branch's own ARN, the `jobs` collection, and
+/// the job's NUMBER padded with leading zeroes to [`JOB_ARN_NUMBER_DIGITS`] digits.
+///
+/// The ARN and the `jobId` of one summary are NOT the same string: `jobId` is modelled
+/// `pattern ^[0-9]+$` and reports the branch's bare job number, while recorded behaviour
+/// shows the last segment of the ARN as that number in a fixed-width field — the form
+/// every job ARN Amplify emits has, and so the form an IAM resource pattern or a log
+/// correlation built from one matches against. Formatted HERE rather than in each
+/// handler, so the call that reserves a job, the two that start one and the readers that
+/// report them cannot drift on it.
+///
+/// A number too long for the field is written as it stands: padding only ever adds
+/// digits, so an id outside the width is still addressable.
+pub fn job_arn(branch_arn: &str, job_id: &str) -> String {
+    format!(
+        "{branch_arn}/jobs/{job_id:0>width$}",
+        width = JOB_ARN_NUMBER_DIGITS
+    )
+}
+
+/// How wide the job-number field of a [`job_arn`] is.
+pub const JOB_ARN_NUMBER_DIGITS: usize = 10;
+
 /// One deployment reserved on a branch and not started yet: the `jobId` it reserved,
 /// where its content is uploaded, and the window it has to be started in.
 ///
@@ -704,26 +729,42 @@ pub struct BranchJob {
     /// a later deployment of the same branch publishes its own set, and a reader of an
     /// older job still sees the one that job published.
     pub deployed_assets: BTreeSet<String>,
+    /// Whether this job's work has BEGUN — whether a start call is running it.
+    ///
+    /// `false` for the job a `CreateDeployment` reserved and nothing has started: that
+    /// job holds a number and a reservation, and no work. The distinction is what
+    /// [`Self::cancel`] turns on, because there is nothing to wind down for work that
+    /// never began.
+    pub work_has_begun: bool,
 }
 
 impl BranchJob {
     /// A job that has just been started: [`JOB_STATUS_PENDING`] now, settled by the
     /// clock [`JOB_SETTLE_MILLIS`] from now to `conclusion`, having published `assets`.
     pub fn settling(
-        job: Job,
+        summary: JobSummary,
         conclusion: JobConclusion,
         deployed_assets: BTreeSet<String>,
     ) -> Self {
         Self {
-            job,
+            job: Job {
+                // The job is RUNNING, so the service determined every member of its
+                // summary when it started it.
+                summary: JobSummaryProjection::executed(summary),
+                // The steps of a job are what its execution produced, and it has
+                // produced none yet; the settling the clock owes records the one step
+                // (see [`Self::settle`]).
+                steps: Vec::new(),
+            },
             settles_at: Some(now_millis().saturating_add(JOB_SETTLE_MILLIS)),
             conclusion,
             deployed_assets,
+            work_has_begun: true,
         }
     }
 
-    /// The job a `CreateDeployment` call creates: the deployment exists and nothing has
-    /// started it, which is what [`JOB_STATUS_CREATED`] says.
+    /// The job a `CreateDeployment` call creates: the deployment's number is spent and
+    /// nothing has started it, which is what [`JOB_STATUS_PENDING`] says.
     ///
     /// The clock already owes this job one status change: "the maximum duration between
     /// the CreateDeployment call and the StartDeployment call cannot exceed 8 hours. If
@@ -733,21 +774,27 @@ impl BranchJob {
     /// instant [`PendingDeployment::expires_at`] drops the reservation. A deployment that
     /// IS started replaces this record with the started job's own
     /// ([`Self::settling`]).
-    pub fn reserved(job: Job, window_closes_at: i64) -> Self {
+    pub fn reserved(summary: JobSummary, window_closes_at: i64) -> Self {
         Self {
-            job,
+            job: Job {
+                // Nothing has run under this job, so most of its summary has no value to
+                // report (see [`JobSummaryProjection::reserved`]).
+                summary: JobSummaryProjection::reserved(summary),
+                steps: Vec::new(),
+            },
             settles_at: Some(window_closes_at),
             conclusion: JobConclusion::not_deployed(DEPLOYMENT_WINDOW_CLOSED_REASON),
             deployed_assets: BTreeSet::new(),
+            work_has_begun: false,
         }
     }
 
     /// A job `StartJob` has just started: a build of the branch's repository, which
     /// this emulator has no environment to run (see
     /// [`JobConclusion::build_without_an_environment`]), so it publishes no assets.
-    pub fn started(job: Job) -> Self {
+    pub fn started(summary: JobSummary) -> Self {
         Self::settling(
-            job,
+            summary,
             JobConclusion::build_without_an_environment(),
             BTreeSet::new(),
         )
@@ -792,20 +839,34 @@ impl BranchJob {
         }];
     }
 
-    /// Stop this job: it leaves the status it is in for [`JOB_STATUS_CANCELLING`] now,
-    /// and the clock settles it to [`JOB_STATUS_CANCELLED`].
+    /// Stop this job: it reaches [`JOB_STATUS_CANCELLED`] now if no work had begun under
+    /// it, and otherwise leaves the status it is in for [`JOB_STATUS_CANCELLING`] while
+    /// the clock settles the stop to [`JOB_STATUS_CANCELLED`].
     ///
-    /// Stopping is ASYNCHRONOUS exactly as starting is — "stops a job that is in
-    /// progress" names work that is already running — so the status a caller is answered
-    /// is the non-terminal one and the terminal status is owed
-    /// [`JOB_SETTLE_MILLIS`] later. The step the job is cancelled IN is the one its
-    /// recorded conclusion names, because that is the phase the job was stopped in; only
-    /// the status and the reason are the cancellation's.
+    /// Winding work down takes time, which is why `JobStatus` models both halves of
+    /// stopping (`CANCELLING` and `CANCELLED`,
+    /// `smithy_query(query="shape",shape="JobStatus")`): "stops a job that is in
+    /// progress" names work that is already running, so a stop of one is answered with
+    /// the non-terminal status and the terminal one is owed [`JOB_SETTLE_MILLIS`] later.
+    /// A job NOTHING had begun has no work to wind down, so its cancellation is complete
+    /// when the call answers — the terminal status is in that call's own response, and no
+    /// settling is owed. The step the job is cancelled IN is the one its recorded
+    /// conclusion names, because that is the phase the job was stopped in; only the
+    /// status and the reason are the cancellation's.
     pub fn cancel(&mut self) {
+        self.conclusion = JobConclusion::cancelled(&self.conclusion.step_name);
+        if !self.work_has_begun {
+            self.job.summary.status = JOB_STATUS_CANCELLED.to_string();
+            // A job that never ran produced no step and has no execution that ended, so
+            // it reports neither steps nor an end instant.
+            self.job.summary.end_time = None;
+            self.job.steps = Vec::new();
+            self.settles_at = None;
+            return;
+        }
         self.job.summary.status = JOB_STATUS_CANCELLING.to_string();
         self.job.summary.end_time = None;
         self.job.steps = Vec::new();
-        self.conclusion = JobConclusion::cancelled(&self.conclusion.step_name);
         self.settles_at = Some(now_millis().saturating_add(JOB_SETTLE_MILLIS));
     }
 }
@@ -877,15 +938,6 @@ impl JobConclusion {
 /// after starting it still sees the `PENDING` status a real client has to poll through.
 pub const JOB_SETTLE_MILLIS: i64 = 500;
 
-/// The status the job of a deployment carries from `CreateDeployment` until something
-/// starts it, stops it, or its window closes.
-///
-/// `JobStatus` is modelled `CREATED | PENDING | PROVISIONING | RUNNING | FAILED |
-/// SUCCEED | CANCELLING | CANCELLED` (`smithy_query(query="shape",shape="JobStatus")`),
-/// and `CreateDeployment` "creates a deployment" without running it: the job exists and
-/// no work has been asked of it, which is what `CREATED` says.
-pub const JOB_STATUS_CREATED: &str = "CREATED";
-
 /// Why the job of a deployment nobody started ends in [`JOB_STATUS_FAILED`].
 ///
 /// The duration is the documented one, not a chosen one: "the maximum duration between
@@ -896,12 +948,16 @@ pub const JOB_STATUS_CREATED: &str = "CREATED";
 pub const DEPLOYMENT_WINDOW_CLOSED_REASON: &str =
     "The deployment was not started before its upload window closed.";
 
-/// The status a job carries from `StartJob` until the clock settles it.
+/// The status a job carries until the clock settles it: the one `StartJob` and
+/// `StartDeployment` answer with, and the one the job of a reserved deployment carries
+/// from `CreateDeployment` until something starts it, stops it, or its window closes.
 ///
 /// `JobStatus` is modelled `CREATED | PENDING | PROVISIONING | RUNNING | FAILED |
 /// SUCCEED | CANCELLING | CANCELLED` (`smithy_query(query="shape",shape="JobStatus")`)
 /// and `StartJob` "starts a new job": the job exists and has not run yet, which is
-/// what `PENDING` says.
+/// what `PENDING` says — and which is also what a job holding a reserved deployment's
+/// number is, since a client polls a deployment through the documented PENDING ->
+/// RUNNING -> SUCCEED progression.
 pub const JOB_STATUS_PENDING: &str = "PENDING";
 
 /// The terminal status a job settles to when its work could not be done; see
@@ -958,9 +1014,10 @@ pub const JOB_ALREADY_TERMINAL_MESSAGE: &str =
 ///
 /// Deployments of one branch are SERIALIZED: a new one cannot be created while the
 /// branch's last job is still in flight, because the two could not be ordered against
-/// each other. The sentence is fixed text apart from `job_id`, which is read out of the
-/// branch's own job history, and it states the two ways out AWS offers — wait for that
-/// job, or `StopJob` it.
+/// each other. The sentence is fixed text apart from `job_id`, which is the number this
+/// call took out of the branch's sequence — a call that is refused spends one too, so the
+/// job it names is the branch's last — and it states the two ways out AWS offers: wait
+/// for that job, or `StopJob` it.
 pub fn unfinished_job_message(job_id: &str) -> String {
     format!(
         "The last job(deployment) {job_id} was not finished, please wait until it finish \

@@ -57,7 +57,7 @@ const FAILED: &str = "FAILED";
 
 /// The status of the job of a deployment nothing has started, which is where a refused
 /// start leaves it.
-const CREATED: &str = "CREATED";
+const PENDING: &str = "PENDING";
 
 /// A declared `MD5Hash` for a file a reservation names: the member is modelled
 /// `length 0..32` with no further constraint
@@ -341,7 +341,7 @@ fn upload_cases() -> Vec<UploadCase> {
             request: json!({}),
             zip: None,
             uploaded_files: &[],
-            status: CREATED,
+            status: PENDING,
             assets: &[],
             reason_names: None,
         },
@@ -397,7 +397,7 @@ fn upload_cases() -> Vec<UploadCase> {
             request: json!({ "fileMap": { "index.html": DECLARED_HASH } }),
             zip: None,
             uploaded_files: &[],
-            status: CREATED,
+            status: PENDING,
             assets: &[],
             reason_names: None,
         },
