@@ -37,12 +37,13 @@ aws-sdk-ec2 = { version = "1", default-features = false }
 # Lambda service, so `src/service/invoke/` asks Lambda to run it rather than deciding the
 # answer here.
 aws-sdk-lambda = { version = "1", default-features = false }
-# The AWS SDK for EventBridge and for Amazon SQS, driven over the same in-process callback:
-# an HTTP api route whose integration names a first-class `IntegrationSubtype` performs that
-# AWS service action, which lives in the service that owns it, so `src/service/invoke/`
-# calls it there rather than deciding the answer here.
+# The AWS SDK for EventBridge, Amazon SQS and Step Functions, driven over the same in-process
+# callback: an HTTP api route whose integration names a first-class `IntegrationSubtype`
+# performs that AWS service action, which lives in the service that owns it, so
+# `src/service/invoke/` calls it there rather than deciding the answer here.
 aws-sdk-eventbridge = { version = "1", default-features = false }
 aws-sdk-sqs = { version = "1", default-features = false }
+aws-sdk-sfn = { version = "1", default-features = false }
 # Base64, for the one encoding an HTTP api's proxy event states a payload in when it is not
 # text (`isBase64Encoded`), in both directions.
 base64 = "0.22"
@@ -112,6 +113,11 @@ service-com-amazonaws-cognitoidentityprovider-awscognitoidentityproviderservice 
 # against the services that OWN that action and the role it is performed under. DEV-ONLY.
 service-com-amazonaws-eventbridge-awsevents = { workspace = true }
 service-com-amazonaws-sqs-amazonsqs = { workspace = true }
+# Step Functions, mounted beside this one in the test harness: a route whose integration names
+# a first-class Step Functions subtype starts a run of a state machine THAT service holds, and
+# `tests/all/http_api_step_functions_subtype.rs` reads the execution back through its own
+# `DescribeExecution`. DEV-ONLY.
+service-com-amazonaws-sfn-awsstepfunctions = { workspace = true }
 # The XML reader the service-action suite reads a first-class subtype route's answer with:
 # the answer of a QUERY api is that api's own `{Action}Response` envelope, so the test parses
 # it the way a client's XML reader does rather than by slicing the body. DEV-ONLY.

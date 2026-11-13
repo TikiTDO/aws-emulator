@@ -121,6 +121,8 @@ mod http_api_servable_stage;
 mod http_api_service_action_integration;
 #[path = "all/http_api_signed_invoke.rs"]
 mod http_api_signed_invoke;
+#[path = "all/http_api_step_functions_subtype.rs"]
+mod http_api_step_functions_subtype;
 #[path = "all/integration_deletion.rs"]
 mod integration_deletion;
 #[path = "all/integration_lifecycle.rs"]
@@ -201,6 +203,8 @@ mod product_rest_endpoint_page_update;
 mod protocol_restricted_member_message;
 #[path = "all/protocol_type_gating.rs"]
 mod protocol_type_gating;
+#[path = "all/query_form.rs"]
+mod query_form;
 #[path = "all/quick_create_is_http_only.rs"]
 mod quick_create_is_http_only;
 #[path = "all/quick_create_servable_set.rs"]

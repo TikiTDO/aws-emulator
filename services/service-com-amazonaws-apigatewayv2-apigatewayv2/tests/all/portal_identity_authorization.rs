@@ -37,6 +37,8 @@ use service_com_amazonaws_apigatewayv2_apigatewayv2::state::{
     domain_name_arn, portal_arn, portal_product_arn,
 };
 
+use crate::query_form::form_encode;
+
 /// The region every call below is signed for, so the ARNs the decisions are made about are
 /// the ones this region's resources carry.
 pub(crate) const REGION: &str = "us-west-2";
@@ -297,21 +299,6 @@ impl Emulator {
             arn,
         }
     }
-}
-
-/// Percent-encode one `application/x-www-form-urlencoded` component, leaving only RFC
-/// 3986's unreserved characters literal — so a policy document's braces and quotes survive
-/// the round trip.
-fn form_encode(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    encoded
 }
 
 /// The text of the first `<name>…</name>` element of an awsQuery response.

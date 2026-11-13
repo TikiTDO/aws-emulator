@@ -39,7 +39,8 @@
 //! and its answer is the only thing the gateway has to report. Which form that is belongs to
 //! each action's own module, from what is recorded for its subtype, because it is a fact
 //! about the api API Gateway performs the action over and not about this gateway: for
-//! [`eventbridge`] it is the JSON document that service's protocol answers with, and for
+//! [`eventbridge`] and [`stepfunctions`] it is the JSON document that service's protocol
+//! answers with, and for
 //! [`sqs`] the `{Action}Response` envelope the queue api's query interface answers with. An
 //! action the service serving it
 //! ANSWERED a refusal for is that refusal, RELAYED: that service's own status, the error
@@ -52,9 +53,17 @@
 //! does.
 //!
 //! The subtypes performed here are the ones whose service this emulator mounts and whose
-//! parameters are the action's own: [`eventbridge`] and [`sqs`]. Any other subtype is
-//! reported as an integration this emulator cannot perform, which is the answer it already
-//! had — never a success for a call nothing made.
+//! parameters are the action's own: [`eventbridge`], [`sqs`] and [`stepfunctions`]. Any other
+//! subtype is reported as an integration this emulator cannot perform, which is the answer it
+//! already had — never a success for a call nothing made.
+//!
+//! ## The Region an action is called in
+//!
+//! One parameter belongs to no action's own request shape and may be mapped onto EVERY
+//! first-class subtype ([`REGION_PARAMETER`]): the Region the gateway sends the call to. An
+//! integration that maps none calls the action in the api's OWN Region, which is the Region
+//! the request was addressed in, so the mapping only ever moves a call this emulator would
+//! otherwise have made at home.
 
 use std::time::Duration;
 
@@ -84,6 +93,11 @@ const PERFORMED_STATUS: u16 = 200;
 /// TEXT, under the member this endpoint reports a relayed service error's text in.
 const SHAPE_MEMBER: &str = "__type";
 const DETAIL_MEMBER: &str = "Message";
+
+/// The parameter every first-class subtype may map and no action's own request shape declares:
+/// the Region API Gateway sends the call to. An integration mapping none has the action called
+/// in the api's own Region (see the module docs).
+const REGION_PARAMETER: &str = "Region";
 
 /// Build the client ONE in-process hop is made with: the AWS SDK for the service the action
 /// belongs to, driven over the emulator's own transport.
@@ -128,6 +142,7 @@ pub mod credentials;
 mod eventbridge;
 pub mod parameters;
 mod sqs;
+mod stepfunctions;
 
 use credentials::SigningIdentity;
 use parameters::Mapped;
@@ -299,7 +314,13 @@ pub async fn perform<Eng: Send + Sync + 'static>(
         &dispatch.request,
         &dispatch.invocation,
     );
-    if let Some(beyond) = mapped.beyond(action.parameters()) {
+    let carried: Vec<&str> = action
+        .parameters()
+        .iter()
+        .copied()
+        .chain(::std::iter::once(REGION_PARAMETER))
+        .collect();
+    if let Some(beyond) = mapped.beyond(&carried) {
         return Err(Unperformed::NotPerformed(format!(
             "the integration maps the request parameter {beyond}, which this emulator does \
              not carry into {subtype}"
@@ -318,7 +339,11 @@ pub async fn perform<Eng: Send + Sync + 'static>(
         ctx,
         integration.credentials_arn.as_deref(),
     );
-    let region = dispatch.request.region.clone();
+    // The Region the action is called in: the one the integration maps, and otherwise the
+    // api's own.
+    let region = mapped
+        .get(REGION_PARAMETER)
+        .map_or_else(|| dispatch.request.region.clone(), str::to_string);
     let call = action.invoke(ctx, &region, identity.as_ref(), &mapped);
     let answered = match ::tokio::time::timeout(timeout, call).await {
         Ok(answered) => answered,
@@ -334,6 +359,11 @@ enum Action {
     EventBridgePutEvents,
     /// `SQS-SendMessage`: send the mapped message to the queue it names.
     SqsSendMessage,
+    /// `StepFunctions-StartExecution`: start an execution of the state machine it names.
+    StepFunctionsStartExecution,
+    /// `StepFunctions-StartSyncExecution`: start one synchronously and answer what it came
+    /// to.
+    StepFunctionsStartSyncExecution,
 }
 
 impl Action {
@@ -345,6 +375,10 @@ impl Action {
         match subtype {
             eventbridge::PUT_EVENTS_SUBTYPE => Some(Self::EventBridgePutEvents),
             sqs::SEND_MESSAGE_SUBTYPE => Some(Self::SqsSendMessage),
+            stepfunctions::START_EXECUTION_SUBTYPE => Some(Self::StepFunctionsStartExecution),
+            stepfunctions::START_SYNC_EXECUTION_SUBTYPE => {
+                Some(Self::StepFunctionsStartSyncExecution)
+            }
             _ => None,
         }
     }
@@ -355,6 +389,10 @@ impl Action {
         match self {
             Self::EventBridgePutEvents => eventbridge::PUT_EVENTS_PARAMETERS,
             Self::SqsSendMessage => sqs::SEND_MESSAGE_PARAMETERS,
+            Self::StepFunctionsStartExecution => stepfunctions::START_EXECUTION_PARAMETERS,
+            Self::StepFunctionsStartSyncExecution => {
+                stepfunctions::START_SYNC_EXECUTION_PARAMETERS
+            }
         }
     }
 
@@ -364,6 +402,12 @@ impl Action {
         match self {
             Self::EventBridgePutEvents => eventbridge::PUT_EVENTS_REQUIRED_PARAMETERS,
             Self::SqsSendMessage => sqs::SEND_MESSAGE_REQUIRED_PARAMETERS,
+            Self::StepFunctionsStartExecution => {
+                stepfunctions::START_EXECUTION_REQUIRED_PARAMETERS
+            }
+            Self::StepFunctionsStartSyncExecution => {
+                stepfunctions::START_SYNC_EXECUTION_REQUIRED_PARAMETERS
+            }
         }
     }
 
@@ -381,6 +425,12 @@ impl Action {
                 eventbridge::put_events(ctx, region, identity, mapped).await
             }
             Self::SqsSendMessage => sqs::send_message(ctx, region, identity, mapped).await,
+            Self::StepFunctionsStartExecution => {
+                stepfunctions::start_execution(ctx, region, identity, mapped).await
+            }
+            Self::StepFunctionsStartSyncExecution => {
+                stepfunctions::start_sync_execution(ctx, region, identity, mapped).await
+            }
         }
     }
 }
@@ -449,6 +499,16 @@ mod tests {
                 Some("Detail"),
             ),
             ("the SQS send", sqs::SEND_MESSAGE_SUBTYPE, Some("MessageBody")),
+            (
+                "the Step Functions start",
+                stepfunctions::START_EXECUTION_SUBTYPE,
+                Some("StateMachineArn"),
+            ),
+            (
+                "the synchronous Step Functions start",
+                stepfunctions::START_SYNC_EXECUTION_SUBTYPE,
+                Some("StateMachineArn"),
+            ),
             ("a case-folded spelling", "eventbridge-putevents", None),
             ("an action this emulator does not perform", "SQS-PurgeQueue", None),
             ("nothing at all", "", None),

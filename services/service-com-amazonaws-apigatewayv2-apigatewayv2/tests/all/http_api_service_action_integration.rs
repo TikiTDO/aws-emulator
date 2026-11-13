@@ -29,6 +29,8 @@ use quick_xml::Reader;
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
+use crate::query_form::form_encode;
+
 /// The Region every request below is signed for.
 const REGION: &str = "us-east-1";
 
@@ -542,20 +544,6 @@ fn role_arn() -> String {
         "arn:aws:iam::{}:role/{ROLE_NAME}",
         engine::emulator_account_id()
     )
-}
-
-/// `application/x-www-form-urlencoded` for one awsQuery parameter value.
-fn form_encode(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(char::from(byte));
-            }
-            _ => encoded.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    encoded
 }
 
 /// The integration an api below carries: the first-class subtype `subtype`, performed under
