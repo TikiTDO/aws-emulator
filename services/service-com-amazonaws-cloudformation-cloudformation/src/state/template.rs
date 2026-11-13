@@ -2718,6 +2718,30 @@ pub fn replacement_properties(resource_type: &str) -> &'static [&'static str] {
         | crate::state::provisioning::logs_resources::LOGS_SUBSCRIPTION_FILTER => {
             &["LogGroupName"]
         }
+        // An Amazon ECS task-definition REVISION is immutable: that service publishes no call
+        // that edits one — `RegisterTaskDefinition` is the only way to state a configuration,
+        // and it makes a NEW revision — so every property of the type carries "Update
+        // requires: Replacement", and a declaration that states any of them differently asks
+        // for a new revision rather than a change to the one the stack has.
+        ECS_TASK_DEFINITION => &[
+            "ContainerDefinitions",
+            "Cpu",
+            "EnableFaultInjection",
+            "EphemeralStorage",
+            "ExecutionRoleArn",
+            "Family",
+            "InferenceAccelerators",
+            "IpcMode",
+            "Memory",
+            "NetworkMode",
+            "PidMode",
+            "PlacementConstraints",
+            "ProxyConfiguration",
+            "RequiresCompatibilities",
+            "RuntimePlatform",
+            "TaskRoleArn",
+            "Volumes",
+        ],
         _ => composite_identity_properties(resource_type),
     }
 }

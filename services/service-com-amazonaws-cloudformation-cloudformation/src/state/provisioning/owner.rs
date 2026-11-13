@@ -64,6 +64,12 @@ impl Owner {
             Self::Ec2Instance => {
                 ec2_instance::create(ctx, region, resource, propagated).await
             }
+            // A task-definition revision IS taggable: its `Tags` property is the tag list
+            // `RegisterTaskDefinition` takes, so the revision carries the tags CloudFormation
+            // gives the resource beside its own.
+            Self::EcsTaskDefinition => {
+                ecs_task_definition::create(ctx, region, resource, propagated).await
+            }
             Self::CognitoIdentityPool(kind) => {
                 cognito_identity_pool::create(ctx, region, kind, resource, propagated).await
             }
@@ -179,6 +185,9 @@ impl Owner {
             // declaration asked for.
             Self::LogsResource(_) => Ok(logs_resources::ready()),
             Self::IotAuthorizer => Ok(iot_authorizer::ready()),
+            // A task-definition revision is `ACTIVE` the moment `RegisterTaskDefinition`
+            // answers.
+            Self::EcsTaskDefinition => Ok(ecs_task_definition::ready()),
             // Each of these resources EXISTS from the moment its create answers: the table
             // takes its routes, the association holds, the gateway is there to be attached,
             // the attachment is in force, the address is allocated, and the endpoint's own
@@ -277,6 +286,9 @@ impl Owner {
             // authorizer's `Arn` is the one its create answered with. So there is nothing
             // left to read once any of them is up.
             Self::LogsResource(_) | Self::IotAuthorizer => Ok(BTreeMap::new()),
+            // A task-definition revision's `TaskDefinitionArn` is the one its own
+            // registration answered with, so there is nothing left to read once it is up.
+            Self::EcsTaskDefinition => Ok(BTreeMap::new()),
             // Each of these types publishes its own identifier (an Elastic IP address its
             // address and allocation id, an attachment nothing at all), and the create
             // answered it, so there is nothing to read once the resource is up.
@@ -381,6 +393,9 @@ impl Owner {
             // deleted in.
             Self::LogsResource(_) => Ok(logs_resources::removal()),
             Self::IotAuthorizer => Ok(iot_authorizer::removal()),
+            // `DeregisterTaskDefinition` marks the revision `INACTIVE` as it answers, so
+            // there is nothing to wait for.
+            Self::EcsTaskDefinition => Ok(ecs_task_definition::removal()),
             // Each of these deletes takes the resource away as it answers — Amazon EC2
             // reports no state a deleted route table, association, endpoint, gateway,
             // attachment, address or route is still being removed in — except the NAT
@@ -491,6 +506,10 @@ impl Owner {
             Self::IotAuthorizer => {
                 iot_authorizer::update(ctx, region, resource, declared).await
             }
+            // A task-definition revision cannot be CHANGED: Amazon ECS publishes no call that
+            // edits one, so a changed declaration registers a new revision rather than
+            // reaching this ([`ecs_task_definition::update`]).
+            Self::EcsTaskDefinition => Ok(ecs_task_definition::update()),
             // Neither an association nor a route table has a property that can change on the
             // resource that exists (both of an association's are its identity, and a route
             // table's VPC is create-only), every property of a gateway, of an attachment and
@@ -599,6 +618,9 @@ impl Owner {
             // log group and of an authorizer that already exist are reconciled by no arm here
             // yet ([`Provisioner::retag`]'s own default), so nothing is asked about them.
             Self::LogsResource(_) | Self::IotAuthorizer => Ok(()),
+            // A task-definition revision's tags are the ones its registration carried, and no
+            // deployment changes a revision, so nothing is asked about them.
+            Self::EcsTaskDefinition => Ok(()),
             // The tags of an Amazon EC2 resource that already exists are reconciled by no arm
             // here yet — as for every other type of that service ([`Provisioner::retag`]'s
             // own default) — so nothing is asked about them.
@@ -692,6 +714,10 @@ impl Owner {
                 logs_resources::delete(ctx, region, kind, resource).await
             }
             Self::IotAuthorizer => iot_authorizer::delete(ctx, region, resource).await,
+            // Amazon ECS takes no snapshot of a task-definition revision on the way out:
+            // there is no such call, so a `Snapshot` deletion policy on one deregisters the
+            // revision with no snapshot invented for it.
+            Self::EcsTaskDefinition => ecs_task_definition::delete(ctx, region, resource).await,
             // Amazon EC2 takes no snapshot of any of these on the way out: there is no such
             // call for a route table, an association, an endpoint, a gateway, an attachment
             // or an address, so a `Snapshot` deletion policy on one of them deletes the
@@ -819,6 +845,10 @@ impl Owner {
             Self::IotAuthorizer => {
                 iot_authorizer::actual_configuration(ctx, region, resource).await
             }
+            // A task-definition revision is immutable — every property of the type requires
+            // the resource to be replaced, and Amazon ECS publishes no call that edits one —
+            // so nothing of it can have drifted from its declaration.
+            Self::EcsTaskDefinition => Ok(None),
             // These types report no configuration of their own to compare either: every
             // property each one has is part of its identity or of the call that made it, so
             // there is no member a later read could find changed. An INSTANCE's are the same
@@ -885,6 +915,8 @@ impl Owner {
             Self::DynamodbTable => message.to_string(),
             // Amazon CloudWatch Logs's and AWS IoT's do the same.
             Self::LogsResource(_) | Self::IotAuthorizer => message.to_string(),
+            // Amazon ECS's does the same.
+            Self::EcsTaskDefinition => message.to_string(),
             // Amazon EC2's does the same.
             Self::Ec2VpcNetwork(_) | Self::Ec2Instance => message.to_string(),
             // Amazon Cognito Identity's and Amazon Cognito user pools' do the same.

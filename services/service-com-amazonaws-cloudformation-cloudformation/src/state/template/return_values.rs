@@ -2411,6 +2411,18 @@ pub fn identity_is_service_assigned(resource_type: &str) -> bool {
         || resource_type == ELB_TARGET_GROUP
         || resource_type == ELB_LISTENER
         || resource_type == ELB_LISTENER_RULE
+        // An Amazon ECS task-definition REVISION is one more: `RegisterTaskDefinition` takes
+        // the FAMILY and no identifier, and Amazon ECS allocates the revision — "the revision
+        // is a version number of a task definition in a family", incremented per registration
+        // — so the `family:revision` ARN "Ref returns the Amazon Resource Name (ARN) of the
+        // task definition" publishes cannot be computed from the template: a family the
+        // account already holds revisions of is registered at the next number, not at the
+        // first. That ARN is also the `taskDefinition` handle every call on one takes
+        // (`DescribeTaskDefinition`, `RunTask`, an EventBridge target's
+        // `EcsParameters.TaskDefinitionArn`), so the identity in force is the one that service
+        // answered ([`crate::state::provisioning`]'s task-definition provider), and the ARN
+        // computed here is the stand-in a declaration is resolved against until then.
+        || resource_type == ECS_TASK_DEFINITION
 }
 
 /// The type of an IAM access key: the long-term credential of an IAM user, under the

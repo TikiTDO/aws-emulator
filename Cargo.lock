@@ -10445,6 +10445,7 @@ dependencies = [
  "service-com-amazonaws-dynamodb-dynamodb-20120810",
  "service-com-amazonaws-ec2-amazonec2",
  "service-com-amazonaws-ecr-amazonec2containerregistry-v20150921",
+ "service-com-amazonaws-ecs-amazonec2containerservicev20141113",
  "service-com-amazonaws-elasticloadbalancing-elasticloadbalancing-v7",
  "service-com-amazonaws-elasticloadbalancingv2-elasticloadbalancing-v10",
  "service-com-amazonaws-iam-awsidentitymanagementv20100508",

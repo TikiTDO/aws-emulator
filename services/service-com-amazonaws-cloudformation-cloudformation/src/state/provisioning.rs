@@ -223,6 +223,9 @@ pub(super) mod dynamodb_table;
 /// ([`ec2_instance`]).
 mod ec2_instance;
 mod ec2_vpc_network;
+/// `AWS::ECS::TaskDefinition`: the revision a stack declares, registered in Amazon ECS
+/// itself ([`ecs_task_definition`]).
+mod ecs_task_definition;
 /// The four `AWS::ElasticLoadBalancingV2::*` types a stack declares — the load balancer, the
 /// target group traffic is routed to, the listener on the load balancer and the rule that
 /// routes a request: created in Elastic Load Balancing itself
@@ -818,6 +821,10 @@ pub(super) enum Owner {
     /// VPC, and the Elastic IP address. Which of them it is travels with the owner, so the
     /// algorithm resolves the type once and every call below is about that same resource.
     Ec2VpcNetwork(ec2_vpc_network::Kind),
+    /// `AWS::ECS::TaskDefinition`, whose arms are [`ecs_task_definition`]'s: the revision
+    /// Amazon ECS registers for the resource, whose ARN — revision and all — is the identity
+    /// that service assigned it.
+    EcsTaskDefinition,
     /// `AWS::EC2::Instance`, whose arms are [`ec2_instance`]'s: the instance Amazon EC2
     /// launches for the resource, which is a resource of that service's own rather than part
     /// of the VPC network above.
@@ -904,6 +911,9 @@ pub(super) fn owner_for(resource_type: &str) -> Option<Owner> {
     }
     if resource_type == ec2_instance::EC2_INSTANCE {
         return Some(Owner::Ec2Instance);
+    }
+    if resource_type == super::template::ECS_TASK_DEFINITION {
+        return Some(Owner::EcsTaskDefinition);
     }
     if let Some(kind) = cognito_identity_pool::kind_of(resource_type) {
         return Some(Owner::CognitoIdentityPool(kind));

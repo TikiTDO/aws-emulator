@@ -18,6 +18,23 @@
 #[path = "all/cloudformation_fifo_resource_generated_names.rs"]
 mod cloudformation_fifo_resource_generated_names;
 // Declared here, in this same head region, for the reason the entry above records: the
+// "an EventBridge rule runs a Fargate task" estate deployed in one stack spans
+// CloudFormation, Amazon S3, CloudWatch Logs, Amazon EC2, IAM, Amazon ECS and Amazon
+// EventBridge at once, so no single service crate's test target can deploy it.
+#[path = "all/cloudformation_eventbridge_scheduled_fargate_estate.rs"]
+mod cloudformation_eventbridge_scheduled_fargate_estate;
+// Declared here, in this same head region, for the reason the entry above records: what a
+// stack deploys for a property written as a `{{resolve:secretsmanager:…}}` dynamic reference
+// spans CloudFormation (which resolves it), AWS Secrets Manager (which holds the secret) and
+// the service that owns the configured resource at once, so no single crate's test target can
+// ask it.
+#[path = "all/cloudformation_secretsmanager_dynamic_references.rs"]
+mod cloudformation_secretsmanager_dynamic_references;
+// reference RabbitMQ-consumer estate deployed from scratch in one stack spans CloudFormation,
+// AWS Secrets Manager, Amazon MQ, IAM and AWS Lambda at once, so no single service crate's
+// test target can deploy it.
+#[path = "all/scratch_estate.rs"]
+mod scratch_estate;
 // identifiers a stack publishes for the Amazon Cognito user pool, app client, resource server
 // and identity provider it declares are the ones that service minted or is addressed by, which
 // spans CloudFormation and Amazon Cognito user pools at once, so neither crate's own test
@@ -29,7 +46,6 @@ mod cloudformation_provisions_cognito_user_pools;
 // mount both sides of it.
 #[path = "all/workmailmessageflow_resolves_an_s3_object.rs"]
 mod workmailmessageflow_resolves_an_s3_object;
-// Declared here, in this same head region, for the reason the entry above records: what a
 // client is answered by an endpoint serving a model SageMaker trained spans IAM, Amazon S3,
 // the SageMaker control plane and the SageMaker runtime at once, so neither SageMaker
 // crate's own test target can train a model and then invoke what it deployed.
@@ -1525,7 +1541,6 @@ mod polly_synthesis_task_side_effects;
 // RUNNING function's own DynamoDB item call is authorized against spans IAM (the role and its
 // document), STS (the session the call is signed with), Lambda (the handler and the SDK it is
 // given) and DynamoDB (the decision) at once, so no single service crate's test target can
-// ask it.
 #[path = "all/lambda_in_function_dynamodb_authorization.rs"]
 mod lambda_in_function_dynamodb_authorization;
 // Declared here, in this same head region, for the reason the entry above records: a backup
@@ -1556,22 +1571,6 @@ mod cloudformation_rotation_schedule_rotates_its_secret;
 // destination that decides the refusal) at once.
 #[path = "all/cloudformation_rollback_deletes_the_buckets_it_created.rs"]
 mod cloudformation_rollback_deletes_the_buckets_it_created;
-// Declared in the appended tail: the IDENTITY-BASED authorization of a bucket's own lifecycle
-// — the permissions a create's headers ask for and the one a delete asks for — which spans
-// IAM (the documents), STS (the session) and Amazon S3 (the decision) at once, so no single
-// service crate's test target can see both sides.
-#[path = "all/s3_bucket_lifecycle_identity_authorization.rs"]
-mod s3_bucket_lifecycle_identity_authorization;
-// stack deploys for a property written as a `{{resolve:secretsmanager:…}}` dynamic reference
-// spans CloudFormation (which resolves it), AWS Secrets Manager (which holds the secret) and
-// the service that owns the configured resource at once, so no single crate's test target can
-#[path = "all/cloudformation_secretsmanager_dynamic_references.rs"]
-mod cloudformation_secretsmanager_dynamic_references;
-// reference RabbitMQ-consumer estate deployed from scratch in one stack spans CloudFormation,
-// AWS Secrets Manager, Amazon MQ, IAM and AWS Lambda at once, so no single service crate's
-// test target can deploy it.
-#[path = "all/scratch_estate.rs"]
-mod scratch_estate;
 // completed stack PUBLISHES for the Amazon Redshift resources it declared — an `OutputValue`
 // on every output, carrying the endpoint, port and parameter-group name Amazon Redshift
 // itself reports — which spans CloudFormation (the outputs) and Amazon Redshift (the cluster
@@ -1589,6 +1588,12 @@ mod logs_subscription_filter_role_trust;
 // can see both ends of it.
 #[path = "all/logs_subscription_filter_to_lambda.rs"]
 mod logs_subscription_filter_to_lambda;
+// Declared in the appended tail: the IDENTITY-BASED authorization of a bucket's own lifecycle
+// — the permissions a create's headers ask for and the one a delete asks for — which spans
+// IAM (the documents), STS (the session) and Amazon S3 (the decision) at once, so no single
+// service crate's test target can see both sides.
+#[path = "all/s3_bucket_lifecycle_identity_authorization.rs"]
+mod s3_bucket_lifecycle_identity_authorization;
 // Declared in the appended tail, which is where every new suite inserts its lines: a CI
 // topology DEPLOYED BY TEMPLATE and then run — the pipeline, the build project and the two
 // service roles a stack provisions, driven to the terminal execution status the build decided

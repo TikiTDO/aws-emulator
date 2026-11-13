@@ -178,6 +178,15 @@ pub fn router_with_engine() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>)
             Arc::clone(&engine),
         ),
     );
+    // Amazon ECS, for the `AWS::ECS::Cluster` and the `AWS::ECS::TaskDefinition` a stack
+    // really creates there: a suite that deploys a container platform reads the cluster back
+    // through that service's own wire, and the task definition by the revision-qualified ARN
+    // Amazon ECS allocated for it.
+    router.register_service(
+        service_com_amazonaws_ecs_amazonec2containerservicev20141113::EmulatedService::new(
+            Arc::clone(&engine),
+        ),
+    );
     // Amazon Bedrock Agent's build-time control plane, for the `AWS::Bedrock::KnowledgeBase`
     // a stack really creates there: a suite that deploys one reads the knowledge base back
     // through that service's own wire, by the id the stack publishes. (Amazon S3 Vectors is

@@ -268,9 +268,15 @@ struct Case {
 }
 
 /// The container definition every task definition row declares, as a template spells it.
+///
+/// It reserves `Memory`, because every task definition declared here is now really
+/// registered in Amazon ECS: "at least one of 'memory' or 'memoryReservation' must be
+/// specified" for a container of a task that reserves none itself, which is the rule that
+/// service holds a registration to.
 const CONTAINER_DEFINITIONS: &str = r#"
         - Name: app
           Image: public.ecr.aws/nginx/nginx:latest
+          Memory: 256
           PortMappings:
             - ContainerPort: 80"#;
 
