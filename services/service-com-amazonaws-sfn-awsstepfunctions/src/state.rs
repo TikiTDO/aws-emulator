@@ -1356,7 +1356,7 @@ impl PlannedActivityTask {
         std::mem::size_of::<ActivityTask>()
             + TASK_TOKEN_CHARS
             + WORKER_NAME_RESERVE_BYTES
-            + ACTIVITY_TASK_EVENT_RESERVE_BYTES
+            + activity_task_event_reserve(&self.state_name)
             + self.activity_arn.as_ref().map_or(0, String::len)
             + self.state_name.len()
             + self.input.len()
@@ -1376,8 +1376,12 @@ const TASK_TOKEN_CHARS: usize = 4 * (36 + 1 + MAX_ARN_BYTES).div_ceil(3) + 4;
 /// closure writes — whether the clock closed it or a worker's reply did. Reserved
 /// where the task is admitted, so those writes cannot take the store past
 /// [`MAX_STORE_BYTES`] either.
-const ACTIVITY_TASK_EVENT_RESERVE_BYTES: usize =
-    3 * (std::mem::size_of::<HistoryEvent>() + "ActivityTimedOut".len());
+///
+/// Each of those events names the STATE whose work it reports
+/// ([`Execution::push_state_event`]), so the state's own name is reserved with them.
+const fn activity_task_event_reserve(state_name: &str) -> usize {
+    3 * (std::mem::size_of::<HistoryEvent>() + "ActivityTimedOut".len() + state_name.len())
+}
 
 /// One job an execution is PARKED at: the work a `Task` state's run-a-job (`.sync`)
 /// integration started, which the task is not finished until the invoked service
@@ -2139,6 +2143,41 @@ impl Execution {
         timestamp: SystemTime,
         details: EventDetails,
     ) {
+        self.push_recorded_event(event_type, None, timestamp, details);
+    }
+
+    /// Append one event recorded against the STATE whose work it reports.
+    ///
+    /// A `Task` state's work is reported by events a CALL writes (a worker's reply, the
+    /// clock closing a task) as well as by the ones the walk writes, and the state is
+    /// what says which of the definition's work such an event is about: it is what the
+    /// series that work is counted in are read off
+    /// ([`observability::ComAmazonawsSfnAwsstepfunctionsState::observe_task_work`]), so
+    /// an event a call writes names its state exactly as the walk's own events do.
+    pub fn push_state_event(
+        &mut self,
+        event_type: &str,
+        state_name: &str,
+        timestamp: SystemTime,
+        details: EventDetails,
+    ) {
+        self.push_recorded_event(
+            event_type,
+            Some(state_name.to_string()),
+            timestamp,
+            details,
+        );
+    }
+
+    /// Append one event, keeping the history within [`MAX_HISTORY_EVENTS`]: the one
+    /// place an event is appended outside the walk that produced it.
+    fn push_recorded_event(
+        &mut self,
+        event_type: &str,
+        state_name: Option<String>,
+        timestamp: SystemTime,
+        details: EventDetails,
+    ) {
         if self.history.len() >= MAX_HISTORY_EVENTS {
             return;
         }
@@ -2153,7 +2192,7 @@ impl Execution {
             previous_event_id,
             event_type: event_type.to_string(),
             timestamp,
-            state_name: None,
+            state_name,
             details,
         });
     }

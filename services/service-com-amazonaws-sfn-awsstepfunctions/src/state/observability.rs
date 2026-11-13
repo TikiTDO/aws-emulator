@@ -1,31 +1,49 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! What an execution PUBLISHES about itself: the `AWS/States` metric series every
-//! execution is counted in, and the history events a state machine's
-//! `loggingConfiguration` delivers to CloudWatch Logs.
+//! What this service PUBLISHES about its own work: the `AWS/States` metric series its
+//! executions, its workers' tasks, its state machines and its APIs are counted in, and
+//! the history events a state machine's `loggingConfiguration` delivers to CloudWatch
+//! Logs.
 //!
 //! An execution runs with no client action at all once it has been started, so the
 //! only way a client can see that it started, how long it ran and whether it succeeded
 //! — and the only way an alarm, a dashboard or a log-based assertion over Step
 //! Functions can see anything — is what the service publishes about its own work:
 //!
-//! * the METRICS go to the [`METRIC_NAMESPACE`] namespace. The EXECUTION series are
-//!   dimensioned on the state machine the execution belongs to
-//!   ([`STATE_MACHINE_ARN_DIMENSION`]): one datapoint per execution started, one per
-//!   execution that reached a terminal status under the metric for that status, and the
-//!   span it ran for. An EXPRESS workflow is billed per run, so it also publishes the
-//!   two billed series, whose values are the very figures `StartSyncExecution` reports
-//!   as `billingDetails` — summing a window of either series therefore gives the summed
-//!   billing details of the runs in it, and a STANDARD workflow, which is not billed
-//!   that way, publishes neither. The series of a `Task` state's own WORK are
-//!   dimensioned on the resource that work was taken on instead: a state whose
-//!   `Resource` is the ARN of a Lambda FUNCTION counts each invocation it takes in the
-//!   per-function series under [`LAMBDA_FUNCTION_ARN_DIMENSION`] — scheduled, started,
-//!   and closed under the series of the outcome it reached, beside the spans it stayed
-//!   scheduled and ran for — so a client can tell which function's work is failing from
-//!   a series the execution counters cannot show it. A `Resource` that names one of this
-//!   service's integration tokens names no function, so it is counted in none of those,
-//!   and the two dimensions never cross;
+//! * the METRICS go to the [`METRIC_NAMESPACE`] namespace, each series dimensioned on
+//!   WHAT it is about:
+//!   * the EXECUTION series are reported per REFERENCE the execution is associated with:
+//!     one datapoint per execution started, one per execution that reached a terminal
+//!     status under the metric for that status, the span it ran for, and the redrive
+//!     series of a re-run. A run started with an unqualified ARN is associated with the
+//!     state machine alone ([`STATE_MACHINE_ARN_DIMENSION`]); one started through a
+//!     QUALIFIED ARN is associated with the alias that routed it ([`ALIAS_DIMENSION`])
+//!     and the version it ran ([`VERSION_DIMENSION`]) as well, so it is counted under
+//!     each of them ([`execution_series`]) — which is what makes a weighted alias's
+//!     traffic split, and the traffic one version served, visible. An EXPRESS workflow is
+//!     billed per run, so it also publishes the two billed series, whose values are the
+//!     very figures `StartSyncExecution` reports as `billingDetails` — summing a window
+//!     of either series therefore gives the summed billing details of the runs in it, and
+//!     a STANDARD workflow, which is not billed that way, publishes neither;
+//!   * the series of a `Task` state's own WORK are dimensioned on the RESOURCE that work
+//!     was taken on, in the family that kind of resource is counted in ([`WorkSeries`]):
+//!     a state whose `Resource` is the ARN of a Lambda FUNCTION counts each invocation it
+//!     takes under [`LAMBDA_FUNCTION_ARN_DIMENSION`], and one whose `Resource` is the ARN
+//!     of an ACTIVITY counts each task it hands to that activity's workers under
+//!     [`ACTIVITY_ARN_DIMENSION`] — scheduled, started, and closed under the series of
+//!     the outcome it reached, beside the spans it stayed scheduled and ran for — so a
+//!     client can tell which function's or which worker fleet's work is failing from a
+//!     series the execution counters cannot show it. A `Resource` that names one of this
+//!     service's integration tokens names neither resource, so it is counted in neither
+//!     family, and the dimensions never cross;
+//!   * the series counting what a state machine HOLDS are reported per state machine
+//!     ([`RESOURCE_ARN_DIMENSION`]): how many versions and how many aliases it carries,
+//!     reported as of every accepted mutation of them, so a refused publish is visible as
+//!     a count that did not move;
+//!   * the series of an API of this service are reported per operation
+//!     ([`API_NAME_DIMENSION`]): one unit of consumed capacity per call served
+//!     ([`meter_api_call`]), which is what a client watching its own approach to an API's
+//!     quota reads;
 //! * the LOG EVENTS go to the log group the configuration names, with the events
 //!   selected by its `level` ([`delivered_at_level`]) and the execution data included
 //!   only where `includeExecutionData` asks for it.
@@ -53,6 +71,12 @@
 //! stores from being locked at once and what lets the work that produces an observation
 //! stay a pure store transition; it is bounded ([`MAX_PENDING_OBSERVATIONS`]), so a
 //! deployment with no CloudWatch mounted cannot grow it without end.
+//!
+//! Every call this service SERVES hands the queue over once it has answered
+//! ([`meter_api_call`], called in front of every operation by
+//! [`crate::service::identity_authorization`]), so a mutation's own series — the counts
+//! of what a state machine holds, which no clock ever makes due — reach CloudWatch's
+//! store as soon as the call that made it has answered.
 
 use ::std::collections::BTreeMap;
 use ::std::time::{SystemTime, UNIX_EPOCH};
@@ -68,6 +92,23 @@ pub const METRIC_NAMESPACE: &str = "AWS/States";
 /// The dimension those series are reported per: the state machine the execution
 /// belongs to, named by its ARN.
 pub const STATE_MACHINE_ARN_DIMENSION: &str = "StateMachineArn";
+
+/// The dimension the series of the executions one ALIAS of a state machine routed are
+/// reported per, beside that state machine's own dimension: the alias, named by its NAME
+/// — the qualifier of its ARN, which is what names an alias inside the state machine it
+/// belongs to.
+///
+/// An alias is a reference of its own rather than another name for the state machine, so
+/// its traffic is its own series: that is what makes a weighted alias's split, and a
+/// canary's own failures, visible beside the state machine's totals. The state machine's
+/// dimension stays on the series, so a reader asking for the state machine is not
+/// answered one alias' traffic.
+pub const ALIAS_DIMENSION: &str = "Alias";
+
+/// The dimension the series of the executions one VERSION of a state machine served are
+/// reported per, beside that state machine's own: the version, named by its NUMBER — the
+/// qualifier of its ARN — for the same reason an alias is named by its name.
+pub const VERSION_DIMENSION: &str = "Version";
 
 /// The series counting the executions that were STARTED.
 pub const EXECUTIONS_STARTED_METRIC: &str = "ExecutionsStarted";
@@ -134,6 +175,78 @@ pub const LAMBDA_FUNCTION_RUN_TIME_METRIC: &str = "LambdaFunctionRunTime";
 /// scheduled it to the instant it closed.
 pub const LAMBDA_FUNCTION_TIME_METRIC: &str = "LambdaFunctionTime";
 
+/// The dimension the series of a `Task` state's own work are reported per, for a state
+/// whose `Resource` is the ARN of an ACTIVITY: the activity the task was handed to a
+/// worker under, named by the ARN the `Resource` carried.
+///
+/// An activity's work is taken by a worker that polls for it rather than by a call this
+/// service makes, so these series are the only ones a client can see a worker fleet
+/// through — the backlog it has to take, the outcomes it reported and the tasks it let
+/// run out of time.
+pub const ACTIVITY_ARN_DIMENSION: &str = "ActivityArn";
+
+/// The series counting the tasks a `Task` state SCHEDULED for its activity.
+pub const ACTIVITIES_SCHEDULED_METRIC: &str = "ActivitiesScheduled";
+
+/// The series counting the tasks a worker's poll took.
+pub const ACTIVITIES_STARTED_METRIC: &str = "ActivitiesStarted";
+
+/// The series counting the tasks a worker reported succeeded.
+pub const ACTIVITIES_SUCCEEDED_METRIC: &str = "ActivitiesSucceeded";
+
+/// The series counting the tasks a worker reported failed.
+pub const ACTIVITIES_FAILED_METRIC: &str = "ActivitiesFailed";
+
+/// The series counting the tasks that ran out of the time the scheduling state allowed
+/// them.
+pub const ACTIVITIES_TIMED_OUT_METRIC: &str = "ActivitiesTimedOut";
+
+/// The series measuring the span one task stayed SCHEDULED for: from the instant the
+/// state scheduled it to the instant a worker took it.
+pub const ACTIVITY_SCHEDULE_TIME_METRIC: &str = "ActivityScheduleTime";
+
+/// The series measuring the span one task RAN for: from the instant a worker took it to
+/// the instant it closed.
+pub const ACTIVITY_RUN_TIME_METRIC: &str = "ActivityRunTime";
+
+/// The series measuring the whole span one task took: from the instant the state
+/// scheduled it to the instant it closed.
+pub const ACTIVITY_TIME_METRIC: &str = "ActivityTime";
+
+/// The dimension the series of an API of this service are reported per: the operation
+/// the call named.
+pub const API_NAME_DIMENSION: &str = "APIName";
+
+/// The series counting the capacity the calls of one API consumed — one unit per call
+/// served, so the sum over a window is the number of calls made in it, which is what a
+/// client watching its own approach to an API's quota reads.
+pub const CONSUMED_CAPACITY_METRIC: &str = "ConsumedCapacity";
+
+/// The dimension the series counting what a state machine HOLDS are reported per: the
+/// state machine itself, named by its unqualified ARN.
+pub const RESOURCE_ARN_DIMENSION: &str = "ResourceArn";
+
+/// The series reporting how many versions a state machine holds.
+pub const VERSION_COUNT_METRIC: &str = "VersionCount";
+
+/// The series reporting how many aliases a state machine holds.
+pub const ALIAS_COUNT_METRIC: &str = "AliasCount";
+
+/// The series counting the executions a redrive re-ran.
+pub const EXECUTIONS_REDRIVEN_METRIC: &str = "ExecutionsRedriven";
+
+/// The series counting the redriven executions that then completed successfully.
+pub const REDRIVEN_EXECUTIONS_SUCCEEDED_METRIC: &str = "RedrivenExecutionsSucceeded";
+
+/// The series counting the redriven executions that then failed.
+pub const REDRIVEN_EXECUTIONS_FAILED_METRIC: &str = "RedrivenExecutionsFailed";
+
+/// The series counting the redriven executions that were aborted.
+pub const REDRIVEN_EXECUTIONS_ABORTED_METRIC: &str = "RedrivenExecutionsAborted";
+
+/// The series counting the redriven executions that timed out.
+pub const REDRIVEN_EXECUTIONS_TIMED_OUT_METRIC: &str = "RedrivenExecutionsTimedOut";
+
 /// The `StandardUnit` a bare count of things carries.
 pub const COUNT_UNIT: &str = "Count";
 
@@ -169,13 +282,18 @@ pub const MAX_PENDING_OBSERVATIONS: usize = 4096;
 /// ONE measurement an execution owes a series, waiting to be published.
 #[derive(Debug, Clone)]
 pub struct Datapoint {
-    /// The dimension the series is reported per — the state machine an execution
-    /// belongs to ([`STATE_MACHINE_ARN_DIMENSION`]), the function a task's work was
-    /// taken on ([`LAMBDA_FUNCTION_ARN_DIMENSION`]) — and the resource that dimension
-    /// names.
-    pub dimension: &'static str,
-    /// See [`Datapoint::dimension`].
-    pub target: String,
+    /// The dimension SET that identifies the series — the state machine an execution
+    /// belongs to ([`state_machine_dimensions`]), the alias that routed it
+    /// ([`state_machine_alias_dimensions`]), the function or activity a task's work was
+    /// taken on ([`lambda_function_dimensions`], [`activity_dimensions`]) — and the
+    /// resource each of its dimensions names.
+    ///
+    /// A SET rather than one dimension, because "a metric is uniquely defined by a name,
+    /// a namespace, and zero or more dimensions" (`Metric`): a series scoped to a
+    /// REFERENCE of a resource carries the resource's own dimension beside the one
+    /// naming that reference, so a reader asking for the resource and a reader asking
+    /// for one reference of it are asking for two different series.
+    pub dimensions: BTreeMap<String, String>,
     /// The metric the measurement belongs to.
     pub metric: &'static str,
     /// What was measured.
@@ -260,6 +378,23 @@ fn completion_metric(status: &str) -> Option<&'static str> {
         super::EXECUTION_STATUS_FAILED => Some(EXECUTIONS_FAILED_METRIC),
         super::EXECUTION_STATUS_ABORTED => Some(EXECUTIONS_ABORTED_METRIC),
         super::EXECUTION_STATUS_TIMED_OUT => Some(EXECUTIONS_TIMED_OUT_METRIC),
+        _ => None,
+    }
+}
+
+/// The series a REDRIVEN execution that reached `status` is counted in BESIDE the
+/// completion series every execution is counted in, and `None` for a status that is not
+/// terminal.
+///
+/// A redrive re-runs an execution that had already ended, so the outcome of the re-run
+/// is what tells a client whether re-running helped: the base series alone cannot, since
+/// the first attempt's own outcome is already counted in it.
+fn redriven_completion_metric(status: &str) -> Option<&'static str> {
+    match status {
+        super::EXECUTION_STATUS_SUCCEEDED => Some(REDRIVEN_EXECUTIONS_SUCCEEDED_METRIC),
+        super::EXECUTION_STATUS_FAILED => Some(REDRIVEN_EXECUTIONS_FAILED_METRIC),
+        super::EXECUTION_STATUS_ABORTED => Some(REDRIVEN_EXECUTIONS_ABORTED_METRIC),
+        super::EXECUTION_STATUS_TIMED_OUT => Some(REDRIVEN_EXECUTIONS_TIMED_OUT_METRIC),
         _ => None,
     }
 }
@@ -793,16 +928,15 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
         let Some(execution) = self.executions.get(execution_arn) else {
             return;
         };
-        let datapoint = Datapoint {
-            dimension: STATE_MACHINE_ARN_DIMENSION,
-            target: execution.state_machine_arn.clone(),
-            metric: EXECUTIONS_STARTED_METRIC,
-            value: 1.0,
-            unit: COUNT_UNIT,
-            at: execution.start_date,
-        };
+        let queued = execution_datapoints(
+            execution,
+            &[(EXECUTIONS_STARTED_METRIC, 1.0, COUNT_UNIT)],
+            execution.start_date,
+        );
         let terminal = execution.is_terminal();
-        self.pending_observations.queue_datapoint(datapoint);
+        for datapoint in queued {
+            self.pending_observations.queue_datapoint(datapoint);
+        }
         if terminal {
             self.observe_execution_settled(execution_arn);
         }
@@ -810,6 +944,61 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
         // too, because a record that arrives with its history complete — a synchronous
         // Express run — reports every task it ran at the instant it is stored.
         self.observe_task_work();
+    }
+
+    /// Queue what the execution `execution_arn` publishes about having been REDRIVEN at
+    /// `at`: the series counting the executions a redrive re-ran.
+    ///
+    /// Called by the one place a redrive is recorded
+    /// ([`ComAmazonawsSfnAwsstepfunctionsState::redrive_execution`]), so a redrive the
+    /// store refused — one of an execution that is not redrivable, or a repeat of a
+    /// client token that already redrove it — is counted in nothing, and an accepted one
+    /// exactly once however many times the execution is read afterwards.
+    pub(super) fn observe_execution_redriven(&mut self, execution_arn: &str, at: SystemTime) {
+        let Some(execution) = self.executions.get(execution_arn) else {
+            return;
+        };
+        let queued = execution_datapoints(
+            execution,
+            &[(EXECUTIONS_REDRIVEN_METRIC, 1.0, COUNT_UNIT)],
+            at,
+        );
+        for datapoint in queued {
+            self.pending_observations.queue_datapoint(datapoint);
+        }
+    }
+
+    /// Queue what the state machine `state_machine_arn` publishes about how many
+    /// VERSIONS it holds, as of this instant.
+    ///
+    /// The series is a COUNT of what the state machine holds rather than a count of
+    /// mutations, so every accepted mutation of its versions reports the count that
+    /// mutation left — which is what makes a refused publish observable: it leaves the
+    /// count where the last accepted one put it.
+    pub(super) fn observe_version_count(&mut self, state_machine_arn: &str, at: SystemTime) {
+        #[allow(clippy::cast_precision_loss)]
+        let held = self.version_count(state_machine_arn) as f64;
+        self.pending_observations.queue_datapoint(Datapoint {
+            dimensions: resource_dimensions(state_machine_arn),
+            metric: VERSION_COUNT_METRIC,
+            value: held,
+            unit: COUNT_UNIT,
+            at,
+        });
+    }
+
+    /// Queue what the state machine `state_machine_arn` publishes about how many
+    /// ALIASES it holds; see [`Self::observe_version_count`].
+    pub(super) fn observe_alias_count(&mut self, state_machine_arn: &str, at: SystemTime) {
+        #[allow(clippy::cast_precision_loss)]
+        let held = self.aliases_of(state_machine_arn).len() as f64;
+        self.pending_observations.queue_datapoint(Datapoint {
+            dimensions: resource_dimensions(state_machine_arn),
+            metric: ALIAS_COUNT_METRIC,
+            value: held,
+            unit: COUNT_UNIT,
+            at,
+        });
     }
 
     /// Queue what the execution `execution_arn` publishes about having reached a
@@ -833,22 +1022,19 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
             .duration_since(execution.start_date)
             .map(|span| span.as_millis())
             .unwrap_or_default();
-        let observation = |metric: &'static str, value: f64, unit: &'static str| Datapoint {
-            dimension: STATE_MACHINE_ARN_DIMENSION,
-            target: machine_arn.clone(),
-            metric,
-            value,
-            unit,
-            at: stopped,
-        };
-        let mut queued = vec![
-            observation(metric, 1.0, COUNT_UNIT),
-            observation(
-                EXECUTION_TIME_METRIC,
-                ran_millis as f64,
-                MILLISECONDS_UNIT,
-            ),
+        #[allow(clippy::cast_precision_loss)]
+        let mut measured: Vec<(&'static str, f64, &'static str)> = vec![
+            (metric, 1.0, COUNT_UNIT),
+            (EXECUTION_TIME_METRIC, ran_millis as f64, MILLISECONDS_UNIT),
         ];
+        // An execution a redrive re-ran is counted in the redriven series of the outcome
+        // it reached as well: "The number of times you've redriven an execution" is what
+        // makes this attempt one of those.
+        if execution.redrive_count > 0 {
+            if let Some(redriven) = redriven_completion_metric(&execution.status) {
+                measured.push((redriven, 1.0, COUNT_UNIT));
+            }
+        }
         let machine = self.state_machines.get(&machine_arn);
         let express =
             machine.is_some_and(|machine| machine.sm_type == super::STATE_MACHINE_TYPE_EXPRESS);
@@ -858,17 +1044,20 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
             // series equals the billing details of the runs in it.
             let billed_duration = super::billed_duration_millis(execution.start_date, stopped);
             let billed_memory = super::billed_memory_mb(execution.measure());
-            queued.push(observation(
+            #[allow(clippy::cast_precision_loss)]
+            measured.push((
                 EXPRESS_BILLED_DURATION_METRIC,
                 billed_duration as f64,
                 MILLISECONDS_UNIT,
             ));
-            queued.push(observation(
+            #[allow(clippy::cast_precision_loss)]
+            measured.push((
                 EXPRESS_BILLED_MEMORY_METRIC,
                 billed_memory as f64,
                 MEGABYTES_UNIT,
             ));
         }
+        let queued = execution_datapoints(execution, &measured, stopped);
         // The events the state machine's logging configuration delivers, selected by
         // its own `level` and carrying the execution data only where it asks for it.
         let delivery = machine.and_then(|machine| {
@@ -902,8 +1091,9 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
     }
 
     /// Queue what the `Task` states of every stored execution publish about the work
-    /// they took on a LAMBDA FUNCTION, for the history events that have become
-    /// reportable since this last ran.
+    /// they took on the resource their `Resource` named — a LAMBDA FUNCTION or an
+    /// ACTIVITY — for the history events that have become reportable since this last
+    /// ran.
     ///
     /// An execution's history is what the work really did: an event of it is written as
     /// the walk takes the step it reports and becomes reportable at its own instant
@@ -928,7 +1118,7 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
             if execution.observed_events >= execution.history.len() {
                 continue;
             }
-            queued.extend(function_datapoints(execution));
+            queued.extend(work_datapoints(execution));
             counted.push((arn.clone(), execution.history.len()));
         }
         for (arn, through) in counted {
@@ -948,27 +1138,176 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
     }
 }
 
-/// What one history event of a `Task` state's own work reports about the invocation it
-/// is about.
+/// The series ONE execution's own measurements are published in, each identified by the
+/// dimension SET of a reference that execution is associated with: the state machine it
+/// belongs to, and — for a run started through a QUALIFIED ARN — the alias that routed
+/// it and the version it ran.
+///
+/// "Step Functions associates executions that you start with an alias ARN with that
+/// alias and the state machine version used for that execution"
+/// ([`super::Execution::state_machine_alias_arn`]), so the run is counted once under
+/// each reference it is associated with: the series of a weighted alias are its own
+/// traffic, and the series of a version are the traffic that version served, neither of
+/// which the state machine's own series can show.
+///
+/// A reference's series carries the STATE MACHINE's dimension beside the one naming the
+/// reference inside it ([`ALIAS_DIMENSION`], [`VERSION_DIMENSION`]) — an alias and a
+/// version are named within their state machine, as their own ARNs are — so a reader
+/// asking for the state machine is answered all of its traffic and never one alias'.
+fn execution_series(execution: &super::Execution) -> Vec<BTreeMap<String, String>> {
+    let machine_arn = execution.state_machine_arn.as_str();
+    let mut series = vec![state_machine_dimensions(machine_arn)];
+    let qualifier = |arn: &Option<String>| {
+        arn.as_deref()
+            .and_then(|arn| qualifier_of(machine_arn, arn))
+            .map(str::to_string)
+    };
+    if let Some(alias_name) = qualifier(&execution.state_machine_alias_arn) {
+        series.push(state_machine_alias_dimensions(machine_arn, &alias_name));
+    }
+    if let Some(version) = qualifier(&execution.state_machine_version_arn) {
+        series.push(state_machine_version_dimensions(machine_arn, &version));
+    }
+    series
+}
+
+/// What `arn` names INSIDE the state machine `state_machine_arn`: the alias name or the
+/// version number its qualifier carries, and `None` for an ARN that qualifies another
+/// state machine or qualifies nothing.
+///
+/// A qualified state machine ARN is the state machine's own ARN, a colon and the
+/// qualifier ([`super::state_machine_alias_arn`],
+/// [`super::state_machine_version_arn`]), so the qualifier is read off that prefix
+/// rather than guessed at from the colons.
+fn qualifier_of<'a>(state_machine_arn: &str, arn: &'a str) -> Option<&'a str> {
+    arn.strip_prefix(state_machine_arn)?
+        .strip_prefix(':')
+        .filter(|qualifier| !qualifier.is_empty())
+}
+
+/// The datapoints `measured` — each a `(series, value, unit)` — owes at `at`, one per
+/// series the execution is counted in ([`execution_series`]).
+fn execution_datapoints(
+    execution: &super::Execution,
+    measured: &[(&'static str, f64, &'static str)],
+    at: SystemTime,
+) -> Vec<Datapoint> {
+    let mut queued = Vec::with_capacity(measured.len());
+    for dimensions in execution_series(execution) {
+        for (metric, value, unit) in measured {
+            queued.push(Datapoint {
+                dimensions: dimensions.clone(),
+                metric,
+                value: *value,
+                unit,
+                at,
+            });
+        }
+    }
+    queued
+}
+
+/// What one history event of a `Task` state's own work reports about the attempt it is
+/// about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     /// The work was handed over.
     Scheduled,
     /// It began.
     Started,
-    /// It ended, counted in the series named here.
-    Closed(&'static str),
+    /// It ended, as reported here.
+    Closed(Outcome),
 }
+
+/// How one attempt of a `Task` state's work ENDED, which is what decides the series it
+/// is counted in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Succeeded,
+    Failed,
+    TimedOut,
+}
+
+/// The series ONE KIND of resource a `Task` state takes its work on is counted in: the
+/// dimension those series are reported per, and the series of each phase and outcome an
+/// attempt of that work reports.
+///
+/// There is one of these per kind of resource because the series are per kind — a client
+/// watching a function fleet and a client watching a worker fleet read different metric
+/// names — while what is counted, and when, is the same for both: an attempt is
+/// scheduled, starts, and closes as one outcome, and the two spans either side of it are
+/// measured between those instants.
+#[derive(Debug, Clone, Copy)]
+struct WorkSeries {
+    /// The dimension the series are reported per, naming the resource the work was taken
+    /// on.
+    dimension: &'static str,
+    /// The series counting the attempts scheduled, started, and closed as each outcome.
+    scheduled: &'static str,
+    started: &'static str,
+    succeeded: &'static str,
+    failed: &'static str,
+    timed_out: &'static str,
+    /// The series measuring the span one attempt stayed scheduled for, the span it ran
+    /// for, and the whole span it took.
+    schedule_time: &'static str,
+    run_time: &'static str,
+    time: &'static str,
+}
+
+impl WorkSeries {
+    /// The series an attempt that ended as `outcome` is counted in.
+    fn closed_in(self, outcome: Outcome) -> &'static str {
+        match outcome {
+            Outcome::Succeeded => self.succeeded,
+            Outcome::Failed => self.failed,
+            Outcome::TimedOut => self.timed_out,
+        }
+    }
+}
+
+/// The series the work a `Task` state takes on a LAMBDA FUNCTION is counted in.
+const LAMBDA_FUNCTION_SERIES: WorkSeries = WorkSeries {
+    dimension: LAMBDA_FUNCTION_ARN_DIMENSION,
+    scheduled: LAMBDA_FUNCTIONS_SCHEDULED_METRIC,
+    started: LAMBDA_FUNCTIONS_STARTED_METRIC,
+    succeeded: LAMBDA_FUNCTIONS_SUCCEEDED_METRIC,
+    failed: LAMBDA_FUNCTIONS_FAILED_METRIC,
+    timed_out: LAMBDA_FUNCTIONS_TIMED_OUT_METRIC,
+    schedule_time: LAMBDA_FUNCTION_SCHEDULE_TIME_METRIC,
+    run_time: LAMBDA_FUNCTION_RUN_TIME_METRIC,
+    time: LAMBDA_FUNCTION_TIME_METRIC,
+};
+
+/// The series the work a `Task` state hands to an ACTIVITY's workers is counted in.
+const ACTIVITY_SERIES: WorkSeries = WorkSeries {
+    dimension: ACTIVITY_ARN_DIMENSION,
+    scheduled: ACTIVITIES_SCHEDULED_METRIC,
+    started: ACTIVITIES_STARTED_METRIC,
+    succeeded: ACTIVITIES_SUCCEEDED_METRIC,
+    failed: ACTIVITIES_FAILED_METRIC,
+    timed_out: ACTIVITIES_TIMED_OUT_METRIC,
+    schedule_time: ACTIVITY_SCHEDULE_TIME_METRIC,
+    run_time: ACTIVITY_RUN_TIME_METRIC,
+    time: ACTIVITY_TIME_METRIC,
+};
 
 /// The phase an event of type `event_type` reports, and `None` for every event that is
 /// not a `Task` state reporting its own work.
 ///
-/// Both FAMILIES a `Task` state records its work under report the same phases — the
-/// `Task*` events of a service integration's call and the `LambdaFunction*` events of a
-/// direct invocation (`super::asl`'s work-event families) — so each phase is read off
-/// either family's event for it.
+/// Every FAMILY a `Task` state records its work under reports the same phases — the
+/// `Task*` events of a service integration's call, the `LambdaFunction*` events of a
+/// direct invocation and the `Activity*` events of a task a worker polls for
+/// (`super::asl`'s work-event families) — so each phase is read off any of those
+/// families' event for it, and which SERIES the phase is counted in is decided by the
+/// resource the work was taken on ([`work_on`]) rather than by the event's name.
+fn work_phase(event_type: &str) -> Option<Phase> {
+    task_phase(event_type).or_else(|| activity_phase(event_type))
+}
+
+/// The phase an event of the `Task*` and `LambdaFunction*` families reports.
 ///
-/// The failure of the work and the failure to SUBMIT it are both the invocation ending
+/// The failure of the work and the failure to SUBMIT it are both the attempt ending
 /// without doing its work, so both are counted as a failure; running out of the time
 /// the state allowed is its own series, exactly as it is its own event.
 fn task_phase(event_type: &str) -> Option<Phase> {
@@ -978,42 +1317,63 @@ fn task_phase(event_type: &str) -> Option<Phase> {
         }
         super::EVENT_TASK_STARTED | super::EVENT_LAMBDA_FUNCTION_STARTED => Some(Phase::Started),
         super::EVENT_TASK_SUCCEEDED | super::EVENT_LAMBDA_FUNCTION_SUCCEEDED => {
-            Some(Phase::Closed(LAMBDA_FUNCTIONS_SUCCEEDED_METRIC))
+            Some(Phase::Closed(Outcome::Succeeded))
         }
         super::EVENT_TASK_FAILED
         | super::EVENT_TASK_SUBMIT_FAILED
-        | super::EVENT_LAMBDA_FUNCTION_FAILED => Some(Phase::Closed(LAMBDA_FUNCTIONS_FAILED_METRIC)),
+        | super::EVENT_LAMBDA_FUNCTION_FAILED => Some(Phase::Closed(Outcome::Failed)),
         super::EVENT_TASK_TIMED_OUT | super::EVENT_LAMBDA_FUNCTION_TIMED_OUT => {
-            Some(Phase::Closed(LAMBDA_FUNCTIONS_TIMED_OUT_METRIC))
+            Some(Phase::Closed(Outcome::TimedOut))
         }
         _ => None,
     }
 }
 
-/// Whether an event of type `event_type` CLOSES a `Task` state's attempt: the work that
-/// attempt handed over has ended, whatever it ended as.
+/// The phase an event of the `Activity*` family reports: the life of the task a `Task`
+/// state whose `Resource` is an activity ARN queued for a worker to poll for.
+fn activity_phase(event_type: &str) -> Option<Phase> {
+    match event_type {
+        super::EVENT_ACTIVITY_SCHEDULED => Some(Phase::Scheduled),
+        super::EVENT_ACTIVITY_STARTED => Some(Phase::Started),
+        super::EVENT_ACTIVITY_SUCCEEDED => Some(Phase::Closed(Outcome::Succeeded)),
+        super::EVENT_ACTIVITY_FAILED => Some(Phase::Closed(Outcome::Failed)),
+        super::EVENT_ACTIVITY_TIMED_OUT => Some(Phase::Closed(Outcome::TimedOut)),
+        _ => None,
+    }
+}
+
+/// Whether an event of type `event_type` CLOSES a `Task` state's CALL: the work that
+/// attempt handed over to another service has ended, whatever it ended as.
 ///
 /// The one place a task's call is made asks this to decide which event its measured span
-/// belongs on ([`super::EventDetails::work_millis`]).
+/// belongs on ([`super::EventDetails::work_millis`]), so it asks about the families whose
+/// work is a call this service makes; an activity's task is answered by a worker rather
+/// than by a call, and the span it ran for is measured between its own events.
 pub(super) fn closes_task_work(event_type: &str) -> bool {
     matches!(task_phase(event_type), Some(Phase::Closed(_)))
 }
 
-/// The function a `Task` state's work is taken ON, for a state of `definition` named
-/// `state_name` whose `Resource` is the ARN of a LAMBDA FUNCTION; `None` for every
-/// other state.
+/// The resource a `Task` state's work is taken ON, and the series that work is counted
+/// in, for the state of `definition` named `state_name`; `None` for a state whose work
+/// is counted in neither family.
 ///
 /// The `Resource` is read out of the very definition the execution interprets
-/// ([`super::RanConfiguration::definition`]), and what it names is decided by the ONE
-/// reader that decides what work a `Resource` names
-/// ([`super::integration::read`]): a function ARN is the only `Resource` whose work is
-/// an invocation of a function the definition itself named
-/// ([`super::integration::Call::invokes`]), so nothing else is counted per function.
-fn invoked_function(definition: &::serde_json::Value, state_name: &str) -> Option<String> {
+/// ([`super::RanConfiguration::definition`]), and what it names is decided by the one
+/// reader of each kind: an ACTIVITY ARN is work handed to the workers that poll that
+/// activity ([`super::names_an_activity`]), and a LAMBDA FUNCTION's ARN is the one
+/// `Resource` whose work is an invocation of a function the definition itself named
+/// ([`super::integration::Call::invokes`]). Everything else — the integration tokens
+/// whose work is a call this service makes on the caller's behalf — names neither
+/// resource, so it is counted in neither family and the dimensions never cross.
+fn work_on(definition: &::serde_json::Value, state_name: &str) -> Option<(WorkSeries, String)> {
     let resource = state_named(definition, state_name)?
         .get("Resource")?
         .as_str()?;
-    super::integration::read(resource).ok()?.invokes
+    if super::names_an_activity(resource) {
+        return Some((ACTIVITY_SERIES, resource.to_string()));
+    }
+    let invoked = super::integration::read(resource).ok()?.invokes?;
+    Some((LAMBDA_FUNCTION_SERIES, invoked))
 }
 
 /// The state named `state_name` of the state machine `definition`, searched through the
@@ -1054,8 +1414,8 @@ fn state_named<'a>(
     None
 }
 
-/// What one invocation of a function has reported so far, for the spans the series
-/// below measure.
+/// What one attempt at a `Task` state's work has reported so far, for the spans the
+/// series below measure.
 #[derive(Debug, Default)]
 struct Attempt {
     /// The instant the task scheduled it.
@@ -1067,7 +1427,7 @@ struct Attempt {
 }
 
 /// How far back of the events already counted one more pass reads, to pick an
-/// invocation's spans back up: an attempt that STRADDLES the cursor — scheduled and
+/// attempt's spans back up: an attempt that STRADDLES the cursor — scheduled and
 /// perhaps started before it, closed after it — reported those two events immediately
 /// before it, because one attempt's events are consecutive. Reading that much and no
 /// more is what keeps the work of a pass proportional to the events it counts, however
@@ -1085,7 +1445,7 @@ fn scan_from(execution: &super::Execution) -> usize {
         let previous = execution
             .history
             .get(at - 1)
-            .is_some_and(|event| task_phase(&event.event_type).is_some());
+            .is_some_and(|event| work_phase(&event.event_type).is_some());
         if !previous {
             break;
         }
@@ -1094,27 +1454,27 @@ fn scan_from(execution: &super::Execution) -> usize {
     at
 }
 
-/// The datapoints the per-function series owe for the events of `execution` that have
+/// The datapoints the per-resource series owe for the events of `execution` that have
 /// become reportable since it was last counted.
 ///
-/// The pass begins a little BEFORE the cursor ([`scan_from`]), because an invocation's
+/// The pass begins a little BEFORE the cursor ([`scan_from`]), because an attempt's
 /// span is measured between events that can become reportable at different instants, and
 /// counts only the events past the cursor: each one is counted exactly once, at its own
-/// instant, with the spans of the invocation it belongs to.
-fn function_datapoints(execution: &super::Execution) -> Vec<Datapoint> {
+/// instant, with the spans of the attempt it belongs to.
+fn work_datapoints(execution: &super::Execution) -> Vec<Datapoint> {
     let from = execution.observed_events;
     let mut queued: Vec<Datapoint> = Vec::new();
     let mut document: Option<::serde_json::Value> = None;
-    // The function each `Task` state's work is taken on, read once per state name.
-    let mut functions: BTreeMap<String, Option<String>> = BTreeMap::new();
-    // What each state's invocation has reported so far. A state is entered again by a
+    // The resource each `Task` state's work is taken on, and the series it is counted
+    // in, read once per state name.
+    let mut taken_on: BTreeMap<String, Option<(WorkSeries, String)>> = BTreeMap::new();
+    // What each state's attempt has reported so far. A state is entered again by a
     // `Retry`, a loop and every `Map` iteration, and each of those is one more
-    // invocation of the function, so the entry is replaced as the next one is
-    // scheduled.
+    // attempt at the work, so the entry is replaced as the next one is scheduled.
     let mut attempts: BTreeMap<String, Attempt> = BTreeMap::new();
     let scanned = scan_from(execution);
     for (index, event) in execution.history.iter().enumerate().skip(scanned) {
-        let Some(phase) = task_phase(&event.event_type) else {
+        let Some(phase) = work_phase(&event.event_type) else {
             continue;
         };
         let Some(state_name) = event.state_name.as_deref() else {
@@ -1123,10 +1483,10 @@ fn function_datapoints(execution: &super::Execution) -> Vec<Datapoint> {
         let document = document.get_or_insert_with(|| {
             ::serde_json::from_str(&execution.ran.definition).unwrap_or(::serde_json::Value::Null)
         });
-        let function = functions
+        let work = taken_on
             .entry(state_name.to_string())
-            .or_insert_with(|| invoked_function(document, state_name));
-        let Some(function) = function.clone() else {
+            .or_insert_with(|| work_on(document, state_name));
+        let Some((series, target)) = work.clone() else {
             continue;
         };
         let attempt = attempts.entry(state_name.to_string()).or_default();
@@ -1134,8 +1494,7 @@ fn function_datapoints(execution: &super::Execution) -> Vec<Datapoint> {
         let mut count = |metric: &'static str, value: f64, unit: &'static str| {
             if index >= from {
                 queued.push(Datapoint {
-                    dimension: LAMBDA_FUNCTION_ARN_DIMENSION,
-                    target: function.clone(),
+                    dimensions: one_dimension(series.dimension, &target),
                     metric,
                     value,
                     unit,
@@ -1143,7 +1502,7 @@ fn function_datapoints(execution: &super::Execution) -> Vec<Datapoint> {
                 });
             }
         };
-        // The span between two instants of one invocation, in milliseconds, which is
+        // The span between two instants of one attempt, in milliseconds, which is
         // the unit every one of these series is measured in.
         #[allow(clippy::cast_precision_loss)]
         let span = |from: Option<SystemTime>| {
@@ -1152,7 +1511,7 @@ fn function_datapoints(execution: &super::Execution) -> Vec<Datapoint> {
         };
         match phase {
             Phase::Scheduled => {
-                count(LAMBDA_FUNCTIONS_SCHEDULED_METRIC, 1.0, COUNT_UNIT);
+                count(series.scheduled, 1.0, COUNT_UNIT);
                 *attempt = Attempt {
                     scheduled: Some(at),
                     started: None,
@@ -1160,22 +1519,19 @@ fn function_datapoints(execution: &super::Execution) -> Vec<Datapoint> {
                 };
             }
             Phase::Started => {
-                count(LAMBDA_FUNCTIONS_STARTED_METRIC, 1.0, COUNT_UNIT);
+                count(series.started, 1.0, COUNT_UNIT);
                 attempt.waited_millis = span(attempt.scheduled);
                 if let Some(waited) = attempt.waited_millis {
-                    count(
-                        LAMBDA_FUNCTION_SCHEDULE_TIME_METRIC,
-                        waited,
-                        MILLISECONDS_UNIT,
-                    );
+                    count(series.schedule_time, waited, MILLISECONDS_UNIT);
                 }
                 attempt.started = Some(at);
             }
-            Phase::Closed(metric) => {
-                count(metric, 1.0, COUNT_UNIT);
+            Phase::Closed(outcome) => {
+                count(series.closed_in(outcome), 1.0, COUNT_UNIT);
                 // How long the work RAN: the span the call it made really took, as the
                 // event that closed it measured it, and the span between the two events
-                // for work no call of this walk closed.
+                // for work no call of this walk closed — which is every task a worker
+                // answered, since no call of this service ran it.
                 #[allow(clippy::cast_precision_loss)]
                 let ran = event
                     .details
@@ -1183,11 +1539,11 @@ fn function_datapoints(execution: &super::Execution) -> Vec<Datapoint> {
                     .map(|millis| millis as f64)
                     .or_else(|| span(attempt.started));
                 if let Some(ran) = ran {
-                    count(LAMBDA_FUNCTION_RUN_TIME_METRIC, ran, MILLISECONDS_UNIT);
-                    // The whole span the invocation took: what it stayed scheduled for,
+                    count(series.run_time, ran, MILLISECONDS_UNIT);
+                    // The whole span the attempt took: what it stayed scheduled for,
                     // and what it then ran for.
                     count(
-                        LAMBDA_FUNCTION_TIME_METRIC,
+                        series.time,
                         attempt.waited_millis.unwrap_or_default() + ran,
                         MILLISECONDS_UNIT,
                     );
@@ -1239,14 +1595,10 @@ fn publish_datapoints<Eng: Send + Sync + 'static>(engine: &Eng, datapoints: &[Da
     };
     let mut store = metrics.lock();
     for datapoint in datapoints {
-        let dimensions: cloudwatch::DimensionSet =
-            [(datapoint.dimension.to_string(), datapoint.target.clone())]
-                .into_iter()
-                .collect();
         let key = cloudwatch::MetricKey {
             namespace: METRIC_NAMESPACE.to_string(),
             metric_name: datapoint.metric.to_string(),
-            dimensions,
+            dimensions: datapoint.dimensions.clone(),
         };
         let at_secs = epoch_secs(datapoint.at);
         let datum = cloudwatch::StoredDatum {
@@ -1394,24 +1746,97 @@ fn deliver_events<Eng: Send + Sync + 'static>(engine: &Eng, deliveries: &[Delive
 /// publisher writes them under.
 #[must_use]
 pub fn state_machine_dimensions(state_machine_arn: &str) -> BTreeMap<String, String> {
-    [(
-        STATE_MACHINE_ARN_DIMENSION.to_string(),
-        state_machine_arn.to_string(),
-    )]
-    .into_iter()
-    .collect()
+    one_dimension(STATE_MACHINE_ARN_DIMENSION, state_machine_arn)
+}
+
+/// The dimension set the series of the executions the ALIAS `alias_name` of
+/// `state_machine_arn` routed are identified by: the state machine's own dimension and
+/// the alias' ([`ALIAS_DIMENSION`]).
+///
+/// `pub` for the same reason [`state_machine_dimensions`] is.
+#[must_use]
+pub fn state_machine_alias_dimensions(
+    state_machine_arn: &str,
+    alias_name: &str,
+) -> BTreeMap<String, String> {
+    let mut dimensions = state_machine_dimensions(state_machine_arn);
+    dimensions.insert(ALIAS_DIMENSION.to_string(), alias_name.to_string());
+    dimensions
+}
+
+/// The dimension set the series of the executions the VERSION `version` of
+/// `state_machine_arn` served are identified by, built the same way and for the same
+/// reason ([`VERSION_DIMENSION`]).
+#[must_use]
+pub fn state_machine_version_dimensions(
+    state_machine_arn: &str,
+    version: &str,
+) -> BTreeMap<String, String> {
+    let mut dimensions = state_machine_dimensions(state_machine_arn);
+    dimensions.insert(VERSION_DIMENSION.to_string(), version.to_string());
+    dimensions
 }
 
 /// The dimension set the series of a `Task` state's work on a LAMBDA FUNCTION are
 /// identified by, for the same reason [`state_machine_dimensions`] is `pub`.
 #[must_use]
 pub fn lambda_function_dimensions(function_arn: &str) -> BTreeMap<String, String> {
-    [(
-        LAMBDA_FUNCTION_ARN_DIMENSION.to_string(),
-        function_arn.to_string(),
-    )]
-    .into_iter()
-    .collect()
+    one_dimension(LAMBDA_FUNCTION_ARN_DIMENSION, function_arn)
+}
+
+/// The dimension set the series of a `Task` state's work on an ACTIVITY are identified
+/// by, for the same reason [`state_machine_dimensions`] is `pub`.
+#[must_use]
+pub fn activity_dimensions(activity_arn: &str) -> BTreeMap<String, String> {
+    one_dimension(ACTIVITY_ARN_DIMENSION, activity_arn)
+}
+
+/// The dimension set the series of ONE API of this service are identified by, for the
+/// same reason [`state_machine_dimensions`] is `pub`.
+#[must_use]
+pub fn api_name_dimensions(api_name: &str) -> BTreeMap<String, String> {
+    one_dimension(API_NAME_DIMENSION, api_name)
+}
+
+/// The dimension set the series counting what a state machine HOLDS are identified by,
+/// and the series of the executions one ALIAS routed or one VERSION served
+/// ([`execution_series`]), for the same reason [`state_machine_dimensions`] is `pub`.
+#[must_use]
+pub fn resource_dimensions(resource_arn: &str) -> BTreeMap<String, String> {
+    one_dimension(RESOURCE_ARN_DIMENSION, resource_arn)
+}
+
+/// The dimension set of a series identified by ONE dimension: `name`, naming `value`.
+fn one_dimension(name: &str, value: &str) -> BTreeMap<String, String> {
+    [(name.to_string(), value.to_string())]
+        .into_iter()
+        .collect()
+}
+
+/// Count ONE served call of the API `api_name` into [`CONSUMED_CAPACITY_METRIC`], and
+/// hand over everything that call left queued.
+///
+/// A call consumes one unit of the capacity of the API it named, so the sum over a
+/// window is the number of calls made in it: that is what lets a client see how close
+/// its own traffic is to the quota of an API before the throttling starts, which no
+/// series about the executions can show — the capacity is consumed by the REQUEST,
+/// whatever it then did.
+///
+/// Call it with NO store of this service locked, once the call has been served: it is
+/// also where the observations that call queued are handed over ([`publish`]), so a
+/// mutation's own series reach CloudWatch's store as soon as the call that made it has
+/// answered rather than waiting for the next caller.
+pub fn meter_api_call<Eng: Send + Sync + 'static>(engine: &Eng, api_name: &str) {
+    if let Some(state) = super::service_state(engine) {
+        state.lock().pending_observations.queue_datapoint(Datapoint {
+            dimensions: api_name_dimensions(api_name),
+            metric: CONSUMED_CAPACITY_METRIC,
+            value: 1.0,
+            unit: COUNT_UNIT,
+            at: super::now(),
+        });
+    }
+    publish(engine);
 }
 
 #[cfg(test)]
@@ -1534,21 +1959,27 @@ mod tests {
         }
     }
 
-    /// RULE: the function a `Task` state's work is taken on is the one its own
-    /// `Resource` names, wherever the definition nests that state, and a `Resource`
-    /// naming anything but a function's ARN names none.
+    /// RULE: the resource a `Task` state's work is taken on is the one its own
+    /// `Resource` names, wherever the definition nests that state, and the series it is
+    /// counted in are the ones of that KIND of resource — a function's ARN per function,
+    /// an activity's ARN per activity, and a `Resource` naming neither counted in
+    /// neither.
     ///
     /// The rows span where a state can live (the top-level list, a `Map` state's
     /// `ItemProcessor`, the legacy `Iterator`, a `Parallel` state's branch) against the
-    /// forms a `Resource` takes (a function's ARN, an optimized integration token, an
-    /// activity, and a state that names no work at all).
+    /// forms a `Resource` takes (a function's ARN, an activity's ARN, an optimized
+    /// integration token, an ARN whose region field names no region — so it is the ARN
+    /// of no activity this emulator holds — and a state that names no work at all).
     #[test]
-    fn a_nested_task_state_names_the_function_its_resource_does() {
+    fn a_nested_task_state_names_the_resource_its_work_is_taken_on() {
         const FUNCTION: &str = "arn:aws:lambda:us-east-1:000000000000:function:counted";
+        const ACTIVITY: &str = "arn:aws:states:us-east-1:000000000000:activity:counted";
+        const BARE_ACTIVITY: &str = "arn:aws:states:::activity:worker";
         let definition = ::serde_json::json!({
             "StartAt": "Top",
             "States": {
                 "Top": { "Type": "Task", "Resource": FUNCTION, "Next": "Fan" },
+                "Polled": { "Type": "Task", "Resource": ACTIVITY, "End": true },
                 "Optimized": {
                     "Type": "Task",
                     "Resource": "arn:aws:states:::lambda:invoke",
@@ -1588,7 +2019,7 @@ mod tests {
                             "States": {
                                 "Right": {
                                     "Type": "Task",
-                                    "Resource": "arn:aws:states:::activity:worker",
+                                    "Resource": BARE_ACTIVITY,
                                     "End": true,
                                 },
                             },
@@ -1599,20 +2030,23 @@ mod tests {
                 "Done": { "Type": "Succeed" },
             },
         });
-        // (the state, the function its work is taken on)
+        // (the state, the dimension its work is counted per and the resource it names)
         let rows = [
-            ("Top", Some(FUNCTION)),
-            ("Item", Some(FUNCTION)),
-            ("Iterated", Some(FUNCTION)),
-            ("Left", Some(FUNCTION)),
-            ("Optimized", None),
+            ("Top", Some((LAMBDA_FUNCTION_ARN_DIMENSION, FUNCTION))),
+            ("Item", Some((LAMBDA_FUNCTION_ARN_DIMENSION, FUNCTION))),
+            ("Iterated", Some((LAMBDA_FUNCTION_ARN_DIMENSION, FUNCTION))),
+            ("Left", Some((LAMBDA_FUNCTION_ARN_DIMENSION, FUNCTION))),
+            ("Polled", Some((ACTIVITY_ARN_DIMENSION, ACTIVITY))),
             ("Right", None),
+            ("Optimized", None),
             ("Done", None),
             ("NoSuchState", None),
         ];
         for (state_name, expected) in rows {
-            let read = invoked_function(&definition, state_name);
-            let expected = expected.map(str::to_string);
+            let read = work_on(&definition, state_name)
+                .map(|(series, target)| (series.dimension, target));
+            let expected =
+                expected.map(|(dimension, target)| (dimension, target.to_string()));
             assert_eq!(
                 read, expected,
                 "case {state_name:?}: expected {expected:?}, got {read:?}"
@@ -1620,39 +2054,121 @@ mod tests {
         }
     }
 
-    /// RULE: a `Task` state's own events report the phase of the invocation they are
-    /// about — handed over, begun, or closed in the series of the outcome it reached —
-    /// and no other event type reports one.
+    /// RULE: a `Task` state's own events report the phase of the attempt they are about
+    /// — handed over, begun, or closed as the outcome it reached — in every family such
+    /// a state records its work under, and no other event type reports one; and only the
+    /// families whose work is a CALL this service makes close that call's measured span.
     #[test]
-    fn a_task_event_reports_the_phase_of_its_invocation() {
-        for (event_type, expected) in [
-            (super::super::EVENT_TASK_SCHEDULED, Some(Phase::Scheduled)),
-            (super::super::EVENT_TASK_STARTED, Some(Phase::Started)),
+    fn a_task_event_reports_the_phase_of_its_attempt() {
+        // (event type, the phase it reports, whether it closes a task's own call)
+        let rows = [
+            (
+                super::super::EVENT_TASK_SCHEDULED,
+                Some(Phase::Scheduled),
+                false,
+            ),
+            (super::super::EVENT_TASK_STARTED, Some(Phase::Started), false),
             (
                 super::super::EVENT_TASK_SUCCEEDED,
-                Some(Phase::Closed(LAMBDA_FUNCTIONS_SUCCEEDED_METRIC)),
+                Some(Phase::Closed(Outcome::Succeeded)),
+                true,
             ),
             (
                 super::super::EVENT_TASK_FAILED,
-                Some(Phase::Closed(LAMBDA_FUNCTIONS_FAILED_METRIC)),
+                Some(Phase::Closed(Outcome::Failed)),
+                true,
             ),
             (
                 super::super::EVENT_TASK_SUBMIT_FAILED,
-                Some(Phase::Closed(LAMBDA_FUNCTIONS_FAILED_METRIC)),
+                Some(Phase::Closed(Outcome::Failed)),
+                true,
             ),
             (
                 super::super::EVENT_TASK_TIMED_OUT,
-                Some(Phase::Closed(LAMBDA_FUNCTIONS_TIMED_OUT_METRIC)),
+                Some(Phase::Closed(Outcome::TimedOut)),
+                true,
             ),
-            (super::super::EVENT_TASK_SUBMITTED, None),
-            (super::super::EVENT_ACTIVITY_SUCCEEDED, None),
-            (super::super::EVENT_EXECUTION_SUCCEEDED, None),
-            ("TaskStateEntered", None),
-        ] {
-            let phase = task_phase(event_type);
+            (
+                super::super::EVENT_LAMBDA_FUNCTION_SCHEDULED,
+                Some(Phase::Scheduled),
+                false,
+            ),
+            (
+                super::super::EVENT_LAMBDA_FUNCTION_SUCCEEDED,
+                Some(Phase::Closed(Outcome::Succeeded)),
+                true,
+            ),
+            (
+                super::super::EVENT_ACTIVITY_SCHEDULED,
+                Some(Phase::Scheduled),
+                false,
+            ),
+            (
+                super::super::EVENT_ACTIVITY_STARTED,
+                Some(Phase::Started),
+                false,
+            ),
+            (
+                super::super::EVENT_ACTIVITY_SUCCEEDED,
+                Some(Phase::Closed(Outcome::Succeeded)),
+                false,
+            ),
+            (
+                super::super::EVENT_ACTIVITY_FAILED,
+                Some(Phase::Closed(Outcome::Failed)),
+                false,
+            ),
+            (
+                super::super::EVENT_ACTIVITY_TIMED_OUT,
+                Some(Phase::Closed(Outcome::TimedOut)),
+                false,
+            ),
+            (super::super::EVENT_TASK_SUBMITTED, None, false),
+            (super::super::EVENT_EXECUTION_SUCCEEDED, None, false),
+            ("TaskStateEntered", None, false),
+        ];
+        for (event_type, expected, closes) in rows {
+            let phase = work_phase(event_type);
             assert_eq!(
                 phase, expected,
                 "case {event_type:?}: expected {expected:?}, got {phase:?}"
+            );
+            let closed = closes_task_work(event_type);
+            assert_eq!(
+                closed, closes,
+                "case {event_type:?}: expected closes_task_work={closes}, got {closed}"
+            );
+        }
+    }
+
+    /// RULE: a terminal status a REDRIVEN execution reached is counted in the redriven
+    /// series of that status as well, and a status that is not terminal in none.
+    #[test]
+    fn a_redriven_execution_is_counted_in_the_redriven_series_of_its_status() {
+        for (status, expected) in [
+            (
+                super::super::EXECUTION_STATUS_SUCCEEDED,
+                Some(REDRIVEN_EXECUTIONS_SUCCEEDED_METRIC),
+            ),
+            (
+                super::super::EXECUTION_STATUS_FAILED,
+                Some(REDRIVEN_EXECUTIONS_FAILED_METRIC),
+            ),
+            (
+                super::super::EXECUTION_STATUS_ABORTED,
+                Some(REDRIVEN_EXECUTIONS_ABORTED_METRIC),
+            ),
+            (
+                super::super::EXECUTION_STATUS_TIMED_OUT,
+                Some(REDRIVEN_EXECUTIONS_TIMED_OUT_METRIC),
+            ),
+            (super::super::EXECUTION_STATUS_RUNNING, None),
+            ("PENDING_REDRIVE", None),
+        ] {
+            let metric = redriven_completion_metric(status);
+            assert_eq!(
+                metric, expected,
+                "case {status:?}: expected {expected:?}, got {metric:?}"
             );
         }
     }

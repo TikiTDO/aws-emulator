@@ -217,10 +217,14 @@ mod state_machine_version_publish;
 mod state_machine_versions;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/states_metric_families.rs"]
+mod states_metric_families;
 #[path = "all/stuck_state_cause.rs"]
 mod stuck_state_cause;
 #[path = "all/sync_execution.rs"]
 mod sync_execution;
+#[path = "all/sync_execution_qualified_arn.rs"]
+mod sync_execution_qualified_arn;
 #[path = "all/sync_service_integration.rs"]
 mod sync_service_integration;
 #[path = "all/task_execution_role.rs"]

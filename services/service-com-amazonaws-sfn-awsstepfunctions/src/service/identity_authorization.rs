@@ -143,6 +143,24 @@ pub fn addressed_by(operation: &str) -> &'static [&'static str] {
         .map_or(&[], |(_, members)| *members)
 }
 
+/// The operation of THIS service that `routing_key` names, spelled by this service's own
+/// catalog of them ([`ADDRESSED_BY`], which carries every operation the model binds and is
+/// re-derived from the model by this crate's tests), and `None` for a key that names no
+/// operation of this service.
+///
+/// A routing key is read off a request header, so it is a caller's text until it has been
+/// resolved: resolving it here hands back a `&'static str` out of a CLOSED set, which is
+/// what lets a caller's key be used as a value — the name of the API a call was made
+/// against ([`super::api_capacity`]) — without the set of values it can take growing with
+/// the requests made.
+#[must_use]
+pub fn served_operation(routing_key: &str) -> Option<&'static str> {
+    ADDRESSED_BY
+        .iter()
+        .find(|(named, _)| *named == routing_key)
+        .map(|(named, _)| *named)
+}
+
 /// The member a request that MINTS a resource names it by.
 const NAME_MEMBER: &str = "name";
 
@@ -233,9 +251,10 @@ pub struct IamAuthorized<Eng> {
     /// The shared engine, so the principal's policies are read from the one store every
     /// service of this emulator shares.
     engine: Arc<Eng>,
-    /// Serves the request the decision admitted, and names the request each response
-    /// answers.
-    served: ::service_common::query_error_envelope::RequestIdHeaderOperation,
+    /// Serves the request the decision admitted, names the request each response
+    /// answers, and counts what the served call consumed
+    /// ([`super::api_capacity`]).
+    served: super::api_capacity::Metered<Eng>,
     /// This service's wire protocol, held rather than built per refusal: the envelope a
     /// refusal is rendered in is the one every other error of this endpoint is rendered in.
     protocol: super::wire::SwfJsonProtocol,
@@ -246,8 +265,8 @@ impl<Eng> IamAuthorized<Eng> {
     /// policies in force from `engine`.
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
+            served: super::api_capacity::Metered::new(Arc::clone(&engine)),
             engine,
-            served: ::service_common::query_error_envelope::RequestIdHeaderOperation,
             protocol: super::wire::SwfJsonProtocol::new(),
         }
     }

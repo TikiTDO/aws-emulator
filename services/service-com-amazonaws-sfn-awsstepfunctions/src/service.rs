@@ -47,6 +47,13 @@
 //! `LookupEvents` reads it. The recording is a property of SERVING a call rather than of
 //! any one operation, so no handler of this service carries one.
 //!
+//! ## Every served call consumes the capacity of its API
+//!
+//! For the same reason, every call this service serves is counted into the `AWS/States`
+//! series of the API it named ([`api_capacity`]), which is also where the observations
+//! that call queued are handed over to the stores CloudWatch and CloudWatch Logs answer
+//! from.
+//!
 //! ## Naming the request a response answers
 //!
 //! Every response AWS sends names the request it answered, in the response header this
@@ -89,6 +96,12 @@ pub(crate) mod authorization;
 /// WHO a signed request speaks for, and what the account's IAM store holds about it —
 /// the lookups both of those questions are decided from.
 pub(crate) mod request_caller;
+
+/// What one SERVED call costs the API it named: the capacity it consumed, and the
+/// hand-over of what that call left for the stores that report it.
+///
+/// Public: the series a call is counted in are read back by this crate's tests.
+pub mod api_capacity;
 
 /// This front door's AUDIT leg: every call it serves is recorded as a management event of
 /// `states.amazonaws.com` in the account's event history, where CloudTrail's

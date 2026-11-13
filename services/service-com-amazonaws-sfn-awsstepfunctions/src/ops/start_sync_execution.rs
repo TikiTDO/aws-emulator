@@ -581,7 +581,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         let response = StartSyncExecutionOutput {
             execution_arn: executed.arn.clone(),
-            state_machine_arn: Some(executed.state_machine_arn.clone()),
+            // "The Amazon Resource Name (ARN) that identifies the state machine": the
+            // QUALIFIED reference this run was started through, which is the alias that
+            // routed it or the version it ran, and the state machine itself for a run
+            // started with an unqualified ARN. This response declares no member for the
+            // alias or the version, so resolving the reference down to the state machine
+            // would lose the routing of the very run it reports — a caller of an alias
+            // could not tell which alias served its result.
+            state_machine_arn: Some(
+                executed
+                    .state_machine_alias_arn
+                    .clone()
+                    .or_else(|| executed.state_machine_version_arn.clone())
+                    .unwrap_or_else(|| executed.state_machine_arn.clone()),
+            ),
             name: Some(executed.name.clone()),
             start_date: crate::state::to_date_time(executed.start_date),
             stop_date: crate::state::to_date_time(stopped),

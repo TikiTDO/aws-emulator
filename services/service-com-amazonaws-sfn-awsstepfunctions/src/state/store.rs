@@ -302,9 +302,10 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
             let before = execution.retained_bytes;
             // "You can provide an arbitrary name in order to identify the worker that
             // the task is assigned to": the event the claim writes is where that name
-            // is recorded.
-            execution.push_detailed_event(
+            // is recorded, against the state whose work the claim took.
+            execution.push_state_event(
                 EVENT_ACTIVITY_STARTED,
+                &claimed.state_name,
                 now,
                 EventDetails {
                     worker_name: claimed.worker_name.clone(),
@@ -318,6 +319,10 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
                 .saturating_add(after)
                 .saturating_sub(before);
         }
+        // The claim made an event of the task's own work reportable — the worker took
+        // it — so the series that work is counted in are queued at this instant rather
+        // than at whatever call happens to settle the store next.
+        self.observe_task_work();
         Some(claimed)
     }
 
@@ -636,8 +641,9 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
             state_name: task.state_name.clone(),
             state_input: task.state_input.clone(),
         });
-        execution.push_detailed_event(
+        execution.push_state_event(
             timed_out,
+            &task.state_name,
             due,
             EventDetails::of_failure(
                 Some(TASK_TIMEOUT_ERROR.to_string()),
@@ -664,6 +670,13 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
         let execution_arn = task.execution_arn;
         self.pending_executions
             .retain(|pending| pending != &execution_arn);
+        // The bound the clock reached is this execution's TERMINAL status, reached
+        // without an owed outcome for `settle` to apply, so what it publishes about
+        // having ended is queued here — the one place that publishes it
+        // ([`ComAmazonawsSfnAwsstepfunctionsState::observe_execution_settled`]), so an
+        // execution the clock failed is counted exactly as one that failed any other
+        // way.
+        self.observe_execution_settled(&execution_arn);
     }
 
     /// Re-schedule the task `token` names for its next attempt, when the state that
@@ -739,13 +752,15 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
         // The failure happened when the bound was reached; the next attempt is
         // scheduled when its interval has passed, which is also when a poll may first
         // claim it.
-        candidate.push_detailed_event(
+        candidate.push_state_event(
             failure_event,
+            &task.state_name,
             at,
             EventDetails::of_failure(Some(error.to_string()), None),
         );
-        candidate.push_detailed_event(
+        candidate.push_state_event(
             EVENT_ACTIVITY_SCHEDULED,
+            &queued.state_name,
             available_at,
             EventDetails::of_scheduled_task(&queued),
         );
@@ -966,6 +981,9 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
             .saturating_sub(before);
         self.pending_executions
             .retain(|pending| pending != execution_arn);
+        // The terminal status this bound reached is published here, for the reason
+        // [`Self::time_out_activity_task`] publishes its own.
+        self.observe_execution_settled(execution_arn);
     }
 
     /// Make the outcome the clock has already made due for the execution `arn` a
@@ -1379,6 +1397,11 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
         machine.version_counter = version;
         self.state_machine_versions
             .insert(candidate.arn.clone(), candidate.clone());
+        // How many versions the state machine holds has changed, which is what it
+        // publishes about them: queued here, at the one place a version enters the
+        // store, so an accepted publish moves the count and a refused one leaves it
+        // exactly where the last accepted one put it.
+        self.observe_version_count(arn, now);
         Some(candidate)
     }
 
@@ -1463,6 +1486,9 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
     ) -> Option<StateMachineVersion> {
         let version = self.state_machine_versions.remove(version_arn)?;
         self.retained_bytes = self.retained_bytes.saturating_sub(version.retained_bytes);
+        // One fewer version is held, which the count reports for the same reason the
+        // publish does.
+        self.observe_version_count(&version.state_machine_arn, now());
         Some(version)
     }
 
@@ -1492,7 +1518,12 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
         alias.creation_sequence = self.alias_sequence;
         alias.retained_bytes = alias.measure();
         self.retained_bytes = self.retained_bytes.saturating_add(alias.retained_bytes);
+        let state_machine_arn = alias.state_machine_arn.clone();
+        let created = alias.creation_date;
         self.state_machine_aliases.insert(alias.arn.clone(), alias);
+        // How many aliases the state machine holds has changed; see
+        // [`ComAmazonawsSfnAwsstepfunctionsState::observe_alias_count`].
+        self.observe_alias_count(&state_machine_arn, created);
     }
 
     /// Apply an `UpdateStateMachineAlias` to the alias `arn` names, and report the
@@ -1562,6 +1593,9 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
     pub fn remove_state_machine_alias(&mut self, arn: &str) -> Option<StateMachineAlias> {
         let alias = self.state_machine_aliases.remove(arn)?;
         self.retained_bytes = self.retained_bytes.saturating_sub(alias.retained_bytes);
+        // One fewer alias is held, which the count reports for the same reason the
+        // create does.
+        self.observe_alias_count(&alias.state_machine_arn, now());
         Some(alias)
     }
 
@@ -2574,6 +2608,10 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
                 .saturating_add(after)
                 .saturating_sub(before);
             self.pending_executions.retain(|pending| pending != &arn);
+            // A child workflow execution is an execution in its own right, so the
+            // terminal status this abort gives it is published exactly as any other
+            // execution's is.
+            self.observe_execution_settled(&arn);
         }
     }
 
@@ -2779,6 +2817,10 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
             self.pending_executions.push(arn.to_string());
         }
         self.executions.insert(arn.to_string(), candidate);
+        // The execution has been re-run, which is what it publishes about having been
+        // redriven: queued at the one place an accepted redrive is recorded, so a
+        // refused one — and the idempotent repeat of one — is counted in nothing.
+        self.observe_execution_redriven(arn, now);
         Ok(now)
     }
 
