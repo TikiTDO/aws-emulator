@@ -33,8 +33,8 @@ use serde_json::{json, Value};
 use smithy_server_runtime::multi_service_router::MultiServiceRouter;
 
 use crate::support::{
-    assert_created_definitions, assert_definition_conflicts, call, canonical_metric_definition,
-    create, emulator, message, percent_encoded, Reply, REGION,
+    assert_definition_conflicts, assert_reports_no_created_definitions, call,
+    canonical_metric_definition, create, emulator, message, percent_encoded, Reply, REGION,
 };
 
 /// Every value `MetricDestination` admits.
@@ -390,9 +390,9 @@ async fn batch_create(
 /// The definitions a successful `BatchCreateRumMetricDefinitions` created, in request
 /// order, asserting it refused none of them.
 ///
-/// The create's answer ECHOES what it created — one definition per requested entry, under
-/// the id the call minted ([`crate::support::assert_created_definitions`]) — and the same
-/// definitions are read back through `BatchGetRumMetricDefinitions` under those ids.
+/// The create's answer reports NONE of what it created
+/// ([`crate::support::assert_reports_no_created_definitions`]), so the definitions are read
+/// back through `BatchGetRumMetricDefinitions`, which is where their ids are learned.
 async fn create_definitions(
     router: &MultiServiceRouter,
     case: &str,
@@ -415,24 +415,23 @@ async fn create_definitions(
         "case {case:?}: expected no per-definition errors, got {:?}",
         answered["Errors"]
     );
-    let echoed = assert_created_definitions(case, &answered, definitions);
-    // Resolved through the ids the create reported rather than by matching content, which is
-    // what the echo is for: two definitions the service tells apart can read back
-    // identically, so content alone does not say which of them this call created.
-    crate::support::stored_under_echoed_ids(
+    assert_reports_no_created_definitions(case, &answered);
+    // Resolved by reading the destination back: a definition's identity is the definition
+    // itself, so one requested entry resolves to exactly one stored definition.
+    crate::support::held_metric_definitions(
         router,
         case,
         monitor,
         &destination.destination,
         destination.destination_arn.as_deref(),
         definitions,
-        &echoed,
     )
     .await
 }
 
 /// The definition the destination now holds for each of `definitions`, in request order —
-/// the read-back that shows what a create stored, beside the answer it echoed.
+/// the read-back that shows what a create stored, which the create's own answer reports
+/// nothing about.
 ///
 /// One definition of "the definition the destination holds for this request" for the whole
 /// crate: the shared [`crate::support::held_metric_definitions`], which resolves each
@@ -1236,13 +1235,9 @@ async fn a_batch_create_refuses_only_the_definitions_it_cannot_store() {
     );
     let answered = reply.json("mixed batch");
 
-    // The valid definitions still succeed, and the answer echoes exactly THOSE — the
-    // refused ones are reported in `Errors` and echoed nowhere.
-    let echoed = assert_created_definitions(
-        "mixed batch",
-        &answered,
-        &[good_one.clone(), good_two.clone()],
-    );
+    // The valid definitions still succeed, and the answer reports NONE of them — the
+    // refused ones are reported in `Errors` and the stored ones nowhere.
+    assert_reports_no_created_definitions("mixed batch", &answered);
     let created = held_definitions(
         &router,
         "mixed batch",
@@ -1261,15 +1256,6 @@ async fn a_batch_create_refuses_only_the_definitions_it_cannot_store() {
         let id = id_of("mixed batch", reported);
         assert_definition("mixed batch", reported, wanted, &id);
     }
-    assert_eq!(
-        created
-            .iter()
-            .map(|reported| id_of("mixed batch", reported))
-            .collect::<Vec<String>>(),
-        echoed,
-        "case {:?}: expected the echoed ids to address the stored definitions, got {echoed:?}",
-        "mixed batch"
-    );
 
     // And each refused one is reported on its own, with the definition that caused it.
     let refused = answered["Errors"].as_array().cloned().unwrap_or_default();
@@ -1741,8 +1727,9 @@ async fn a_repeated_batch_create_reports_a_conflict_and_stores_no_second_copy() 
         );
         let answered_repeat = repeated.json(case);
         assert_definition_conflicts(case, &answered_repeat, &definitions);
-        // Every entry was refused, so the repeat echoes no definition at all.
-        assert_created_definitions(case, &answered_repeat, &[]);
+        // Every entry was refused, and the repeat reports no definition at all — as no
+        // create does.
+        assert_reports_no_created_definitions(case, &answered_repeat);
         let after_repeat = stored_by_id(&router, case, &monitor, &destination).await;
         assert_eq!(
             after_repeat, stored,
@@ -1766,9 +1753,8 @@ async fn a_repeated_batch_create_reports_a_conflict_and_stores_no_second_copy() 
         );
         let answered_mixed = reply.json(case);
         assert_definition_conflicts(case, &answered_mixed, &definitions);
-        // Only the addition was created, so it is the one definition the answer echoes.
-        let echoed_added =
-            assert_created_definitions(case, &answered_mixed, std::slice::from_ref(&added));
+        // Only the addition was created, which the answer reports nothing about.
+        assert_reports_no_created_definitions(case, &answered_mixed);
         let after_addition = stored_by_id(&router, case, &monitor, &destination).await;
         assert_eq!(
             after_addition.len(),
@@ -1787,12 +1773,6 @@ async fn a_repeated_batch_create_reports_a_conflict_and_stores_no_second_copy() 
             );
         }
         let added_id = added_definition_id(case, &after_addition, &ids);
-        assert_eq!(
-            vec![added_id.clone()],
-            echoed_added,
-            "case {case:?}: expected the echoed id to address the added definition, got \
-             {echoed_added:?}"
-        );
         assert_definition(
             case,
             &after_addition[&added_id],
@@ -1840,9 +1820,9 @@ async fn a_repeated_batch_create_reports_a_conflict_and_stores_no_second_copy() 
         );
         let answered_twice = reply.json(case);
         assert_definition_conflicts(case, &answered_twice, std::slice::from_ref(&twice));
-        // The FIRST of the two entries created the definition, so the answer echoes it
-        // once, beside the one conflict the second entry raised.
-        assert_created_definitions(case, &answered_twice, std::slice::from_ref(&twice));
+        // The FIRST of the two entries created the definition and the second raised the one
+        // conflict; what the first entry stored is reported nowhere in the answer.
+        assert_reports_no_created_definitions(case, &answered_twice);
         let finally = stored_by_id(&router, case, &monitor, &destination).await;
         assert_eq!(
             finally.len(),

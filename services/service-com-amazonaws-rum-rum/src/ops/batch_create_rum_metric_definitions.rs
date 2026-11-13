@@ -8,11 +8,10 @@
 //! freshly minted `MetricDefinitionId`; a definition it ALREADY holds is a definition that
 //! already exists, so that entry of the batch is refused with a per-item
 //! `ConflictException` naming the definition the request asked for, and the stored one keeps
-//! its id and its content. The answer ECHOES what it created: `MetricDefinitions` carries one
-//! definition per entry the call stored, each under the id it minted — the handle
-//! `UpdateRumMetricDefinition` and `BatchDeleteRumMetricDefinitions` address it by — reported
-//! through the same projection `BatchGetRumMetricDefinitions` reads the same map back
-//! through. Each definition the call refuses
+//! its id and its content. The answer reports only what the call REFUSED: its
+//! `MetricDefinitions` member is the EMPTY list rather than the definitions the call
+//! stored, so a caller learns a new definition's `MetricDefinitionId` by reading the
+//! destination back with `BatchGetRumMetricDefinitions`. Each definition the call refuses
 //! is reported in `Errors` while the rest still succeed, which is what the model asks for:
 //! "If some
 //! metric definitions specified in a BatchCreateRumMetricDefinitions operations are not
@@ -421,14 +420,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 crate::state::MetricDefinitionRecord::from_request(&id, requested)
             })
             .collect();
-        // What this call CREATED, reported through the one projection every read of a
-        // definition goes through ([`crate::state::MetricDefinitionRecord::to_metric_definition`]),
-        // so the definition this answer reports is the definition
-        // `BatchGetRumMetricDefinitions` reads back under the same id.
-        let created: Vec<MetricDefinition> = records
-            .iter()
-            .map(crate::state::MetricDefinitionRecord::to_metric_definition)
-            .collect();
         let Some(monitor) = store.app_monitor_mut(&region, &input.app_monitor_name) else {
             return Err(
                 BatchCreateRumMetricDefinitionsErrorModeled::ResourceNotFoundException(
@@ -445,14 +436,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // `Errors` is `@required`, so a call that refused nothing reports the EMPTY
             // list rather than leaving the member off the wire.
             errors,
-            // `MetricDefinitions` carries ONE entry per definition this call created, in
-            // the order the request listed them, each under the `MetricDefinitionId` the
-            // call minted for it: the id a caller addresses that definition by in
-            // `UpdateRumMetricDefinition` and `BatchDeleteRumMetricDefinitions` is learned
-            // from the call that created it. A call that created nothing — every entry
-            // refused — reports the member as the empty list rather than leaving it off
-            // the wire.
-            metric_definitions: Some(created),
+            // The optional `MetricDefinitions` member is reported as the EMPTY list: this
+            // operation does not report the definitions it stored, which are read back from
+            // the destination they were stored under (`BatchGetRumMetricDefinitions`) —
+            // that read is where a caller learns the `MetricDefinitionId`s this call
+            // minted. The member is the empty list whatever the call created.
+            metric_definitions: Some(Vec::new()),
         })
     }
 }

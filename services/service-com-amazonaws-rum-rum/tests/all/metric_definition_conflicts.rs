@@ -41,11 +41,11 @@ use crate::metric_definitions::{
     EXTENDED_METRICS,
 };
 use crate::support::{
-    all_metric_definitions, already_defined_message, assert_created_definitions,
-    assert_definition_conflicts, assert_metric_definition, batch_create_metric_definitions, call,
-    conflicting_metric_definitions, create, created_metric_definitions, emulator, experiment_arn,
-    metric_definition_id, metrics_destination_query, percent_encoded, put_metrics_destination,
-    CONFLICT_CODE,
+    all_metric_definitions, already_defined_message, assert_definition_conflicts,
+    assert_metric_definition, assert_reports_no_created_definitions,
+    batch_create_metric_definitions, call, conflicting_metric_definitions, create,
+    created_metric_definitions, emulator, experiment_arn, metric_definition_id,
+    metrics_destination_query, percent_encoded, put_metrics_destination, CONFLICT_CODE,
 };
 
 /// Both values `MetricDestination` admits: an `Evidently` destination is identified by the
@@ -170,8 +170,8 @@ async fn a_definition_a_destination_already_holds_is_reported_as_that_entrys_own
         );
         let answered = reply.json(case);
         assert_definition_conflicts(case, &answered, std::slice::from_ref(&row.definition));
-        // The only entry was refused, so the call created nothing to echo.
-        assert_created_definitions(case, &answered, &[]);
+        // The only entry was refused, and the create reports nothing it created anyway.
+        assert_reports_no_created_definitions(case, &answered);
         // The message states the definition the request carried, member by member, with
         // `null` for each one it left out.
         let stated = answered["Errors"][0]["ErrorMessage"]
@@ -224,9 +224,10 @@ async fn a_definition_a_destination_already_holds_is_reported_as_that_entrys_own
         );
         let mixed = reply.json(case);
         assert_definition_conflicts(case, &mixed, std::slice::from_ref(&row.definition));
-        // The entry the destination does NOT hold is created, so the SAME answer echoes it
-        // beside the conflict — under the id it was minted.
-        let echoed_other = assert_created_definitions(case, &mixed, std::slice::from_ref(&other));
+        // The entry the destination does NOT hold is created, which the SAME answer reports
+        // nothing about: it is seen by reading the destination back, under the id the create
+        // minted for it.
+        assert_reports_no_created_definitions(case, &mixed);
         let held =
             all_metric_definitions(&router, case, &monitor, row.destination, arn.as_deref(), None)
                 .await;
@@ -241,12 +242,6 @@ async fn a_definition_a_destination_already_holds_is_reported_as_that_entrys_own
             .find(|(held_id, _)| *held_id != &id)
             .map(|(held_id, _)| held_id.clone())
             .unwrap_or_else(|| panic!("case {case:?}: the addition was not stored: {held:?}"));
-        assert_eq!(
-            vec![other_id.clone()],
-            echoed_other,
-            "case {case:?}: expected the mixed batch to echo the id the addition is stored \
-             under, got {echoed_other:?}"
-        );
         assert_metric_definition(case, &held[&other_id], &other, &other_id);
 
         // Deleting the stored definition frees the identity: the IDENTICAL request now

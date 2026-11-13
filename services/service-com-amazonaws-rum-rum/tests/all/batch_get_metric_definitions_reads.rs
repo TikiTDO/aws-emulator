@@ -121,8 +121,8 @@ async fn seed_definitions(
             .as_array()
             .map(Vec::len)
             .unwrap_or_default(),
-        count,
-        "case {case:?}: expected the create to echo {count} definition(s), got {answered}"
+        0,
+        "case {case:?}: expected the create to report none of what it stored, got {answered}"
     );
     // The ids the seed minted are read back through the operation under test, matched to the
     // definitions the seed named by the unique `Name` each carries.

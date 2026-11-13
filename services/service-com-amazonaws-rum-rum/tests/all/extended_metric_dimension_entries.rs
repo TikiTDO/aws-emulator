@@ -31,7 +31,7 @@ use crate::metric_definitions::{
     EXTENDED_DIMENSION_KEYS, EXTENDED_METRICS,
 };
 use crate::support::{
-    all_metric_definitions, assert_created_definitions, call, create, emulator,
+    all_metric_definitions, assert_reports_no_created_definitions, call, create, emulator,
     held_metric_definition, message, metric_definition_id, put_metrics_destination,
     sole_metric_definition, Reply,
 };
@@ -285,8 +285,8 @@ async fn every_listed_dimension_entry_is_created_and_read_back() {
         "accepted",
         answered["Errors"]
     );
-    // The create echoes one definition per entry it created, in request order.
-    assert_created_definitions("accepted", &answered, &requested);
+    // The create reports none of the definitions it created.
+    assert_reports_no_created_definitions("accepted", &answered);
 
     // Each is read back as the definition that was asked for.
     let held = all_metric_definitions(&router, "accepted", monitor, DESTINATION, None, None).await;

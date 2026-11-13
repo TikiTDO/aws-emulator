@@ -35,8 +35,9 @@ use serde_json::{json, Value};
 use smithy_server_runtime::multi_service_router::MultiServiceRouter;
 
 use crate::support::{
-    all_metric_definitions, call, create, emulator, experiment_arn, metric_definition_id,
-    metrics_destination_query, metrics_role_arn, percent_encoded,
+    all_metric_definitions, assert_reports_no_created_definitions, call, create, emulator,
+    experiment_arn, metric_definition_id, metrics_destination_query, metrics_role_arn,
+    percent_encoded,
 };
 
 /// The two values `MetricDestination` admits: a `CloudWatch` destination carries no ARN and
@@ -267,19 +268,10 @@ async fn create_definition(
         "case {case:?}: expected no per-definition errors, got {:?}",
         answered["Errors"]
     );
-    let echoed = answered["MetricDefinitions"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    assert_eq!(
-        echoed.len(),
-        1,
-        "case {case:?}: expected the create to echo the definition it created, got {answered}"
-    );
-    let echoed_id = metric_definition_id(case, &echoed[0]);
-    // The id the create echoed is read back through `BatchGetRumMetricDefinitions` — under
-    // the same spelling of the pair, which is what makes this a check of the ARN rule rather
-    // than of the create's own answer.
+    assert_reports_no_created_definitions(case, &answered);
+    // The definition the create stored is read back through `BatchGetRumMetricDefinitions` —
+    // under the same spelling of the pair, which is what makes this a check of the ARN rule
+    // rather than of the create's own answer, and the read is where its id is learned.
     let created = all_metric_definitions(router, case, monitor, destination, destination_arn, None)
         .await
         .into_values()
@@ -289,13 +281,7 @@ async fn create_definition(
         1,
         "case {case:?}: expected one created definition, got {created:?}"
     );
-    let held_id = metric_definition_id(case, &created[0]);
-    assert_eq!(
-        held_id, echoed_id,
-        "case {case:?}: expected the stored definition to be held under the id the create \
-         echoed ({echoed_id:?}), got {held_id:?}"
-    );
-    held_id
+    metric_definition_id(case, &created[0])
 }
 
 #[tokio::test]

@@ -212,15 +212,15 @@ async fn seeded_metric_definitions() -> (MultiServiceRouter, Listing) {
         "case {case:?}: expected no per-definition errors, got {:?}",
         answered["Errors"]
     );
-    // The create echoes one definition per entry it stored; what it stored is then counted
-    // through `BatchGetRumMetricDefinitions` at the modelled maximum page size.
+    // The create reports none of what it stored; what it stored is counted through
+    // `BatchGetRumMetricDefinitions` at the modelled maximum page size.
     assert_eq!(
         answered["MetricDefinitions"]
             .as_array()
             .map(Vec::len)
             .unwrap_or_default(),
-        STORE_SIZE,
-        "case {case:?}: expected the create to echo {STORE_SIZE} definitions, got {answered}"
+        0,
+        "case {case:?}: expected the create to report none of what it stored, got {answered}"
     );
     let created = all_metric_definitions(&router, case, &monitor, CLOUD_WATCH, None, Some(100))
         .await

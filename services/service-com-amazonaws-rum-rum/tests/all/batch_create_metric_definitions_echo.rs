@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! End-to-end HTTP tests for what `BatchCreateRumMetricDefinitions` ANSWERS about the
-//! definitions it created: `MetricDefinitions` carries one `MetricDefinition` per entry the
-//! call stored, in request order, each under the `MetricDefinitionId` the call minted — the
-//! handle a caller then addresses that definition by.
+//! definitions it stored: nothing. Its `MetricDefinitions` member is the EMPTY list however
+//! many definitions the call created, so the answer reports only the per-definition
+//! `Errors`, and the `MetricDefinitionId` a caller addresses a new definition by is learned
+//! by reading the destination back with `BatchGetRumMetricDefinitions`.
 //!
 //! Every case drives the real wire path — `MultiServiceRouter::dispatch` with a signed
 //! restJson1 request — so routing, the `@httpLabel` app-monitor name, the `@httpQuery`
@@ -14,9 +15,10 @@
 //! definitions one call carries (one, two, five), which `MetricDestination` they are created
 //! under, and which optional members a definition uses — from an extended metric that names
 //! no namespace through a custom metric carrying every optional member it may. A further
-//! case drives the echo of a batch only PART of which was stored, and the last one shows the
-//! echoed id is the handle: it addresses the definition through `UpdateRumMetricDefinition`
-//! and `BatchDeleteRumMetricDefinitions` without any read in between.
+//! case drives a batch only PART of which was stored, and another one a batch NONE of which
+//! was stored, since the answer is the same empty list either way. The last case shows the
+//! create still did the work: the ids the read-back reports address the new definitions
+//! through `UpdateRumMetricDefinition` and `BatchDeleteRumMetricDefinitions`.
 
 use serde_json::{json, Value};
 use smithy_server_runtime::multi_service_router::MultiServiceRouter;
@@ -26,8 +28,8 @@ use crate::metric_definitions::{
     EXTENDED_METRICS,
 };
 use crate::support::{
-    all_metric_definitions, assert_created_definitions, assert_metric_definition,
-    batch_create_metric_definitions, call, create, emulator, experiment_arn,
+    all_metric_definitions, assert_metric_definition, assert_reports_no_created_definitions,
+    batch_create_metric_definitions, call, create, emulator, experiment_arn, metric_definition_ids,
     metric_definitions_page, metrics_destination_query, percent_encoded, put_metrics_destination,
     reported_metric_definitions, update_metric_definition, CONFLICT_CODE,
 };
@@ -95,7 +97,7 @@ fn rows() -> Vec<Row> {
         Row {
             case: "two definitions under an Evidently destination",
             destination: EVIDENTLY,
-            experiment: Some("echo-ab"),
+            experiment: Some("answer-ab"),
             definitions: vec![
                 extended(EXTENDED_METRICS[12].name),
                 custom("Abandonments", "MyApp/Checkout"),
@@ -142,11 +144,11 @@ async fn seeded(router: &MultiServiceRouter, row: &Row, monitor: &str) -> Option
 }
 
 #[tokio::test]
-async fn a_batch_create_echoes_one_definition_per_entry_it_created() {
+async fn a_batch_create_reports_none_of_the_definitions_it_created() {
     for (index, row) in rows().into_iter().enumerate() {
         let (router, _engine) = emulator();
         let case = row.case;
-        let monitor = format!("echo-{index}");
+        let monitor = format!("answer-{index}");
         let arn = seeded(&router, &row, &monitor).await;
 
         let reply = batch_create_metric_definitions(
@@ -172,12 +174,11 @@ async fn a_batch_create_echoes_one_definition_per_entry_it_created() {
             answered["Errors"]
         );
 
-        // One echoed definition per requested entry, in request order, each the definition
-        // that was asked for under an id of its own.
-        let echoed = assert_created_definitions(case, &answered, &row.definitions);
+        // The answer reports no definition at all, however many the call stored.
+        assert_reports_no_created_definitions(case, &answered);
 
-        // And each echoed id is the id the destination holds that definition under, which is
-        // what makes the echo the handle rather than a value of its own.
+        // And the call DID store them: the destination holds one definition per requested
+        // entry, each the definition that was asked for under an id of its own.
         let held = all_metric_definitions(
             &router,
             case,
@@ -193,9 +194,18 @@ async fn a_batch_create_echoes_one_definition_per_entry_it_created() {
             "case {case:?}: expected {} stored definition(s), got {held:?}",
             row.definitions.len()
         );
-        for (requested, id) in row.definitions.iter().zip(echoed.iter()) {
+        let ids = metric_definition_ids(
+            &router,
+            case,
+            &monitor,
+            row.destination,
+            arn.as_deref(),
+            &row.definitions,
+        )
+        .await;
+        for (requested, id) in row.definitions.iter().zip(ids.iter()) {
             let reported = held.get(id).unwrap_or_else(|| {
-                panic!("case {case:?}: the create echoed {id:?}, which holds nothing: {held:?}")
+                panic!("case {case:?}: the read reported {id:?}, which holds nothing: {held:?}")
             });
             assert_metric_definition(case, reported, requested, id);
         }
@@ -203,10 +213,10 @@ async fn a_batch_create_echoes_one_definition_per_entry_it_created() {
 }
 
 #[tokio::test]
-async fn a_batch_create_echoes_only_the_entries_it_stored() {
+async fn a_batch_create_reports_no_definition_whether_it_stored_part_of_the_batch_or_none_of_it() {
     let (router, _engine) = emulator();
     let case = "part of the batch is refused";
-    let monitor = "echo-partial";
+    let monitor = "answer-partial";
     let row = Row {
         case,
         destination: CLOUD_WATCH,
@@ -218,7 +228,7 @@ async fn a_batch_create_echoes_only_the_entries_it_stored() {
     // One definition the destination already holds (a conflict), one the service will not
     // store at all (a reserved namespace), and two it stores.
     let repeated = custom("Repeated", "MyApp/Partial");
-    let created = assert_created_definitions(
+    assert_reports_no_created_definitions(
         case,
         &batch_create_metric_definitions(
             &router,
@@ -229,8 +239,16 @@ async fn a_batch_create_echoes_only_the_entries_it_stored() {
         )
         .await
         .json(case),
-        std::slice::from_ref(&repeated),
     );
+    let held_repeated = metric_definition_ids(
+        &router,
+        case,
+        monitor,
+        CLOUD_WATCH,
+        None,
+        std::slice::from_ref(&repeated),
+    )
+    .await;
     let refused = custom("Reserved", "AWS/Billing");
     let stored = [
         custom("StoredOne", "MyApp/Partial"),
@@ -259,13 +277,9 @@ async fn a_batch_create_echoes_only_the_entries_it_stored() {
     );
     let answered = reply.json(case);
 
-    // Exactly the two entries it stored are echoed, in request order — the conflict and the
-    // refusal are reported in `Errors` and echoed nowhere.
-    let echoed = assert_created_definitions(case, &answered, &stored);
-    assert!(
-        !echoed.contains(&created[0]),
-        "case {case:?}: expected the refused resubmission not to be echoed, got {answered}"
-    );
+    // The two entries it stored are reported nowhere in the answer — only the conflict and
+    // the refusal are, in `Errors`.
+    assert_reports_no_created_definitions(case, &answered);
     let errors = answered["Errors"].as_array().cloned().unwrap_or_default();
     assert_eq!(
         errors.len(),
@@ -284,26 +298,49 @@ async fn a_batch_create_echoes_only_the_entries_it_stored() {
         errors[1]
     );
 
-    // The destination holds the original and the two additions, under the ids the two
-    // creates echoed, and nothing for the refused definition.
+    // The destination holds the original and the two additions, and nothing for the refused
+    // definition.
+    let added = metric_definition_ids(&router, case, monitor, CLOUD_WATCH, None, &stored).await;
     let held = all_metric_definitions(&router, case, monitor, CLOUD_WATCH, None, None).await;
-    let mut expected: Vec<String> = echoed.clone();
-    expected.push(created[0].clone());
+    let mut expected: Vec<String> = added.clone();
+    expected.push(held_repeated[0].clone());
     expected.sort();
     assert_eq!(
         held.keys().cloned().collect::<Vec<String>>(),
         expected,
-        "case {case:?}: expected the destination to hold exactly the echoed definitions, got \
+        "case {case:?}: expected the destination to hold exactly the stored definitions, got \
          {held:?}"
+    );
+
+    // A batch NONE of which was stored answers the same way: every entry is a conflict, and
+    // the answer still reports the empty list rather than the definitions the destination
+    // holds.
+    let none_stored = batch_create_metric_definitions(
+        &router,
+        monitor,
+        CLOUD_WATCH,
+        None,
+        &[repeated.clone(), stored[0].clone()],
+    )
+    .await
+    .json(case);
+    assert_reports_no_created_definitions(case, &none_stored);
+    assert_eq!(
+        none_stored["Errors"]
+            .as_array()
+            .map(|errors| errors.len())
+            .unwrap_or_default(),
+        2,
+        "case {case:?}: expected both entries to be refused, got {none_stored}"
     );
 }
 
 #[tokio::test]
-async fn the_echoed_id_addresses_the_definition_without_a_read_in_between() {
+async fn the_read_back_id_addresses_the_definition_the_create_stored() {
     for (index, row) in rows().into_iter().enumerate() {
         let (router, _engine) = emulator();
         let case = row.case;
-        let monitor = format!("echo-handle-{index}");
+        let monitor = format!("answer-handle-{index}");
         let arn = seeded(&router, &row, &monitor).await;
 
         let answered = batch_create_metric_definitions(
@@ -315,10 +352,19 @@ async fn the_echoed_id_addresses_the_definition_without_a_read_in_between() {
         )
         .await
         .json(case);
-        let echoed = assert_created_definitions(case, &answered, &row.definitions);
+        assert_reports_no_created_definitions(case, &answered);
+        let ids = metric_definition_ids(
+            &router,
+            case,
+            &monitor,
+            row.destination,
+            arn.as_deref(),
+            &row.definitions,
+        )
+        .await;
 
-        // The FIRST echoed id, used straight away: the update replaces the definition it
-        // names, which the read-back under that same id shows.
+        // The FIRST id the read reported: the update replaces the definition it names, which
+        // the read-back under that same id shows.
         let replacement = with(
             row.definitions[0].clone(),
             "UnitLabel",
@@ -330,7 +376,7 @@ async fn the_echoed_id_addresses_the_definition_without_a_read_in_between() {
             &monitor,
             row.destination,
             arn.as_deref(),
-            &echoed[0],
+            &ids[0],
             &replacement,
         )
         .await;
@@ -343,10 +389,10 @@ async fn the_echoed_id_addresses_the_definition_without_a_read_in_between() {
             None,
         )
         .await;
-        let reported = held.get(&echoed[0]).unwrap_or_else(|| {
-            panic!("case {case:?}: nothing is held under the echoed id {:?}", echoed[0])
+        let reported = held.get(&ids[0]).unwrap_or_else(|| {
+            panic!("case {case:?}: nothing is held under {:?}", ids[0])
         });
-        assert_metric_definition(case, reported, &replacement, &echoed[0]);
+        assert_metric_definition(case, reported, &replacement, &ids[0]);
 
         // And the same id deletes it: the delete reports it as deleted and the destination
         // holds only the definitions the batch's other entries created.
@@ -356,7 +402,7 @@ async fn the_echoed_id_addresses_the_definition_without_a_read_in_between() {
             &format!(
                 "/rummetrics/{monitor}/metrics?{}&metricDefinitionIds={}",
                 metrics_destination_query(row.destination, arn.as_deref()),
-                percent_encoded(&echoed[0])
+                percent_encoded(&ids[0])
             ),
             None,
         )
@@ -370,8 +416,8 @@ async fn the_echoed_id_addresses_the_definition_without_a_read_in_between() {
         );
         assert_eq!(
             deleted.json(case)["MetricDefinitionIds"],
-            json!([echoed[0]]),
-            "case {case:?}: expected the delete to report the echoed id, got {:?}",
+            json!([ids[0]]),
+            "case {case:?}: expected the delete to report the id it deleted, got {:?}",
             deleted.json(case)
         );
         let page = metric_definitions_page(
@@ -386,7 +432,7 @@ async fn the_echoed_id_addresses_the_definition_without_a_read_in_between() {
             .collect();
         assert_eq!(
             remaining,
-            echoed[1..].to_vec(),
+            ids[1..].to_vec(),
             "case {case:?}: expected only the batch's other definitions to remain, got \
              {remaining:?}"
         );

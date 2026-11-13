@@ -409,56 +409,34 @@ pub(crate) async fn batch_create_metric_definitions(
     .await
 }
 
-/// Assert an accepted batch create ECHOES what it created: `MetricDefinitions` carries ONE
-/// definition per requested entry, in request order, each the canonical form of the request
-/// it was created from ([`canonical_metric_definition`]) under an id the call minted, and no
-/// two of them sharing an id. Returns those ids in request order — the handles
-/// `UpdateRumMetricDefinition` and `BatchDeleteRumMetricDefinitions` address the new
-/// definitions by.
-pub(crate) fn assert_created_definitions(
-    case: &str,
-    answered: &Value,
-    requested: &[Value],
-) -> Vec<String> {
-    let created = answered["MetricDefinitions"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+/// Assert an accepted batch create reports NOTHING about the definitions it stored: its
+/// `MetricDefinitions` member is the EMPTY list whatever the call created, so the id a
+/// caller addresses a new definition by is learned by reading the destination back
+/// ([`metric_definition_ids`]) rather than from the create's own answer.
+///
+/// An omitted list member reads as the empty list it stands for, since restJson1 draws no
+/// distinction between the two.
+pub(crate) fn assert_reports_no_created_definitions(case: &str, answered: &Value) {
     assert_eq!(
-        created.len(),
-        requested.len(),
-        "case {case:?}: expected the create to report {} definition(s), got {created:?}",
-        requested.len()
+        reported_metric_definitions(answered),
+        Vec::<Value>::new(),
+        "case {case:?}: expected the create to report no definition, got {:?}",
+        answered["MetricDefinitions"]
     );
-    let mut ids: Vec<String> = Vec::new();
-    for (asked, reported) in requested.iter().zip(created.iter()) {
-        let id = metric_definition_id(case, reported);
-        assert!(
-            (1..=255).contains(&id.chars().count()),
-            "case {case:?}: expected a MetricDefinitionId within MetricDefinitionId's \
-             1..255 length, got {id:?}"
-        );
-        assert!(
-            !ids.contains(&id),
-            "case {case:?}: expected every created definition to carry its own id, got \
-             {id:?} twice in {created:?}"
-        );
-        assert_metric_definition(case, reported, asked, &id);
-        ids.push(id);
-    }
-    ids
 }
 
 /// The definitions an accepted `BatchCreateRumMetricDefinitions` created, in REQUEST
 /// order, asserting it refused none of them: a 200 whose `Errors` is the empty list the
-/// `@required` member carries when nothing was refused.
+/// `@required` member carries when nothing was refused, and whose `MetricDefinitions`
+/// reports none of what it stored ([`assert_reports_no_created_definitions`]).
 ///
-/// The create's own answer ECHOES what it created ([`assert_created_definitions`]), so each
-/// requested definition is resolved to the stored one through the id the create reported for
-/// it rather than by matching content — which is what the echo is FOR: two definitions the
-/// service tells apart can read back identically, so content alone does not say which of
-/// them a call created. The stored definition is then asserted to be the one that was asked
-/// for, in the canonical form the service stores it in ([`canonical_metric_definition`]).
+/// Each requested definition is resolved to the stored one by reading the destination back,
+/// which is the only place a create's work is reported: a definition's identity is the
+/// definition ITSELF — the members the request carries — so a destination holds at most one
+/// definition per requested entry and the read resolves it unambiguously
+/// ([`matching_metric_definition`]). The stored definition is asserted to be the one that
+/// was asked for, in the canonical form the service stores it in
+/// ([`canonical_metric_definition`]).
 pub(crate) async fn created_metric_definitions(
     router: &MultiServiceRouter,
     case: &str,
@@ -484,53 +462,47 @@ pub(crate) async fn created_metric_definitions(
         "case {case:?}: expected no per-definition errors, got {:?}",
         answered["Errors"]
     );
-    let echoed = assert_created_definitions(case, &answered, definitions);
-    stored_under_echoed_ids(
-        router,
-        case,
-        monitor,
-        destination,
-        destination_arn,
-        definitions,
-        &echoed,
-    )
-    .await
+    assert_reports_no_created_definitions(case, &answered);
+    let stored =
+        held_metric_definitions(router, case, monitor, destination, destination_arn, definitions)
+            .await;
+    for (requested, reported) in definitions.iter().zip(stored.iter()) {
+        let id = metric_definition_id(case, reported);
+        assert!(
+            (1..=255).contains(&id.chars().count()),
+            "case {case:?}: expected a MetricDefinitionId within MetricDefinitionId's \
+             1..255 length, got {id:?}"
+        );
+        assert_metric_definition(case, reported, requested, &id);
+    }
+    stored
 }
 
-/// The definition the destination holds under each of `echoed` — the ids a create reported
-/// for `definitions` — asserting each is the definition that entry of the request asked for.
+/// The `MetricDefinitionId` the destination holds each of `definitions` under, in REQUEST
+/// order — the handles `UpdateRumMetricDefinition` and `BatchDeleteRumMetricDefinitions`
+/// address those definitions by.
 ///
-/// The ONE read-back a create is checked through, so every suite resolves "the definition
-/// this entry created" the same way: by the id the create handed back.
-pub(crate) async fn stored_under_echoed_ids(
+/// The create reports no id of its own, so every suite learns the handle the same way: by
+/// reading the destination back and resolving each requested definition to the stored one
+/// that IS it ([`matching_metric_definition`]).
+pub(crate) async fn metric_definition_ids(
     router: &MultiServiceRouter,
     case: &str,
     monitor: &str,
     destination: &str,
     destination_arn: Option<&str>,
     definitions: &[Value],
-    echoed: &[String],
-) -> Vec<Value> {
-    let held = all_metric_definitions(router, case, monitor, destination, destination_arn, None)
-        .await;
-    definitions
+) -> Vec<String> {
+    held_metric_definitions(router, case, monitor, destination, destination_arn, definitions)
+        .await
         .iter()
-        .zip(echoed.iter())
-        .map(|(requested, id)| {
-            let reported = held.get(id).unwrap_or_else(|| {
-                panic!(
-                    "case {case:?}: the create reported {id:?}, which the destination holds no \
-                     definition under: {held:?}"
-                )
-            });
-            assert_metric_definition(case, reported, requested, id);
-            reported.clone()
-        })
+        .map(|reported| metric_definition_id(case, reported))
         .collect()
 }
 
 /// The definition the destination now holds for each of `definitions`, in request order —
-/// the read-back that shows what the create stored, beside the answer it echoed.
+/// the read-back that shows what the create stored, which its own answer reports nothing
+/// about.
 pub(crate) async fn held_metric_definitions(
     router: &MultiServiceRouter,
     case: &str,
@@ -677,9 +649,10 @@ pub(crate) fn already_defined_message(requested: &Value) -> String {
 /// definition of `conflicting`, in the order the request named them: the modelled error's
 /// code, the definition that caused it and the message above.
 ///
-/// What the same answer ECHOES in `MetricDefinitions` is asserted on its own
-/// ([`assert_created_definitions`]), because a batch can carry both: the entries the
-/// destination already holds are refused while the rest are still created.
+/// What the call STORED is reported nowhere in the same answer
+/// ([`assert_reports_no_created_definitions`]), whether the batch refused every entry or
+/// only some: the entries the destination already holds are refused while the rest are
+/// still created, and the created ones are seen only by reading the destination back.
 pub(crate) fn assert_definition_conflicts(case: &str, answered: &Value, conflicting: &[Value]) {
     let errors = answered["Errors"].as_array().cloned().unwrap_or_default();
     assert_eq!(
@@ -732,8 +705,8 @@ pub(crate) async fn conflicting_metric_definitions(
     );
     let answered = reply.json(case);
     assert_definition_conflicts(case, &answered, definitions);
-    // Every entry was refused, so the call created nothing and echoes nothing.
-    assert_created_definitions(case, &answered, &[]);
+    // The create reports none of what it stored, here or anywhere.
+    assert_reports_no_created_definitions(case, &answered);
     held_metric_definitions(router, case, monitor, destination, destination_arn, definitions).await
 }
 

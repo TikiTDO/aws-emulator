@@ -33,7 +33,8 @@ use crate::metric_definitions::{
     EXTENDED_DIMENSION_KEYS, EXTENDED_METRICS,
 };
 use crate::support::{
-    assert_created_definitions, call, canonical_metric_definition, create, emulator, message, Reply,
+    assert_reports_no_created_definitions, call, canonical_metric_definition, create, emulator,
+    message, Reply,
 };
 
 /// The `ErrorCode` a per-definition error carries for a definition the service will not
@@ -436,8 +437,8 @@ async fn every_definition_the_model_declares_valid_is_created_and_read_back() {
         "accepted",
         answered["Errors"]
     );
-    // The create echoes one definition per entry it created, in request order.
-    assert_created_definitions("accepted", &answered, &requested);
+    // The create reports none of the definitions it created.
+    assert_reports_no_created_definitions("accepted", &answered);
 
     // Each is read back as the definition that was asked for.
     let held = stored(&router, "accepted", monitor).await;

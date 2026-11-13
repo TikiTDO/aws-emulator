@@ -30,7 +30,7 @@ use serde_json::{json, Value};
 use smithy_server_runtime::multi_service_router::MultiServiceRouter;
 
 use crate::support::{
-    all_metric_definitions, assert_created_definitions, call, create, emulator,
+    all_metric_definitions, assert_reports_no_created_definitions, call, create, emulator,
     held_metric_definition, message, metric_definition_id, put_metrics_destination,
     sole_metric_definition, Reply,
 };
@@ -433,8 +433,8 @@ async fn every_custom_metric_naming_only_rum_event_fields_is_created_and_read_ba
         "accepted",
         answered["Errors"]
     );
-    // The create echoes one definition per entry it created, in request order.
-    assert_created_definitions("accepted", &answered, &requested);
+    // The create reports none of the definitions it created.
+    assert_reports_no_created_definitions("accepted", &answered);
 
     // Each is read back as the definition that was asked for.
     let held = all_metric_definitions(&router, "accepted", monitor, DESTINATION, None, None).await;

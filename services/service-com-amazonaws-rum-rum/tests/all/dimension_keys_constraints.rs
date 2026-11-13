@@ -41,7 +41,8 @@ use crate::metric_definitions::{
     dimension_keys, event_pattern, extended_with_dimensions, EXTENDED_DIMENSION_KEYS,
 };
 use crate::support::{
-    all_metric_definitions, call, create, emulator, message, put_metrics_destination, Reply,
+    all_metric_definitions, assert_reports_no_created_definitions, call, create, emulator, message,
+    put_metrics_destination, Reply,
 };
 
 /// The error code a constraint refusal of a metrics call carries: the `ValidationException`
@@ -503,39 +504,17 @@ async fn a_dimension_entry_inside_the_modelled_constraints_is_stored_and_read_ba
             "case {case:?}: expected the definition to be accepted, got {:?}",
             answered["Errors"]
         );
-        let created = answered["MetricDefinitions"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        assert_eq!(
-            created.len(),
-            1,
-            "case {case:?}: expected the create to echo the definition it created, got \
-             {answered:?}"
-        );
-        assert_eq!(
-            created[0]["DimensionKeys"], requested["DimensionKeys"],
-            "case {case:?}: expected the echoed DimensionKeys to be {:?}, got {:?}",
-            requested["DimensionKeys"], created[0]["DimensionKeys"]
-        );
-        let echoed_id = created[0]["MetricDefinitionId"]
-            .as_str()
-            .unwrap_or_else(|| panic!("case {case:?}: the echo carries no id: {answered:?}"))
-            .to_string();
+        // The create reports none of what it stored.
+        assert_reports_no_created_definitions(&case, &answered);
 
-        // Read back through the implemented reader: the map is persisted whole, key for key,
-        // under the id the create echoed.
+        // Read back through the implemented reader, which is where the definition and the id
+        // it was stored under are seen: the map is persisted whole, key for key.
         let held = stored(&router, &case, monitor).await;
         let (id, reported) = held
             .iter()
             .find(|(_, held)| held["DimensionKeys"] == requested["DimensionKeys"])
             .unwrap_or_else(|| panic!("case {case:?}: the definition was not stored: {held:?}"));
         let id = id.clone();
-        assert_eq!(
-            id, echoed_id,
-            "case {case:?}: expected the stored definition to be held under the id the create \
-             echoed ({echoed_id:?}), got {id:?}"
-        );
         assert_eq!(
             reported["DimensionKeys"], requested["DimensionKeys"],
             "case {case:?}: expected the stored DimensionKeys to be {:?}, got {:?}",

@@ -13,10 +13,9 @@
 //!
 //! The rules under test, each over a SET of inputs rather than one request:
 //!
-//! * a batch create answers its per-item `Errors` and ECHOES every definition it created:
-//!   `MetricDefinitions` carries one definition per entry the call stored, each under the
-//!   `MetricDefinitionId` the call minted for it, which is the id the read reports it
-//!   under;
+//! * a batch create answers its per-item `Errors` and reports NONE of the definitions it
+//!   created: `MetricDefinitions` is the empty list however many entries the call stored,
+//!   so the stored definitions and the ids the call minted are seen only through the read;
 //! * a definition that named no namespace is an extended metric, which RUM publishes to
 //!   its own vended namespace, so a read reports `AWS/RUM` for it and the namespace the
 //!   request named for a custom metric;
@@ -39,10 +38,10 @@ use smithy_server_runtime::multi_service_router::MultiServiceRouter;
 
 use crate::metric_definitions::{custom, extended, with, EXTENDED_METRICS};
 use crate::support::{
-    all_metric_definitions, assert_created_definitions, batch_create_metric_definitions, call,
-    create, emulator, experiment_arn, message, metric_definition_id, metrics_destination_query,
-    percent_encoded, put_metrics_destination, update_metric_definition_reply,
-    EXTENDED_METRICS_NAMESPACE,
+    all_metric_definitions, assert_reports_no_created_definitions, batch_create_metric_definitions,
+    call, create, emulator, experiment_arn, message, metric_definition_id,
+    metrics_destination_query, percent_encoded, put_metrics_destination,
+    update_metric_definition_reply, EXTENDED_METRICS_NAMESPACE,
 };
 
 /// Every value `MetricDestination` admits.
@@ -201,7 +200,7 @@ fn create_cases() -> Vec<CreateCase> {
 }
 
 #[tokio::test]
-async fn a_batch_create_echoes_every_definition_it_created() {
+async fn a_batch_create_reports_its_errors_and_none_of_what_it_created() {
     let (router, _engine) = emulator();
 
     for (index, row) in create_cases().into_iter().enumerate() {
@@ -233,20 +232,23 @@ async fn a_batch_create_echoes_every_definition_it_created() {
             body_text(&reply)
         );
         // The body carries the `@required` per-item `Errors` as the EMPTY list a call that
-        // refused nothing reports — present rather than left out, which is asserted on the
-        // BYTES because restJson1 reads an absent member and an empty list differently on
-        // the wire while a parsed body does not tell them apart — and `MetricDefinitions`
-        // echoing one definition per entry the call created, for a batch of one as for a
-        // batch of five.
+        // refused nothing reports, and `MetricDefinitions` as the EMPTY list whatever the
+        // call created — both present rather than left out, which is asserted on the BYTES
+        // because restJson1 reads an absent member and an empty list differently on the
+        // wire while a parsed body does not tell them apart.
         let text = body_text(&reply);
         assert!(
             text.contains(r#""Errors":[]"#),
             "case {case:?}: expected the empty Errors list on the wire, got {text:?}"
         );
-        let echoed = assert_created_definitions(case, &reply.json(case), &row.definitions);
+        assert!(
+            text.contains(r#""MetricDefinitions":[]"#),
+            "case {case:?}: expected the empty MetricDefinitions list on the wire, got {text:?}"
+        );
+        assert_reports_no_created_definitions(case, &reply.json(case));
 
-        // And every definition it was asked for IS stored: what the create does not report
-        // is reported by the read.
+        // And every definition it was asked for IS stored, each under an id of its own:
+        // what the create does not report is reported by the read.
         let held = all_metric_definitions(
             &router,
             case,
@@ -269,14 +271,6 @@ async fn a_batch_create_echoes_every_definition_it_created() {
                 "case {case:?}: no definition named {name:?} was stored, got {held:?}"
             );
         }
-        // And every id the create echoed is the id the read reports that definition under.
-        for id in &echoed {
-            assert!(
-                held.contains_key(id),
-                "case {case:?}: the create echoed {id:?}, which the read holds no definition \
-                 under: {held:?}"
-            );
-        }
     }
 }
 
@@ -288,7 +282,7 @@ async fn a_partly_refused_batch_create_answers_only_the_items_that_failed() {
     destination_holding_definitions(&router, case, monitor, CLOUD_WATCH, None).await;
 
     // A definition the service will not store beside two it will, so the answer has an
-    // `Errors` list with something in it — and echoes only the two it created.
+    // `Errors` list with something in it — and reports none of the two it created.
     let good = [
         custom("Accepted", "MyApp/Mixed"),
         extended(EXTENDED_METRICS[4].name),
@@ -310,8 +304,8 @@ async fn a_partly_refused_batch_create_answers_only_the_items_that_failed() {
         body_text(&reply)
     );
     let answered = reply.json(case);
-    // Only the two definitions the service stored are echoed, in request order.
-    assert_created_definitions(case, &answered, &good);
+    // The two definitions the service stored are reported nowhere in the answer.
+    assert_reports_no_created_definitions(case, &answered);
     let errors = answered["Errors"]
         .as_array()
         .unwrap_or_else(|| panic!("case {case:?}: the create reported no Errors: {answered}"));
