@@ -2273,3 +2273,6 @@ pub mod workload;
 /// What of a service survives the emulator restarting: an opt-in snapshot per service, written
 /// atomically under `EMULATOR_STATE_DIR`.
 pub mod persist;
+
+/// Shared bounded payload bytes and the single transactional reference catalog.
+pub mod payload_store;
