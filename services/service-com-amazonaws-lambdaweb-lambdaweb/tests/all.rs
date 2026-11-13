@@ -17,6 +17,8 @@ mod absent_function_message;
 mod endpoint_data_plane;
 #[path = "all/enum_constraint_message.rs"]
 mod enum_constraint_message;
+#[path = "all/list_web_function_revisions.rs"]
+mod list_web_function_revisions;
 #[path = "all/logging_config_defaults.rs"]
 mod logging_config_defaults;
 #[path = "all/resource_policy.rs"]

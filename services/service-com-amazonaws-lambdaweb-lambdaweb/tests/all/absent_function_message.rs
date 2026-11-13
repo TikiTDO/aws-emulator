@@ -36,8 +36,9 @@ const SOME_ENDPOINT_NAME: &str = "an-endpoint";
 /// The sentence every operation reports an absent web function with: the fixed text
 /// `The function ` … ` does not exist.` around the one variable part, the identifier
 /// the request addressed the function by. Written out here rather than taken from
-/// the service's helper, so the test pins the wording.
-fn absent_function_message(identifier: &str) -> String {
+/// the service's helper, so the test pins the wording. Shared with the sibling suite
+/// of a listing that resolves a function too.
+pub(crate) fn absent_function_message(identifier: &str) -> String {
     format!("The function {identifier} does not exist.")
 }
 
@@ -117,6 +118,13 @@ fn calls_for(identifier: &str) -> Vec<Call> {
             method: "GET",
             path: format!("/web-functions/{label}/revisions/{SOME_REVISION_ID}"),
             body: None,
+        },
+        Call {
+            operation: "ListWebFunctionRevisions",
+            address: Address::NameOrArn,
+            method: "POST",
+            path: format!("/web-functions/{label}/list-revisions"),
+            body: Some(json!({})),
         },
         Call {
             operation: "GetWebFunctionEndpoint",

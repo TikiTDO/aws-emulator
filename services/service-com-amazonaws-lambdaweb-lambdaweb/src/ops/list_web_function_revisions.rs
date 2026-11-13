@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListWebFunctionRevisions
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListWebFunctionRevisions`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListWebFunctionRevisions::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! One page of the revisions of a web function, in creation order, optionally
+//! narrowed by the documented `state` filter. A read: the only write it makes is
+//! materialising the build transitions the clock had already made due.
 //!
 //! ## Shape of an operation
 //!
@@ -164,20 +159,98 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListWebFunctionRevisions` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListWebFunctionRevisionsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListWebFunctionRevisions"))
+        // The only filter name the service supports is `state`, and each of its values
+        // must name a `RevisionState`; a revision matches when its state is among the
+        // values of every filter supplied.
+        let wanted_states = crate::state::state_filters(
+            &input.filters.unwrap_or_default(),
+            REVISION_STATE_VALUES,
+            crate::state::RevisionState::from_wire,
+        )
+        .map_err(|message| {
+            ListWebFunctionRevisionsErrorModeled::ValidationException(ValidationException {
+                message,
+            })
+        })?;
+
+        let page_size = crate::state::page_size(input.max_results);
+
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            ListWebFunctionRevisionsErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("the web function store is unavailable".to_string()),
+                },
+            )
+        })?;
+        let mut state = state.lock();
+        // The only write a read makes: the state transitions the clock already owed,
+        // which were due whether or not anybody listed.
+        state.materialise_due_transitions(::std::time::SystemTime::now());
+
+        // The caller may name the function by name or by ARN; both resolve to the one
+        // stored record, and a listing of revisions of a function that is not stored is
+        // a missing resource rather than an empty page.
+        let name = crate::state::resolve_function_name(&input.function_name);
+        let Some(function) = state.functions.get(name) else {
+            return Err(
+                ListWebFunctionRevisionsErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        // The one sentence every operation that resolves a function
+                        // reports an absent one with.
+                        message: crate::state::function_not_found_message(&input.function_name),
+                        resource_id: Some(input.function_name.clone()),
+                        resource_type: Some("WebFunction".to_string()),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        // `revisions` is a `BTreeMap` keyed by `revisionId`, and ids are minted from a
+        // monotonic counter rendered in a fixed width, so `values()` walks this
+        // function's revisions in creation order — one stable order for the page and
+        // for the cursor minted from it.
+        let matching: Vec<&crate::state::Revision> = function
+            .revisions
+            .values()
+            .filter(|revision| {
+                wanted_states
+                    .iter()
+                    .all(|states| states.contains(&revision.state))
+            })
+            .collect();
+        let keys: Vec<&str> = matching
+            .iter()
+            .map(|revision| revision.revision_id.as_str())
+            .collect();
+
+        // An absent token starts at the first matching revision; a token this service
+        // minted names where to resume. Anything else is not a cursor at all.
+        let Some(page) =
+            crate::state::page_bounds(&keys, input.next_token.as_deref(), page_size)
+        else {
+            return Err(
+                ListWebFunctionRevisionsErrorModeled::ValidationException(ValidationException {
+                    message: "Member must be a nextToken returned by a previous \
+                              ListWebFunctionRevisions call: nextToken"
+                        .to_string(),
+                })
+                .into(),
+            );
+        };
+
+        let revisions: Vec<FunctionRevisionSummary> = matching
+            .get(page.start..page.end)
+            .unwrap_or_default()
+            .iter()
+            .map(|revision| revision.summary())
+            .collect();
+
+        Ok(ListWebFunctionRevisionsOutput {
+            revisions,
+            next_token: page.next_token,
+        })
     }
 }

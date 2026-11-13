@@ -31,8 +31,9 @@ use super::web_function_lifecycle::{build_config, role_arn, Emulator, Reply};
 /// The region every request here signs with.
 const REGION: &str = "us-east-1";
 
-/// The bucket the packages below are staged in.
-const BUCKET: &str = "lambda-web-packages";
+/// The bucket the packages below are staged in. Shared with the sibling suite that
+/// needs revisions whose builds settle differently.
+pub(crate) const BUCKET: &str = "lambda-web-packages";
 
 /// How long a test waits before expecting a build to have settled: the service's own span
 /// plus slack for a loaded test machine. An endpoint settles one span later again, so a
@@ -61,7 +62,7 @@ fn s3(emulator: &Emulator) -> aws_sdk_s3::Client {
 }
 
 /// Create the bucket every package below is staged in.
-async fn create_bucket(emulator: &Emulator) {
+pub(crate) async fn create_bucket(emulator: &Emulator) {
     // No `CreateBucketConfiguration`: `us-east-1` is the one Region a create must NOT
     // state a location constraint for, which Amazon S3 refuses as
     // `InvalidLocationConstraint`.
@@ -74,7 +75,7 @@ async fn create_bucket(emulator: &Emulator) {
 
 /// Stage one object through Amazon S3's OWN operations: what a build fetches is what that
 /// service really holds.
-async fn stage_object(emulator: &Emulator, key: &str, body: Vec<u8>) {
+pub(crate) async fn stage_object(emulator: &Emulator, key: &str, body: Vec<u8>) {
     let put = s3(emulator)
         .put_object()
         .bucket(BUCKET)
@@ -90,7 +91,7 @@ async fn stage_object(emulator: &Emulator, key: &str, body: Vec<u8>) {
 
 /// A .zip archive carrying `entries`, written with the maintained zip writer — a real
 /// archive, not bytes that happen to pass.
-fn archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
+pub(crate) fn archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for (name, contents) in entries {
         writer

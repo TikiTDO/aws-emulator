@@ -158,45 +158,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The only filter name the service supports is `state`, and each of its values
         // must name a `FunctionState`; a function matches when its state is among the
         // values of every filter supplied.
-        let mut wanted_states: Vec<Vec<crate::state::FunctionState>> = Vec::new();
-        for filter in input.filters.unwrap_or_default() {
-            if filter.name != crate::state::STATE_FILTER_NAME {
-                return Err(ListWebFunctionsErrorModeled::ValidationException(
-                    ValidationException {
-                        message: format!(
-                            "Member must satisfy the supported filter names [{}]: filters.name",
-                            crate::state::STATE_FILTER_NAME
-                        ),
-                    },
-                )
-                .into());
-            }
-            let mut states = Vec::with_capacity(filter.values.len());
-            for value in &filter.values {
-                let Some(state) = crate::state::FunctionState::from_wire(value) else {
-                    return Err(ListWebFunctionsErrorModeled::ValidationException(
-                        ValidationException {
-                            message: format!(
-                                "Member must satisfy enum value set [{}]: filters.values",
-                                FUNCTION_STATE_VALUES.join(", ")
-                            ),
-                        },
-                    )
-                    .into());
-                };
-                states.push(state);
-            }
-            wanted_states.push(states);
-        }
+        let wanted_states = crate::state::state_filters(
+            &input.filters.unwrap_or_default(),
+            FUNCTION_STATE_VALUES,
+            crate::state::FunctionState::from_wire,
+        )
+        .map_err(|message| {
+            ListWebFunctionsErrorModeled::ValidationException(ValidationException { message })
+        })?;
 
-        // `maxResults` is `@range(1..50)` with `@default(50)`, so a value outside that
-        // range is already refused at the boundary and a non-positive one here means
-        // the member was absent: the default page size applies.
-        let page_size = usize::try_from(input.max_results)
-            .ok()
-            .filter(|size| *size >= 1)
-            .unwrap_or(crate::state::DEFAULT_MAX_RESULTS)
-            .min(crate::state::MAX_MAX_RESULTS);
+        let page_size = crate::state::page_size(input.max_results);
 
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             ListWebFunctionsErrorModeled::InternalServerException(InternalServerException {
@@ -227,46 +198,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // An absent token starts at the first matching function; a token this service
         // minted names where to resume. Anything else is not a cursor at all.
-        let start = match input.next_token.as_deref() {
-            None => 0,
-            Some(token) => match crate::state::decode_cursor(token) {
-                Some(cursor) => crate::state::resume_index(cursor, &keys),
-                None => {
-                    return Err(ListWebFunctionsErrorModeled::ValidationException(
-                        ValidationException {
-                            message: "Member must be a nextToken returned by a previous \
-                                      ListWebFunctions call: nextToken"
-                                .to_string(),
-                        },
-                    )
-                    .into())
-                }
-            },
+        let Some(page) =
+            crate::state::page_bounds(&keys, input.next_token.as_deref(), page_size)
+        else {
+            return Err(ListWebFunctionsErrorModeled::ValidationException(
+                ValidationException {
+                    message: "Member must be a nextToken returned by a previous \
+                              ListWebFunctions call: nextToken"
+                        .to_string(),
+                },
+            )
+            .into());
         };
 
-        // The resume point is clamped to the end of the current listing and the page
-        // is taken through `get`, so a cursor can never index past the matches —
-        // whether because functions were deleted between pages or because the token
-        // was minted from a listing narrowed by different filters. A resume point
-        // past the last match is an empty final page, never a panic.
-        let page: &[&crate::state::WebFunction] = matching
-            .get(start.min(matching.len())..)
-            .unwrap_or_default();
-        let functions: Vec<FunctionSummary> = page
+        let functions: Vec<FunctionSummary> = matching
+            .get(page.start..page.end)
+            .unwrap_or_default()
             .iter()
-            .take(page_size)
             .map(|function| function.summary())
             .collect();
-        // The cursor names the first function AFTER this page, so `nextToken` is
-        // present exactly when one remains.
-        let next_index = start.min(matching.len()) + functions.len();
-        let next_token = keys
-            .get(next_index)
-            .map(|key| crate::state::encode_cursor(key, next_index));
 
         Ok(ListWebFunctionsOutput {
             functions,
-            next_token,
+            next_token: page.next_token,
         })
     }
 }

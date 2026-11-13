@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime};
 use sha2::{Digest, Sha256};
 
 use crate::ops::types::{
-    BuildConfig, FunctionRevisionSummary, FunctionSummary, RevisionError, ServiceConfig,
+    BuildConfig, Filter, FunctionRevisionSummary, FunctionSummary, RevisionError, ServiceConfig,
 };
 
 /// The account-settings slice: the quotas this emulator applies to web
@@ -121,16 +121,17 @@ pub fn default_log_group(function_name: &str) -> String {
     format!("/aws/lambda/web/{function_name}")
 }
 
-/// The page size `ListWebFunctions` uses when the caller sends no `maxResults`:
+/// The page size a listing uses when the caller sends no `maxResults`:
 /// the member's modelled `@default` (and the largest page its `@range` allows).
 pub const DEFAULT_MAX_RESULTS: usize = 50;
 
-/// The largest page `ListWebFunctions` returns (`MaxResults` range 1..50).
+/// The largest page a listing returns (`MaxResults` range 1..50).
 pub const MAX_MAX_RESULTS: usize = 50;
 
-/// The only filter name `ListWebFunctions` supports: "The only supported filter
-/// name is `state`." (source: `smithy_query(query="doc",
-/// shape="ListWebFunctionsRequest", member="filters")`).
+/// The only filter name the web-function and revision listings support: "The only
+/// supported filter name is `state`." (source: `smithy_query(query="doc",
+/// shape="ListWebFunctionsRequest", member="filters")`, stated identically by
+/// `ListWebFunctionRevisionsRequest$filters`).
 pub const STATE_FILTER_NAME: &str = "state";
 
 /// `stateReason` while a web function is still being created.
@@ -192,6 +193,14 @@ impl RevisionState {
             Self::Active => "Active",
             Self::Failed => "Failed",
         }
+    }
+
+    /// The state a wire value names, or `None` when it names none — which is how
+    /// a `state` filter value that is not a `RevisionState` is refused.
+    pub fn from_wire(value: &str) -> Option<Self> {
+        [Self::Pending, Self::Active, Self::Failed]
+            .into_iter()
+            .find(|state| state.wire() == value)
     }
 }
 
@@ -689,7 +698,55 @@ fn hex_uuid_shape(high: u64, low: u64) -> String {
     )
 }
 
-/// Where a `ListWebFunctions` page resumes: the digest of the key the page starts
+/// The page a listing serves, from its `maxResults` member.
+///
+/// `MaxResults` is `@range(1..50)` with `@default(50)` on every listing of this
+/// service, so a value outside that range is already refused at the boundary and a
+/// non-positive one here means the member was absent: the default page size applies.
+pub fn page_size(max_results: i32) -> usize {
+    usize::try_from(max_results)
+        .ok()
+        .filter(|size| *size >= 1)
+        .unwrap_or(DEFAULT_MAX_RESULTS)
+        .min(MAX_MAX_RESULTS)
+}
+
+/// The states each supplied filter narrows a listing to, or the `ValidationException`
+/// message the request earns.
+///
+/// ONE rule for every listing of this service: the only filter name supported is
+/// [`STATE_FILTER_NAME`] and each of its values must name one of `values` — the
+/// resource's own state enum, parsed by `from_wire`. The result holds one entry per
+/// supplied filter, so a resource matches when its state is among the values of
+/// EVERY filter.
+pub fn state_filters<State>(
+    filters: &[Filter],
+    values: &[&str],
+    from_wire: impl Fn(&str) -> Option<State>,
+) -> Result<Vec<Vec<State>>, String> {
+    let mut wanted = Vec::with_capacity(filters.len());
+    for filter in filters {
+        if filter.name != STATE_FILTER_NAME {
+            return Err(format!(
+                "Member must satisfy the supported filter names [{STATE_FILTER_NAME}]: filters.name"
+            ));
+        }
+        let mut states = Vec::with_capacity(filter.values.len());
+        for value in &filter.values {
+            let Some(state) = from_wire(value) else {
+                return Err(format!(
+                    "Member must satisfy enum value set [{}]: filters.values",
+                    values.join(", ")
+                ));
+            };
+            states.push(state);
+        }
+        wanted.push(states);
+    }
+    Ok(wanted)
+}
+
+/// Where a listing page resumes: the digest of the key the page starts
 /// at, and that key's index in the listing the cursor was minted from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ListCursor {
@@ -757,6 +814,42 @@ pub fn resume_index(cursor: ListCursor, keys: &[&str]) -> usize {
     keys.iter()
         .position(|key| key_digest(key) == cursor.digest)
         .unwrap_or_else(|| cursor.offset.min(keys.len()))
+}
+
+/// The slice of a listing one page covers, and the cursor that resumes after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListPage {
+    /// The index of the first item of the page in the listing it was taken from.
+    pub start: usize,
+    /// One past the index of its last item.
+    pub end: usize,
+    /// The cursor naming the first item AFTER this page, present exactly when one
+    /// remains.
+    pub next_token: Option<String>,
+}
+
+/// The page a listing serves, from the identities of its matching items in their
+/// stable order and the cursor the caller sent.
+///
+/// `None` when `next_token` is not a cursor this service minted — the caller answers
+/// that with its own `ValidationException`, naming its own operation.
+///
+/// The resume point is clamped to the end of the CURRENT listing, so a cursor can never
+/// index past the matches — whether because items were deleted between pages or because
+/// the token was minted from a listing narrowed by different filters. A resume point past
+/// the last match is an empty final page, never a panic.
+pub fn page_bounds(keys: &[&str], next_token: Option<&str>, page_size: usize) -> Option<ListPage> {
+    let start = match next_token {
+        None => 0,
+        Some(token) => resume_index(decode_cursor(token)?, keys),
+    }
+    .min(keys.len());
+    let end = keys.len().min(start.saturating_add(page_size));
+    Some(ListPage {
+        start,
+        end,
+        next_token: keys.get(end).map(|key| encode_cursor(key, end)),
+    })
 }
 
 /// This service's store in the shared engine: call it with a handler's `&*self.engine`.
