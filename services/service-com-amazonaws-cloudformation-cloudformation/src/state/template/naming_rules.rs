@@ -20,6 +20,8 @@ pub(super) fn naming_rules(resource_type: &str) -> Option<NameRules> {
         // "Bucket names must be between 3 (min) and 63 (max) characters long", lowercase
         // (Amazon S3 bucket naming rules).
         S3_BUCKET => rules(63, Characters::LowercaseAlphanumeric),
+        // Collapse adjacent separators; a generated trail is a valid non-IP 3..128 name.
+        "AWS::CloudTrail::Trail" => rules(128, Characters::LowercaseAlphanumeric),
         // IAM `CreateRole.RoleName`: `@length(min: 1, max: 64)` (`roleNameType`, IAM's own
         // Smithy model). A longer name is the 400 `ValidationError` IAM answers, which the
         // stack that declared the role then rolls back on.

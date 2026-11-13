@@ -208,6 +208,7 @@ mod appconfig_resources;
 /// own NAMES live here, beside the arms that provision them
 /// ([`super::template::return_values`] names the two whose identity their create answers).
 pub(super) mod application_auto_scaling;
+pub(super) mod cloudtrail_trail;
 mod cognito_identity_pool;
 /// The three Amazon Cognito user-pool types a stack declares — the user pool, the app client
 /// that signs in against it and the identity provider it federates with: visible to the rest
@@ -223,6 +224,8 @@ pub(super) mod dynamodb_table;
 /// ([`ec2_instance`]).
 mod ec2_instance;
 mod ec2_vpc_network;
+/// One actual EC2 ingress rule, independent of the group that owns it.
+pub(super) mod security_group_ingress;
 /// `AWS::ECS::TaskDefinition`: the revision a stack declares, registered in Amazon ECS
 /// itself ([`ecs_task_definition`]).
 mod ecs_task_definition;
@@ -285,6 +288,8 @@ mod outstanding_teardown;
 /// Where each of this algorithm's questions is PUT to the module that owns a resource type
 /// ([`Owner`]'s own methods, moved out so adding a type's arms does not grow this file).
 mod owner;
+#[cfg(test)]
+mod managed_tags_tests;
 
 /// The success signals the INSTANCES of a signalled resource send: what releases the
 /// resource-signal wait of a resource whose signals come from the instances it consists of
@@ -331,6 +336,35 @@ pub(super) fn applicable_tags(propagated: &[(String, String)]) -> Vec<(String, S
         .filter(|(key, _)| !is_reserved_tag_key(key))
         .cloned()
         .collect()
+}
+
+/// Ownership bookkeeping for the owners that preserve unrelated live tags. This is the
+/// same effective set those owners send, captured from resolved properties; recognizing a
+/// type alone must never give an unimplemented owner tag-removal authority.
+fn managed_tags_for(
+    resource_type: &str,
+    declared: &Value,
+    propagated: &[(String, String)],
+) -> Option<Vec<(String, String)>> {
+    (resource_type == "AWS::CloudTrail::Trail")
+        .then(|| applicable_tags(&super::provisioner::tags_of(declared, propagated)))
+}
+
+/// A successful restoration replays settings, not a new declaration of ownership. In
+/// particular a REVERT_DRIFT snapshot may contain unrelated actual tags; restoring those
+/// values must not grant the next deployment authority to remove their keys.
+fn successful_managed_tags(
+    resource_type: &str,
+    deployed: &Value,
+    propagated: &[(String, String)],
+    restoring: bool,
+    restored_witness: &Option<Vec<(String, String)>>,
+) -> Option<Vec<(String, String)>> {
+    if restoring {
+        restored_witness.clone()
+    } else {
+        managed_tags_for(resource_type, deployed, propagated)
+    }
 }
 
 /// One tag set as the `[{Key, Value}]` LIST most AWS models spell a `Tag` with — Amazon
@@ -470,6 +504,9 @@ pub struct StackProvenance {
     pub stack_id: String,
     /// The stack-level `Tags` in force, in the order the stack records them.
     pub tags: Vec<(String, String)>,
+    /// Replaying a previous resource snapshot, rather than accepting newly authored tags.
+    /// Its ownership witness is restored separately from its (possibly actual-drift) settings.
+    pub restoring_tag_ownership: bool,
     /// The `Capabilities` in force on the stack — what the operation deploying it
     /// ACKNOWLEDGED. Carried because a resource that is itself a STACK is created under the
     /// parent operation's acknowledgement ("if you have IAM resources in nested stacks, you
@@ -823,6 +860,10 @@ pub(super) enum Owner {
     LogsResource(logs_resources::Kind),
     /// `AWS::IoT::Authorizer`, whose arms are [`iot_authorizer`]'s.
     IotAuthorizer,
+    /// A real trail in CloudTrail, configured through its signed service APIs.
+    CloudTrailTrail,
+    /// A single actual inbound rule whose identity EC2 assigns.
+    SecurityGroupIngress,
     /// One of the Amazon EC2 VPC-network types [`ec2_vpc_network`] creates: the route table,
     /// the subnet association that puts a subnet on one, the VPC endpoint reached through it,
     /// the internet and virtual private gateways, the attachment that puts one of those on a
@@ -913,6 +954,12 @@ pub(super) fn owner_for(resource_type: &str) -> Option<Owner> {
     }
     if let Some(kind) = logs_resources::kind_of(resource_type) {
         return Some(Owner::LogsResource(kind));
+    }
+    if resource_type == cloudtrail_trail::TRAIL {
+        return Some(Owner::CloudTrailTrail);
+    }
+    if resource_type == security_group_ingress::SECURITY_GROUP_INGRESS {
+        return Some(Owner::SecurityGroupIngress);
     }
     if resource_type == iot_authorizer::IOT_AUTHORIZER {
         return Some(Owner::IotAuthorizer);
@@ -1749,6 +1796,8 @@ pub async fn reconcile(
         let Some(mut resource) = declared.next() else {
             break;
         };
+        // Save restore intent before carry_forward replaces it with the applied witness.
+        let restored_managed_tags = resource.managed_tags.clone();
         // The resource's record carries the document the stack RECORDS — a secure
         // reference's value is never one of them — while the owning service is asked for
         // the resource with the resolved one.
@@ -2129,12 +2178,28 @@ pub async fn reconcile(
             // change. Only a type with a re-tagging arm has anything asked of its service
             // ([`super::provisioner::Provisioner::retag`]), and that arm is idempotent, so a
             // resource whose tags already agree with the set has nothing called about it.
+            // Forward ownership comes from the resolved request; a rollback restores its
+            // separate witness, never ownership inferred from actual-drift settings.
+            // The applied witness stays on the resource until the tagging call succeeds.
+            let desired_managed_tags = successful_managed_tags(
+                &resource.resource_type,
+                &deployed_properties,
+                &stack.tags_for(&resource.logical_id),
+                stack.restoring_tag_ownership,
+                &restored_managed_tags,
+            );
             let retagged = match owner_for(&resource.resource_type) {
                 Some(provisioner) => {
                     let tags = stack.tags_for(&resource.logical_id);
                     super::service_role::on_resource(
                         super::service_role::target_of(&resource),
-                        provisioner.retag(ctx, region, &resource, &deployed_properties, &tags),
+                        provisioner.retag(
+                            ctx, region, &resource, &deployed_properties, &tags,
+                            // Restore intent limits live-tag mutation as well as the next witness.
+                            stack.restoring_tag_ownership.then_some(
+                                desired_managed_tags.as_deref().unwrap_or(&[]),
+                            ),
+                        ),
                     )
                     .await
                 }
@@ -2144,6 +2209,7 @@ pub async fn reconcile(
                 // Both halves of the change landed, which is what ends a resource this
                 // deployment acted on.
                 Ok(()) => {
+                    resource.managed_tags = desired_managed_tags;
                     if changed {
                         outcome.transitions.push(ResourceTransition::finished(
                             &resource,
@@ -2376,6 +2442,15 @@ pub async fn reconcile(
         // readiness read that follows it are two questions for the same provisioner, and
         // one lookup is what keeps them from ever being asked of different ones.
         let owner = owner_for(&resource.resource_type);
+        // The create below moves the resolved properties into its request. Keep the exact
+        // managed set before that move, but record ownership only after owner success.
+        let desired_managed_tags = successful_managed_tags(
+            &resource.resource_type,
+            &deployed_properties,
+            &stack.tags_for(&resource.logical_id),
+            stack.restoring_tag_ownership,
+            &restored_managed_tags,
+        );
         let created = match owner {
             // The resource is created WITH the tags CloudFormation gives it: the stack's
             // own, plus the three that name the stack and this resource's place in it.
@@ -2422,6 +2497,7 @@ pub async fn reconcile(
             // itself, where that service ASSIGNS the id rather than taking it from a name
             // the template or CloudFormation decided.
             Ok(created) => {
+                resource.managed_tags = desired_managed_tags;
                 let computed = resource.physical_resource_id.clone();
                 let computed_attributes = resource.attributes.clone();
                 adopt_minted_identity(&mut resource, created.physical_resource_id);
@@ -2912,6 +2988,7 @@ fn carry_forward(existing: &StoredResource, resource: &mut StoredResource) {
     // says: carrying one resource forward cannot make a declared-only resource — one of a
     // type no service here provisions — into a resource some service holds.
     resource.materialised = existing.materialised;
+    resource.managed_tags = existing.managed_tags.clone();
     for (name, value) in &existing.attributes {
         resource.attributes.insert(name.clone(), value.clone());
     }

@@ -75,6 +75,8 @@ mod change_set_status_refusals;
 mod client_request_tokens;
 #[path = "all/cloudformation_ec2_instance_rollback.rs"]
 mod cloudformation_ec2_instance_rollback;
+#[path = "all/cloudtrail_trail_stack_resources.rs"]
+mod cloudtrail_trail_stack_resources;
 #[path = "all/cognito_resource_types.rs"]
 mod cognito_resource_types;
 #[path = "all/cognito_user_pool_return_values.rs"]
@@ -429,6 +431,8 @@ mod stack_fleet_resources;
 mod stack_identifier_refusals;
 #[path = "all/stack_input_contracts.rs"]
 mod stack_input_contracts;
+#[path = "all/standalone_security_group_ingress.rs"]
+mod standalone_security_group_ingress;
 #[path = "all/stack_lifecycle.rs"]
 mod stack_lifecycle;
 #[path = "all/stack_not_found_wording.rs"]

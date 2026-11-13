@@ -590,6 +590,7 @@ mod tests {
             metadata: None,
             properties,
             materialised: true,
+            managed_tags: None,
             deletion_policy: None,
         }
     }

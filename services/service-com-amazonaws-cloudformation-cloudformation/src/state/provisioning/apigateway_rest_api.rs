@@ -1635,6 +1635,7 @@ mod tests {
             metadata: None,
             properties,
             materialised: false,
+            managed_tags: None,
             deletion_policy: None,
         }
     }

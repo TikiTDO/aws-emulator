@@ -58,6 +58,12 @@ impl Owner {
             Self::IotAuthorizer => {
                 iot_authorizer::create(ctx, region, resource, propagated).await
             }
+            Self::CloudTrailTrail => {
+                cloudtrail_trail::create(ctx, region, resource, propagated).await
+            }
+            Self::SecurityGroupIngress => {
+                security_group_ingress::create(ctx, region, resource).await
+            }
             Self::Ec2VpcNetwork(kind) => {
                 ec2_vpc_network::create(ctx, region, kind, resource, propagated).await
             }
@@ -188,6 +194,10 @@ impl Owner {
             // declaration asked for.
             Self::LogsResource(_) => Ok(logs_resources::ready()),
             Self::IotAuthorizer => Ok(iot_authorizer::ready()),
+            Self::CloudTrailTrail => {
+                cloudtrail_trail::readiness(ctx, region, physical_resource_id).await
+            }
+            Self::SecurityGroupIngress => Ok(Readiness::Ready),
             // A task-definition revision is `ACTIVE` the moment `RegisterTaskDefinition`
             // answers.
             Self::EcsTaskDefinition => Ok(ecs_task_definition::ready()),
@@ -292,6 +302,10 @@ impl Owner {
             // authorizer's `Arn` is the one its create answered with. So there is nothing
             // left to read once any of them is up.
             Self::LogsResource(_) | Self::IotAuthorizer => Ok(BTreeMap::new()),
+            Self::CloudTrailTrail => {
+                cloudtrail_trail::ready_attributes(ctx, region, physical_resource_id).await
+            }
+            Self::SecurityGroupIngress => Ok(BTreeMap::new()),
             // A task-definition revision's `TaskDefinitionArn` is the one its own
             // registration answered with, so there is nothing left to read once it is up.
             Self::EcsTaskDefinition => Ok(BTreeMap::new()),
@@ -401,6 +415,10 @@ impl Owner {
             // deleted in.
             Self::LogsResource(_) => Ok(logs_resources::removal()),
             Self::IotAuthorizer => Ok(iot_authorizer::removal()),
+            Self::CloudTrailTrail => {
+                cloudtrail_trail::removal(ctx, region, physical_resource_id).await
+            }
+            Self::SecurityGroupIngress => Ok(Removal::Gone),
             // `DeregisterTaskDefinition` marks the revision `INACTIVE` as it answers, so
             // there is nothing to wait for.
             Self::EcsTaskDefinition => Ok(ecs_task_definition::removal()),
@@ -517,6 +535,12 @@ impl Owner {
             Self::IotAuthorizer => {
                 iot_authorizer::update(ctx, region, resource, declared).await
             }
+            Self::CloudTrailTrail => {
+                cloudtrail_trail::update(ctx, region, resource, declared).await
+            }
+            Self::SecurityGroupIngress => {
+                security_group_ingress::update(ctx, region, resource, declared).await.map(Some)
+            }
             // A task-definition revision cannot be CHANGED: Amazon ECS publishes no call that
             // edits one, so a changed declaration registers a new revision rather than
             // reaching this ([`ecs_task_definition::update`]).
@@ -596,6 +620,7 @@ impl Owner {
         resource: &StoredResource,
         declared: &Value,
         propagated: &[(String, String)],
+        restoring_managed: Option<&[(String, String)]>,
     ) -> Result<(), Refusal> {
         match self {
             // A bucket's tags are Amazon S3's own `PutBucketTagging`/`DeleteBucketTagging`,
@@ -633,6 +658,14 @@ impl Owner {
             // log group and of an authorizer that already exist are reconciled by no arm here
             // yet ([`Provisioner::retag`]'s own default), so nothing is asked about them.
             Self::LogsResource(_) | Self::IotAuthorizer => Ok(()),
+            Self::CloudTrailTrail => {
+                cloudtrail_trail::retag(
+                    ctx, region, resource, declared, propagated,
+                    resource.managed_tags.as_deref().unwrap_or(&[]),
+                    restoring_managed,
+                ).await
+            }
+            Self::SecurityGroupIngress => Ok(()),
             // A task-definition revision's tags are the ones its registration carried, and no
             // deployment changes a revision, so nothing is asked about them.
             Self::EcsTaskDefinition => Ok(()),
@@ -730,6 +763,8 @@ impl Owner {
                 logs_resources::delete(ctx, region, kind, resource).await
             }
             Self::IotAuthorizer => iot_authorizer::delete(ctx, region, resource).await,
+            Self::CloudTrailTrail => cloudtrail_trail::delete(ctx, region, resource).await,
+            Self::SecurityGroupIngress => security_group_ingress::delete(ctx, region, resource).await,
             // Amazon ECS takes no snapshot of a task-definition revision on the way out:
             // there is no such call, so a `Snapshot` deletion policy on one deregisters the
             // revision with no snapshot invented for it.
@@ -864,6 +899,12 @@ impl Owner {
             Self::IotAuthorizer => {
                 iot_authorizer::actual_configuration(ctx, region, resource).await
             }
+            Self::CloudTrailTrail => {
+                cloudtrail_trail::actual_configuration(ctx, region, resource).await
+            }
+            Self::SecurityGroupIngress => {
+                security_group_ingress::actual_configuration(ctx, region, resource).await
+            }
             // A task-definition revision is immutable — every property of the type requires
             // the resource to be replaced, and Amazon ECS publishes no call that edits one —
             // so nothing of it can have drifted from its declaration.
@@ -940,6 +981,7 @@ impl Owner {
             Self::DynamodbTable => message.to_string(),
             // Amazon CloudWatch Logs's and AWS IoT's do the same.
             Self::LogsResource(_) | Self::IotAuthorizer => message.to_string(),
+            Self::CloudTrailTrail | Self::SecurityGroupIngress => message.to_string(),
             // Amazon ECS's does the same.
             Self::EcsTaskDefinition => message.to_string(),
             // Amazon EC2's does the same.

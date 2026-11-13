@@ -267,7 +267,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // have to be put back or deleted.
                 stack.region.clone(),
                 operation_id,
-                stack.provenance(),
+                crate::state::provisioning::StackProvenance {
+                    restoring_tag_ownership: true,
+                    ..stack.provenance()
+                },
                 work,
                 // The records the stack HOLDS, which is the set a discarding rollback
                 // reports a deletion of.

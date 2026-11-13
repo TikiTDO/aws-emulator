@@ -99,6 +99,8 @@ service-com-amazonaws-lambda-awsgirapiservice = { workspace = true }
 emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
+# Generic CFN lifecycle fixtures verify the actual CloudTrail owner.
+service-com-amazonaws-cloudtrail-cloudtrail-20131101 = { workspace = true }
 # URL-form-encodes the request bodies this crate's integration tests send (the encoder
 # behind the `url` crate), so no test suite hand-rolls a percent-encoder.
 form_urlencoded = "1"

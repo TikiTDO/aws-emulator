@@ -1503,6 +1503,11 @@ pub struct StoredResource {
     /// provisioner for: nothing was created for it anywhere (see
     /// [`provisioning`](crate::state::provisioning)).
     pub materialised: bool,
+    /// The tag set this owner last successfully accepted from CloudFormation. Internal
+    /// ownership evidence, never a public attribute or a copy of every live owner tag.
+    /// `None` is unknown (including import); `Some(vec![])` is a known empty managed set.
+    /// Carried with resource snapshots so rollback removes only keys CFN actually managed.
+    pub managed_tags: Option<Vec<(String, String)>>,
     /// The `DeletionPolicy` resource attribute the template declared for this resource, as
     /// written — what CloudFormation does with the physical resource when the stack is
     /// deleted or the resource is removed from it ([`deletion_policy`]).
@@ -2309,7 +2314,10 @@ impl ComAmazonawsCloudformationCloudformationState {
                 Some(DueRollback {
                     region: stack.region.clone(),
                     stack_id: stack.stack_id.clone(),
-                    provenance: stack.provenance(),
+                    provenance: provisioning::StackProvenance {
+                        restoring_tag_ownership: true,
+                        ..stack.provenance()
+                    },
                     // The role the rollback's own calls are made under, which is the one in
                     // force on the stack ([`service_role`]).
                     role_arn: stack.role_arn.clone(),

@@ -556,6 +556,7 @@ mod tests {
                 metadata: None,
                 properties: properties.clone(),
                 materialised: false,
+                managed_tags: None,
                 deletion_policy: None,
             };
             let family = declared_family(&resource);

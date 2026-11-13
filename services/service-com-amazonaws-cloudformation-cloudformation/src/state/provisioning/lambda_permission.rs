@@ -280,6 +280,7 @@ mod tests {
                 metadata: None,
                 properties: properties.clone(),
                 materialised: false,
+                managed_tags: None,
                 deletion_policy: None,
             };
             let refused = function_of(&resource);

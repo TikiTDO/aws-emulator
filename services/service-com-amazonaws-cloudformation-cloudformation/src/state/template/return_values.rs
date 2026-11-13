@@ -33,6 +33,13 @@ pub(super) fn return_values(
     let properties = &declared.properties;
     let mut attributes = BTreeMap::new();
     match resource_type {
+        "AWS::CloudTrail::Trail" => {
+            // Placeholders resolve to actual owning-service attributes after creation.
+            for attribute in ["Arn", "SnsTopicArn"] {
+                attributes.insert(attribute.into(), service_assigned_document(name, attribute));
+            }
+            (name.to_string(), attributes)
+        }
         // "Ref returns the report group name"; Fn::GetAtt: Arn. This is the type
         // `super::provisioning` creates in CodeBuild itself, which then answers with the
         // report group's own ARN — the same ARN this computes, since both are built from
@@ -1935,6 +1942,7 @@ pub fn published_attribute_names(resource_type: &str) -> &'static [&'static str]
         ],
         S3VECTORS_VECTOR_BUCKET => &["VectorBucketArn"],
         S3VECTORS_INDEX => &["IndexArn"],
+        "AWS::CloudTrail::Trail" => &["Arn", "SnsTopicArn"],
         "AWS::DynamoDB::Table" => &["Arn"],
         "AWS::Lambda::Function" => &["Arn"],
         // "Fn::GetAtt … FunctionArn: the ARN of the version. Version: the version number."
@@ -2365,6 +2373,7 @@ pub fn identity_is_service_assigned(resource_type: &str) -> bool {
         || resource_type == EC2_VPC
         || resource_type == EC2_SUBNET
         || resource_type == EC2_SECURITY_GROUP
+        || resource_type == "AWS::EC2::SecurityGroupIngress"
         // An Amazon EBS volume is a fourth: `CreateVolume` takes no identifier either — the
         // declaration states the volume's zone, size and type — Amazon EC2 assigns the
         // `vol-` id, and "Ref returns the volume ID", so the identifier in force is the one

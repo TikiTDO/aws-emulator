@@ -233,6 +233,7 @@ pub fn adopted_resources(
                     .clone()
                     .unwrap_or_else(|| declaration.physical_resource_id.clone()),
                 materialised: true,
+                managed_tags: None,
                 ..declaration.clone()
             })
         })
@@ -591,6 +592,7 @@ mod tests {
                 metadata: None,
                 properties: ::serde_json::Value::Null,
                 materialised: true,
+                managed_tags: None,
                 deletion_policy: None,
             };
             let adopted = adopt_identifier(&mut resource, identifier);
