@@ -600,6 +600,22 @@ pub(super) fn return_values(
             }
             (name.to_string(), attributes)
         }
+        // "Ref returns the group name"; Fn::GetAtt: Arn. This is the type
+        // `super::provisioning` creates in Resource Groups itself, which keys a group by its
+        // name and mints the same ARN from the Region and that name (`group_arn` in its own
+        // state module). The ARN namespace is that model's `arnNamespace`,
+        // [`RESOURCE_GROUPS_ARN_NAMESPACE`], not the type's CloudFormation segment.
+        RESOURCE_GROUPS_GROUP => {
+            attributes.insert(
+                "Arn".to_string(),
+                ::emulator_server::emulator_arn(
+                    RESOURCE_GROUPS_ARN_NAMESPACE,
+                    region,
+                    &format!("group/{name}"),
+                ),
+            );
+            (name.to_string(), attributes)
+        }
         // "Ref returns the schedule group name"; Fn::GetAtt: Arn (and the group's State,
         // CreationDate and LastModificationDate, which are EventBridge Scheduler's own to
         // decide and are not computed here). This is the type `super::provisioning`
@@ -2011,6 +2027,7 @@ pub fn published_attribute_names(resource_type: &str) -> &'static [&'static str]
         STEP_FUNCTIONS_ACTIVITY => &["Arn", "Name"],
         STEP_FUNCTIONS_STATE_MACHINE => &["Arn", "Name"],
         SCHEDULER_SCHEDULE_GROUP | SCHEDULER_SCHEDULE => &["Arn"],
+        RESOURCE_GROUPS_GROUP => &["Arn"],
         _ => &[],
     }
 }
@@ -3636,6 +3653,19 @@ pub const SSM_ASSOCIATION: &str = "AWS::SSM::Association";
 /// ("Fn::GetAtt … AssociationId: the association ID"), which is also the member Systems
 /// Manager's own `AssociationDescription` reports it as.
 pub const SSM_ASSOCIATION_ID_ATTRIBUTE: &str = "AssociationId";
+
+/// A Resource Groups resource group's resource type (that model:
+/// `cloudFormationName: ResourceGroups`, `arnNamespace: resource-groups`). This is a type
+/// `super::provisioning` creates in Resource Groups itself, and "Ref returns the group name",
+/// so the group a stack declares is the one `resource-groups GetGroup` answers with.
+pub const RESOURCE_GROUPS_GROUP: &str = "AWS::ResourceGroups::Group";
+
+/// The ARN namespace Resource Groups mints its groups under (that model's
+/// `awsService.arnNamespace`): the HYPHENATED `resource-groups`, which is the only namespace
+/// token the modelled group-ARN form admits (`GroupArnV2`'s pattern,
+/// `^arn:aws(-[a-z]+)*:resource-groups:…:group/…$`) — and is NOT what lower-casing the type's
+/// `ResourceGroups` namespace segment gives.
+pub const RESOURCE_GROUPS_ARN_NAMESPACE: &str = "resource-groups";
 
 /// An EventBridge Scheduler schedule group's resource type (that model:
 /// `cloudFormationName: Scheduler`, `arnNamespace: scheduler`). This is a type

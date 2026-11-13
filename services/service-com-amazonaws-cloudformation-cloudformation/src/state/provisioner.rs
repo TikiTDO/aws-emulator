@@ -499,7 +499,7 @@ use super::template::{
     KMS_ALIAS, KMS_KEY,
     MQ_BROKER, MSK_CLUSTER,
     MSK_SERVERLESS_CLUSTER, MWAA_ENVIRONMENT, OPENSEARCH_DOMAIN, PIPES_PIPE, REDSHIFT_CLUSTER,
-    REDSHIFT_CLUSTER_SUBNET_GROUP, ROUTE53RESOLVER_ENDPOINT,
+    REDSHIFT_CLUSTER_SUBNET_GROUP, RESOURCE_GROUPS_GROUP, ROUTE53RESOLVER_ENDPOINT,
     ROUTE53RESOLVER_FIREWALL_DOMAIN_LIST, ROUTE53RESOLVER_FIREWALL_RULE_GROUP,
     ROUTE53RESOLVER_FIREWALL_RULE_GROUP_ASSOCIATION,
     ROUTE53RESOLVER_RULE,
@@ -795,6 +795,13 @@ pub(super) enum Provisioner {
     /// its `DesiredState` asked for.
     PipesPipe,
     SsmParameter,
+    /// `AWS::ResourceGroups::Group`: a resource group of Resource Groups, which
+    /// `CreateGroup` creates under the name the template states — the name this type's `Ref`
+    /// returns and the identifier every Resource Groups call on one takes — `UpdateGroup` and
+    /// `UpdateGroupQuery` change and `DeleteGroup` removes. The ARN the type publishes is the
+    /// one that service mints, under its own hyphenated `arnNamespace`, so it is read off the
+    /// create's own answer.
+    ResourceGroupsGroup,
     /// `AWS::SSM::Association`: a State Manager association of AWS Systems Manager, which
     /// `CreateAssociation` creates, `UpdateAssociation` changes and `DeleteAssociation`
     /// removes.
@@ -1011,6 +1018,7 @@ pub(super) fn provisioner_for(resource_type: &str) -> Option<Provisioner> {
         REDSHIFT_CLUSTER_PARAMETER_GROUP => Some(Provisioner::RedshiftClusterParameterGroup),
         EVENTS_RULE => Some(Provisioner::EventsRule),
         PIPES_PIPE => Some(Provisioner::PipesPipe),
+        RESOURCE_GROUPS_GROUP => Some(Provisioner::ResourceGroupsGroup),
         SSM_PARAMETER => Some(Provisioner::SsmParameter),
         SSM_ASSOCIATION => Some(Provisioner::SsmAssociation),
         STEP_FUNCTIONS_ACTIVITY => Some(Provisioner::StepFunctionsActivity),
@@ -1335,6 +1343,13 @@ impl Provisioner {
             // `CreatePipe`'s own `Tags` member takes, so a pipe a stack creates carries the
             // tags CloudFormation gives it beside the ones the declaration asks for.
             Self::PipesPipe => event_pipes::create_pipe(ctx, region, resource, propagated).await,
+            // `AWS::ResourceGroups::Group` publishes `Tags` as the `[{Key, Value}]` list most
+            // types do, which `CreateGroup` takes as its own `Tags` MAP, so a group a stack
+            // creates carries the tags CloudFormation gives it beside the ones the
+            // declaration asks for.
+            Self::ResourceGroupsGroup => {
+                create_resource_group(ctx, region, resource, propagated).await
+            }
             Self::SsmParameter => put_parameter(ctx, region, resource, propagated).await,
             // `AWS::SSM::Association` publishes no `Tags` property — Systems Manager tags
             // documents and managed nodes rather than the associations between them — so the
@@ -1707,6 +1722,11 @@ impl Provisioner {
                 // `AddTagsToResource` alike, in the one check its own crate's tag validation
                 // makes — so a cache cluster carries the stack's own tags without the three.
                 | Self::ElastiCacheCacheCluster
+                // Resource Groups refuses a tag key in the reserved namespace on every call
+                // that takes tags — `CreateGroup`'s `Tags` map and `Tag` alike, in the one
+                // check its own crate's tag validation makes — so a group carries the stack's
+                // own tags without the three.
+                | Self::ResourceGroupsGroup
         );
         propagated
             .iter()
@@ -2232,6 +2252,13 @@ impl Provisioner {
             // so a declaration whose change is its tags has nothing else to ask of that
             // service ([`update_schedule_group`]).
             Self::SchedulerScheduleGroup => Ok(update_schedule_group(resource, declared)),
+            // `UpdateGroup` changes a resource group's description and `UpdateGroupQuery` its
+            // resource query, which are the two halves of a group a declaration can state
+            // differently; its name is its identity and its tags reach that service through
+            // its own tagging calls ([`Self::retag`]).
+            Self::ResourceGroupsGroup => {
+                update_resource_group(ctx, region, resource, declared).await
+            }
             // `UpdateWorkloadIdentity` takes an identity's name together with the whole
             // list of allowed OAuth2 return URLs, which "replaces the existing list" — so
             // a changed declaration of that list is applied to the identity the stack
@@ -2381,6 +2408,13 @@ impl Provisioner {
             // set a group is to end up carrying is reconciled.
             Self::SchedulerScheduleGroup => {
                 retag_schedule_group(ctx, region, resource, declared, propagated).await
+            }
+            // A resource group's tags are Resource Groups' own `Tag` and `Untag`:
+            // `CreateGroup`'s `Tags` member applies to the group that call creates and to no
+            // group that already exists, so this is where the set a group is to end up
+            // carrying is reconciled.
+            Self::ResourceGroupsGroup => {
+                retag_resource_group(ctx, region, resource, declared, propagated).await
             }
             // A stream's tags are Amazon Kinesis Data Streams' own `AddTagsToStream` and
             // `RemoveTagsFromStream`: `CreateStream`'s `Tags` member applies to the stream
@@ -2632,6 +2666,10 @@ impl Provisioner {
             }
             Self::SchedulerScheduleGroup => {
                 delete_schedule_group(ctx, region, physical_resource_id).await
+            }
+            // A resource group is addressed by its name, which is this resource's physical id.
+            Self::ResourceGroupsGroup => {
+                delete_resource_group(ctx, region, physical_resource_id).await
             }
             // A schedule is addressed by its name AND the group that holds it, which only
             // the resource's own record carries, so the delete takes the record.
@@ -3052,6 +3090,10 @@ impl Provisioner {
             Self::SchedulerScheduleGroup => {
                 describe_schedule_group(ctx, region, physical_resource_id).await
             }
+            // Resource Groups' own read of the group, by the name it was created under.
+            Self::ResourceGroupsGroup => {
+                describe_resource_group(ctx, region, physical_resource_id).await
+            }
             // The read is addressed by the schedule's name AND its group, which only the
             // resource's own record carries.
             Self::SchedulerSchedule => describe_schedule(ctx, region, resource).await,
@@ -3344,11 +3386,13 @@ mod route53_policies;
 pub(super) mod compute_fleet;
 mod network_and_delivery;
 mod ssm_associations;
+mod resource_groups;
 pub(super) mod elasticache_caches;
 pub(super) mod redshift_parameter_groups;
 use elasticache_caches::*;
 use redshift_parameter_groups::*;
 use ssm_associations::*;
+use resource_groups::*;
 use compute_fleet::*;
 pub(crate) use network_and_delivery::*;
 use platform_services::*;

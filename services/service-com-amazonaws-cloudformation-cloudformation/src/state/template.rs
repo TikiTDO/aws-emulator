@@ -2959,6 +2959,7 @@ pub const IMPLEMENTED_RESOURCE_TYPES: &[&str] = &[
     "AWS::RDS::DBCluster",
     "AWS::RDS::DBInstance",
     "AWS::RUM::AppMonitor",
+    RESOURCE_GROUPS_GROUP,
     ROUTE53_HEALTH_CHECK,
     ROUTE53_HOSTED_ZONE,
     ROUTE53_CIDR_COLLECTION,
