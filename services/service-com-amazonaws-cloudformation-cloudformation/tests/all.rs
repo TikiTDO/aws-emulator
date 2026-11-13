@@ -11,6 +11,8 @@
 // points it into `tests/all/`.
 #[path = "all/account_limits.rs"]
 mod account_limits;
+#[path = "all/acm_and_route53_delegation.rs"]
+mod acm_and_route53_delegation;
 #[path = "all/agentcore_stack_outputs.rs"]
 mod agentcore_stack_outputs;
 #[path = "all/appconfig_estate_provisioning.rs"]

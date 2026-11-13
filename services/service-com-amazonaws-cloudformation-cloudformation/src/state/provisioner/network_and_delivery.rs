@@ -2428,12 +2428,15 @@ pub(super) const ACM_DOMAIN_VALIDATION_OPTION_MEMBERS: &[(&str, &str)] = &[
     ("ValidationDomain", "ValidationDomain"),
 ];
 
-/// The property of a `DomainValidationOptions` entry this provisioner does not map onto the
-/// create's request: `HostedZoneId` is not a member of ACM's `DomainValidationOption` at
-/// all — it names the Route 53 hosted zone CloudFormation itself publishes the validation
-/// record into, which this emulator does not do — so a declaration that states one is
-/// refused rather than deployed as a certificate whose validation record nothing publishes.
+/// The property of a `DomainValidationOptions` entry that names the Route 53 hosted zone
+/// CloudFormation itself publishes the ACM DNS validation CNAME into: `HostedZoneId` is not
+/// a member of ACM's `DomainValidationOption` wire structure, so CloudFormation consumes it
+/// directly and writes (and on stack delete, removes) the validation CNAME record in Route 53.
 pub(super) const ACM_HOSTED_ZONE_ID: &str = "HostedZoneId";
+
+/// Default TTL (in seconds) CloudFormation uses when publishing ACM DNS validation CNAME
+/// records into a declared Route 53 `HostedZoneId`.
+const ACM_VALIDATION_RECORD_TTL: &str = "300";
 
 /// The type's one property that is a member of the create's `Options` rather than of the
 /// request itself (`CertificateOptions$CertificateTransparencyLoggingPreference`).
@@ -2445,6 +2448,137 @@ pub(super) const ACM_TRANSPARENCY_LOGGING: &str = "CertificateTransparencyLoggin
 pub(super) const CERTIFICATE_PENDING_VALIDATION: &str = "PENDING_VALIDATION";
 pub(super) const CERTIFICATE_ISSUED: &str = "ISSUED";
 
+/// Extract `(DomainName, bare HostedZoneId)` pairs from a certificate resource's
+/// `DomainValidationOptions` entries that specify `HostedZoneId`.
+fn certificate_dns_validation_zones(properties: &Map<String, Value>) -> Vec<(String, String)> {
+    let Some(Value::Array(options)) = properties.get("DomainValidationOptions") else {
+        return Vec::new();
+    };
+    let mut zones = Vec::new();
+    for option in options {
+        let Some(domain) = option.get("DomainName").and_then(scalar_text) else {
+            continue;
+        };
+        let Some(zone_id) = option.get(ACM_HOSTED_ZONE_ID).and_then(scalar_text) else {
+            continue;
+        };
+        let bare = bare_hosted_zone_id(&zone_id).to_string();
+        if !domain.is_empty() && !bare.is_empty() {
+            zones.push((domain, bare));
+        }
+    }
+    zones
+}
+
+/// Whether an ACM `DomainValidation` entry for `covered_domain` is governed by a
+/// CloudFormation `DomainValidationOptions` entry naming `option_domain`.
+///
+/// CDK and CloudFormation templates commonly declare a single `{ DomainName: "example.com",
+/// HostedZoneId: ... }` entry for a certificate covering both `example.com` and
+/// `*.example.com` (or stripping a wildcard prefix on the option itself). Both validation
+/// records live in that hosted zone.
+fn validation_domain_matches_option(covered_domain: &str, option_domain: &str) -> bool {
+    let covered = covered_domain.trim_end_matches('.');
+    let option = option_domain.trim_end_matches('.');
+    covered.eq_ignore_ascii_case(option)
+        || covered
+            .strip_prefix("*.")
+            .is_some_and(|base| base.eq_ignore_ascii_case(option))
+        || option
+            .strip_prefix("*.")
+            .is_some_and(|base| covered.eq_ignore_ascii_case(base))
+}
+
+/// Apply `action` (`"UPSERT"` on create, `"DELETE"` on delete) to every ACM DNS validation
+/// CNAME record whose covered domain matches a `HostedZoneId` declared on the resource.
+async fn apply_certificate_validation_records(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    certificate_arn: &str,
+    dns_validation_zones: &[(String, String)],
+    action: &str,
+) -> Result<(), Refusal> {
+    if dns_validation_zones.is_empty() {
+        return Ok(());
+    }
+    let describe_request = serde_json::json!({ "CertificateArn": certificate_arn });
+    let reported = call_json_rpc(
+        ctx,
+        ACM_SIGNING_NAME,
+        region,
+        AWS_JSON_1_1,
+        &format!("{ACM_TARGET_PREFIX}.DescribeCertificate"),
+        &describe_request,
+    )
+    .await?;
+    let Some(validations) = reported
+        .get("Certificate")
+        .and_then(|cert| cert.get("DomainValidationOptions"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(());
+    };
+
+    // Group changes per hosted zone and deduplicate `(zone_id, name, type)` so duplicate
+    // `DomainValidationOptions` entries or shared wildcard CNAMEs never emit conflicting
+    // changes in the same Route 53 `ChangeBatch`.
+    let mut changes_by_zone: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
+    for validation in validations {
+        let Some(covered_domain) = validation.get("DomainName").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(record) = validation.get("ResourceRecord") else {
+            continue;
+        };
+        let (Some(rec_name), Some(rec_type), Some(rec_value)) = (
+            record.get("Name").and_then(Value::as_str),
+            record.get("Type").and_then(Value::as_str),
+            record.get("Value").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        for (option_domain, zone_id) in dns_validation_zones {
+            if validation_domain_matches_option(covered_domain, option_domain) {
+                let entries = changes_by_zone.entry(zone_id.clone()).or_default();
+                if !entries
+                    .iter()
+                    .any(|(n, t, _)| n.eq_ignore_ascii_case(rec_name) && t == rec_type)
+                {
+                    entries.push((
+                        rec_name.to_string(),
+                        rec_type.to_string(),
+                        rec_value.to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    for (zone_id, records) in changes_by_zone {
+        let mut changes_xml = String::new();
+        for (rec_name, rec_type, rec_value) in records {
+            changes_xml.push_str(&format!(
+                "<Change>{}<ResourceRecordSet>{}{}{}<ResourceRecords><ResourceRecord>{}</ResourceRecord></ResourceRecords></ResourceRecordSet></Change>",
+                xml_leaf("Action", action),
+                xml_leaf("Name", &rec_name),
+                xml_leaf("Type", &rec_type),
+                xml_leaf("TTL", ACM_VALIDATION_RECORD_TTL),
+                xml_leaf("Value", &rec_value),
+            ));
+        }
+        let batch = format!("<ChangeBatch><Changes>{changes_xml}</Changes></ChangeBatch>");
+        call_route53(
+            ctx,
+            region,
+            "POST",
+            &format!("/hostedzone/{}/rrset", percent_encoded(&zone_id)),
+            Some(&route53_request("ChangeResourceRecordSetsRequest", &batch)),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// Request the certificate an `AWS::CertificateManager::Certificate` declares, so a client
 /// that reads the stack's physical resource id can call ACM with it (`DescribeCertificate`,
 /// `AddTagsToCertificate`) rather than being handed an identifier ACM never minted.
@@ -2452,9 +2586,9 @@ pub(super) const CERTIFICATE_ISSUED: &str = "ISSUED";
 /// The type's properties are NOT the create's own members throughout, so they are mapped
 /// one by one ([`ACM_CERTIFICATE_MEMBERS`] for the ones named identically, `Tags` as ACM's
 /// own tag list, `CertificateTransparencyLoggingPreference` into the create's `Options`,
-/// and each `DomainValidationOptions` entry onto ACM's `DomainValidationOption`), and a
-/// property with no member at all is refused ([`ACM_HOSTED_ZONE_ID`]) rather than dropped.
-/// Nothing the declaration does not state is sent.
+/// `ValidationDomain`-bearing `DomainValidationOptions` entries onto ACM's
+/// `DomainValidationOption`, and `HostedZoneId`-bearing entries published as validation
+/// CNAME records into Route 53).
 ///
 /// The certificate's identifier is ACM's OWN to mint — the create takes no identifier and
 /// answers with `CertificateArn`, and "Ref returns the certificate ARN" — so that answer is
@@ -2476,19 +2610,13 @@ pub(super) async fn request_certificate(
     if let Some(Value::Array(options)) = properties.get("DomainValidationOptions") {
         let mut mapped: Vec<Value> = Vec::with_capacity(options.len());
         for option in options {
-            if option.get(ACM_HOSTED_ZONE_ID).is_some() {
-                return Err(Refusal {
-                    code: NOT_IMPLEMENTED.to_string(),
-                    message: format!(
-                        "this emulator does not implement the {ACM_HOSTED_ZONE_ID} property of \
-                         {}'s DomainValidationOptions",
-                        resource.resource_type
-                    ),
-                });
+            if option.get("ValidationDomain").is_some() {
+                mapped.push(mapped_members(option, ACM_DOMAIN_VALIDATION_OPTION_MEMBERS));
             }
-            mapped.push(mapped_members(option, ACM_DOMAIN_VALIDATION_OPTION_MEMBERS));
         }
-        request.insert("DomainValidationOptions".to_string(), Value::Array(mapped));
+        if !mapped.is_empty() {
+            request.insert("DomainValidationOptions".to_string(), Value::Array(mapped));
+        }
     }
     if let Some(preference) = properties.get(ACM_TRANSPARENCY_LOGGING) {
         let mut options = Map::new();
@@ -2517,6 +2645,8 @@ pub(super) async fn request_certificate(
             message: "RequestCertificate answered no CertificateArn".to_string(),
         });
     };
+    let dns_validation_zones = certificate_dns_validation_zones(&properties);
+    apply_certificate_validation_records(ctx, region, arn, &dns_validation_zones, "UPSERT").await?;
     Ok(Created {
         physical_resource_id: Some(arn.to_string()),
         attributes: BTreeMap::new(),
@@ -2592,7 +2722,24 @@ pub(super) async fn delete_certificate(
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
     physical_resource_id: &str,
+    resource: &StoredResource,
 ) -> Result<(), Refusal> {
+    if let Some(properties) = resource.properties.as_object() {
+        let dns_validation_zones = certificate_dns_validation_zones(properties);
+        if !dns_validation_zones.is_empty() {
+            // Best-effort cleanup of validation CNAMEs CloudFormation published into Route 53
+            // so a hosted zone declared in the same stack can delete cleanly afterwards. If
+            // the certificate, zone, or record is already gone, proceed with certificate deletion.
+            let _ = apply_certificate_validation_records(
+                ctx,
+                region,
+                physical_resource_id,
+                &dns_validation_zones,
+                "DELETE",
+            )
+            .await;
+        }
+    }
     let request = serde_json::json!({ "CertificateArn": physical_resource_id });
     match call_json_rpc(
         ctx,

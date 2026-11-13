@@ -212,6 +212,8 @@ service-com-amazonaws-appconfig-amazonappconfig = { workspace = true }
 # is the front door that routes an ELBv2 envelope to the ELBv2 model.
 service-com-amazonaws-elasticloadbalancingv2-elasticloadbalancing-v10 = { workspace = true }
 service-com-amazonaws-elasticloadbalancing-elasticloadbalancing-v7 = { workspace = true }
+service-com-amazonaws-acm-certificatemanager = { workspace = true }
+service-com-amazonaws-route53-awsdnsv20130401 = { workspace = true }
 
 [lints]
 workspace = true
