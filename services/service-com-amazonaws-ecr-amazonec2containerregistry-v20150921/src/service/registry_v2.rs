@@ -131,6 +131,9 @@ pub(super) enum RegistryV2Target {
         /// The digest addressing it.
         digest: String,
     },
+    /// Start or address one bounded native blob upload.
+    Uploads { repository_name: String },
+    Upload { repository_name: String, upload_id: String },
     /// An endpoint the registry API DEFINES beneath a repository name that this registry
     /// does not serve — a tag listing, a referrers query, the upload session a push opens —
     /// or one of the two it does serve, addressed by a path carrying no repository name or
@@ -173,6 +176,21 @@ pub(super) fn registry_v2_target(path: &str) -> Option<RegistryV2Target> {
         return Some(RegistryV2Target::Version);
     }
     let rest = rest.strip_prefix('/')?;
+    if let Some((name, suffix)) = rest.rsplit_once("/blobs/uploads") {
+        let repository_name = ::smithy_server_runtime::percent_decode(name);
+        if !repository_name.is_empty() && matches!(suffix, "" | "/") {
+            return Some(RegistryV2Target::Uploads { repository_name });
+        }
+        if let Some(id) = suffix.strip_prefix('/') {
+            if !repository_name.is_empty() && !id.is_empty() && !id.contains('/') {
+                return Some(RegistryV2Target::Upload {
+                    repository_name,
+                    upload_id: ::smithy_server_runtime::percent_decode(id),
+                });
+            }
+        }
+        return Some(RegistryV2Target::Unserved);
+    }
     let mut segments: Vec<&str> = rest.split('/').collect();
     // The endpoint is the last two segments: `<kind>/<reference>`.
     let (Some(reference), Some(kind)) = (segments.pop(), segments.pop()) else {
@@ -210,10 +228,23 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
         req: &RtRequest,
         target: &RegistryV2Target,
     ) -> RtResponse {
-        if !matches!(req.method(), "GET" | "HEAD") {
+        if !matches!((target, req.method()),
+            (RegistryV2Target::Version | RegistryV2Target::Blob { .. }, "GET" | "HEAD") |
+            (RegistryV2Target::Manifest { .. }, "GET" | "HEAD" | "PUT") |
+            (RegistryV2Target::Uploads { .. }, "POST") |
+            (RegistryV2Target::Upload { .. }, "GET" | "PATCH" | "PUT" | "DELETE") |
+            (RegistryV2Target::Unserved, "GET" | "HEAD")) {
             // The registry API names an operation by method and path together, so a method
             // this plane does not serve is a registry operation it does not support.
-            return registry_unsupported();
+            let mut response = registry_unsupported();
+            let allowed = match target {
+                RegistryV2Target::Manifest { .. } => "GET, HEAD, PUT",
+                RegistryV2Target::Uploads { .. } => "POST",
+                RegistryV2Target::Upload { .. } => "GET, PATCH, PUT, DELETE",
+                _ => REGISTRY_READ_METHODS,
+            };
+            response.headers_mut().insert("allow", allowed);
+            return response;
         }
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return registry_error(500, "UNKNOWN", "the ecr repository store is unavailable");
@@ -236,6 +267,11 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
             }
         };
 
+        if matches!(target, RegistryV2Target::Uploads { .. } | RegistryV2Target::Upload { .. })
+            || req.method() == "PUT"
+        {
+            return self.serve_registry_push(&state, req, target, &principal_arn, now);
+        }
         match target {
             RegistryV2Target::Version => version_check(),
             RegistryV2Target::Manifest {
@@ -246,7 +282,7 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
                 repository_name,
                 digest,
             } => serve_blob(&state, req, repository_name, digest),
-            RegistryV2Target::Unserved => registry_unsupported(),
+            RegistryV2Target::Unserved | RegistryV2Target::Uploads { .. } | RegistryV2Target::Upload { .. } => registry_unsupported(),
         }
     }
 
@@ -540,7 +576,7 @@ fn registry_unsupported() -> RtResponse {
 }
 
 /// One refusal of the registry API, in that API's own envelope.
-fn registry_error(status_code: u16, code: &str, message: &str) -> RtResponse {
+pub(super) fn registry_error(status_code: u16, code: &str, message: &str) -> RtResponse {
     let mut response = error_document(status_code, code, message);
     registry_headers(&mut response);
     response
@@ -567,7 +603,7 @@ fn error_document(status_code: u16, code: &str, message: &str) -> RtResponse {
 
 /// The headers every answer of this plane carries: the registry API version a client reads
 /// to discover the API, stated whether the answer is content or a refusal.
-fn registry_headers(response: &mut RtResponse) {
+pub(super) fn registry_headers(response: &mut RtResponse) {
     response
         .headers_mut()
         .insert(API_VERSION_HEADER, API_VERSION);

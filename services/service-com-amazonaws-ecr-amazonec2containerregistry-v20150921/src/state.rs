@@ -963,6 +963,8 @@ pub const MAX_LAYERS_PER_REPOSITORY: usize = 10_000;
 /// client was told to send, when it was opened — plus the layer bytes received so far.
 #[derive(Debug, Clone)]
 pub struct LayerUpload {
+    /// Native RegistryV2 upload owner; JSON API uploads have no native owner.
+    pub registry_principal: Option<String>,
     /// The repository the upload was opened against. An upload id is only valid for
     /// the repository it was issued for, so every later call names both.
     pub repository_name: String,

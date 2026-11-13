@@ -163,7 +163,7 @@ fn refusal(
 /// derived from the request — laid out in the five groups the pattern requires. A hex id
 /// of 16 bytes is 32 digits, which is exactly what the layout consumes, so the slices
 /// below cannot be short.
-fn new_upload_id() -> String {
+pub(crate) fn new_upload_id() -> String {
     /// The bytes a minted `UploadId` carries: 16, whose hex rendering is the 32 digits
     /// the model's layout spells out.
     const UPLOAD_ID_BYTES: usize = 16;
@@ -290,6 +290,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         store.uploads.insert(
             upload_id.clone(),
             crate::state::LayerUpload {
+                    registry_principal: None,
                 repository_name: input.repository_name,
                 part_size,
                 started_at: ::std::time::SystemTime::now(),
