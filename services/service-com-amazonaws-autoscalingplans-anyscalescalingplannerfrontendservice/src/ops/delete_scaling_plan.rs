@@ -5,8 +5,9 @@
 //! state is owed on the clock, so the next describe stops listing it.
 //!
 //! A plan that already has a pending lifecycle transition cannot be deleted
-//! (`ConcurrentUpdateException`); a name and version that names no plan is
-//! `ObjectNotFoundException`.
+//! (`ConcurrentUpdateException`, answered as the client error it is — HTTP 400,
+//! `crate::state::wire_refusals` — rather than at the status the model classifies that
+//! shape with); a name and version that names no plan is `ObjectNotFoundException`.
 //!
 //! ## Shape of an operation
 //!
@@ -91,9 +92,12 @@ pub enum DeleteScalingPlanErrorModeled {
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
-/// (`crate::ops::delete_scaling_plan::DeleteScalingPlanError`). Wrapping the modeled enum is what
-/// lets a scaffolded operation answer 501 for one whose model declares no errors at all.
-pub type DeleteScalingPlanError = crate::scaffolded::Scaffolded<DeleteScalingPlanErrorModeled>;
+/// (`crate::ops::delete_scaling_plan::DeleteScalingPlanError`): the operation's own channel widened by
+/// the refusal this service words itself, which is how a mutation overlapping the plan's
+/// in-flight transition is answered at the client-error status rather than at the 500 the
+/// modelled shape declares (`crate::state::wire_refusals`).
+pub type DeleteScalingPlanError =
+    crate::state::wire_refusals::Refusable<DeleteScalingPlanErrorModeled>;
 
 /// Lets `?` and `.into()` lift a modeled failure into the error channel, so an
 /// implemented handler writes `Err(SomeModeledError.into())` rather than naming the
@@ -101,7 +105,9 @@ pub type DeleteScalingPlanError = crate::scaffolded::Scaffolded<DeleteScalingPla
 /// this operation is implemented.
 impl From<DeleteScalingPlanErrorModeled> for DeleteScalingPlanError {
     fn from(modeled: DeleteScalingPlanErrorModeled) -> Self {
-        crate::scaffolded::Scaffolded::Modeled(modeled)
+        crate::state::wire_refusals::Refusable::Channel(crate::scaffolded::Scaffolded::Modeled(
+            modeled,
+        ))
     }
 }
 
@@ -158,19 +164,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // The admission rule every mutating operation shares — resolve the plan this
         // request names, then refuse one whose lifecycle transition is still in flight —
-        // lives in `crate::state::admit_plan_mutation`; this operation only mints the
-        // refusal it answers in its own error shape.
+        // lives in `crate::state::admit_plan_mutation`; this operation answers the
+        // not-found refusal in its own modelled shape, and the overlapping-mutation one
+        // through the service's own refusal, which every mutating operation answers it
+        // with.
         let plan = state
-            .admit_plan_mutation(
-                &input.scaling_plan_name,
-                input.scaling_plan_version,
-                crate::state::PlanMutation::Delete,
-            )
+            .admit_plan_mutation(&input.scaling_plan_name, input.scaling_plan_version)
             .map_err(|refusal| match refusal {
                 crate::state::PlanMutationRefusal::NotFound(message) => not_found(message),
-                crate::state::PlanMutationRefusal::InProgress(message) => {
-                    concurrent_update(message)
-                }
+                crate::state::PlanMutationRefusal::InProgress => concurrent_update(),
             })?;
 
         plan.begin(
@@ -191,13 +193,12 @@ fn not_found(message: impl Into<String>) -> DeleteScalingPlanError {
     .into()
 }
 
-/// The modelled `ConcurrentUpdateException` (HTTP 500): the plan already has a
-/// pending lifecycle transition.
-fn concurrent_update(message: impl Into<String>) -> DeleteScalingPlanError {
-    DeleteScalingPlanErrorModeled::ConcurrentUpdateException(ConcurrentUpdateException {
-        message: Some(message.into()),
-    })
-    .into()
+/// The service's own `ConcurrentUpdateException` refusal (HTTP 400): the plan already has
+/// a pending lifecycle transition. Code, status and sentence all come from
+/// `crate::state::wire_refusals`, so this operation and `UpdateScalingPlan` answer the one
+/// condition identically.
+fn concurrent_update() -> DeleteScalingPlanError {
+    crate::state::wire_refusals::WireRefusal::concurrent_update().into()
 }
 
 /// The service's state is unreachable: a server fault, never a client error.

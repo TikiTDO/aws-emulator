@@ -596,7 +596,8 @@ async fn a_plan_with_a_pending_transition_is_reported_but_not_mutated() {
         );
 
         // "You cannot update a scaling plan if it is in the process of being created,
-        // updated, or deleted."
+        // updated, or deleted." — refused as the client error it is (the status lives in
+        // `state::wire_refusals`; `crate::concurrent_update_refusal` tables the rule).
         for operation in ["UpdateScalingPlan", "DeleteScalingPlan"] {
             let (code_status, code) = emulator
                 .err(
@@ -606,7 +607,10 @@ async fn a_plan_with_a_pending_transition_is_reported_but_not_mutated() {
                 .await;
             assert_eq!(
                 (code_status, code.as_str()),
-                (500, "ConcurrentUpdateException"),
+                (
+                    plan_state::wire_refusals::CONCURRENT_UPDATE_STATUS,
+                    "ConcurrentUpdateException"
+                ),
                 "case {label}/{operation}: a pending transition must refuse the mutation"
             );
         }

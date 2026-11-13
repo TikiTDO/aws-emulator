@@ -8,8 +8,9 @@
 //! stored plan is refused as not found, and a plan that IS stored but still has a
 //! lifecycle transition in flight is refused as a concurrent update — "You cannot update
 //! a scaling plan if it is in the process of being created, updated, or deleted". Each
-//! operation mints the refusal in the error shape it models and names what it was about
-//! to do in the wording; nothing else about the two refusals differs.
+//! operation answers the not-found refusal in the shape it models, naming the coordinate
+//! the request asked about; the overlapping-mutation refusal is one fixed answer both
+//! share (see [`crate::concurrent_update_refusal`] for its own table).
 //!
 //! Every row below is driven through BOTH operations, so the one rule is exercised from
 //! each of the two call sites, including the ranking between its two refusals and the
@@ -20,6 +21,9 @@
 
 use serde_json::{json, Value};
 
+use service_com_amazonaws_autoscalingplans_anyscalescalingplannerfrontendservice::state::wire_refusals::{
+    CONCURRENT_UPDATE_MESSAGE, CONCURRENT_UPDATE_STATUS,
+};
 use service_com_amazonaws_autoscalingplans_anyscalescalingplannerfrontendservice::state::{
     ONLY_VERSION, STATUS_CREATION_IN_PROGRESS, STATUS_DELETION_IN_PROGRESS,
     STATUS_UPDATE_IN_PROGRESS,
@@ -29,26 +33,16 @@ use crate::scaling_plan_lifecycle::{
     error_code, error_message, simple_instructions, stack_source, Emulator,
 };
 
-/// The operations the rule admits, with the verb each names its blocked work with and
-/// the shape it mints a not-found refusal in.
+/// The operations the rule admits.
 ///
 /// Source: `smithy_query(query="operation",
 /// operation="UpdateScalingPlan,DeleteScalingPlan")` — both bind
-/// `ObjectNotFoundException` (httpError 400) and `ConcurrentUpdateException`
-/// (httpError 500).
-const MUTATING_OPERATIONS: [(&str, &str); 2] = [
-    ("UpdateScalingPlan", "updated"),
-    ("DeleteScalingPlan", "deleted"),
-];
+/// `ObjectNotFoundException` (httpError 400) and `ConcurrentUpdateException`.
+const MUTATING_OPERATIONS: [&str; 2] = ["UpdateScalingPlan", "DeleteScalingPlan"];
 
 /// The not-found sentence the rule requires for a requested name and version.
 fn expected_not_found(name: &str, version: i64) -> String {
     format!("No scaling plan found for scaling plan name: {name}, version: {version}")
-}
-
-/// The in-progress sentence the rule requires for a plan in `status`, blocking `verb`.
-fn expected_in_progress(name: &str, status: &str, verb: &str) -> String {
-    format!("The scaling plan '{name}' is in status {status} and cannot be {verb}")
 }
 
 /// The identifying members both operations carry.
@@ -131,24 +125,25 @@ async fn a_plan_with_a_transition_in_flight_refuses_every_mutation_in_awss_words
         }
         emulator.hold_pending(&name);
 
-        for (operation, verb) in MUTATING_OPERATIONS {
+        for operation in MUTATING_OPERATIONS {
             let (http_status, body) = emulator
                 .call(operation, &identifier(&name, ONLY_VERSION))
                 .await;
             assert_eq!(
-                http_status, 500,
-                "case {operation}/{label}: expected HTTP 500, got {http_status} with {body}"
+                http_status, CONCURRENT_UPDATE_STATUS,
+                "case {operation}/{label}: expected HTTP {CONCURRENT_UPDATE_STATUS}, got \
+                 {http_status} with {body}"
             );
             assert_eq!(
                 error_code(&body),
                 "ConcurrentUpdateException",
                 "case {operation}/{label}: expected a ConcurrentUpdateException, got {body}"
             );
-            let expected = expected_in_progress(&name, status, verb);
             let actual = error_message(&body);
             assert_eq!(
-                actual, expected,
-                "case {operation}/{label}: expected {expected:?}, got {actual:?}"
+                actual, CONCURRENT_UPDATE_MESSAGE,
+                "case {operation}/{label}: expected {CONCURRENT_UPDATE_MESSAGE:?}, got \
+                 {actual:?}"
             );
         }
 
@@ -196,7 +191,7 @@ async fn a_name_and_version_that_name_no_plan_refuse_every_mutation_in_awss_word
     ];
 
     for (label, name, version) in rows {
-        for (operation, _) in MUTATING_OPERATIONS {
+        for operation in MUTATING_OPERATIONS {
             let (http_status, body) = emulator.call(operation, &identifier(&name, version)).await;
             assert_eq!(
                 http_status, 400,
@@ -274,9 +269,9 @@ async fn the_admission_refusals_outrank_the_application_source_rule() {
             "plan in flight, covered source",
             "in flight",
             ONLY_VERSION,
-            500,
+            CONCURRENT_UPDATE_STATUS,
             "ConcurrentUpdateException",
-            expected_in_progress("in flight", STATUS_UPDATE_IN_PROGRESS, "updated"),
+            CONCURRENT_UPDATE_MESSAGE.to_string(),
         ),
     ];
 

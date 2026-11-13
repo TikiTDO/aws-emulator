@@ -7,6 +7,11 @@
 //! status, and the value helpers (timestamps and pagination cursors) plus the paged
 //! walk itself ([`take_page`]) that more than one handler in `src/ops/` reaches.
 
+/// The refusals this service words itself — the wire code, status and sentence of a
+/// mutation that overlaps a plan's in-flight transition — and the error channel the
+/// mutating operations carry them on.
+pub mod wire_refusals;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
@@ -462,40 +467,21 @@ impl ScalingPlanRecord {
     }
 }
 
-/// What a request is about to do to the plan it names — the ONLY thing the two write
-/// paths differ in where they admit a mutation, and so the only thing they hand
-/// [`ComAmazonawsAutoscalingplansAnyscalescalingplannerfrontendserviceState::admit_plan_mutation`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlanMutation {
-    /// The request writes the plan (`UpdateScalingPlan`).
-    Update,
-    /// The request removes the plan (`DeleteScalingPlan`).
-    Delete,
-}
-
-impl PlanMutation {
-    /// How a refusal names what the request was going to do to the plan.
-    fn verb(self) -> &'static str {
-        match self {
-            Self::Update => "updated",
-            Self::Delete => "deleted",
-        }
-    }
-}
-
-/// Which refusal the mutating-plan admission rule answers with, carrying the text it is
-/// worded with.
+/// Which refusal the mutating-plan admission rule answers with.
 ///
-/// The rule decides WHICH refusal applies and what it says; the operation that asked
-/// mints it in the error shape its own model binds — `ObjectNotFoundException` for
-/// [`Self::NotFound`] and `ConcurrentUpdateException` for [`Self::InProgress`] on both
-/// write paths.
+/// The rule decides WHICH refusal applies; the operation that asked answers it on the
+/// wire — `ObjectNotFoundException`, in the operation's own modelled shape, carrying the
+/// text the rule worded it with for [`Self::NotFound`], and the service's own
+/// overlapping-mutation refusal ([`wire_refusals::WireRefusal::concurrent_update`]) for
+/// [`Self::InProgress`], on both write paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanMutationRefusal {
     /// Nothing is stored under the requested name and version: [`plan_not_found_message`].
     NotFound(String),
-    /// The plan has a lifecycle transition in flight: [`plan_in_progress_message`].
-    InProgress(String),
+    /// The plan has a lifecycle transition in flight. The refusal carries no text of its
+    /// own: its sentence is fixed ([`wire_refusals::CONCURRENT_UPDATE_MESSAGE`]) and
+    /// interpolates nothing about the plan or the request.
+    InProgress,
 }
 
 /// The name AWS Auto Scaling gives the policy it mints from one target tracking
@@ -612,8 +598,8 @@ impl ComAmazonawsAutoscalingplansAnyscalescalingplannerfrontendserviceState {
     /// and version that name no stored plan are refused as not found
     /// ([`plan_not_found_message`]); a plan that is resolved but still has a lifecycle
     /// transition in flight ([`ScalingPlanRecord::is_in_progress`]) is refused as a
-    /// concurrent update ([`plan_in_progress_message`], which names `mutation`'s verb).
-    /// Only a plan past both is handed back, mutably, for the caller to write.
+    /// concurrent update. Only a plan past both is handed back, mutably, for the caller
+    /// to write.
     ///
     /// The refusal order is part of the rule: a request is answered about whether the
     /// plan it addresses exists before it is answered about what that plan is doing, and
@@ -622,17 +608,12 @@ impl ComAmazonawsAutoscalingplansAnyscalescalingplannerfrontendserviceState {
         &mut self,
         name: &str,
         version: i64,
-        mutation: PlanMutation,
     ) -> Result<&mut ScalingPlanRecord, PlanMutationRefusal> {
         let plan = self
             .plan_mut(name, version)
             .ok_or_else(|| PlanMutationRefusal::NotFound(plan_not_found_message(name, version)))?;
         if plan.is_in_progress() {
-            return Err(PlanMutationRefusal::InProgress(plan_in_progress_message(
-                name,
-                &plan.status_code,
-                mutation,
-            )));
+            return Err(PlanMutationRefusal::InProgress);
         }
         Ok(plan)
     }
@@ -1848,19 +1829,6 @@ pub fn check_scaling_plan_name(member_path: &str, value: &str) -> Result<(), Str
 /// on every path.
 pub fn plan_not_found_message(name: &str, version: i64) -> String {
     format!("No scaling plan found for scaling plan name: {name}, version: {version}")
-}
-
-/// AWS's wording for "the plan this request names is in the process of being created,
-/// updated, or deleted", built from the request's own `ScalingPlanName`, the status the
-/// plan is in and what the request was going to do to it.
-///
-/// Every mutating operation refuses an in-flight plan with this one text, differing only
-/// in `mutation`'s verb, so the refusal reads the same whichever write path was blocked.
-pub fn plan_in_progress_message(name: &str, status_code: &str, mutation: PlanMutation) -> String {
-    format!(
-        "The scaling plan '{name}' is in status {status_code} and cannot be {}",
-        mutation.verb()
-    )
 }
 
 /// The refusal wording for an application source another plan already claims, built
