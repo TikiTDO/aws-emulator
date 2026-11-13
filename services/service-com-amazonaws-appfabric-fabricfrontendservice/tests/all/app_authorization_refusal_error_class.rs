@@ -16,9 +16,11 @@
 //!   `@idempotent` delete included — refuses it with the modelled
 //!   `ResourceNotFoundException` (HTTP 404), one fixed sentence, and the
 //!   supplied identifier in `resourceId`;
-//! * `app` is an open `String255` with no enum trait, so an application name
-//!   outside the value list the model's documentation of `app` gives runs the
-//!   whole authorize → connect → ingest chain rather than being refused.
+//! * `app` is typed as an open `String255`, so the wire schema bounds its length
+//!   only, while the set of applications the service serves is the one the
+//!   member's documentation gives: a name in that set runs the whole authorize →
+//!   connect → ingest chain (a name outside it is refused, which
+//!   `supported_application_names` pins).
 //!
 //! The harness (the router, `Answer`, `encode`, `arn_of`, `uuid_of`) is the one
 //! `app_bundle_ingestion_lifecycle` already builds.
@@ -49,20 +51,20 @@ const NOT_CONNECTED_MESSAGE: &str =
 /// (`smithy_query(query="shape",shape="AuthType")`: `apiKey` | `oauth2`).
 const AUTH_TYPES: &[&str] = &["apiKey", "oauth2"];
 
-/// Application names the tables below carry: the first four are from the value
-/// list the model's own documentation of `app` gives
+/// Application names the tables below carry, from the set the model's own
+/// documentation of `app` gives
 /// (`smithy_query(query="doc",shape="CreateAppAuthorizationRequest",member="app")`:
 /// "Valid values are: SLACK ASANA JIRA M365 M365AUDITLOGS ZOOM ZENDESK OKTA
-/// GOOGLE DROPBOX SMARTSHEET CISCO"), the rest are outside it — the one the
-/// recorded run carried and two the issue did not cite.
+/// GOOGLE DROPBOX SMARTSHEET CISCO") — entries the issue did not cite rather
+/// than one repeated value.
 const APPS: &[&str] = &[
     "ZENDESK",
     "DROPBOX",
     "M365AUDITLOGS",
     "CISCO",
-    "PAGERDUTY",
-    "SALESFORCE",
-    "TERRAFORMCLOUD",
+    "ZOOM",
+    "GOOGLE",
+    "JIRA",
 ];
 
 /// The `credential` body one `authType` takes, as the model's documentation of
@@ -189,9 +191,9 @@ async fn held_authorizations(emulator: &Emulator, bundle: &str) -> Vec<String> {
 /// sentence, `reason` `other` and no `fieldList` — the sentence has no variable
 /// part, and the stored authorization is left exactly as it was.
 ///
-/// The table spans the application (names the model documents and names outside
-/// that list), both `AuthType` values and tenant identifiers of several forms,
-/// because none of them may change which error class answers.
+/// The table spans the application (names the model documents), both `AuthType`
+/// values and tenant identifiers of several forms, because none of them may
+/// change which error class answers.
 #[tokio::test]
 async fn a_second_authorization_for_a_held_pair_is_the_modelled_validation_refusal() {
     let tenants = [
@@ -337,9 +339,9 @@ async fn an_app_authorization_identifier_the_bundle_does_not_hold_is_not_found()
         let foreign = create_authorization(
             &emulator,
             &other_bundle,
-            "PAGERDUTY",
+            "SMARTSHEET",
             "apiKey",
-            "fabric.pagerduty.com",
+            "fabric.smartsheet.com",
         )
         .await;
         assert_eq!(
@@ -471,25 +473,23 @@ async fn an_app_authorization_identifier_the_bundle_does_not_hold_is_not_found()
     }
 }
 
-/// RULE: `app` targets `String255` with no enum trait, so the value list the
-/// model's documentation of `app` gives is a snapshot of what AppFabric
-/// supported when the model was published, not a wire constraint: an application
-/// name outside it is stored as the caller sent it and runs the whole chain —
-/// create (`PendingConnect`, `persona` `admin`, the tenant echoed), connect
-/// (`Connected`), then the ingestion of that pair. Before the connect call the
-/// ingestion is refused for the handshake the pair has not completed, which
+/// RULE: an application name the service serves runs the whole chain — create
+/// (`PendingConnect`, `persona` `admin`, the tenant echoed), connect
+/// (`Connected`), then the ingestion of that pair — and the name the request
+/// carried is what every read of those records reports. Before the connect call
+/// the ingestion is refused for the handshake the pair has not completed, which
 /// names neither the application nor the tenant.
 ///
-/// The table spans names outside the documented list — the one the recorded run
-/// carried among them — with one documented name as the control row, and tenant
-/// identifiers of the forms an application tenant takes.
+/// The table spans names from the served set that the issue did not cite, with
+/// tenant identifiers of the forms an application tenant takes. The refusal of a
+/// name outside that set is pinned in `supported_application_names`.
 #[tokio::test]
-async fn an_application_name_outside_the_documented_list_runs_the_whole_chain() {
+async fn a_served_application_name_runs_the_whole_chain() {
     // (application, tenant identifier)
     let cases = [
-        ("PAGERDUTY", "fabric.pagerduty.com"),
-        ("SALESFORCE", "fabric-salesforce"),
-        ("TERRAFORMCLOUD", "99999999-8888-4777-8666-555555555555"),
+        ("ASANA", "fabric.asana.com"),
+        ("OKTA", "fabric-okta"),
+        ("M365", "99999999-8888-4777-8666-555555555555"),
         ("SLACK", "fabric.slack.com"),
     ];
 

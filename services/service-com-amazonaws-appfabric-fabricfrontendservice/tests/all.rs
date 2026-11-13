@@ -81,6 +81,8 @@ mod resource_tags;
 mod spent_client_token_decision;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/supported_application_names.rs"]
+mod supported_application_names;
 #[path = "all/tagging_refusal_resource_type.rs"]
 mod tagging_refusal_resource_type;
 #[path = "all/update_app_authorization_contract.rs"]

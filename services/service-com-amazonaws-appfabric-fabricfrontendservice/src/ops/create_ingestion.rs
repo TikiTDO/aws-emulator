@@ -17,6 +17,13 @@
 //! judged only AFTER the `clientToken` replay: a retry whose ingestion already
 //! exists replays it, whatever the authorization has become since.
 //!
+//! `app` itself is a rule over the REQUEST: the model types it as a plain
+//! `String255`, so the wire schema bounds its length only, while the set of
+//! applications the service serves is stated in the member's own documentation
+//! ([`crate::state::SUPPORTED_APPLICATIONS`]) and enforced by the service — an
+//! application name outside that set is refused with the modelled
+//! `ValidationException` (HTTP 400) before anything is written.
+//!
 //! The `tags` the request carries are stored as the MAP they are (see
 //! [`crate::state::tag_set`]), so a key the list repeats is held once with the
 //! last value the list gave it — exactly what `TagResource` would have stored.
@@ -231,13 +238,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
-        // `app` is a plain `String255` in the model (no `@enum`): the member's
-        // constraint is its length, not its value, and the value list the
-        // documentation gives is a snapshot of the applications AppFabric
-        // supported when the model was published. An application name is
-        // therefore never refused on the name itself — what this operation
-        // requires of the (application, tenant) pair is a CONNECTED app
+        // `app` is typed as an open `String255` in the model, so the wire schema
+        // bounds its LENGTH only; the set of applications the service serves is
+        // stated in the member's own documentation and enforced here (see
+        // [`crate::state::SUPPORTED_APPLICATIONS`]) — the same member, the same
+        // set and the same refusal as on the authorization this ingestion hangs
+        // off. It is judged before anything is written, so a name outside the
+        // set creates no ingestion. What this operation requires of the
+        // (application, tenant) pair BEYOND the name is a CONNECTED app
         // authorization, which the guard further down judges.
+        if !crate::state::is_supported_app(&input.app) {
+            return Err(CreateIngestionErrorModeled::ValidationException(
+                crate::state::app_not_supported(&input.app),
+            )
+            .into());
+        }
 
         // The PARENT is one of this request's parameters, so it belongs in the
         // fingerprint: the same token under a different bundle is a different

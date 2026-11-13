@@ -150,6 +150,49 @@ pub const AUTH_TYPE_OAUTH2: &str = "oauth2";
 /// model's `Persona` values (`PERSONA_VALUES`).
 pub const APP_AUTHORIZATION_PERSONA_ADMIN: &str = "admin";
 
+/// The applications this service supports, which is the value set its `app`
+/// member is closed over.
+///
+/// The member targets `String255`, so the MODEL constrains only its length; the
+/// set of names is stated in the member's own documentation
+/// (`smithy_query(query="doc",shape="CreateAppAuthorizationRequest",member="app")`:
+/// "The name of the application. Valid values are: SLACK ASANA JIRA M365
+/// M365AUDITLOGS ZOOM ZENDESK OKTA GOOGLE DROPBOX SMARTSHEET CISCO") and is
+/// enforced by the service rather than by the wire schema. The names are
+/// compared exactly: each one is a fixed upper-case token, so a different
+/// spelling of one is a different value and names no supported application.
+pub const SUPPORTED_APPLICATIONS: &[&str] = &[
+    "SLACK",
+    "ASANA",
+    "JIRA",
+    "M365",
+    "M365AUDITLOGS",
+    "ZOOM",
+    "ZENDESK",
+    "OKTA",
+    "GOOGLE",
+    "DROPBOX",
+    "SMARTSHEET",
+    "CISCO",
+];
+
+/// Whether `app` names one of the applications this service supports (see
+/// [`SUPPORTED_APPLICATIONS`]).
+pub fn is_supported_app(app: &str) -> bool {
+    SUPPORTED_APPLICATIONS.contains(&app)
+}
+
+/// A modelled `ValidationException` refusing an `app` outside
+/// [`SUPPORTED_APPLICATIONS`].
+///
+/// The sentence is the service's own, with the application name the request
+/// carried as its only variable part: "app `<app>` is not supported". The faulted
+/// member is `app`, so `reason` is `fieldValidationFailed` and `fieldList` names
+/// it — a value of the request is what cannot be served.
+pub fn app_not_supported(app: &str) -> ValidationException {
+    field_validation_failed("app", &format!("app {app} is not supported"))
+}
+
 /// The number of tags ONE resource may hold.
 ///
 /// Not a resource guard but the model's own bound: a `TagList` is

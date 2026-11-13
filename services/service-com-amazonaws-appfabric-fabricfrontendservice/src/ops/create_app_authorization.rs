@@ -18,17 +18,19 @@
 //!   `ValidationException` and concurrent racers for one pair produce exactly
 //!   one winner.
 //!
-//! `app` is NOT one of them: the model types it as a plain `String255` with no
-//! `@enum`, and the value list its documentation gives is a snapshot of the
-//! applications AppFabric supported when the model was published rather than a
-//! wire constraint, so an application name outside that list is stored as the
-//! caller gave it instead of being refused.
+//! `app` is a third: the model types it as a plain `String255`, so the wire
+//! schema bounds its LENGTH only, while the set of applications the service
+//! serves is stated in the member's own documentation
+//! ([`crate::state::SUPPORTED_APPLICATIONS`]) and enforced by the service — an
+//! application name outside that set is refused with the modelled
+//! `ValidationException` (HTTP 400) before anything is written, so no
+//! authorization is created for it.
 //!
-//! Neither rule is judged before `appBundleIdentifier` is resolved: the bundle
-//! the URI names is the scope this call is made in, so an identifier naming
-//! nothing stored is refused as the app bundle (`ResourceNotFoundException`)
-//! whatever else the request carries — the same order every sibling of this
-//! chain applies.
+//! No rule over the request's own members is judged before
+//! `appBundleIdentifier` is resolved: the bundle the URI names is the scope this
+//! call is made in, so an identifier naming nothing stored is refused as the app
+//! bundle (`ResourceNotFoundException`) whatever else the request carries — the
+//! same order every sibling of this chain applies.
 //!
 //! A new authorization is `PendingConnect`; `ConnectAppAuthorization` is what
 //! moves it to `Connected`, so the clock owes no transition here.
@@ -258,8 +260,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         //
         // `authType` is closed by the model (`AUTH_TYPE_VALUES`), so the
         // boundary validator has already refused anything outside it. `app` is
-        // an open `String255`: the model constrains its length, not its value,
-        // so no application name is refused here.
+        // typed as an open `String255`, so the wire schema checks only its
+        // length: the set of applications the service serves is stated in the
+        // member's documentation and enforced here (see
+        // [`crate::state::SUPPORTED_APPLICATIONS`]), before anything is
+        // written, so a name outside it creates no authorization.
+        if !crate::state::is_supported_app(&input.app) {
+            return Err(CreateAppAuthorizationErrorModeled::ValidationException(
+                crate::state::app_not_supported(&input.app),
+            )
+            .into());
+        }
 
         // The credential must be the one the chosen authorization type uses.
         // Only the KIND is read: the secret inside it is never stored, logged or

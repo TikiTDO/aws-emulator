@@ -9,9 +9,8 @@
 //! * an app authorization is PERSISTED under its bundle, starts `PendingConnect`
 //!   and is reported identically by `GetAppAuthorization` and
 //!   `ListAppAuthorizations` for either identifier form;
-//! * an `app` is an OPEN string: a name outside the value list the model's
-//!   documentation gives is stored as the caller gave it, by every operation
-//!   that names one;
+//! * an `app` names an application the service serves: such a name is stored as
+//!   the caller gave it, by every operation that names one;
 //! * a bundle holds AT MOST ONE authorization per (app, tenant) pair, however
 //!   many callers race for it;
 //! * an ingestion exists only for a pair whose authorization has completed the
@@ -467,28 +466,18 @@ async fn an_app_authorization_round_trips_and_starts_pending_connect() {
     );
 }
 
-/// RULE: `app` is an OPEN string in the model (`String255`, no enum trait), so
-/// no operation refuses an application name for being outside the value list the
-/// model's documentation gives: `CreateAppAuthorization` stores and reports back
-/// the name the request carried, and what `CreateIngestion` requires of an
-/// (application, tenant) pair is a CONNECTED app authorization — which is what
-/// its refusal states, naming neither the application nor the tenant.
+/// RULE: an application name from the set the service serves is stored and
+/// reported back as the request carried it, and what `CreateIngestion` requires
+/// of such an (application, tenant) pair BEYOND the name is a CONNECTED app
+/// authorization — which is what its refusal states, naming neither the
+/// application nor the tenant.
 ///
-/// The table spans the names the documentation lists and names outside it: the
-/// one the recorded run carried, another vendor's, a lower-case spelling of a
-/// listed value, a near miss of one and a name at the member's own length bound.
+/// The table spans every name the member's documentation lists, so no single
+/// served value stands for the set. A name OUTSIDE the set is refused instead,
+/// which `supported_application_names` pins.
 #[tokio::test]
-async fn an_application_name_outside_the_documented_list_is_accepted_and_persisted() {
-    let at_the_length_bound = "A".repeat(255);
-    let mut apps: Vec<&str> = DOCUMENTED_APPS.to_vec();
-    apps.extend_from_slice(&[
-        "PAGERDUTY",
-        "SALESFORCE",
-        "DISCORD",
-        "slack",
-        "M365AUDITLOG",
-        at_the_length_bound.as_str(),
-    ]);
+async fn a_served_application_name_is_accepted_and_persisted() {
+    let apps: Vec<&str> = DOCUMENTED_APPS.to_vec();
 
     for (index, app) in apps.iter().enumerate() {
         let emulator = Emulator::new();
