@@ -8,24 +8,29 @@
 //! actually ingested, ranked by each chunk's relevance to the query text, highest first:
 //!
 //! * WHAT a chunk is, and where it came from, is decided by
-//!   [`crate::state::knowledge_base_retrieval`]: it reads the vector INDEX the knowledge
-//!   base is bound to, which the Bedrock Agent build-time plane's ingestion wrote — one
-//!   vector per source document it took in, with the chunk's text, the chunk's id, the
-//!   data source and the source's URI recorded beside it. A result's `location`
-//!   therefore RESOLVES: the `s3://<bucket>/<key>` URI it reports is the one the
-//!   ingestion read the chunk from, and `metadata` carries that chunk's own id, the id of
-//!   the data source it came from and the modality of its source file. Nothing here reads
-//!   an object store or re-derives a chunk, so a source deleted after it was ingested is
-//!   still cited exactly as the ingestion took it in, until another ingestion job
-//!   replaces what the index holds;
+//!   [`crate::state::knowledge_base_retrieval`]: it reads what the Bedrock Agent
+//!   build-time plane's ingestion recorded — one vector per document it took in, whether a
+//!   job crawled it from the data source's own source or a caller pushed it straight in,
+//!   with the chunk's text, the chunk's id, the data source and the document's own address
+//!   recorded beside it — in the S3 Vectors index a knowledge base bound to one holds its
+//!   vectors in, and otherwise in that plane's own ingestion record, because no API of this
+//!   emulator writes the store such a knowledge base names. A result's `location`
+//!   therefore RESOLVES: for a document read from an object store it is the
+//!   `s3://<bucket>/<key>` URI the ingestion read the chunk from, and for a document of a
+//!   custom data source the id it was ingested under, which is what a later read of that
+//!   document names it by; `metadata` carries that chunk's own id, the id of the data
+//!   source it came from and the modality of its source file. Nothing here reads an object
+//!   store or re-derives a chunk, so a source deleted after it was ingested is still cited
+//!   exactly as the ingestion took it in, until another ingestion replaces what the store
+//!   holds;
 //! * a knowledge base the Bedrock Agent plane does not hold is the modelled
 //!   `ResourceNotFoundException` (HTTP 404), not an empty success;
 //! * WHICH chunks are reported is narrowed by the request's `filter`
 //!   ([`crate::state::retrieval_filter`]) and bounded by `numberOfResults`;
 //! * `score` is the chunk's relevance to the query, in `[0, 1]`, computed from the
-//!   index's own nearest-neighbour geometry: the query's vector is built the way the
-//!   ingestion built each document's and the distance is the one the index was created
-//!   with. No embedding model runs inside this emulator and nothing here invents a score.
+//!   nearest-neighbour geometry of the store the chunks were read from: the query's vector
+//!   is built the way the ingestion built each document's and the distance is that store's
+//!   own. No embedding model runs inside this emulator and nothing here invents a score.
 //!
 //! This operation is `@readonly` and writes nothing a later caller can observe: the one
 //! write on its path is the Bedrock Agent plane materialising the status transitions its
@@ -303,8 +308,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into())
             }
             // The knowledge base's content does not live anywhere this plane can read it:
-            // the store it is backed by is not the one this emulator serves, or the index
-            // it was bound to is gone. Its DEPENDENCY failed, which is the modelled error
+            // it names no vector store, or the index it was bound to cannot be resolved or
+            // is gone. Its DEPENDENCY failed, which is the modelled error
             // for exactly that ("There was an issue with a dependency. Check the resource
             // configurations and retry the request."), and never an empty success.
             Err(retrieval::RetrievalRefusal::UnreachableVectorStore(resource))

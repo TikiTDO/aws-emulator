@@ -245,25 +245,43 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // not found. `clientToken` needs no index of its own: a document
         // already on its way out is not deleted a second time, so a retried
         // request reports exactly the documents the first one deleted.
-        let document_details = keys
-            .iter()
-            .map(|key| {
-                state
-                    .begin_document_deletion(
-                        &input.knowledge_base_id,
-                        &input.data_source_id,
-                        key,
-                        now,
-                    )
-                    .unwrap_or_else(|| {
-                        crate::state::not_found_document_detail(
-                            &input.knowledge_base_id,
-                            &input.data_source_id,
-                            key,
-                        )
-                    })
-            })
-            .collect();
+        let mut document_details = Vec::with_capacity(keys.len());
+        let mut deleted: Vec<crate::state::DocumentKey> = Vec::new();
+        for key in &keys {
+            match state.begin_document_deletion(
+                &input.knowledge_base_id,
+                &input.data_source_id,
+                key,
+                now,
+            ) {
+                Some(detail) => {
+                    document_details.push(detail);
+                    deleted.push(key.clone());
+                }
+                None => document_details.push(crate::state::not_found_document_detail(
+                    &input.knowledge_base_id,
+                    &input.data_source_id,
+                    key,
+                )),
+            }
+        }
+
+        // The index the knowledge base's own `storageConfiguration` binds it to,
+        // read while this store is still held.
+        let binding = state
+            .live_knowledge_base(&input.knowledge_base_id)
+            .and_then(|knowledge_base| {
+                crate::state::s3_vectors_binding(knowledge_base.storage_configuration.as_ref())
+            });
+        // A document whose deletion this call accepted is no longer part of what
+        // the knowledge base holds, so the chunk its ingestion recorded leaves
+        // the bound index with it and no retrieval keeps reporting it. Written
+        // with NO guard of this service's store held, the lock order every
+        // cross-plane path of these services keeps.
+        drop(state);
+        if let Some(binding) = binding.filter(|_| !deleted.is_empty()) {
+            crate::state::remove_document_vectors(&*self.engine, &binding, &deleted);
+        }
 
         Ok(DeleteKnowledgeBaseDocumentsOutput {
             document_details: Some(document_details),

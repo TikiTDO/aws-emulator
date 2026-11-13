@@ -45,6 +45,14 @@ pub const CHUNK_ID_METADATA_KEY: &str = "x-amz-bedrock-kb-chunk-id";
 /// [`CHUNK_TEXT_METADATA_KEY`].
 pub const DATA_SOURCE_ID_METADATA_KEY: &str = "x-amz-bedrock-kb-data-source-id";
 
+/// The metadata field the id of a chunk's document is recorded under, for a document of a
+/// CUSTOM data source: such a document is addressed by the id the request that ingested it
+/// gave it rather than by the URI of a source it was read from, so that id is its
+/// provenance, and a retrieval reports it as the result's own document location. The
+/// sibling field a document read from an object store records instead is
+/// `crate::state::SOURCE_URI_METADATA_KEY`. See [`CHUNK_TEXT_METADATA_KEY`].
+pub const DOCUMENT_ID_METADATA_KEY: &str = "x-amz-bedrock-kb-document-id";
+
 /// The metadata field the modality of the chunk's source file is recorded under. See
 /// [`CHUNK_TEXT_METADATA_KEY`].
 pub const SOURCE_FILE_MODALITY_METADATA_KEY: &str = "x-amz-bedrock-kb-source-file-modality";

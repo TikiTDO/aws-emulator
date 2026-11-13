@@ -4,8 +4,11 @@
 //!
 //! Ingests documents straight into the data source the URI names: each document
 //! is stored against this service's state and reported back as just accepted,
-//! and the clock alone carries it on to being indexed. This is the ONLY file to
-//! touch for this operation.
+//! and the clock alone carries it on to being indexed. The chunk of each
+//! document's text goes into the vector index the knowledge base is bound to, so
+//! what this call takes in is what a retrieval of that knowledge base reads back
+//! ([`crate::state::index_pushed_documents`]). This is the ONLY file to touch
+//! for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -161,7 +164,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let _ = ctx;
-        let Some(state) = crate::state::service_state(&*self.engine) else {
+        let Some(store) = crate::state::service_state(&*self.engine) else {
             return Err(
                 IngestKnowledgeBaseDocumentsErrorModeled::InternalServerException(
                     InternalServerException {
@@ -173,7 +176,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let now = ::std::time::SystemTime::now();
-        let mut state = state.lock();
+        let mut state = store.lock();
         state.materialise_due_transitions(now);
 
         // The documents are ingested into one data source of one knowledge
@@ -360,6 +363,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // same progression, and the details reported are the records just
         // written rather than the request.
         let mut document_details = Vec::with_capacity(keys.len());
+        let mut ingested: Vec<(crate::state::DocumentKey, DocumentContent)> =
+            Vec::with_capacity(keys.len());
         for (key, document) in keys.iter().cloned().zip(input.documents) {
             let record = crate::state::DocumentRecord::starting(
                 input.knowledge_base_id.clone(),
@@ -371,6 +376,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 now,
             );
             document_details.push(record.to_detail());
+            ingested.push((key.clone(), record.content.clone()));
             state.documents.insert(
                 (
                     input.knowledge_base_id.clone(),
@@ -382,6 +388,64 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
         if let Some(key) = token_key {
             state.document_client_tokens.insert(key, keys);
+        }
+
+        // The index the knowledge base's own `storageConfiguration` binds it to,
+        // and the dimension its chunks carry, read while this store is still
+        // held.
+        let (binding, record_dimension) =
+            match state.live_knowledge_base(&input.knowledge_base_id) {
+                Some(knowledge_base) => (
+                    crate::state::s3_vectors_binding(
+                        knowledge_base.storage_configuration.as_ref(),
+                    ),
+                    Some(crate::state::record_dimension(knowledge_base)),
+                ),
+                None => (None, None),
+            };
+        // A document ingested directly is part of what the knowledge base holds,
+        // so the chunk of each one just taken in is recorded: on the document
+        // itself, which is what a retrieval reads for a knowledge base whose
+        // vector store no API of this emulator writes, and written through to
+        // the bound index for one bound to an index this emulator serves — the
+        // same index, with the same fields, an ingestion job writes a crawled
+        // document's chunk into. The chunk's own vector carries the dimension of
+        // the store that will answer: the bound index's own, or the one the
+        // knowledge base's embedding model produces.
+        //
+        // The chunks are read and the index written with NO guard of this
+        // service's store held, the lock order every cross-plane path of these
+        // services keeps; the records take them afterwards.
+        drop(state);
+        let Some(record_dimension) = record_dimension else {
+            // The knowledge base was deleted while this call was being served,
+            // so there is nothing left to record a chunk on.
+            return Ok(IngestKnowledgeBaseDocumentsOutput {
+                document_details: Some(document_details),
+            });
+        };
+        let dimension = binding
+            .as_ref()
+            .and_then(|binding| crate::state::bound_index_dimension(&*self.engine, binding))
+            .unwrap_or(record_dimension);
+        let chunks =
+            crate::state::pushed_document_chunks(&*self.engine, &ingested, dimension);
+        if let Some(binding) = binding {
+            crate::state::index_pushed_chunks(
+                &*self.engine,
+                &binding,
+                &input.data_source_id,
+                &chunks,
+            );
+        }
+        let mut state = store.lock();
+        for (key, chunk) in chunks {
+            state.record_document_chunk(
+                &input.knowledge_base_id,
+                &input.data_source_id,
+                &key,
+                chunk,
+            );
         }
 
         Ok(IngestKnowledgeBaseDocumentsOutput {

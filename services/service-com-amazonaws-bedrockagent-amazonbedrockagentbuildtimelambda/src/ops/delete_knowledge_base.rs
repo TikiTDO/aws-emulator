@@ -188,7 +188,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // "upon deletion of a knowledge base or data source resource", and
             // RETAIN leaves them in the vector store. Read while the data
             // sources are still here to read them off.
-            let uris: Vec<String> = if already_deleting {
+            let keys: Vec<String> = if already_deleting {
                 Vec::new()
             } else {
                 let targeted: Vec<String> = state
@@ -205,7 +205,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 targeted
                     .iter()
                     .flat_map(|data_source_id| {
-                        state.ingested_source_uris(&input.knowledge_base_id, data_source_id)
+                        state.document_vector_keys(&input.knowledge_base_id, data_source_id)
                     })
                     .collect()
             };
@@ -230,14 +230,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 state.begin_knowledge_base_deletion(&input.knowledge_base_id, now);
             }
             binding
-                .filter(|_| !uris.is_empty())
-                .map(|binding| (binding, uris))
+                .filter(|_| !keys.is_empty())
+                .map(|binding| (binding, keys))
         };
 
         // The vectors leave the store that OWNS them, with no guard of this
         // service's store held.
-        if let Some((binding, uris)) = removal {
-            crate::state::remove_source_vectors(&*self.engine, &binding, &uris);
+        if let Some((binding, keys)) = removal {
+            crate::state::remove_vectors(&*self.engine, &binding, &keys);
         }
 
         Ok(DeleteKnowledgeBaseOutput {

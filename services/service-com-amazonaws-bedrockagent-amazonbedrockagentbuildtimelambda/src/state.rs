@@ -138,12 +138,22 @@ mod flow_aliases;
 /// it reports for it.
 mod ingestion;
 
+/// The knowledge base's own record of what it ingested, read for a knowledge
+/// base whose vector store is not one this emulator serves.
+mod ingestion_record;
+
+/// What a document pushed straight into a data source puts into the knowledge
+/// base's bound vector index, and what takes it back out again.
+mod pushed_documents;
+
 /// The vector store a knowledge base is bound to, and the embedding model that
 /// writes into it.
 mod vector_store;
 
 pub use flow_aliases::*;
 pub use ingestion::*;
+pub use ingestion_record::*;
+pub use pushed_documents::*;
 pub use vector_store::*;
 
 /// What an ingestion records in the bound vector index beside the vector: the published
@@ -2309,6 +2319,13 @@ pub struct DocumentRecord {
     /// It is what tells a re-crawl that a source document has not changed from
     /// one that was modified since it was last ingested.
     pub source_digest: Option<u64>,
+    /// The CHUNK the ingestion recorded for this document: the text it read and
+    /// the vector of that text ([`IngestedChunk`]). Recorded when the ingestion
+    /// took the document in and never re-derived, so what a retrieval of this
+    /// document answers does not change when its source does; `None` for a
+    /// document whose bytes live nowhere this emulator holds, for which nothing
+    /// invents one.
+    pub chunk: Option<IngestedChunk>,
     pub updated_at: SystemTime,
     pub client_token: Option<String>,
 }
@@ -2334,6 +2351,9 @@ impl DocumentRecord {
             content,
             metadata,
             source_digest: None,
+            // The chunk is recorded once the ingestion has read the document's
+            // bytes, which is work no store guard is held for.
+            chunk: None,
             updated_at: now,
             client_token,
         }
@@ -2352,6 +2372,7 @@ impl DocumentRecord {
         data_source_id: String,
         key: DocumentKey,
         source_digest: u64,
+        chunk: Option<IngestedChunk>,
         now: SystemTime,
     ) -> Self {
         let content = DocumentContent {
@@ -2372,6 +2393,7 @@ impl DocumentRecord {
             content,
             metadata: None,
             source_digest: Some(source_digest),
+            chunk,
             updated_at: now,
             // No request named this document: the job found it in the data
             // source's source.
@@ -2395,6 +2417,9 @@ impl DocumentRecord {
             DocumentStatus::DeleteInProgress,
         ));
         self.source_digest = None;
+        // The chunk goes with it: the knowledge base no longer holds this
+        // document's content, so no retrieval reports it from here on.
+        self.chunk = None;
         self.updated_at = now;
     }
 

@@ -335,8 +335,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> RetrieveAndGenera
                 internal("the knowledge base store is unavailable")
             }
             // The knowledge base's content does not live anywhere this plane can read it:
-            // the store it is backed by is not the one this emulator serves, or the index it
-            // was bound to is gone. Its DEPENDENCY failed, which is the modelled error for
+            // it names no vector store, or the index it was bound to cannot be resolved or
+            // is gone. Its DEPENDENCY failed, which is the modelled error for
             // exactly that, and never an empty success.
             retrieval::RetrievalRefusal::UnreachableVectorStore(resource)
             | retrieval::RetrievalRefusal::MissingVectorIndex(resource) => {

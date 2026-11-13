@@ -1,38 +1,42 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! What a knowledge-base retrieval reads: the chunks the knowledge base's bound vector
-//! index holds, and the provenance recorded with each of them.
+//! What a knowledge-base retrieval reads: the chunks the knowledge base's ingestion
+//! recorded, and the provenance recorded with each of them.
 //!
 //! `Retrieve` RANKS and REPORTS chunks and `RetrieveAndGenerate` CITES them; this module is
 //! where they come from, and where what a request asks of the search is read
 //! ([`search_configuration`]), so the provenance of every retrieval result and the meaning
 //! of every `KnowledgeBaseRetrievalConfiguration` are settled in one place for both.
 //!
-//! A knowledge base's content lives in the vector store it is BOUND to: an ingestion job
-//! of the Bedrock Agent build-time plane reads the data source's source documents, writes
-//! one vector per document into the index the knowledge base's `storageConfiguration`
-//! names, and records with that vector the fields Amazon Bedrock records — the chunk's
-//! text, the chunk's id, the data source it came from and where its source lives
+//! A knowledge base's content is written by the Bedrock Agent build-time plane: one vector
+//! per document it takes in — an ingestion job for a document it crawls from the data
+//! source's own source, and `IngestKnowledgeBaseDocuments` for one pushed straight in —
+//! with the fields Amazon Bedrock records beside it: the chunk's text, the chunk's id, the
+//! data source it came from and how the document is addressed — where its source lives for
+//! a document read from an object store, and the id it was ingested under for a document of
+//! a custom data source
 //! (`service-com-amazonaws-bedrockagent-amazonbedrockagentbuildtimelambda`'s
 //! `state::ingestion_index`, the ONE place those field names are decided). This plane
-//! writes none of it. That is what makes a result's provenance real, and what makes it
-//! stay put:
+//! writes none of it, and reads it where the knowledge base keeps it ([`nearest_chunks`]):
+//! in the S3 Vectors index a knowledge base bound to one holds its vectors in, whose data
+//! plane this emulator serves, and otherwise in the ingestion's own record of what it took
+//! in, because no API here writes the store such a knowledge base names. That is what makes
+//! a result's provenance real:
 //!
 //! * a chunk exists only because an ingestion took its source in, so a knowledge base
 //!   that has ingested nothing retrieves nothing;
 //! * the text and the citation are the ones that ingestion recorded, so deleting or
-//!   rewriting the source afterwards does not change what a retrieval cites — the
-//!   citation keeps pointing at the object the chunk came from until another ingestion
-//!   job replaces what the index holds;
-//! * the RANKING is the index's own nearest-neighbour order: the query's vector is
-//!   computed the way the ingestion computed each document's
-//!   (`agent_state::document_vector`, a term-frequency vector in the index's dimension)
-//!   and the distance is the one the index was created with
-//!   (`vectors_state::vector_distance`), so a retrieval is a real vector search over the
-//!   store the knowledge base is bound to rather than a second notion of relevance.
+//!   rewriting the source afterwards does not change what a retrieval cites — the citation
+//!   keeps pointing at the object the chunk came from until another ingestion replaces
+//!   what the store holds, whichever of the two stores answered it;
+//! * the RANKING is a nearest-neighbour order: the query's vector is computed the way the
+//!   ingestion computed each document's (`agent_state::document_vector`, a term-frequency
+//!   vector in the store's dimension) and the distance is the store's own
+//!   (`vectors_state::vector_distance`), so a retrieval is a real vector search rather
+//!   than a second notion of relevance.
 //!
-//! A vector a caller wrote into that index themselves carries none of those fields: it is
-//! not a chunk of this knowledge base, so no retrieval reports it.
+//! A vector a caller wrote into a bound index themselves carries none of those fields: it
+//! is not a chunk of this knowledge base, so no retrieval reports it.
 
 use std::collections::BTreeMap;
 use std::time::SystemTime;
@@ -44,13 +48,19 @@ use ::service_com_amazonaws_bedrockagent_amazonbedrockagentbuildtimelambda::stat
 use ::service_com_amazonaws_s3vectors_s3vectors::state as vectors_state;
 
 use crate::ops::types::{
-    KnowledgeBaseRetrievalConfiguration, RetrievalFilter, RetrievalResultLocation,
-    RetrievalResultS3Location,
+    KnowledgeBaseRetrievalConfiguration, RetrievalFilter, RetrievalResultCustomDocumentLocation,
+    RetrievalResultLocation, RetrievalResultS3Location,
 };
 
 /// The `RetrievalResultLocationType` an ingested S3 object is reported under
 /// (`smithy_query(query="shape",shape="RetrievalResultLocationType")`).
 pub const LOCATION_TYPE_S3: &str = "S3";
+
+/// The `RetrievalResultLocationType` a document of a custom data source is reported
+/// under: one pushed straight into the knowledge base through the build-time plane's
+/// document API, which is addressed by its own id rather than by a source it was read
+/// from. See [`LOCATION_TYPE_S3`].
+pub const LOCATION_TYPE_CUSTOM: &str = "CUSTOM";
 
 /// How many results a retrieval reports when the request names no `numberOfResults`: the
 /// `default` the model puts on that member
@@ -205,11 +215,10 @@ pub enum RetrievalRefusal {
     StoreUnavailable,
     /// The Bedrock Agent plane holds no knowledge base of that identifier.
     UnknownKnowledgeBase,
-    /// The knowledge base is backed by a vector store this emulator cannot query: the
-    /// modelled `KnowledgeBaseStorageType` admits several, and the one this plane reads
-    /// is the S3 Vectors index the Bedrock Agent plane's ingestion writes. The string is
-    /// the store the knowledge base names, for the refusal to report as its
-    /// `resourceName`.
+    /// The knowledge base names no vector store at all, or names one whose index this
+    /// plane cannot resolve from the configuration — so its content lives nowhere a
+    /// retrieval can read it. The string is what the knowledge base names, for the refusal
+    /// to report as its `resourceName`.
     ///
     /// A refusal rather than an empty success: a knowledge base whose content lives
     /// somewhere this emulator cannot reach has not "ingested nothing", and a caller
@@ -317,6 +326,20 @@ pub fn knowledge_base_resource_arn(
     )
 }
 
+/// Where the chunks of one knowledge base are read from.
+#[derive(Debug, Clone)]
+enum ChunkStore {
+    /// The S3 Vectors index the knowledge base is bound to, whose data plane this
+    /// emulator serves: the chunks ARE the vectors that index holds, so they are read
+    /// there and the index's own metric orders them.
+    S3Vectors(agent_state::S3VectorsBinding),
+    /// The knowledge base's own ingestion record, for a vector store no service of this
+    /// emulator serves: nothing here writes that store, so what the knowledge base holds
+    /// is what its ingestion took in (`agent_state::recorded_chunks`). The number is the
+    /// dimension that record's vectors carry.
+    Ingestion(i32),
+}
+
 /// The chunks of `knowledge_base_id` nearest to `query`, most relevant first, at most
 /// `keep` of them, and only those whose own metadata `filter` admits.
 ///
@@ -326,10 +349,9 @@ pub fn knowledge_base_resource_arn(
 /// instant whether or not anybody called, which is the same write every reporting
 /// operation of that plane performs.
 ///
-/// A knowledge base backed by a vector store this emulator cannot query, or bound to an
-/// S3 Vectors index that store no longer holds, is REFUSED rather than answered with an
-/// empty success: its content does not live anywhere this plane can read, which is not
-/// the same as a knowledge base that has ingested nothing.
+/// A knowledge base bound to an S3 Vectors index that store no longer holds is REFUSED
+/// rather than answered with an empty success: its content does not live anywhere this
+/// plane can read, which is not the same as a knowledge base that has ingested nothing.
 pub fn nearest_chunks<Eng: Send + Sync + 'static>(
     engine: &Eng,
     knowledge_base_id: &str,
@@ -340,27 +362,70 @@ pub fn nearest_chunks<Eng: Send + Sync + 'static>(
     let Some(agent) = agent_state::service_state(engine) else {
         return Err(RetrievalRefusal::StoreUnavailable);
     };
-    // The knowledge base and the store it binds to are read under the Bedrock Agent
-    // plane's lock; the vector store is reached with that lock released, the lock order
-    // every cross-plane path of these two services keeps.
-    let binding = {
-        let mut store = agent.lock();
-        store.materialise_due_transitions(SystemTime::now());
-        let Some(knowledge_base) = store.live_knowledge_base(knowledge_base_id) else {
+    // The knowledge base and the store that holds its chunks are read under the Bedrock
+    // Agent plane's lock; every other store is reached with that lock released, the lock
+    // order every cross-plane path of these two services keeps.
+    let store = {
+        let mut agent = agent.lock();
+        agent.materialise_due_transitions(SystemTime::now());
+        let Some(knowledge_base) = agent.live_knowledge_base(knowledge_base_id) else {
             return Err(RetrievalRefusal::UnknownKnowledgeBase);
         };
-        let storage = knowledge_base.storage_configuration.as_ref();
-        agent_state::s3_vectors_binding(storage).ok_or_else(|| {
-            // The store the knowledge base DOES name, so the refusal reports what it is
-            // bound to rather than only that this plane cannot read it.
-            RetrievalRefusal::UnreachableVectorStore(
-                storage.map_or_else(
-                    || "a knowledge base with no vector store".to_string(),
-                    |storage| storage.r#type.clone(),
-                ),
-            )
-        })
+        chunk_store(knowledge_base)
     }?;
+    match store {
+        ChunkStore::S3Vectors(binding) => {
+            nearest_index_chunks(engine, &binding, query, keep, filter)
+        }
+        ChunkStore::Ingestion(dimension) => Ok(nearest_recorded_chunks(
+            engine,
+            knowledge_base_id,
+            dimension,
+            query,
+            keep,
+            filter,
+        )),
+    }
+}
+
+/// Where `knowledge_base`'s chunks are read from, by the store its own
+/// `storageConfiguration` names.
+///
+/// The one store whose data plane this emulator serves is the S3 Vectors index an
+/// ingestion writes through to, so a knowledge base that names it is read THERE, and an
+/// index this plane cannot resolve from the configuration is a dependency that failed. A
+/// knowledge base that names any other store keeps its vectors somewhere no API here
+/// reaches, so what it holds is read from the ingestion record of the plane that took it
+/// in; a knowledge base that names no vector store at all holds its content nowhere this
+/// plane can read, which is refused rather than answered empty.
+fn chunk_store(
+    knowledge_base: &agent_state::KnowledgeBaseRecord,
+) -> Result<ChunkStore, RetrievalRefusal> {
+    let Some(storage) = knowledge_base.storage_configuration.as_ref() else {
+        return Err(RetrievalRefusal::UnreachableVectorStore(
+            "a knowledge base with no vector store".to_string(),
+        ));
+    };
+    if storage.r#type != agent_state::S3_VECTORS_STORAGE_TYPE {
+        return Ok(ChunkStore::Ingestion(agent_state::record_dimension(
+            knowledge_base,
+        )));
+    }
+    agent_state::s3_vectors_binding(Some(storage))
+        .map(ChunkStore::S3Vectors)
+        // The store the knowledge base DOES name, so the refusal reports what it is
+        // bound to rather than only that this plane cannot read it.
+        .ok_or_else(|| RetrievalRefusal::UnreachableVectorStore(storage.r#type.clone()))
+}
+
+/// The page of chunks the S3 Vectors index `binding` names answers for `query`.
+fn nearest_index_chunks<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    binding: &agent_state::S3VectorsBinding,
+    query: &str,
+    keep: usize,
+    filter: Option<&RetrievalFilter>,
+) -> Result<Vec<RetrievedChunk>, RetrievalRefusal> {
     let Some(vectors) = vectors_state::service_state(engine) else {
         return Err(RetrievalRefusal::StoreUnavailable);
     };
@@ -370,7 +435,7 @@ pub fn nearest_chunks<Eng: Send + Sync + 'static>(
     // the guard is held for is one pass of the index's own distance function — work the
     // index's size bounds and no request can grow — rather than anything the request
     // chose.
-    let (metric, mut ranked) = {
+    let (metric, ranked) = {
         let store = vectors.lock();
         let Ok(index) = store.index(&binding.vector_bucket, &binding.index) else {
             return Err(RetrievalRefusal::MissingVectorIndex(format!(
@@ -398,37 +463,84 @@ pub fn nearest_chunks<Eng: Send + Sync + 'static>(
         (index.distance_metric.clone(), ranked)
     };
 
-    // Nearest first, which is the ordering the index is read under. The sort is STABLE and
-    // the vectors are walked in key order, so vectors at the same distance keep that order
-    // and one request always answers the same way.
+    // PHASE TWO, with the guard RELEASED between candidates: the chunks are read in
+    // nearest-first order, so what is copied is the page the request asked for and not the
+    // whole index, and a filter's own work never holds a store every other caller shares.
+    Ok(page_of_chunks(ranked, &metric, keep, filter, |key| {
+        read_chunk(&vectors, binding, key)
+    }))
+}
+
+/// The page of chunks the knowledge base's own ingestion record answers for `query`.
+///
+/// The record holds the chunk each ingestion read, with the vector it computed for it, so
+/// the ranking is the geometry the bound index would be read under: both vectors are the
+/// term-frequency vectors the ingestion computes, in the dimension the knowledge base's
+/// chunks carry, and the distance is the cosine one — the metric a knowledge base's
+/// vectors are compared under.
+///
+/// Two phases, as for the index: the distances first, with nothing copied, and then one
+/// chunk read per candidate until the page is full.
+fn nearest_recorded_chunks<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    knowledge_base_id: &str,
+    dimension: i32,
+    query: &str,
+    keep: usize,
+    filter: Option<&RetrievalFilter>,
+) -> Vec<RetrievedChunk> {
+    let query_vector = agent_state::document_vector(query, dimension);
+    let ranked = agent_state::ranked_chunks(engine, knowledge_base_id, &query_vector);
+    page_of_chunks(
+        ranked,
+        vectors_state::DISTANCE_METRIC_COSINE,
+        keep,
+        filter,
+        |chunk| {
+            agent_state::recorded_chunk_metadata(engine, knowledge_base_id, chunk)
+                .as_ref()
+                .and_then(chunk_of)
+        },
+    )
+}
+
+/// The page a retrieval reports, from candidates each carrying its distance from the
+/// query: nearest first, only the chunks `filter` admits, and at most `keep` of them.
+///
+/// The ONE place the ordering, the filter and the page bound are applied, so the two
+/// stores a knowledge base's chunks can live in cannot disagree about any of the three.
+/// The sort is STABLE and the candidates arrive in key order, so candidates at the same
+/// distance keep that order and one request always answers the same way. The walk stops
+/// as soon as the page is full, and `chunk` is what reads one candidate's chunk.
+fn page_of_chunks<Candidate>(
+    mut ranked: Vec<(f32, Candidate)>,
+    metric: &str,
+    keep: usize,
+    filter: Option<&RetrievalFilter>,
+    mut chunk: impl FnMut(&Candidate) -> Option<RetrievedChunk>,
+) -> Vec<RetrievedChunk> {
     ranked.sort_by(|left, right| {
         left.0
             .partial_cmp(&right.0)
             .unwrap_or(::std::cmp::Ordering::Equal)
     });
-
-    // PHASE TWO, with the guard RELEASED between candidates: the chunks are read in that
-    // order, the filter is evaluated against one chunk at a time, and the walk stops as
-    // soon as the page is full — so what is copied is the page the request asked for and
-    // not the whole index, and a filter's own work never holds a store every other caller
-    // shares.
     let mut chunks: Vec<RetrievedChunk> = Vec::new();
-    for (distance, key) in ranked {
+    for (distance, candidate) in &ranked {
         if chunks.len() >= keep {
             break;
         }
-        let Some(mut chunk) = read_chunk(&vectors, &binding, &key) else {
+        let Some(mut read) = chunk(candidate) else {
             continue;
         };
         if let Some(filter) = filter {
-            if !crate::state::retrieval_filter::admits(&chunk.metadata, filter) {
+            if !crate::state::retrieval_filter::admits(&read.metadata, filter) {
                 continue;
             }
         }
-        chunk.score = relevance(&metric, distance);
-        chunks.push(chunk);
+        read.score = relevance(metric, *distance);
+        chunks.push(read);
     }
-    Ok(chunks)
+    chunks
 }
 
 /// The chunk the vector at `key` carries, read under its own brief hold of the vector
@@ -445,10 +557,10 @@ fn read_chunk(
 }
 
 /// The `DependencyFailedException` message a retrieval answers when the knowledge base's
-/// content does not live anywhere this plane can read it: the vector store it is backed by
-/// is not the one this emulator serves, or the index it is bound to is gone from that
-/// store. `resource` is the store or index the knowledge base names, which the refusal
-/// also reports as its `resourceName`.
+/// content does not live anywhere this plane can read it: it names no vector store, or the
+/// index it is bound to cannot be resolved or is gone from the store that held it.
+/// `resource` is the store or index the knowledge base names, which the refusal also
+/// reports as its `resourceName`.
 pub fn unreachable_store_message(resource: &str) -> String {
     format!(
         "The vector store the knowledge base is backed by could not be queried: \
@@ -480,17 +592,14 @@ fn relevance(metric: &str, distance: f32) -> f64 {
 /// `score` is filled by the caller once the ranking is known.
 fn chunk_of(metadata: &Document) -> Option<RetrievedChunk> {
     let text = field(metadata, index_fields::CHUNK_TEXT_METADATA_KEY)?.to_string();
-    let uri = field(metadata, agent_state::SOURCE_URI_METADATA_KEY)?;
-    let location = s3_location(uri)?;
-    // Everything the ingestion recorded ABOUT the chunk: the two fields the response
+    let location = location_of(metadata)?;
+    // Everything the ingestion recorded ABOUT the chunk: the fields the response
     // carries elsewhere are left out, so the metadata map is what the chunk is annotated
     // with and nothing else.
     let mut reported = BTreeMap::new();
     if let Document::Object(fields) = metadata {
         for (key, value) in fields {
-            if key == index_fields::CHUNK_TEXT_METADATA_KEY
-                || key == agent_state::SOURCE_URI_METADATA_KEY
-            {
+            if PROVENANCE_METADATA_KEYS.contains(&key.as_str()) {
                 continue;
             }
             reported.insert(key.clone(), value.clone());
@@ -501,6 +610,36 @@ fn chunk_of(metadata: &Document) -> Option<RetrievedChunk> {
         text,
         location,
         metadata: reported,
+    })
+}
+
+/// The fields of a chunk's recorded metadata the response carries ELSEWHERE than in its
+/// `metadata` map: the chunk's text, which is the content, and the two forms of the
+/// provenance [`location_of`] reports as the location.
+const PROVENANCE_METADATA_KEYS: [&str; 3] = [
+    index_fields::CHUNK_TEXT_METADATA_KEY,
+    agent_state::SOURCE_URI_METADATA_KEY,
+    index_fields::DOCUMENT_ID_METADATA_KEY,
+];
+
+/// Where the chunk's document lives, as the ingestion that took it in recorded it.
+///
+/// A document is addressed the way its DATA SOURCE addresses one, which is the member of
+/// the modelled `RetrievalResultLocation` that carries the detail: a document read from an
+/// object store by the object it lives at, and a document pushed straight into a custom
+/// data source by the id it was ingested under. `None` for a vector recording neither,
+/// which is no chunk of this knowledge base.
+fn location_of(metadata: &Document) -> Option<RetrievalResultLocation> {
+    if let Some(uri) = field(metadata, agent_state::SOURCE_URI_METADATA_KEY) {
+        return s3_location(uri);
+    }
+    let id = field(metadata, index_fields::DOCUMENT_ID_METADATA_KEY)?;
+    Some(RetrievalResultLocation {
+        r#type: LOCATION_TYPE_CUSTOM.to_string(),
+        custom_document_location: Some(RetrievalResultCustomDocumentLocation {
+            id: Some(id.to_string()),
+        }),
+        ..RetrievalResultLocation::default()
     })
 }
 

@@ -69,8 +69,9 @@ pub struct SourceDocument {
     /// before and that has not changed from one that was modified since.
     pub digest: u64,
     /// The vector of the document's text, as [`document_vector`] computes it for
-    /// the bound index's dimension; empty when the knowledge base binds to no
-    /// index this emulator holds, so there is nothing to compute it against.
+    /// the dimension the store that will answer a retrieval holds; empty when
+    /// the crawl was asked for no dimension at all, so there is nothing to
+    /// compute it against.
     pub vector: Vec<f32>,
     /// The CHUNK of the document's text the index holds beside that vector
     /// ([`ingestion_index::leading_chunk`]), which is what a retrieval of this
@@ -197,9 +198,9 @@ pub fn source_uri(bucket: &str, key: &str) -> String {
 }
 
 /// The source documents of the data source `configuration` describes, read in
-/// the service that owns them, each with the vector of its text for an index of
-/// `dimension` values (`None` when the knowledge base binds to no index this
-/// emulator holds, so no vector is computed). `None` when the configuration
+/// the service that owns them, each with the vector of its text in `dimension`
+/// values — the dimension of the store that will answer a retrieval of them
+/// (`None` to compute no vector at all). `None` when the configuration
 /// names no source this service enumerates.
 ///
 /// Only the objects under one of the configured `inclusionPrefixes` are taken
@@ -367,6 +368,23 @@ pub fn remove_source_vectors<Eng: Send + Sync + 'static>(
     binding: &S3VectorsBinding,
     uris: &[String],
 ) -> usize {
+    let keys: Vec<String> = uris.iter().map(|uri| source_vector_key(uri)).collect();
+    remove_vectors(engine, binding, &keys)
+}
+
+/// Take the vectors held under `keys` out of the index `binding` names,
+/// answering how many were there to take.
+///
+/// The keys are the ones this plane holds a chunk under, whichever path wrote
+/// it: a crawled document's is where its source object lives, and a pushed
+/// document's is [`crate::state::document_vector_key`].
+///
+/// LOCK ORDER: as the module doc says.
+pub fn remove_vectors<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    binding: &S3VectorsBinding,
+    keys: &[String],
+) -> usize {
     use ::service_com_amazonaws_s3vectors_s3vectors::state as vectors;
 
     let Some(state) = vectors::service_state(engine) else {
@@ -377,10 +395,9 @@ pub fn remove_source_vectors<Eng: Send + Sync + 'static>(
         return 0;
     };
     let mut removed = 0usize;
-    for uri in uris {
-        let key = source_vector_key(uri);
-        if index.vectors.contains_key(&key) {
-            index.tombstone(&key);
+    for key in keys {
+        if index.vectors.contains_key(key) {
+            index.tombstone(key);
             removed += 1;
         }
     }
@@ -468,6 +485,13 @@ impl ComAmazonawsBedrockagentAmazonbedrockagentbuildtimelambdaState {
                 continue;
             }
             let key = DocumentKey::S3(document.uri.clone());
+            // The chunk this job read, recorded on the document: what a
+            // retrieval answers for it, for a knowledge base whose vector store
+            // no API of this emulator writes ([`ingestion_record`]).
+            let chunk = Some(IngestedChunk {
+                text: document.chunk.clone(),
+                vector: document.vector.clone(),
+            });
             let index = (
                 knowledge_base_id.to_string(),
                 data_source_id.to_string(),
@@ -484,6 +508,7 @@ impl ComAmazonawsBedrockagentAmazonbedrockagentbuildtimelambdaState {
                             data_source_id.to_string(),
                             key,
                             document.digest,
+                            chunk,
                             now,
                         );
                     }
@@ -497,6 +522,7 @@ impl ComAmazonawsBedrockagentAmazonbedrockagentbuildtimelambdaState {
                             data_source_id.to_string(),
                             key,
                             document.digest,
+                            chunk,
                             now,
                         ),
                     );

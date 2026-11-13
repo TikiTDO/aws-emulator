@@ -31,6 +31,8 @@ mod list_sessions;
 mod pattern_constraint_messages;
 #[path = "all/prompt_optimization.rs"]
 mod prompt_optimization;
+#[path = "all/pushed_document_retrieval.rs"]
+mod pushed_document_retrieval;
 #[path = "all/reranking.rs"]
 mod reranking;
 #[path = "all/retrieve_and_generate.rs"]

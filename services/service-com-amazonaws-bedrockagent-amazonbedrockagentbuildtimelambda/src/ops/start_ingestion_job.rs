@@ -184,6 +184,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ingestion_job,
             data_source_configuration,
             storage_configuration,
+            record_dimension,
             ingested,
         ) = {
             let mut state = state.lock();
@@ -206,6 +207,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into());
             };
             let storage_configuration = knowledge_base.storage_configuration.clone();
+            // The dimension this job's chunks carry when the knowledge base
+            // binds to no index this emulator holds: the one its embedding model
+            // produces ([`crate::state::record_dimension`]).
+            let record_dimension = crate::state::record_dimension(knowledge_base);
             let Some(data_source) =
                 state.live_data_source_of(&input.knowledge_base_id, &input.data_source_id)
             else {
@@ -320,6 +325,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 ingestion_job,
                 data_source_configuration,
                 storage_configuration,
+                record_dimension,
                 state.ingested_source_uris(&input.knowledge_base_id, &input.data_source_id),
             )
         };
@@ -329,14 +335,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // service that owns them, then the vectors for them written into that
         // index. Each store is reached on its own, which is what keeps a lock
         // cycle between them unreachable.
+        //
+        // A knowledge base that binds to no index this emulator holds still gets
+        // a chunk per document, in the dimension its own embedding model
+        // produces: that chunk is what a retrieval of such a knowledge base
+        // reads ([`crate::state::ingestion_record`]).
         let binding = crate::state::s3_vectors_binding(storage_configuration.as_ref());
         let dimension = binding
             .as_ref()
-            .and_then(|binding| crate::state::bound_index_dimension(&*self.engine, binding));
+            .and_then(|binding| crate::state::bound_index_dimension(&*self.engine, binding))
+            .unwrap_or(record_dimension);
         let crawled = crate::state::crawl_data_source(
             &*self.engine,
             &data_source_configuration,
-            dimension,
+            Some(dimension),
         );
         let mut indexed = crate::state::IndexedVectors::NotReconciled;
         if let (Some(crawled), Some(binding)) = (crawled.as_ref(), binding.as_ref()) {
