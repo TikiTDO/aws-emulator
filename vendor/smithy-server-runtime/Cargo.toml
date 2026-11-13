@@ -18,3 +18,6 @@ bytes = "1"
 emulator-server = { path = "../server", package = "aws-emulator-server", version = "*" }
 emulator-telemetry = { path = "../emulator-telemetry", package = "aws-emulator-emulator-telemetry", version = "*" }
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util", "time"] }

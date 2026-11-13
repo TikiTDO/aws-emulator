@@ -639,6 +639,278 @@ mod tests {
             }
         }
 
+        const CHILD_TEST: &str = "boot_identity::tests::linux::private_identity_process_child";
+        const CASE_ENV: &str = "EMULATOR_IDENTITY_TEST_CASE";
+        const ROOT_ENV: &str = "EMULATOR_IDENTITY_TEST_ROOT";
+
+        // Only a handle returned by our own successful spawn is signalled. No raw PID/group.
+        struct ChildOwner(Option<std::process::Child>);
+        impl ChildOwner {
+            fn stop(&mut self) -> Result<(), &'static str> {
+                let Some(child) = self.0.as_mut() else {
+                    return Ok(());
+                };
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    self.0 = None;
+                    return Ok(());
+                }
+                // A process may exit between observation and kill; the reap decides completion.
+                let _ = child.kill();
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => {
+                            self.0 = None;
+                            return Ok(());
+                        }
+                        Err(_) => return Err("child reap failed; fixture retained"),
+                        Ok(None) if std::time::Instant::now() >= until => {
+                            return Err("child termination deadline; fixture retained");
+                        }
+                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                    }
+                }
+            }
+        }
+        impl Drop for ChildOwner {
+            fn drop(&mut self) {
+                let _ = self.stop();
+            }
+        }
+
+        fn run_process_case(root: &Path, case: &str) -> Result<(), &'static str> {
+            use std::os::unix::fs::OpenOptionsExt;
+            let log = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(root.join(format!("{case}.log")))
+                .map_err(|_| "create child log")?;
+            let errors = log.try_clone().map_err(|_| "clone child log")?;
+            let executable =
+                std::env::current_exe().map_err(|_| "locate native test executable")?;
+            let child = std::process::Command::new(executable)
+                .args(["--ignored", "--exact", CHILD_TEST, "--test-threads=1"])
+                .env_clear()
+                .env("HOME", root)
+                .env("TMPDIR", root)
+                .env("PATH", "")
+                .env(CASE_ENV, case)
+                .env(ROOT_ENV, root)
+                .current_dir(root)
+                .stdin(std::process::Stdio::null())
+                .stdout(log)
+                .stderr(errors)
+                .spawn()
+                .map_err(|_| "spawn native test child")?;
+            let mut owner = ChildOwner(Some(child));
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            let outcome = loop {
+                match owner.0.as_mut().unwrap().try_wait() {
+                    Ok(Some(status)) => {
+                        owner.0 = None;
+                        break if status.success() {
+                            Ok(())
+                        } else {
+                            Err("native child failed; private fixture log retained")
+                        };
+                    }
+                    Err(_) => break Err("observe native child failed"),
+                    Ok(None) if std::time::Instant::now() >= until => {
+                        break Err("native child deadline");
+                    }
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                }
+            };
+            owner.stop()?;
+            outcome?;
+            let marker = std::fs::read_to_string(root.join(format!("{case}.done")))
+                .map_err(|_| "child did not execute the exact requested witness")?;
+            if marker != format!("identity-case:{case}\n") {
+                return Err("child witness marker mismatch");
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn private_identity_fresh_process_getters_restart_and_failure_boundaries() {
+            // On any failure/unwind, retain this private fixture rather than delete beneath a
+            // child whose cleanup could not be confirmed. Successful children are all reaped.
+            let fixture = std::mem::ManuallyDrop::new(Fixture::new());
+            for case in [
+                "ephemeral",
+                "create",
+                "restore",
+                "late-auth",
+                "late-tls",
+                "failure",
+            ] {
+                if let Err(reason) = run_process_case(&fixture.root, case) {
+                    panic!(
+                        "identity child {case}: {reason}; private fixture retained at {}",
+                        fixture.root.display()
+                    );
+                }
+            }
+            // No process or inherited log handle remains after all six successful joins.
+            std::fs::remove_dir_all(&fixture.root).expect("remove completed private fixture");
+            drop(std::mem::ManuallyDrop::into_inner(fixture));
+        }
+
+        #[test]
+        #[ignore = "only the fresh-process parent supplies this child's disposable inputs"]
+        fn private_identity_process_child() {
+            let case = std::env::var(CASE_ENV).expect("fixed identity child case required");
+            let root =
+                PathBuf::from(std::env::var_os(ROOT_ENV).expect("private fixture root required"));
+            assert!(root.is_absolute());
+            let config = || IdentityConfig::Retained {
+                state_dir: root.clone(),
+                namespace: "test".into(),
+                network: loopback(),
+                action: RetainedIdentityAction::KeepOrCreate,
+            };
+            assert!(SigV4Authenticator::minted_credentials().is_none());
+            match case.as_str() {
+                "ephemeral" => {
+                    let auth = SigV4Authenticator::for_this_process();
+                    assert!(std::ptr::eq(
+                        auth,
+                        SigV4Authenticator::minted_credentials().unwrap()
+                    ));
+                    let ca = TlsCertificateAuthority::covering(Some("127.0.0.2".parse().unwrap()))
+                        .unwrap();
+                    assert!(
+                        ca.covers("127.0.0.2".parse().unwrap()),
+                        "auth must not eagerly freeze TLS names"
+                    );
+                    assert!(std::ptr::eq(
+                        ca,
+                        TlsCertificateAuthority::for_this_process()
+                    ));
+                    assert!(!root.join("test/identity").exists());
+                }
+                "create" | "restore" => {
+                    let info = prepare(config()).unwrap();
+                    let expected = if case == "create" {
+                        IdentityDisposition::Created
+                    } else {
+                        IdentityDisposition::Restored
+                    };
+                    let IdentityInfo::Retained {
+                        generation,
+                        certificate_sha256,
+                        disposition,
+                    } = info
+                    else {
+                        panic!("retained result required")
+                    };
+                    assert_eq!(disposition, expected);
+                    let ca = TlsCertificateAuthority::for_this_process();
+                    assert!(
+                        SigV4Authenticator::minted_credentials().is_none(),
+                        "TLS must not publish an unrequested authenticator"
+                    );
+                    let auth = SigV4Authenticator::for_this_process();
+                    assert!(std::ptr::eq(
+                        ca,
+                        TlsCertificateAuthority::for_this_process()
+                    ));
+                    assert!(std::ptr::eq(auth, SigV4Authenticator::for_this_process()));
+                    assert!(std::ptr::eq(
+                        auth,
+                        SigV4Authenticator::minted_credentials().unwrap()
+                    ));
+                    let bytes = std::fs::read(root.join("test/identity/boot-identity.v1")).unwrap();
+                    let recorded = decode(&bytes).unwrap();
+                    assert_eq!(generation, recorded.generation);
+                    assert_eq!(base64::encode(ca.der()), recorded.certificate_der_base64);
+                    assert!(auth.access_key_id == recorded.root_access_key_id);
+                    assert!(auth.secret_access_key == recorded.root_secret_access_key);
+                    let public =
+                        format!("{}\n{}\n", generation, base64::encode(certificate_sha256));
+                    let receipt = root.join("public-generation.txt");
+                    if case == "create" {
+                        use std::io::Write;
+                        use std::os::unix::fs::OpenOptionsExt;
+                        let mut out = std::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .mode(0o600)
+                            .open(receipt)
+                            .unwrap();
+                        out.write_all(public.as_bytes()).unwrap();
+                    } else {
+                        assert_eq!(std::fs::read_to_string(receipt).unwrap(), public);
+                    }
+                }
+                "late-auth" | "late-tls" => {
+                    let original_auth =
+                        (case == "late-auth").then(SigV4Authenticator::for_this_process);
+                    let original_tls =
+                        (case == "late-tls").then(TlsCertificateAuthority::for_this_process);
+                    let absent = root.join(case);
+                    assert!(!absent.exists());
+                    assert_eq!(
+                        prepare(IdentityConfig::Retained {
+                            state_dir: absent.clone(),
+                            namespace: "test".into(),
+                            network: loopback(),
+                            action: RetainedIdentityAction::KeepOrCreate,
+                        }),
+                        Err(IdentityError::AlreadyInitialized)
+                    );
+                    assert!(!absent.exists());
+                    let auth = SigV4Authenticator::for_this_process();
+                    let ca = TlsCertificateAuthority::for_this_process();
+                    if let Some(original) = original_auth {
+                        assert!(std::ptr::eq(original, auth));
+                    }
+                    if let Some(original) = original_tls {
+                        assert!(std::ptr::eq(original, ca));
+                    }
+                    assert!(std::ptr::eq(auth, SigV4Authenticator::for_this_process()));
+                    assert!(std::ptr::eq(
+                        ca,
+                        TlsCertificateAuthority::for_this_process()
+                    ));
+                }
+                "failure" => {
+                    // This is the disposable record made by the preceding child, not a host key.
+                    let path = root.join("test/identity/boot-identity.v1");
+                    std::fs::write(&path, b"deliberately invalid synthetic identity").unwrap();
+                    assert_eq!(prepare(config()), Err(IdentityError::InvalidIdentity));
+                    assert_eq!(
+                        std::fs::read(path).unwrap(),
+                        b"deliberately invalid synthetic identity"
+                    );
+                    assert!(
+                        std::panic::catch_unwind(SigV4Authenticator::for_this_process).is_err()
+                    );
+                    assert!(
+                        std::panic::catch_unwind(TlsCertificateAuthority::for_this_process)
+                            .is_err()
+                    );
+                    assert!(SigV4Authenticator::minted_credentials().is_none());
+                    assert_eq!(
+                        prepare(IdentityConfig::Ephemeral),
+                        Err(IdentityError::AlreadyInitialized)
+                    );
+                }
+                _ => panic!("unknown identity child case"),
+            }
+            // A zero-test libtest invocation must not look like an executed witness.
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut marker = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(root.join(format!("{case}.done")))
+                .unwrap();
+            writeln!(marker, "identity-case:{case}").unwrap();
+        }
+
         #[test]
         fn private_identity_disk_restart_lease_and_explicit_atomic_rotation() {
             let fixture = Fixture::new();
