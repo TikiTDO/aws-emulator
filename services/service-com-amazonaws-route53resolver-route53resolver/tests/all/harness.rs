@@ -635,7 +635,19 @@ async fn outposts_ok(
 
 /// Call one operation and return `(http status, parsed body)`.
 pub async fn call(router: &MultiServiceRouter, operation: &str, body: Value) -> (u16, Value) {
-    let request = http::Request::builder()
+    call_tracing(router, operation, body, None).await
+}
+
+/// The same call, carrying the tracing header `tracing` when the caller sends
+/// one — which is what a Resolver refusal reports the trace of the request
+/// under, so a suite that asserts on that clause chooses the chain itself.
+pub async fn call_tracing(
+    router: &MultiServiceRouter,
+    operation: &str,
+    body: Value,
+    tracing: Option<&str>,
+) -> (u16, Value) {
+    let mut builder = http::Request::builder()
         .method("POST")
         .uri("/")
         .header("content-type", "application/x-amz-json-1.1")
@@ -648,7 +660,11 @@ pub async fn call(router: &MultiServiceRouter, operation: &str, body: Value) -> 
                 "AWS4-HMAC-SHA256 Credential=AKIDTESTONLY/20261021/{REGION}/route53resolver/aws4_request, \
                  SignedHeaders=host;x-amz-date, Signature=not-verified-in-this-test"
             ),
-        )
+        );
+    if let Some(tracing) = tracing {
+        builder = builder.header("x-amzn-trace-id", tracing);
+    }
+    let request = builder
         .body(bytes::Bytes::from(
             serde_json::to_vec(&body).expect("the request body serializes"),
         ))
@@ -662,6 +678,19 @@ pub async fn call(router: &MultiServiceRouter, operation: &str, body: Value) -> 
         serde_json::from_slice(response.body()).unwrap_or(Value::Null)
     };
     (status, parsed)
+}
+
+/// A refusal `Message` split into the sentence it states and the trace id its
+/// closing clause carries, when it closes with that clause and the id in it is
+/// in the form X-Ray gives one (`1-<8 hex>-<24 hex>`, read through the one
+/// reading of that form the services share).
+///
+/// `None` for a message that closes with no such clause, so a suite asserting
+/// the clause reports what it got instead.
+pub fn traced_message(message: &str) -> Option<(&str, &str)> {
+    let (stated, clause) = message.rsplit_once(" Trace Id: ")?;
+    let trace = clause.strip_prefix('"')?.strip_suffix('"')?;
+    service_common::xray_trace::is_trace_id(trace).then_some((stated, trace))
 }
 
 /// Call an operation that must succeed, and return its body.

@@ -32,8 +32,8 @@ use serde_json::{json, Value};
 use service_com_amazonaws_route53resolver_route53resolver::ops::types::RESOLVER_QUERY_LOG_CONFIG_ASSOCIATION_STATUS_VALUES;
 
 use super::harness::{
-    call, emulator, error_type, expect_error, ok, parse_time, string_member, without_status,
-    Emulator,
+    call, emulator, error_type, expect_error, ok, parse_time, string_member, traced_message,
+    without_status, Emulator,
 };
 use super::resolver_query_log_config_associations::{association, association_count, config_id};
 
@@ -49,16 +49,16 @@ const LONGEST_VPC_ID: &str =
 const IN_FORCE_STATUSES: &[&str] = &["CREATING", "ACTIVE"];
 
 /// The sentence Resolver answers for a query logging configuration it holds
-/// nothing under: entirely fixed text behind the service error code for that
-/// fault, naming no id.
-const CONFIG_GONE_MESSAGE: &str =
+/// nothing under: fixed text behind the service error code for that fault,
+/// naming no id, before the trace clause the refusal closes with.
+const CONFIG_GONE_SENTENCE: &str =
     "[RSLVR-01601] The specified query logging configuration doesn't exist.";
 
 /// The sentence Resolver answers for an association it holds nothing under,
 /// whether the request addressed it by its own id or by the (configuration,
-/// VPC) pair it was made from: entirely fixed text behind its own service error
-/// code, which is what tells this fault from [`CONFIG_GONE_MESSAGE`]'s.
-const ASSOCIATION_GONE_MESSAGE: &str =
+/// VPC) pair it was made from: fixed text behind its own service error code,
+/// which is what tells this fault from [`CONFIG_GONE_SENTENCE`]'s.
+const ASSOCIATION_GONE_SENTENCE: &str =
     "[RSLVR-01602] The specified query logging configuration association doesn't exist.";
 
 /// One row of the scope table.
@@ -322,8 +322,8 @@ async fn a_disassociate_takes_out_exactly_the_association_its_pair_was_made_from
 /// address no association the store holds. Each is refused with
 /// `ResourceNotFoundException`, nothing is taken out, and the sentence is the
 /// service's own for the resource that is missing — the configuration
-/// ([`CONFIG_GONE_MESSAGE`]) or the association itself
-/// ([`ASSOCIATION_GONE_MESSAGE`]). Both are entirely fixed text, so the
+/// ([`CONFIG_GONE_SENTENCE`]) or the association itself
+/// ([`ASSOCIATION_GONE_SENTENCE`]). Both sentences are fixed text, so the
 /// bracketed service error code, and not an id echoed into the message, is what
 /// tells the two faults apart.
 #[tokio::test]
@@ -376,8 +376,14 @@ async fn a_pair_the_store_holds_no_association_for_is_refused() {
             "case {case:?}: the refusal must name ResourceNotFoundException, got {parsed}"
         );
         let message = string_member(&parsed, "Message");
+        let (stated, _) = traced_message(&message).unwrap_or_else(|| {
+            panic!(
+                "case {case:?}: the refusal must close with the trace clause of the request, got \
+                 {message:?}"
+            )
+        });
         assert_eq!(
-            message, CONFIG_GONE_MESSAGE,
+            stated, CONFIG_GONE_SENTENCE,
             "case {case:?}: the refusal must carry the service's own coded sentence, got {parsed}"
         );
         assert_eq!(
@@ -385,7 +391,7 @@ async fn a_pair_the_store_holds_no_association_for_is_refused() {
             "ResolverQueryLogConfig",
             "case {case:?}: the refusal must name the resource that is missing, got {parsed}"
         );
-        config_messages.push(message);
+        config_messages.push(stated.to_string());
     }
     assert_eq!(
         config_messages.iter().collect::<BTreeSet<&String>>().len(),
@@ -434,20 +440,26 @@ async fn a_pair_the_store_holds_no_association_for_is_refused() {
             "case {case:?}: the refusal must name ResourceNotFoundException, got {parsed}"
         );
         let message = string_member(&parsed, "Message");
+        let (stated, _) = traced_message(&message).unwrap_or_else(|| {
+            panic!(
+                "case {case:?}: the refusal must close with the trace clause of the request, got \
+                 {message:?}"
+            )
+        });
         // The swapped row names a configuration the store holds nothing under,
         // so it is answered for the configuration; the others name a stored
         // configuration, so they are answered for the association itself.
         let expected = if config.starts_with("rqlc-") {
-            ASSOCIATION_GONE_MESSAGE
+            ASSOCIATION_GONE_SENTENCE
         } else {
-            CONFIG_GONE_MESSAGE
+            CONFIG_GONE_SENTENCE
         };
         assert_eq!(
-            message, expected,
+            stated, expected,
             "case {case:?}: the refusal must carry the coded sentence of the resource that is \
              missing, got {parsed}"
         );
-        pair_messages.push(message);
+        pair_messages.push(stated.to_string());
     }
     assert_eq!(
         pair_messages.iter().collect::<BTreeSet<&String>>().len(),

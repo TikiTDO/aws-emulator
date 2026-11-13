@@ -17,8 +17,8 @@ use service_com_amazonaws_route53resolver_route53resolver::state::PROVISIONING_D
 use smithy_server_runtime::MultiServiceRouter;
 
 use super::harness::{
-    call, emulator, error_type, expect_error, ok, parse_time, string_member, without_status,
-    Emulator,
+    call, emulator, error_type, expect_error, ok, parse_time, string_member, traced_message,
+    without_status, Emulator,
 };
 
 /// The destination every configuration these cases create delivers to: one
@@ -503,9 +503,10 @@ async fn an_unknown_association_id_is_reported_as_missing() {
 
         // Every Resolver fault answers HTTP 400, so the bracketed service error
         // code inside `Message` is what tells this one apart. The sentence is
-        // the service's own and is entirely fixed text: it names neither the
-        // association the caller asked for nor the configuration it would
-        // belong to, so the SAME body comes back whichever id was named.
+        // the service's own and is fixed text: it names neither the association
+        // the caller asked for nor the configuration it would belong to, so the
+        // same sentence comes back whichever id was named, closed with the trace
+        // clause of the request it refused.
         let (_, body) = call(
             &router,
             "GetResolverQueryLogConfigAssociation",
@@ -513,8 +514,14 @@ async fn an_unknown_association_id_is_reported_as_missing() {
         )
         .await;
         let message = string_member(&body, "Message");
+        let (stated, _) = traced_message(&message).unwrap_or_else(|| {
+            panic!(
+                "case {case:?}: the refusal must close with the trace clause of the request, got \
+                 {message:?}"
+            )
+        });
         assert_eq!(
-            message,
+            stated,
             "[RSLVR-01602] The specified query logging configuration association doesn't exist.",
             "case {case:?}: the refusal must carry the service's own coded sentence, got {body}"
         );

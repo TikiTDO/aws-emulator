@@ -155,8 +155,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         // This operation mints no ARN — it reports the one the stored record
-        // already carries — so it takes nothing from `ctx`.
-        let _ = ctx;
+        // already carries — so the only thing it takes from `ctx` is the
+        // request's tracing header, which the refusals below close with.
+        let trace_root = crate::state::request_trace_root(&ctx.parts().headers);
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(
                 DeleteResolverQueryLogConfigErrorModeled::InternalServiceErrorException(
@@ -181,7 +182,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         else {
             return Err(
                 DeleteResolverQueryLogConfigErrorModeled::ResourceNotFoundException(
-                    crate::state::resolver_query_log_config_not_found(),
+                    crate::state::resolver_query_log_config_not_found(&trace_root),
                 )
                 .into(),
             );
@@ -211,7 +212,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         else {
             return Err(
                 DeleteResolverQueryLogConfigErrorModeled::ResourceNotFoundException(
-                    crate::state::resolver_query_log_config_not_found(),
+                    crate::state::resolver_query_log_config_not_found(&trace_root),
                 )
                 .into(),
             );

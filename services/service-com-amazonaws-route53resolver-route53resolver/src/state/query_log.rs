@@ -196,16 +196,21 @@ pub fn invalid_query_log_config_name(name: &str) -> InvalidParameterException {
 /// a `ResolverQueryLogConfigId` reports the same body.
 ///
 /// The sentence is the service's own for this fault
-/// ([`RSLVR_CODE_QUERY_LOG_CONFIG_NOT_FOUND`]) and is ENTIRELY fixed text:
+/// ([`RSLVR_CODE_QUERY_LOG_CONFIG_NOT_FOUND`]) and names nothing of the request:
 /// Resolver does not name the configuration the caller asked for, so a caller
 /// that cannot address one learns nothing else about it — the same reticence as
 /// [`resource_not_found_message`], and the reason the fault is told apart by its
-/// code rather than by the id in the message.
-pub fn resolver_query_log_config_not_found() -> ResourceNotFoundException {
+/// code rather than by the id in the message. It is closed with the trace clause
+/// of the request ([`traced_message`]), which is the only part of the body that
+/// is not fixed text.
+pub fn resolver_query_log_config_not_found(trace_root: &str) -> ResourceNotFoundException {
     ResourceNotFoundException {
-        message: Some(rslvr_message(
-            RSLVR_CODE_QUERY_LOG_CONFIG_NOT_FOUND,
-            "The specified query logging configuration doesn't exist",
+        message: Some(traced_message(
+            rslvr_message(
+                RSLVR_CODE_QUERY_LOG_CONFIG_NOT_FOUND,
+                "The specified query logging configuration doesn't exist",
+            ),
+            trace_root,
         )),
         resource_type: Some(RESOURCE_TYPE_RESOLVER_QUERY_LOG_CONFIG.to_string()),
     }
@@ -218,17 +223,24 @@ pub fn resolver_query_log_config_not_found() -> ResourceNotFoundException {
 /// (`DisassociateResolverQueryLogConfig`) — reports the same body.
 ///
 /// The sentence is the service's own for this fault
-/// ([`RSLVR_CODE_QUERY_LOG_CONFIG_ASSOCIATION_NOT_FOUND`]) and is ENTIRELY
-/// fixed text: Resolver names neither the association the caller asked for, nor
+/// ([`RSLVR_CODE_QUERY_LOG_CONFIG_ASSOCIATION_NOT_FOUND`]) and names nothing of
+/// the request: Resolver names neither the association the caller asked for, nor
 /// the configuration or the VPC it would join, so a caller that cannot address
 /// an association learns nothing else about it — the same reticence as
 /// [`resource_not_found_message`]. Its code is what distinguishes it from a
-/// configuration that is itself gone ([`resolver_query_log_config_not_found`]).
-pub fn resolver_query_log_config_association_not_found() -> ResourceNotFoundException {
+/// configuration that is itself gone ([`resolver_query_log_config_not_found`]),
+/// and it is closed with the same trace clause of the request
+/// ([`traced_message`]).
+pub fn resolver_query_log_config_association_not_found(
+    trace_root: &str,
+) -> ResourceNotFoundException {
     ResourceNotFoundException {
-        message: Some(rslvr_message(
-            RSLVR_CODE_QUERY_LOG_CONFIG_ASSOCIATION_NOT_FOUND,
-            "The specified query logging configuration association doesn't exist",
+        message: Some(traced_message(
+            rslvr_message(
+                RSLVR_CODE_QUERY_LOG_CONFIG_ASSOCIATION_NOT_FOUND,
+                "The specified query logging configuration association doesn't exist",
+            ),
+            trace_root,
         )),
         resource_type: Some(RESOURCE_TYPE_RESOLVER_QUERY_LOG_CONFIG_ASSOCIATION.to_string()),
     }

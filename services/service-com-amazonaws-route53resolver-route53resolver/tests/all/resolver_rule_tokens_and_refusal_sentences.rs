@@ -31,7 +31,7 @@
 
 use serde_json::{json, Value};
 
-use super::harness::{call, emulator, error_type, ok, string_member, Emulator};
+use super::harness::{call, emulator, error_type, ok, string_member, traced_message, Emulator};
 use super::resolver_query_log_config_associations::{association, config_id};
 use super::resolver_rule_deletion::{associate, forward_rule, outbound_endpoint};
 
@@ -46,13 +46,14 @@ const CODE_CREATOR_REQUEST_ID_EXISTS: &str = "RSLVR-00701";
 const CODE_INVALID_DOMAIN: &str = "RSLVR-00711";
 
 /// The sentence a query logging configuration the service holds nothing under is
-/// refused with: entirely fixed text behind its own service error code.
-const CONFIG_GONE_MESSAGE: &str =
+/// refused with: fixed text behind its own service error code, before the trace
+/// clause the refusal closes with.
+const CONFIG_GONE_SENTENCE: &str =
     "[RSLVR-01601] The specified query logging configuration doesn't exist.";
 
 /// The sentence an association the service holds nothing under is refused with,
 /// whichever way the request addressed it.
-const ASSOCIATION_GONE_MESSAGE: &str =
+const ASSOCIATION_GONE_SENTENCE: &str =
     "[RSLVR-01602] The specified query logging configuration association doesn't exist.";
 
 /// The code a listing reports for a `NextToken` it never issued, from the
@@ -78,6 +79,38 @@ fn assert_refusal(case: &str, operation: &str, status: u16, parsed: &Value, shap
     assert_eq!(
         message, expected,
         "case {case:?}/{operation}: expected Message {expected:?}, got {message:?}"
+    );
+}
+
+/// Assert one refusal whose `Message` closes with the trace clause of the
+/// request it refused: HTTP 400, the modelled shape, the exact sentence before
+/// the clause, and a clause carrying this call's own trace id.
+fn assert_traced_refusal(
+    case: &str,
+    operation: &str,
+    status: u16,
+    parsed: &Value,
+    shape: &str,
+    sentence: &str,
+) {
+    assert_eq!(
+        status, 400,
+        "case {case:?}/{operation}: expected HTTP 400, got {status}: {parsed}"
+    );
+    assert!(
+        error_type(parsed).contains(shape),
+        "case {case:?}/{operation}: expected {shape}, got {parsed}"
+    );
+    let message = string_member(parsed, "Message");
+    let (stated, _) = traced_message(&message).unwrap_or_else(|| {
+        panic!(
+            "case {case:?}/{operation}: the refusal must close with its trace clause, got \
+             {message:?}"
+        )
+    });
+    assert_eq!(
+        stated, sentence,
+        "case {case:?}/{operation}: expected the sentence {sentence:?}, got {message:?}"
     );
 }
 
@@ -469,13 +502,13 @@ async fn an_unknown_query_log_config_is_refused_with_the_coded_sentence() {
             ),
         ] {
             let (status, parsed) = call(&router, operation, body).await;
-            assert_refusal(
+            assert_traced_refusal(
                 case,
                 operation,
                 status,
                 &parsed,
                 "ResourceNotFoundException",
-                CONFIG_GONE_MESSAGE,
+                CONFIG_GONE_SENTENCE,
             );
             assert_eq!(
                 string_member(&parsed, "ResourceType"),
@@ -573,13 +606,13 @@ async fn a_gone_query_log_config_association_is_refused_with_the_coded_sentence(
     ];
     for (case, operation, body) in &cases {
         let (status, parsed) = call(&router, operation, body.clone()).await;
-        assert_refusal(
+        assert_traced_refusal(
             case,
             operation,
             status,
             &parsed,
             "ResourceNotFoundException",
-            ASSOCIATION_GONE_MESSAGE,
+            ASSOCIATION_GONE_SENTENCE,
         );
         assert_eq!(
             string_member(&parsed, "ResourceType"),

@@ -145,9 +145,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx`
-        // carries request metadata, which this pure read needs none of.
-        let _ = ctx;
+        // The engine is reachable from `&self` (constructor-injected); what this
+        // pure read takes from `ctx` is the request's tracing header, which the
+        // refusal below closes with.
+        let trace_root = crate::state::request_trace_root(&ctx.parts().headers);
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(
                 GetResolverQueryLogConfigErrorModeled::InternalServiceErrorException(
@@ -175,7 +176,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }),
             None => Err(
                 GetResolverQueryLogConfigErrorModeled::ResourceNotFoundException(
-                    crate::state::resolver_query_log_config_not_found(),
+                    crate::state::resolver_query_log_config_not_found(&trace_root),
                 )
                 .into(),
             ),

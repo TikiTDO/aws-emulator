@@ -151,7 +151,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
+        // What this call takes from `ctx` is the request's tracing header, which
+        // the refusals below close with.
+        let trace_root = crate::state::request_trace_root(&ctx.parts().headers);
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(
                 DisassociateResolverQueryLogConfigErrorModeled::InternalServiceErrorException(
@@ -179,7 +181,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         else {
             return Err(
                 DisassociateResolverQueryLogConfigErrorModeled::ResourceNotFoundException(
-                    crate::state::resolver_query_log_config_not_found(),
+                    crate::state::resolver_query_log_config_not_found(&trace_root),
                 )
                 .into(),
             );
@@ -197,7 +199,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(record) = config.remove_association_for_vpc(&input.resource_id) else {
             return Err(
                 DisassociateResolverQueryLogConfigErrorModeled::ResourceNotFoundException(
-                    crate::state::resolver_query_log_config_association_not_found(),
+                    crate::state::resolver_query_log_config_association_not_found(&trace_root),
                 )
                 .into(),
             );

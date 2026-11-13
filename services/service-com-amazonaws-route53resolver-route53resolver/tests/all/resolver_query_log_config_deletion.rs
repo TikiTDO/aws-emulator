@@ -29,13 +29,14 @@ use serde_json::{json, Value};
 use service_com_amazonaws_route53resolver_route53resolver::ops::types::RESOLVER_QUERY_LOG_CONFIG_STATUS_VALUES;
 
 use super::harness::{
-    call, emulator, error_type, ok, parse_time, string_member, without_status, Emulator,
+    call, emulator, error_type, ok, parse_time, string_member, traced_message, without_status,
+    Emulator,
 };
 
 /// The sentence Resolver answers for a query logging configuration it holds
-/// nothing under: entirely fixed text behind the service error code for that
-/// fault, naming no id.
-const CONFIG_GONE_MESSAGE: &str =
+/// nothing under: fixed text behind the service error code for that fault,
+/// naming no id, before the trace clause the refusal closes with.
+const CONFIG_GONE_SENTENCE: &str =
     "[RSLVR-01601] The specified query logging configuration doesn't exist.";
 
 /// The documented precondition of the delete, which is the sentence it answers
@@ -289,9 +290,15 @@ async fn a_delete_takes_out_exactly_the_configuration_it_names() {
                 "ResourceNotFoundException",
             )
             .await;
+            let message = string_member(&parsed, "Message");
+            let (stated, _) = traced_message(&message).unwrap_or_else(|| {
+                panic!(
+                    "case {case:?}: {operation} must close its refusal with the trace clause of \
+                     the request, got {message:?}"
+                )
+            });
             assert_eq!(
-                string_member(&parsed, "Message"),
-                CONFIG_GONE_MESSAGE,
+                stated, CONFIG_GONE_SENTENCE,
                 "case {case:?}: {operation} must carry the service's own coded sentence, got \
                  {parsed}"
             );
