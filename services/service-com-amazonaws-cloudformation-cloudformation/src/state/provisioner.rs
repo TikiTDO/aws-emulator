@@ -465,6 +465,7 @@ pub(super) use super::{
 
 use super::provisioning::{
     call_json_rpc, call_query, call_rest_json, call_rest_json_named, call_rest_xml,
+    call_rest_xml_versioned,
     percent_encoded, xml_element, xml_elements,
     xml_entry_map, xml_leaf, xml_member_structures, xml_scalar_children, Created, Readiness,
     Refusal, Removal,
@@ -479,6 +480,7 @@ use super::template::{
     APIGATEWAYV2_STAGE, BACKUP_PLAN, BACKUP_SELECTION, BACKUP_VAULT, BATCH_COMPUTE_ENVIRONMENT,
     BATCH_JOB_QUEUE, BATCH_SERVICE_ENVIRONMENT, BEDROCK_GUARDRAIL, BEDROCK_KNOWLEDGE_BASE,
     BRAKET_SPENDING_LIMIT,
+    CLOUDFRONT_KEY_GROUP, CLOUDFRONT_ORIGIN_ACCESS_IDENTITY, CLOUDFRONT_PUBLIC_KEY,
     CLOUDWATCH_DASHBOARD,
     CLOUDWATCH_METRIC_STREAM, CODEARTIFACT_DOMAIN, CODEARTIFACT_REPOSITORY,
     CODEBUILD_PROJECT,
@@ -624,6 +626,9 @@ pub(super) enum Provisioner {
     /// `DeleteStream` deletes.
     KinesisStream,
     CloudWatchMetricStream,
+    CloudFrontKeyGroup,
+    CloudFrontOriginAccessIdentity,
+    CloudFrontPublicKey,
     CloudWatchDashboard,
     EcrPublicRepository,
     /// `AWS::ECR::Repository`: a repository of the PRIVATE Amazon ECR registry — a
@@ -955,6 +960,9 @@ pub(super) fn provisioner_for(resource_type: &str) -> Option<Provisioner> {
         FIREHOSE_DELIVERY_STREAM => Some(Provisioner::FirehoseDeliveryStream),
         KINESIS_STREAM => Some(Provisioner::KinesisStream),
         CLOUDWATCH_METRIC_STREAM => Some(Provisioner::CloudWatchMetricStream),
+        CLOUDFRONT_KEY_GROUP => Some(Provisioner::CloudFrontKeyGroup),
+        CLOUDFRONT_ORIGIN_ACCESS_IDENTITY => Some(Provisioner::CloudFrontOriginAccessIdentity),
+        CLOUDFRONT_PUBLIC_KEY => Some(Provisioner::CloudFrontPublicKey),
         CLOUDWATCH_DASHBOARD => Some(Provisioner::CloudWatchDashboard),
         ECR_PUBLIC_REPOSITORY => Some(Provisioner::EcrPublicRepository),
         ECR_REPOSITORY => Some(Provisioner::EcrRepository),
@@ -1100,6 +1108,16 @@ pub(super) fn provisioner_for(resource_type: &str) -> Option<Provisioner> {
 }
 
 impl Provisioner {
+    /// The CloudFront identity kind a CloudFront arm acts on ([`CloudFrontKind`]); only the
+    /// three CloudFront identity variants call it.
+    fn cloudfront_kind(self) -> CloudFrontKind {
+        match self {
+            Self::CloudFrontKeyGroup => CloudFrontKind::KeyGroup,
+            Self::CloudFrontPublicKey => CloudFrontKind::PublicKey,
+            _ => CloudFrontKind::OriginAccessIdentity,
+        }
+    }
+
     /// Create one resource in the service that owns it, and report back what that service
     /// decided about it ([`Created`]): the attributes it reported (an ARN it minted, say),
     /// which replace the ones CloudFormation's naming rules computed, and — for a type
@@ -1132,6 +1150,15 @@ impl Provisioner {
             }
             Self::CloudWatchMetricStream => {
                 put_metric_stream(ctx, region, resource, propagated).await
+            }
+            Self::CloudFrontKeyGroup
+            | Self::CloudFrontOriginAccessIdentity
+            | Self::CloudFrontPublicKey => {
+                create_cloudfront_resource(ctx, region, self.cloudfront_kind                declared,
+            )
+            .await
+            .map(|()| Some(Created::default())),, resource, propagated)
+                    .await
             }
             Self::CloudWatchDashboard => {
                 put_dashboard(ctx, region, resource, propagated).await
@@ -2109,6 +2136,19 @@ impl Provisioner {
             // exist, or updates an existing dashboard. If you update a dashboard, the
             // entire contents are replaced with what you specify here", so the call that
             // created the dashboard is the call that applies a changed declaration to it.
+            // CloudFront replaces the whole configuration it holds on an update, under the
+            // ETag it answered the current one with.
+            Self::CloudFrontKeyGroup
+            | Self::CloudFrontOriginAccessIdentity
+            | Self::CloudFrontPublicKey => update_cloudfront_resource(
+                ctx,
+                region,
+                self.cloudfront_kind(),
+                resource,
+                declared,
+            )
+            .await
+            .map(|()| Some(Created::default())),
             Self::CloudWatchDashboard => {
                 put_dashboard_body(ctx, region, &resource.physical_resource_id, declared)
                     .await
@@ -2477,6 +2517,12 @@ impl Provisioner {
             }
             Self::CloudWatchMetricStream => {
                 delete_metric_stream(ctx, region, physical_resource_id).await
+            }
+            Self::CloudFrontKeyGroup
+            | Self::CloudFrontOriginAccessIdentity
+            | Self::CloudFrontPublicKey => {
+                delete_cloudfront_resource(ctx, region, self.cloudfront_kind(), physical_resource_id)
+                    .await
             }
             Self::CloudWatchDashboard => {
                 delete_dashboard(ctx, region, physical_resource_id).await
@@ -2937,6 +2983,12 @@ impl Provisioner {
             Self::CloudWatchMetricStream => {
                 describe_metric_stream(ctx, region, physical_resource_id).await
             }
+            Self::CloudFrontKeyGroup
+            | Self::CloudFrontOriginAccessIdentity
+            | Self::CloudFrontPublicKey => {
+                describe_cloudfront_resource(ctx, region, self.cloudfront_kind(), physical_resource_id)
+                    .await
+            }
             Self::CloudWatchDashboard => {
                 describe_dashboard(ctx, region, physical_resource_id).await
             }
@@ -3390,6 +3442,7 @@ mod mwaa_environments;
 mod data_and_storage;
 mod iam_identities;
 mod application_services;
+mod content_delivery;
 mod platform_services;
 mod route53_policies;
 /// The FLEET types a stack launches instances with — the Amazon EC2 launch template and the
@@ -3409,6 +3462,7 @@ use ssm_associations::*;
 use resource_groups::*;
 use compute_fleet::*;
 pub(crate) use network_and_delivery::*;
+use content_delivery::*;
 use platform_services::*;
 use route53_policies::*;
 pub(crate) use application_services::*;
