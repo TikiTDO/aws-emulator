@@ -45,5 +45,7 @@ mod tag_key_refusal;
 mod tag_key_refusal_element_path;
 #[path = "all/tag_key_refusal_list_bound.rs"]
 mod tag_key_refusal_list_bound;
+#[path = "all/tag_key_unicode_class.rs"]
+mod tag_key_unicode_class;
 #[path = "all/unknown_invocation_refusal.rs"]
 mod unknown_invocation_refusal;

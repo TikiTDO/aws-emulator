@@ -9861,6 +9861,7 @@ dependencies = [
  "http",
  "image",
  "percent-encoding",
+ "regex",
  "serde_json",
  "service-com-amazonaws-bedrockdataautomation-amazonbedrockkeystonebuildtimeservice",
  "service-com-amazonaws-eventbridge-awsevents",

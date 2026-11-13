@@ -46,6 +46,11 @@ image = { version = "0.25", default-features = false, features = [
 # the UUID an invocation id is (`state::mint_invocation_id`); the UUID layout itself is
 # `service_common::uuid_from_random_bytes`.
 sha2 = { workspace = true }
+# Applies the character-class half of the modelled `TagKey` `@pattern` from the pattern's
+# own source text: the framework's boundary walk cannot compile the expression's leading
+# look-around and so drops the whole pattern, and this is the same linear-time engine that
+# walk compiles a `@pattern` with.
+regex = "1.13"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

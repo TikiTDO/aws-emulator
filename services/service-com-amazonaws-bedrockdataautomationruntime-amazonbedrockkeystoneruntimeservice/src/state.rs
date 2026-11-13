@@ -22,6 +22,7 @@
 //! resolution established.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::LazyLock;
 use std::time::{Duration, SystemTime};
 
 use service_com_amazonaws_bedrockdataautomation_amazonbedrockkeystonebuildtimeservice::state as build_time;
@@ -78,7 +79,8 @@ pub const MAX_TAGS: usize = 200;
 
 /// The modelled `TagKey` pattern, verbatim (`smithy_query` shape `TagKey`).
 ///
-/// Stated here because it has to be applied by hand: see [`tag_key_is_well_formed`].
+/// Stated here because this crate has to apply it itself rather than leave it to the
+/// framework's boundary walk: see [`tag_key_is_well_formed`].
 pub const TAG_KEY_PATTERN: &str = r"^(?!aws:)[\p{L}\p{Z}\p{N}_.:/=+\-@]*$";
 
 /// The tag-key prefix the modelled `TagKey` pattern excludes with its negative
@@ -86,52 +88,73 @@ pub const TAG_KEY_PATTERN: &str = r"^(?!aws:)[\p{L}\p{Z}\p{N}_.:/=+\-@]*$";
 /// documentation; the pattern itself is what [`tag_key_is_well_formed`] applies.
 pub const RESERVED_TAG_KEY_PREFIX: &str = "aws:";
 
-/// The characters the modelled [`TAG_KEY_PATTERN`]'s class lists literally, beside the
-/// three Unicode general categories it names.
-const TAG_KEY_PUNCTUATION: [char; 8] = ['_', '.', ':', '/', '=', '+', '-', '@'];
-
-/// Whether `c` is admitted by the character-class half of [`TAG_KEY_PATTERN`]
-/// (`[\p{L}\p{Z}\p{N}_.:/=+\-@]`), applied as the Unicode general categories the class
-/// names:
+/// The modelled [`TAG_KEY_PATTERN`] with its leading look-around removed and NOTHING else
+/// changed — the declared anchors and the declared character class — compiled once.
 ///
-/// * `\p{N}` is `char::is_numeric` exactly (`Nd`, `Nl`, `No`).
-/// * `\p{Z}` is `char::is_whitespace` MINUS the control characters: `White_Space` is
-///   `\p{Z}` plus `\t`, `\n`, `\u{b}`, `\u{c}`, `\r` and `\u{85}`, every one of which is
-///   a control character, so subtracting `char::is_control` leaves the separators alone.
-/// * `\p{L}` is `char::is_alphabetic` up to `Alphabetic`'s wider definition: that property
-///   is `\p{L}` plus `Nl` — already admitted through `\p{N}` — plus `Other_Alphabetic`,
-///   which is combining marks. A key carrying a combining mark is therefore accepted where
-///   AWS's class would refuse it; erring toward accepting an exotic mark is the direction
-///   the framework's own constraint walk takes for a pattern it cannot apply
-///   (`vendor/smithy-schema-server/src/constraints.rs` treats such a pattern as matching
-///   every value), and it keeps this check from refusing a key on a Unicode table
-///   difference.
-fn is_tag_key_char(c: char) -> bool {
-    c.is_alphabetic()
-        || c.is_numeric()
-        || (c.is_whitespace() && !c.is_control())
-        || TAG_KEY_PUNCTUATION.contains(&c)
-}
+/// The expression is derived from the declared source text rather than written out a
+/// second time, and the part removed is built from [`RESERVED_TAG_KEY_PREFIX`], so the
+/// class this matches cannot drift from the class the model declares and the prefix
+/// [`tag_key_is_well_formed`] tests cannot drift from the one the pattern names.
+///
+/// The engine is the same linear-time one the framework's boundary walk compiles a
+/// `@pattern` with, so a match is bounded by the length of the value and nothing has to
+/// bound the matcher itself. Compilation is fallible and its input is a compile-time
+/// constant, never request text, but a pattern that failed to compile is dropped rather
+/// than unwrapped: nothing here panics, on any input.
+static TAG_KEY_CLASS_REGEX: LazyLock<Option<::regex::Regex>> = LazyLock::new(|| {
+    let look_around = format!("(?!{RESERVED_TAG_KEY_PREFIX})");
+    let class_only = TAG_KEY_PATTERN.replacen(&look_around, "", 1);
+    // Both operands are compile-time constants, so this holds or it never holds: it says
+    // the declared pattern still opens with the look-around over the reserved prefix, and
+    // so that the expression below is the declared one minus exactly that look-around.
+    debug_assert!(
+        class_only != TAG_KEY_PATTERN,
+        "the modelled TagKey pattern no longer opens with the reserved-prefix look-around"
+    );
+    match ::regex::Regex::new(&class_only) {
+        Ok(compiled) => Some(compiled),
+        Err(error) => {
+            // Reachable only if the declared pattern stops decomposing this way, and a
+            // rule that is not applied must not read as a value that satisfied it.
+            ::tracing::warn!(
+                pattern = TAG_KEY_PATTERN,
+                %error,
+                "the modelled TagKey character class is not being applied",
+            );
+            None
+        }
+    }
+});
 
 /// Whether `key` satisfies the modelled [`TAG_KEY_PATTERN`].
 ///
 /// This one modelled constraint cannot be left to the framework's boundary walk: the
-/// pattern opens with the negative lookahead `(?!aws:)`, which the walk's regex engine
+/// pattern opens with the negative look-around `(?!aws:)`, which the walk's regex engine
 /// cannot compile, and a `@pattern` that fails to compile is treated as matching EVERY
-/// value — which drops the character-class half of the pattern along with the lookahead
-/// (`vendor/smithy-schema-server/src/constraints.rs`). So the pattern is applied here,
-/// verbatim, by the three operations that accept a tag key (`InvokeDataAutomationAsync`
-/// and `TagResource` through `tags`, `UntagResource` through `tagKeys`).
+/// value — which drops the character-class half of the pattern along with the look-around
+/// (`vendor/smithy-schema-server/src/constraints.rs`). So the pattern is applied here, by
+/// the three operations that accept a tag key (`InvokeDataAutomationAsync` and
+/// `TagResource` through `tags`, `UntagResource` through `tagKeys`).
 ///
-/// It is applied as the pattern's two independent halves rather than through a
-/// look-around regex engine, because the pattern's ONLY look-around is its leading
-/// `(?!aws:)`, which states exactly "the key does not begin with
-/// [`RESERVED_TAG_KEY_PREFIX`]" — a prefix test. What remains is the plain character
-/// class [`is_tag_key_char`] applies to every character, anchored at both ends by `*$`,
-/// so the whole modelled constraint is enforced without a second regex engine in the
-/// dependency graph.
+/// Both halves are applied as declared, neither approximated. The look-around sits
+/// immediately behind the pattern's `^`, so "no match begins at position 0" is exactly
+/// "the key does not begin with [`RESERVED_TAG_KEY_PREFIX`]" — a prefix test, and nothing
+/// weaker. Everything else, anchors and class alike, is matched by
+/// [`TAG_KEY_CLASS_REGEX`] from the declared source text: reading the class off `char`'s
+/// properties instead cannot express it, because `char::is_alphabetic` is the Unicode
+/// `Alphabetic` property — `\p{L}` plus `Nl` plus `Other_Alphabetic` (combining marks) —
+/// so a key carrying such a mark would be admitted where the class names only `L`, `Z`,
+/// `N` and eight literal characters. The refusal quotes this same source text
+/// ([`pattern_requirement`]), so what a clause states and what is applied are one thing.
+///
+/// A class that holds no compiled form is treated as matching, which is what the boundary
+/// walk does with a pattern it cannot compile: a value is never refused because of a model
+/// pattern nothing could evaluate.
 pub fn tag_key_is_well_formed(key: &str) -> bool {
-    !key.starts_with(RESERVED_TAG_KEY_PREFIX) && key.chars().all(is_tag_key_char)
+    !key.starts_with(RESERVED_TAG_KEY_PREFIX)
+        && TAG_KEY_CLASS_REGEX
+            .as_ref()
+            .is_none_or(|compiled| compiled.is_match(key))
 }
 
 /// The requirement clause this service states for a `@pattern` violation: the declared

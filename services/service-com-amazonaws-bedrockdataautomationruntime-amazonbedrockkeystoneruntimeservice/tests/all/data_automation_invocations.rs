@@ -1426,9 +1426,8 @@ async fn every_operation_that_accepts_a_tag_key_applies_the_modelled_tag_key_pat
     // Rows span both halves of the pattern: the reserved prefix, and characters inside
     // and outside the class (Unicode letters, numbers and separators, which the class
     // admits; combining marks, symbols and ASCII punctuation outside it, which it does
-    // not). The one boundary the rows do NOT pin is `Other_Alphabetic`: `std` exposes
-    // `Alphabetic`, not `\p{L}`, and `crate::state::is_tag_key_char` documents that
-    // narrow deviation.
+    // not). The class is spanned category by category — including the marks that carry
+    // `Other_Alphabetic` — by `tag_key_unicode_class`.
     let router = service();
     let arn = submit(
         &router,
