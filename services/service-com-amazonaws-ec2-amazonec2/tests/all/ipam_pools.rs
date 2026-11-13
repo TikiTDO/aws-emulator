@@ -30,7 +30,7 @@ use ec2::ops::types::{AsnAssociation, ByoipCidr, IpamScope};
 use ec2::state::{
     ADDRESS_FAMILY_IPV4, ADDRESS_FAMILY_IPV6, BYOIP_CIDR_STATE_PROVISIONED, ByoipCidrRecord,
     ComAmazonawsEc2Amazonec2State as Ec2State, IPAM_POOL_ID_PREFIX,
-    IPAM_POOL_PUBLIC_IP_SOURCE_BYOIP, IPAM_POOL_STATE_CREATE_COMPLETE,
+    IPAM_POOL_LOCALE_NONE, IPAM_POOL_PUBLIC_IP_SOURCE_BYOIP, IPAM_POOL_STATE_CREATE_COMPLETE,
     IPAM_POOL_STATE_CREATE_IN_PROGRESS, IPAM_SCOPE_TYPE_PRIVATE, IPAM_SCOPE_TYPE_PUBLIC,
     INVALID_IPAM_POOL_ID_MALFORMED, INVALID_IPAM_POOL_ID_NOT_FOUND,
     INVALID_IPAM_SCOPE_ID_MALFORMED, INVALID_IPAM_SCOPE_ID_NOT_FOUND, INVALID_PARAMETER_VALUE,
@@ -188,15 +188,13 @@ async fn a_created_pool_reports_the_request_and_its_scope() {
                 ("state", owned(IPAM_POOL_STATE_CREATE_IN_PROGRESS)),
                 ("poolDepth", TOP_LEVEL_IPAM_POOL_DEPTH.to_string()),
                 ("autoImport", owned("false")),
+                // Nothing named a locale, which the pool reports as its default spelled
+                // out rather than by leaving the member out.
+                ("locale", owned(IPAM_POOL_LOCALE_NONE)),
             ],
             // A private-scope pool has no public IP source, an IPv4 pool no
-            // advertisement flag, and nothing named a locale or a description.
-            absent: vec![
-                "publicIpSource",
-                "publiclyAdvertisable",
-                "locale",
-                "description",
-            ],
+            // advertisement flag, and nothing named a description.
+            absent: vec!["publicIpSource", "publiclyAdvertisable", "description"],
         },
         Created {
             case: "an IPv4 pool in the public scope carrying every allocation netmask rule",
@@ -242,8 +240,9 @@ async fn a_created_pool_reports_the_request_and_its_scope() {
                 ("awsService", owned("ec2")),
                 ("allocationMinNetmaskLength", owned("48")),
                 ("allocationMaxNetmaskLength", owned("64")),
+                ("locale", owned(IPAM_POOL_LOCALE_NONE)),
             ],
-            absent: vec!["locale"],
+            absent: Vec::new(),
         },
         Created {
             case: "an Amazon-sourced IPv6 pool in the public scope",

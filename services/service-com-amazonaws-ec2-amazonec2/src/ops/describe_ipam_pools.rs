@@ -298,10 +298,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             {
                 continue;
             }
+            // The pool as this report carries it, which is also what its filters compare
+            // against: a filter selects by the value the response shows for that member
+            // ([`crate::state::reported_ipam_pool`] is the one projection of a stored pool),
+            // so nothing can be reported with a value no filter can name.
+            let pool = crate::state::reported_ipam_pool(pool.clone());
             if crate::state::matches_every_filter(&selectors, &mut budget, &|name| {
-                filter_values(pool, name)
+                filter_values(&pool, name)
             }) {
-                selected.push(pool.clone());
+                selected.push(pool);
             }
         }
         // A spent budget means the answer is INCOMPLETE, which is not something to report as
@@ -419,11 +424,12 @@ fn is_documented_filter(name: &str) -> bool {
 
 /// The values the EC2 filter `name` compares against this pool.
 ///
-/// A filter naming an attribute this pool does not carry compares against NO values, so it
-/// selects nothing — the same answer AWS gives for, say, `locale` on a pool created without
-/// one. A number and a boolean are compared as the wire spells them, which is how a client
-/// would send the filter value, so those are the only values built here rather than borrowed
-/// from the record.
+/// The pool is the one a response REPORTS ([`crate::state::reported_ipam_pool`]), so a filter
+/// selects by exactly the value the body shows for that member. A filter naming an attribute
+/// the reported pool does not carry — a `description` on a pool created without one — compares
+/// against NO values, so it selects nothing. A number and a boolean are compared as the wire
+/// spells them, which is how a client would send the filter value, so those are the only
+/// values built here rather than borrowed from the record.
 fn filter_values<'a>(pool: &'a IpamPool, name: &str) -> Vec<::std::borrow::Cow<'a, str>> {
     use ::std::borrow::Cow;
 

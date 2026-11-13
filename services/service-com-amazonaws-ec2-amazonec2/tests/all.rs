@@ -15,6 +15,13 @@
 // exactly that. The lines above are the file header, which no landing edits.
 #[path = "all/prefix_lists.rs"]
 mod prefix_lists;
+// The `locale` an IPAM pool reports: every reader of a pool carries the modelled member, with
+// the default spelled out for a pool created without one, and a `locale` filter selects by the
+// value the body shows. Declared beside `prefix_lists` for the reason the note above gives:
+// the sorted neighbourhood and the tail of this file are where every new ec2 suite inserts its
+// lines.
+#[path = "all/ipam_pool_locale.rs"]
+mod ipam_pool_locale;
 // The per-instance-type hardware facts the catalog publishes — the EBS, instance store,
 // network, accelerator, processor and host-feature members that are facts of one type rather
 // than functions of its name's size multiplier. Declared beside `prefix_lists` for the reason

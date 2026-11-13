@@ -457,7 +457,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 return Err(state::idempotent_parameter_mismatch());
             }
             return Ok(CreateIpamPoolOutput {
-                ipam_pool: Some(pool.clone()),
+                ipam_pool: Some(state::reported_ipam_pool(pool.clone())),
             });
         }
 
@@ -584,13 +584,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })?;
 
         // Read the answer back OUT of the store, so the caller sees the pool a later
-        // reader will see rather than the request object.
+        // reader will see rather than the request object — through the one projection every
+        // reader of a pool reports it by ([`state::reported_ipam_pool`]), so the locale this
+        // create answers is the locale a later read of the same pool answers.
         store
             .ipam_pools
             .get(&pool_id)
             .cloned()
             .map(|pool| CreateIpamPoolOutput {
-                ipam_pool: Some(pool),
+                ipam_pool: Some(state::reported_ipam_pool(pool)),
             })
             .ok_or_else(|| {
                 Scaffolded::internal_error(format!(

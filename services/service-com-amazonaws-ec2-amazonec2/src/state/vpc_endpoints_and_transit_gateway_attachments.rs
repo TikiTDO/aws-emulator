@@ -1975,6 +1975,34 @@ pub fn ipam_pool_is_deleting(pool: &IpamPool) -> bool {
     state == IPAM_POOL_STATE_DELETE_IN_PROGRESS || state == IPAM_POOL_STATE_DELETE_COMPLETE
 }
 
+/// The `IpamPool$Locale` a pool created without one reports: the pool's default locale,
+/// spelled out.
+///
+/// "Default is none and means any locale" (`CreateIpamPoolRequest$Locale`) — a pool whose
+/// create named no locale allocates in any Region of its IPAM, and the Region catalog this
+/// emulator serves holds no Region spelled this way ([`region_name_is_well_formed`] refuses
+/// it as a locale), so the spelling cannot collide with a locale a pool actually names.
+pub const IPAM_POOL_LOCALE_NONE: &str = "None";
+
+/// `pool` as a response reports it.
+///
+/// "The locale of the IPAM pool" (`IpamPool$Locale`) is a member of the pool structure EVERY
+/// read of a pool carries: a pool created without a locale reports
+/// [`IPAM_POOL_LOCALE_NONE`] rather than leaving the element out, so a client that reads the
+/// member to decide where a pool allocates finds it on every pool instead of having to tell
+/// "no locale" from "no such member".
+///
+/// The record itself keeps no locale for such a pool — the default is what the pool REPORTS,
+/// not something the create stored — so this is applied where a pool is reported, the way
+/// [`reported_network_acl_entry`] is the one projection of a stored ACL entry; every
+/// operation that reports an [`IpamPool`] goes through it, so no two readers report one pool
+/// differently.
+pub fn reported_ipam_pool(mut pool: IpamPool) -> IpamPool {
+    pool.locale
+        .get_or_insert_with(|| IPAM_POOL_LOCALE_NONE.to_string());
+    pool
+}
+
 /// The `IpamPoolPublicIpSource` a public-scope pool gets when the request names none:
 /// "Default is byoip" (`CreateIpamPoolRequest$PublicIpSource`).
 pub const IPAM_POOL_PUBLIC_IP_SOURCE_BYOIP: &str = "byoip";

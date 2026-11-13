@@ -252,7 +252,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "Information about the results of the deletion" (`IpamPool`): the pool as it was
         // STORED by the move this delete started, so the caller sees what a later reader of
-        // the pools will see rather than a value built here.
+        // the pools will see rather than a value built here — reported through the one
+        // projection every reader of a pool reports it by
+        // ([`state::reported_ipam_pool`]), which is what carries the modelled members a pool
+        // reports whether or not its record holds a value for them.
         let view = store.begin_ipam_pool_deletion(pool_id).ok_or_else(|| {
             state::internal_error(format!(
                 "the IPAM pool '{pool_id}' resolved a moment ago is not in the store any more"
@@ -260,7 +263,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })?;
 
         Ok(DeleteIpamPoolOutput {
-            ipam_pool: Some(view),
+            ipam_pool: Some(state::reported_ipam_pool(view)),
         })
     }
 }
