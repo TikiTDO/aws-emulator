@@ -10,7 +10,9 @@
 //!
 //! * the parent is resolved first: a request naming an assistant this account does not
 //!   hold is the modelled `ResourceNotFoundException` (404), and so is one naming a
-//!   knowledge base it does not hold;
+//!   knowledge base it does not hold — the knowledge base belongs to another plane, so
+//!   that refusal is reported as the service holding it answered it, relayed
+//!   ([`crate::state::message_knowledge_base_not_found_relayed`]);
 //! * `associationType` and the `association` union name the same thing, so a create
 //!   whose pair disagrees is refused with `ValidationException` (400);
 //! * a replayed `@idempotencyToken` carrying the SAME request answers with the
@@ -278,14 +280,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::state::Replay::Fresh => {}
         }
 
-        // The target, resolved: a knowledge base is one THIS account holds, so an id it
-        // holds none under is not found. Its ARN is read off the stored knowledge base
+        // The target, resolved: a knowledge base belongs to the knowledge-base plane
+        // behind this endpoint rather than to the assistant plane this operation serves,
+        // so resolving it is a CALL to that service and an id it holds nothing under comes
+        // back refused by IT. That refusal is reported as it arrived — the called
+        // service's own sentence inside the envelope naming the call
+        // ([`crate::state::message_knowledge_base_not_found_relayed`]) — rather than
+        // restated as this plane's own. Its ARN is read off the stored knowledge base
         // rather than rebuilt, so the association reports the knowledge base's own ARN.
         let target = match &input.association {
             AssistantAssociationInputData::knowledgeBaseId(knowledge_base_id) => {
                 let Some(knowledge_base) = store.knowledge_base(knowledge_base_id) else {
                     return Err(not_found(
-                        crate::state::MESSAGE_KNOWLEDGE_BASE_NOT_FOUND,
+                        &crate::state::message_knowledge_base_not_found_relayed(),
                         knowledge_base_id,
                     ));
                 };

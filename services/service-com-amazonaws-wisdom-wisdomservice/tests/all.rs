@@ -45,6 +45,8 @@ mod quick_response;
 mod quick_response_mutations;
 #[path = "all/quick_response_search.rs"]
 mod quick_response_search;
+#[path = "all/relayed_knowledge_base_refusal.rs"]
+mod relayed_knowledge_base_refusal;
 #[path = "all/resource_tags.rs"]
 mod resource_tags;
 #[path = "all/session_recommendations.rs"]

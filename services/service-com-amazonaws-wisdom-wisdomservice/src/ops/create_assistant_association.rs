@@ -9,7 +9,10 @@
 //!
 //! * the parent is resolved first: a request naming an assistant this account
 //!   does not hold is the modelled `ResourceNotFoundException` (404), and so is
-//!   one naming a knowledge base it does not hold;
+//!   one naming a knowledge base it does not hold — the knowledge base belongs
+//!   to another plane, so that refusal is reported as the service holding it
+//!   answered it, relayed
+//!   ([`crate::state::message_knowledge_base_not_found_relayed`]);
 //! * a replayed `clientToken` carrying the SAME request answers with the
 //!   association that token already created; carrying a DIFFERENT request it is
 //!   an idempotency conflict, `ConflictException` (409);
@@ -284,12 +287,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::state::Replay::Fresh => {}
         }
 
-        // The knowledge base is one THIS account holds, so an id it holds none
-        // under is not found. Its ARN is read off the stored knowledge base
+        // A knowledge base belongs to the knowledge-base plane behind this endpoint
+        // rather than to the assistant plane this operation serves, so resolving it is
+        // a CALL to that service and an id it holds nothing under comes back refused by
+        // IT. That refusal is reported as it arrived — the called service's own sentence
+        // inside the envelope naming the call
+        // ([`crate::state::message_knowledge_base_not_found_relayed`]) — rather than
+        // restated as this plane's own. The ARN is read off the stored knowledge base
         // rather than rebuilt, so the association reports that record's own ARN.
         let Some(knowledge_base) = state.knowledge_base(knowledge_base_id).cloned() else {
             return Err(not_found(
-                format!("No knowledge base {knowledge_base_id} found."),
+                crate::state::message_knowledge_base_not_found_relayed(),
                 knowledge_base_id,
             ));
         };

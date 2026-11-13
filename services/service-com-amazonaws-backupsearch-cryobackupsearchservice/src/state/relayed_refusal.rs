@@ -42,17 +42,20 @@ const RELAYED_ATTEMPTS: u32 = 1;
 /// `reason`, the message the relayed-to service itself gave, as this service reports it to
 /// its caller: that reason verbatim, then the relay envelope naming the call it came from.
 ///
-/// The request id is the only per-call part, and it is the id of the RELAYED call: minted
-/// here, per call, from the emulator's one request-id mint
-/// ([`service_common::query_error_envelope::new_request_id`]), so it is indistinguishable
-/// from the id any other response of this emulator reports and two refusals never share
-/// one.
+/// The envelope is rendered by the workspace's one writer of it
+/// (`service_common::relayed_refusal`), so this service's relayed refusals carry the same
+/// form as every other service's. The request id in it is the id of the RELAYED call:
+/// minted there, per call, so it is indistinguishable from the id any other response of
+/// this emulator reports and two refusals never share one.
 pub fn relayed_refusal_message(reason: &str, relayed: RelayedService) -> String {
     let RelayedService { name, status } = relayed;
-    format!(
-        "{reason} (Service: {name}, Status Code: {status}, Request ID: {}) \
-         (SDK Attempt Count: {RELAYED_ATTEMPTS})",
-        ::service_common::query_error_envelope::new_request_id(),
+    ::service_common::relayed_refusal::relayed_refusal_message(
+        reason,
+        ::service_common::relayed_refusal::RelayedCall {
+            service: name,
+            status,
+            attempts: RELAYED_ATTEMPTS,
+        },
     )
 }
 

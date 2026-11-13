@@ -137,6 +137,47 @@ pub const MESSAGE_SESSION_NOT_FOUND: &str = "Session does not exist.";
 /// which the model provides for naming it.
 pub const MESSAGE_KNOWLEDGE_BASE_NOT_FOUND: &str = "Knowledge Base does not exist.";
 
+/// The internal service that HOLDS this endpoint's knowledge bases, as a refusal relayed
+/// from it names that service.
+///
+/// The knowledge-base plane is a service of its own behind this endpoint, so an operation
+/// of the ASSISTANT plane that takes a `knowledgeBaseId` resolves it by CALLING that
+/// service instead of answering for it, and the refusal that call comes back with is
+/// reported relayed: the called service's own sentence followed by the envelope naming the
+/// call ([`message_knowledge_base_not_found_relayed`]). An operation addressed to the
+/// knowledge-base plane itself is answered BY that service, so there is no relayed call to
+/// name and its refusal is reported bare ([`MESSAGE_KNOWLEDGE_BASE_NOT_FOUND`]).
+///
+/// The name is the one the SDK layer that relays the call reports the service under, which
+/// is neither this endpoint's signing name nor its `sdkId`. The Amazon Q in Connect view of
+/// this same endpoint relays it from its own copy of this constant
+/// (`services/service-com-amazonaws-qconnect-wisdomservice/src/state.rs`), so a client
+/// cannot read a different service out of the message depending on which model it addressed.
+pub const KNOWLEDGE_BASE_SERVICE: &str = "CloverKnowledge";
+
+/// The status the knowledge-base service answers a `knowledgeBaseId` it holds nothing under
+/// with: the `@httpError` of the `ResourceNotFoundException` its own operations declare
+/// (`smithy_query(query="operation",operation="GetKnowledgeBase")`), which is the status the
+/// same lookup answers a client with when the client makes it directly.
+pub const KNOWLEDGE_BASE_NOT_FOUND_STATUS: u16 = 404;
+
+/// [`MESSAGE_KNOWLEDGE_BASE_NOT_FOUND`] as an operation of the ASSISTANT plane reports it:
+/// the knowledge-base service's own sentence, then the envelope naming the relayed call it
+/// came from — rendered by the workspace's one writer of that envelope
+/// (`service_common::relayed_refusal`), so the form cannot drift per service.
+///
+/// The request id in it belongs to the RELAYED call and is minted per call, so two refusals
+/// never report one id and nothing in the request decides it.
+pub fn message_knowledge_base_not_found_relayed() -> String {
+    ::service_common::relayed_refusal::relayed_refusal_message(
+        MESSAGE_KNOWLEDGE_BASE_NOT_FOUND,
+        ::service_common::relayed_refusal::RelayedCall::once(
+            KNOWLEDGE_BASE_SERVICE,
+            KNOWLEDGE_BASE_NOT_FOUND_STATUS,
+        ),
+    )
+}
+
 /// The most quick responses one knowledge base holds at once.
 ///
 /// Same contract as [`MAX_KNOWLEDGE_BASES`], one level down: a quick response is

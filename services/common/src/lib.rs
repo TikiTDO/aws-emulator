@@ -523,6 +523,10 @@ pub mod query_error_envelope;
 /// An `@httpQuery`-bound timestamp read in the `epoch-seconds` form the model declares (or
 /// documents), which the generated schema drops and the framework therefore refuses.
 pub mod query_timestamps;
+/// The ONE rendering of the envelope a service states around a refusal ANOTHER service
+/// answered it with: the called service, the status it answered, that call's request id and
+/// how many attempts it took.
+pub mod relayed_refusal;
 /// The media type a service announces on a response, where the recorded wire differs from
 /// the one its protocol trait implies.
 pub mod response_media_type;
