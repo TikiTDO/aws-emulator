@@ -312,8 +312,8 @@ const UNRECOGNIZED_ENCODING: &str =
 /// "the public key is malformed or otherwise invalid" (`InvalidPublicKeyException`).
 const INVALID_PUBLIC_KEY: &str = "The public key is malformed or otherwise invalid.";
 
-/// What IAM answers an upload of a key the named user already holds with — "the SSH public
-/// key is already associated with the specified IAM user"
-/// (`DuplicateSSHPublicKeyException`).
-const DUPLICATE_KEY: &str =
-    "The SSH public key is already associated with the specified IAM user.";
+/// What IAM answers an upload of a key the named user already holds with — the one sentence
+/// it words for "the SSH public key is already associated with the specified IAM user"
+/// (`DuplicateSSHPublicKeyException`), which names neither the key nor the user, since the
+/// caller already named both.
+const DUPLICATE_KEY: &str = "Duplicate SSH public key uploaded.";

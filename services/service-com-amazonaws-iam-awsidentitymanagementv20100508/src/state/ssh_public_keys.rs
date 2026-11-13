@@ -273,11 +273,12 @@ pub enum SshPublicKeyMaterial {
     Key {
         /// Its DER `SubjectPublicKeyInfo`, which is what tells it from every other key.
         subject_public_key_info: Vec<u8>,
-        /// Its `Fingerprint`: "the MD5 message digest of the SSH public key", as the
-        /// colon-separated lowercase hex pairs a hex fingerprint is published in — the
-        /// value `openssl rsa -pubin -outform DER | openssl md5 -c` prints for the same
-        /// key, so one key always fingerprints to one string whichever encoding carried
-        /// it.
+        /// Its `Fingerprint`: "the MD5 message digest of the SSH public key"
+        /// (`SSHPublicKey$Fingerprint`) — the digest of the key in the SSH public key
+        /// format itself (the `ssh-rsa` key blob of RFC 4253 section 6.6), as the
+        /// colon-separated lowercase hex pairs a hex fingerprint is published in. That is
+        /// the value `ssh-keygen -l -E md5` prints for the same key, so one key always
+        /// fingerprints to one string whichever encoding carried it.
         fingerprint: String,
     },
 }
@@ -305,10 +306,43 @@ pub fn read_ssh_public_key(ssh_public_key_body: &str) -> SshPublicKeyMaterial {
     let Some(subject_public_key_info) = subject_public_key_info(&modulus, &public_exponent) else {
         return SshPublicKeyMaterial::Invalid;
     };
+    let Some(key_blob) = openssh_rsa_key_blob(&modulus, &public_exponent) else {
+        return SshPublicKeyMaterial::Invalid;
+    };
     SshPublicKeyMaterial::Key {
-        fingerprint: colon_separated_hex(&::md5::Md5::digest(&subject_public_key_info)),
+        fingerprint: colon_separated_hex(&::md5::Md5::digest(&key_blob)),
         subject_public_key_info,
     }
+}
+
+/// The SSH public key blob of the RSA public key `(modulus, public_exponent)` — the key
+/// itself in the SSH public key format (RFC 4253 section 6.6: the key type name, then the
+/// exponent and the modulus as `mpint`s), which is the material an OpenSSH line carries
+/// base64-encoded and which "the MD5 message digest of the SSH public key"
+/// (`SSHPublicKey$Fingerprint`) is taken over.
+///
+/// Written by the crate that implements the format — [`ssh_key`]'s own encoding of the key
+/// — rather than laid out here, so the digest is taken over the real encoding of the key and
+/// not over a blob written out by hand. It is a function of the KEY alone, so both encodings
+/// a body may arrive in fingerprint alike, and the comment a line may carry is no part of
+/// it.
+fn openssh_rsa_key_blob(modulus: &[u8], public_exponent: &[u8]) -> Option<Vec<u8>> {
+    ::ssh_key::PublicKey::new(rsa_key_data(modulus, public_exponent)?, String::new())
+        .to_bytes()
+        .ok()
+}
+
+/// The SSH key data of the RSA public key `(modulus, public_exponent)` — the one place the
+/// account turns the integers that identify a key into the key as [`ssh_key`] holds it, so
+/// the blob the fingerprint is taken over and the OpenSSH line a read reports are provably
+/// the same key.
+fn rsa_key_data(modulus: &[u8], public_exponent: &[u8]) -> Option<::ssh_key::public::KeyData> {
+    Some(::ssh_key::public::KeyData::Rsa(
+        ::ssh_key::public::RsaPublicKey {
+            e: ::ssh_key::Mpint::from_positive_bytes(public_exponent).ok()?,
+            n: ::ssh_key::Mpint::from_positive_bytes(modulus).ok()?,
+        },
+    ))
 }
 
 /// The `(modulus, public exponent)` of the RSA key the OpenSSH public key line `text`
@@ -387,11 +421,7 @@ fn body_encoding(ssh_public_key_body: &str) -> Option<&'static str> {
 /// it, and the account holds a key rather than a line.
 fn openssh_public_key_line(subject_public_key_info: &[u8]) -> Option<String> {
     let (modulus, public_exponent) = spki_rsa_key(subject_public_key_info)?;
-    let rsa = ::ssh_key::public::RsaPublicKey {
-        e: ::ssh_key::Mpint::from_positive_bytes(&public_exponent).ok()?,
-        n: ::ssh_key::Mpint::from_positive_bytes(&modulus).ok()?,
-    };
-    ::ssh_key::PublicKey::new(::ssh_key::public::KeyData::Rsa(rsa), String::new())
+    ::ssh_key::PublicKey::new(rsa_key_data(&modulus, &public_exponent)?, String::new())
         .to_openssh()
         .ok()
 }
@@ -410,8 +440,8 @@ fn subject_public_key_info_pem(subject_public_key_info: &[u8]) -> Option<String>
 }
 
 /// The DER `SubjectPublicKeyInfo` of the RSA public key `(modulus, public_exponent)` — the
-/// X.509 public key `openssl rsa -pubout -outform DER` writes, which identifies the key and
-/// which its MD5 fingerprint is taken over.
+/// X.509 public key `openssl rsa -pubout -outform DER` writes, which identifies the key
+/// whichever encoding carried it and which the PEM form of the key is written out from.
 ///
 /// The structure is written by the crates that implement the standards it comes from: the
 /// PKCS#1 `RSAPublicKey` body by [`pkcs1`] (RFC 8017), under the `rsaEncryption` algorithm

@@ -418,7 +418,7 @@ async fn the_read_is_decided_against_the_callers_policies() {
 }
 
 /// One `GetSSHPublicKey` call.
-async fn get(
+pub(crate) async fn get(
     router: &MultiServiceRouter,
     user_name: &str,
     ssh_public_key_id: &str,

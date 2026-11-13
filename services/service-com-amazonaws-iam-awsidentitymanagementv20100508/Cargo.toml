@@ -36,11 +36,12 @@ pkcs8 = { version = "0.10", features = ["pem", "std"] }
 # in its certificate, and for reading the RSA public key an `UploadSSHPublicKey` body
 # carries in either of the PEM structures a public key is written in.
 pkcs1 = { version = "0.7", features = ["pem", "pkcs8"] }
-# Hashes the DER public key of an uploaded SSH public key into the MD5 fingerprint
+# Hashes the SSH public key of an uploaded SSH public key into the MD5 fingerprint
 # `SSHPublicKey$Fingerprint` carries.
 md-5 = "0.10"
 # Reads the OpenSSH public key line an `UploadSSHPublicKey` body may carry, so what counts
-# as a key is the format itself rather than the shape of the text.
+# as a key is the format itself rather than the shape of the text, and writes that key in the
+# SSH encoding whose digest is the fingerprint `SSHPublicKey$Fingerprint` carries.
 ssh-key = { version = "0.6", default-features = false, features = ["alloc"] }
 # The SEC1 elliptic-curve private key structure, for that same match on an EC key pair.
 sec1 = "0.7"
