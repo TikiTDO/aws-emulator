@@ -1,22 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op StartExecutionPreview
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `StartExecutionPreview`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`StartExecutionPreview::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
-//!
-//! ## Shape of an operation
-//!
-//! Each operation is a struct that owns the shared engine and implements
-//! [`smithy_server_runtime::Operation`]. The framework constructs one per service via
-//! `StartExecutionPreview::new(engine)` and drives it through the centralized request walk:
-//! deserialize → validate → `handle` → serialize. You write ONLY the `handle` body.
+//! Initiates the preview of what running an Automation runbook would do: the runbook the
+//! start names is resolved, its steps are read and the resources its targets resolve to
+//! are counted, and the preview that works out is persisted under the id this answers
+//! with — which [`crate::ops::get_execution_preview`] reports.
 //!
 //! ## Reaching this service's state
 //!
@@ -146,18 +134,150 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `StartExecutionPreview` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(StartExecutionPreviewErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("StartExecutionPreview"))
+        // `DocumentName`'s and `DocumentVersion`'s patterns and every size of the
+        // execution inputs are MODELLED constraints, so the centralized walk has already
+        // refused anything outside them. What is checked here is what the model cannot
+        // say: which runbook, which version, which parameters and which targets the
+        // preview resolves to.
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            StartExecutionPreviewErrorModeled::InternalServerError(InternalServerError {
+                message: Some("the execution preview store is unavailable".to_string()),
+            })
+        })?;
+        let region = crate::state::request_region(ctx.parts());
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+
+        let invalid = |why: String| {
+            StartExecutionPreviewErrorModeled::ValidationException(ValidationException {
+                message: Some(why),
+                reason_code: None,
+            })
+        };
+
+        // "The name of the Automation runbook to run. The result of the execution preview
+        // indicates what the impact would be of running this runbook" (`DocumentName`),
+        // resolved through the endpoint the start was signed for by the one lookup every
+        // document read of this service uses.
+        let runbook_not_found = || {
+            invalid(crate::state::automation::runbook_not_found_message(
+                &input.document_name,
+            ))
+        };
+        let Some(document) = store.resolve_document_for_request(&input.document_name, &region, now)
+        else {
+            return Err(runbook_not_found().into());
+        };
+        // Only an Automation runbook has an execution to preview, so a document of any
+        // other type is no runbook of that name.
+        if document.document_type != crate::state::automation::AUTOMATION_DOCUMENT_TYPE {
+            return Err(runbook_not_found().into());
+        }
+        // "The version of the Automation runbook to run. The default value is $DEFAULT"
+        // (`DocumentVersion`): each spelling the modelled pattern admits names one of the
+        // versions the document holds, and a number it does not hold names none.
+        let requested_version = input
+            .document_version
+            .as_deref()
+            .filter(|version| !version.is_empty())
+            .unwrap_or(crate::state::DOCUMENT_VERSION_DEFAULT);
+        let Some(version) = document.select(requested_version) else {
+            return Err(invalid(
+                crate::state::automation::runbook_version_not_found_message(
+                    &document.name,
+                    requested_version,
+                ),
+            )
+            .into());
+        };
+
+        // "Information about the inputs that can be specified for the preview operation"
+        // (`ExecutionInputs`): the inputs an Automation preview takes are the ones an
+        // automation START takes, so they are held to the same rules — the parameters the
+        // runbook declares, and the target members that cannot hold together without each
+        // other.
+        let automation = input
+            .execution_inputs
+            .as_ref()
+            .map(|ExecutionInputs::Automation(inputs)| inputs);
+        let supplied: ::std::collections::BTreeMap<String, Vec<String>> = automation
+            .and_then(|inputs| inputs.parameters.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let targets: Vec<Target> = automation
+            .and_then(|inputs| inputs.targets.clone())
+            .unwrap_or_default();
+        let target_maps = automation
+            .and_then(|inputs| inputs.target_maps.clone())
+            .unwrap_or_default();
+        let target_parameter_name = automation
+            .and_then(|inputs| inputs.target_parameter_name.as_deref())
+            .filter(|name| !name.is_empty());
+        if let Some(why) = crate::state::automation::target_rejection(
+            &document.name,
+            &version.parsed.parameters,
+            target_parameter_name,
+            &targets,
+            target_maps.len(),
+        ) {
+            return Err(invalid(why).into());
+        }
+        let mut named = supplied.clone();
+        if let Some(name) = target_parameter_name {
+            named.entry(name.to_string()).or_default();
+        }
+        if let Some(why) = crate::state::commands::parameter_rejection(
+            &document.name,
+            &version.parsed.parameters,
+            &named,
+        ) {
+            return Err(invalid(why).into());
+        }
+
+        // The steps the runbook declares, read out of the content of the version this
+        // start resolved — so the preview describes the runbook as it stands now, whatever
+        // a later update does to the document.
+        let steps = crate::state::automation::runbook::steps_of(&version.content)
+            .map_err(invalid)?;
+        let unknown = crate::state::automation::unknown_step_references(&steps);
+        if !unknown.is_empty() {
+            return Err(invalid(
+                crate::state::automation::unknown_step_reference_message(&unknown),
+            )
+            .into());
+        }
+
+        // What running it would do: the impact of each step, the Regions and accounts the
+        // execution would run in, and the resources its targets resolve to in this Region.
+        // Worked out HERE, from the store as it stands, so the read reports a computation
+        // rather than repeating the request.
+        let computed =
+            crate::state::execution_previews::compute(&store, &region, &steps, automation)
+                .map_err(|key| {
+                    invalid(crate::state::automation::unresolvable_target_key_message(
+                        &key,
+                    ))
+                })?;
+
+        let preview_id = store.mint_execution_preview_id();
+        store.insert_execution_preview(crate::state::execution_previews::ExecutionPreviewRecord {
+            preview_id: preview_id.clone(),
+            region: region.clone(),
+            document_name: document.name.clone(),
+            document_version: version.version.to_string(),
+            // Nothing has worked the preview out yet, which is what `Pending` says; the
+            // service has it worked out a span later
+            // (`crate::state::execution_previews::COMPLETION_DELAY`).
+            status: crate::state::execution_previews::STATUS_PENDING.to_string(),
+            status_message: None,
+            started_at: now,
+            ready_at: now + crate::state::execution_previews::COMPLETION_DELAY,
+            computed,
+        });
+
+        Ok(StartExecutionPreviewOutput {
+            execution_preview_id: Some(preview_id),
+        })
     }
 }

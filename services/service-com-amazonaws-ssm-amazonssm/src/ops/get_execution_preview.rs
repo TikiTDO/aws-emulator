@@ -1,22 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetExecutionPreview
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetExecutionPreview`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetExecutionPreview::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
-//!
-//! ## Shape of an operation
-//!
-//! Each operation is a struct that owns the shared engine and implements
-//! [`smithy_server_runtime::Operation`]. The framework constructs one per service via
-//! `GetExecutionPreview::new(engine)` and drives it through the centralized request walk:
-//! deserialize → validate → `handle` → serialize. You write ONLY the `handle` body.
+//! Reports the execution preview an id names: the status the clock has moved it to, and —
+//! once the service has had time to work it out — what
+//! [`crate::ops::start_execution_preview`] computed and persisted for it. A preview is
+//! reached through the endpoint of the Region it was started in, so an id this Region
+//! holds none of is the modelled miss.
 //!
 //! ## Reaching this service's state
 //!
@@ -150,18 +139,41 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetExecutionPreview` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetExecutionPreviewErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetExecutionPreview"))
+        // `ExecutionPreviewId`'s presence, length and UUID pattern are MODELLED
+        // constraints the centralized walk has already refused anything outside of.
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            GetExecutionPreviewErrorModeled::InternalServerError(InternalServerError {
+                message: Some("the execution preview store is unavailable".to_string()),
+            })
+        })?;
+        let region = crate::state::request_region(ctx.parts());
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+
+        // The one write a report makes: a preview the service has had time to work out was
+        // worked out at the instant it was DUE, whether or not anybody called, so that
+        // transition is materialised before the id resolves against the store.
+        store.advance_execution_previews(now);
+
+        let Some(held) = store.execution_preview(&region, &input.execution_preview_id) else {
+            return Err(GetExecutionPreviewErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: Some(
+                        crate::state::execution_previews::execution_preview_not_found_message(
+                            &input.execution_preview_id,
+                        ),
+                    ),
+                },
+            )
+            .into());
+        };
+
+        Ok(GetExecutionPreviewOutput {
+            execution_preview_id: Some(held.preview_id.clone()),
+            status: Some(held.status.clone()),
+            status_message: held.status_message.clone(),
+            ended_at: held.ended_at().map(::aws_smithy_types::DateTime::from),
+            execution_preview: held.execution_preview(),
+        })
     }
 }

@@ -235,7 +235,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let runbook_not_found = || {
             StartAutomationExecutionErrorModeled::AutomationDefinitionNotFoundException(
                 AutomationDefinitionNotFoundException {
-                    message: Some(format!("Document {} does not exist.", input.document_name)),
+                    message: Some(crate::state::automation::runbook_not_found_message(
+                        &input.document_name,
+                    )),
                 },
             )
         };
@@ -257,10 +259,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(
                 StartAutomationExecutionErrorModeled::AutomationDefinitionVersionNotFoundException(
                     AutomationDefinitionVersionNotFoundException {
-                        message: Some(format!(
-                            "Document {} version {requested_version} does not exist.",
-                            document.name
-                        )),
+                        message: Some(
+                            crate::state::automation::runbook_version_not_found_message(
+                                &document.name,
+                                requested_version,
+                            ),
+                        ),
                     },
                 )
                 .into(),
@@ -317,10 +321,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .map_err(crate::scaffolded::Scaffolded::validation)?;
         let unknown = crate::state::automation::unknown_step_references(&steps);
         if !unknown.is_empty() {
-            return Err(crate::scaffolded::Scaffolded::validation(format!(
-                "The runbook declares no step named {}",
-                unknown.join(", ")
-            )));
+            return Err(crate::scaffolded::Scaffolded::validation(
+                crate::state::automation::unknown_step_reference_message(&unknown),
+            ));
         }
         // "Tags enable you to categorize a resource… When calling the
         // StartAutomationExecution action, you can specify a maximum of 5 tags."
@@ -394,12 +397,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .automation_target_values(&region, target)
                 .map_err(|key| {
                     StartAutomationExecutionErrorModeled::InvalidTarget(InvalidTarget {
-                        message: Some(format!(
-                            "Target key '{key}' isn't one of the target keys an automation \
-                             resolves its targets by: {}, {}",
-                            crate::state::automation::TARGET_KEY_PARAMETER_VALUES,
-                            crate::state::commands::supported_target_keys().join(", ")
-                        )),
+                        message: Some(
+                            crate::state::automation::unresolvable_target_key_message(&key),
+                        ),
                     })
                 })?;
             for value in selected {

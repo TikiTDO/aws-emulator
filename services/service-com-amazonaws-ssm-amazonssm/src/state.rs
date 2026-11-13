@@ -128,6 +128,13 @@
 //! interval the window is active over
 //! ([`maintenance_windows::MaintenanceWindowRecord::next_execution_time`]).
 //!
+//! Then the **execution previews** ([`execution_previews`]), keyed by
+//! `(region, execution preview id)`: `StartExecutionPreview` works out what running an
+//! Automation runbook would do — from the steps that runbook declares and the resources its
+//! targets resolve to in this store — and persists it, and `GetExecutionPreview` reports
+//! what it persisted once the service has had time to work it out. Nothing is run and no
+//! resource is touched: a preview is the report of what an execution WOULD do.
+//!
 //! Last is the account's **service settings** ([`service_settings`]):
 //! `GetServiceSetting` reports one, `UpdateServiceSetting` overwrites it and
 //! `ResetServiceSetting` restores the value its service team provisioned. The settings an
@@ -172,6 +179,10 @@ pub mod commands;
 /// An automation execution a caller started, the step executions it is made of, and the
 /// walk through them the clock owes.
 pub mod automation;
+
+/// The execution previews of an Automation runbook: what a preview works out from the
+/// runbook and the targets, and the status the clock moves it to.
+pub mod execution_previews;
 
 /// The State Manager associations this service holds, each with the versions a create and
 /// its updates wrote.
@@ -3178,6 +3189,17 @@ pub struct ComAmazonawsSsmAmazonssmState {
     /// ([`ComAmazonawsSsmAmazonssmState::mint_automation_id`]).
     pub minted_automation_ids: u64,
 
+    /// Every execution preview a caller started, keyed by `(region, execution preview
+    /// id)`: a preview is worked out at the Systems Manager endpoint of one Region and is
+    /// identified there by the id the start minted. A `BTreeMap` so a walk over them is
+    /// stable and total. See [`execution_previews`].
+    pub execution_previews:
+        BTreeMap<(String, String), execution_previews::ExecutionPreviewRecord>,
+
+    /// How many execution preview ids this store has minted, which is the entropy behind
+    /// the next one ([`ComAmazonawsSsmAmazonssmState::mint_execution_preview_id`]).
+    pub minted_execution_preview_ids: u64,
+
     /// Every managed node, keyed by `(region, node id)`: a node is registered with the
     /// Systems Manager endpoint of one Region and is identified there by its node id. A
     /// `BTreeMap` so a describe walks a stable, total order — ascending by node id
@@ -3335,6 +3357,8 @@ impl Default for ComAmazonawsSsmAmazonssmState {
             minted_command_ids: 0,
             automation_executions: BTreeMap::new(),
             minted_automation_ids: 0,
+            execution_previews: BTreeMap::new(),
+            minted_execution_preview_ids: 0,
             managed_nodes: BTreeMap::new(),
             activations: BTreeMap::new(),
             cloud_connectors: BTreeMap::new(),
@@ -3378,6 +3402,9 @@ impl ComAmazonawsSsmAmazonssmState {
         // The approval an auto-approval policy owes an access request was due at the same
         // instant whether or not anybody called (`just_in_time_node_access`).
         self.materialize_access_requests_due(now);
+        // So was the instant an execution preview the service had worked out became
+        // reportable (`execution_previews`).
+        self.advance_execution_previews(now);
     }
 
     /// The command `command_id` names in `region`, or `None` when that Region holds none.

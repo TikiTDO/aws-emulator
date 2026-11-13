@@ -1346,6 +1346,39 @@ pub fn resolved_parameters(
     resolved
 }
 
+/// How an operation that runs or previews an Automation runbook words the miss of a
+/// runbook name: a name no document of this Region carries, and a document of that name
+/// that is no Automation runbook, are the same miss — there is no Automation runbook of
+/// that name to run.
+///
+/// Worded here rather than in either handler so the two operations that resolve a runbook
+/// (`StartAutomationExecution`, `StartExecutionPreview`) cannot word one refusal two ways.
+pub fn runbook_not_found_message(document_name: &str) -> String {
+    format!("Document {document_name} does not exist.")
+}
+
+/// The same, for a version selector the resolved runbook holds no version for.
+pub fn runbook_version_not_found_message(document_name: &str, version: &str) -> String {
+    format!("Document {document_name} version {version} does not exist.")
+}
+
+/// The same, for the step names a runbook's flow members name that it does not declare
+/// ([`unknown_step_references`]).
+pub fn unknown_step_reference_message(unknown: &[String]) -> String {
+    format!("The runbook declares no step named {}", unknown.join(", "))
+}
+
+/// The same, for a target `Key` that is not one an automation resolves its targets by: the
+/// key the request sent, then the keys an automation does resolve by — the values form and
+/// the node criteria ([`super::commands::supported_target_keys`]).
+pub fn unresolvable_target_key_message(key: &str) -> String {
+    format!(
+        "Target key '{key}' isn't one of the target keys an automation resolves its targets \
+         by: {TARGET_KEY_PARAMETER_VALUES}, {}",
+        super::commands::supported_target_keys().join(", ")
+    )
+}
+
 /// Why the start's `TargetParameterName`, `Targets` and `TargetMaps` cannot hold together,
 /// or `None` when they can.
 ///
