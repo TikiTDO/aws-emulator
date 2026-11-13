@@ -31,6 +31,8 @@ mod awsvpc_interface_subnet_and_identity;
 mod capacity_provider_surface;
 #[path = "all/capacity_providers.rs"]
 mod capacity_providers;
+#[path = "all/classic_load_balancer_attachments.rs"]
+mod classic_load_balancer_attachments;
 #[path = "all/cluster_capacity_and_statistics.rs"]
 mod cluster_capacity_and_statistics;
 #[path = "all/cluster_mutations.rs"]

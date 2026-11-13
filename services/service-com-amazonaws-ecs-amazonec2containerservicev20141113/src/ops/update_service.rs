@@ -499,6 +499,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 },
             )?
         };
+        // The CLASSIC load balancers the REQUEST's own entries name, resolved against the
+        // Classic Elastic Load Balancing store in the same place and under the same lock
+        // order as the v2 reads above. Only the request's own names are asked about, as with
+        // the groups a load balancer forwards to: the ones the service already carries were
+        // resolved when they were set ([`crate::state::held_classic_load_balancer_names`]).
+        let requested_classic_names = crate::state::requested_load_balancer_names(
+            input.load_balancers.as_deref().unwrap_or_default(),
+        );
+        let held_classic = if requested_classic_names.is_empty() {
+            Vec::new()
+        } else {
+            crate::state::held_classic_load_balancer_names(
+                &*self.engine,
+                &region,
+                &requested_classic_names,
+            )
+            .ok_or_else(|| {
+                UpdateServiceErrorModeled::ServerException(ServerException {
+                    message: Some("the Elastic Load Balancing store is unavailable".to_string()),
+                })
+            })?
+        };
 
         // A `serviceRegistries` list this update NAMES is validated the way the create's is:
         // every entry names a CLOUD MAP service, READ from that service's store here, before
@@ -913,6 +935,33 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             None
         };
         if let Some(message) = refusal {
+            return Err(UpdateServiceErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    message: Some(message),
+                },
+            )
+            .into());
+        }
+
+        // The CLASSIC half of the same pairing: a `loadBalancers` list this request NAMES
+        // has to name load balancers the account holds, and a request that moves the service
+        // onto another revision is checked against the Classic attachments it already holds,
+        // because only an `awsvpc` revision cannot be reached through one
+        // (`crate::state::classic_load_balancer_refusal`).
+        let classic_refusal = if input.load_balancers.is_some() {
+            crate::state::classic_load_balancer_refusal(
+                &effective_load_balancers,
+                network_mode,
+                &held_classic,
+            )
+        } else if input.task_definition.is_some() {
+            network_mode.and_then(|mode| {
+                crate::state::classic_load_balancer_mode_refusal(&effective_load_balancers, mode)
+            })
+        } else {
+            None
+        };
+        if let Some(message) = classic_refusal {
             return Err(UpdateServiceErrorModeled::InvalidParameterException(
                 InvalidParameterException {
                     message: Some(message),

@@ -270,6 +270,11 @@ pub use circuit_breaker::*;
 mod load_balancer_targets;
 pub use load_balancer_targets::*;
 
+/// The CLASSIC load balancer a `loadBalancers` entry attaches a service to: whether the
+/// account holds it, and the network mode that kind of attachment can reach a task in.
+mod classic_load_balancers;
+pub use classic_load_balancers::*;
+
 /// The `ECS Task State Change` events this service publishes as a task moves, and the
 /// clock pump that publishes the transitions nobody is waiting on a call for.
 mod task_events;

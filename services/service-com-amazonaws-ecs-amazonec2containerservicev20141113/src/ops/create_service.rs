@@ -595,6 +595,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     message: Some("the Elastic Load Balancing store is unavailable".to_string()),
                 })
             })?;
+        // The other kind of load balancer an entry can attach: a CLASSIC one, named by
+        // `loadBalancerName`, whose record lives in the Classic Elastic Load Balancing
+        // service's store. Read here for the same reason and under the same lock order as
+        // the two reads above ([`crate::state::held_classic_load_balancer_names`]).
+        let classic_names = crate::state::requested_load_balancer_names(&load_balancers);
+        let held_classic = if classic_names.is_empty() {
+            Vec::new()
+        } else {
+            crate::state::held_classic_load_balancer_names(&*self.engine, &region, &classic_names)
+                .ok_or_else(|| {
+                    CreateServiceErrorModeled::ServerException(ServerException {
+                        message: Some(
+                            "the Elastic Load Balancing store is unavailable".to_string(),
+                        ),
+                    })
+                })?
+        };
 
         // "The details of the service discovery registry to associate with this service":
         // the registry is a CLOUD MAP service, so whether this one can be registered into is
@@ -853,6 +870,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &load_balancers,
             definition.as_ref().map(|found| found.network_mode.as_str()),
             &target_types,
+        ) {
+            return Err(CreateServiceErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    message: Some(message),
+                },
+            )
+            .into());
+        }
+
+        // And an entry that attaches a CLASSIC load balancer instead has to name one the
+        // account holds, and a revision whose tasks that kind of load balancer can reach:
+        // it registers the container INSTANCE, which an `awsvpc` task is not associated with
+        // (`crate::state::classic_load_balancer_refusal`).
+        if let Some(message) = crate::state::classic_load_balancer_refusal(
+            &load_balancers,
+            definition.as_ref().map(|found| found.network_mode.as_str()),
+            &held_classic,
         ) {
             return Err(CreateServiceErrorModeled::InvalidParameterException(
                 InvalidParameterException {

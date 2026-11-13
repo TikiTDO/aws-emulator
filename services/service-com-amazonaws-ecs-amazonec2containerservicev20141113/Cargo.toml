@@ -16,6 +16,14 @@ engine = { workspace = true }
 # store in the shared engine, so these are cross-service READS of it rather than a copy of a
 # value the request carried. No cycle: that crate does not depend on this one.
 service-com-amazonaws-elasticloadbalancingv2-elasticloadbalancing-v10 = { workspace = true }
+# The CLASSIC Elastic Load Balancing service, for ONE read of the load balancer a
+# `loadBalancers` entry's `loadBalancerName` names: whether the account holds one by that name
+# in the Region the request was signed for, which decides whether the container instances this
+# service's tasks run on could be registered with it at all
+# (`crate::state::held_classic_load_balancer_names`). The load balancer lives in that
+# service's own store in the shared engine, so this is a cross-service READ of it rather than
+# a copy of a value the request carried. No cycle: that crate does not depend on this one.
+service-com-amazonaws-elasticloadbalancing-elasticloadbalancing-v7 = { workspace = true }
 # The Cloud Map (service discovery) service, for ONE read of the namespace a Service Connect
 # request names: whether Cloud Map holds it, which decides whether a listing scoped to that
 # namespace can be walked at all (`crate::state::cloud_map_holds_namespace`). The namespace
