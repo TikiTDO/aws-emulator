@@ -47,10 +47,35 @@
 //! member, so the sentences live here once instead of once per operation. The OTHER
 //! layer's refusal — the boundary's constraint envelope — is rendered here too
 //! ([`glue_constraint_refusal`]), once for both paths that answer one.
+//!
+//! # The request a response names
+//!
+//! Every response AWS sends names the request it answered, and an SDK surfaces that name as
+//! the call's response metadata — the value a caller correlates its own logs with the
+//! service's by. This service's protocol (`awsJson1_1`) carries it in the `x-amzn-requestid`
+//! response HEADER alone, which the shared report
+//! (`service_common::query_error_envelope::with_request_id_header`) writes, wired at the two
+//! layers every response of this service passes through:
+//!
+//! * the operation [`Service::override_operation`] hands the router — the catalog wrapper
+//!   below under [`RequestIdReportingOperation::header`], and [`RequestIdHeaderOperation`]
+//!   for every other modelled operation — which covers a success, a modelled error, a
+//!   refusal this file words itself and a constraint refusal raised while an operation was
+//!   being served;
+//! * [`RequestIdEnvelopeDefinition::header_only`], the definition wrapper
+//!   [`Service::definition`] hands back, which covers a response NO operation produced: a
+//!   routing failure, a transport failure detected up front, and a pre-dispatch
+//!   authentication refusal.
+//!
+//! Nothing else about a response changes: the status, the other headers and every byte of
+//! the body stay as the renderer wrote them.
 
+use service_common::query_error_envelope::{
+    RequestIdEnvelopeDefinition, RequestIdHeaderOperation, RequestIdReportingOperation,
+};
 use smithy_server_runtime::{
-    http, BoxFuture, ErasedOperation, Operation, OperationContext, Refusal, Refused,
-    ServerHttpProtocol, Service, Violation, ViolationKind,
+    http, BoxFuture, ErasedOperation, ErasedServiceDefinition, Operation, OperationContext,
+    Refusal, Refused, ServerHttpProtocol, Service, Violation, ViolationKind,
 };
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -82,14 +107,25 @@ pub mod integration_properties;
 /// Generic over the engine type `Eng` so this file names no concrete engine; the
 /// router builds one shared engine and hands it to `new`.
 pub struct EmulatedService<Eng: Send + Sync + 'static> {
-    entry: crate::ServiceDefinition<Eng>,
+    /// The generated entry, with its three framework-level error renderers wrapped so a
+    /// response no operation produced still names the request it answers. Identity, the
+    /// protocol and the operations are the generated entry's untouched.
+    entry: RequestIdEnvelopeDefinition<crate::ServiceDefinition<Eng>>,
     /// One [`CatalogNameValidation`] per operation whose name members this service words
     /// its own refusal for, keyed by the routing key the model names that operation by
     /// ([`Operation::NAME`], the key the generated routing table uses). Built once here,
     /// never per request; each entry is zero-sized, so this is a table of NAMES rather
     /// than a second set of operations — the operation that serves a request is still the
     /// one the generated table built from the shared engine.
+    ///
+    /// Each wrapper is composed inside [`RequestIdReportingOperation::header`], so the
+    /// refusal it words names the request it answered exactly as every other response of
+    /// this service does.
     name_refusals: HashMap<&'static str, Box<dyn ErasedOperation>>,
+    /// Serves every OTHER modelled operation exactly as the generated routing table would,
+    /// and names the request its response answers. Held, not built per request:
+    /// `override_operation` hands back a borrow of it.
+    request_id: RequestIdHeaderOperation,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -98,8 +134,9 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// operation's behaviour lives in that operation's own `impl Operation`.
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
-            entry: crate::ServiceDefinition::new(engine),
+            entry: RequestIdEnvelopeDefinition::header_only(crate::ServiceDefinition::new(engine)),
             name_refusals: catalog_name_validation_table::<Eng>(),
+            request_id: RequestIdHeaderOperation,
         }
     }
 }
@@ -108,7 +145,10 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
     fn definition(&self) -> &dyn smithy_server_runtime::ErasedServiceDefinition {
         // The model-derived half of this service — identity, protocol, routing
         // table, and the default error renderers — lives in the generated entry.
-        // The router reads it through this one accessor. Do not edit the entry.
+        // The router reads it through this one accessor. Do not edit the entry: what is
+        // handed back is the shared `RequestIdEnvelopeDefinition`, which reads identity,
+        // protocol and the routing table straight off that entry and adds the request-id
+        // header to the three error renderers (see the module docs).
         &self.entry
     }
 
@@ -139,7 +179,19 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // operation for resolves to nothing here and keeps the framework's routing
         // failure.
         let key = self.entry.protocol().routing_key(req).ok()?;
-        self.name_refusals.get(key).map(|wrapper| &**wrapper)
+        if let Some(wrapper) = self.name_refusals.get(key) {
+            return Some(&**wrapper);
+        }
+        // NOT a re-route: every other request is served by the operation this service's
+        // own routing table names for it, through the shared `RequestIdHeaderOperation` —
+        // the one place every other operation's response passes, so no operation can
+        // answer without naming the request it answered. A request the table does not
+        // answer declines here exactly as it would there, leaving the router's
+        // routing-error path (which names the request itself, through the definition
+        // wrapper) unchanged.
+        self.entry
+            .routes(req)
+            .then_some(&self.request_id as &dyn ErasedOperation)
     }
 
     fn override_refusal(&self, refusal: &Refusal) -> Option<Refused> {
@@ -382,10 +434,18 @@ fn catalog_name_validation_table<Eng: Send + Sync + 'static>(
 /// Register one operation's wrapper under the key the model names that operation by, read
 /// off the operation itself so the table cannot be keyed by a hand-typed name that drifts
 /// from the model.
+///
+/// The wrapper is composed inside the shared request-id report, so the refusal it words
+/// names the request it answered exactly as the generated operation's own answers do.
 fn register_name_validation<Op: Operation>(
     refusals: &mut HashMap<&'static str, Box<dyn ErasedOperation>>,
 ) {
-    refusals.insert(Op::NAME, Box::new(CatalogNameValidation::<Op>::new()));
+    refusals.insert(
+        Op::NAME,
+        Box::new(RequestIdReportingOperation::header(
+            CatalogNameValidation::<Op>::new(),
+        )),
+    );
 }
 
 /// One modelled operation, served so that a request leaving one of its name members ABSENT

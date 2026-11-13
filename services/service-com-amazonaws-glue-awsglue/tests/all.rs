@@ -291,6 +291,8 @@ mod resource_tagging;
 mod resource_untagging;
 #[path = "all/response_members.rs"]
 mod response_members;
+#[path = "all/response_request_id.rs"]
+mod response_request_id;
 #[path = "all/schema_registry.rs"]
 mod schema_registry;
 #[path = "all/schema_version_by_definition.rs"]

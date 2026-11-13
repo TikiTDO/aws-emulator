@@ -208,6 +208,18 @@ async fn history_types(router: &MultiServiceRouter, execution_arn: &str) -> Vec<
 /// The `JobRunId` the task's `TaskSubmitted` event reports, read off the history
 /// rather than guessed at: "the response from a resource when a task has started".
 async fn submitted_job_run(router: &MultiServiceRouter, case: &str, execution_arn: &str) -> String {
+    let submitted = submitted_envelope(router, case, execution_arn).await;
+    string(case, &submitted, "JobRunId")
+}
+
+/// The document the task's `TaskSubmitted` event reports as its output, parsed: for an
+/// optimized service integration that is the literal SDK response of the call the task
+/// made, so the operation's own members sit in it beside the envelope the SDK puts the
+/// response's HTTP facts in.
+///
+/// Read off the history rather than guessed at, and polled for, because the submission is
+/// recorded by the call that parks the job.
+async fn submitted_envelope(router: &MultiServiceRouter, case: &str, execution_arn: &str) -> Value {
     let began = Instant::now();
     loop {
         let history = sfn(
@@ -235,7 +247,7 @@ async fn submitted_job_run(router: &MultiServiceRouter, case: &str, execution_ar
             let reported: Value = serde_json::from_str(&output).unwrap_or_else(|error| {
                 panic!("case {case:?}: expected a JSON submission, got {error} in {output:?}")
             });
-            return string(case, &reported, "JobRunId");
+            return reported;
         }
         assert!(
             began.elapsed() < PATIENCE,
@@ -512,6 +524,108 @@ async fn a_sync_task_over_glue_is_resolved_by_the_job_run_it_started() {
             row.case
         );
     }
+}
+
+/// The output a `TaskSubmitted` event reports for an optimized service integration IS the
+/// SDK response of the call the task made: the operation's own members, plus the envelope
+/// the SDK puts that response's HTTP facts in — the status it answered
+/// (`SdkHttpMetadata.HttpStatusCode`) and the id it named the request it answered by
+/// (`SdkResponseMetadata.RequestId`), which a definition's JSONPath and an operator
+/// correlating the workflow with the service's own logs read.
+///
+/// Every value asserted is the ANSWER's own: the status is the one Glue's `StartJobRun`
+/// came back with, the request id is the one that answer named, and the rows only assert
+/// its presence, type and per-call distinctness — the VALUE of a request id is per run.
+///
+/// The rows differ along the revision of the pattern the `Resource` asks for and along how
+/// the document the state builds names the job, because the envelope is a fact of the call
+/// and not of either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sync_submission_carries_the_sdk_envelope_of_the_call_it_made() {
+    let rows = [
+        ("a literal job name, the pattern's first revision", ".sync", false),
+        ("the same task, the pattern's second revision", ".sync:2", false),
+        ("a job name the payload template takes from the input", ".sync", true),
+    ];
+
+    let router = build_router();
+    let mut request_ids: Vec<String> = Vec::new();
+    for (index, (case, suffix, from_input)) in rows.iter().enumerate() {
+        let job_name = create_job(&router, &format!("sfn-glue-envelope-{index}")).await;
+        let parameters = match from_input {
+            true => json!({ "JobName.$": "$.job" }),
+            false => json!({ "JobName": job_name }),
+        };
+        let machine = create_machine(
+            &router,
+            &format!("sfn-glue-envelope-{index}"),
+            &definition(suffix, parameters),
+        )
+        .await;
+        let started = sfn(
+            &router,
+            "StartExecution",
+            &json!({
+                "stateMachineArn": machine,
+                "name": format!("envelope-{index}"),
+                "input": json!({ "job": job_name }).to_string()
+            }),
+        )
+        .await;
+        let execution_arn = string(case, &started, "executionArn");
+
+        let submitted = submitted_envelope(&router, case, &execution_arn).await;
+        // The operation's own member: the run the call started, which Glue serves.
+        let run_id = string(case, &submitted, "JobRunId");
+        let run = job_run(&router, &job_name, &run_id).await;
+        assert_eq!(
+            run.get("Id").and_then(Value::as_str),
+            Some(run_id.as_str()),
+            "case {case:?}: expected the submission to name a run Glue serves, got {run:?}"
+        );
+        // The HTTP facts of that same call.
+        let status = submitted
+            .pointer("/SdkHttpMetadata/HttpStatusCode")
+            .and_then(Value::as_u64);
+        assert_eq!(
+            status,
+            Some(200),
+            "case {case:?}: expected the status the call answered in the envelope, got \
+             {submitted:?}"
+        );
+        assert!(
+            submitted
+                .pointer("/SdkHttpMetadata/HttpHeaders")
+                .is_some_and(Value::is_object),
+            "case {case:?}: expected the headers the call answered in the envelope, got \
+             {submitted:?}"
+        );
+        let reported = submitted.pointer("/SdkResponseMetadata/RequestId");
+        let request_id = reported
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| {
+                panic!(
+                    "case {case:?}: expected the envelope to name the request the call \
+                     answered, got {reported:?} in {submitted:?}"
+                )
+            })
+            .to_string();
+        assert!(
+            !request_id.is_empty(),
+            "case {case:?}: expected a non-empty request id, got {request_id:?}"
+        );
+        request_ids.push(request_id);
+    }
+
+    // The id belongs to the CALL: each row's starting call named its own request.
+    let mut distinct = request_ids.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(
+        distinct.len(),
+        request_ids.len(),
+        "case every submission: expected one request id per starting call, got {request_ids:?}"
+    );
 }
 
 /// One row of the stop table: the `error` and `cause` the stop carries.
