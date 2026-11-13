@@ -38,9 +38,11 @@
 //!    authorizer reads it, which is the authority on its own store.
 //!
 //! The refusal is worded here, because only the invoked service can say what its own
-//! refusal says: the principal is the role the call is made as — the emulator assumes
-//! no session for a `Task` state's call, so there is no session identity to report it
-//! under — and the metadata tail names the service, the status and the error code the
+//! refusal says: the principal is the SESSION of the role the call is made as — this
+//! service holds no credentials of the role, it assumes the role for the resource's
+//! work, and `sts:AssumeRole` reports the credentials it gets under an assumed-role
+//! session ARN ([`assumed_role_session`]), which is the identity an invoked service
+//! blames — and the metadata tail names the service, the status and the error code the
 //! answer came back with, and nothing it did not carry.
 //!
 //! A run-a-job (`.sync`) task's pattern makes a further call of its own, the one that
@@ -138,6 +140,36 @@ pub async fn unassumable_role(
     })
 }
 
+/// The ARN of a SESSION of the role `role_arn`, named `session` — the spelling
+/// `sts:AssumeRole` reports a session by, and therefore the identity a refusal about a
+/// call this service makes as that role names.
+///
+/// Step Functions holds no credentials of the role: it assumes the role for the
+/// resource's work, and the session it gets is named after the resource that work is
+/// for. The ONE rendering of that identity in this crate, so a refusal about an
+/// integration call and one about a use of a key ([`super::encryption`]) name the
+/// acting principal alike. `None` for an ARN that is not a role of an account, or an
+/// empty session name, neither of which names a session.
+#[must_use]
+pub fn assumed_role_session(role_arn: &str, session: &str) -> Option<String> {
+    let parsed = ::service_common::arn::parse(role_arn)?;
+    let name = parsed.resource.strip_prefix("role/")?.rsplit('/').next()?;
+    (!name.is_empty() && !session.is_empty()).then(|| {
+        format!(
+            "arn:{}:sts::{}:assumed-role/{name}/{session}",
+            parsed.partition, parsed.account
+        )
+    })
+}
+
+/// The principal a refusal about a call made as `role_arn` names: the session of that
+/// role this service assumed for the work ([`assumed_role_session`]), and the role's own
+/// ARN where that names no session — a value that is not a role ARN of an account, or a
+/// call with no resource to name a session after.
+fn acting_principal(role_arn: &str, session_name: &str) -> String {
+    assumed_role_session(role_arn, session_name).unwrap_or_else(|| role_arn.to_string())
+}
+
 /// The sentence the service refuses an execution role it cannot assume with.
 ///
 /// It names the two principals the assume was attempted as — the global one and
@@ -184,6 +216,11 @@ fn denied_answer(denied: Option<Denied>) -> (&'static str, u16) {
 /// what the ARN the access request is over is formed in
 /// ([`super::integration::TargetNaming`]).
 ///
+/// `session_name` is the resource the walk's work is for — the state machine's own name
+/// — which is what the session this service assumes the role under is named after, and
+/// therefore the principal a refusal of one of its calls blames
+/// ([`assumed_role_session`]).
+///
 /// `unassumable` is the refusal [`unassumable_role`] resolved for this walk's role: a
 /// role this service cannot assume fails EVERY call of the walk, whatever the call
 /// asks for, because the credentials the work would be done with are the ones that
@@ -197,6 +234,7 @@ pub fn role_gate<Eng: Send + Sync + 'static>(
     engine: &Arc<Eng>,
     region: &str,
     role_arn: &str,
+    session_name: &str,
     unassumable: Option<Failed>,
 ) -> Option<RoleGate> {
     if role_arn.is_empty() {
@@ -208,6 +246,7 @@ pub fn role_gate<Eng: Send + Sync + 'static>(
     let engine = Arc::clone(engine);
     let region = region.to_string();
     let role_arn = role_arn.to_string();
+    let session_name = session_name.to_string();
     Some(Arc::new(move |call: &Call, request: &::serde_json::Value| {
         if let Some(refused) = &unassumable {
             return Some(refused.clone());
@@ -220,7 +259,10 @@ pub fn role_gate<Eng: Send + Sync + 'static>(
         let (code, status) = denied_answer(targets.denied);
         if let Some(refused) = refusal(
             &iam.lock(),
-            &role_arn,
+            Acts {
+                role_arn: &role_arn,
+                session_name: &session_name,
+            },
             &action,
             &resource,
             call.api.sdk_client,
@@ -315,10 +357,11 @@ pub fn acting<Eng: Send + Sync + 'static>(
     engine: &Arc<Eng>,
     region: &str,
     role_arn: &str,
+    session_name: &str,
     unassumable: Option<Failed>,
 ) -> Acting {
     Acting {
-        role: role_gate(engine, region, role_arn, unassumable),
+        role: role_gate(engine, region, role_arn, session_name, unassumable),
         connections: super::http_task::connections(engine),
         handovers: super::callbacks::handovers(engine),
         // A walk that BEGINS an attempt runs every item of every Map state it enters,
@@ -339,6 +382,7 @@ pub fn acting<Eng: Send + Sync + 'static>(
 pub fn role_denial<Eng: Send + Sync + 'static>(
     engine: &Eng,
     role_arn: &str,
+    session_name: &str,
     action: &str,
     resource: &str,
     service: &str,
@@ -349,7 +393,10 @@ pub fn role_denial<Eng: Send + Sync + 'static>(
     let iam = iam_state(engine)?;
     let denial = refusal(
         &iam.lock(),
-        role_arn,
+        Acts {
+            role_arn,
+            session_name,
+        },
         action,
         resource,
         service,
@@ -376,6 +423,7 @@ pub fn role_denial<Eng: Send + Sync + 'static>(
 pub fn job_report_denial<Eng: Send + Sync + 'static>(
     engine: &Eng,
     role_arn: &str,
+    session_name: &str,
     call: &Call,
     resource: &str,
 ) -> Option<Failed> {
@@ -385,7 +433,10 @@ pub fn job_report_denial<Eng: Send + Sync + 'static>(
     let iam = iam_state(engine)?;
     let cause = refusal(
         &iam.lock(),
-        role_arn,
+        Acts {
+            role_arn,
+            session_name,
+        },
         &call.action(),
         resource,
         call.api.sdk_client,
@@ -441,10 +492,23 @@ pub fn role_is_denied<Eng: Send + Sync + 'static>(
     let iam = iam.lock();
     actions
         .iter()
-        .any(|action| not_authorized(&iam, role_arn, action, resource).is_some())
+        .any(|action| withheld(&iam, role_arn, action, resource).is_some())
 }
 
-/// The sentence the invoked service refuses the call with when the role `role_arn`
+/// WHO a call is made as: the execution role, and the name of the session this service
+/// assumes it under — the resource the work is for ([`assumed_role_session`]).
+///
+/// The two travel together because the DECISION is the role's and the PRINCIPAL a refusal
+/// blames is the session's, so every reading of one needs the other.
+#[derive(Debug, Clone, Copy)]
+struct Acts<'a> {
+    /// The state machine's `roleArn`, whose documents decide the call.
+    role_arn: &'a str,
+    /// The name of the session the role is assumed under.
+    session_name: &'a str,
+}
+
+/// The sentence the invoked service refuses the call with when the identity `acts`
 /// may not perform `action` on `resource`, or `None` when nothing of the kind can be
 /// shown (see the module docs for the cases that show nothing).
 ///
@@ -461,14 +525,14 @@ pub fn role_is_denied<Eng: Send + Sync + 'static>(
 /// in for.
 fn refusal(
     iam: &IamState,
-    role_arn: &str,
+    acts: Acts<'_>,
     action: &str,
     resource: &str,
     service: &str,
     code: &str,
     status: u16,
 ) -> Option<String> {
-    let sentence = not_authorized(iam, role_arn, action, resource)?;
+    let sentence = not_authorized(iam, acts, action, resource)?;
     Some(super::integration::sdk_exception_message(
         service,
         &sentence,
@@ -478,14 +542,36 @@ fn refusal(
     ))
 }
 
-/// IAM's own not-authorized sentence for the role `role_arn` performing `action` on
+/// IAM's own not-authorized sentence for the identity `acts` performing `action` on
 /// `resource`, or `None` when nothing of the kind can be shown (see the module docs for
 /// the cases that show nothing).
+///
+/// The principal it blames is the SESSION, which is the identity the call was really made
+/// as ([`acting_principal`]); the DECISION is the role's, and nothing it reads is
+/// re-spelled — the statements that grant to an assumed-role session name the role, and
+/// `aws:PrincipalArn` of such a request is the role's ARN.
+fn not_authorized(
+    iam: &IamState,
+    acts: Acts<'_>,
+    action: &str,
+    resource: &str,
+) -> Option<String> {
+    let because = withheld(iam, acts.role_arn, action, resource)?;
+    let principal = acting_principal(acts.role_arn, acts.session_name);
+    Some(format!(
+        "User: {principal} is not authorized to perform: {action} on resource: {resource} \
+         {because}"
+    ))
+}
+
+/// WHY the documents in force on `role_arn` withhold `action` on `resource` — the clause
+/// IAM's own sentence ends with — or `None` where they allow it, and wherever nothing of
+/// the kind can be shown (see the module docs for the cases that show nothing).
 ///
 /// The ONE decision about a state machine's role in this crate: whatever the refusal is
 /// then reported AS — an invoked service's SDK exception ([`refusal`]), or a sentence
 /// this service words itself — the documents are read here, in this order.
-fn not_authorized(
+fn withheld(
     iam: &IamState,
     role_arn: &str,
     action: &str,
@@ -536,10 +622,5 @@ fn not_authorized(
     } else {
         format!("because no identity-based policy allows the {action} action")
     };
-    // The acting principal is the role itself: the emulator assumes no session for a
-    // `Task` state's call, so there is no session name to report it under.
-    Some(format!(
-        "User: {role_arn} is not authorized to perform: {action} on resource: {resource} \
-         {because}"
-    ))
+    Some(because)
 }

@@ -407,9 +407,10 @@ async fn a_tasks_call_is_made_only_when_the_execution_role_allows_it() {
 
     for (index, (case, child, resource, allowed)) in rows.into_iter().enumerate() {
         let child_arn = children[child].clone();
+        let machine_name = format!("role-parent-{index}");
         let parent = chain
             .machine(
-                &format!("role-parent-{index}"),
+                &machine_name,
                 &parent_definition(&child_arn, resource),
                 &role_arn,
             )
@@ -480,9 +481,13 @@ async fn a_tasks_call_is_made_only_when_the_execution_role_allows_it() {
             cause.contains("states:StartExecution"),
             "case {case:?}: expected the cause to name the action, got {cause:?}"
         );
+        // The principal is the SESSION of the role the call was made as, named after the
+        // state machine the work is for — not the role's own IAM ARN.
+        let principal =
+            crate::task_refusal_session_principal::session_principal(&role_arn, &machine_name);
         assert!(
-            cause.contains(&role_arn),
-            "case {case:?}: expected the cause to name the principal {role_arn}, got {cause:?}"
+            cause.contains(&principal),
+            "case {case:?}: expected the cause to name the principal {principal}, got {cause:?}"
         );
         assert!(
             !types.contains(&EVENT_TASK_SUBMITTED),

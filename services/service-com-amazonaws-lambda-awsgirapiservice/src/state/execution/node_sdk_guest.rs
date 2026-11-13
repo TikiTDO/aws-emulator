@@ -320,7 +320,10 @@ function serviceError(answered) {
     }
     // A v3 client reports the MODELED name — the error shape the answer's own document names
     // in `__type` — and falls back to the error type of the response's header for an error
-    // the document names none for, which is what an unmodeled refusal is.
+    // the document names none for, which is what an unmodeled refusal is. The legacy query
+    // code a query-compatible service answers beside the shape is NOT what this client
+    // reports: its error classes are the model's shapes, which is what
+    // `instanceof QueueDoesNotExist` answers for.
     var code = document.__type === undefined || document.__type === null
         ? (answered.errorType === null || answered.errorType === undefined
             ? '__SERVICE_EXCEPTION__'

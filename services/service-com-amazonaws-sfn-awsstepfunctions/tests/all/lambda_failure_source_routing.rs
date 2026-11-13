@@ -434,9 +434,16 @@ fn count(events: &[Value], kind: &str) -> usize {
 /// What the `cause` of a failure of `source` must carry: the run's own error document for
 /// a handler that raised — the class it raised and the message it built from this
 /// execution's input — and the refusal the invoked service answers an unauthorized call
-/// with, naming the role it was attempted as and the function it was over, for a call the
-/// policies refused.
-fn assert_cause(source: Source, cause: &str, order: u64, function: &str, role: &str, case: &str) {
+/// with, naming the SESSION of the role it was attempted as and the function it was over,
+/// for a call the policies refused.
+fn assert_cause(
+    source: Source,
+    cause: &str,
+    order: u64,
+    function: &str,
+    principal: &str,
+    case: &str,
+) {
     match source {
         Source::Raised => {
             let document: Value = serde_json::from_str(cause).unwrap_or_else(|error| {
@@ -458,7 +465,7 @@ fn assert_cause(source: Source, cause: &str, order: u64, function: &str, role: &
             );
         }
         Source::Refused => {
-            for fragment in [REFUSED_TEXT, function, role] {
+            for fragment in [REFUSED_TEXT, function, principal] {
                 assert!(
                     cause.contains(fragment),
                     "case {case:?}: expected the refusal to carry {fragment:?}, got {cause:?}"
@@ -505,10 +512,15 @@ async fn the_failures_error_name_decides_which_retrier_and_catcher_act_on_it() {
             Role::Granted => granted.as_str(),
             Role::Denied => denied.as_str(),
         };
+        let machine_name = format!("machine-{index}");
+        // The principal a refusal blames is the SESSION of that role, named after the state
+        // machine the work is for.
+        let principal =
+            crate::task_refusal_session_principal::session_principal(role_arn, &machine_name);
         let described = chain
             .ran_as(
                 case,
-                &format!("machine-{index}"),
+                &machine_name,
                 &definition(resource, &function, catch_on, retry_on),
                 &json!({ "kind": kind, "order": order }),
                 role_arn,
@@ -553,7 +565,7 @@ async fn the_failures_error_name_decides_which_retrier_and_catcher_act_on_it() {
                     &text(&caught, "Cause", case),
                     order,
                     &function,
-                    role_arn,
+                    &principal,
                     case,
                 );
             }
@@ -573,7 +585,7 @@ async fn the_failures_error_name_decides_which_retrier_and_catcher_act_on_it() {
                     &string(&described, "cause"),
                     order,
                     &function,
-                    role_arn,
+                    &principal,
                     case,
                 );
                 assert_eq!(

@@ -53,6 +53,18 @@ const TARGET_HEADER: &str = "x-amz-target";
 /// The header an AWS answer names the error shape of a refusal in.
 const ERROR_TYPE_HEADER: &str = "x-amzn-errortype";
 
+/// The header a client of a QUERY-COMPATIBLE service opts into the legacy error vocabulary
+/// with, which is the only thing that makes the service answer [`QUERY_ERROR_HEADER`].
+///
+/// A service whose model carries the `awsQueryCompatible` protocol modifier moved from the
+/// query protocol to an AWS JSON one while its clients kept matching on the query-era error
+/// codes, so every SDK client of such a service sends this and no client of any other
+/// service does.
+const QUERY_MODE_HEADER: &str = "x-amzn-query-mode";
+
+/// The header such a service names the LEGACY code of a refusal in, as `<code>;<fault>`.
+const QUERY_ERROR_HEADER: &str = "x-amzn-query-error";
+
 /// The header an AWS answer carries the id of the request it answers in.
 const REQUEST_ID_HEADER: &str = "x-amzn-requestid";
 
@@ -124,6 +136,15 @@ pub enum Protocol {
         /// The protocol version (`awsJson1_0` -> `1.0`), which names the media type of the
         /// request body.
         json_version: &'static str,
+        /// Whether the service's model carries the `awsQueryCompatible` protocol modifier
+        /// (`smithy_query(query="service_info")` reports it under `protocol_modifiers`).
+        ///
+        /// Such a service kept the error vocabulary of the query protocol it moved off, and
+        /// every SDK client of one asks for that vocabulary ([`QUERY_MODE_HEADER`]) and
+        /// reports a refusal by the legacy code the answer carries ([`QUERY_ERROR_HEADER`])
+        /// rather than by the modelled shape's name — so the request this seam builds asks
+        /// for it too.
+        query_compatible: bool,
     },
     /// `restJson1`: each operation binds its input to a method, a URI, a query, headers and
     /// a body, member by member, so the request is built from the service's own model
@@ -182,6 +203,8 @@ pub const APIS: &[Api] = &[
         protocol: Protocol::AwsJson {
             target_prefix: "AmazonSQS",
             json_version: "1.0",
+            // `protocol_modifiers: ["awsQueryCompatible"]`.
+            query_compatible: true,
         },
         answer_model: Some(&SQS),
     },
@@ -196,6 +219,7 @@ pub const APIS: &[Api] = &[
         protocol: Protocol::AwsJson {
             target_prefix: "AWSEvents",
             json_version: "1.1",
+            query_compatible: false,
         },
         answer_model: Some(&EVENTBRIDGE),
     },
@@ -209,6 +233,7 @@ pub const APIS: &[Api] = &[
         protocol: Protocol::AwsJson {
             target_prefix: "AWSEvents",
             json_version: "1.1",
+            query_compatible: false,
         },
         answer_model: Some(&EVENTBRIDGE),
     },
@@ -223,6 +248,7 @@ pub const APIS: &[Api] = &[
         protocol: Protocol::AwsJson {
             target_prefix: "DynamoDB_20120810",
             json_version: "1.0",
+            query_compatible: false,
         },
         answer_model: Some(&DYNAMODB),
     },
@@ -239,6 +265,7 @@ pub const APIS: &[Api] = &[
         protocol: Protocol::AwsJson {
             target_prefix: "Logs_20140328",
             json_version: "1.1",
+            query_compatible: false,
         },
         answer_model: Some(&CLOUDWATCH_LOGS),
     },
@@ -251,6 +278,7 @@ pub const APIS: &[Api] = &[
         protocol: Protocol::AwsJson {
             target_prefix: "Logs_20140328",
             json_version: "1.1",
+            query_compatible: false,
         },
         answer_model: Some(&CLOUDWATCH_LOGS),
     },
@@ -271,6 +299,9 @@ pub const APIS: &[Api] = &[
         protocol: Protocol::AwsJson {
             target_prefix: "GraniteServiceVersion20100801",
             json_version: "1.0",
+            // `protocol_modifiers: ["awsQueryCompatible"]`, which is the legacy `awsQuery`
+            // vocabulary this service's clients keep matching on.
+            query_compatible: true,
         },
         answer_model: Some(&CLOUDWATCH),
     },
@@ -303,6 +334,7 @@ pub const APIS: &[Api] = &[
         protocol: Protocol::AwsJson {
             target_prefix: "secretsmanager",
             json_version: "1.1",
+            query_compatible: false,
         },
         answer_model: Some(&SECRETSMANAGER),
     },
@@ -323,6 +355,7 @@ pub const APIS: &[Api] = &[
         protocol: Protocol::AwsJson {
             target_prefix: "AmazonSSM",
             json_version: "1.1",
+            query_compatible: false,
         },
         answer_model: Some(&SSM),
     },
@@ -375,6 +408,7 @@ pub const APIS: &[Api] = &[
         protocol: Protocol::AwsJson {
             target_prefix: "AWSStepFunctions",
             json_version: "1.0",
+            query_compatible: false,
         },
         answer_model: Some(&SFN),
     },
@@ -388,6 +422,7 @@ pub const APIS: &[Api] = &[
         protocol: Protocol::AwsJson {
             target_prefix: "AWSStepFunctions",
             json_version: "1.0",
+            query_compatible: false,
         },
         answer_model: Some(&SFN),
     },
@@ -510,6 +545,7 @@ pub const APIS: &[Api] = &[
         protocol: Protocol::AwsJson {
             target_prefix: "StarlingDoveService",
             json_version: "1.1",
+            query_compatible: false,
         },
         answer_model: Some(&CONFIG_ANSWERS),
     },
@@ -523,6 +559,7 @@ pub const APIS: &[Api] = &[
         protocol: Protocol::AwsJson {
             target_prefix: "StarlingDoveService",
             json_version: "1.1",
+            query_compatible: false,
         },
         answer_model: Some(&CONFIG_ANSWERS),
     },
@@ -545,6 +582,7 @@ pub const APIS: &[Api] = &[
         protocol: Protocol::AwsJson {
             target_prefix: "CodeDeploy_20141006",
             json_version: "1.1",
+            query_compatible: false,
         },
         answer_model: Some(&CODEDEPLOY_ANSWERS),
     },
@@ -1203,6 +1241,13 @@ pub struct Answer {
     pub body: String,
     /// The error shape it named in [`ERROR_TYPE_HEADER`], for a refusal.
     pub error_type: Option<String>,
+    /// The LEGACY error code it named in [`QUERY_ERROR_HEADER`], for a refusal answered by a
+    /// query-compatible service, with the fault the header states after it dropped.
+    ///
+    /// It is the code the SDK whose own model keys such a service's error classes by it
+    /// reports a refusal under ([`super::aws_sdk_guest`]). `None` for every answer that
+    /// carried none, which is every answer of every other service.
+    pub query_error_code: Option<String>,
     /// The id it gave the request it answered.
     pub request_id: Option<String>,
     /// The output members of [`Self::body`] that carry BYTES rather than text, as the
@@ -1259,12 +1304,22 @@ async fn sent(
     let host = api.host(region);
     let mut builder = ::http::Request::builder().header("host", host.clone());
     let sent_body = match &api.protocol {
-        Protocol::AwsJson { target_prefix, .. } => {
+        Protocol::AwsJson {
+            target_prefix,
+            query_compatible,
+            ..
+        } => {
             builder = builder
                 .method("POST")
                 .uri(format!("https://{host}/"))
                 .header("content-type", api.content_type())
                 .header(TARGET_HEADER, format!("{target_prefix}.{operation}"));
+            // A client of a query-compatible service asks for the legacy error vocabulary
+            // its own clients match on, and only a request that asks for it is answered
+            // with those codes.
+            if *query_compatible {
+                builder = builder.header(QUERY_MODE_HEADER, "true");
+            }
             body.as_bytes().to_vec()
         }
         Protocol::RestJson(rest) => {
@@ -1316,6 +1371,12 @@ async fn sent(
     let status = response.status().as_u16();
     let header = |name: &str| response.headers().get(name).map(|value| value.to_string());
     let error_type = header(ERROR_TYPE_HEADER);
+    // `<code>;<fault>`: the code is the part a client reports, and the fault is the one the
+    // status already says, so only the code is read back.
+    let query_error_code = header(QUERY_ERROR_HEADER).and_then(|carried| {
+        let code = carried.split(';').next().unwrap_or_default().trim();
+        (!code.is_empty()).then(|| code.to_string())
+    });
     let request_id = header(REQUEST_ID_HEADER);
     let payload = response.body().bytes().ok_or_else(|| {
         Sent::NotMade("the in-process answer carried a streaming body".to_string())
@@ -1379,6 +1440,7 @@ async fn sent(
         status,
         body,
         error_type,
+        query_error_code,
         request_id,
         streams,
         blobs,
@@ -1597,6 +1659,7 @@ mod tests {
                 super::Protocol::AwsJson {
                     target_prefix,
                     json_version,
+                    ..
                 } => assert!(
                     !target_prefix.is_empty()
                         && (*json_version == "1.0" || *json_version == "1.1"),

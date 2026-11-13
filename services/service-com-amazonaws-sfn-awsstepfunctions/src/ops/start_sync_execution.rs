@@ -444,6 +444,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &self.engine,
             &region,
             &role_arn,
+            &machine_name,
             unassumable,
         );
         let interpreted = {

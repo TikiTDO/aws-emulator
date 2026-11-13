@@ -624,7 +624,11 @@ async fn only_a_resource_that_names_the_function_is_counted_per_function() {
                     "case {case:?}: expected run {run} to end on the refusal, got {described}"
                 );
                 let cause = string(&described, "cause");
-                for fragment in [REFUSED_TEXT, function.as_str(), role.as_str()] {
+                // The principal is the SESSION of the role the call was made as, named
+                // after the state machine the work is for.
+                let principal =
+                    crate::task_refusal_session_principal::session_principal(&role, &name);
+                for fragment in [REFUSED_TEXT, function.as_str(), principal.as_str()] {
                     assert!(
                         cause.contains(fragment),
                         "case {case:?}: expected run {run}'s cause to carry {fragment:?}, got \

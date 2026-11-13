@@ -59,6 +59,25 @@ const PATIENCE: Duration = Duration::from_secs(20);
 /// back under.
 const REFUSAL_CODE: &str = "Error Code: AccessDeniedException";
 
+/// The ARN of the SESSION a refusal of one of an execution's calls blames: Step Functions
+/// holds no credentials of the state machine's `roleArn` — it ASSUMES the role for the
+/// run's work — so the identity the call is made as is a session of that role, spelled the
+/// way `sts:AssumeRole` reports one, and named after the state machine the work is for.
+///
+/// `pub(crate)` for the same reason the harness is: `all/sfn_athena_run_a_job_sync.rs` reads
+/// the same refusal and `tests/all.rs` is one crate root, so the spelling is stated once.
+pub(crate) fn session_principal(role_arn: &str, session_name: &str) -> String {
+    let (head, named) = role_arn
+        .split_once(":role/")
+        .unwrap_or_else(|| panic!("expected an IAM role ARN, got {role_arn:?}"));
+    // A session ARN carries the role's NAME, never the path IAM holds it under.
+    let role_name = named.rsplit('/').next().unwrap_or(named);
+    let fields: Vec<&str> = head.split(':').collect();
+    let partition = fields.get(1).copied().unwrap_or_default();
+    let account = fields.get(4).copied().unwrap_or_default();
+    format!("arn:{partition}:sts::{account}:assumed-role/{role_name}/{session_name}")
+}
+
 /// The history event a failed task writes
 /// (`smithy_query(query="shape",shape="HistoryEventType")`).
 const TASK_FAILED: &str = "TaskFailed";
@@ -435,9 +454,10 @@ async fn an_integration_call_the_role_is_not_granted_is_not_made() {
 
     for (index, row) in rows.iter().enumerate() {
         let case = row.case;
+        let machine_name = format!("denied-{index}");
         let machine_arn = machine(
             &router,
-            &format!("denied-{index}"),
+            &machine_name,
             row.resource,
             &row.parameters,
             &role_arn,
@@ -466,9 +486,12 @@ async fn an_integration_call_the_role_is_not_granted_is_not_made() {
             "case {case:?}: expected the cause to name the action {:?}, got {cause:?}",
             row.action
         );
+        // The principal is the SESSION of the role the call was made as, named after the
+        // state machine the work is for.
+        let principal = session_principal(&role_arn, &machine_name);
         assert!(
-            cause.contains(&role_arn),
-            "case {case:?}: expected the cause to name the principal {role_arn}, got {cause:?}"
+            cause.contains(&principal),
+            "case {case:?}: expected the cause to name the principal {principal}, got {cause:?}"
         );
         // The resource it was refused ON is the ARN of what the request addressed,
         // whichever form the request named it in.

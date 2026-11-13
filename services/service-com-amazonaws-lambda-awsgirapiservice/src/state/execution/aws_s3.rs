@@ -913,6 +913,9 @@ impl Observed {
             status: carried.status,
             body: Value::Object(document).to_string(),
             error_type: None,
+            // Amazon S3 speaks `restXml` rather than a query-compatible protocol, so no
+            // answer of its carries a legacy query error code.
+            query_error_code: None,
             request_id: carried.request_id,
             streams,
             // Amazon S3's own protocol carries an object's bytes as the body itself rather
@@ -951,6 +954,7 @@ fn refused<E: ProvideErrorMetadata>(
         status: carried.status,
         body: Value::Object(document).to_string(),
         error_type: Some(code.to_string()),
+        query_error_code: None,
         request_id: carried.request_id,
         streams: Vec::new(),
         blobs: Vec::new(),
@@ -986,6 +990,7 @@ fn refused_without_a_document<E: ProvideErrorMetadata>(
         status: carried.status,
         body: Value::Object(document).to_string(),
         error_type: Some(code),
+        query_error_code: None,
         request_id: carried.request_id,
         streams: Vec::new(),
         blobs: Vec::new(),

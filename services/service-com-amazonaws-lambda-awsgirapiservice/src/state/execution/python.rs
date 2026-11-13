@@ -1070,6 +1070,7 @@ fn call_answer(answered: &Result<super::aws_api::Answer, Refusal>) -> String {
             "status": answer.status,
             "body": answer.body,
             "errorType": answer.error_type,
+            "queryErrorCode": answer.query_error_code,
             "requestId": answer.request_id,
             "streams": answer.streams,
             "blobs": answer.blobs,

@@ -243,6 +243,8 @@ mod handler_metric_timestamp;
 mod handler_object_store_sdk;
 #[path = "all/handler_parameter_store_sdk.rs"]
 mod handler_parameter_store_sdk;
+#[path = "all/handler_query_compatible_error_code.rs"]
+mod handler_query_compatible_error_code;
 #[path = "all/handler_dynamodb_binary_attributes.rs"]
 mod handler_dynamodb_binary_attributes;
 #[path = "all/handler_dynamodb_resource.rs"]

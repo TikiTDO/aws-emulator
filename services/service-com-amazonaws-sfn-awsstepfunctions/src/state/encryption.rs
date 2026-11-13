@@ -912,7 +912,7 @@ fn role_key_denied<Eng: Send + Sync + 'static>(
 /// role's ARN is the one re-spelled; a sentence that does not name the role (or an ARN
 /// that names no session) is relayed as KMS worded it.
 fn reported_as_session(why: &str, role_arn: &str, used: &KeyUse) -> String {
-    match assumed_role_session(role_arn, used.resource_name()) {
+    match super::task_authorization::assumed_role_session(role_arn, used.resource_name()) {
         Some(session) => why.replacen(role_arn, &session, 1),
         None => why.to_string(),
     }
@@ -1054,20 +1054,3 @@ fn modelled_key_state(key_state: &str) -> Option<String> {
         .then_some(modelled)
 }
 
-/// The ARN of a SESSION of the role `role_arn`, named `session` — the spelling
-/// `sts:AssumeRole` reports a session by, and therefore the identity a refusal about a
-/// use this service makes as that role names.
-///
-/// Step Functions holds no credentials of the role: it assumes the role for the
-/// resource's work, and the session it gets is named after the resource that work is
-/// for. `None` for an ARN that is not a role of an account, which names no session.
-fn assumed_role_session(role_arn: &str, session: &str) -> Option<String> {
-    let parsed = ::service_common::arn::parse(role_arn)?;
-    let name = parsed.resource.strip_prefix("role/")?.rsplit('/').next()?;
-    (!name.is_empty() && !session.is_empty()).then(|| {
-        format!(
-            "arn:{}:sts::{}:assumed-role/{name}/{session}",
-            parsed.partition, parsed.account
-        )
-    })
-}

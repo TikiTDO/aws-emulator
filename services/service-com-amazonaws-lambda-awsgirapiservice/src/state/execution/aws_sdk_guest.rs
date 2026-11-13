@@ -21,10 +21,13 @@
 //! * A refusal is raised as `botocore.exceptions.ClientError`, carrying the service's own
 //!   error code and message under the `response` member and rendering the sentence botocore
 //!   renders, so a handler that catches one and reports `response["Error"]["Code"]` reads
-//!   the emulated service's own answer.
+//!   the emulated service's own answer. For a service whose model carries the
+//!   `awsQueryCompatible` modifier, this SDK's model keys the class by the LEGACY query code
+//!   the answer carries for it, so that code is what the refusal reports.
 //! * `client.exceptions.<ShapeName>` is the modelled error class for that name, a subclass
 //!   of `ClientError`, so `except client.exceptions.QueueDoesNotExist` catches exactly that
-//!   refusal and nothing else.
+//!   refusal and nothing else — the class for the legacy code of that same class and the
+//!   class named after the shape are ONE ([`Client`]'s exception table).
 //! * DynamoDB's RESOURCE interface is supplied too ([`dynamodb`]), because it is the
 //!   interface an application stores from inside a function through:
 //!   `boto3.resource("dynamodb").Table(name)` carries the table name, its items are plain
@@ -689,8 +692,8 @@ def _materialise_bytes(document, path):
         held[last] = base64.b64decode(carried)
 
 
-def _error_code(error_type, document):
-    """The error code a refusal names, from the header or the document's own member."""
+def _error_shape(error_type, document):
+    """The modelled error SHAPE a refusal names, from the header or the document's own member."""
     for named in (
         error_type,
         document.get("__type"),
@@ -702,7 +705,18 @@ def _error_code(error_type, document):
         shape = named.split("#")[-1].split(":")[0].strip()
         if shape:
             return shape
-    return "Unknown"
+    return ""
+
+
+def _error_code(query_code, shape):
+    """The error code a refusal names, as this SDK reports it.
+
+    A query-compatible service kept the error vocabulary of the query protocol it moved off,
+    and this SDK's model keys such a service's error classes by that LEGACY code, so the code
+    it reports for the class is the one the answer carried beside the shape. Every other
+    service has only the shape, which is then the code.
+    """
+    return query_code or shape or "Unknown"
 
 
 def _error_message(document):
@@ -725,11 +739,23 @@ class _ClientExceptions:
             raise AttributeError(name)
         return self.from_code(name)
 
-    def from_code(self, code):
+    def from_code(self, code, shape=None):
+        """The class for one error code, which is the class the modelled SHAPE names too.
+
+        This SDK's model keys a query-compatible service's error class by the LEGACY code,
+        so the class named after the modelled shape and the class for that code are ONE:
+        `except client.exceptions.<Shape>` catches the refusal whose reported code is the
+        legacy one. `shape` is the shape the answer named, which is what ties the two
+        together; a lookup by either name answers the same class however they are reached.
+        """
         held = self._classes.get(code)
+        if held is None and shape:
+            held = self._classes.get(shape)
         if held is None:
-            held = type(str(code), (ClientError,), {})
-            self._classes[code] = held
+            held = type(str(shape or code), (ClientError,), {})
+        self._classes[code] = held
+        if shape:
+            self._classes[shape] = held
         return held
 
 
@@ -932,12 +958,13 @@ class Client:
                 _materialise_bytes(document, path)
             document["ResponseMetadata"] = metadata
             return document
-        code = _error_code(answered.get("errorType"), document)
+        shape = _error_shape(answered.get("errorType"), document)
+        code = _error_code(answered.get("queryErrorCode"), shape)
         response = {
             "Error": {"Code": code, "Message": _error_message(document)},
             "ResponseMetadata": metadata,
         }
-        raise self.exceptions.from_code(code)(response, operation_name)
+        raise self.exceptions.from_code(code, shape)(response, operation_name)
 
     def _sent(self, parameters):
         """The call's parameters, with every byte-carrying member encoded as base64."""

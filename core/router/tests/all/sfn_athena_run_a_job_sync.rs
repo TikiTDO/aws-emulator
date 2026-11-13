@@ -331,9 +331,10 @@ async fn the_execution_role_decides_the_patterns_reporting_call() {
                 "ResultConfiguration": { "OutputLocation": RESULTS_LOCATION },
             }),
         };
+        let machine_name = format!("athena-sync-{index}");
         let machine_arn = machine(
             &router,
-            &format!("athena-sync-{index}"),
+            &machine_name,
             START_QUERY_SYNC,
             &parameters,
             &role_arn,
@@ -380,9 +381,16 @@ async fn the_execution_role_decides_the_patterns_reporting_call() {
                 cause.contains(&format!("on resource: {group_arn} ")),
                 "case {case:?}: expected the cause to name the workgroup {group_arn}, got {cause:?}"
             );
+            // The principal is the SESSION of the role the poll was made as, named after
+            // the state machine the work is for.
+            let principal = crate::sfn_task_target_authorization::session_principal(
+                &role_arn,
+                &machine_name,
+            );
             assert!(
-                cause.contains(&role_arn),
-                "case {case:?}: expected the cause to name the principal {role_arn}, got {cause:?}"
+                cause.contains(&principal),
+                "case {case:?}: expected the cause to name the principal {principal}, got \
+                 {cause:?}"
             );
             assert_eq!(
                 count_of(&events, TASK_SUCCEEDED),

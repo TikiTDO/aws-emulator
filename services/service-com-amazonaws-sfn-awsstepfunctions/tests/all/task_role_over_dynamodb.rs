@@ -477,9 +477,8 @@ async fn a_tasks_dynamodb_call_is_made_only_when_the_execution_role_allows_it() 
         }
 
         let definition = task(resource, parameters(action, table, &pk));
-        let (execution_arn, described) = chain
-            .ran(&format!("ddb-role-{index}"), &definition, &role_arn)
-            .await;
+        let machine_name = format!("ddb-role-{index}");
+        let (execution_arn, described) = chain.ran(&machine_name, &definition, &role_arn).await;
         let types = chain.history(&execution_arn).await;
         let stored = chain.item(held, &pk).await;
 
@@ -523,11 +522,17 @@ async fn a_tasks_dynamodb_call_is_made_only_when_the_execution_role_allows_it() 
             "case {case:?}: expected {REFUSAL_ERROR}, got {described:?}"
         );
         let cause = string(&described, "cause");
+        // The principal is the SESSION of the role the call was made as, named after the
+        // state machine the work is for.
+        let principal = crate::task_refusal_session_principal::session_principal(
+            &role_arn,
+            &machine_name,
+        );
         for fragment in [
             REFUSAL_CODE,
             &format!("on resource: {table_arn} "),
             &format!("dynamodb:{}", upper_first(action)),
-            &role_arn,
+            &principal,
         ] {
             assert!(
                 cause.contains(fragment),

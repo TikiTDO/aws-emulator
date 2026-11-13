@@ -505,6 +505,9 @@ impl Observed {
             status: carried.status,
             body,
             error_type: None,
+            // CloudFront speaks `restXml` rather than a query-compatible protocol, so no
+            // answer of its carries a legacy query error code.
+            query_error_code: None,
             request_id: carried.request_id,
             // Every value of a CloudFront answer is text or a number; none of its
             // invalidation members carries bytes.
@@ -542,6 +545,7 @@ fn refused<E: ProvideErrorMetadata>(
         status: carried.status,
         body: Value::Object(document).to_string(),
         error_type: Some(code.to_string()),
+        query_error_code: None,
         request_id: carried.request_id,
         streams: Vec::new(),
         blobs: Vec::new(),

@@ -95,17 +95,20 @@ async fn poll<Eng: Send + Sync + 'static>(
         // time, is gone by the time it is read, and there is then nothing to poll.
         // The execution role is read with it, because the call that reports the job is
         // made as that role — the role of the configuration this execution RAN, read
-        // at the moment of the call, exactly as the starting call's was.
-        let (task, role_arn) = {
+        // at the moment of the call, exactly as the starting call's was — together with
+        // the state machine's own name, which is what the session the role is assumed
+        // under is named after.
+        let (task, role_arn, machine_name) = {
             let mut store = state.lock();
             store.settle(super::now());
             let task = store.job_tasks.get(execution_arn).cloned();
-            let role_arn = store
+            let machine = store
                 .executions
                 .get(execution_arn)
-                .and_then(|execution| store.state_machines.get(&execution.state_machine_arn))
-                .map_or_else(String::new, |machine| machine.role_arn.clone());
-            (task, role_arn)
+                .and_then(|execution| store.state_machines.get(&execution.state_machine_arn));
+            let role_arn = machine.map_or_else(String::new, |machine| machine.role_arn.clone());
+            let machine_name = machine.map_or_else(String::new, |machine| machine.name.clone());
+            (task, role_arn, machine_name)
         };
         let Some(task) = task else {
             return;
@@ -125,6 +128,7 @@ async fn poll<Eng: Send + Sync + 'static>(
                 super::task_authorization::job_report_denial(
                     &**engine,
                     &role_arn,
+                    &machine_name,
                     &call,
                     resource,
                 )
@@ -267,6 +271,7 @@ async fn resolve<Eng: Send + Sync + 'static>(
             engine,
             &region,
             &context.role_arn,
+            &context.state_machine_name,
             unassumable,
         );
         integration::interpret_through(callback, depth, &region, acting, move |tasks| {

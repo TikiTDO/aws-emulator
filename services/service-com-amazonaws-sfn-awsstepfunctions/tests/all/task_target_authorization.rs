@@ -183,9 +183,10 @@ async fn an_integration_call_is_judged_by_its_own_action_and_addressed_resource(
 
     for (index, row) in rows.iter().enumerate() {
         let case = row.case;
+        let machine_name = format!("target-action-{index}");
         let machine = chain
             .machine(
-                &format!("target-action-{index}"),
+                &machine_name,
                 &definition(row.resource, &row.parameters),
                 &role_arn,
             )
@@ -231,9 +232,13 @@ async fn an_integration_call_is_judged_by_its_own_action_and_addressed_resource(
             "case {case:?}: expected the cause to name the resource {}, got {cause:?}",
             row.resource_arn
         );
+        // The principal is the SESSION of the role the call was made as, named after the
+        // state machine the work is for.
+        let principal =
+            crate::task_refusal_session_principal::session_principal(&role_arn, &machine_name);
         assert!(
-            cause.contains(&role_arn),
-            "case {case:?}: expected the cause to name the principal {role_arn}, got {cause:?}"
+            cause.contains(&principal),
+            "case {case:?}: expected the cause to name the principal {principal}, got {cause:?}"
         );
     }
 }
