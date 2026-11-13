@@ -141,6 +141,8 @@ mod replay_name_opt_out;
 mod reserved_event_source;
 #[path = "all/resource_tagging.rs"]
 mod resource_tagging;
+#[path = "all/routing_counter_metric_reads.rs"]
+mod routing_counter_metric_reads;
 #[path = "all/rule_fan_out_and_target_repointing.rs"]
 mod rule_fan_out_and_target_repointing;
 #[path = "all/rule_invocation_metrics.rs"]
