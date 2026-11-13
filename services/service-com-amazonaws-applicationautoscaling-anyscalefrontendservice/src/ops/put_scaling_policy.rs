@@ -279,6 +279,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .ok()
             .flatten();
 
+        let policy_arn = {
         let mut state = state.lock();
 
         // A policy only exists against a registered scalable target: "You cannot create
@@ -440,7 +441,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             last_executed: stored.as_ref().and_then(|existing| existing.last_executed),
         };
         state.policies.insert(key.clone(), record);
-        drop(state);
+        policy_arn
+        }; // only owned view/plan data escapes the state phase
+
 
         // A target-tracking policy IS its alarms: putting one materialises the alarm set in
         // CloudWatch and records it on the policy. Done with this service's lock RELEASED —

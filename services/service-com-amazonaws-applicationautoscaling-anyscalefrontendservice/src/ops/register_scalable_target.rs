@@ -369,6 +369,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let now = ::std::time::SystemTime::now();
+        let (effective_capacity, arn) = {
         let mut guard = state.lock();
         let state = &mut *guard;
         crate::state::apply_due_scheduled_actions(state, now);
@@ -475,7 +476,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // within these bounds, even if you don't include the MinCapacity or MaxCapacity
         // request parameters."
         let effective_capacity = enforce_capacity_window(state, &key, resolved_capacity, now);
-        drop(guard);
+        (effective_capacity, arn)
+        }; // only owned view/plan data escapes the state phase
+
 
         // Suspending or resuming a scaling activity changes which alarms the target's
         // policies want to exist, and a capacity move changes what their thresholds are

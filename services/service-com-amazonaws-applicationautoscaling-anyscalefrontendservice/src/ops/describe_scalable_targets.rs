@@ -244,6 +244,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         };
 
+        let (scalable_targets, next_token) = {
         let mut state = state.lock();
         // A scheduled action's occurrence moves the target's capacity bounds, and it was
         // due at its scheduled instant whether or not anybody called, so what this report
@@ -281,7 +282,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 ],
             )
         });
-        drop(state);
+        (scalable_targets, next_token)
+        }; // only owned view/plan data escapes the state phase
+
 
         // A movement an occurrence just made is one the scaled resource is owed: delivered
         // with this service's lock released, and the clock is left watching for the next
