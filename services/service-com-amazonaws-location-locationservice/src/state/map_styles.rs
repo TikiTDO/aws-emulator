@@ -138,21 +138,17 @@ pub fn map_style(style: &str) -> Option<MapStyle> {
 /// The data provider a map carrying `style` sources its tiles from, or the sentence
 /// a style outside the published catalog is refused with.
 ///
-/// The sentence is the one this service states a value-set requirement in: the
-/// member name in single quotes, "must be one of", the allowed values joined with
-/// ", ", then a period. Its `fieldList` entry repeats it. It names the whole
-/// published set, so a caller reads which styles exist out of the refusal itself,
-/// and never the value the request sent.
+/// The sentence is the one [`super::documented_value_set_refusal`] words for every
+/// member this
+/// service constrains to a documented value set, and its `fieldList` entry repeats
+/// it. It names the whole published set, so a caller reads which styles exist out of
+/// the refusal itself, and never the value the request sent.
 pub fn map_data_source(style: &str) -> Result<&'static str, String> {
     match map_style(style) {
         Some(entry) => Ok(entry.data_source),
-        None => Err(format!(
-            "'{MAP_STYLE_MEMBER}' must be one of {}.",
-            MAP_STYLES
-                .iter()
-                .map(|entry| entry.style)
-                .collect::<Vec<_>>()
-                .join(", ")
+        None => Err(super::documented_value_set_refusal(
+            MAP_STYLE_MEMBER,
+            MAP_STYLES.iter().map(|entry| entry.style),
         )),
     }
 }

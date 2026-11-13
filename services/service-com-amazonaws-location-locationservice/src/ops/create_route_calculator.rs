@@ -213,8 +213,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `DataSource` is a plain `String` in the model, so the request boundary
         // accepts any text: which data providers exist, and the fact that they are
         // matched case-sensitively, are this service's own check.
-        crate::state::validate_route_calculator_data_source(&input.data_source)
-            .map_err(|why| field_validation_failed("DataSource", why))?;
+        crate::state::validate_route_calculator_data_source(&input.data_source).map_err(|why| {
+            field_validation_failed(crate::state::ROUTE_CALCULATOR_DATA_SOURCE_MEMBER, why)
+        })?;
         // `PricingPlan` is deprecated and admits only one of its enum's values.
         crate::state::validate_deprecated_pricing_plan(input.pricing_plan.as_deref())
             .map_err(|why| field_validation_failed("PricingPlan", why))?;

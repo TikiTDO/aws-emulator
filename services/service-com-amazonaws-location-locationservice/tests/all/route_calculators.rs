@@ -30,8 +30,9 @@ use crate::harness::{call, call_in_region, emulator, millis_of, Answer, ACCOUNT,
 const DOCUMENTED_DATA_SOURCES: [&str; 3] = ["Esri", "Grab", "Here"];
 
 /// The sentence a `DataSource` outside that set is refused with, written out as a
-/// fixed string for the same reason.
-const DATA_SOURCE_REFUSAL: &str = "'DataSource' must be one of [Esri, Grab, Here]";
+/// fixed string for the same reason: the member name in single quotes, "must be one
+/// of", the documented values separated by ", ", then the period that ends it.
+const DATA_SOURCE_REFUSAL: &str = "'DataSource' must be one of Esri, Grab, Here.";
 
 /// The sentence a retired `PricingPlan` is refused with.
 const PRICING_PLAN_REFUSAL: &str = "'PricingPlan' must be RequestBasedUsage";

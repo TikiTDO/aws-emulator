@@ -24,6 +24,11 @@ pub use resource_tags::{
     MAX_TAGS_PER_RESOURCE, RESERVED_TAG_KEY_PREFIX, RESOURCE_ARN_MEMBER, TAGS_MEMBER,
 };
 
+/// The sentence a value outside a member's documented set is refused with, kept
+/// beside this module because every such check in the crate words it the same way.
+mod value_sets;
+pub use value_sets::documented_value_set_refusal;
+
 /// The map styles a map resource can carry and the data provider each is sourced
 /// from, kept beside this module because a map write checks the style and every map
 /// read reports its provider.
@@ -535,13 +540,17 @@ pub fn map_arn(region: &str, name: &str) -> String {
 /// case-sensitive.
 pub const ROUTE_CALCULATOR_DATA_SOURCES: [&str; 3] = ["Esri", "Grab", "Here"];
 
+/// The member a refusal about the requested data provider names, as the model
+/// spells it on `CreateRouteCalculatorRequest`.
+pub const ROUTE_CALCULATOR_DATA_SOURCE_MEMBER: &str = "DataSource";
+
 /// `Ok` when `data_source` names one of [`ROUTE_CALCULATOR_DATA_SOURCES`], matched
 /// case-sensitively as the member documents, otherwise the sentence the refusal
 /// states.
 ///
-/// The sentence follows the form this service states a member requirement in —
-/// the member name as the model spells it, quoted, then what the member has to
-/// satisfy — which is also the form its `fieldList` entry repeats.
+/// The sentence is the one [`documented_value_set_refusal`] words for every member
+/// this service constrains to a documented value set, and is also what its
+/// `fieldList` entry repeats.
 ///
 /// The member is a plain `String` in the model rather than an enum, so the request
 /// boundary accepts any text and the provider set is the service's own check.
@@ -549,9 +558,9 @@ pub fn validate_route_calculator_data_source(data_source: &str) -> Result<(), St
     if ROUTE_CALCULATOR_DATA_SOURCES.contains(&data_source) {
         return Ok(());
     }
-    Err(format!(
-        "'DataSource' must be one of [{}]",
-        ROUTE_CALCULATOR_DATA_SOURCES.join(", ")
+    Err(documented_value_set_refusal(
+        ROUTE_CALCULATOR_DATA_SOURCE_MEMBER,
+        ROUTE_CALCULATOR_DATA_SOURCES,
     ))
 }
 
