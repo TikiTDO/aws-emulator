@@ -61,10 +61,14 @@ const ACCOUNT_CLASSES: [AccountClass; 3] = [
 /// One row of the gate table: an operation of a gated subject, a well-formed request for
 /// it, and the status an account that MAY plan bills gets for that same request — the
 /// operation's own answer, which is what the gate must not replace.
-struct GatedCall {
-    operation: &'static str,
-    request: Value,
-    admitted_status: u16,
+///
+/// `pub(crate)` with [`gated_calls`]: `tests/all/account_class_refusal_announcer.rs` drives
+/// the same table to pin what the gate's refusal is ANNOUNCED under, so the two suites
+/// cannot disagree about which calls the gate refuses.
+pub(crate) struct GatedCall {
+    pub(crate) operation: &'static str,
+    pub(crate) request: Value,
+    pub(crate) admitted_status: u16,
 }
 
 /// Every IMPLEMENTED operation of the gated subjects: the bill scenario itself, the usage
@@ -75,7 +79,7 @@ struct GatedCall {
 ///
 /// The remaining operations of these subjects are still scaffold stubs answering HTTP 501
 /// `NotImplemented`, so they have no behaviour to gate yet.
-fn gated_calls() -> Vec<GatedCall> {
+pub(crate) fn gated_calls() -> Vec<GatedCall> {
     vec![
         GatedCall {
             operation: "CreateBillScenario",
@@ -127,7 +131,7 @@ fn gated_calls() -> Vec<GatedCall> {
 /// Assert `body` is the account-class refusal: the modelled code, the `reason` in the
 /// spelling the gate puts on the wire, and the ONE fixed message — which names no
 /// operation, so it is byte-identical for every row of the table.
-fn assert_member_refusal(case: &str, status: u16, body: &Value) {
+pub(crate) fn assert_member_refusal(case: &str, status: u16, body: &Value) {
     assert_eq!(
         status, 400,
         "case {case}: expected HTTP 400, got {status} with {body}"

@@ -25,8 +25,11 @@
 //! service's wire) and the rest keep the media type their own producer stamped. Which
 //! announcer owns which responses is a fact of the recorded wire, never a guess. The one
 //! such split that is not a single service's question lives here too: a refusal reporting
-//! the REQUEST as invalid is the validator's and everything else is the front door's
-//! ([`not_a_validation_refusal`]).
+//! the REQUEST as invalid is the validator's and everything else — a success, an error about
+//! stored state, and a refusal of a WELL-FORMED request on the CALLER's account class — is
+//! the front door's ([`not_an_input_validation_refusal`]). What decides it is the GROUND the
+//! refusal states, not the error shape it is answered in: a service can answer both grounds
+//! in one modelled shape, and then the shape name tells the two announcers apart nowhere.
 //!
 //! The REQUEST side is untouched: the media type a caller sends is not re-read, routing
 //! still follows the model's protocol, and the awsJson `1.0` and `1.1` codecs are the same
@@ -208,44 +211,95 @@ pub type AnnouncedResponses = fn(&RtResponse) -> bool;
 /// on a JSON protocol declares for an input that does not satisfy its requirements.
 const VALIDATION_EXCEPTION: &str = "ValidationException";
 
-/// Whether `resp` is the modelled `ValidationException` refusal, read as a CLIENT reads it:
-/// a client error whose awsJson envelope names that shape in `__type`.
+/// `ValidationExceptionReason`'s value naming the CALLER — an account whose bills another
+/// account in its organization pays — rather than anything in the request, as the ground a
+/// well-formed request was refused on: `invalidRequestFromMember`, as the modelled enum
+/// spells it.
+///
+/// A refusal on that ground is answered by the layer that decides what the CALLER may ask
+/// for, which sits behind the request validator, so it is not the validator's response even
+/// though both are worded in the same modelled shape. A service's gate may put the value on
+/// the wire in its own spelling — the recorded wire of an AWS billing front door carries the
+/// SCREAMING_SNAKE_CASE rendering of the enum value — so the two spellings are folded
+/// together ([`names_the_callers_account_class`]).
+const REASON_INVALID_REQUEST_FROM_MEMBER: &str = "invalidRequestFromMember";
+
+/// The awsJson error envelope `resp` carries, when `resp` is a client error whose body is
+/// one — read off the response the CLIENT receives, not off the seam that rendered it.
+fn client_error_envelope(resp: &RtResponse) -> Option<serde_json::Value> {
+    if !resp.status().is_client_error() {
+        return None;
+    }
+    serde_json::from_slice(resp.body().bytes()?).ok()
+}
+
+/// The shape an awsJson error envelope names in `__type`: the shape name alone, since
+/// `__type` may qualify it by its namespace or by the `<version>#` prefix the awsJson
+/// protocols allow.
+fn envelope_shape(envelope: &serde_json::Value) -> Option<&str> {
+    envelope
+        .get("__type")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|code| code.split(['#', '/']).next_back())
+}
+
+/// Whether `reason` — the `ValidationExceptionReason` a refusal reports — is the value naming
+/// the caller's account class ([`REASON_INVALID_REQUEST_FROM_MEMBER`]), in either spelling a
+/// service puts an enum value on the wire in: the model's own lowerCamel, or the
+/// SCREAMING_SNAKE_CASE rendering of it. Folding the `_` separators and the case away is what
+/// makes the two the same value rather than two.
+fn names_the_callers_account_class(reason: &str) -> bool {
+    fn folded(value: &str) -> String {
+        value
+            .chars()
+            .filter(|character| *character != '_')
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+    folded(reason) == folded(REASON_INVALID_REQUEST_FROM_MEMBER)
+}
+
+/// Whether `resp` is the refusal a REQUEST VALIDATOR answers: a client error whose awsJson
+/// envelope names the modelled `ValidationException` in `__type` AND whose stated ground is
+/// the request itself rather than the caller's account class.
+///
+/// The ground is read from the modelled `reason` member, the one half of the body that states
+/// it: a refusal naming the caller's account class
+/// ([`names_the_callers_account_class`]) is the account-class layer's, and every other
+/// `ValidationException` — one reporting a member of the request at fault, with or without a
+/// `reason` — is the validator's.
 ///
 /// Read off the response rather than off the seam that rendered it, because which seam
 /// refuses a constraint is the emulator's business: a boundary validator refuses what the
 /// model's constraints express and a handler refuses what they cannot, and both are the one
 /// refusal to the client.
 #[must_use]
-pub fn is_validation_refusal(resp: &RtResponse) -> bool {
-    if !resp.status().is_client_error() {
+pub fn is_input_validation_refusal(resp: &RtResponse) -> bool {
+    let Some(envelope) = client_error_envelope(resp) else {
+        return false;
+    };
+    if envelope_shape(&envelope) != Some(VALIDATION_EXCEPTION) {
         return false;
     }
-    let Some(body) = resp.body().bytes() else {
-        return false;
-    };
-    let Ok(envelope) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return false;
-    };
     envelope
-        .get("__type")
+        .get("reason")
         .and_then(serde_json::Value::as_str)
-        // `__type` carries the shape name, optionally qualified by its namespace or by the
-        // `<version>#` prefix the awsJson protocols allow; the shape is the last segment.
-        .is_some_and(|code| code.split(['#', '/']).next_back() == Some(VALIDATION_EXCEPTION))
+        .is_none_or(|reason| !names_the_callers_account_class(reason))
 }
 
 /// The [`AnnouncedResponses`] predicate for a service whose front door announces its own
-/// media type on what its handlers produce while the REQUEST VALIDATOR in front of it
-/// answers under the protocol-implied one: every response but the modelled
-/// `ValidationException` refusal is the front door's ([`is_validation_refusal`]).
+/// media type on what it answers while the REQUEST VALIDATOR in front of it answers under
+/// the protocol-implied one: every response but the input-validation refusal is the front
+/// door's ([`is_input_validation_refusal`]).
 ///
 /// Stated here because it is not one service's question — a success, an error about stored
-/// state and a body the codec cannot read are the front door's, a refusal reporting the
-/// request as invalid is the validator's — so two services on that wire cannot disagree
-/// about which announcer answered.
+/// state, a body the codec cannot read and a refusal of a well-formed request on the
+/// caller's account class are the front door's, a refusal reporting the request as invalid
+/// is the validator's — so two services on that wire cannot disagree about which announcer
+/// answered.
 #[must_use]
-pub fn not_a_validation_refusal(resp: &RtResponse) -> bool {
-    !is_validation_refusal(resp)
+pub fn not_an_input_validation_refusal(resp: &RtResponse) -> bool {
+    !is_input_validation_refusal(resp)
 }
 
 impl ResponseMediaTypeOperation {
@@ -450,15 +504,18 @@ mod tests {
         }
     }
 
-    /// A refusal naming the modelled `ValidationException` is the request validator's; every
-    /// other response is the front door's.
+    /// A refusal reporting the REQUEST as invalid is the request validator's; every other
+    /// response — including a refusal of a well-formed request on the CALLER's account class,
+    /// worded in the same modelled shape — is the front door's.
     ///
-    /// The rows span the envelopes a client can receive: the validation refusal qualified and
-    /// unqualified, another client error of the same status, a client error the framework
-    /// renders before the operation, a success, a server error, and a body that is not the
-    /// JSON envelope at all.
+    /// The rows span the envelopes a client can receive: the input-validation refusal
+    /// qualified and unqualified, the same refusal stating its ground in `reason`, the
+    /// account-class refusal in both spellings a service puts that enum value on the wire in,
+    /// another client error of the same status, a client error the framework renders before
+    /// the operation, a success, a server error, and a body that is not the JSON envelope at
+    /// all.
     #[test]
-    fn only_the_validation_refusal_is_the_validators() {
+    fn only_a_refusal_about_the_request_is_the_validators() {
         /// A response carrying `body` under `status`, as a layer of the walk renders one.
         fn answered(status: u16, body: &str) -> RtResponse {
             RtResponse::new(
@@ -467,9 +524,9 @@ mod tests {
             )
         }
 
-        let cases: [(&str, RtResponse, bool); 7] = [
+        let cases: [(&str, RtResponse, bool); 10] = [
             (
-                "the validation refusal",
+                "the input-validation refusal",
                 answered(
                     400,
                     r#"{"__type":"ValidationException","message":"1 validation error detected"}"#,
@@ -477,12 +534,36 @@ mod tests {
                 true,
             ),
             (
-                "the validation refusal, namespace-qualified",
+                "the input-validation refusal, namespace-qualified",
                 answered(
                     400,
                     r#"{"__type":"com.amazonaws.example#ValidationException","message":"x"}"#,
                 ),
                 true,
+            ),
+            (
+                "the input-validation refusal stating its own ground",
+                answered(
+                    400,
+                    r#"{"__type":"ValidationException","reason":"fieldValidationFailed","message":"x"}"#,
+                ),
+                true,
+            ),
+            (
+                "the account-class refusal, the gate's spelling of the reason",
+                answered(
+                    400,
+                    r#"{"__type":"ValidationException","reason":"INVALID_REQUEST_FROM_MEMBER","message":"x"}"#,
+                ),
+                false,
+            ),
+            (
+                "the account-class refusal, the model's spelling of the reason",
+                answered(
+                    400,
+                    r#"{"__type":"ValidationException","reason":"invalidRequestFromMember","message":"x"}"#,
+                ),
+                false,
             ),
             (
                 "a refusal about stored state, same status",
@@ -508,13 +589,13 @@ mod tests {
         ];
 
         for (case, resp, expected) in cases {
-            let actual = is_validation_refusal(&resp);
+            let actual = is_input_validation_refusal(&resp);
             assert_eq!(
                 actual, expected,
-                "case {case:?}: expected is_validation_refusal {expected}, got {actual}"
+                "case {case:?}: expected is_input_validation_refusal {expected}, got {actual}"
             );
             assert_eq!(
-                not_a_validation_refusal(&resp),
+                not_an_input_validation_refusal(&resp),
                 !expected,
                 "case {case:?}: the announcer predicate must be the inverse of the refusal \
                  question"

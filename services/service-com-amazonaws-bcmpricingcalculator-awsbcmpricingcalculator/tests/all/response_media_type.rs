@@ -39,13 +39,17 @@ use crate::bill_scenario_lifecycle::{request, request_builder, Emulator, REQUEST
 
 /// The media type the workload-estimate and bill-planning dispatcher announces on what it
 /// returns.
-const DISPATCHER_MEDIA_TYPE: &str = "application/x-amz-json-1.1";
+///
+/// `pub(crate)` with the helpers below: `tests/all/account_class_refusal_announcer.rs` reads
+/// the same two values and sends through the same request builder, so the two suites cannot
+/// disagree about what either announcer answers under.
+pub(crate) const DISPATCHER_MEDIA_TYPE: &str = "application/x-amz-json-1.1";
 
 /// The media type the model's `awsJson1_0` protocol trait implies (smithy_query
 /// `query="service_info"` → `protocols: ["awsJson1_0"]`), which the framework stamps and
 /// everything answered in front of the dispatcher announces. Requests are sent under it too
 /// — it is the harness's own [`REQUEST_MEDIA_TYPE`].
-const PROTOCOL_MEDIA_TYPE: &str = REQUEST_MEDIA_TYPE;
+pub(crate) const PROTOCOL_MEDIA_TYPE: &str = REQUEST_MEDIA_TYPE;
 
 /// A well-formed `ResourceId` (the lowercase-hex v4 UUID form `^[a-f0-9]{8}-[a-f0-9]{4}-…$`
 /// the shape pins) that no live resource of this emulator carries.
@@ -66,12 +70,16 @@ fn estimate_arn(id: &str) -> String {
 
 /// Call one operation and answer the WHOLE response, headers included — what
 /// [`Emulator::call`] parses the body out of, sent through the same request builder.
-async fn send(emulator: &Emulator, operation: &str, body: &Value) -> http::Response<Bytes> {
+pub(crate) async fn send(
+    emulator: &Emulator,
+    operation: &str,
+    body: &Value,
+) -> http::Response<Bytes> {
     emulator.router.dispatch(request(Some(operation), body)).await
 }
 
 /// The media type a response announces, as a client reads it.
-fn media_type(response: &http::Response<Bytes>) -> String {
+pub(crate) fn media_type(response: &http::Response<Bytes>) -> String {
     response
         .headers()
         .get("content-type")
@@ -82,7 +90,7 @@ fn media_type(response: &http::Response<Bytes>) -> String {
 
 /// Assert one response: the status it carries, the media type it announces, and that the
 /// body under that media type is the JSON document the media type promises.
-fn assert_media_type(
+pub(crate) fn assert_media_type(
     case: &str,
     response: &http::Response<Bytes>,
     expected_status: u16,
@@ -368,32 +376,12 @@ async fn every_routed_response_announces_its_announcers_media_type() {
     }
 }
 
-/// The account-class gate refuses from inside the handler with the modelled
-/// `ValidationException`: a refusal reporting the REQUEST as invalid, so it is the
-/// validator's and announces the protocol's media type, for every operation the gate
-/// refuses.
-#[tokio::test]
-async fn the_account_class_refusal_announces_the_protocols_media_type() {
-    let emulator = Emulator::with_account_class(state::AccountClass::Member);
-    let cases = [
-        ("the gate on a create", "CreateBillScenario", json!({"name": "gated"})),
-        ("the gate on a listing", "ListBillScenarios", json!({"maxResults": 25})),
-        (
-            "the gate on a read",
-            "GetBillScenario",
-            json!({"identifier": ABSENT_ID}),
-        ),
-        (
-            "the gate on the preferences write",
-            "UpdatePreferences",
-            json!({"memberAccountRateTypeSelections": ["AFTER_DISCOUNTS"]}),
-        ),
-    ];
-    for (label, operation, body) in cases {
-        let response = send(&emulator, operation, &body).await;
-        assert_media_type(label, &response, 400, PROTOCOL_MEDIA_TYPE);
-    }
-}
+// A request a MEMBER account makes of the bill-planning surface is refused by the
+// account-class gate, which is part of the dispatcher's front door: that refusal is the
+// dispatcher's and announces its media type, even though it is worded in the same modelled
+// `ValidationException` the request validator's refusal is. Pinned over every gated
+// operation, beside the body it must not change, in
+// `tests/all/account_class_refusal_announcer.rs`.
 
 /// A request that reaches this service but names no modelled operation is answered before
 /// any operation runs — so no dispatcher produced it, and it announces the protocol's media

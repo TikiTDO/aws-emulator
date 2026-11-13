@@ -13,6 +13,8 @@
 // points it into `tests/all/`.
 #[path = "all/account_class_gate.rs"]
 mod account_class_gate;
+#[path = "all/account_class_refusal_announcer.rs"]
+mod account_class_refusal_announcer;
 #[path = "all/bill_scenario_lifecycle.rs"]
 mod bill_scenario_lifecycle;
 #[path = "all/field_list_value_subject.rs"]

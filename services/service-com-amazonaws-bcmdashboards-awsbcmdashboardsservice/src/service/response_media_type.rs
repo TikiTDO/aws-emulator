@@ -24,12 +24,13 @@
 //! * the RESOURCE-TAGGING operations announce the protocol-implied media type throughout,
 //!   on every status.
 //!
-//! Which layer renders a validation refusal is the EMULATOR's business and does not change
-//! what it announces: the boundary validator refuses what the model's constraints express,
-//! and a handler re-applies the ones it cannot (a `@pattern` the boundary's regular
+//! Which layer renders a refusal about the request is the EMULATOR's business and does not
+//! change what it announces: the boundary validator refuses what the model's constraints
+//! express, and a handler re-applies the ones it cannot (a `@pattern` the boundary's regular
 //! expression engine will not compile — see `crate::state::text_pattern_refusal`), so the
 //! question below is asked of the refusal the client sees rather than of the seam that
-//! produced it. It is [`service_common::response_media_type::not_a_validation_refusal`],
+//! produced it. It is
+//! [`service_common::response_media_type::not_an_input_validation_refusal`],
 //! because it is not this service's own question.
 //!
 //! The two lists are therefore read on different things, and each on what the wire record
@@ -84,11 +85,11 @@ pub fn fronted_by_the_dispatcher(routing_key: &str) -> bool {
 /// Whether `resp` is a response the dispatcher produced, rather than one the request
 /// validator in front of it answered.
 ///
-/// The validator's refusal is the modelled `ValidationException`, recognised from the body
-/// the client receives wherever the emulator rendered it; the question is
+/// The validator's refusal is the one reporting the REQUEST ITSELF as invalid, recognised
+/// from the body the client receives wherever the emulator rendered it; the question is
 /// `service_common`'s, so this service and every other one on that wire ask it the same way.
 pub fn produced_by_the_dispatcher(resp: &RtResponse) -> bool {
-    service_common::response_media_type::not_a_validation_refusal(resp)
+    service_common::response_media_type::not_an_input_validation_refusal(resp)
 }
 
 #[cfg(test)]

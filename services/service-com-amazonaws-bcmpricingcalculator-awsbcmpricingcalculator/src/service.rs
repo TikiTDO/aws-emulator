@@ -71,11 +71,15 @@
 //!
 //! TWO media types, because the recorded wire shows two announcers: the dispatcher that
 //! fronts the workload-estimate and bill-planning operations announces
-//! `application/x-amz-json-1.1` on what it returns, while a refusal reporting the REQUEST
-//! as invalid, every response of a resource-tagging operation and everything rendered in
+//! `application/x-amz-json-1.1` on what it returns — its successes, its errors about stored
+//! state and the account-class gate's refusal of a well-formed request — while a refusal
+//! reporting the REQUEST as invalid, every response of a resource-tagging operation and
+//! everything rendered in
 //! front of the service announce the `application/x-amz-json-1.0` the model's
 //! `aws.protocols#awsJson1_0` trait implies — which is what the framework's serializers and
-//! pre-dispatch renderers already stamp. Which announcer owns which responses, and the pair
+//! pre-dispatch renderers already stamp. The two are told apart by the GROUND a refusal
+//! states and not by the shape it is worded in, since both grounds are the one modelled
+//! `ValidationException`. Which announcer owns which responses, and the pair
 //! itself, are stated in [`response_media_type`]; the rule and its mechanism live in
 //! [`service_common::response_media_type`].
 //!
@@ -123,14 +127,16 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use service_common::response_media_type::{not_a_validation_refusal, ResponseMediaTypeOperation};
+use service_common::response_media_type::ResponseMediaTypeOperation;
 use smithy_server_runtime::{
     http, BoxFuture, ErasedOperation, Operation, OperationContext, Refusal, Refused,
     ServerHttpProtocol, Service, Violation, ViolationKind,
 };
 
 use crate::ops::types::{ValidationException, ValidationExceptionField};
-use response_media_type::{fronted_by_the_dispatcher, DISPATCHER_RESPONSE_MEDIA_TYPE};
+use response_media_type::{
+    fronted_by_the_dispatcher, produced_by_the_dispatcher, DISPATCHER_RESPONSE_MEDIA_TYPE,
+};
 
 /// The error code this service answers an input-constraint violation with: the modeled
 /// `ValidationException`, which this service declares as a common error on EVERY
@@ -172,8 +178,10 @@ const MAX_VIOLATIONS: usize = service_common::validation::MAX_VIOLATIONS;
 /// A `const` rather than a field: the wrapper is zero-sized state (a media-type pair and a
 /// function pointer) and `Copy`, so each [`ModelledValidation`] carries its own copy and
 /// nothing has to be borrowed from the service.
-const DISPATCHER: ResponseMediaTypeOperation =
-    ResponseMediaTypeOperation::announcing(DISPATCHER_RESPONSE_MEDIA_TYPE, not_a_validation_refusal);
+const DISPATCHER: ResponseMediaTypeOperation = ResponseMediaTypeOperation::announcing(
+    DISPATCHER_RESPONSE_MEDIA_TYPE,
+    produced_by_the_dispatcher,
+);
 
 /// What a violated constraint REQUIRED, as this service words it — the half both halves
 /// of a refusal body share, so an envelope clause and a `fieldList` entry cannot describe
