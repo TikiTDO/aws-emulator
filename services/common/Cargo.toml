@@ -182,7 +182,7 @@ brush-parser = { version = "0.4", default-features = false }
 percent-encoding = "2"
 
 # One authoritative durable payload/reference catalog; already locked in this workspace.
-rusqlite = { version = "0.41.1", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled", "fallible_uint"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["user"] }
