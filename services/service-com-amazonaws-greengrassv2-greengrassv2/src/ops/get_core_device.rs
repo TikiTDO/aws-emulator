@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetCoreDevice
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetCoreDevice`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetCoreDevice::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the metadata the Greengrass core device of this thing name last reported
+//! about itself, from this service's core-device fleet.
 //!
 //! ## Shape of an operation
 //!
@@ -176,18 +169,45 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetCoreDevice` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetCoreDeviceErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetCoreDevice"))
+        let _ = ctx;
+        use crate::state as st;
+
+        let Some(state) = st::service_state(&*self.engine) else {
+            return Err(GetCoreDeviceErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: "the greengrassv2 state store is unavailable".to_string(),
+                    retry_after_seconds: 1,
+                },
+            )
+            .into());
+        };
+
+        let store = state.lock();
+        // A core device is known to this account once the device has reported itself, so
+        // a thing name the fleet holds no record for is the modelled 404 — never an empty
+        // success, which a client cannot tell from an unregistered device.
+        let Some(device) = store.core_device(&input.core_device_thing_name) else {
+            return Err(GetCoreDeviceErrorModeled::ResourceNotFoundException(
+                st::core_device_not_found(&input.core_device_thing_name),
+            )
+            .into());
+        };
+
+        Ok(GetCoreDeviceOutput {
+            core_device_thing_name: Some(device.core_device_thing_name.clone()),
+            // Reported back only when the device reported it: a device that has not told
+            // IoT Greengrass its Core version, platform, architecture or runtime has none
+            // reported for it rather than one invented on its behalf.
+            core_version: device.core_version.clone(),
+            platform: device.platform.clone(),
+            architecture: device.architecture.clone(),
+            runtime: device.runtime.clone(),
+            status: Some(device.status.clone()),
+            last_status_update_timestamp: Some(st::to_datetime(device.last_status_update)),
+            // The tag set written on this device's ARN, reported as an EMPTY map for a
+            // device with no tags rather than omitted, as every other tag set this
+            // service reports is.
+            tags: st::tags_out(&device.tags),
+        })
     }
 }

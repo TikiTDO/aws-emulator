@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListCoreDevices
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListCoreDevices`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListCoreDevices::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Enumerates this account's Greengrass core devices, filtered by status, runtime or
+//! thing group and paged by an opaque cursor.
 //!
 //! ## Shape of an operation
 //!
@@ -174,18 +167,117 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListCoreDevices` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListCoreDevicesErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListCoreDevices"))
+        let _ = ctx;
+        use crate::state as st;
+
+        let Some(state) = st::service_state(&*self.engine) else {
+            return Err(ListCoreDevicesErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: "the greengrassv2 state store is unavailable".to_string(),
+                    retry_after_seconds: 1,
+                },
+            )
+            .into());
+        };
+
+        // `status` is a `CoreDeviceStatus`, so a value outside that enum filters on a
+        // status no device can have and is refused as bad input rather than answering an
+        // empty list a client would read as "no such device".
+        if let Some(status) = input.status.as_deref() {
+            if !CORE_DEVICE_STATUS_VALUES.contains(&status) {
+                return Err(ListCoreDevicesErrorModeled::ValidationException(
+                    ValidationException {
+                        message: format!(
+                            "status must be one of {}; got {status}.",
+                            CORE_DEVICE_STATUS_VALUES.join(", ")
+                        ),
+                        reason: Some("FIELD_VALIDATION_FAILED".to_string()),
+                        fields: Some(vec![ValidationExceptionField {
+                            name: "status".to_string(),
+                            message: format!("{status} is not a CoreDeviceStatus value."),
+                        }]),
+                    },
+                )
+                .into());
+            }
+        }
+
+        let page_size = st::page_size(input.max_results);
+        let resume_at = match st::cursor(input.next_token.as_deref()) {
+            st::Cursor::Start => None,
+            st::Cursor::ResumeAt(key) => Some(key),
+            st::Cursor::Unreadable => {
+                return Err(ListCoreDevicesErrorModeled::ValidationException(
+                    st::unreadable_next_token(),
+                )
+                .into())
+            }
+        };
+
+        let store = state.lock();
+
+        // The fleet is keyed by thing name, so iterating it is already the stable order a
+        // cursor can resume in — and a resumed page seeks straight to its key rather than
+        // re-scanning the devices before it.
+        let devices: Box<dyn Iterator<Item = &st::CoreDeviceEntry>> = match resume_at.as_deref() {
+            Some(from) => Box::new(
+                store
+                    .core_devices
+                    .range(from.to_string()..)
+                    .map(|(_, device)| device),
+            ),
+            None => Box::new(store.core_devices.values()),
+        };
+
+        let mut core_devices: Vec<CoreDevice> = Vec::new();
+        let mut next_token = None;
+        for device in devices {
+            // Each filter keeps only the devices that match what the request named: the
+            // status the device reported, the runtime it reported, and — for
+            // `thingGroupArn` — "only core devices that have successfully deployed a
+            // deployment that targets the thing group".
+            if input
+                .status
+                .as_deref()
+                .is_some_and(|status| status != device.status)
+            {
+                continue;
+            }
+            if input
+                .runtime
+                .as_deref()
+                .is_some_and(|runtime| device.runtime.as_deref() != Some(runtime))
+            {
+                continue;
+            }
+            if input
+                .thing_group_arn
+                .as_deref()
+                .is_some_and(|group| !device.thing_group_arns.contains(group))
+            {
+                continue;
+            }
+            if core_devices.len() == page_size {
+                // This device begins the next page, so its key is the cursor.
+                next_token = Some(st::encode_cursor(&device.core_device_thing_name));
+                break;
+            }
+            core_devices.push(CoreDevice {
+                core_device_thing_name: Some(device.core_device_thing_name.clone()),
+                status: Some(device.status.clone()),
+                last_status_update_timestamp: Some(st::to_datetime(device.last_status_update)),
+                platform: device.platform.clone(),
+                architecture: device.architecture.clone(),
+                runtime: device.runtime.clone(),
+            });
+        }
+
+        // The list member is reported even when the fleet holds nothing for this account,
+        // as the recorded empty listing does (`coreDevices: []`), so a client enumerating
+        // the fleet always finds a list to enumerate.
+        Ok(ListCoreDevicesOutput {
+            core_devices: Some(core_devices),
+            next_token,
+        })
     }
 }

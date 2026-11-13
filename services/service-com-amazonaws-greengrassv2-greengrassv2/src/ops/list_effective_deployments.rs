@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListEffectiveDeployments
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListEffectiveDeployments`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListEffectiveDeployments::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the deployment jobs IoT Greengrass sends to one Greengrass core device, paged
+//! by an opaque cursor.
 //!
 //! ## Shape of an operation
 //!
@@ -155,18 +148,108 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListEffectiveDeployments` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListEffectiveDeploymentsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListEffectiveDeployments"))
+        let _ = ctx;
+        use crate::state as st;
+
+        let Some(state) = st::service_state(&*self.engine) else {
+            return Err(ListEffectiveDeploymentsErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: "the greengrassv2 state store is unavailable".to_string(),
+                    retry_after_seconds: 1,
+                },
+            )
+            .into());
+        };
+
+        let page_size = st::page_size(input.max_results);
+        let resume_at = match st::cursor(input.next_token.as_deref()) {
+            st::Cursor::Start => None,
+            st::Cursor::ResumeAt(key) => Some(key),
+            st::Cursor::Unreadable => {
+                return Err(ListEffectiveDeploymentsErrorModeled::ValidationException(
+                    st::unreadable_next_token(),
+                )
+                .into())
+            }
+        };
+
+        // Which deployments reach this device is computed from the deployments this
+        // service holds — the ones that target this thing, or a thing group whose
+        // deployments the device applies — so nothing is stored per device that could
+        // disagree with the deployment history. A thing name no device has reported under
+        // is served the same way: the deployments that target that thing, which is an
+        // empty answer when nothing does, rather than a refusal.
+        let store = state.lock();
+        let mut page: Vec<st::DeploymentEntry> = Vec::new();
+        let mut next_token = None;
+        // The deployments are in deployment-id order, which is the stable order a cursor
+        // can resume in.
+        for deployment in store.deployments_effective_for(&input.core_device_thing_name) {
+            if resume_at
+                .as_deref()
+                .is_some_and(|from| deployment.deployment_id.as_str() < from)
+            {
+                continue;
+            }
+            if page.len() == page_size {
+                // This deployment begins the next page, so its key is the cursor.
+                next_token = Some(st::encode_cursor(&deployment.deployment_id));
+                break;
+            }
+            page.push(deployment.clone());
+        }
+        drop(store);
+
+        // The status of the deployment on the device, and the instant it last moved, are
+        // the status of the IoT job that applies it — read from the plane that OWNS jobs,
+        // where `CreateDeployment` registered it and a cancel moved it. LOCK ORDER: this
+        // service's store first (released above), the shared jobs store second.
+        let jobs = st::iot_job_store(&*self.engine);
+        let effective_deployments: Vec<EffectiveDeployment> = page
+            .iter()
+            .map(|deployment| {
+                let job = jobs.as_ref().and_then(|jobs| {
+                    let store = jobs.lock();
+                    store
+                        .job(&deployment.iot_job_id)
+                        .map(|job| (job.status.clone(), job.last_updated_at))
+                });
+                let (job_status, modified_at) = match job {
+                    Some((status, updated_at)) => (Some(status), Some(updated_at)),
+                    None => (None, None),
+                };
+                EffectiveDeployment {
+                    deployment_id: deployment.deployment_id.clone(),
+                    deployment_name: st::effective_deployment_name(deployment),
+                    iot_job_id: Some(deployment.iot_job_id.clone()),
+                    iot_job_arn: Some(deployment.iot_job_arn.clone()),
+                    description: None,
+                    target_arn: deployment.target_arn.clone(),
+                    core_device_execution_status: st::effective_execution_status(
+                        job_status.as_deref(),
+                        &deployment.deployment_status,
+                    )
+                    .to_string(),
+                    // `reason` and `statusDetails` report why a deployment FAILED on the
+                    // device; nothing here has failed, so neither is reported.
+                    reason: None,
+                    creation_timestamp: st::to_datetime(deployment.creation_timestamp),
+                    modified_timestamp: match modified_at {
+                        Some(updated_at) => ::aws_smithy_types::DateTime::from_secs(updated_at),
+                        None => st::to_datetime(deployment.creation_timestamp),
+                    },
+                    status_details: None,
+                }
+            })
+            .collect();
+
+        // A device with no effective deployment is answered with the member ABSENT — the
+        // recorded response for such a device is the empty JSON object — while a device a
+        // deployment reaches carries the list of the deployments that reach it.
+        Ok(ListEffectiveDeploymentsOutput {
+            effective_deployments: (!effective_deployments.is_empty())
+                .then_some(effective_deployments),
+            next_token,
+        })
     }
 }

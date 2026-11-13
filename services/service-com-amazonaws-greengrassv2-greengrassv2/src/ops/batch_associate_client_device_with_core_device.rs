@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op BatchAssociateClientDeviceWithCoreDevice
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `BatchAssociateClientDeviceWithCoreDevice`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`BatchAssociateClientDeviceWithCoreDevice::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Associates client devices with one core device for cloud discovery, reporting the
+//! entries it did not apply in the response's own per-entry error channel.
 //!
 //! ## Shape of an operation
 //!
@@ -160,18 +153,65 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `BatchAssociateClientDeviceWithCoreDevice` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(BatchAssociateClientDeviceWithCoreDeviceErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("BatchAssociateClientDeviceWithCoreDevice"))
+        use crate::state as st;
+
+        let Some(state) = st::service_state(&*self.engine) else {
+            return Err(
+                BatchAssociateClientDeviceWithCoreDeviceErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: "the greengrassv2 state store is unavailable".to_string(),
+                        retry_after_seconds: 1,
+                    },
+                )
+                .into(),
+            );
+        };
+
+        let now = ::std::time::SystemTime::now();
+        let entries = input.entries.clone().unwrap_or_default();
+
+        // Every entry is applied on its own and an entry that could not be applied is
+        // reported in `errorEntries` — "the list of any errors for the entries in the
+        // request" — rather than failing the request: this API reports per-entry failures
+        // inside the response, so a client reads the channel rather than branching on a
+        // request-level error. The association is recorded for the core device's THING
+        // NAME, which AWS records whether or not a core device has reported itself under
+        // that name.
+        let mut store = state.lock();
+        let mut error_entries: Vec<AssociateClientDeviceWithCoreDeviceErrorEntry> = Vec::new();
+        for entry in &entries {
+            if let Err(refusal) = store.associate_client_device(
+                &input.core_device_thing_name,
+                &entry.thing_name,
+                now,
+            ) {
+                error_entries.push(AssociateClientDeviceWithCoreDeviceErrorEntry {
+                    thing_name: Some(entry.thing_name.clone()),
+                    code: Some(refusal.code().to_string()),
+                    message: Some(refusal.to_string()),
+                });
+            }
+        }
+        drop(store);
+
+        // Audit record for a state-changing call: who asked, what changed, and how it
+        // ended. The presented access-key id is an identifier, never a secret.
+        ::tracing::info!(
+            target: "audit",
+            operation = Self::NAME,
+            outcome = "associated",
+            principal = %::engine::extract_akid(&ctx.parts().headers),
+            resource = %input.core_device_thing_name,
+            requested = entries.len(),
+            failed = error_entries.len(),
+            "associated client devices with a core device"
+        );
+
+        // The member is reported even when every entry was applied, as the recorded
+        // response does (`errorEntries: []`), so a client reading the per-entry error
+        // channel always finds one.
+        Ok(BatchAssociateClientDeviceWithCoreDeviceOutput {
+            error_entries: Some(error_entries),
+        })
     }
 }

@@ -19,6 +19,8 @@ mod component_state_recipe_and_deployment_reads;
 mod component_versions_and_resolution;
 #[path = "all/core_device_data_plane_authorization.rs"]
 mod core_device_data_plane_authorization;
+#[path = "all/core_device_fleet.rs"]
+mod core_device_fleet;
 #[path = "all/deployment_cancellation.rs"]
 mod deployment_cancellation;
 #[path = "all/not_found_refusal_class_per_route.rs"]

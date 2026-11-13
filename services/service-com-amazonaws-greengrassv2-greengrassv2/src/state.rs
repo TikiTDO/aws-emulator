@@ -4,13 +4,22 @@
 //! helpers its handlers share.
 //!
 //! The store holds the component catalog (one entry per component name, each
-//! carrying that component's versions) and the deployment history. Beside it live
+//! carrying that component's versions), the deployment history and the core-device
+//! fleet ([`core_devices`]). Beside it live
 //! the pieces more than one handler needs and that therefore cannot live in a
 //! single `src/ops/<op>.rs`: ARN minting and parsing, component-recipe parsing and
 //! format conversion, opaque pagination cursors and the timestamp conversion.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// The core-device fleet, the client-device associations, and the pieces the
+/// core-device operations share.
+pub mod core_devices;
+/// What every paginated reader of this service shares.
+pub mod paging;
+pub use core_devices::*;
+pub use paging::*;
 
 use crate::ops::types::{
     CloudComponentStatus, ComponentDeploymentSpecification, ComponentPlatform,
@@ -399,6 +408,18 @@ pub struct ComAmazonawsGreengrassv2Greengrassv2State {
     /// role is associated — which is the state an account starts in and the one a
     /// disassociation returns it to. At most one record, so it needs no count bound.
     pub service_role: Option<ServiceRoleAssociation>,
+    /// The account's Greengrass core devices, keyed by thing name — the fleet
+    /// `ListCoreDevices` enumerates and `GetCoreDevice` reads. Bounded by
+    /// [`MAX_CORE_DEVICES`]; written as the device's own status update writes it
+    /// ([`core_devices`]).
+    pub core_devices: BTreeMap<String, CoreDeviceEntry>,
+    /// The client devices associated with each core device thing name for cloud
+    /// discovery, and the instant each was associated. Keyed by the CORE DEVICE's thing
+    /// name, and held beside the fleet rather than on a core-device record because AWS
+    /// records an association for a thing name whether or not a core device has reported
+    /// itself under it. Bounded by [`MAX_CORE_DEVICES_WITH_ASSOCIATIONS`] names, each by
+    /// [`MAX_CLIENT_DEVICES_PER_CORE_DEVICE`].
+    pub client_device_associations: BTreeMap<String, BTreeMap<String, SystemTime>>,
 }
 
 impl ComAmazonawsGreengrassv2Greengrassv2State {
@@ -415,15 +436,18 @@ impl ComAmazonawsGreengrassv2Greengrassv2State {
     /// A tag set belongs to the resource it was written on, so this reads the ONE
     /// copy the creating operation persisted rather than a second map beside it:
     /// a component version's tags from the catalog entry, a deployment's from the
-    /// deployment history. No operation registers a core device, so a core-device
-    /// ARN names no resource here.
+    /// deployment history, a core device's from its own fleet record — so an ARN whose
+    /// resource this service does not hold, of any of the three kinds, names nothing
+    /// here.
     pub fn resource_tags(&self, arn: &str) -> Option<&BTreeMap<String, String>> {
         match NamedResource::from_arn(arn)? {
             NamedResource::ComponentVersion { .. } => Some(&self.component_version(arn)?.tags),
             NamedResource::Deployment { deployment_id } => {
                 Some(&self.deployments.get(&deployment_id)?.tags)
             }
-            NamedResource::CoreDevice { .. } => None,
+            NamedResource::CoreDevice {
+                core_device_thing_name,
+            } => Some(&self.core_device(&core_device_thing_name)?.tags),
         }
     }
 
@@ -450,7 +474,9 @@ impl ComAmazonawsGreengrassv2Greengrassv2State {
             NamedResource::Deployment { deployment_id } => {
                 Some(&mut self.deployments.get_mut(&deployment_id)?.tags)
             }
-            NamedResource::CoreDevice { .. } => None,
+            NamedResource::CoreDevice {
+                core_device_thing_name,
+            } => Some(&mut self.core_device_mut(&core_device_thing_name)?.tags),
         }
     }
 

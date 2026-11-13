@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListClientDevicesAssociatedWithCoreDevice
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListClientDevicesAssociatedWithCoreDevice`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListClientDevicesAssociatedWithCoreDevice::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the client devices associated with one core device thing name for cloud
+//! discovery, paged by an opaque cursor.
 //!
 //! ## Shape of an operation
 //!
@@ -154,18 +147,71 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListClientDevicesAssociatedWithCoreDevice` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListClientDevicesAssociatedWithCoreDeviceErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListClientDevicesAssociatedWithCoreDevice"))
+        let _ = ctx;
+        use crate::state as st;
+
+        let Some(state) = st::service_state(&*self.engine) else {
+            return Err(
+                ListClientDevicesAssociatedWithCoreDeviceErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: "the greengrassv2 state store is unavailable".to_string(),
+                        retry_after_seconds: 1,
+                    },
+                )
+                .into(),
+            );
+        };
+
+        let page_size = st::page_size(input.max_results);
+        let resume_at = match st::cursor(input.next_token.as_deref()) {
+            st::Cursor::Start => None,
+            st::Cursor::ResumeAt(key) => Some(key),
+            st::Cursor::Unreadable => {
+                return Err(
+                    ListClientDevicesAssociatedWithCoreDeviceErrorModeled::ValidationException(
+                        st::unreadable_next_token(),
+                    )
+                    .into(),
+                )
+            }
+        };
+
+        let store = state.lock();
+        // The association set belongs to the core device's THING NAME, and a name with
+        // none has an empty one: the operation reports the set as it stands rather than
+        // refusing a name no core device has reported itself under, which is what the
+        // recorded listing for an unregistered device answers.
+        let associations = store.associated_client_devices(&input.core_device_thing_name);
+
+        // The set is keyed by the client device's thing name, so iterating it is already
+        // the stable order a cursor can resume in.
+        let mut associated_client_devices: Vec<AssociatedClientDevice> = Vec::new();
+        let mut next_token = None;
+        if let Some(associations) = associations {
+            let entries: Box<dyn Iterator<Item = (&String, &::std::time::SystemTime)>> =
+                match resume_at.as_deref() {
+                    Some(from) => Box::new(associations.range(from.to_string()..)),
+                    None => Box::new(associations.iter()),
+                };
+            for (thing_name, associated_at) in entries {
+                if associated_client_devices.len() == page_size {
+                    // This client device begins the next page, so its key is the cursor.
+                    next_token = Some(st::encode_cursor(thing_name));
+                    break;
+                }
+                associated_client_devices.push(AssociatedClientDevice {
+                    thing_name: Some(thing_name.clone()),
+                    association_timestamp: Some(st::to_datetime(*associated_at)),
+                });
+            }
+        }
+
+        // The list member is reported even when nothing is associated, as the recorded
+        // empty listing does (`associatedClientDevices: []`), so an empty association set
+        // is not indistinguishable from a failure.
+        Ok(ListClientDevicesAssociatedWithCoreDeviceOutput {
+            associated_client_devices: Some(associated_client_devices),
+            next_token,
+        })
     }
 }
