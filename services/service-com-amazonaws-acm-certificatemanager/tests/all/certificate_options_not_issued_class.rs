@@ -5,14 +5,18 @@
 //! `X-Amz-Target: CertificateManager.<Op>`, awsJson1_1).
 //!
 //! RULE under test: the options this operation changes are those of a certificate ACM
-//! has ISSUED, so a `CertificateArn` naming a record in any other `CertificateStatus`
-//! is input this operation's constraints do not admit — refused as a constraint failure
-//! of the REQUEST, `ValidationException` (HTTP 400, "the supplied input failed to
-//! satisfy constraints of an Amazon Web Services service"), under one fixed sentence
-//! that names neither the certificate nor its status, with nothing written. The `Export`
-//! rule carries the same modelled code under its own sentence and is decided first, so
-//! the sentence is the only thing that tells the two refusals apart — which is exactly
-//! what a client has to match on.
+//! has ISSUED, and for a `CertificateArn` naming a record in any other
+//! `CertificateStatus` the class of the refusal follows what the request asks for: a
+//! member that directs issuance work ACM has yet to perform — the method it validates
+//! the names by, the export it permits — is input this operation's constraints do not
+//! admit, refused as a constraint failure of the REQUEST, `ValidationException` (HTTP
+//! 400), while a request that asks only about the issued certificate's own record — the
+//! deprecated transparency-logging preference — is admissible and is refused for the
+//! certificate's processing state, `InvalidStateException` (HTTP 400). Each class has
+//! one fixed sentence that names neither the certificate nor its status, and nothing is
+//! written. The `Export` rule carries the request-constraint class under its own
+//! sentence and is decided first, so the sentence is the only thing that tells those two
+//! refusals apart — which is exactly what a client has to match on.
 //!
 //! The table spans what the rule generalises over: every non-ISSUED status a stored
 //! certificate can be in, reached the way a request reaches it (a public request held
@@ -37,10 +41,21 @@ use crate::certificate_validation_state_machine::{make_validation_due_now, PRIVA
 /// among this operation's errors, at HTTP 400).
 const REQUEST_CONSTRAINT_ERROR: &str = "ValidationException";
 
-/// The one sentence `UpdateCertificateOptions` reports for a certificate ACM has not
-/// issued: fixed text naming neither the certificate nor its status, and terminated by
-/// no period.
+/// The modelled error ACM refuses an admissible request with when the certificate's
+/// processing has reached a state the call cannot be served in
+/// (`smithy_query(query="operation", operation="UpdateCertificateOptions")` lists it
+/// among this operation's errors, at HTTP 400).
+const PROCESSING_STATE_ERROR: &str = "InvalidStateException";
+
+/// The one sentence `UpdateCertificateOptions` reports for a request that directs
+/// issuance work for a certificate ACM has not issued: fixed text naming neither the
+/// certificate nor its status, and terminated by no period.
 const NOT_ISSUED: &str = "Certificate is not issued";
+
+/// The one sentence `UpdateCertificateOptions` reports for a request that asks only
+/// about the record of a certificate ACM has not issued: fixed text naming neither the
+/// certificate nor its status, terminated by a period.
+const NOT_ISSUED_OR_VALID: &str = "The selected certificate is not Issued and/or Valid.";
 
 /// The one sentence `UpdateCertificateOptions` reports for a request that asks for an
 /// `Export` value other than the one in force — "you cannot update the value of Export
@@ -109,9 +124,9 @@ async fn certificate_in_status(
 }
 
 /// One row: what it exercises, the `RequestCertificate` body, how the fixture reaches
-/// its status, the `CertificateStatus` it must then be in, and the `Options` the refused
-/// update asks for.
-type NotIssuedCase<'a> = (&'a str, Value, Fixture, &'a str, Value);
+/// its status, the `CertificateStatus` it must then be in, the `Options` the refused
+/// update asks for, and the modelled error and sentence that draws.
+type NotIssuedCase<'a> = (&'a str, Value, Fixture, &'a str, Value, &'a str, &'a str);
 
 /// The rows the class table runs over.
 fn not_issued_cases() -> Vec<NotIssuedCase<'static>> {
@@ -133,6 +148,8 @@ fn not_issued_cases() -> Vec<NotIssuedCase<'static>> {
             Fixture::HeldPending,
             "PENDING_VALIDATION",
             json!({ "ValidationMethod": method }),
+            REQUEST_CONSTRAINT_ERROR,
+            NOT_ISSUED,
         ));
     }
 
@@ -146,6 +163,8 @@ fn not_issued_cases() -> Vec<NotIssuedCase<'static>> {
         Fixture::HeldPending,
         "PENDING_VALIDATION",
         json!({ "CertificateTransparencyLoggingPreference": "DISABLED" }),
+        PROCESSING_STATE_ERROR,
+        NOT_ISSUED_OR_VALID,
     ));
     cases.push((
         "a pending request asked for the export value already in force",
@@ -156,6 +175,8 @@ fn not_issued_cases() -> Vec<NotIssuedCase<'static>> {
         Fixture::HeldPending,
         "PENDING_VALIDATION",
         json!({ "Export": "DISABLED" }),
+        REQUEST_CONSTRAINT_ERROR,
+        NOT_ISSUED,
     ));
     cases.push((
         "a pending request whose Options names no member at all",
@@ -166,6 +187,8 @@ fn not_issued_cases() -> Vec<NotIssuedCase<'static>> {
         Fixture::HeldPending,
         "PENDING_VALIDATION",
         json!({}),
+        PROCESSING_STATE_ERROR,
+        NOT_ISSUED_OR_VALID,
     ));
     cases.push((
         "a wildcard request that timed out, asked for two members at once",
@@ -180,6 +203,8 @@ fn not_issued_cases() -> Vec<NotIssuedCase<'static>> {
             "ValidationMethod": "EMAIL",
             "CertificateTransparencyLoggingPreference": "ENABLED",
         }),
+        REQUEST_CONSTRAINT_ERROR,
+        NOT_ISSUED,
     ));
     cases.push((
         // A name whose top-level label the public DNS delegates to nobody (RFC 6761),
@@ -189,6 +214,17 @@ fn not_issued_cases() -> Vec<NotIssuedCase<'static>> {
         Fixture::Settled,
         "FAILED",
         json!({ "ValidationMethod": "HTTP" }),
+        REQUEST_CONSTRAINT_ERROR,
+        NOT_ISSUED,
+    ));
+    cases.push((
+        "a request that failed, asked only about transparency logging",
+        json!({ "DomainName": "failed-logging.invalid", "ValidationMethod": "DNS" }),
+        Fixture::Settled,
+        "FAILED",
+        json!({ "CertificateTransparencyLoggingPreference": "ENABLED" }),
+        PROCESSING_STATE_ERROR,
+        NOT_ISSUED_OR_VALID,
     ));
     cases.push((
         "a certificate whose revocation is recorded",
@@ -201,17 +237,37 @@ fn not_issued_cases() -> Vec<NotIssuedCase<'static>> {
         Fixture::Revoked,
         "REVOKED",
         json!({ "ValidationMethod": "EMAIL" }),
+        REQUEST_CONSTRAINT_ERROR,
+        NOT_ISSUED,
+    ));
+    cases.push((
+        "a revoked certificate asked only about transparency logging",
+        json!({
+            "DomainName": "revoked-logging.probe-domain.net",
+            "ValidationMethod": "DNS",
+            "Options": { "Export": "ENABLED" },
+            "CertificateAuthorityArn": PRIVATE_CA_ARN,
+        }),
+        Fixture::Revoked,
+        "REVOKED",
+        json!({ "CertificateTransparencyLoggingPreference": "DISABLED" }),
+        PROCESSING_STATE_ERROR,
+        NOT_ISSUED_OR_VALID,
     ));
 
     cases
 }
 
-/// RULE: every non-ISSUED status draws the SAME refusal — the request-constraint class
-/// under the one not-issued sentence — whatever `Options` the request names, and the
-/// refused call writes nothing.
+/// RULE: every non-ISSUED status draws the SAME pair of refusals, decided by the
+/// `Options` the request names and not by the status: the request-constraint class under
+/// the not-issued sentence for a member that directs issuance work still to come, the
+/// processing-state class under its own sentence for a request that asks only about the
+/// certificate's record — and the refused call writes nothing.
 #[tokio::test]
-async fn a_certificate_that_is_not_issued_is_refused_as_a_request_constraint_failure() {
-    for (case, body, fixture, expected_status, options) in not_issued_cases() {
+async fn a_certificate_that_is_not_issued_is_refused_in_the_class_its_options_decide() {
+    for (case, body, fixture, expected_status, options, expected_code, expected_message) in
+        not_issued_cases()
+    {
         let (router, arn) = certificate_in_status(case, &body, fixture).await;
 
         let before = describe(&router, &arn).await;
@@ -226,9 +282,9 @@ async fn a_certificate_that_is_not_issued_is_refused_as_a_request_constraint_fai
         let message = error_message(&response);
         assert_eq!(
             (status, code.as_str(), message.as_str()),
-            (400, REQUEST_CONSTRAINT_ERROR, NOT_ISSUED),
+            (400, expected_code, expected_message),
             "case {case}: a {expected_status} certificate must be refused \
-             400 {REQUEST_CONSTRAINT_ERROR} {NOT_ISSUED:?}, got {status} {response}"
+             400 {expected_code} {expected_message:?}, got {status} {response}"
         );
         // The sentence is fixed text: nothing of the request travels in it, so a client
         // can match it.
@@ -245,13 +301,15 @@ async fn a_certificate_that_is_not_issued_is_refused_as_a_request_constraint_fai
     }
 }
 
-/// RULE: the `Export` rule and the not-issued rule carry the same modelled code, and
-/// `Export` is decided first — so a certificate that is not issued AND asks for a
-/// different `Export` is told about `Export`, and the two refusals are distinguishable
-/// only by their sentence. The same update is served once the certificate is issued, so
-/// the refusal is about the status and not about the payload.
+/// RULE: the `Export` rule and the not-issued-for-issuance-work rule carry the same
+/// modelled code, and `Export` is decided first — so a certificate that is not issued
+/// AND asks for a different `Export` is told about `Export`, and those two refusals are
+/// distinguishable only by their sentence; the third leg of the same gate, a request
+/// asking only about the certificate's record, carries the processing-state code
+/// instead. The same update is served once the certificate is issued, so the refusals
+/// are about the status and not about the payload.
 #[tokio::test]
-async fn the_two_refusals_of_this_operation_differ_only_in_their_sentence() {
+async fn the_refusals_of_this_operation_differ_in_their_class_or_their_sentence() {
     for method in VALIDATION_METHODS {
         let case = format!("a pending EMAIL request migrating to {method}");
         let body = json!({
@@ -288,12 +346,28 @@ async fn the_two_refusals_of_this_operation_differ_only_in_their_sentence() {
              refusals, got {status_leg:?} twice"
         );
 
+        // Leg three: the transparency-logging preference, which asks about the record
+        // rather than about work still to come — the processing-state class, told apart
+        // from the other two by its code.
+        let (status, response) = update_options(
+            &router,
+            &arn,
+            &json!({ "CertificateTransparencyLoggingPreference": "DISABLED" }),
+        )
+        .await;
+        assert_eq!(
+            (status, error_code(&response).as_str(), error_message(&response).as_str()),
+            (400, PROCESSING_STATE_ERROR, NOT_ISSUED_OR_VALID),
+            "case {case}: the logging preference is refused for the certificate's \
+             processing state, got {status} {response}"
+        );
+
         // Neither refusal wrote anything: the status, the per-domain validation method
         // and the stored options all read as they did before.
         let after = describe(&router, &arn).await;
         assert_eq!(
             after, before,
-            "case {case}: two refusals must leave the record untouched, got {after}"
+            "case {case}: three refusals must leave the record untouched, got {after}"
         );
     }
 

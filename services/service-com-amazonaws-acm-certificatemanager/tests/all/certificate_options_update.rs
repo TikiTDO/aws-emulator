@@ -10,8 +10,12 @@
 //! that method while leaving the certificate's own status and each domain's validation
 //! status alone. It applies only to a certificate ACM has ISSUED: while the request is
 //! still being validated, or once it has failed, there is no issued certificate to
-//! reconfigure, so the `CertificateArn` the request names fails this operation's
-//! constraint and ACM answers `ValidationException`. `Export` is fixed at creation
+//! reconfigure, and which class that refusal carries follows the `Options` the request
+//! names — asking for a member that directs issuance work still to come (a validation
+//! method, an export opt-in) fails this operation's own constraints and draws
+//! `ValidationException`, while asking only about the certificate's record (the
+//! transparency-logging preference) reports the certificate's processing state,
+//! `InvalidStateException`. `Export` is fixed at creation
 //! ("You cannot update the value of `Export` after the the certificate is created",
 //! `CertificateOptions$Export` doc), so asking for a different value is refused with
 //! `ValidationException` while asking for the one in force is accepted.
@@ -45,10 +49,17 @@ const ACM_VALIDATIONS_ZONE: &str = "acm-validations.aws";
 /// shows (`http://example.com/.well-known/pki-validation/abc.txt`).
 const HTTP_VALIDATION_PATH: &str = "/.well-known/pki-validation/";
 
-/// The one sentence ACM reports when `UpdateCertificateOptions` names a certificate it
-/// has not issued — taken from ACM's recorded behaviour, which names neither the
-/// certificate nor its status, so the refusal reads the same whatever status drew it.
+/// The one sentence ACM reports when `UpdateCertificateOptions` is asked to direct
+/// issuance work — a validation method, an export opt-in — for a certificate it has not
+/// issued — taken from ACM's recorded behaviour, which names neither the certificate nor
+/// its status, so the refusal reads the same whatever status drew it.
 const NOT_ISSUED_MESSAGE: &str = "Certificate is not issued";
+
+/// The one sentence ACM reports when `UpdateCertificateOptions` asks only about the
+/// record of a certificate it has not issued — the deprecated transparency-logging
+/// preference — taken from ACM's recorded behaviour, naming neither the certificate nor
+/// its status.
+const NOT_ISSUED_OR_VALID_MESSAGE: &str = "The selected certificate is not Issued and/or Valid.";
 
 /// One certificate to migrate: what it is, the `RequestCertificate` body (always a
 /// private certificate authority, the request ACM needs no out-of-band proof for and
@@ -615,22 +626,28 @@ async fn export_cannot_be_updated_after_creation() {
 
 /// RULE: only a certificate ACM has ISSUED can be reconfigured — a request still being
 /// validated has produced no certificate yet, one whose validation timed out or failed
-/// never will, so either is refused with HTTP 400 `ValidationException` and the one
-/// sentence ACM words that precondition with, and nothing is written.
+/// never will — so either is refused HTTP 400 under the sentence ACM words that
+/// precondition with, in the class the `Options` the request names decides (a member
+/// directing issuance work still to come fails the request's own constraints, a request
+/// asking only about the record reports the certificate's processing state), and nothing
+/// is written.
 #[tokio::test]
 async fn options_cannot_be_updated_unless_the_certificate_is_issued() {
     // Rows: the request, whether its validation outcome is held off (leaving the
     // certificate in the transient PENDING_VALIDATION status) or materialised (leaving
     // a public request in the terminal status its own names decide), the status the row
-    // asserts, and the options it asks for — the first row is the recorded case, a
-    // validation-method change while the certificate is pending.
-    let cases: &[(&str, Value, bool, &str, Value)] = &[
+    // asserts, the options it asks for, and the class and sentence that draws — the
+    // first row is the recorded case, a validation-method change while the certificate
+    // is pending.
+    let cases: &[(&str, Value, bool, &str, Value, &str, &str)] = &[
         (
             "a public certificate still being validated",
             json!({ "DomainName": "pending.example.com", "ValidationMethod": "EMAIL" }),
             true,
             "PENDING_VALIDATION",
             json!({ "ValidationMethod": "DNS" }),
+            "ValidationException",
+            NOT_ISSUED_MESSAGE,
         ),
         (
             "a private certificate still being validated",
@@ -642,6 +659,8 @@ async fn options_cannot_be_updated_unless_the_certificate_is_issued() {
             true,
             "PENDING_VALIDATION",
             json!({ "ValidationMethod": "EMAIL" }),
+            "ValidationException",
+            NOT_ISSUED_MESSAGE,
         ),
         (
             "a public certificate whose validation timed out",
@@ -649,6 +668,8 @@ async fn options_cannot_be_updated_unless_the_certificate_is_issued() {
             false,
             "VALIDATION_TIMED_OUT",
             json!({ "ValidationMethod": "HTTP" }),
+            "ValidationException",
+            NOT_ISSUED_MESSAGE,
         ),
         (
             "a failed certificate, asked for the export option it already has",
@@ -656,6 +677,8 @@ async fn options_cannot_be_updated_unless_the_certificate_is_issued() {
             false,
             "FAILED",
             json!({ "Export": "DISABLED" }),
+            "ValidationException",
+            NOT_ISSUED_MESSAGE,
         ),
         (
             "a failed certificate, asked for the transparency logging preference",
@@ -663,10 +686,12 @@ async fn options_cannot_be_updated_unless_the_certificate_is_issued() {
             false,
             "FAILED",
             json!({ "CertificateTransparencyLoggingPreference": "ENABLED" }),
+            "InvalidStateException",
+            NOT_ISSUED_OR_VALID_MESSAGE,
         ),
     ];
 
-    for (case, body, hold, expected_status, options) in cases {
+    for (case, body, hold, expected_status, options, expected_code, expected_message) in cases {
         let (router, engine) = router_with_engine();
         let arn = request_certificate(&router, body).await;
         if *hold {
@@ -685,14 +710,14 @@ async fn options_cannot_be_updated_unless_the_certificate_is_issued() {
         let (status, response) = update_options(&router, &arn, options).await;
         assert_eq!(
             (status, error_code(&response).as_str()),
-            (400, "ValidationException"),
-            "case {case}: expected 400 ValidationException for a {expected_status} \
+            (400, *expected_code),
+            "case {case}: expected 400 {expected_code} for a {expected_status} \
              certificate, got {status} {response}"
         );
         let message = error_message(&response);
         assert_eq!(
-            message, NOT_ISSUED_MESSAGE,
-            "case {case}: expected the refusal sentence {NOT_ISSUED_MESSAGE:?}, got {message:?}"
+            message, *expected_message,
+            "case {case}: expected the refusal sentence {expected_message:?}, got {message:?}"
         );
 
         // The refusal persisted nothing: the record reads exactly as it did before.

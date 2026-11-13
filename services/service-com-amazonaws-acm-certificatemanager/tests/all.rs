@@ -85,6 +85,8 @@ mod certificate_lifecycle;
 mod certificate_list_filters;
 #[path = "all/certificate_not_found_message.rs"]
 mod certificate_not_found_message;
+#[path = "all/certificate_options_member_verdict.rs"]
+mod certificate_options_member_verdict;
 #[path = "all/certificate_options_not_issued_class.rs"]
 mod certificate_options_not_issued_class;
 #[path = "all/certificate_options_update.rs"]

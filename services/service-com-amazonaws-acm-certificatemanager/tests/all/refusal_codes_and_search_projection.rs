@@ -12,9 +12,12 @@
 //!    this service did not issue — with one code, `ValidationException` (HTTP 400).
 //!    A well-formed ARN no record answers to is a different class and keeps
 //!    `ResourceNotFoundException`.
-//! 2. `UpdateCertificateOptions` applies only to a certificate ACM has ISSUED, and a
-//!    request naming one in any other status fails that constraint of the request:
-//!    `ValidationException` (HTTP 400), with nothing written.
+//! 2. `UpdateCertificateOptions` applies only to a certificate ACM has ISSUED, and
+//!    which class a request naming one in any other status draws is decided per
+//!    `Options` member: a member directing issuance work still to come fails a
+//!    constraint of the REQUEST (`ValidationException`), while one that asks only about
+//!    the issued certificate's own record draws the certificate's processing state
+//!    (`InvalidStateException`) — both HTTP 400, with nothing written.
 //! 3. A union of this service's input carries exactly one member, and a request that
 //!    sets more than one is refused with `ValidationException` (HTTP 400) whose
 //!    message is built FROM the request: it names the union, states the
@@ -42,9 +45,13 @@ use crate::certificate_validation_state_machine::{make_validation_due_now, PRIVA
 /// The one sentence this service reports for a pagination token it did not issue.
 const INVALID_NEXT_TOKEN: &str = "Invalid next token.";
 
-/// The one sentence ACM reports when `UpdateCertificateOptions` names a certificate it
-/// has not issued.
+/// The one sentence ACM reports when `UpdateCertificateOptions` is asked to direct
+/// issuance work for a certificate it has not issued.
 const NOT_ISSUED_MESSAGE: &str = "Certificate is not issued";
+
+/// The one sentence ACM reports when `UpdateCertificateOptions` asks only about the
+/// record of a certificate it has not issued.
+const NOT_ISSUED_OR_VALID_MESSAGE: &str = "The selected certificate is not Issued and/or Valid.";
 
 /// The byte `ListCertificateDomainValidations` joins a `NextToken`'s two keys with.
 const CURSOR_SEPARATOR: char = '\u{1f}';
@@ -259,21 +266,26 @@ async fn bad_parameters_of_a_domain_validation_listing_are_one_validation_except
     );
 }
 
-/// RULE 2: `UpdateCertificateOptions` applies only to a certificate ACM has ISSUED,
-/// and a request naming one in any other status fails that constraint of the request
-/// rather than reporting the certificate's processing state: `ValidationException`
-/// (HTTP 400), with nothing written.
+/// RULE 2: `UpdateCertificateOptions` applies only to a certificate ACM has ISSUED, and
+/// which class a request naming one in any other status draws is decided per `Options`
+/// member — a member that directs issuance work ACM has yet to perform fails a
+/// constraint of the REQUEST (`ValidationException`), one that asks only about the
+/// issued certificate's own record reports the certificate's processing state
+/// (`InvalidStateException`) — both HTTP 400, with nothing written.
 #[tokio::test]
-async fn updating_the_options_of_a_certificate_that_is_not_issued_is_a_validation_exception() {
+async fn updating_the_options_of_a_certificate_that_is_not_issued_is_refused_per_member() {
     // The rows differ along the statuses a stored certificate can be in other than
-    // ISSUED, and along the `Options` member the request asks for.
-    let cases: &[(&str, Value, bool, &str, Value)] = &[
+    // ISSUED, along the `Options` member the request asks for, and so along the class
+    // the refusal carries.
+    let cases: &[(&str, Value, bool, &str, Value, &str, &str)] = &[
         (
             "a public certificate still being validated",
             json!({ "DomainName": "pending.classify.example.com", "ValidationMethod": "EMAIL" }),
             true,
             "PENDING_VALIDATION",
             json!({ "ValidationMethod": "DNS" }),
+            "ValidationException",
+            NOT_ISSUED_MESSAGE,
         ),
         (
             "a private certificate still being validated",
@@ -285,6 +297,8 @@ async fn updating_the_options_of_a_certificate_that_is_not_issued_is_a_validatio
             true,
             "PENDING_VALIDATION",
             json!({ "CertificateTransparencyLoggingPreference": "ENABLED" }),
+            "InvalidStateException",
+            NOT_ISSUED_OR_VALID_MESSAGE,
         ),
         (
             "a public certificate whose validation timed out",
@@ -292,6 +306,8 @@ async fn updating_the_options_of_a_certificate_that_is_not_issued_is_a_validatio
             false,
             "VALIDATION_TIMED_OUT",
             json!({ "ValidationMethod": "HTTP" }),
+            "ValidationException",
+            NOT_ISSUED_MESSAGE,
         ),
         (
             "a failed certificate asked for the export option it already has",
@@ -299,10 +315,21 @@ async fn updating_the_options_of_a_certificate_that_is_not_issued_is_a_validatio
             false,
             "FAILED",
             json!({ "Export": "DISABLED" }),
+            "ValidationException",
+            NOT_ISSUED_MESSAGE,
+        ),
+        (
+            "a failed certificate asked only about its transparency logging",
+            json!({ "DomainName": "failed.classify.localhost", "ValidationMethod": "HTTP" }),
+            false,
+            "FAILED",
+            json!({ "CertificateTransparencyLoggingPreference": "DISABLED" }),
+            "InvalidStateException",
+            NOT_ISSUED_OR_VALID_MESSAGE,
         ),
     ];
 
-    for (case, body, hold, expected_status, options) in cases {
+    for (case, body, hold, expected_status, options, expected_code, expected_message) in cases {
         let (router, engine) = router_with_engine();
         let arn = request_certificate(&router, body).await;
         if *hold {
@@ -321,14 +348,14 @@ async fn updating_the_options_of_a_certificate_that_is_not_issued_is_a_validatio
         let (status, response) = update_options(&router, &arn, options).await;
         assert_eq!(
             (status, error_code(&response).as_str()),
-            (400, "ValidationException"),
-            "case {case}: expected 400 ValidationException for a {expected_status} \
+            (400, *expected_code),
+            "case {case}: expected 400 {expected_code} for a {expected_status} \
              certificate, got {status} {response}"
         );
         let message = error_message(&response);
         assert_eq!(
-            message, NOT_ISSUED_MESSAGE,
-            "case {case}: expected {NOT_ISSUED_MESSAGE:?}, got {message:?}"
+            message, *expected_message,
+            "case {case}: expected {expected_message:?}, got {message:?}"
         );
         let after = describe(&router, &arn).await;
         assert_eq!(

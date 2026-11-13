@@ -12,11 +12,14 @@
 //!    validity window — with `ValidationException` (HTTP 400) under the fixed sentence
 //!    naming the defect and the member it was found in; the invalid-parameter class is
 //!    for the request's own parameters, not for its material.
-//! 2. `UpdateCertificateOptions` applies to a certificate ACM has ISSUED: a record in
-//!    any other status is refused with `ValidationException` (HTTP 400) under one
-//!    fixed sentence, and a request that asks for an `Export` value other than the one
-//!    in force is refused with `ValidationException` (HTTP 400) under its own, whatever
-//!    status the certificate is in — and neither refusal changes the record.
+//! 2. `UpdateCertificateOptions` applies to a certificate ACM has ISSUED, and which
+//!    class a record in any other status is refused with is decided per `Options`
+//!    member: a member directing issuance work still to come draws
+//!    `ValidationException` (HTTP 400) under one fixed sentence, a request asking only
+//!    about the record draws `InvalidStateException` (HTTP 400) under its own, and a
+//!    request that asks for an `Export` value other than the one in force is refused
+//!    with `ValidationException` (HTTP 400) under a third, whatever status the
+//!    certificate is in — and no refusal changes the record.
 //! 3. `GetCertificate` on a certificate ACM holds no issued material for is refused
 //!    with `RequestInProgressException` (HTTP 400) under a sentence naming the
 //!    certificate the request asked for and the account that ARN belongs to.
@@ -65,13 +68,20 @@ const CERTIFICATE_NOT_YET_VALID: &str = "The certificate is not valid yet. You c
 /// carries.
 const PRIVATE_KEY_NOT_PEM: &str = "The private key is not PEM-encoded or is not valid.";
 
-/// The one sentence ACM reports when `UpdateCertificateOptions` is handed a
-/// certificate that is not issued: fixed text naming neither the certificate nor its
-/// status, and terminated by no period. Two corpora record this refusal as
-/// `ValidationException` with this sentence — the behavioral contract check for the
-/// operation and the recorded wire traffic of the request-certificate lifecycle — which
-/// is what this suite holds the operation to.
+/// The one sentence ACM reports when `UpdateCertificateOptions` is asked to direct
+/// issuance work — a validation method, an export opt-in — for a certificate that is
+/// not issued: fixed text naming neither the certificate nor its status, and terminated
+/// by no period. Two corpora record this refusal as `ValidationException` with this
+/// sentence — the behavioral contract check for the operation and the recorded wire
+/// traffic of the request-certificate lifecycle — which is what this suite holds the
+/// operation to.
 const NOT_ISSUED: &str = "Certificate is not issued";
+
+/// The one sentence ACM reports when `UpdateCertificateOptions` asks only about the
+/// record of a certificate that is not issued — the deprecated transparency-logging
+/// preference — as recorded against the real service: fixed text naming neither the
+/// certificate nor its status, terminated by a period.
+const NOT_ISSUED_OR_VALID: &str = "The selected certificate is not Issued and/or Valid.";
 
 /// The sentence `UpdateCertificateOptions` answers for a request that asks to change
 /// `Export`, which "cannot [be updated] after the the certificate is created"
@@ -338,10 +348,13 @@ async fn import_material_defects_are_one_class_under_their_own_sentence() {
 type OptionsCase<'a> = (&'a str, Value, bool, &'a str, Value, &'a str, &'a str);
 
 /// RULE 2: `UpdateCertificateOptions` is served only for a certificate ACM has ISSUED,
-/// and `Export` can never be changed — each refused as a constraint failure of the
-/// request (`ValidationException`) under its OWN fixed sentence, with the record left
-/// exactly as it was. The `Export` sentence is decided first, so a certificate that is
-/// not issued AND asks for a different `Export` is told about `Export`.
+/// and `Export` can never be changed — each refused under its OWN fixed sentence, with
+/// the record left exactly as it was, and the class decided by what the request asks
+/// for: a constraint failure of the request (`ValidationException`) for a member
+/// directing issuance work still to come or for an `Export` change, the certificate's
+/// processing state (`InvalidStateException`) for a request that asks only about its
+/// record. The `Export` sentence is decided first, so a certificate that is not issued
+/// AND asks for a different `Export` is told about `Export`.
 #[tokio::test]
 async fn options_update_refusals_carry_the_sentence_of_the_rule_they_break() {
     // Rows differ along the status the certificate is in, the `Options` member the
@@ -363,8 +376,8 @@ async fn options_update_refusals_carry_the_sentence_of_the_rule_they_break() {
             false,
             "PENDING_VALIDATION",
             json!({ "CertificateTransparencyLoggingPreference": "DISABLED" }),
-            "ValidationException",
-            NOT_ISSUED,
+            "InvalidStateException",
+            NOT_ISSUED_OR_VALID,
         ),
         (
             // The export value in force asks for no change, so it passes the Export

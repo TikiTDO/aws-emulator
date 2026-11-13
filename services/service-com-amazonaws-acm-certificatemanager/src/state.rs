@@ -2974,18 +2974,40 @@ pub fn certificate_resource_message(
     )
 }
 
-/// The `ValidationException` message `UpdateCertificateOptions` answers for a
-/// certificate that is not [`STATUS_ISSUED`].
+/// The `ValidationException` message `UpdateCertificateOptions` answers for a request
+/// that directs issuance work ACM has yet to perform on a certificate that is not
+/// [`STATUS_ISSUED`].
 ///
-/// The options this operation changes are those of a certificate ACM has issued, so a
-/// `CertificateArn` naming a record in any other `CertificateStatus` is input this
-/// operation's constraints do not admit — which is what `ValidationException` reports
-/// ("the supplied input failed to satisfy constraints of an Amazon Web Services
-/// service"). `ValidationException` carries one modelled member (`message: String`) and
-/// the model documents no text for it, so the sentence comes from ACM's recorded
-/// behaviour for this refusal: ONE constant sentence naming neither the certificate nor
-/// the status it is in, and terminated by no period.
+/// `Options.ValidationMethod` is "the domain validation method for the certificate" and
+/// `Options.Export` the export "you cannot update … after the the certificate is
+/// created" (`CertificateOptions` member docs): both direct how ACM carries out the
+/// issuance of the certificate the request names, so naming either for a record ACM has
+/// not issued is input this operation's constraints do not admit — which is what
+/// `ValidationException` reports ("the supplied input failed to satisfy constraints of
+/// an Amazon Web Services service"). A request that asks only about the issued
+/// certificate's own record draws the certificate's processing state instead
+/// ([`CERTIFICATE_NOT_ISSUED_OR_VALID_MESSAGE`]). `ValidationException` carries one
+/// modelled member (`message: String`) and the model documents no text for it, so the
+/// sentence comes from ACM's recorded behaviour for this refusal: ONE constant sentence
+/// naming neither the certificate nor the status it is in, and terminated by no period.
 pub const CERTIFICATE_NOT_ISSUED_MESSAGE: &str = "Certificate is not issued";
+
+/// The `InvalidStateException` message `UpdateCertificateOptions` answers for a request
+/// that asks only about an issued certificate's own record — the transparency-logging
+/// preference — over a certificate that is not [`STATUS_ISSUED`].
+///
+/// `CertificateTransparencyLoggingPreference` describes the certificate ACM has already
+/// logged ("all public certificates are recorded in a certificate transparency log",
+/// `CertificateOptions` doc) rather than directing issuance work still to come, so the
+/// request itself is admissible and what rules it out is that the certificate's
+/// processing has produced no issued certificate to reconfigure — "processing has
+/// reached an invalid state" (`InvalidStateException` doc). `InvalidStateException`
+/// carries one modelled member (`message: String`) and the model documents no text for
+/// it, so the sentence comes from ACM's recorded behaviour for this error class: ONE
+/// constant sentence naming neither the certificate nor the status it is in, terminated
+/// by a period.
+pub const CERTIFICATE_NOT_ISSUED_OR_VALID_MESSAGE: &str =
+    "The selected certificate is not Issued and/or Valid.";
 
 /// The `RequestInProgressException` message for a request that asks for the
 /// certificate material of a resource this service holds none for.

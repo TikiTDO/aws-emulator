@@ -17,13 +17,17 @@
 //!
 //! * a certificate ACM has not issued — one whose validation is still running, one
 //!   whose request failed or timed out, one that has been revoked — has no issued
-//!   certificate to reconfigure, so the `CertificateArn` the request names does not
-//!   satisfy this operation's constraint that it address an ISSUED certificate. ACM
-//!   reports that as the REQUEST failing a constraint — `ValidationException` ("the
-//!   supplied input failed to satisfy constraints of an Amazon Web Services service")
-//!   under the one sentence it words this precondition with
-//!   ([`crate::state::CERTIFICATE_NOT_ISSUED_MESSAGE`]) — and not as the certificate's
-//!   processing state;
+//!   certificate to reconfigure, and which class that draws is decided per `Options`
+//!   member. A member that directs issuance work ACM has yet to perform — the method it
+//!   validates the names by, the export it permits — cannot be asked of a record ACM
+//!   has not issued, so the REQUEST fails a constraint of this operation:
+//!   `ValidationException` ("the supplied input failed to satisfy constraints of an
+//!   Amazon Web Services service") under
+//!   [`crate::state::CERTIFICATE_NOT_ISSUED_MESSAGE`]. A request that asks only about
+//!   the issued certificate's own record — the deprecated transparency-logging
+//!   preference — is admissible, and what rules it out is the certificate's processing
+//!   state: `InvalidStateException` ("processing has reached an invalid state") under
+//!   [`crate::state::CERTIFICATE_NOT_ISSUED_OR_VALID_MESSAGE`];
 //! * `Export` "cannot [be updated] after the the certificate is created"
 //!   (`CertificateOptions$Export` doc), so a request naming a different value than the
 //!   certificate carries is refused with `ValidationException` under its own sentence,
@@ -275,18 +279,41 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The options this operation updates are those of an ISSUED certificate: a
         // request ACM is still validating has not produced one yet, a request that
         // failed or timed out never will, and a revoked or expired one no longer has a
-        // certificate to reconfigure. Every such status draws the same refusal, and ACM
-        // reports it as the REQUEST failing a constraint of this operation — its
-        // `CertificateArn` must address an issued certificate — which is what
-        // `ValidationException` names ("the supplied input failed to satisfy constraints
-        // of an Amazon Web Services service"), under the one sentence it words this
-        // precondition with ([`crate::state::CERTIFICATE_NOT_ISSUED_MESSAGE`]). The
-        // verdict is read off the stored record and writes nothing, so the certificate
-        // keeps its status, its options and each domain's validation record.
+        // certificate to reconfigure. Which refusal that draws is decided per member,
+        // because the two kinds of member ask for two different things of a record that
+        // is not issued:
+        //
+        // * `ValidationMethod` is "the domain validation method for the certificate"
+        //   and `Export` the opt-in ACM honours when it issues one, so both direct
+        //   issuance work ACM has yet to perform. Naming either for a certificate ACM
+        //   has not issued is input this operation does not admit, which is the REQUEST
+        //   failing a constraint — `ValidationException` under
+        //   `crate::state::CERTIFICATE_NOT_ISSUED_MESSAGE`.
+        // * a request that names only the transparency-logging preference asks about
+        //   the issued certificate's own record and directs no such work, so the
+        //   request is admissible and what rules it out is that the certificate's
+        //   processing has produced no issued certificate — `InvalidStateException`
+        //   under `crate::state::CERTIFICATE_NOT_ISSUED_OR_VALID_MESSAGE`. An `Options`
+        //   naming nothing at all asks for no change, so it draws the same verdict.
+        //
+        // Either verdict is read off the stored record and writes nothing, so the
+        // certificate keeps its status, its options and each domain's validation record.
         if certificate.status != crate::state::STATUS_ISSUED {
-            return Err(UpdateCertificateOptionsErrorModeled::ValidationException(
-                ValidationException {
-                    message: Some(crate::state::CERTIFICATE_NOT_ISSUED_MESSAGE.to_string()),
+            let directs_issuance =
+                input.options.validation_method.is_some() || input.options.export.is_some();
+            if directs_issuance {
+                return Err(UpdateCertificateOptionsErrorModeled::ValidationException(
+                    ValidationException {
+                        message: Some(crate::state::CERTIFICATE_NOT_ISSUED_MESSAGE.to_string()),
+                    },
+                )
+                .into());
+            }
+            return Err(UpdateCertificateOptionsErrorModeled::InvalidStateException(
+                InvalidStateException {
+                    message: Some(
+                        crate::state::CERTIFICATE_NOT_ISSUED_OR_VALID_MESSAGE.to_string(),
+                    ),
                 },
             )
             .into());
