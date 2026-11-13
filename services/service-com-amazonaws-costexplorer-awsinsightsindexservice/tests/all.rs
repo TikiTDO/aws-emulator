@@ -15,6 +15,8 @@
 mod anomaly_monitor_delete;
 #[path = "all/anomaly_monitors.rs"]
 mod anomaly_monitors;
+#[path = "all/anomaly_subscription_update.rs"]
+mod anomaly_subscription_update;
 #[path = "all/anomaly_subscriptions.rs"]
 mod anomaly_subscriptions;
 #[path = "all/cost_category_definitions.rs"]

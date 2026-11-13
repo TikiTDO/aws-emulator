@@ -197,8 +197,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             "",
             &format!("anomalysubscription/{}", store.next_resource_id()),
         );
-        // The deprecated scalar is shorthand for an expression, so a subscription written
-        // with it is stored carrying the expression that shorthand expands to as well.
+        // The deprecated scalar is shorthand for an expression, so what a subscription
+        // stores is the expression — the caller's own, or the one their scalar expands
+        // into. The scalar a read reports is then that expression's dollar threshold.
         let threshold_expression = subscription.threshold_expression.or_else(|| {
             subscription
                 .threshold
@@ -211,7 +212,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 account_id: ::engine::emulator_account_id().to_string(),
                 monitor_arn_list: subscription.monitor_arn_list,
                 subscribers: crate::state::admitted_subscribers(subscription.subscribers),
-                threshold: subscription.threshold,
                 threshold_expression,
                 frequency: subscription.frequency,
                 subscription_name: subscription.subscription_name,

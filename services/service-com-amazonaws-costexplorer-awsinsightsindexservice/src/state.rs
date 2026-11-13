@@ -28,10 +28,12 @@ mod anomaly_subscriptions;
 mod pagination;
 
 pub use anomaly_subscriptions::{
-    admitted_subscribers, threshold_expression_for, validate_anomaly_subscription,
+    absolute_threshold_of, admitted_subscribers, threshold_expression_for, unknown_subscription,
+    validate_anomaly_subscription, validate_monitor_arn_list, validate_subscribers,
     validate_threshold, AnomalySubscriptionRecord, MAX_ANOMALY_SUBSCRIPTIONS,
-    MAX_THRESHOLD_EXPRESSION_DEPTH, SUBSCRIBER_STATUS_CONFIRMED, THRESHOLD_ABSOLUTE_DIMENSION,
-    THRESHOLD_DIMENSIONS, THRESHOLD_MATCH_OPTION, THRESHOLD_VALUE_MAX,
+    MAX_THRESHOLD_EXPRESSION_DEPTH, SUBSCRIBER_STATUS_CONFIRMED, SUBSCRIPTION_ID_AS_RESOURCE,
+    THRESHOLD_ABSOLUTE_DIMENSION, THRESHOLD_DIMENSIONS, THRESHOLD_MATCH_OPTION,
+    THRESHOLD_VALUE_MAX,
 };
 pub use pagination::{
     decode_next_token, encode_next_token, page, requested_page_size, Page, UNPAGED,
@@ -631,7 +633,7 @@ pub fn validate_anomaly_monitor(monitor: &AnomalyMonitor) -> Result<(), String> 
 }
 
 // ---------------------------------------------------------------------------
-// Unknown-monitor refusals
+// Unknown-resource refusals
 // ---------------------------------------------------------------------------
 
 /// The fixed half of the sentence Cost Explorer refuses an unresolvable monitor reference
@@ -649,16 +651,17 @@ pub const MONITOR_ID_AS_RESOURCE: &str = "resourceId";
 /// monitors a subscription alerts on).
 pub const MONITOR_ID_AS_MONITOR: &str = "monitorId";
 
-/// The bare monitor id a monitor ARN carries: the last segment of its resource portion,
-/// which is what an unknown-monitor refusal names rather than the whole ARN.
+/// The bare resource id an ARN carries: the last segment of its resource portion, which is
+/// what an unresolvable-reference refusal names rather than the whole ARN.
 ///
 /// A value carrying no `/` at all is its own id — the ARN members are plain strings
 /// (`GenericString`, pattern `^[\S\s]*$`), so a caller can send one, and it is then the
-/// only id the request holds.
-pub fn monitor_id(monitor_arn: &str) -> &str {
-    match monitor_arn.rsplit_once('/') {
+/// only id the request holds. Shared by every refusal of this kind, so the monitor and the
+/// subscription surfaces cannot drift apart on what an id is.
+pub fn resource_id(arn: &str) -> &str {
+    match arn.rsplit_once('/') {
         Some((_, id)) => id,
-        None => monitor_arn,
+        None => arn,
     }
 }
 
@@ -678,7 +681,7 @@ pub fn unknown_monitor(member: &str, monitor_arn: &str) -> UnknownMonitorExcepti
     UnknownMonitorException {
         message: Some(format!(
             "{NO_MONITOR_PRESENT} {member}: {}",
-            monitor_id(monitor_arn)
+            resource_id(monitor_arn)
         )),
     }
 }

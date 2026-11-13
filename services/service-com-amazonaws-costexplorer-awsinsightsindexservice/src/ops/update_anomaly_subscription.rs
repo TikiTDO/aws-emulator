@@ -1,16 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateAnomalySubscription
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateAnomalySubscription`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateAnomalySubscription::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
-//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -166,18 +156,103 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateAnomalySubscription` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateAnomalySubscriptionErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            // Only reachable when this service was mounted on an engine that holds no
+            // store for it, so there is no subscription to update and the operation
+            // genuinely cannot be served here.
+            return Err(crate::scaffolded::Scaffolded::not_implemented(Self::NAME));
+        };
+
+        // "Specify the fields that you want to update": every member the request carries
+        // is a value the subscription would be left holding, so each one is checked
+        // against the rule its own `AnomalySubscription` member documents — the same rules
+        // the create path applies, shared with it rather than restated. A member the
+        // request omits is unchanged, so there is nothing to check it against.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateAnomalySubscription"))
+        // The threshold pair is checked ONLY when the request names one of the two: "You
+        // can specify either Threshold or ThresholdExpression, but not both" refuses a
+        // request carrying both, while a request carrying neither leaves the stored
+        // threshold alone. The model declares no client-input error for this operation, so
+        // a request its schema admits but its documentation forbids is refused through the
+        // 400 `ValidationException` channel.
+        if input.threshold.is_some() || input.threshold_expression.is_some() {
+            crate::state::validate_threshold(input.threshold, input.threshold_expression.as_ref())
+                .map_err(crate::scaffolded::Scaffolded::validation)?;
+        }
+        if let Some(monitor_arn_list) = input.monitor_arn_list.as_deref() {
+            crate::state::validate_monitor_arn_list(monitor_arn_list)
+                .map_err(crate::scaffolded::Scaffolded::validation)?;
+        }
+        if let Some(subscribers) = input.subscribers.as_deref() {
+            crate::state::validate_subscribers(subscribers)
+                .map_err(crate::scaffolded::Scaffolded::validation)?;
+        }
+
+        let mut store = state.lock();
+        // Admission before any write, so a refused update leaves the registry exactly as
+        // it was.
+        //
+        // A subscription alerts on monitors, so every ARN the update would leave it
+        // alerting on has to be a monitor the account holds — that is the unknown-monitor
+        // refusal this operation models. Which one does not is read here, before the write
+        // borrows the subscription registry.
+        let unknown_monitor = input
+            .monitor_arn_list
+            .iter()
+            .flatten()
+            .find(|monitor_arn| !store.anomaly_monitors.contains_key(*monitor_arn))
+            .cloned();
+
+        // The subscription this call is ABOUT is refused on first: the account has to hold
+        // one under the ARN the request named, whatever else the request says.
+        let Some(subscription) = store
+            .anomaly_subscriptions
+            .get_mut(&input.subscription_arn)
+        else {
+            return Err(
+                UpdateAnomalySubscriptionErrorModeled::UnknownSubscriptionException(
+                    crate::state::unknown_subscription(&input.subscription_arn),
+                )
+                .into(),
+            );
+        };
+        // The monitor is a resource this request REFERENCES rather than the one the call
+        // is about, so the shared refusal names its id under `monitorId`.
+        if let Some(monitor_arn) = unknown_monitor {
+            return Err(UpdateAnomalySubscriptionErrorModeled::UnknownMonitorException(
+                crate::state::unknown_monitor(crate::state::MONITOR_ID_AS_MONITOR, &monitor_arn),
+            )
+            .into());
+        }
+
+        // The write: every member the request named, and nothing else. `SubscriptionArn`
+        // and `AccountId` are the service's own and no update member addresses them, and
+        // each subscriber's `Status` stays the service's rather than the caller's.
+        if let Some(monitor_arn_list) = input.monitor_arn_list {
+            subscription.monitor_arn_list = monitor_arn_list;
+        }
+        if let Some(subscribers) = input.subscribers {
+            subscription.subscribers = crate::state::admitted_subscribers(subscribers);
+        }
+        if let Some(frequency) = input.frequency {
+            subscription.frequency = frequency;
+        }
+        if let Some(subscription_name) = input.subscription_name {
+            subscription.subscription_name = subscription_name;
+        }
+        if input.threshold.is_some() || input.threshold_expression.is_some() {
+            // The two members are one threshold, so naming either REPLACES it: the
+            // deprecated scalar is shorthand for an expression, so an update written with
+            // it leaves the subscription carrying the expression that shorthand expands
+            // into, which is also the one a read reads its dollar threshold back off.
+            subscription.threshold_expression = input
+                .threshold_expression
+                .or_else(|| input.threshold.map(crate::state::threshold_expression_for));
+        }
+        let subscription_arn = subscription.arn.clone();
+        drop(store);
+
+        Ok(UpdateAnomalySubscriptionOutput { subscription_arn })
     }
 }

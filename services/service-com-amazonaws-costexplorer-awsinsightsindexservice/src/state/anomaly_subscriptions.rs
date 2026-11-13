@@ -11,6 +11,7 @@
 
 use crate::ops::types::{
     AnomalySubscription, DimensionValues, Expression, ResourceTag, Subscriber,
+    UnknownSubscriptionException,
 };
 
 /// How many cost anomaly subscriptions an account may hold.
@@ -79,20 +80,37 @@ pub const SUBSCRIBER_STATUS_CONFIRMED: &str = "CONFIRMED";
 /// Shared by every operation that accepts a whole `AnomalySubscription`, so the write
 /// paths cannot drift apart on it.
 pub fn validate_anomaly_subscription(subscription: &AnomalySubscription) -> Result<(), String> {
-    if subscription.monitor_arn_list.is_empty() {
+    validate_monitor_arn_list(&subscription.monitor_arn_list)?;
+    validate_subscribers(&subscription.subscribers)?;
+    validate_threshold(
+        subscription.threshold,
+        subscription.threshold_expression.as_ref(),
+    )
+}
+
+/// Check the monitors a subscription alerts on.
+///
+/// Taken as the list rather than as a whole subscription so `UpdateAnomalySubscription`,
+/// which carries the same list as a top-level member, applies the same rule to the value
+/// it would store.
+pub fn validate_monitor_arn_list(monitor_arn_list: &[String]) -> Result<(), String> {
+    if monitor_arn_list.is_empty() {
         return Err(
             "MonitorArnList must name at least one cost anomaly monitor for the subscription \
              to alert on"
                 .to_string(),
         );
     }
-    if subscription.subscribers.is_empty() {
+    Ok(())
+}
+
+/// Check the subscribers a subscription notifies, for the same reason
+/// [`validate_monitor_arn_list`] is taken as a list.
+pub fn validate_subscribers(subscribers: &[Subscriber]) -> Result<(), String> {
+    if subscribers.is_empty() {
         return Err("Subscribers must name at least one subscriber to notify".to_string());
     }
-    validate_threshold(
-        subscription.threshold,
-        subscription.threshold_expression.as_ref(),
-    )
+    Ok(())
 }
 
 /// Check the threshold half of a subscription: exactly one of the two members, and a
@@ -100,6 +118,11 @@ pub fn validate_anomaly_subscription(subscription: &AnomalySubscription) -> Resu
 ///
 /// Taken as two values rather than as a whole subscription so `UpdateAnomalySubscription`,
 /// which carries the same pair as top-level members, applies the same rule.
+///
+/// The sentence a request carrying both is refused with is Cost Explorer's own, in the
+/// terms the service states the rule in — the two member names and the condition on them —
+/// rather than a paraphrase of `$Threshold`'s "You can specify either Threshold or
+/// ThresholdExpression, but not both".
 pub fn validate_threshold(
     threshold: Option<f64>,
     threshold_expression: Option<&Expression>,
@@ -109,11 +132,9 @@ pub fn validate_threshold(
             "One of Threshold or ThresholdExpression is required for an anomaly subscription"
                 .to_string(),
         ),
-        (Some(_), Some(_)) => Err(
-            "You cannot specify both Threshold and ThresholdExpression for an anomaly \
-             subscription"
-                .to_string(),
-        ),
+        (Some(_), Some(_)) => {
+            Err("Threshold and ThresholdExpression cannot both be non-null".to_string())
+        }
         // The scalar's own range (0 or more) is modelled, so a value reaching here
         // satisfies it and there is nothing left to check.
         (Some(_), None) => Ok(()),
@@ -265,6 +286,48 @@ pub fn threshold_expression_for(threshold: f64) -> Expression {
     }
 }
 
+/// The dollar value the deprecated scalar `Threshold` reports for a threshold expression,
+/// when that expression names one.
+///
+/// `AnomalySubscription$Threshold` is "the dollar value that triggers a notification if the
+/// threshold is exceeded", and `$ThresholdExpression` documents
+/// `ANOMALY_TOTAL_IMPACT_ABSOLUTE` as "corresponding to an anomaly's TotalImpact" — that
+/// impact in dollars. The deprecated member is therefore a READING of the one threshold a
+/// subscription holds rather than a second value a write stores: whichever member the
+/// caller wrote, a read reports the dollar threshold the stored expression names, and
+/// reports none for an expression that names only a percentage.
+///
+/// `And`/`Or` branches are searched in order, since a nested expression's dollar threshold
+/// is the absolute one nested inside it. The depth is bounded by
+/// [`MAX_THRESHOLD_EXPRESSION_DEPTH`], the same bound admission applies, so no stored
+/// expression is walked without limit.
+pub fn absolute_threshold_of(expression: &Expression) -> Option<f64> {
+    absolute_threshold_at(expression, 0)
+}
+
+fn absolute_threshold_at(expression: &Expression, depth: usize) -> Option<f64> {
+    if depth > MAX_THRESHOLD_EXPRESSION_DEPTH {
+        return None;
+    }
+    if let Some(dimensions) = expression.dimensions.as_ref() {
+        if dimensions.key.as_deref() == Some(THRESHOLD_ABSOLUTE_DIMENSION) {
+            return dimensions
+                .values
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .find_map(|value| value.parse::<f64>().ok().filter(|number| number.is_finite()));
+        }
+    }
+    expression
+        .and
+        .as_deref()
+        .into_iter()
+        .chain(expression.or.as_deref())
+        .flatten()
+        .find_map(|branch| absolute_threshold_at(branch, depth + 1))
+}
+
 /// The subscribers a write stores: the caller's channel and address, with the `Status` the
 /// service owns ([`SUBSCRIBER_STATUS_CONFIRMED`]) rather than whatever the caller sent.
 pub fn admitted_subscribers(subscribers: Vec<Subscriber>) -> Vec<Subscriber> {
@@ -276,6 +339,39 @@ pub fn admitted_subscribers(subscribers: Vec<Subscriber>) -> Vec<Subscriber> {
             status: Some(SUBSCRIBER_STATUS_CONFIRMED.to_string()),
         })
         .collect()
+}
+
+/// The fixed half of the sentence Cost Explorer refuses an unresolvable subscription
+/// reference with. The only variable part is the subscription id, which
+/// [`unknown_subscription`] appends.
+///
+/// The same sentence form the service's unknown-MONITOR refusal carries ("No monitor
+/// present with <member>: <id>"), over the resource this one could not resolve: one
+/// service, one way of saying a reference resolves to nothing.
+const NO_SUBSCRIPTION_PRESENT: &str = "No subscription present with";
+
+/// The member word an unknown-subscription refusal names the id under.
+///
+/// Every operation that resolves a `SubscriptionArn` (`UpdateAnomalySubscription`,
+/// `DeleteAnomalySubscription`) has the subscription as the resource the call was MADE
+/// AGAINST, which is the same word [`crate::state::MONITOR_ID_AS_RESOURCE`] carries for a
+/// monitor in that position.
+pub const SUBSCRIPTION_ID_AS_RESOURCE: &str = "resourceId";
+
+/// The refusal every operation that resolves a subscription ARN against
+/// [`anomaly_subscriptions`](crate::state::ComAmazonawsCostexplorerAwsinsightsindexserviceState::anomaly_subscriptions)
+/// answers with when the account holds no subscription under it.
+///
+/// One helper, so no two operations can drift apart on the wording: the modelled
+/// `UnknownSubscriptionException` carrying the service's fixed sentence over the bare
+/// subscription id the request named, never the whole ARN.
+pub fn unknown_subscription(subscription_arn: &str) -> UnknownSubscriptionException {
+    UnknownSubscriptionException {
+        message: Some(format!(
+            "{NO_SUBSCRIPTION_PRESENT} {SUBSCRIPTION_ID_AS_RESOURCE}: {}",
+            crate::state::resource_id(subscription_arn)
+        )),
+    }
 }
 
 /// A stored cost anomaly subscription: everything `GetAnomalySubscriptions` reports, plus
@@ -290,11 +386,12 @@ pub struct AnomalySubscriptionRecord {
     pub monitor_arn_list: Vec<String>,
     /// Who is notified, and over which channel.
     pub subscribers: Vec<Subscriber>,
-    /// The deprecated scalar threshold, kept as the caller sent it so a read reports the
-    /// member they wrote; `None` when the caller named a `ThresholdExpression` instead.
-    pub threshold: Option<f64>,
     /// The threshold the subscription alerts above — the caller's expression, or the one
     /// [`threshold_expression_for`] expands their scalar into.
+    ///
+    /// The ONE place a subscription's threshold is held: the deprecated scalar is read off
+    /// this expression by [`absolute_threshold_of`] rather than stored beside it, so the
+    /// two members a read reports can never disagree.
     pub threshold_expression: Option<Expression>,
     /// `AnomalySubscriptionFrequency` as the caller sent it.
     pub frequency: String,
@@ -313,7 +410,10 @@ impl AnomalySubscriptionRecord {
             account_id: Some(self.account_id.clone()),
             monitor_arn_list: self.monitor_arn_list.clone(),
             subscribers: self.subscribers.clone(),
-            threshold: self.threshold,
+            threshold: self
+                .threshold_expression
+                .as_ref()
+                .and_then(absolute_threshold_of),
             frequency: self.frequency.clone(),
             subscription_name: self.subscription_name.clone(),
             threshold_expression: self.threshold_expression.clone(),

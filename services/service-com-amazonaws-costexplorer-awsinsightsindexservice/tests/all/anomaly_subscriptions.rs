@@ -103,6 +103,25 @@ fn shorthand_expansion(rendered: &str) -> Value {
     dimension_threshold(THRESHOLD_ABSOLUTE_DIMENSION, rendered)
 }
 
+/// The dollar threshold an expression names, read off the JSON the test sent: the value of
+/// the absolute-impact dimension it selects on, searched through its `And`/`Or` branches.
+/// Computed here from the request so the assertion does not borrow the service's own
+/// reading.
+fn absolute_threshold_in(expression: &Value) -> Option<f64> {
+    let dimensions = &expression["Dimensions"];
+    if dimensions["Key"].as_str() == Some(THRESHOLD_ABSOLUTE_DIMENSION) {
+        return dimensions["Values"]
+            .as_array()?
+            .iter()
+            .find_map(|value| value.as_str()?.parse::<f64>().ok());
+    }
+    ["And", "Or"]
+        .iter()
+        .filter_map(|nested| expression[nested].as_array())
+        .flatten()
+        .find_map(absolute_threshold_in)
+}
+
 /// A `CreateAnomalySubscription` body.
 fn subscription_body(
     name: &str,
@@ -125,9 +144,9 @@ fn subscription_body(
 
 /// RULE: `CreateAnomalySubscription` mints the subscription's ARN, persists the
 /// subscription as the caller described it — with `AccountId` and each subscriber's
-/// `Status` owned by the service, and the deprecated scalar `Threshold` expanded into the
-/// `ThresholdExpression` it is shorthand for — and `GetAnomalySubscriptions` reports that
-/// stored subscription.
+/// `Status` owned by the service, the deprecated scalar `Threshold` expanded into the
+/// `ThresholdExpression` it is shorthand for and reported back as the dollar threshold
+/// that expression names — and `GetAnomalySubscriptions` reports that stored subscription.
 ///
 /// The table spans the class of subscriptions the model admits: every
 /// `AnomalySubscriptionFrequency` value, both `SubscriberType` channels, one and several
@@ -320,10 +339,14 @@ async fn a_created_subscription_is_reported_as_it_was_described() {
                 );
             }
             None => {
-                assert!(
-                    subscription.get("Threshold").is_none(),
-                    "case {label:?}: a subscription written with an expression reports no \
-                     deprecated scalar, got {subscription}"
+                // The deprecated scalar is a dollar READING of the stored expression: the
+                // value of the absolute-impact dimension it names, and absent when the
+                // expression names only a percentage.
+                assert_eq!(
+                    subscription.get("Threshold").and_then(Value::as_f64),
+                    absolute_threshold_in(&sent["ThresholdExpression"]),
+                    "case {label:?}: expected the deprecated scalar to report the dollar \
+                     threshold the expression names, got {subscription}"
                 );
                 assert_eq!(
                     subscription["ThresholdExpression"], sent["ThresholdExpression"],
