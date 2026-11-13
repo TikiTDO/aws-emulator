@@ -549,10 +549,12 @@ impl ComAmazonawsLicensemanagerlinuxsubscriptionsLicensemanagerlinuxsubscription
     ///
     /// A record of a Region this account does not discover at this instant is dropped rather
     /// than merged, for the same reason [`Self::record_discovery_pass`] writes nothing for
-    /// one.
+    /// one: the one set of discovered Regions ([`Self::discovered_regions`]), read off the
+    /// settings under the lock this write holds, decides it for every record at once.
     pub fn merge_discovery_pass(&mut self, found: Vec<DiscoveredInstanceRecord>, now: SystemTime) {
+        let discovered = self.discovered_regions();
         for record in self.timestamped(found, now) {
-            if !self.discovers_region(&record.region) {
+            if !discovered.contains(&record.region) {
                 continue;
             }
             self.discovered_instances
@@ -606,6 +608,11 @@ impl ComAmazonawsLicensemanagerlinuxsubscriptionsLicensemanagerlinuxsubscription
     /// A Region named twice is one Region, so the set is deduplicated and in a stable
     /// order, which is the order [`Self::discovery_plan`] lays a pass's walk of them out
     /// in.
+    ///
+    /// The ONE place that rule is computed: the plan a pass walks, the pruning step that
+    /// ends it ([`Self::retain_discovered_regions`]) and the per-hop and per-write gate
+    /// ([`Self::discovers_region`]) all read this set, so the two ends of one pass cannot
+    /// come to disagree about which Regions it is about.
     pub fn discovered_regions(&self) -> BTreeSet<String> {
         match self.service_settings.as_ref() {
             Some(settings) if settings.linux_subscriptions_discovery == DISCOVERY_ENABLED => {
@@ -622,17 +629,13 @@ impl ComAmazonawsLicensemanagerlinuxsubscriptionsLicensemanagerlinuxsubscription
 
     /// Whether this account discovers `region` right now — the one question each hop of a
     /// pass and each of its writes settles against the settings as they are then.
+    ///
+    /// Membership of the ONE set [`Self::discovered_regions`] computes, so the enabled gate
+    /// and the Region set are stated once: the per-hop and per-write gate here and the
+    /// pruning step and plan that read that set cannot come to disagree about the Regions of
+    /// a single pass.
     pub fn discovers_region(&self, region: &str) -> bool {
-        match self.service_settings.as_ref() {
-            Some(settings) if settings.linux_subscriptions_discovery == DISCOVERY_ENABLED => {
-                settings
-                    .discovery_settings
-                    .source_regions
-                    .iter()
-                    .any(|source| source == region)
-            }
-            _ => false,
-        }
+        self.discovered_regions().contains(region)
     }
 
     /// The plan the NEXT discovery pass walks: every Region this account discovers right

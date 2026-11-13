@@ -13,6 +13,8 @@
 // points it into `tests/all/`.
 #[path = "all/discovered_fleet_selection.rs"]
 mod discovered_fleet_selection;
+#[path = "all/discovered_region_set.rs"]
+mod discovered_region_set;
 #[path = "all/discovery_from_ec2.rs"]
 mod discovery_from_ec2;
 #[path = "all/discovery_pass_settings_change.rs"]
