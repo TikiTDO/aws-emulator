@@ -182,86 +182,113 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             now,
         )
         .await;
+        // The same for a step that submitted a COMMAND, whose status this service answers with
+        // a PARSE and a fixed allow-list of session-local utilities
+        // (`crate::state::step_command_status`): no host command, process or shell is ever
+        // started, and a command outside that list is refused with the status a shell gives a
+        // command it could not find, so the step reports that its work was not run. The call
+        // resolves the cluster itself and answers only for steps that cluster has already
+        // started, so a request naming no cluster of this account answers for nothing; it runs
+        // with no store guard held so one caller's bounded parse cannot hold this service's
+        // state against another's.
+        crate::state::resolve_due_step_commands(&*self.engine, &input.cluster_id, now);
 
-        let mut store = state.lock();
+        // The store is taken and RELEASED inside this block: the publication below reaches
+        // EventBridge's own handler, which may call back into this service, so this
+        // service's lock is never held across it.
+        let output = {
+            let mut store = state.lock();
 
-        // Reporting only: the cluster's step runner materialises the step transitions the
-        // clock already made due (PENDING -> RUNNING -> COMPLETED/FAILED), which were owed
-        // at this instant whether or not anybody listed the steps.
-        crate::state::run_due_steps(&*self.engine, &mut store, &input.cluster_id, now);
+            // Reporting only: the cluster's step runner materialises the step transitions the
+            // clock already made due (PENDING -> RUNNING -> COMPLETED/FAILED), which were owed
+            // at this instant whether or not anybody listed the steps.
+            crate::state::run_due_steps(&*self.engine, &mut store, &input.cluster_id, now);
 
-        let Some(cluster) = store.cluster_mut(&input.cluster_id, now) else {
-            return Err(ListStepsErrorModeled::InvalidRequestException(
-                crate::state::unknown_cluster(&input.cluster_id),
-            )
-            .into());
-        };
-
-        // The cluster is resolved FIRST and the request's other members are checked
-        // against the resolved cluster, which is the order Amazon EMR answers a request
-        // that gets both wrong in.
-        //
-        // "You can specify a maximum of 10 stepIDs." (ListSteps doc.)
-        if let Some(ids) = input.step_ids.as_ref() {
-            if ids.len() > LIST_STEPS_MAX_STEP_IDS {
+            let Some(cluster) = store.cluster_mut(&input.cluster_id, now) else {
                 return Err(ListStepsErrorModeled::InvalidRequestException(
-                    InvalidRequestException {
-                        error_code: None,
-                        message: Some(format!(
-                            "StepIds carries {} ids; a maximum of {LIST_STEPS_MAX_STEP_IDS} \
-                             stepIDs may be specified.",
-                            ids.len()
-                        )),
-                    },
+                    crate::state::unknown_cluster(&input.cluster_id),
                 )
                 .into());
-            }
-        }
+            };
 
-        // "Provides a list of steps for the cluster in reverse order" (ListSteps doc):
-        // the records are held in submission order, so the newest is reported first.
-        let matched: Vec<&crate::state::StepRecord> = cluster
-            .steps
-            .iter()
-            .rev()
-            .filter(|step| {
-                input
-                    .step_states
-                    .as_ref()
-                    .is_none_or(|states| states.contains(&step.state))
-            })
-            .filter(|step| {
-                input
-                    .step_ids
-                    .as_ref()
-                    .is_none_or(|ids| ids.contains(&step.id))
-            })
-            .collect();
-
-        // The marker is the id of the first step the previous page did not report, so a
-        // page boundary survives steps being added between calls.
-        let start = match input.marker.as_ref() {
-            Some(marker) => match matched.iter().position(|step| step.id == *marker) {
-                Some(at) => at,
-                None => {
+            // The cluster is resolved FIRST and the request's other members are checked
+            // against the resolved cluster, which is the order Amazon EMR answers a request
+            // that gets both wrong in.
+            //
+            // "You can specify a maximum of 10 stepIDs." (ListSteps doc.)
+            if let Some(ids) = input.step_ids.as_ref() {
+                if ids.len() > LIST_STEPS_MAX_STEP_IDS {
                     return Err(ListStepsErrorModeled::InvalidRequestException(
-                        crate::state::malformed_marker(marker),
+                        InvalidRequestException {
+                            error_code: None,
+                            message: Some(format!(
+                                "StepIds carries {} ids; a maximum of {LIST_STEPS_MAX_STEP_IDS} \
+                                 stepIDs may be specified.",
+                                ids.len()
+                            )),
+                        },
                     )
-                    .into())
+                    .into());
                 }
-            },
-            None => 0,
-        };
-        let end = matched.len().min(start + LIST_STEPS_PAGE_SIZE);
-        let steps: Vec<StepSummary> = matched[start..end]
-            .iter()
-            .map(|step| step.to_summary())
-            .collect();
-        let marker = matched.get(end).map(|step| step.id.clone());
+            }
 
-        Ok(ListStepsOutput {
-            steps: Some(steps),
-            marker,
-        })
+            // "Provides a list of steps for the cluster in reverse order" (ListSteps doc):
+            // the records are held in submission order, so the newest is reported first.
+            let matched: Vec<&crate::state::StepRecord> = cluster
+                .steps
+                .iter()
+                .rev()
+                .filter(|step| {
+                    input
+                        .step_states
+                        .as_ref()
+                        .is_none_or(|states| states.contains(&step.state))
+                })
+                .filter(|step| {
+                    input
+                        .step_ids
+                        .as_ref()
+                        .is_none_or(|ids| ids.contains(&step.id))
+                })
+                .collect();
+
+            // The marker is the id of the first step the previous page did not report, so a
+            // page boundary survives steps being added between calls.
+            let start = match input.marker.as_ref() {
+                Some(marker) => match matched.iter().position(|step| step.id == *marker) {
+                    Some(at) => at,
+                    None => {
+                        return Err(ListStepsErrorModeled::InvalidRequestException(
+                            crate::state::malformed_marker(marker),
+                        )
+                        .into())
+                    }
+                },
+                None => 0,
+            };
+            let end = matched.len().min(start + LIST_STEPS_PAGE_SIZE);
+            let steps: Vec<StepSummary> = matched[start..end]
+                .iter()
+                .map(|step| step.to_summary())
+                .collect();
+            let marker = matched.get(end).map(|step| step.id.clone());
+
+            ListStepsOutput {
+                steps: Some(steps),
+                marker,
+            }
+        };
+
+        // Every step state this call materialised is published onto the account's default
+        // event bus, with this service's store released: see `crate::state::step_events`.
+        crate::state::publish_step_state_changes(
+            &*self.engine,
+            ctx,
+            &crate::state::request_region(ctx.parts()),
+            &input.cluster_id,
+        )
+        .await;
+
+        Ok(output)
     }
 }

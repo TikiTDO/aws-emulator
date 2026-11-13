@@ -171,24 +171,51 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             now,
         )
         .await;
+        // The same for a step that submitted a COMMAND — the cluster's own shutdown waits on
+        // its queue having run. Such a status is answered with a PARSE and a fixed allow-list
+        // of session-local utilities (`crate::state::step_command_status`): no host command,
+        // process or shell is ever started, and a command outside that list is refused with
+        // the status a shell gives a command it could not find. The call resolves the cluster
+        // itself and answers only for steps that cluster has already started, and it runs with
+        // no store guard held.
+        crate::state::resolve_due_step_commands(&*self.engine, &input.cluster_id, now);
 
-        let mut store = state.lock();
+        // The store is taken and RELEASED inside this block: the publication below reaches
+        // EventBridge's own handler, which may call back into this service, so this
+        // service's lock is never held across it.
+        let output = {
+            let mut store = state.lock();
 
-        // Reporting only: `cluster_mut` materialises the transitions the clock already
-        // made due (STARTING -> RUNNING/WAITING, TERMINATING -> TERMINATED), which were
-        // owed at this instant whether or not anybody described the cluster.
-        let Some(cluster) = store.cluster_mut(&input.cluster_id, now) else {
-            return Err(DescribeClusterErrorModeled::InvalidRequestException(
-                crate::state::unknown_cluster(&input.cluster_id),
-            )
-            .into());
+            // Reporting only: `cluster_mut` materialises the transitions the clock already
+            // made due (STARTING -> RUNNING/WAITING, TERMINATING -> TERMINATED), which were
+            // owed at this instant whether or not anybody described the cluster.
+            let Some(cluster) = store.cluster_mut(&input.cluster_id, now) else {
+                return Err(DescribeClusterErrorModeled::InvalidRequestException(
+                    crate::state::unknown_cluster(&input.cluster_id),
+                )
+                .into());
+            };
+
+            DescribeClusterOutput {
+                cluster: Some(cluster.to_cluster(&crate::state::ClusterRead {
+                    now,
+                    master_host: master_host.as_deref(),
+                })),
+            }
         };
 
-        Ok(DescribeClusterOutput {
-            cluster: Some(cluster.to_cluster(&crate::state::ClusterRead {
-                now,
-                master_host: master_host.as_deref(),
-            })),
-        })
+        // Describing a cluster materialises its step queue too, and this service's step
+        // states are an event source: every state its steps have moved into is published
+        // onto the account's default event bus, with this service's store released (see
+        // `crate::state::step_events`).
+        crate::state::publish_step_state_changes(
+            &*self.engine,
+            ctx,
+            &crate::state::request_region(ctx.parts()),
+            &input.cluster_id,
+        )
+        .await;
+
+        Ok(output)
     }
 }

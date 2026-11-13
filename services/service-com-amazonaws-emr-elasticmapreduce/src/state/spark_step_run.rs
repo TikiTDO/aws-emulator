@@ -487,10 +487,13 @@ fn failed(reason: &str, message: String) -> StepOutcome {
     }
 }
 
-/// The step's end when nothing ran its application and nothing can be said about it: the
-/// modelled failure state with the reason every step this emulator ran no application for
-/// carries ([`STEP_NOT_EXECUTED_REASON`]).
-fn not_executed() -> StepOutcome {
+/// The step's end when nothing ran its work and nothing can be said about it: the modelled
+/// failure state with the reason every step this emulator ran no application for carries
+/// ([`STEP_NOT_EXECUTED_REASON`]).
+///
+/// Shared with the command queue ([`super::command_step_run`]), whose commands end the same
+/// way when the session performed nothing of them, so the two have ONE spelling of this end.
+pub fn not_executed() -> StepOutcome {
     StepOutcome {
         state: step_state::FAILED.to_string(),
         failure: Some(StepFailure {

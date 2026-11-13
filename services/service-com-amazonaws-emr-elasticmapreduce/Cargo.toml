@@ -52,8 +52,19 @@ service-com-amazonaws-glue-awsglue = { workspace = true }
 sqlparser = { version = "0.59", features = ["visitor"] }
 # `shell-words`: a step's command may arrive as one argument holding a whole command line
 # (`bash -c '…'`), which is lexed with the POSIX shell's own word rules rather than split
-# by hand.
+# by hand — and the words of a step's own argument list are rendered BACK into one command
+# line with the same crate's quoter, so the session that answers for it reads exactly those
+# words (`state::step_command_status`).
 shell-words = "1"
+# The AWS SDK for EventBridge, driven over the in-process callback
+# (`OperationContext::callback`): every state a step moves into is published onto the
+# account's default event bus (`state::step_events`). Only the generated client is needed —
+# the emulator supplies the transport, so the SDK's own HTTPS stack and runtime are left out.
+aws-sdk-eventbridge = { version = "1", default-features = false }
+# `state::step_events`: the UTC calendar date and minute a published step event's own message
+# names the transition by, from the maintained calendar crate rather than by slicing a
+# rendered timestamp.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 # A notebook execution's notebook is an object in Amazon S3 ("the Amazon S3 location that
 # the notebook execution input is stored in"), and `StartNotebookExecution` FOLLOWS that
 # reference: the object is read with a `GetObject` driven over the in-process callback
@@ -81,6 +92,12 @@ emulator-core-build-support = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
+# A step's state changes are published onto the account's default EventBridge bus and routed
+# from there, so the suite that asserts them mounts EventBridge and Amazon SQS beside Amazon
+# EMR on ONE engine and reads each event back off the queue a rule delivered it to — the
+# same path a client's own rule takes.
+service-com-amazonaws-eventbridge-awsevents = { workspace = true }
+service-com-amazonaws-sqs-amazonsqs = { workspace = true }
 # A notebook execution's notebook is an object in Amazon S3, and a submitted Spark
 # application's file is too, so the suites that assert either RUNS write it through Amazon
 # S3's own `CreateBucket`/`PutObject` and read what it wrote back with `GetObject`, with that

@@ -151,7 +151,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     ) -> Result<Self::Output, Self::Error> {
         use crate::state::{cancel_steps_request_status, MAX_CANCEL_STEP_IDS};
 
-        let _ = ctx;
         let now = ::std::time::SystemTime::now();
 
         // The SHAPE of the cluster id is settled BEFORE any cluster is resolved: a value
@@ -169,75 +168,94 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 CancelStepsErrorModeled::InternalServerError(InternalServerError {}).into(),
             );
         };
-        let mut store = state.lock();
+        // The store is taken and RELEASED inside this block: the publication below reaches
+        // EventBridge's own handler, which may call back into this service, so this
+        // service's lock is never held across it.
+        let info = {
+            let mut store = state.lock();
 
-        // Which steps a cancel can still act on depends on the state each is in NOW, so
-        // the cluster's step runner materialises the transitions the clock already made
-        // due before any step is cancelled.
-        crate::state::run_due_steps(&*self.engine, &mut store, &input.cluster_id, now);
+            // Which steps a cancel can still act on depends on the state each is in NOW, so
+            // the cluster's step runner materialises the transitions the clock already made
+            // due before any step is cancelled.
+            crate::state::run_due_steps(&*self.engine, &mut store, &input.cluster_id, now);
 
-        let Some(cluster) = store.cluster_mut(&input.cluster_id, now) else {
-            return Err(CancelStepsErrorModeled::InvalidRequestException(
-                crate::state::unknown_cluster(&input.cluster_id),
-            )
-            .into());
+            let Some(cluster) = store.cluster_mut(&input.cluster_id, now) else {
+                return Err(CancelStepsErrorModeled::InvalidRequestException(
+                    crate::state::unknown_cluster(&input.cluster_id),
+                )
+                .into());
+            };
+
+            // The cluster is resolved FIRST and the request's other members are checked
+            // against the resolved cluster, which is the order Amazon EMR answers a request
+            // that gets both wrong in.
+            //
+            // "A maximum of 256 steps are allowed in each CancelSteps request."
+            // (`CancelSteps` doc.)
+            if input.step_ids.len() > MAX_CANCEL_STEP_IDS {
+                return Err(CancelStepsErrorModeled::InvalidRequestException(
+                    InvalidRequestException {
+                        error_code: None,
+                        message: Some(format!(
+                            "StepIds carries {} ids; a maximum of {MAX_CANCEL_STEP_IDS} steps \
+                             are allowed in each CancelSteps request",
+                            input.step_ids.len()
+                        )),
+                    },
+                )
+                .into());
+            }
+
+            // One entry per requested id, in request order: "A list of CancelStepsInfo,
+            // which shows the status of specified cancel requests for each StepID
+            // specified." (`CancelStepsOutput$CancelStepsInfoList` doc.)
+            let mut info = Vec::with_capacity(input.step_ids.len());
+            for step_id in &input.step_ids {
+                let (status, reason) = match cluster.step_mut(step_id) {
+                    Some(step) => {
+                        if step.begin_cancellation(now) {
+                            (cancel_steps_request_status::SUBMITTED, None)
+                        } else {
+                            // The step is past cancelling: "you can cancel steps that are
+                            // in a PENDING or RUNNING state" (`CancelSteps` doc).
+                            (
+                                cancel_steps_request_status::FAILED,
+                                Some(format!(
+                                    "Step {step_id} is in state {} and can no longer be \
+                                     cancelled",
+                                    step.state
+                                )),
+                            )
+                        }
+                    }
+                    None => (
+                        cancel_steps_request_status::FAILED,
+                        Some(format!(
+                            "Step id '{step_id}' is not valid or does not exist on cluster '{}'",
+                            input.cluster_id
+                        )),
+                    ),
+                };
+                info.push(CancelStepsInfo {
+                    step_id: Some(step_id.clone()),
+                    status: Some(status.to_string()),
+                    reason,
+                });
+            }
+            info
         };
 
-        // The cluster is resolved FIRST and the request's other members are checked
-        // against the resolved cluster, which is the order Amazon EMR answers a request
-        // that gets both wrong in.
-        //
-        // "A maximum of 256 steps are allowed in each CancelSteps request."
-        // (`CancelSteps` doc.)
-        if input.step_ids.len() > MAX_CANCEL_STEP_IDS {
-            return Err(CancelStepsErrorModeled::InvalidRequestException(
-                InvalidRequestException {
-                    error_code: None,
-                    message: Some(format!(
-                        "StepIds carries {} ids; a maximum of {MAX_CANCEL_STEP_IDS} steps are \
-                         allowed in each CancelSteps request",
-                        input.step_ids.len()
-                    )),
-                },
-            )
-            .into());
-        }
-
-        // One entry per requested id, in request order: "A list of CancelStepsInfo,
-        // which shows the status of specified cancel requests for each StepID
-        // specified." (`CancelStepsOutput$CancelStepsInfoList` doc.)
-        let mut info = Vec::with_capacity(input.step_ids.len());
-        for step_id in &input.step_ids {
-            let (status, reason) = match cluster.step_mut(step_id) {
-                Some(step) => {
-                    if step.begin_cancellation(now) {
-                        (cancel_steps_request_status::SUBMITTED, None)
-                    } else {
-                        // The step is past cancelling: "you can cancel steps that are
-                        // in a PENDING or RUNNING state" (`CancelSteps` doc).
-                        (
-                            cancel_steps_request_status::FAILED,
-                            Some(format!(
-                                "Step {step_id} is in state {} and can no longer be cancelled",
-                                step.state
-                            )),
-                        )
-                    }
-                }
-                None => (
-                    cancel_steps_request_status::FAILED,
-                    Some(format!(
-                        "Step id '{step_id}' is not valid or does not exist on cluster '{}'",
-                        input.cluster_id
-                    )),
-                ),
-            };
-            info.push(CancelStepsInfo {
-                step_id: Some(step_id.clone()),
-                status: Some(status.to_string()),
-                reason,
-            });
-        }
+        // A cancel MOVES the steps it accepted, and this service's step states are an event
+        // source: every state its steps have moved into is published onto the account's
+        // default event bus, with this service's store released (see
+        // `crate::state::step_events`).
+        crate::state::publish_step_state_changes(
+            &*self.engine,
+            ctx,
+            &crate::state::request_region(ctx.parts()),
+            &input.cluster_id,
+        )
+        .await;
 
         Ok(CancelStepsOutput {
             cancel_steps_info_list: Some(info),

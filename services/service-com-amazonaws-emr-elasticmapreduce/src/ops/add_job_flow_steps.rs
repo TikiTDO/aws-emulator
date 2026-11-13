@@ -155,7 +155,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     ) -> Result<Self::Output, Self::Error> {
         use crate::state::{cluster_state, StepRecord, MAX_STEPS_PER_JOB_FLOW};
 
-        let _ = ctx;
         let now = ::std::time::SystemTime::now();
         let submitted = input.steps.len();
 
@@ -164,62 +163,79 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 AddJobFlowStepsErrorModeled::InternalServerError(InternalServerError {}).into(),
             );
         };
-        let mut store = state.lock();
+        // The store is taken and RELEASED inside this block: the publication below reaches
+        // EventBridge's own handler, which may call back into this service, so this
+        // service's lock is never held across it.
+        let step_ids = {
+            let mut store = state.lock();
 
-        // Where a step of this cluster is in its lifecycle is reported here too, so the
-        // cluster's step runner materialises the transitions the clock already made due
-        // before anything is counted or queued.
-        crate::state::run_due_steps(&*self.engine, &mut store, &input.job_flow_id, now);
+            // Where a step of this cluster is in its lifecycle is reported here too, so the
+            // cluster's step runner materialises the transitions the clock already made due
+            // before anything is counted or queued.
+            crate::state::run_due_steps(&*self.engine, &mut store, &input.job_flow_id, now);
 
-        // This operation models no client error, so a request it must refuse is answered
-        // with the 400 `ValidationException` channel rather than a 501 or an empty 200.
-        // The legacy job-flow surface's sentence is CONSTANT: it names no id.
-        let Some(cluster) = store.cluster_mut(&input.job_flow_id, now) else {
-            return Err(crate::scaffolded::Scaffolded::validation(
-                crate::state::unknown_job_flow_message(),
-            ));
+            // This operation models no client error, so a request it must refuse is answered
+            // with the 400 `ValidationException` channel rather than a 501 or an empty 200.
+            // The legacy job-flow surface's sentence is CONSTANT: it names no id.
+            let Some(cluster) = store.cluster_mut(&input.job_flow_id, now) else {
+                return Err(crate::scaffolded::Scaffolded::validation(
+                    crate::state::unknown_job_flow_message(),
+                ));
+            };
+            let cluster_state_now = cluster.status.state.clone();
+            let already_held = cluster.steps.len();
+
+            // "You can only add steps to a cluster that is in one of the following states:
+            // STARTING, BOOTSTRAPPING, RUNNING, or WAITING." (AddJobFlowSteps doc.) The
+            // legacy job-flow surface's sentence for a cluster on its way out is CONSTANT:
+            // neither the id the request named nor the state the store holds it in is part
+            // of it.
+            if !cluster_state::ACCEPTS_STEPS.contains(&cluster_state_now.as_str()) {
+                return Err(crate::scaffolded::Scaffolded::validation(
+                    crate::state::job_flow_not_modifiable_message(),
+                ));
+            }
+
+            // "A maximum of 256 steps are allowed in each job flow." (AddJobFlowSteps doc.)
+            if already_held + submitted > MAX_STEPS_PER_JOB_FLOW {
+                return Err(crate::scaffolded::Scaffolded::validation(format!(
+                    "'{}' already holds {already_held} steps; a maximum of \
+                     {MAX_STEPS_PER_JOB_FLOW} steps are allowed in each job flow",
+                    input.job_flow_id
+                )));
+            }
+
+            let mut step_ids = Vec::with_capacity(submitted);
+            for _ in 0..submitted {
+                step_ids.push(store.mint_step_id());
+            }
+            let Some(cluster) = store.clusters.get_mut(&input.job_flow_id) else {
+                return Err(
+                    AddJobFlowStepsErrorModeled::InternalServerError(InternalServerError {})
+                        .into(),
+                );
+            };
+            for (step_id, config) in step_ids.iter().cloned().zip(input.steps) {
+                cluster.steps.push(StepRecord::from_config(
+                    step_id,
+                    config,
+                    input.execution_role_arn.clone(),
+                    now,
+                ));
+            }
+            step_ids
         };
-        let cluster_state_now = cluster.status.state.clone();
-        let already_held = cluster.steps.len();
 
-        // "You can only add steps to a cluster that is in one of the following states:
-        // STARTING, BOOTSTRAPPING, RUNNING, or WAITING." (AddJobFlowSteps doc.) The
-        // legacy job-flow surface's sentence for a cluster on its way out is CONSTANT:
-        // neither the id the request named nor the state the store holds it in is part
-        // of it.
-        if !cluster_state::ACCEPTS_STEPS.contains(&cluster_state_now.as_str()) {
-            return Err(crate::scaffolded::Scaffolded::validation(
-                crate::state::job_flow_not_modifiable_message(),
-            ));
-        }
-
-        // "A maximum of 256 steps are allowed in each job flow." (AddJobFlowSteps doc.)
-        if already_held + submitted > MAX_STEPS_PER_JOB_FLOW {
-            return Err(crate::scaffolded::Scaffolded::validation(format!(
-                "'{}' already holds {already_held} steps; a maximum of \
-                 {MAX_STEPS_PER_JOB_FLOW} steps are allowed in each job flow",
-                input.job_flow_id
-            )));
-        }
-
-        let mut step_ids = Vec::with_capacity(submitted);
-        for _ in 0..submitted {
-            step_ids.push(store.mint_step_id());
-        }
-        let Some(cluster) = store.clusters.get_mut(&input.job_flow_id) else {
-            return Err(
-                AddJobFlowStepsErrorModeled::InternalServerError(InternalServerError {}).into(),
-            );
-        };
-        for (step_id, config) in step_ids.iter().cloned().zip(input.steps) {
-            cluster.steps.push(StepRecord::from_config(
-                step_id,
-                config,
-                input.execution_role_arn.clone(),
-                now,
-            ));
-        }
-        drop(store);
+        // The queue this call moved is an event SOURCE: every state a step of it has moved
+        // into — the `PENDING` these submissions start in among them — is published onto the
+        // account's default event bus, with this service's store released.
+        crate::state::publish_step_state_changes(
+            &*self.engine,
+            ctx,
+            &crate::state::request_region(ctx.parts()),
+            &input.job_flow_id,
+        )
+        .await;
 
         Ok(AddJobFlowStepsOutput {
             step_ids: Some(step_ids),

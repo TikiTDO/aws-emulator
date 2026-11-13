@@ -105,6 +105,8 @@ mod spark_step_application;
 mod state_roundtrip;
 #[path = "all/step_concurrency_band_sentences.rs"]
 mod step_concurrency_band_sentences;
+#[path = "all/step_state_change_events.rs"]
+mod step_state_change_events;
 #[path = "all/studio_notebook_and_catalog_contract.rs"]
 mod studio_notebook_and_catalog_contract;
 #[path = "all/studio_session_mapping_identity.rs"]

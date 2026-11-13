@@ -131,6 +131,23 @@ pub use spark_runtime::*;
 mod spark_step_run;
 pub use spark_step_run::*;
 
+/// PERFORMING the command a step submitted — the command line its arguments are, and the
+/// status it exits with, answered by a parse and a fixed allow-list of session-local
+/// utilities with no host command, process or shell started — split out and re-exported the
+/// same way.
+mod step_command_status;
+pub use step_command_status::*;
+
+/// WHEN that answer is given, and what one call may spend giving it: the queue side of the
+/// same concern, split out and re-exported the same way.
+mod command_step_run;
+pub use command_step_run::*;
+
+/// The EventBridge events a step's state changes are published as, split out and
+/// re-exported the same way.
+mod step_events;
+pub use step_events::*;
+
 /// The Spark Connect session surface of a cluster — which clusters carry sessions, what
 /// `StartSession` records and the states the clock walks one through — split out and
 /// re-exported the same way.
@@ -1326,9 +1343,10 @@ pub const STEP_RUN_SPAN: Duration = Duration::from_secs(2);
 /// This service always runs the step LIFECYCLE: it accepts a step, queues it behind whatever
 /// its cluster is already running, starts it when a concurrency slot frees and records its
 /// timeline. What it can RUN is the submission it holds an engine and bytes for — a
-/// `spark-submit` of a Python application in Amazon S3 ([`spark_step_run`]) and a read-only
-/// statement resolvable in the cluster's metastore ([`step_runner`]). Every other
-/// submission — a jar, a command this service performs nothing for — produced no outcome,
+/// `spark-submit` of a Python application in Amazon S3 ([`spark_step_run`]), a read-only
+/// statement resolvable in the cluster's metastore ([`step_runner`]) and a command whose exit
+/// status the session-local utilities answer ([`step_command_status`]). Every other
+/// submission — a jar, a command this service answers for nothing of — produced no outcome,
 /// so the step ENDS in the modelled failure state with this reason saying exactly why,
 /// rather than reporting `COMPLETED` for work nothing performed.
 pub const STEP_NOT_EXECUTED_REASON: &str =
@@ -3924,6 +3942,15 @@ pub struct StepRecord {
     /// application has been RUN and its answer recorded in
     /// [`StepRecord::outcome`] ([`run_due_step_applications`]).
     pub application: Option<SparkApplication>,
+    /// The COMMAND this step's command line is, read off that command line once when the
+    /// step was submitted ([`StepCommand::of`]) for a step that submits neither of the two
+    /// classes above — those answer for themselves. What it answers is the status it exits
+    /// with, performed when the step's run ends ([`command_outcome`]).
+    pub command: Option<StepCommand>,
+    /// The state this step was last PUBLISHED in, so a transition reaches the account's
+    /// event bus exactly once however it was materialised ([`step_events`]). `None` while
+    /// nothing of this step has been published.
+    pub published_state: Option<String>,
 }
 
 impl StepRecord {
@@ -3954,6 +3981,13 @@ impl StepRecord {
         // The application the command submits, read the same way and for the same reason:
         // the command never changes, and what it submits is what the step will RUN.
         let application = submitted_spark_application(&config.hadoop_jar_step.jar, &args);
+        // The command the step's command line is, read the same way. It is read only for a
+        // step that submits neither of the two classes above: an application and a statement
+        // resolvable in the cluster's metastore answer for themselves, and what the command
+        // ANSWERS is the status it exits with, performed when the step's run ends.
+        let command = (work.is_none() && application.is_none())
+            .then(|| StepCommand::of(&config.hadoop_jar_step.jar, &args))
+            .flatten();
         Self {
             id,
             name: config.name,
@@ -3980,6 +4014,8 @@ impl StepRecord {
             work,
             outcome: None,
             application,
+            command,
+            published_state: None,
         }
     }
 
@@ -3992,6 +4028,23 @@ impl StepRecord {
     #[must_use]
     pub fn awaits_application(&self) -> bool {
         self.application.is_some()
+            && self.outcome.is_none()
+            && !self.is_terminal()
+            && self.stop_due_at.is_none()
+    }
+
+    /// Whether this step is still owed the PERFORMANCE of the command it submitted: it
+    /// submitted one, nothing has answered for it yet, and the step is neither terminal nor
+    /// stopping.
+    ///
+    /// Such a step does not end ([`Self::run_between`]) for the same reason one awaiting its
+    /// application does not: the state it ends in is the status its command exited with, so
+    /// it stays `RUNNING` until that command has been performed
+    /// ([`resolve_due_step_commands`]) rather than being reported COMPLETED or FAILED for a
+    /// command nothing has performed yet.
+    #[must_use]
+    pub fn awaits_command(&self) -> bool {
+        self.command.is_some()
             && self.outcome.is_none()
             && !self.is_terminal()
             && self.stop_due_at.is_none()
@@ -4100,7 +4153,11 @@ impl StepRecord {
     /// not end until it has ([`Self::awaits_application`]) — and a statement whose only
     /// effect is reading, submitted to a cluster whose Hive metastore this service holds,
     /// ends `COMPLETED` when every table it names resolves and `FAILED` with the driver's
-    /// table-not-found when one does not ([`run_due_steps`]).
+    /// table-not-found when one does not ([`run_due_steps`]). A step that submits neither of
+    /// those submits a COMMAND, and it ends in the status that command exited with — zero is
+    /// `COMPLETED` and anything else `FAILED` ([`resolve_due_step_commands`]) — which is what
+    /// `AddJobFlowSteps` documents a step's completion as; such a step does not end until
+    /// that command has been performed ([`Self::awaits_command`]).
     ///
     /// For every other step that end is the modelled FAILURE state, with the details
     /// saying why ([`STEP_NOT_EXECUTED_REASON`]): this service runs the step lifecycle —
@@ -4122,9 +4179,10 @@ impl StepRecord {
             return;
         }
         if now >= end {
-            // A step whose application has not run yet does not end: what it ends in is
-            // what that application answers ([`Self::awaits_application`]).
-            if self.awaits_application() {
+            // A step whose application has not run yet, or whose command has not been
+            // performed yet, does not end: what it ends in is what that run answers
+            // ([`Self::awaits_application`], [`Self::awaits_command`]).
+            if self.awaits_application() || self.awaits_command() {
                 self.state = step_state::RUNNING.to_string();
                 self.start_date_time = Some(start);
                 return;
