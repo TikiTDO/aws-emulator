@@ -46,3 +46,20 @@ tar, a temporary Docker config and a fixed local socket; it pushes, verifies
 bytes independently over HTTP, removes its exact local tags, then pulls by
 digest. It does not prune unrelated images or prove a large application image
 fits the in-memory bounds. Ordinary tests never execute Docker.
+
+### Production HTTP body ceiling
+
+The production HTTPS server separately buffers at most **16MiB per request body**
+(`vendor/server/src/lib.rs`, `MAX_PRODUCTION_BODY_BYTES`). A larger body is
+refused with HTTP 413 before service dispatch; sending it with HTTP chunked
+transfer encoding does not bypass that total-body limit. The 128MiB layer bound
+above is a stored/upload-session bound, not a promise that one HTTP request can
+carry a layer that large. A client must split larger content into separate
+Registry V2 PATCH requests within the server ceiling; this service cannot force
+an unmodified Docker publisher to do so. Actual Docker/CDK request sizes and
+application layer sizes still require validation before claiming application fit.
+
+The ephemeral HTTP test server used by the ignored witness does not apply this
+production-server body ceiling. A tiny witness passing there is not production
+large-layer/streaming proof. The server's extra-route seam also receives already
+buffered requests; it is not an existing streaming bypass for registry uploads.
