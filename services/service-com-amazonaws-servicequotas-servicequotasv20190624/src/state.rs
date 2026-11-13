@@ -2763,7 +2763,9 @@ fn decode_cursor_token(listing: &str, token: &str) -> Result<Option<String>, Inv
 /// The opaque token for "resume `listing` at `offset`".
 fn encode_page_token(listing: &str, offset: usize) -> String {
     base64::engine::general_purpose::STANDARD.encode(format!("{listing}:{offset}"))
-}/// The position a token names in `listing`, or [`InvalidPageToken`] when it is not
+}
+
+/// The position a token names in `listing`, or [`InvalidPageToken`] when it is not
 /// one this service issued for that listing.
 fn decode_page_token(listing: &str, token: &str) -> Result<usize, InvalidPageToken> {
     // An empty token is the same request as no token at all: start at the beginning.
