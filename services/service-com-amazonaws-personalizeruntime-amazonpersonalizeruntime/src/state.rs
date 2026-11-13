@@ -62,13 +62,22 @@
 //!   `CreateFilter` validates it, so a stored filter is always one the runtime can
 //!   apply. What a REQUEST binds its placeholders to is a fact about the request, so a
 //!   value a clause cannot apply is reported where the request is served.
+//!
+//! # What the registry is NOT asked
+//!
+//! Whether the CALLER may make the request at all is decided before any of the above, and
+//! not from anything this registry holds: see [`authorization`]. A request that fails that
+//! decision never reaches a lookup, so a missing registry entry stays the single source of
+//! truth for the refusals named above and for nothing else.
 
+pub mod authorization;
 pub mod filter;
 pub mod scoring;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub use authorization::authorization_refusal;
 pub use filter::{BoundFilter, Entity, FilterExpression, FilterKind};
 
 /// The only `metadataColumns` map key the service accepts: "The map key is

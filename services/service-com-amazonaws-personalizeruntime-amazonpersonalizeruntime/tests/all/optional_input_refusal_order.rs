@@ -31,24 +31,24 @@ use crate::support::{actions, items, Emulator, ACTION_RECOMMENDATIONS, RECOMMEND
 /// A registered `USER_PERSONALIZATION` campaign: what `GetRecommendations` serves with
 /// `userId`, and the wrong recipe type for `GetActionRecommendations`.
 const CAMPAIGN_USER: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/user-personalization";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/user-personalization";
 /// A registered `RELATED_ITEMS` campaign: what `GetRecommendations` serves with `itemId`.
-const CAMPAIGN_RELATED: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/related-items";
+const CAMPAIGN_RELATED: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/related-items";
 /// A registered `PERSONALIZED_ACTIONS` campaign: what `GetActionRecommendations` serves,
 /// and the wrong recipe type for `GetRecommendations`.
-const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/actions";
+const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/actions";
 /// A registered recommender whose use case needs `userId` (`RECOMMENDER_USE_CASES`).
 const RECOMMENDER_FOR_YOU: &str =
-    "arn:aws:personalize:us-east-1:123456789012:recommender/recommended-for-you";
+    "arn:aws:personalize:us-east-1:000000000000:recommender/recommended-for-you";
 /// The use case behind [`RECOMMENDER_FOR_YOU`], as `RECOMMENDER_USE_CASES` spells it.
 const USE_CASE_FOR_YOU: &str = "Recommended for you";
 
 /// A well-formed campaign ARN the registry does not hold.
 const UNREGISTERED_CAMPAIGN: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/never-created";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/never-created";
 /// A well-formed recommender ARN the registry does not hold.
 const UNREGISTERED_RECOMMENDER: &str =
-    "arn:aws:personalize:us-east-1:123456789012:recommender/never-created";
+    "arn:aws:personalize:us-east-1:000000000000:recommender/never-created";
 
 /// How many entries the seeded catalogs hold.
 const CATALOG_SIZE: usize = 6;

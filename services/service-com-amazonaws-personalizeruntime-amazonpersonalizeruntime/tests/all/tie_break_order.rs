@@ -28,22 +28,22 @@ use crate::support::{
 
 /// A `PERSONALIZED_RANKING` campaign whose catalog entries carry no popularity.
 const CAMPAIGN_FLAT_RANKING: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/tie-flat-ranking";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/tie-flat-ranking";
 /// A `USER_PERSONALIZATION` campaign whose catalog entries carry no popularity.
 const CAMPAIGN_FLAT_USER: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/tie-flat-user";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/tie-flat-user";
 /// A `PERSONALIZED_ACTIONS` campaign whose actions carry no popularity.
 const CAMPAIGN_FLAT_ACTIONS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/tie-flat-actions";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/tie-flat-actions";
 
 /// A `PERSONALIZED_RANKING` campaign over a catalog that does carry popularity.
 const CAMPAIGN_RANKING: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/tie-ranking";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/tie-ranking";
 /// A `USER_PERSONALIZATION` campaign over a catalog that does carry popularity.
-const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/tie-user";
+const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/tie-user";
 /// A `PERSONALIZED_ACTIONS` campaign over actions that do carry popularity.
 const CAMPAIGN_ACTIONS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/tie-actions";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/tie-actions";
 
 /// How many entries the seeded Items catalogs hold. Past ten, so the ids' ascending
 /// order (`item-0`, `item-1`, `item-10`, …) is NOT the catalog order and an assertion

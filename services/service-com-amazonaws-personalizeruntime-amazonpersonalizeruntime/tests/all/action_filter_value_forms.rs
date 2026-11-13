@@ -37,20 +37,20 @@ use crate::support::{
 
 /// The `PERSONALIZED_ACTIONS` campaign every row below recommends from.
 const CAMPAIGN_ACTIONS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/action-value-forms";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/action-value-forms";
 
 /// `INCLUDE ActionID WHERE Actions.CHANNEL IN ($CHANNEL)`.
 const FILTER_INCLUDE_CHANNEL: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/forms-include-channel";
+    "arn:aws:personalize:us-east-1:000000000000:filter/forms-include-channel";
 /// `EXCLUDE ActionID WHERE Actions.CHANNEL IN ($CHANNEL)`.
 const FILTER_EXCLUDE_CHANNEL: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/forms-exclude-channel";
+    "arn:aws:personalize:us-east-1:000000000000:filter/forms-exclude-channel";
 /// `INCLUDE ActionID WHERE Actions.CHANNEL NOT IN ($CHANNEL)`.
 const FILTER_OTHER_CHANNELS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/forms-other-channels";
+    "arn:aws:personalize:us-east-1:000000000000:filter/forms-other-channels";
 /// `INCLUDE ActionID WHERE Actions.VALUE >= $VALUE`.
 const FILTER_FROM_VALUE: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/forms-from-value";
+    "arn:aws:personalize:us-east-1:000000000000:filter/forms-from-value";
 
 /// The categorical Actions column the string rows filter on.
 const COLUMN_CHANNEL: &str = "CHANNEL";

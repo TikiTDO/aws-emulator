@@ -29,6 +29,13 @@ service-common = { path = "../common" }
 # (`src/state/scoring.rs`): SHA-256 as a stable mixing function, hex for the id.
 sha2 = { workspace = true }
 hex = { workspace = true }
+# The two stores the authorization gate reads (`src/state/authorization.rs`): AWS decides
+# whether the caller may make an inference call before any resource it names is looked up —
+# the SESSION a credential speaks for lives in STS's store while the POLICIES in force on
+# that principal live in IAM's. Only their `state` accessors are used; the DECISION itself is
+# `service-common`'s one shared evaluation.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -36,6 +43,13 @@ emulator-core-build-support = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
+# IAM and the token service, mounted beside this one in the authorization suite: the policies
+# an inference call is authorized against are IAM's and the identity a credential speaks for
+# is STS's, so the gate is driven end to end against the services that own them. They are
+# also normal dependencies of this crate (the gate reads their stores); this entry only
+# states that the harness mounts them.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
 
 [lints]
 workspace = true

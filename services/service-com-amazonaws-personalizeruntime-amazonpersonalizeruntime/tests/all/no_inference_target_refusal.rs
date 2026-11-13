@@ -38,13 +38,13 @@ fn unresolvable(arn: &str) -> String {
 
 /// A well-formed campaign ARN no registry holds.
 const UNREGISTERED_CAMPAIGN: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/never-created";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/never-created";
 /// A well-formed recommender ARN no registry holds.
 const UNREGISTERED_RECOMMENDER: &str =
-    "arn:aws:personalize:us-east-1:123456789012:recommender/never-created";
+    "arn:aws:personalize:us-east-1:000000000000:recommender/never-created";
 /// A well-formed filter ARN no registry holds. A filter is bound only AFTER the target is
 /// resolved, so a row carrying it still earns the no-target refusal.
-const UNREGISTERED_FILTER: &str = "arn:aws:personalize:us-east-1:123456789012:filter/never-created";
+const UNREGISTERED_FILTER: &str = "arn:aws:personalize:us-east-1:000000000000:filter/never-created";
 
 /// Requests that name neither alternative, differing in everything else they carry: the
 /// other members present, their values, their count and their form. Every row must earn

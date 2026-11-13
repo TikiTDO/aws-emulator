@@ -54,11 +54,11 @@ async fn a_value_outside_the_arn_pattern_names_the_member_and_the_unanchored_pat
         ("an ARN of another service", "arn:aws:s3:::bucket/key"),
         (
             "an uppercase partition",
-            "arn:AWS:personalize:us-east-1:123456789012:campaign/x",
+            "arn:AWS:personalize:us-east-1:000000000000:campaign/x",
         ),
         (
             "no resource part",
-            "arn:aws:personalize:us-east-1:123456789012:",
+            "arn:aws:personalize:us-east-1:000000000000:",
         ),
         ("an ARN prefix only", "arn:aws:personalize"),
     ];
@@ -89,7 +89,7 @@ async fn a_value_outside_the_arn_pattern_names_the_member_and_the_unanchored_pat
                 "filterArn",
                 ACTION_RECOMMENDATIONS,
                 json!({
-                    "campaignArn": "arn:aws:personalize:us-east-1:123456789012:campaign/actions",
+                    "campaignArn": "arn:aws:personalize:us-east-1:000000000000:campaign/actions",
                     "userId": "user-1",
                     "filterArn": value,
                 }),
@@ -128,7 +128,7 @@ async fn a_violation_of_another_class_keeps_the_frameworks_clause() {
         .refusal(
             RECOMMENDATIONS,
             json!({
-                "campaignArn": "arn:aws:personalize:us-east-1:123456789012:campaign/any",
+                "campaignArn": "arn:aws:personalize:us-east-1:000000000000:campaign/any",
                 "userId": "user-1",
                 "numResults": -1,
             }),
@@ -205,7 +205,7 @@ async fn a_request_that_names_no_campaign_reports_the_campaign_arn_it_gave() {
             json!({
                 "userId": "user-1",
                 "numResults": 2,
-                "filterArn": "arn:aws:personalize:us-east-1:123456789012:filter/any",
+                "filterArn": "arn:aws:personalize:us-east-1:000000000000:filter/any",
             }),
         ),
     ];
@@ -232,7 +232,7 @@ async fn a_request_that_names_no_campaign_reports_the_campaign_arn_it_gave() {
 /// A well-formed campaign ARN no registry holds, so a request that gets past the
 /// request-only checks is refused for the campaign and nothing else.
 const UNREGISTERED_CAMPAIGN: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/never-created";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/never-created";
 
 #[tokio::test]
 async fn an_input_list_past_its_documented_maximum_is_refused_before_the_campaign_resolves() {

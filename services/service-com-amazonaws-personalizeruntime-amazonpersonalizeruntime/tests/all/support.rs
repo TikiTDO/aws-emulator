@@ -27,6 +27,15 @@ use runtime::state::{Action, Item};
 /// (`endpointPrefix: personalize-runtime`).
 pub const HOST: &str = "personalize-runtime.us-east-1.amazonaws.com";
 
+/// The account every suite's campaigns, recommenders and filters live in: the one this
+/// emulator serves.
+///
+/// A resource ARN of any OTHER account is a CROSS-ACCOUNT reference, which the
+/// authorization stage refuses with HTTP 403 `AccessDeniedException` before anything is
+/// resolved (see `identity_and_account_authorization.rs`, which owns that rule) — so a suite
+/// about resolution, scoring, filtering or refusal wording addresses this account.
+pub const ACCOUNT: &str = ::engine::EMULATOR_ACCOUNT_ID;
+
 /// A SigV4 `Authorization` header whose credential scope names this service's signing
 /// name (`personalize`) — the routing signal the router reads first. Request
 /// authentication is off in tests, so the signature itself is never verified.

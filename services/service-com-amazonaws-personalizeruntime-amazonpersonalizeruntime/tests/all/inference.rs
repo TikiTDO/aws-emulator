@@ -26,43 +26,43 @@ use crate::support::{
 };
 
 /// A `USER_PERSONALIZATION` campaign, with metadata in recommendations enabled.
-const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/user-personalization";
+const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/user-personalization";
 /// A `RELATED_ITEMS` campaign, with metadata in recommendations NOT enabled.
-const CAMPAIGN_RELATED: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/related-items";
+const CAMPAIGN_RELATED: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/related-items";
 /// A `PERSONALIZED_RANKING` campaign, with metadata in recommendations enabled.
-const CAMPAIGN_RANKING: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/ranking";
+const CAMPAIGN_RANKING: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/ranking";
 /// A `PERSONALIZED_ACTIONS` campaign.
-const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/actions";
+const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/actions";
 /// A domain recommender for the "Top picks for you" use case.
 const RECOMMENDER_TOP_PICKS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:recommender/top-picks";
+    "arn:aws:personalize:us-east-1:000000000000:recommender/top-picks";
 
 /// `INCLUDE ItemID WHERE Items.GENRE IN ($GENRE)`.
 const FILTER_INCLUDE_GENRE: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/include-genre";
+    "arn:aws:personalize:us-east-1:000000000000:filter/include-genre";
 /// `EXCLUDE ItemID WHERE Items.GENRE IN ("Comedy")`.
 const FILTER_EXCLUDE_COMEDY: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/exclude-comedy";
+    "arn:aws:personalize:us-east-1:000000000000:filter/exclude-comedy";
 /// `EXCLUDE ItemID WHERE Items.GENRE IN ($GENRE)`.
 const FILTER_EXCLUDE_GENRE: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/exclude-genre";
+    "arn:aws:personalize:us-east-1:000000000000:filter/exclude-genre";
 /// `INCLUDE ItemID WHERE Items.YEAR >= 2010`.
-const FILTER_RECENT: &str = "arn:aws:personalize:us-east-1:123456789012:filter/recent";
+const FILTER_RECENT: &str = "arn:aws:personalize:us-east-1:000000000000:filter/recent";
 /// `INCLUDE ItemID WHERE Items.GENRE IN ("Comedy") OR Items.GENRE IN ("Drama")`.
 const FILTER_COMEDY_OR_DRAMA: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/comedy-or-drama";
+    "arn:aws:personalize:us-east-1:000000000000:filter/comedy-or-drama";
 /// `INCLUDE ItemID WHERE Items.GENRE IN ("Comedy") AND Items.YEAR >= 2010`.
 const FILTER_RECENT_COMEDY: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/recent-comedy";
+    "arn:aws:personalize:us-east-1:000000000000:filter/recent-comedy";
 /// `INCLUDE ActionID WHERE Actions.CHANNEL IN ("App")`.
-const FILTER_APP_ACTIONS: &str = "arn:aws:personalize:us-east-1:123456789012:filter/app-actions";
+const FILTER_APP_ACTIONS: &str = "arn:aws:personalize:us-east-1:000000000000:filter/app-actions";
 
 /// An ARN that is well formed but names nothing the registry holds.
 const UNREGISTERED_CAMPAIGN: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/does-not-exist";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/does-not-exist";
 /// A filter ARN that names nothing the registry holds.
 const UNREGISTERED_FILTER: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/does-not-exist";
+    "arn:aws:personalize:us-east-1:000000000000:filter/does-not-exist";
 
 /// How many items every seeded Items catalog holds.
 const CATALOG_SIZE: usize = 40;
@@ -483,7 +483,7 @@ async fn an_unregistered_arn_is_invalid_input_for_every_operation() {
             "GetRecommendations, unknown recommender",
             RECOMMENDATIONS,
             json!({
-                "recommenderArn": "arn:aws:personalize:us-east-1:123456789012:recommender/nope",
+                "recommenderArn": "arn:aws:personalize:us-east-1:000000000000:recommender/nope",
                 "userId": "user-1",
             }),
         ),
@@ -555,7 +555,7 @@ async fn an_arn_outside_the_modelled_pattern_is_refused_with_400() {
         ("not an ARN at all", "not-an-arn"),
         ("an ARN of another service", "arn:aws:s3:::bucket/key"),
         ("an uppercase partition", "arn:AWS:personalize:us-east-1:1:campaign/x"),
-        ("no resource part", "arn:aws:personalize:us-east-1:123456789012:"),
+        ("no resource part", "arn:aws:personalize:us-east-1:000000000000:"),
     ];
 
     for (case, arn) in rows {
@@ -1463,7 +1463,7 @@ async fn a_recommender_requires_the_input_its_use_case_documents() {
     // called with nothing, with `userId`, and with `itemId`.
     for (index, (use_case, required)) in RECOMMENDER_USE_CASES.iter().enumerate() {
         let arn =
-            format!("arn:aws:personalize:us-east-1:123456789012:recommender/use-case-{index}");
+            format!("arn:aws:personalize:us-east-1:000000000000:recommender/use-case-{index}");
         assert!(
             registry::register_recommender(
                 engine,
@@ -1517,7 +1517,7 @@ async fn a_recommender_requires_the_input_its_use_case_documents() {
         !registry::register_recommender(
             engine,
             Recommender::new(
-                "arn:aws:personalize:us-east-1:123456789012:recommender/unknown-use-case",
+                "arn:aws:personalize:us-east-1:000000000000:recommender/unknown-use-case",
                 "unknown",
                 "No such use case",
                 items(4)
@@ -1648,7 +1648,7 @@ fn the_filter_seam_refuses_an_expression_the_runtime_cannot_apply() {
         "INCLUDE ActionID WHERE Actions.CHANNEL IN (\"App\", \"Email\")",
     ];
     for (index, expression) in accepted.iter().enumerate() {
-        let arn = format!("arn:aws:personalize:us-east-1:123456789012:filter/ok-{index}");
+        let arn = format!("arn:aws:personalize:us-east-1:000000000000:filter/ok-{index}");
         assert_eq!(
             registry::register_filter(engine, &arn, *expression),
             Ok(true),
@@ -1676,7 +1676,7 @@ fn the_filter_seam_refuses_an_expression_the_runtime_cannot_apply() {
         ),
     ];
     for (case, expression) in refused {
-        let arn = format!("arn:aws:personalize:us-east-1:123456789012:filter/bad-{case}");
+        let arn = format!("arn:aws:personalize:us-east-1:000000000000:filter/bad-{case}");
         let outcome = registry::register_filter(engine, &arn, expression);
         assert!(
             outcome.is_err(),
@@ -1689,7 +1689,7 @@ fn the_filter_seam_refuses_an_expression_the_runtime_cannot_apply() {
     }
 
     // A resource is created once: re-registering an ARN changes nothing.
-    let arn = "arn:aws:personalize:us-east-1:123456789012:filter/ok-0";
+    let arn = "arn:aws:personalize:us-east-1:000000000000:filter/ok-0";
     assert_eq!(
         registry::register_filter(engine, arn, "EXCLUDE ItemID WHERE Items.GENRE IN ($G)"),
         Ok(false),

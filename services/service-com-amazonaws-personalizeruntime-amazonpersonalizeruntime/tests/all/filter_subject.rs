@@ -28,11 +28,11 @@ use crate::support::{
 };
 
 /// A `USER_PERSONALIZATION` campaign, served by `GetRecommendations`.
-const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/user-personalization";
+const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/user-personalization";
 /// A `PERSONALIZED_RANKING` campaign, served by `GetPersonalizedRanking`.
-const CAMPAIGN_RANKING: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/ranking";
+const CAMPAIGN_RANKING: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/ranking";
 /// A `PERSONALIZED_ACTIONS` campaign, served by `GetActionRecommendations`.
-const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/actions";
+const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/actions";
 
 /// How many items the seeded Items catalog holds.
 const CATALOG_SIZE: usize = 40;
@@ -117,7 +117,7 @@ fn the_subject_slot_admits_only_the_two_identifiers_the_grammar_defines() {
     ];
 
     for (case, expression, entity) in accepted {
-        let arn = format!("arn:aws:personalize:us-east-1:123456789012:filter/ok-{case}");
+        let arn = format!("arn:aws:personalize:us-east-1:000000000000:filter/ok-{case}");
         assert_eq!(
             registry::register_filter(engine, &arn, expression),
             Ok(true),
@@ -182,7 +182,7 @@ fn the_subject_slot_admits_only_the_two_identifiers_the_grammar_defines() {
     ];
 
     for (case, expression) in refused {
-        let arn = format!("arn:aws:personalize:us-east-1:123456789012:filter/bad-{case}");
+        let arn = format!("arn:aws:personalize:us-east-1:000000000000:filter/bad-{case}");
         let outcome = registry::register_filter(engine, &arn, expression);
         let message = match &outcome {
             Err(message) => message.clone(),
@@ -289,7 +289,7 @@ async fn a_filter_applies_only_to_recommendations_of_the_entity_its_subject_name
                 };
                 let expression = format!("{kind} {} WHERE {clause}", subject.subject());
                 let arn = format!(
-                    "arn:aws:personalize:us-east-1:123456789012:filter/{kind}-{}-{}",
+                    "arn:aws:personalize:us-east-1:000000000000:filter/{kind}-{}-{}",
                     subject.subject(),
                     clause_entity.dataset()
                 );

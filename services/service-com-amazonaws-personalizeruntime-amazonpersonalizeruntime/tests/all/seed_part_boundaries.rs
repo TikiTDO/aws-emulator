@@ -35,10 +35,10 @@ use crate::support::{
 };
 
 /// The `USER_PERSONALIZATION` campaign `GetRecommendations` reads here.
-const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/boundary-user";
+const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/boundary-user";
 /// The `PERSONALIZED_RANKING` campaign `GetPersonalizedRanking` re-ranks here.
 const CAMPAIGN_RANKING: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/boundary-ranking";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/boundary-ranking";
 
 /// How many entries the seeded catalogs hold.
 const CATALOG_SIZE: usize = 8;

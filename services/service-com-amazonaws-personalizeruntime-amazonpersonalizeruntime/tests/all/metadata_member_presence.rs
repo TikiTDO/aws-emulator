@@ -33,10 +33,10 @@ use crate::support::{
 /// The `PERSONALIZED_RANKING` campaign the ranking rows re-rank, with metadata in
 /// recommendations enabled.
 const CAMPAIGN_RANKING: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/metadata-ranking";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/metadata-ranking";
 /// The `USER_PERSONALIZATION` campaign the recommendation rows read, over the same
 /// catalog and with metadata in recommendations enabled.
-const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/metadata-user";
+const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/metadata-user";
 
 /// How many entries the seeded Items catalog holds — a multiple of the four column
 /// shapes below, so every shape is carried by more than one entry.

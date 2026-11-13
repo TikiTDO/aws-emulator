@@ -40,20 +40,20 @@ fn unresolvable_message(arn: &str) -> String {
 }
 
 /// A registered `USER_PERSONALIZATION` campaign.
-const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/personalization";
+const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/personalization";
 /// A registered `PERSONALIZED_RANKING` campaign.
-const CAMPAIGN_RANKING: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/ranking";
+const CAMPAIGN_RANKING: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/ranking";
 /// A registered `PERSONALIZED_ACTIONS` campaign.
-const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/actions";
+const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/actions";
 /// A registered domain recommender.
-const RECOMMENDER: &str = "arn:aws:personalize:us-east-1:123456789012:recommender/top-picks";
+const RECOMMENDER: &str = "arn:aws:personalize:us-east-1:000000000000:recommender/top-picks";
 /// A registered filter over the Items dataset.
-const FILTER_ITEMS: &str = "arn:aws:personalize:us-east-1:123456789012:filter/every-item";
+const FILTER_ITEMS: &str = "arn:aws:personalize:us-east-1:000000000000:filter/every-item";
 /// A registered filter over the Actions dataset.
-const FILTER_ACTIONS: &str = "arn:aws:personalize:us-east-1:123456789012:filter/every-action";
+const FILTER_ACTIONS: &str = "arn:aws:personalize:us-east-1:000000000000:filter/every-action";
 
 /// The ARN prefix every value below is built on, so a row varies only the resource part.
-const ARN_PREFIX: &str = "arn:aws:personalize:us-east-1:123456789012:";
+const ARN_PREFIX: &str = "arn:aws:personalize:us-east-1:000000000000:";
 
 /// How many entries the seeded catalogs hold.
 const CATALOG_SIZE: usize = 6;

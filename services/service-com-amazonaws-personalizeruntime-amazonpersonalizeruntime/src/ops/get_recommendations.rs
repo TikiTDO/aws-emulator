@@ -206,7 +206,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
+        // 0. Whether this CALLER may make the call at all — the decision AWS takes in front
+        //    of the handler, on the action this operation names and on every resource ARN
+        //    the request names ([`crate::state::authorization`]). It is taken before
+        //    anything is read, so a refused request consults no registry entry and tells
+        //    its caller nothing about one.
+        if let Some(refusal) = crate::state::authorization_refusal(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &referenced_resources(&input),
+        ) {
+            return Err(GetRecommendationsError::access_denied(refusal));
+        }
+
         let state = crate::state::service_state(&*self.engine)
             .ok_or_else(|| registry::registry_unavailable("GetRecommendations"))?;
         let now = SystemTime::now();
@@ -391,6 +404,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             recommendation_id: Some(recommendation_id),
         })
     }
+}
+
+/// Every resource ARN this request NAMES.
+///
+/// The authorization decision is taken over all of them and nothing else: the campaign or
+/// recommender the action is performed on (the resource types
+/// `personalize:GetRecommendations` is published for), the request's own filter, and the
+/// filter of its promotion. Read from the REQUEST, so the decision is independent of whether
+/// any of them exists — which is what keeps a refused call from telling an unauthorized
+/// caller whether one does. An empty value names no resource at all and is left to the
+/// refusals that report what is wrong with the request itself.
+fn referenced_resources(input: &GetRecommendationsInput) -> Vec<&str> {
+    let mut referenced: Vec<&str> = Vec::new();
+    referenced.extend(registry::present(input.campaign_arn.as_deref()));
+    referenced.extend(registry::present(input.recommender_arn.as_deref()));
+    referenced.extend(registry::present(input.filter_arn.as_deref()));
+    referenced.extend(
+        input
+            .promotions
+            .iter()
+            .flatten()
+            .filter_map(|promotion| registry::present(promotion.filter_arn.as_deref())),
+    );
+    referenced
 }
 
 /// The refusal this operation states for a request that names NO inference target.

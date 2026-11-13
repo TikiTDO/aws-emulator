@@ -33,50 +33,50 @@ use crate::support::{
 };
 
 /// The `USER_PERSONALIZATION` campaign the `GetRecommendations` rows read.
-const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/compare-user";
+const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/compare-user";
 /// The `PERSONALIZED_RANKING` campaign the `GetPersonalizedRanking` rows re-rank.
 const CAMPAIGN_RANKING: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/compare-ranking";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/compare-ranking";
 /// The `PERSONALIZED_ACTIONS` campaign the `GetActionRecommendations` rows read.
 const CAMPAIGN_ACTIONS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/compare-actions";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/compare-actions";
 
 /// `INCLUDE ItemID WHERE Items.GENRE = "Comedy"`.
 const INCLUDE_LITERAL_GENRE: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/compare-include-literal";
+    "arn:aws:personalize:us-east-1:000000000000:filter/compare-include-literal";
 /// `EXCLUDE ItemID WHERE Items.GENRE = "Comedy"`.
 const EXCLUDE_LITERAL_GENRE: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/compare-exclude-literal";
+    "arn:aws:personalize:us-east-1:000000000000:filter/compare-exclude-literal";
 /// `INCLUDE ItemID WHERE Items.GENRE = $GENRE`.
 const INCLUDE_GENRE_EQUALS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/compare-include-equals";
+    "arn:aws:personalize:us-east-1:000000000000:filter/compare-include-equals";
 /// `INCLUDE ItemID WHERE Items.GENRE <> $GENRE`.
 const INCLUDE_GENRE_DIFFERS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/compare-include-differs";
+    "arn:aws:personalize:us-east-1:000000000000:filter/compare-include-differs";
 /// `EXCLUDE ItemID WHERE Items.GENRE <> $GENRE`.
 const EXCLUDE_GENRE_DIFFERS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/compare-exclude-differs";
+    "arn:aws:personalize:us-east-1:000000000000:filter/compare-exclude-differs";
 /// `INCLUDE ItemID WHERE Items.YEAR = $YEAR`.
 const INCLUDE_YEAR_EQUALS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/compare-include-year";
+    "arn:aws:personalize:us-east-1:000000000000:filter/compare-include-year";
 /// `INCLUDE ItemID WHERE Items.YEAR IN ($YEAR)`.
 const INCLUDE_YEAR_IN: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/compare-include-year-in";
+    "arn:aws:personalize:us-east-1:000000000000:filter/compare-include-year-in";
 /// `INCLUDE ItemID WHERE Items.YEAR >= $YEAR`.
 const INCLUDE_FROM_YEAR: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/compare-include-from-year";
+    "arn:aws:personalize:us-east-1:000000000000:filter/compare-include-from-year";
 /// `EXCLUDE ItemID WHERE Items.YEAR >= $YEAR`.
 const EXCLUDE_FROM_YEAR: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/compare-exclude-from-year";
+    "arn:aws:personalize:us-east-1:000000000000:filter/compare-exclude-from-year";
 /// `INCLUDE ActionID WHERE Actions.CHANNEL = $CHANNEL`.
 const INCLUDE_CHANNEL_EQUALS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/compare-include-channel";
+    "arn:aws:personalize:us-east-1:000000000000:filter/compare-include-channel";
 /// `EXCLUDE ActionID WHERE Actions.CHANNEL = $CHANNEL`.
 const EXCLUDE_CHANNEL_EQUALS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/compare-exclude-channel";
+    "arn:aws:personalize:us-east-1:000000000000:filter/compare-exclude-channel";
 /// `INCLUDE ActionID WHERE Actions.VALUE > $VALUE`.
 const INCLUDE_ABOVE_VALUE: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/compare-include-above-value";
+    "arn:aws:personalize:us-east-1:000000000000:filter/compare-include-above-value";
 
 /// The categorical Actions column the action rows filter on.
 const COLUMN_CHANNEL: &str = "CHANNEL";
@@ -600,7 +600,7 @@ fn the_filter_seam_refuses_an_ordering_comparison_against_a_non_numeric_literal(
         ),
     ];
     for (case, expression) in refused {
-        let arn = format!("arn:aws:personalize:us-east-1:123456789012:filter/order-bad-{case}");
+        let arn = format!("arn:aws:personalize:us-east-1:000000000000:filter/order-bad-{case}");
         let outcome = registry::register_filter(engine, &arn, expression);
         assert!(
             outcome.is_err(),
@@ -642,7 +642,7 @@ fn the_filter_seam_refuses_an_ordering_comparison_against_a_non_numeric_literal(
         ),
     ];
     for (case, expression) in accepted {
-        let arn = format!("arn:aws:personalize:us-east-1:123456789012:filter/order-ok-{case}");
+        let arn = format!("arn:aws:personalize:us-east-1:000000000000:filter/order-ok-{case}");
         assert_eq!(
             registry::register_filter(engine, &arn, expression),
             Ok(true),

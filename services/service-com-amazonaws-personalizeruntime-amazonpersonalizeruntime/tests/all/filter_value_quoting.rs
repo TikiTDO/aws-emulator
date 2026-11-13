@@ -32,28 +32,28 @@ use crate::support::{
 
 /// The `PERSONALIZED_RANKING` campaign the ranking rows re-rank against.
 const CAMPAIGN_RANKING: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/quoting-ranking";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/quoting-ranking";
 /// The `USER_PERSONALIZATION` campaign the `GetRecommendations` rows read.
-const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/quoting-user";
+const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/quoting-user";
 /// The `PERSONALIZED_ACTIONS` campaign the `GetActionRecommendations` rows read.
 const CAMPAIGN_ACTIONS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/quoting-actions";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/quoting-actions";
 
 /// `INCLUDE ItemID WHERE Items.GENRE IN ($GENRE)`.
 const FILTER_INCLUDE_GENRE: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/quoting-include-genre";
+    "arn:aws:personalize:us-east-1:000000000000:filter/quoting-include-genre";
 /// `EXCLUDE ItemID WHERE Items.GENRE IN ($GENRE)`.
 const FILTER_EXCLUDE_GENRE: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/quoting-exclude-genre";
+    "arn:aws:personalize:us-east-1:000000000000:filter/quoting-exclude-genre";
 /// `INCLUDE ItemID WHERE Items.YEAR >= $YEAR`.
 const FILTER_FROM_YEAR: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/quoting-from-year";
+    "arn:aws:personalize:us-east-1:000000000000:filter/quoting-from-year";
 /// `INCLUDE ActionID WHERE Actions.CHANNEL IN ($CHANNEL)`.
 const FILTER_INCLUDE_CHANNEL: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/quoting-include-channel";
+    "arn:aws:personalize:us-east-1:000000000000:filter/quoting-include-channel";
 /// `EXCLUDE ActionID WHERE Actions.CHANNEL IN ($CHANNEL)`.
 const FILTER_EXCLUDE_CHANNEL: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/quoting-exclude-channel";
+    "arn:aws:personalize:us-east-1:000000000000:filter/quoting-exclude-channel";
 
 /// The `GENRE` values the seeded Items catalog cycles through.
 ///

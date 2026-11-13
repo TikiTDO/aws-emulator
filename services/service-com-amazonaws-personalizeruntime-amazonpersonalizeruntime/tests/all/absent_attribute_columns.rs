@@ -34,40 +34,40 @@ use crate::support::{
 };
 
 /// The `PERSONALIZED_RANKING` campaign the ranking rows re-rank.
-const CAMPAIGN_RANKING: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/sparse-ranking";
+const CAMPAIGN_RANKING: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/sparse-ranking";
 /// The `USER_PERSONALIZATION` campaign the recommendation rows read.
-const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/sparse-user";
+const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/sparse-user";
 /// The `PERSONALIZED_ACTIONS` campaign the action rows read.
-const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/sparse-actions";
+const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/sparse-actions";
 
 /// `EXCLUDE ItemID WHERE Items.GENRE NOT IN ($GENRE)`.
 const EXCLUDE_OTHER_GENRES: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/sparse-exclude-not-in";
+    "arn:aws:personalize:us-east-1:000000000000:filter/sparse-exclude-not-in";
 /// `INCLUDE ItemID WHERE Items.GENRE NOT IN ($GENRE)`.
 const INCLUDE_OTHER_GENRES: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/sparse-include-not-in";
+    "arn:aws:personalize:us-east-1:000000000000:filter/sparse-include-not-in";
 /// `EXCLUDE ItemID WHERE Items.GENRE IN ($GENRE)`.
-const EXCLUDE_GENRE: &str = "arn:aws:personalize:us-east-1:123456789012:filter/sparse-exclude-in";
+const EXCLUDE_GENRE: &str = "arn:aws:personalize:us-east-1:000000000000:filter/sparse-exclude-in";
 /// `INCLUDE ItemID WHERE Items.GENRE IN ($GENRE)`.
-const INCLUDE_GENRE: &str = "arn:aws:personalize:us-east-1:123456789012:filter/sparse-include-in";
+const INCLUDE_GENRE: &str = "arn:aws:personalize:us-east-1:000000000000:filter/sparse-include-in";
 /// `EXCLUDE ItemID WHERE Items.YEAR >= $YEAR`.
 const EXCLUDE_FROM_YEAR: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/sparse-exclude-from-year";
+    "arn:aws:personalize:us-east-1:000000000000:filter/sparse-exclude-from-year";
 /// `INCLUDE ItemID WHERE Items.YEAR <> $YEAR`.
 const INCLUDE_OTHER_YEARS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/sparse-include-other-years";
+    "arn:aws:personalize:us-east-1:000000000000:filter/sparse-include-other-years";
 /// `INCLUDE ItemID WHERE Items.GENRE NOT IN ($GENRE) OR Items.YEAR >= $YEAR`.
 const INCLUDE_GENRE_OR_YEAR: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/sparse-include-or";
+    "arn:aws:personalize:us-east-1:000000000000:filter/sparse-include-or";
 /// `EXCLUDE ItemID WHERE Items.GENRE NOT IN ($GENRE) AND Items.YEAR >= $YEAR`.
 const EXCLUDE_GENRE_AND_YEAR: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/sparse-exclude-and";
+    "arn:aws:personalize:us-east-1:000000000000:filter/sparse-exclude-and";
 /// `EXCLUDE ActionID WHERE Actions.CHANNEL NOT IN ($CHANNEL)`.
 const EXCLUDE_OTHER_CHANNELS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/sparse-exclude-channel";
+    "arn:aws:personalize:us-east-1:000000000000:filter/sparse-exclude-channel";
 /// `INCLUDE ActionID WHERE Actions.CHANNEL NOT IN ($CHANNEL)`.
 const INCLUDE_OTHER_CHANNELS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/sparse-include-channel";
+    "arn:aws:personalize:us-east-1:000000000000:filter/sparse-include-channel";
 
 /// The Actions-dataset column the action rows filter on, spelled the way an Actions
 /// dataset spells a column.

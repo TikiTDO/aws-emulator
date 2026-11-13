@@ -37,15 +37,15 @@ use crate::support::{
 };
 
 /// A registered `USER_PERSONALIZATION` campaign.
-const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/user";
+const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/user";
 /// A registered `RELATED_ITEMS` campaign, which needs `itemId` instead of `userId`.
-const CAMPAIGN_RELATED: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/related";
+const CAMPAIGN_RELATED: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/related";
 /// A registered `PERSONALIZED_RANKING` campaign — the one `GetPersonalizedRanking` serves.
-const CAMPAIGN_RANKING: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/ranking";
+const CAMPAIGN_RANKING: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/ranking";
 /// A registered `PERSONALIZED_ACTIONS` campaign.
-const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/actions";
+const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/actions";
 /// A registered domain recommender.
-const RECOMMENDER: &str = "arn:aws:personalize:us-east-1:123456789012:recommender/top-picks";
+const RECOMMENDER: &str = "arn:aws:personalize:us-east-1:000000000000:recommender/top-picks";
 /// The recommender's use case, one of `state::RECOMMENDER_USE_CASES`; this one requires
 /// `userId`.
 const USE_CASE: &str = "Top picks for you";
@@ -229,7 +229,7 @@ fn arn_members() -> Vec<ArnMember> {
 
 /// A value of exactly `length` characters that matches [`ARN_PATTERN`].
 fn arn_of_length(length: usize) -> String {
-    let prefix = "arn:aws:personalize:us-east-1:123456789012:campaign/";
+    let prefix = "arn:aws:personalize:us-east-1:000000000000:campaign/";
     assert!(
         length > prefix.len(),
         "a {length}-character ARN cannot carry the {}-character prefix",
@@ -248,7 +248,7 @@ fn values_inside_the_length_bound_and_outside_the_pattern() -> Vec<(&'static str
         ("the ARN scheme alone", "arn:".to_string()),
         (
             "an ARN with no resource part",
-            "arn:aws:personalize:us-east-1:123456789012:".to_string(),
+            "arn:aws:personalize:us-east-1:000000000000:".to_string(),
         ),
         (
             "a value at the 256-character length bound that is no ARN",

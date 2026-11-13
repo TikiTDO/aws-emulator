@@ -39,24 +39,24 @@ use crate::support::{
 /// A registered `USER_PERSONALIZATION` campaign, with metadata in recommendations
 /// enabled — what `GetRecommendations` serves, and the wrong recipe type for either
 /// sibling operation.
-const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/user-personalization";
+const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/user-personalization";
 /// A registered `RELATED_ITEMS` campaign, which needs `itemId` in the request.
-const CAMPAIGN_RELATED: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/related-items";
+const CAMPAIGN_RELATED: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/related-items";
 /// A registered `PERSONALIZED_RANKING` campaign: the wrong recipe type for
 /// `GetRecommendations`.
-const CAMPAIGN_RANKING: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/ranking";
+const CAMPAIGN_RANKING: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/ranking";
 /// A registered `PERSONALIZED_ACTIONS` campaign.
-const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/actions";
+const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/actions";
 
 /// A well-formed campaign ARN the registry does not hold.
 const UNREGISTERED_CAMPAIGN: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/never-created";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/never-created";
 /// A well-formed recommender ARN the registry does not hold.
 const UNREGISTERED_RECOMMENDER: &str =
-    "arn:aws:personalize:us-east-1:123456789012:recommender/never-created";
+    "arn:aws:personalize:us-east-1:000000000000:recommender/never-created";
 /// A well-formed filter ARN the registry does not hold — what a promotion that IS well
 /// formed on the request's own terms still earns a refusal for.
-const UNREGISTERED_FILTER: &str = "arn:aws:personalize:us-east-1:123456789012:filter/never-created";
+const UNREGISTERED_FILTER: &str = "arn:aws:personalize:us-east-1:000000000000:filter/never-created";
 
 /// How many entries the seeded catalogs hold.
 const CATALOG_SIZE: usize = 8;

@@ -25,6 +25,8 @@ mod empty_string_member_constraints;
 mod filter_subject;
 #[path = "all/filter_value_quoting.rs"]
 mod filter_value_quoting;
+#[path = "all/identity_and_account_authorization.rs"]
+mod identity_and_account_authorization;
 #[path = "all/inference.rs"]
 mod inference;
 #[path = "all/metadata_member_presence.rs"]

@@ -36,21 +36,21 @@ use crate::support::{
 
 /// The `PERSONALIZED_RANKING` campaign over a catalog that carries popularity.
 const CAMPAIGN_RANKING: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/repeat-ranking";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/repeat-ranking";
 /// A `PERSONALIZED_RANKING` campaign whose entries carry NO popularity, so every
 /// entry's share is 0.0 and the tie-break alone orders the ranking.
-const CAMPAIGN_FLAT: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/repeat-flat";
+const CAMPAIGN_FLAT: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/repeat-flat";
 /// A `PERSONALIZED_RANKING` campaign with metadata in recommendations enabled, which is
 /// what lets a request ask for `metadataColumns` and so take the lower list bound.
 const CAMPAIGN_METADATA: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/repeat-metadata";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/repeat-metadata";
 
 /// `EXCLUDE ItemID WHERE Items.GENRE IN ("Comedy")`.
 const FILTER_EXCLUDE_COMEDY: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/repeat-exclude-comedy";
+    "arn:aws:personalize:us-east-1:000000000000:filter/repeat-exclude-comedy";
 /// `INCLUDE ItemID WHERE Items.GENRE IN ($GENRE)`.
 const FILTER_INCLUDE_GENRE: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/repeat-include-genre";
+    "arn:aws:personalize:us-east-1:000000000000:filter/repeat-include-genre";
 
 /// How many entries the seeded Items catalogs hold. Past ten, so the ids' ascending
 /// order is not the catalog order and no assertion on order can pass by accident.

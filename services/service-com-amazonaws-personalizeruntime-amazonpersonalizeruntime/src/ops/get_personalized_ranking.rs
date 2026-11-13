@@ -186,7 +186,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
+        // 0. Whether this CALLER may make the call at all — the decision AWS takes in front
+        //    of the handler, on the action this operation names and on every resource ARN
+        //    the request names ([`crate::state::authorization`]). It is taken before
+        //    anything is read, so a refused request consults no registry entry and tells
+        //    its caller nothing about one.
+        if let Some(refusal) = crate::state::authorization_refusal(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &referenced_resources(&input),
+        ) {
+            return Err(GetPersonalizedRankingError::access_denied(refusal));
+        }
+
         let state = crate::state::service_state(&*self.engine)
             .ok_or_else(|| registry::registry_unavailable("GetPersonalizedRanking"))?;
         let now = SystemTime::now();
@@ -359,6 +372,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             recommendation_id: Some(recommendation_id),
         })
     }
+}
+
+/// Every resource ARN this request NAMES.
+///
+/// The authorization decision is taken over all of them and nothing else: the campaign the
+/// action is performed on (the resource type `personalize:GetPersonalizedRanking` is
+/// published for) and the request's own filter. Read from the REQUEST, so the decision is
+/// independent of whether either exists — which is what keeps a refused call from telling an
+/// unauthorized caller whether one does.
+fn referenced_resources(input: &GetPersonalizedRankingInput) -> Vec<&str> {
+    let mut referenced: Vec<&str> = Vec::new();
+    referenced.extend(registry::present(Some(input.campaign_arn.as_str())));
+    referenced.extend(registry::present(input.filter_arn.as_deref()));
+    referenced
 }
 
 /// The modelled `InvalidInputException` (HTTP 400): "Provide a valid value for the

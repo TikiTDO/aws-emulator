@@ -32,15 +32,15 @@ fn unresolvable_message(arn: &str) -> String {
 }
 
 /// A registered `USER_PERSONALIZATION` campaign.
-const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/user-personalization";
+const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/user-personalization";
 /// A registered `PERSONALIZED_RANKING` campaign.
-const CAMPAIGN_RANKING: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/ranking";
+const CAMPAIGN_RANKING: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/ranking";
 /// A registered `PERSONALIZED_ACTIONS` campaign.
-const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/actions";
+const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/actions";
 /// A registered domain recommender.
-const RECOMMENDER: &str = "arn:aws:personalize:us-east-1:123456789012:recommender/top-picks";
+const RECOMMENDER: &str = "arn:aws:personalize:us-east-1:000000000000:recommender/top-picks";
 /// A registered filter over the Items dataset.
-const FILTER_ITEMS: &str = "arn:aws:personalize:us-east-1:123456789012:filter/recent";
+const FILTER_ITEMS: &str = "arn:aws:personalize:us-east-1:000000000000:filter/recent";
 
 /// The modelled bound on `Arn`: `length 0..256`
 /// (`smithy_query(query="operation",operation="GetRecommendations")` —
@@ -53,7 +53,7 @@ const CATALOG_SIZE: usize = 8;
 /// A campaign ARN of exactly `length` characters that matches the modelled pattern
 /// `^arn:([a-z\d-]+):personalize:.*:.*:.+$`.
 fn campaign_arn_of_length(length: usize) -> String {
-    let prefix = "arn:aws:personalize:us-east-1:123456789012:campaign/";
+    let prefix = "arn:aws:personalize:us-east-1:000000000000:campaign/";
     assert!(
         length > prefix.len(),
         "a {length}-character ARN cannot carry the {}-character prefix",
@@ -118,11 +118,11 @@ fn rows() -> Vec<Row> {
     let unresolvable: [(&'static str, String); 6] = [
         (
             "commercial partition",
-            "arn:aws:personalize:us-east-1:123456789012:campaign/never-created".to_string(),
+            "arn:aws:personalize:us-east-1:000000000000:campaign/never-created".to_string(),
         ),
         (
             "china partition and region",
-            "arn:aws-cn:personalize:cn-north-1:210987654321:campaign/never-created".to_string(),
+            "arn:aws-cn:personalize:cn-north-1:000000000000:campaign/never-created".to_string(),
         ),
         (
             "govcloud partition",
@@ -131,7 +131,7 @@ fn rows() -> Vec<Row> {
         ),
         (
             "a one-character resource name",
-            "arn:aws:personalize:eu-west-3:123456789012:campaign/c".to_string(),
+            "arn:aws:personalize:eu-west-3:000000000000:campaign/c".to_string(),
         ),
         (
             "a resource name at the modelled 256-character Arn bound",
@@ -173,7 +173,7 @@ fn rows() -> Vec<Row> {
 
     // `recommenderArn`, the other resource `GetRecommendations` recommends from.
     for resource in ["recommender/never-created", "recommender/r"] {
-        let arn = format!("arn:aws:personalize:ap-south-1:123456789012:{resource}");
+        let arn = format!("arn:aws:personalize:ap-south-1:000000000000:{resource}");
         rows.push(Row {
             case: format!("GetRecommendations recommenderArn, {resource}"),
             route: RECOMMENDATIONS,
@@ -185,7 +185,7 @@ fn rows() -> Vec<Row> {
     // `filterArn`, on every operation that takes one — with the campaign resolvable, so
     // the filter is the only thing that does not resolve.
     for resource in ["filter/never-created", "filter/f"] {
-        let arn = format!("arn:aws:personalize:us-east-1:123456789012:{resource}");
+        let arn = format!("arn:aws:personalize:us-east-1:000000000000:{resource}");
         rows.push(Row {
             case: format!("GetRecommendations filterArn, {resource}"),
             route: RECOMMENDATIONS,
@@ -234,9 +234,9 @@ fn rows() -> Vec<Row> {
     rows.push(Row {
         case: "GetRecommendations unresolvable campaign beside a registered filter".to_string(),
         route: RECOMMENDATIONS,
-        arn: "arn:aws:personalize:us-east-1:123456789012:campaign/never-created".to_string(),
+        arn: "arn:aws:personalize:us-east-1:000000000000:campaign/never-created".to_string(),
         body: json!({
-            "campaignArn": "arn:aws:personalize:us-east-1:123456789012:campaign/never-created",
+            "campaignArn": "arn:aws:personalize:us-east-1:000000000000:campaign/never-created",
             "userId": "user-1",
             "filterArn": FILTER_ITEMS,
         }),
@@ -314,7 +314,7 @@ async fn resolvable_resources_are_still_served_so_the_refusal_is_not_uncondition
 async fn the_refusal_is_a_read_so_it_repeats_and_mints_nothing() {
     let emulator = seeded();
     let engine = &*emulator.engine;
-    let arn = "arn:aws:personalize:us-east-1:123456789012:campaign/never-created";
+    let arn = "arn:aws:personalize:us-east-1:000000000000:campaign/never-created";
     let body = json!({ "campaignArn": arn, "userId": "user-1", "numResults": 3 });
 
     let before = registry::issued_recommendation_ids(engine).expect("the registry is reachable");

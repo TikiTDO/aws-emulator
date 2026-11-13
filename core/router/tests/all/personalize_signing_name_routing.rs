@@ -32,7 +32,7 @@ const AUTHORIZATION: &str = "AWS4-HMAC-SHA256 \
      SignedHeaders=host;x-amz-date, Signature=deadbeef";
 
 /// The campaign the runtime row gets its recommendations from.
-const CAMPAIGN_ARN: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/routing";
+const CAMPAIGN_ARN: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/routing";
 
 /// One request, and the answer its OWNING service gives.
 struct Case {
@@ -95,7 +95,7 @@ fn the_three_personalize_services_route_apart_under_one_signing_name() {
                     name: "the runtime inference surface",
                     path: "/recommendations",
                     target: None,
-                    body: br#"{"campaignArn":"arn:aws:personalize:us-east-1:123456789012:campaign/routing","userId":"user-1","numResults":2}"#,
+                    body: br#"{"campaignArn":"arn:aws:personalize:us-east-1:000000000000:campaign/routing","userId":"user-1","numResults":2}"#,
                     status: Some(200),
                 },
                 Case {

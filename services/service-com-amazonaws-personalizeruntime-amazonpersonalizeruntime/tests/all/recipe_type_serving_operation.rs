@@ -48,7 +48,7 @@ const CATALOG_SIZE: usize = 8;
 /// The campaign ARN a recipe type's registered campaign is keyed by.
 fn campaign_arn(recipe_type: RecipeType) -> String {
     format!(
-        "arn:aws:personalize:us-east-1:123456789012:campaign/{}",
+        "arn:aws:personalize:us-east-1:000000000000:campaign/{}",
         recipe_type.as_str().to_lowercase()
     )
 }
@@ -153,7 +153,7 @@ async fn an_unregistered_campaign_is_unresolvable_for_every_operation() {
     // registry does not hold earns the unresolvable refusal from all three operations
     // — the same 400 channel, with the message that names the ARN.
     let emulator = seeded();
-    let arn = "arn:aws:personalize:us-east-1:123456789012:campaign/never-created";
+    let arn = "arn:aws:personalize:us-east-1:000000000000:campaign/never-created";
 
     for (operation, route) in OPERATIONS {
         let case = format!("unregistered campaign through {operation}");

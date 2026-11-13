@@ -37,37 +37,37 @@ use crate::support::{
 };
 
 /// The `USER_PERSONALIZATION` campaign the `GetRecommendations` rows read.
-const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/unbound-user";
+const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/unbound-user";
 /// The `PERSONALIZED_RANKING` campaign the `GetPersonalizedRanking` rows re-rank.
 const CAMPAIGN_RANKING: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/unbound-ranking";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/unbound-ranking";
 /// The `PERSONALIZED_ACTIONS` campaign the `GetActionRecommendations` rows read.
 const CAMPAIGN_ACTIONS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/unbound-actions";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/unbound-actions";
 
 /// `INCLUDE ItemID WHERE Items.GENRE IN ($GENRE)`.
-const INCLUDE_GENRE: &str = "arn:aws:personalize:us-east-1:123456789012:filter/unbound-in";
+const INCLUDE_GENRE: &str = "arn:aws:personalize:us-east-1:000000000000:filter/unbound-in";
 /// `INCLUDE ItemID WHERE Items.YEAR >= $YEAR`.
 const INCLUDE_FROM_YEAR: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/unbound-compare";
+    "arn:aws:personalize:us-east-1:000000000000:filter/unbound-compare";
 /// `INCLUDE ItemID WHERE Items.GENRE IN ($GENRE) AND Items.YEAR >= $YEAR`.
 const INCLUDE_GENRE_AND_YEAR: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/unbound-two-clauses";
+    "arn:aws:personalize:us-east-1:000000000000:filter/unbound-two-clauses";
 /// `EXCLUDE ItemID WHERE Items.GENRE NOT IN ($GENRE)`.
 const EXCLUDE_NOT_IN_GENRE: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/unbound-exclude-not-in";
+    "arn:aws:personalize:us-east-1:000000000000:filter/unbound-exclude-not-in";
 /// `EXCLUDE ItemID WHERE Items.YEAR >= $YEAR`.
 const EXCLUDE_FROM_YEAR: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/unbound-exclude-compare";
+    "arn:aws:personalize:us-east-1:000000000000:filter/unbound-exclude-compare";
 /// `EXCLUDE ItemID WHERE Items.GENRE IN ($GENRE) AND Items.YEAR >= $YEAR`.
 const EXCLUDE_GENRE_AND_YEAR: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/unbound-exclude-two-clauses";
+    "arn:aws:personalize:us-east-1:000000000000:filter/unbound-exclude-two-clauses";
 /// `INCLUDE ActionID WHERE Actions.CHANNEL IN ($CHANNEL)`.
 const INCLUDE_CHANNEL: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/unbound-include-channel";
+    "arn:aws:personalize:us-east-1:000000000000:filter/unbound-include-channel";
 /// `EXCLUDE ActionID WHERE Actions.CHANNEL IN ($CHANNEL)`.
 const EXCLUDE_CHANNEL: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/unbound-exclude-channel";
+    "arn:aws:personalize:us-east-1:000000000000:filter/unbound-exclude-channel";
 
 /// How many Items the seeded catalogs hold.
 const CATALOG_SIZE: usize = 12;

@@ -32,36 +32,36 @@ use crate::support::{
 
 /// The `PERSONALIZED_RANKING` campaign every ranking row re-ranks against.
 const CAMPAIGN_RANKING: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/denominator-ranking";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/denominator-ranking";
 /// The `USER_PERSONALIZATION` campaign the `GetRecommendations` rows read.
 const CAMPAIGN_USER: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/denominator-user";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/denominator-user";
 /// The `PERSONALIZED_ACTIONS` campaign the `GetActionRecommendations` rows read.
 const CAMPAIGN_ACTIONS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/denominator-actions";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/denominator-actions";
 
 /// A `PERSONALIZED_RANKING` campaign whose catalog entries carry NO popularity.
 const CAMPAIGN_FLAT_RANKING: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/flat-ranking";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/flat-ranking";
 /// A `USER_PERSONALIZATION` campaign whose catalog entries carry no popularity.
 const CAMPAIGN_FLAT_USER: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/flat-user";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/flat-user";
 /// A `PERSONALIZED_ACTIONS` campaign whose actions carry no popularity.
 const CAMPAIGN_FLAT_ACTIONS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/flat-actions";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/flat-actions";
 
 /// `EXCLUDE ItemID WHERE Items.GENRE IN ("Comedy")`.
 const FILTER_EXCLUDE_COMEDY: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/denominator-exclude-comedy";
+    "arn:aws:personalize:us-east-1:000000000000:filter/denominator-exclude-comedy";
 /// `INCLUDE ItemID WHERE Items.GENRE IN ($GENRE)`.
 const FILTER_INCLUDE_GENRE: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/denominator-include-genre";
+    "arn:aws:personalize:us-east-1:000000000000:filter/denominator-include-genre";
 /// `INCLUDE ItemID WHERE Items.YEAR >= 2010`.
 const FILTER_RECENT: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/denominator-recent";
+    "arn:aws:personalize:us-east-1:000000000000:filter/denominator-recent";
 /// `INCLUDE ActionID WHERE Actions.CHANNEL IN ("App")`.
 const FILTER_APP_ACTIONS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:filter/denominator-app-actions";
+    "arn:aws:personalize:us-east-1:000000000000:filter/denominator-app-actions";
 
 /// How many entries the seeded Items catalogs hold.
 const CATALOG_SIZE: usize = 24;

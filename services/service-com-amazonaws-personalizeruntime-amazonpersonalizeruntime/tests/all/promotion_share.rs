@@ -28,25 +28,25 @@ use crate::support::{entries, items, Emulator, COLUMN_GENRE, COLUMN_YEAR, RECOMM
 
 /// A `USER_PERSONALIZATION` campaign over a 40-entry catalog: more entries than any
 /// row asks for, so only a filter can shorten its response.
-const CAMPAIGN_FULL: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/share-full";
+const CAMPAIGN_FULL: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/share-full";
 /// A `USER_PERSONALIZATION` campaign whose whole catalog is shorter than the rows'
 /// `numResults`.
-const CAMPAIGN_TINY: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/share-tiny";
+const CAMPAIGN_TINY: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/share-tiny";
 /// A `USER_PERSONALIZATION` campaign whose catalog is an ODD size, so a 50% share of
 /// the reported entries has to round.
-const CAMPAIGN_ODD: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/share-odd";
+const CAMPAIGN_ODD: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/share-odd";
 /// A `RELATED_ITEMS` campaign: its response never reports the queried item, so its
 /// catalog reports one entry fewer than it holds.
-const CAMPAIGN_RELATED: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/share-related";
+const CAMPAIGN_RELATED: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/share-related";
 
 /// `INCLUDE ItemID WHERE Items.YEAR >= 1990` — the seeded `YEAR` column starts at
 /// 1990, so this keeps every stored entry.
-const FILTER_EVERY_ENTRY: &str = "arn:aws:personalize:us-east-1:123456789012:filter/share-every";
+const FILTER_EVERY_ENTRY: &str = "arn:aws:personalize:us-east-1:000000000000:filter/share-every";
 /// `INCLUDE ItemID WHERE Items.GENRE IN ("Comedy")`.
-const FILTER_COMEDY: &str = "arn:aws:personalize:us-east-1:123456789012:filter/share-comedy";
+const FILTER_COMEDY: &str = "arn:aws:personalize:us-east-1:000000000000:filter/share-comedy";
 /// `INCLUDE ItemID WHERE Items.YEAR >= 2019` — the highest seeded `YEAR`, so it keeps
 /// a single entry of the 40-entry catalog.
-const FILTER_NEWEST: &str = "arn:aws:personalize:us-east-1:123456789012:filter/share-newest";
+const FILTER_NEWEST: &str = "arn:aws:personalize:us-east-1:000000000000:filter/share-newest";
 
 /// How many entries the 40-entry catalog holds.
 const FULL_CATALOG: usize = 40;

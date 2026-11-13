@@ -33,33 +33,33 @@ use crate::support::{
 };
 
 /// The `USER_PERSONALIZATION` campaign the `GetRecommendations` rows read.
-const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/seed-user";
+const CAMPAIGN_USER: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/seed-user";
 /// A second `USER_PERSONALIZATION` campaign over an IDENTICAL catalog: the resolved
 /// resource is a seed part, so the two score the same request differently.
 const CAMPAIGN_USER_TWIN: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/seed-user-twin";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/seed-user-twin";
 /// The `RELATED_ITEMS` campaign whose personalization input is `itemId`.
-const CAMPAIGN_RELATED: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/seed-related";
+const CAMPAIGN_RELATED: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/seed-related";
 /// The `PERSONALIZED_RANKING` campaign the `GetPersonalizedRanking` rows re-rank.
-const CAMPAIGN_RANKING: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/seed-ranking";
+const CAMPAIGN_RANKING: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/seed-ranking";
 /// A second `PERSONALIZED_RANKING` campaign over an identical catalog.
 const CAMPAIGN_RANKING_TWIN: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/seed-ranking-twin";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/seed-ranking-twin";
 /// The `PERSONALIZED_ACTIONS` campaign the `GetActionRecommendations` rows read.
-const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/seed-actions";
+const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/seed-actions";
 /// A second `PERSONALIZED_ACTIONS` campaign over an identical Actions catalog.
 const CAMPAIGN_ACTIONS_TWIN: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/seed-actions-twin";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/seed-actions-twin";
 
 /// A `USER_PERSONALIZATION` campaign whose entries are all EQUALLY popular.
 const CAMPAIGN_FLAT_USER: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/seed-flat-user";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/seed-flat-user";
 /// A `PERSONALIZED_RANKING` campaign whose entries are all equally popular.
 const CAMPAIGN_FLAT_RANKING: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/seed-flat-ranking";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/seed-flat-ranking";
 /// A `PERSONALIZED_ACTIONS` campaign whose actions are all equally popular.
 const CAMPAIGN_FLAT_ACTIONS: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/seed-flat-actions";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/seed-flat-actions";
 
 /// How many entries the seeded Items catalogs hold.
 const CATALOG_SIZE: usize = 8;

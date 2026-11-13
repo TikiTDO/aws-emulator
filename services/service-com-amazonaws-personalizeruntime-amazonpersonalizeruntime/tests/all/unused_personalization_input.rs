@@ -33,10 +33,10 @@ use crate::support::{
 
 /// The `USER_PERSONALIZATION` campaign every user row reads.
 const CAMPAIGN_USER: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/unused-input-user";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/unused-input-user";
 /// The `RELATED_ITEMS` campaign every item row reads.
 const CAMPAIGN_RELATED: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/unused-input-related";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/unused-input-related";
 
 /// How many entries every seeded Items catalog holds.
 const CATALOG_SIZE: usize = 40;
@@ -95,7 +95,7 @@ fn seeded() -> (Emulator, Vec<Resource>) {
     // case needs its own input, so each decides on its own which member is unused.
     for (index, (use_case, uses)) in RECOMMENDER_USE_CASES.iter().enumerate() {
         let arn = format!(
-            "arn:aws:personalize:us-east-1:123456789012:recommender/unused-input-{index}"
+            "arn:aws:personalize:us-east-1:000000000000:recommender/unused-input-{index}"
         );
         assert!(
             registry::register_recommender(

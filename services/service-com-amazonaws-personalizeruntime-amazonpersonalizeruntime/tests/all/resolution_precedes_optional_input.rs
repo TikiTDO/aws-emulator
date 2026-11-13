@@ -37,15 +37,15 @@ use crate::support::{actions, items, Emulator, Refusal, ACTION_RECOMMENDATIONS, 
 /// A registered `USER_PERSONALIZATION` campaign: served by `GetRecommendations` with a
 /// `userId`, and the wrong recipe type for `GetActionRecommendations`.
 const CAMPAIGN_USER: &str =
-    "arn:aws:personalize:us-east-1:123456789012:campaign/user-personalization";
+    "arn:aws:personalize:us-east-1:000000000000:campaign/user-personalization";
 /// A registered `RELATED_ITEMS` campaign: served by `GetRecommendations` with an
 /// `itemId`, and the wrong recipe type for `GetActionRecommendations`.
-const CAMPAIGN_RELATED: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/related-items";
+const CAMPAIGN_RELATED: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/related-items";
 /// A registered `PERSONALIZED_ACTIONS` campaign: served by `GetActionRecommendations`,
 /// and the wrong recipe type for `GetRecommendations`.
-const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:123456789012:campaign/actions";
+const CAMPAIGN_ACTIONS: &str = "arn:aws:personalize:us-east-1:000000000000:campaign/actions";
 /// A registered recommender whose use case needs a `userId`.
-const RECOMMENDER: &str = "arn:aws:personalize:us-east-1:123456789012:recommender/top-picks";
+const RECOMMENDER: &str = "arn:aws:personalize:us-east-1:000000000000:recommender/top-picks";
 /// The domain use case behind [`RECOMMENDER`], as `RECOMMENDER_USE_CASES` spells it.
 const USE_CASE: &str = "Recommended for you";
 
@@ -59,7 +59,7 @@ const CATALOG_SIZE: usize = 6;
 
 /// A campaign ARN of exactly `length` characters matching the modelled `Arn` pattern.
 fn campaign_arn_of_length(length: usize) -> String {
-    let prefix = "arn:aws:personalize:eu-west-1:123456789012:campaign/";
+    let prefix = "arn:aws:personalize:eu-west-1:000000000000:campaign/";
     assert!(
         length > prefix.len(),
         "a {length}-character ARN cannot carry the {}-character prefix",
@@ -164,15 +164,15 @@ fn rows() -> Vec<Row> {
     let unregistered: [(&str, String); 5] = [
         (
             "commercial partition",
-            "arn:aws:personalize:us-east-1:123456789012:campaign/never-created".to_string(),
+            "arn:aws:personalize:us-east-1:000000000000:campaign/never-created".to_string(),
         ),
         (
             "china partition and region",
-            "arn:aws-cn:personalize:cn-north-1:210987654321:campaign/never-created".to_string(),
+            "arn:aws-cn:personalize:cn-north-1:000000000000:campaign/never-created".to_string(),
         ),
         (
             "a one-character resource name",
-            "arn:aws:personalize:ap-south-1:555555555555:campaign/c".to_string(),
+            "arn:aws:personalize:ap-south-1:000000000000:campaign/c".to_string(),
         ),
         (
             "a resource name at the modelled 256-character Arn bound",
