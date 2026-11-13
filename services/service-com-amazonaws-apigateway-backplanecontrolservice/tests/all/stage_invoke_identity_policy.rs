@@ -92,7 +92,11 @@ const SESSION: &str = "CognitoIdentityCredentials";
 
 /// The access key id of that session: the credential a vend hands a client, which the
 /// request below signs with.
-const SESSION_KEY_ID: &str = "ASIAEXAMPLEVENDED001";
+///
+/// `pub(crate)` with the seeding helpers below, so the sibling
+/// `stage_invoke_denial_sentence` suite — which asserts WHAT a refusal of this same gate
+/// reports — signs its requests with the one seeded session rather than seeding a second.
+pub(crate) const SESSION_KEY_ID: &str = "ASIAEXAMPLEVENDED001";
 
 /// The IAM user whose LONG-TERM access key the second principal form signs with.
 const USER: &str = "stage-client";
@@ -122,7 +126,7 @@ const ADMIN_BOUNDARY: &str = "arn:aws:iam::aws:policy/AdministratorAccess";
 const OTHER_SERVICE_BOUNDARY: &str = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess";
 
 /// The body the method's `MOCK` integration answers with.
-fn served_body() -> String {
+pub(crate) fn served_body() -> String {
     format!("{{\"m\":\"{NONCE}\"}}")
 }
 
@@ -136,7 +140,7 @@ fn role_arn() -> String {
 
 /// The principal the seeded session speaks for, as `sts:GetCallerIdentity` reports it for
 /// its credential — what a refusal of a request signed with it must name.
-fn session_arn() -> String {
+pub(crate) fn session_arn() -> String {
     format!(
         "arn:aws:sts::{}:assumed-role/{ROLE}/{SESSION}",
         ::engine::emulator_account_id()
@@ -157,7 +161,7 @@ fn user_arn() -> String {
 /// `iam:CreateRole` and a vend of the pool's role record them: the session lives in the STS
 /// registry every session this emulator mints goes through, carrying the role whose
 /// policies a request signed with it is judged on.
-fn given_session(gateway: &Gateway) {
+pub(crate) fn given_session(gateway: &Gateway) {
     let now = SystemTime::now();
     let role_arn = role_arn();
     let iam_store = iam::service_state(gateway.engine()).expect("the IAM store");
@@ -244,7 +248,7 @@ fn given_user(gateway: &Gateway) {
 /// Attach `document` to `entity` as its one inline policy, replacing whatever it carried —
 /// what `iam:PutRolePolicy` and `iam:PutUserPolicy` do. `None` takes every policy off it, as
 /// the matching delete does.
-fn given_policy(gateway: &Gateway, entity: Entity, document: Option<&Value>) {
+pub(crate) fn given_policy(gateway: &Gateway, entity: Entity, document: Option<&Value>) {
     let store = iam::service_state(gateway.engine()).expect("the IAM store");
     let mut store = store.lock();
     let (policies, key) = match entity {
@@ -289,7 +293,7 @@ fn given_role_boundary(gateway: &Gateway, arn: Option<&str>) {
 
 /// Which kind of identity a document is attached to.
 #[derive(Debug, Clone, Copy)]
-enum Entity {
+pub(crate) enum Entity {
     /// The role the seeded session is of.
     Role,
     /// The IAM user the seeded long-term key belongs to.
@@ -297,7 +301,7 @@ enum Entity {
 }
 
 /// An identity-based policy allowing `action` on `resource`.
-fn allow(action: &str, resource: &str) -> Value {
+pub(crate) fn allow(action: &str, resource: &str) -> Value {
     json!({
         "Version": "2012-10-17",
         "Statement": [{ "Effect": "Allow", "Action": action, "Resource": resource }]
@@ -405,7 +409,11 @@ impl Deployed {
 /// A SigV4 credential scope naming `access_key_id`, as a request signed with that
 /// credential carries it. The signature itself is not verified by this plane (the whole
 /// argument is in `src/service.rs`), so what a row varies is the KEY it names.
-fn credential(access_key_id: &str) -> String {
+///
+/// `pub(crate)` with [`assert_served`] and [`assert_refused`]: the sibling
+/// `stage_invoke_denial_sentence` suite drives the same gate over the PATHS a client
+/// addresses, so it signs and reads its answers through these rather than a second copy.
+pub(crate) fn credential(access_key_id: &str) -> String {
     format!(
         "AWS4-HMAC-SHA256 Credential={access_key_id}/20260101/{REGION}/execute-api/aws4_request, \
          SignedHeaders=host, Signature=0123456789abcdef"
@@ -442,7 +450,7 @@ fn authorization_message(body: &str, case: &str) -> String {
 }
 
 /// Assert the invoke was SERVED the integration's own body.
-fn assert_served(case: &str, answered: &crate::execute_api_data_plane::Invoked) {
+pub(crate) fn assert_served(case: &str, answered: &crate::execute_api_data_plane::Invoked) {
     assert_eq!(
         answered.status, 200,
         "case {case}: expected the integration's 200, got {} with {:?}",
@@ -459,7 +467,7 @@ fn assert_served(case: &str, answered: &crate::execute_api_data_plane::Invoked) 
 /// Which document class refused the invoke, which is what the clause closing IAM's refusal
 /// sentence names.
 #[derive(Debug, Clone, Copy)]
-enum Reason {
+pub(crate) enum Reason {
     /// Nothing the caller carries allows the action: an implicit deny, which a grant lifts.
     NoIdentityGrant,
     /// A readable identity-based document DENIES the action, which no grant lifts.
@@ -494,7 +502,7 @@ impl Reason {
 /// the IAM sentence naming the principal, the action, the method ARN and the clause `reason`
 /// closes it with, and nothing of the integration's body — a refused request never reached
 /// it.
-fn assert_refused(
+pub(crate) fn assert_refused(
     case: &str,
     answered: &crate::execute_api_data_plane::Invoked,
     principal: &str,

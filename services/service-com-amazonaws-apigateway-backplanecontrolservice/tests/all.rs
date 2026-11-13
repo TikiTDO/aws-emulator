@@ -558,3 +558,8 @@ mod stage_logging_role_sequence;
 // Object's `content` map.
 #[path = "all/stage_export_oas30_containers.rs"]
 mod stage_export_oas30_containers;
+// Appended for the reason the note above gives: WHAT an `execute-api` authorization refusal
+// reports — the method ARN of the path the client addressed, and the clause naming the
+// document class that refused the call.
+#[path = "all/stage_invoke_denial_sentence.rs"]
+mod stage_invoke_denial_sentence;
