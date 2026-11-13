@@ -15,6 +15,8 @@
 mod anonymous_routing;
 #[path = "all/aws_response_contract.rs"]
 mod aws_response_contract;
+#[path = "all/client_secret_binding.rs"]
+mod client_secret_binding;
 #[path = "all/create_token_grant_type.rs"]
 mod create_token_grant_type;
 #[path = "all/create_token_with_iam.rs"]

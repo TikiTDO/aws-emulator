@@ -11,6 +11,31 @@ Issue-Commit: c0ce0118fd7c38fba0f2e9d7692bcc75f2ecf7c6
 
 # RegisterClient mints a fresh random clientSecret instead of the registration's bound secret
 
+## Resolution (cause declined: a per-run generated credential)
+
+The emulator's behaviour is correct and the one cause is DECLINED, not implemented.
+`RegisterClient` mints one registration per accepted call — its input names no existing
+registration and carries no idempotency token — and the `clientId`/`clientSecret` it
+answers with is the credential the handler generated and PERSISTED for that
+registration: `src/ops/register_client.rs` reports exactly the stored record's members
+and `src/state.rs` `authenticate_client` then accepts only that stored secret. The
+characters of the secret are generated per registration, and the model fixes no value
+for the member, so the recorded `{{client_secret_basic}}` is a redacted per-run
+credential this (or any) run cannot reproduce; the replay key
+`oidc|RegisterClient|2xx->2xx|$.clientSecret` therefore stays failing by construction.
+
+Do NOT implement the remedy the report proposes (resolve an existing registration from
+the request's client metadata and re-report its secret): that would make the operation
+idempotent on `clientName`/`clientType`, which the model does not support, and would hand
+a later caller a credential minted for a different registration.
+
+What the resolution added instead is the test that pins the rule:
+`tests/all/client_secret_binding.rs` asserts, over a table of registration shapes, that
+the reported secret is the one the store holds for the reported `clientId`, that it keeps
+authenticating that registration without changing, that no other registration's secret
+authenticates it, and that the same metadata registered again mints a separate
+registration while leaving the earlier pair usable.
+
 > _Note: this issue was identified against the code base at commit `c0ce0118fd7c38fba0f2e9d7692bcc75f2ecf7c6`. If you are an issue fixer working on this, the code base you are currently working in can have drifted, so you might need to trace the issue back to the current code base._
 
 ## Operation
