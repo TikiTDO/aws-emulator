@@ -238,6 +238,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             updated_by: None,
             jobs: ::std::collections::HashMap::new(),
             fleet_associations: ::std::collections::HashMap::new(),
+            limit_associations: ::std::collections::HashMap::new(),
         };
 
         let Some(farm) = store.farms.get_mut(&input.farm_id) else {

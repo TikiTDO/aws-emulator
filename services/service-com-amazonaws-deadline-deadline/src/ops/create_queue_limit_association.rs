@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateQueueLimitAssociation
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateQueueLimitAssociation`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateQueueLimitAssociation::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -147,18 +138,99 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateQueueLimitAssociation` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateQueueLimitAssociationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateQueueLimitAssociation"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(
+                CreateQueueLimitAssociationErrorModeled::InternalServerErrorException(
+                    crate::state::state_unavailable(),
+                )
+                .into(),
+            );
+        };
+        let mut store = state.lock();
+
+        // The association joins a queue and a limit OF ONE FARM, so an unheld farm, queue
+        // or limit is a 404 naming the level that is missing, and nothing is stored.
+        if store.farm(&input.farm_id).is_none() {
+            return Err(
+                CreateQueueLimitAssociationErrorModeled::ResourceNotFoundException(
+                    crate::state::not_found(crate::state::RESOURCE_TYPE_FARM, &input.farm_id),
+                )
+                .into(),
+            );
+        }
+        if store.queue(&input.farm_id, &input.queue_id).is_none() {
+            return Err(
+                CreateQueueLimitAssociationErrorModeled::ResourceNotFoundException(
+                    crate::state::not_found(crate::state::RESOURCE_TYPE_QUEUE, &input.queue_id),
+                )
+                .into(),
+            );
+        }
+        let Some(limit) = store.limit(&input.farm_id, &input.limit_id) else {
+            return Err(
+                CreateQueueLimitAssociationErrorModeled::ResourceNotFoundException(
+                    crate::state::not_found(crate::state::RESOURCE_TYPE_LIMIT, &input.limit_id),
+                )
+                .into(),
+            );
+        };
+        let amount_requirement_name = limit.amount_requirement_name.clone();
+
+        // A step of a job template declares a limit requirement by the limit's
+        // `amountRequirementName`, so two limits carrying the same one cannot both be
+        // associated with one queue. The limit this request names is exempt from its own
+        // name: re-associating it is the idempotent retry handled below, not a second limit.
+        let already_required_by = store
+            .limit_associated_with_queue_requiring(
+                &input.farm_id,
+                &input.queue_id,
+                &amount_requirement_name,
+            )
+            .filter(|limit_id| *limit_id != input.limit_id)
+            .map(str::to_string);
+        if let Some(limit_id) = already_required_by {
+            return Err(CreateQueueLimitAssociationErrorModeled::ValidationException(
+                crate::state::field_validation_failed(
+                    "limitId",
+                    &format!(
+                        "You can't associate two limits with the same amountRequirementName \
+                         to the same queue. The limit {limit_id} with the \
+                         amountRequirementName {amount_requirement_name} is already \
+                         associated with the queue {queue_id}.",
+                        queue_id = input.queue_id,
+                    ),
+                ),
+            )
+            .into());
+        }
+
+        let created_by = crate::state::caller_principal(ctx);
+        let Some(queue) = store.queue_mut(&input.farm_id, &input.queue_id) else {
+            return Err(
+                CreateQueueLimitAssociationErrorModeled::ResourceNotFoundException(
+                    crate::state::not_found(crate::state::RESOURCE_TYPE_QUEUE, &input.queue_id),
+                )
+                .into(),
+            );
+        };
+        // The operation is `@idempotent`: a retry of the same association is the same
+        // association, so the stored one stays as the first call made it rather than being
+        // re-created with a later timestamp.
+        queue
+            .limit_associations
+            .entry(input.limit_id.clone())
+            .or_insert_with(|| crate::state::QueueLimitAssociation {
+                queue_id: input.queue_id.clone(),
+                limit_id: input.limit_id.clone(),
+                // The queue's work is subject to the limit from the moment the association
+                // exists; only `UpdateQueueLimitAssociation` stops that.
+                status: crate::state::QUEUE_LIMIT_ASSOCIATION_STATUS_ACTIVE.to_string(),
+                created_at: ::std::time::SystemTime::now(),
+                created_by,
+                updated_at: None,
+                updated_by: None,
+            });
+
+        Ok(CreateQueueLimitAssociationOutput {})
     }
 }

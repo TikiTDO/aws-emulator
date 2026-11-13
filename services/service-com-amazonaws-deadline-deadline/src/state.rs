@@ -140,6 +140,16 @@ pub const QUEUE_FLEET_ASSOCIATION_STOPPED_AFTER: Duration = Duration::from_secs(
 /// delete of the association is allowed in.
 pub const QUEUE_FLEET_ASSOCIATION_STATUS_STOPPED: &str = "STOPPED";
 
+/// `QueueLimitAssociationStatus` a freshly created queue-limit association carries.
+///
+/// From `smithy_query(query="shape", shape="QueueLimitAssociationStatus")`: `ACTIVE`,
+/// `STOP_LIMIT_USAGE_AND_COMPLETE_TASKS`, `STOP_LIMIT_USAGE_AND_CANCEL_TASKS`, `STOPPED`.
+/// The model documents `ACTIVE` as "Association is active", and the association subjects
+/// the queue's work to the limit from the moment it exists, so a create answers with it in
+/// this status; only `UpdateQueueLimitAssociation` asks it to stop, so nothing here is owed
+/// by the clock.
+pub const QUEUE_LIMIT_ASSOCIATION_STATUS_ACTIVE: &str = "ACTIVE";
+
 /// `BudgetStatus` a freshly created budget carries.
 ///
 /// From `smithy_query(query="shape", shape="BudgetStatus")`: `ACTIVE`, `INACTIVE`. A
@@ -170,6 +180,11 @@ pub const RESOURCE_TYPE_JOB: &str = "job";
 /// spelled the way the API path spells that resource — the segment
 /// `/queue-fleet-associations/` names it `queue-fleet-association`.
 pub const RESOURCE_TYPE_QUEUE_FLEET_ASSOCIATION: &str = "queue-fleet-association";
+/// `resourceType` this service reports for a queue-limit association in
+/// `ResourceNotFoundException`. Spelled the way the API path spells that resource, like
+/// every other type here — the segment `/queue-limit-associations/` names it
+/// `queue-limit-association`.
+pub const RESOURCE_TYPE_QUEUE_LIMIT_ASSOCIATION: &str = "queue-limit-association";
 /// `resourceType` this service reports for a budget in `ResourceNotFoundException`.
 pub const RESOURCE_TYPE_BUDGET: &str = "budget";
 /// `resourceType` this service reports for a limit in `ResourceNotFoundException`. The
@@ -528,6 +543,12 @@ pub struct Queue {
     /// association is reachable only through its own queue and a queue holds at most one
     /// of them per fleet.
     pub fleet_associations: HashMap<String, QueueFleetAssociation>,
+    /// Every limit associated with this queue, keyed by `limitId`, exactly as the model's
+    /// paths nest the association
+    /// (`/2023-10-12/farms/{farmId}/queue-limit-associations/{queueId}/{limitId}`), so an
+    /// association is reachable only through its own queue and a queue holds at most one
+    /// of them per limit.
+    pub limit_associations: HashMap<String, QueueLimitAssociation>,
 }
 
 impl Queue {
@@ -607,6 +628,19 @@ impl QueueFleetAssociation {
         self.updated_at = Some(SystemTime::now());
         self.updated_by = Some(by.to_string());
     }
+}
+
+/// A persisted queue-limit association, as `CreateQueueLimitAssociation` stored it under
+/// its queue. The pair of ids is its identity — the model mints no id for it.
+#[derive(Debug, Clone)]
+pub struct QueueLimitAssociation {
+    pub queue_id: String,
+    pub limit_id: String,
+    pub status: String,
+    pub created_at: SystemTime,
+    pub created_by: String,
+    pub updated_at: Option<SystemTime>,
+    pub updated_by: Option<String>,
 }
 
 /// A persisted job, as `CreateJob` stored it under its queue.
@@ -982,6 +1016,47 @@ impl ComAmazonawsDeadlineDeadlineState {
         Some(association)
     }
 
+    /// The association between `queue_id` and `limit_id` UNDER `farm_id`: an association
+    /// of another farm's queue is not found here, because the model reaches an association
+    /// only through its own farm's path.
+    pub fn queue_limit_association(
+        &self,
+        farm_id: &str,
+        queue_id: &str,
+        limit_id: &str,
+    ) -> Option<&QueueLimitAssociation> {
+        self.queue(farm_id, queue_id)?
+            .limit_associations
+            .get(limit_id)
+    }
+
+    /// The limit already associated with `queue_id` that declares
+    /// `amount_requirement_name`, lowest id first so the answer does not depend on map
+    /// order. `None` when none does.
+    ///
+    /// A limit's `amountRequirementName` is what a step of a job template names to declare
+    /// the limit requirement, so two limits declaring the same one would leave a step's
+    /// requirement ambiguous on this queue.
+    pub fn limit_associated_with_queue_requiring(
+        &self,
+        farm_id: &str,
+        queue_id: &str,
+        amount_requirement_name: &str,
+    ) -> Option<&str> {
+        let farm = self.farms.get(farm_id)?;
+        farm.queues
+            .get(queue_id)?
+            .limit_associations
+            .keys()
+            .filter(|limit_id| {
+                farm.limits.get(*limit_id).is_some_and(|limit| {
+                    limit.amount_requirement_name == amount_requirement_name
+                })
+            })
+            .map(String::as_str)
+            .min()
+    }
+
     /// The queue of `farm_id` that still has `fleet_id` associated with it, lowest id
     /// first so the answer does not depend on map order. `None` when no queue does.
     pub fn queue_associated_with_fleet(&self, farm_id: &str, fleet_id: &str) -> Option<&str> {
@@ -1075,6 +1150,30 @@ pub fn queue_fleet_association_not_found(
     not_found(
         RESOURCE_TYPE_QUEUE_FLEET_ASSOCIATION,
         &queue_fleet_association_id(farm_id, queue_id, fleet_id),
+    )
+}
+
+/// The id this service reports for a queue-limit association.
+///
+/// The association carries none of its own — the model mints no id for it and reaches it by
+/// the three ids of its path — so it is named the same way
+/// [`queue_fleet_association_id`] names the other association of this service.
+pub fn queue_limit_association_id(farm_id: &str, queue_id: &str, limit_id: &str) -> String {
+    format!("{farm_id}, {queue_id} and {limit_id}")
+}
+
+/// The 404 this service answers for a queue-limit association it does not hold.
+///
+/// The resource reported missing is the association, named by
+/// [`queue_limit_association_id`], and its type is spelled the way the API path spells it.
+pub fn queue_limit_association_not_found(
+    farm_id: &str,
+    queue_id: &str,
+    limit_id: &str,
+) -> crate::ops::types::ResourceNotFoundException {
+    not_found(
+        RESOURCE_TYPE_QUEUE_LIMIT_ASSOCIATION,
+        &queue_limit_association_id(farm_id, queue_id, limit_id),
     )
 }
 

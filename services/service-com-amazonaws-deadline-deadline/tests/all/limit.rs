@@ -59,7 +59,9 @@ fn create_body(display_name: &str, amount_requirement_name: &str, max_count: i64
 }
 
 /// Create a limit under `farm_id` and return its id.
-async fn create_limit(emulator: &Emulator, farm_id: &str, request: Value) -> String {
+///
+/// `pub(crate)` so every suite in this test target makes a limit the same way.
+pub(crate) async fn create_limit(emulator: &Emulator, farm_id: &str, request: Value) -> String {
     let (status, body) = emulator.post(&limits_path(farm_id), request).await;
     assert_eq!(
         status, 200,
