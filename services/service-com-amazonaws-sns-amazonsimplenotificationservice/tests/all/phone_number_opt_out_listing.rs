@@ -23,6 +23,7 @@ use service_com_amazonaws_sns_amazonsimplenotificationservice::state::{
 };
 
 use super::phone_number_opt_in::{e164_numbers, opt_in, reported, seed_opted_out_at};
+use super::sms_sandbox_phone_numbers::add as add_sandbox_number;
 use super::topics_subscriptions_publish::{Answer, Sns};
 
 /// What the suite puts in the store for one number before any call is made, and the
@@ -319,6 +320,183 @@ async fn the_listing_pages_at_the_documented_page_size() {
         assert_eq!(
             pages, want_pages,
             "case {case:?}: expected {want_pages} page(s), got {pages}"
+        );
+    }
+}
+
+/// The other store this account knows a phone number through, beside the opt-out
+/// record: the listing selects on the opt-out a record HOLDS, so none of these makes a
+/// number opted out and none of them hides one.
+#[derive(Debug, Clone, Copy)]
+enum KnownAs {
+    /// Nothing else — the account knows the number only through its opt-out record.
+    Nothing,
+    /// A destination number in this account's SMS sandbox.
+    SandboxDestination,
+    /// The endpoint of an SMS subscription on one of this account's topics.
+    SmsSubscriptionEndpoint,
+}
+
+/// The listing reports the numbers whose record holds an opt-out and ONLY those: a
+/// number this account knows through another store is not opted out by being known,
+/// and a number both opted out and known elsewhere is reported exactly once.
+///
+/// The rows differ along the other store the number lives in as well as along the
+/// opt-out state its own record holds — which is what the rule generalises over.
+#[tokio::test]
+async fn the_listing_selects_on_the_opt_out_a_record_holds_not_on_the_account_knowing_the_number()
+{
+    let sns = Sns::new();
+    let base = SystemTime::now();
+    let topic = sns.topic("opt-out-listing-cover").await;
+
+    let rows: &[(&str, &str, KnownAs, Seed)] = &[
+        (
+            "opted out, known nowhere else",
+            "+12065550141",
+            KnownAs::Nothing,
+            Seed::OptedOut(300),
+        ),
+        (
+            "opted out and a sandbox destination",
+            "+12065550142",
+            KnownAs::SandboxDestination,
+            Seed::OptedOut(240),
+        ),
+        (
+            "opted out and an sms subscription endpoint",
+            "+12065550143",
+            KnownAs::SmsSubscriptionEndpoint,
+            Seed::OptedOut(180),
+        ),
+        (
+            "a sandbox destination only",
+            "+12065550144",
+            KnownAs::SandboxDestination,
+            Seed::Absent,
+        ),
+        (
+            "an sms subscription endpoint only",
+            "+12065550145",
+            KnownAs::SmsSubscriptionEndpoint,
+            Seed::Absent,
+        ),
+        (
+            "a sandbox destination opted back in",
+            "+12065550146",
+            KnownAs::SandboxDestination,
+            Seed::OptedIn(120),
+        ),
+    ];
+
+    for (case, number, known_as, seed) in rows {
+        match seed {
+            Seed::OptedOut(ago) | Seed::OptedIn(ago) => {
+                seed_opted_out_at(&sns, number, base - Duration::from_secs(*ago), None);
+            }
+            Seed::Absent => {}
+        }
+        if let Seed::OptedIn(_) = seed {
+            let answer = opt_in(&sns, number).await;
+            assert_eq!(
+                answer.status, 200,
+                "case {case:?}: expected the opt-in to answer 200, got {} / {}",
+                answer.status, answer.body
+            );
+        }
+        match known_as {
+            KnownAs::Nothing => {}
+            KnownAs::SandboxDestination => {
+                add_sandbox_number(&sns, case, number).await;
+            }
+            KnownAs::SmsSubscriptionEndpoint => {
+                let answer = sns
+                    .call(
+                        "Subscribe",
+                        &[
+                            ("TopicArn", &topic),
+                            ("Protocol", "sms"),
+                            ("Endpoint", number),
+                            ("ReturnSubscriptionArn", "true"),
+                        ],
+                    )
+                    .await;
+                assert_eq!(
+                    answer.status, 200,
+                    "case {case:?}: expected the subscribe to answer 200, got {} / {}",
+                    answer.status, answer.body
+                );
+            }
+        }
+    }
+
+    // The account really does know the numbers above through those other stores: each
+    // is reported by the store that owns it, so a listing reporting every number the
+    // account knows — rather than the opt-outs it holds — would carry them.
+    let sandbox = sns.call("ListSMSSandboxPhoneNumbers", &[]).await;
+    assert_eq!(
+        sandbox.status, 200,
+        "expected the sandbox listing to answer 200, got {} / {}",
+        sandbox.status, sandbox.body
+    );
+    let sandbox_numbers: Vec<String> = super::sms_sandbox_phone_numbers::reported_numbers(&sandbox)
+        .into_iter()
+        .map(|(number, _)| number)
+        .collect();
+    let subscriptions = sns
+        .call("ListSubscriptionsByTopic", &[("TopicArn", &topic)])
+        .await;
+    assert_eq!(
+        subscriptions.status, 200,
+        "expected the subscription listing to answer 200, got {} / {}",
+        subscriptions.status, subscriptions.body
+    );
+    let endpoints = subscriptions.elements("Endpoint");
+    for (case, number, known_as, _) in rows {
+        match known_as {
+            KnownAs::Nothing => {}
+            KnownAs::SandboxDestination => assert!(
+                sandbox_numbers.contains(&(*number).to_string()),
+                "case {case:?}: expected the sandbox to hold the number, got \
+                 {sandbox_numbers:?}"
+            ),
+            KnownAs::SmsSubscriptionEndpoint => assert!(
+                endpoints.contains(&(*number).to_string()),
+                "case {case:?}: expected the topic to hold the subscription, got \
+                 {endpoints:?}"
+            ),
+        }
+    }
+
+    // Only the rows whose record holds an opt-out, oldest opt-out first.
+    let mut expected: Vec<(u64, &str)> = rows
+        .iter()
+        .filter_map(|(_, number, _, seed)| match seed {
+            Seed::OptedOut(ago) => Some((*ago, *number)),
+            _ => None,
+        })
+        .collect();
+    expected.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+    let expected: Vec<String> = expected
+        .into_iter()
+        .map(|(_, number)| number.to_string())
+        .collect();
+
+    let listed = every_page(&sns, "a number known through several stores").await;
+    assert_eq!(
+        listed, expected,
+        "the listing must report every held opt-out once, oldest first, and nothing \
+         else the account knows: expected {expected:?}, got {listed:?}"
+    );
+
+    // And each number's own check agrees with its membership in the listing.
+    for (case, number, _, _) in rows {
+        let checked = reported(&sns, case, number).await;
+        assert_eq!(
+            checked,
+            listed.contains(&(*number).to_string()),
+            "case {case:?}: the check reported {checked} while the listing reported \
+             {listed:?}"
         );
     }
 }
