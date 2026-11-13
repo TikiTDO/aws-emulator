@@ -45,6 +45,7 @@ use crate::instance_create_in_progress_writes::creating_instance;
 use crate::instance_state_view::{assert_state_mirrors_status, listed};
 use crate::ssoadmin_permission_sets::{
     call_in_region, error_code, hold_deletion, hold_region_activation, organization_engine,
+    served_in_region,
     router_over, TEST_REGION,
 };
 
@@ -115,14 +116,10 @@ struct RefusedRow {
     body: fn(&str) -> Value,
 }
 
-/// One call made from the primary Region, asserted served.
+/// One call made from the primary Region, asserted served — the harness's own
+/// [`served_in_region`] bound to this suite's Region.
 async fn served(case: &str, router: &MultiServiceRouter, operation: &str, body: &Value) -> Value {
-    let (status, answer) = call_in_region(router, PRIMARY_REGION, operation, body).await;
-    assert_eq!(
-        status, 200,
-        "case {case:?}: {operation} expected 200, got {status} {answer}"
-    );
-    answer
+    served_in_region(case, router, PRIMARY_REGION, operation, body).await
 }
 
 /// The `TagResource` request one tag row makes: the instance tagged under itself.

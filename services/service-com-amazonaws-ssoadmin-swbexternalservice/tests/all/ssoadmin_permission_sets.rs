@@ -318,6 +318,26 @@ pub(crate) async fn call_in_region(
     .await
 }
 
+/// The same call, signed for `region` and asserted SERVED, as the parsed 200 body.
+///
+/// The shared form of the "make this call and require the 200" step every suite that scripts
+/// a sequence of calls needs, so a new suite names the region it drives rather than carrying
+/// its own copy of the assertion.
+pub(crate) async fn served_in_region(
+    case: &str,
+    router: &MultiServiceRouter,
+    region: &str,
+    operation: &str,
+    body: &Value,
+) -> Value {
+    let (status, answer) = call_in_region(router, region, operation, body).await;
+    assert_eq!(
+        status, 200,
+        "case {case:?}: {operation} expected 200, got {status} {answer}"
+    );
+    answer
+}
+
 /// The same call, over a body given as the exact BYTES to send.
 ///
 /// For a test whose subject is something a `serde_json::Value` cannot express, because a

@@ -161,6 +161,8 @@ mod listed_instance_state_generated_accounts;
 mod listed_instance_state_at_the_list_bound;
 #[path = "all/listed_instance_state_source.rs"]
 mod listed_instance_state_source;
+#[path = "all/listed_instance_state_through_a_call_sequence.rs"]
+mod listed_instance_state_through_a_call_sequence;
 #[path = "all/listed_instance_state_under_any_name.rs"]
 mod listed_instance_state_under_any_name;
 #[path = "all/listed_instance_state_without_a_name.rs"]
