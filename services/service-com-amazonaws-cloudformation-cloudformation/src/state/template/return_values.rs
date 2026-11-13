@@ -969,6 +969,44 @@ pub(super) fn return_values(
             attributes.insert("Id".to_string(), arn.clone());
             (arn, attributes)
         }
+        // "Ref returns the ARN of the secret"; Fn::GetAtt: Id. Until `SecretTargetAttachment`
+        // resolves `SecretId` against Secrets Manager on create, stand in with the declared
+        // `SecretId` when it is already an ARN or a Secrets Manager ARN built on `name`.
+        SECRETSMANAGER_SECRET_TARGET_ATTACHMENT => {
+            let declared_secret = properties
+                .get("SecretId")
+                .and_then(|value| text(value, scope, 0, budget))
+                .filter(|secret| !secret.is_empty());
+            let arn = match declared_secret {
+                Some(secret) if secret.starts_with("arn:") => secret,
+                Some(secret_name) => {
+                    let suffix = service_assigned_label(
+                        SECRET_ARN_SUFFIX_SALT,
+                        &secret_name,
+                        SECRET_ARN_SUFFIX_CHARACTERS,
+                    );
+                    ::emulator_server::emulator_arn(
+                        "secretsmanager",
+                        region,
+                        &format!("secret:{secret_name}-{suffix}"),
+                    )
+                }
+                None => {
+                    let suffix = service_assigned_label(
+                        SECRET_ARN_SUFFIX_SALT,
+                        name,
+                        SECRET_ARN_SUFFIX_CHARACTERS,
+                    );
+                    ::emulator_server::emulator_arn(
+                        "secretsmanager",
+                        region,
+                        &format!("secret:{name}-{suffix}"),
+                    )
+                }
+            };
+            attributes.insert("Id".to_string(), arn.clone());
+            (arn, attributes)
+        }
         // The Amazon EC2 VPC-network types ([`EC2_VPC`] and its siblings), each of which
         // publishes "Ref returns the ID of …" and one `Fn::GetAtt` attribute that IS that
         // id: a VPC's `VpcId`, a subnet's `SubnetId`, a security group's `GroupId`, an
@@ -1940,7 +1978,7 @@ pub fn published_attribute_names(resource_type: &str) -> &'static [&'static str]
             "Endpoint.Address",
             "Endpoint.Port",
         ],
-        SECRETSMANAGER_SECRET => &["Id"],
+        SECRETSMANAGER_SECRET | SECRETSMANAGER_SECRET_TARGET_ATTACHMENT => &["Id"],
         EC2_VPC => &["VpcId"],
         EC2_SUBNET => &["SubnetId"],
         EC2_SECURITY_GROUP => &["GroupId"],
@@ -2408,6 +2446,7 @@ pub fn identity_is_service_assigned(resource_type: &str) -> bool {
         // in force is carried forward and a later deployment applies its declaration to the
         // rotation that exists ([`SECRETSMANAGER_ROTATION_SCHEDULE`]).
         || resource_type == SECRETSMANAGER_ROTATION_SCHEDULE
+        || resource_type == SECRETSMANAGER_SECRET_TARGET_ATTACHMENT
         // A NESTED STACK is one more, and the clearest case of it: "Ref returns the stack
         // ID" of the stack CloudFormation created for the resource, which carries the unique
         // id that service minted for it — the name the naming rules compute is only what the
@@ -3632,6 +3671,12 @@ pub const SECRETSMANAGER_SECRET: &str = "AWS::SecretsManager::Secret";
 /// the one in force forward and the declaration is applied to the rotation that exists
 /// rather than read as a different resource.
 pub const SECRETSMANAGER_ROTATION_SCHEDULE: &str = "AWS::SecretsManager::RotationSchedule";
+
+/// The attachment binding a Secrets Manager secret to a database instance or cluster. "Ref
+/// returns the ARN of the secret" and `Fn::GetAtt` reads `Id` (that same ARN), which is
+/// resolved from Secrets Manager on create and carried forward across deployments.
+pub const SECRETSMANAGER_SECRET_TARGET_ATTACHMENT: &str =
+    "AWS::SecretsManager::SecretTargetAttachment";
 
 /// A Systems Manager Parameter Store parameter's resource type (the SSM model:
 /// `cloudFormationName: SSM`). This is a type `super::provisioning` creates in Systems

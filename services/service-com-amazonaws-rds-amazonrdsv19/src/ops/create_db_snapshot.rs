@@ -225,6 +225,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         }
+        if store
+            .real_workloads
+            .contains_key(&(region.clone(), source_identifier.clone()))
+        {
+            return Err(CreateDBSnapshotErrorModeled::InvalidDBInstanceStateFault(
+                InvalidDBInstanceStateFault {
+                    message: Some(format!(
+                        "DB snapshots are not supported for host-backed DB instance {source_identifier}"
+                    )),
+                },
+            )
+            .into());
+        }
 
         // Every setting the snapshot reports is COPIED from the source record, so a
         // later change to the instance does not rewrite history, beside the copy of the

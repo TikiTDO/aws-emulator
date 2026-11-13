@@ -258,6 +258,9 @@ mod secretsmanager_rotation_schedule;
 /// `AWS::SecretsManager::Secret`: the secret a stack declares, created in AWS Secrets
 /// Manager itself ([`secretsmanager_secret`]).
 mod secretsmanager_secret;
+/// `AWS::SecretsManager::SecretTargetAttachment`: binds a secret to a database resource and
+/// writes the target's connection fields into the secret ([`secretsmanager_secret_target_attachment`]).
+mod secretsmanager_secret_target_attachment;
 mod step_functions_state_machine;
 
 /// Custom resources: the provider a template names in a resource's `ServiceToken`, the
@@ -851,6 +854,9 @@ pub(super) enum Owner {
     SecretsManagerRotationSchedule,
     /// `AWS::SecretsManager::Secret`, whose arms are [`secretsmanager_secret`]'s.
     SecretsManagerSecret,
+    /// `AWS::SecretsManager::SecretTargetAttachment`, whose arms are
+    /// [`secretsmanager_secret_target_attachment`]'s.
+    SecretsManagerSecretTargetAttachment,
     /// `AWS::StepFunctions::StateMachine`, whose arms are
     /// [`step_functions_state_machine`]'s.
     StepFunctionsStateMachine,
@@ -934,6 +940,11 @@ pub(super) fn owner_for(resource_type: &str) -> Option<Owner> {
     }
     if resource_type == secretsmanager_secret::SECRETSMANAGER_SECRET {
         return Some(Owner::SecretsManagerSecret);
+    }
+    if resource_type
+        == secretsmanager_secret_target_attachment::SECRETSMANAGER_SECRET_TARGET_ATTACHMENT
+    {
+        return Some(Owner::SecretsManagerSecretTargetAttachment);
     }
     if resource_type == step_functions_state_machine::STEP_FUNCTIONS_STATE_MACHINE {
         return Some(Owner::StepFunctionsStateMachine);
