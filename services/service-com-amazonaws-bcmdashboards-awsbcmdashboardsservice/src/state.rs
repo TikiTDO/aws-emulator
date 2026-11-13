@@ -40,8 +40,8 @@ use ::aws_smithy_schema_server::{envelope, Violation, ViolationKind};
 use crate::ops::types::{
     CostAndUsageQuery, DashboardReference, DateTimeRange, DateTimeValue, DisplayConfig,
     GraphDisplayConfig, GroupDefinition, HealthStatus, QueryParameters, ReservationUtilizationQuery,
-    ResourceTag, SavingsPlansCoverageQuery, ScheduleConfig, ScheduledReport,
-    ScheduledReportSummary, TableDisplayConfigStruct, Widget, WidgetConfig,
+    ResourceTag, SavingsPlansCoverageQuery, ScheduleConfig, SchedulePeriod, ScheduledReport,
+    ScheduledReportInput, ScheduledReportSummary, TableDisplayConfigStruct, Widget, WidgetConfig,
 };
 
 /// Whether this service can still assume a scheduled report's execution role, which the
@@ -658,30 +658,38 @@ impl ScheduledReportRecord {
 
 /// What the `CreateScheduledReport` call that claimed a `clientToken` has done with it.
 ///
-/// The member is modelled `@idempotencyToken`, and the create it is presented to SPENDS
-/// it: the claim is taken by the call that commits to creating
+/// The member is modelled `@idempotencyToken`, so the token is the caller's key for ONE
+/// create: the claim is taken by the call that commits to creating
 /// ([`ComAmazonawsBcmdashboardsAwsbcmdashboardsserviceState::reserve_scheduled_report_creation`])
-/// and settled with the ARN of the report that call stored
+/// and settled with the ARN of the report that call stored and the content of the request
+/// that stored it
 /// ([`ComAmazonawsBcmdashboardsAwsbcmdashboardsserviceState::settle_scheduled_report_creation`]),
-/// so one token answers for exactly one report for as long as that report is stored and
-/// no second call presenting it is ever served.
+/// so one token answers for exactly one report for as long as that report is stored.
 ///
-/// Which refusal a later call presenting the token gets is what this record says, and it
-/// is the two the model documents for its `ConflictException` — "attempting to create a
-/// resource that already exists or is being created":
+/// What a later call presenting the token is answered is what this record says:
 ///
+/// * [`Self::Created`], presented the SAME request again — the retry an SDK sends when the
+///   first answer was lost — is answered that create's own answer, the ARN it minted
+///   ([`Self::replayed_arn`]), and creates nothing. That is what an idempotency token is
+///   for: at most one resource, and the original answer for every repeat of the request
+///   that made it.
+/// * [`Self::Created`], presented a DIFFERENT request under the same token, is refused with
+///   the modelled `ConflictException` — "attempting to create a resource that already
+///   exists" — in the name of the report the token already created: one token cannot
+///   answer for two different reports, so the caller has to choose another token or update
+///   the report this one names.
 /// * [`Self::InFlight`] — the create holding the claim has not stored its report yet, so
-///   the resource IS BEING CREATED. The conflict is transient and the caller may present
-///   the same token again.
-/// * [`Self::Created`] — that create stored the report at this ARN, so the resource
-///   ALREADY EXISTS and the token is terminally spent: the caller has to choose another
-///   token or update the report this one names.
+///   there is no answer to replay and the resource IS BEING CREATED, the other conflict the
+///   model documents. That one is transient: the caller may present the same token again.
 #[derive(Debug, Clone)]
 pub enum ScheduledReportCreation {
     /// A create has claimed the token and has not stored its report yet.
     InFlight,
-    /// The create that claimed the token stored its report under this ARN.
-    Created { arn: String },
+    /// The create that claimed the token stored its report under this ARN, from the
+    /// request whose content is `content`
+    /// ([`scheduled_report_create_content`]) — what a later call presenting the token is
+    /// compared against to tell a retry of that request from a different one.
+    Created { arn: String, content: String },
 }
 
 impl ScheduledReportCreation {
@@ -690,7 +698,26 @@ impl ScheduledReportCreation {
     pub fn created_arn(&self) -> Option<&str> {
         match self {
             Self::InFlight => None,
-            Self::Created { arn } => Some(arn.as_str()),
+            Self::Created { arn, .. } => Some(arn.as_str()),
+        }
+    }
+
+    /// The ARN to ANSWER a call presenting this claim's token with `content`, or `None`
+    /// when that call is not a repeat of the create this claim holds and so has no answer
+    /// to replay.
+    ///
+    /// The replay is the point of the `@idempotencyToken`: the same request under the same
+    /// token is one logical create however many times it arrives, so every repeat is
+    /// answered the ARN the first one minted rather than a second resource or a refusal.
+    /// A request whose content differs is a different create under a key that is already
+    /// spent, which no answer of this claim fits.
+    pub fn replayed_arn(&self, content: &str) -> Option<&str> {
+        match self {
+            Self::InFlight => None,
+            Self::Created {
+                arn,
+                content: created,
+            } => (created == content).then_some(arn.as_str()),
         }
     }
 
@@ -710,13 +737,61 @@ impl ScheduledReportCreation {
             Self::InFlight => "A scheduled report creation is already in progress for the \
                  provided clientToken. Please retry after some time."
                 .to_string(),
-            Self::Created { arn } => format!(
+            Self::Created { arn, .. } => format!(
                 "A scheduled report with the provided clientToken already exists (ARN: {arn}). \
                  Use a different clientToken to create a new scheduled report, or use the \
                  existing report's ARN to update it."
             ),
         }
     }
+}
+
+/// The CONTENT of a `CreateScheduledReport` request: everything about it that decides
+/// which report it creates, rendered so that two requests compare equal exactly when they
+/// ask for the same report.
+///
+/// A claim records this for the create that took it
+/// ([`ScheduledReportCreation::Created`]), which is what lets a later call presenting the
+/// same `clientToken` be told apart from a repeat of that create: the repeat is answered
+/// the ARN the first call minted, while a different request under that token is a second
+/// create under a key that already answers for a report.
+///
+/// What is compared is what the CALLER asked for — the submitted report and the tags
+/// applied with it, exactly as submitted, before any default this service resolves at
+/// write time — never what the service made of it: a retry resolves the clock-dependent
+/// defaults ([`resolved_schedule_period`]) to other instants than the create did, and
+/// would look like a different request if those were compared.
+///
+/// The input is destructured rather than rendered whole, so a member added to the shape
+/// later cannot slip into (or out of) the comparison unconsidered: the build stops here
+/// until it is. Each member is rendered by its derived `Debug`, which quotes and escapes
+/// every string it writes, so no value can be spelled to look like another member's.
+pub fn scheduled_report_create_content(
+    report: &ScheduledReportInput,
+    tags: &[ResourceTag],
+) -> String {
+    let ScheduledReportInput {
+        name,
+        dashboard_arn,
+        scheduled_report_execution_role_arn,
+        schedule_config,
+        description,
+        widget_ids,
+        widget_date_range_override,
+    } = report;
+    format!(
+        "{:?}",
+        (
+            name,
+            dashboard_arn,
+            scheduled_report_execution_role_arn,
+            schedule_config,
+            description,
+            widget_ids,
+            widget_date_range_override,
+            tags,
+        )
+    )
 }
 
 /// The outcome one `ExecuteScheduledReport` call recorded under the report it executed
@@ -765,15 +840,18 @@ pub struct ComAmazonawsBcmdashboardsAwsbcmdashboardsserviceState {
     pub next_scheduled_report_seq: u64,
     /// The `clientToken` of every `CreateScheduledReport` that has claimed one, mapped to
     /// what the create holding that claim has done ([`ScheduledReportCreation`]). A token
-    /// is SPENT by the create it is presented to: the call that commits to creating claims
-    /// it ([`Self::reserve_scheduled_report_creation`]) and settles the claim with the ARN
-    /// of the report it stored ([`Self::settle_scheduled_report_creation`]), so every later
-    /// call presenting that token is refused with the modelled `ConflictException` — the
-    /// report is being created while the claim is unsettled, and already exists once it is
-    /// settled — and a token can never mint a second report. A call that is refused before
-    /// it stores anything releases its claim
-    /// ([`Self::release_scheduled_report_creation`]), leaving the token free. A settled
-    /// claim whose report is no longer stored is dropped
+    /// is the caller's key for ONE create: the call that commits to creating claims it
+    /// ([`Self::reserve_scheduled_report_creation`]) and settles the claim with the ARN of
+    /// the report it stored and the content of the request that stored it
+    /// ([`Self::settle_scheduled_report_creation`]), so a repeat of that request under the
+    /// same token is answered the ARN the first call minted
+    /// ([`Self::replayed_scheduled_report_creation`]) and a token can never mint a second
+    /// report: a DIFFERENT request under a settled claim is refused with the modelled
+    /// `ConflictException` in the name of the report the token already created, and any
+    /// request under an unsettled one is refused with the same error's other documented
+    /// case, the report being created. A call that is refused before it stores anything
+    /// releases its claim ([`Self::release_scheduled_report_creation`]), leaving the token
+    /// free. A settled claim whose report is no longer stored is dropped
     /// ([`Self::forget_creations_of_removed_reports`]), which is what keeps the map
     /// bounded by [`MAX_SCHEDULED_REPORTS`] — one record per stored report at most — and
     /// what frees a token whose report a caller deleted.
@@ -1150,6 +1228,25 @@ impl ComAmazonawsBcmdashboardsAwsbcmdashboardsserviceState {
             });
     }
 
+    /// The ARN to ANSWER a `CreateScheduledReport` call presenting `token` for a request
+    /// whose content is `content` with, or `None` when there is nothing to replay: no
+    /// claim, a claim whose create has not stored its report yet, or a claim settled by a
+    /// request that is not this one.
+    ///
+    /// This is the `@idempotencyToken`'s own semantics and it is a READ: a repeat of the
+    /// create that claimed the token is one logical create, so it is answered that create's
+    /// ARN and nothing is written — no second report, no second claim, no counter moved.
+    pub fn replayed_scheduled_report_creation(
+        &self,
+        token: &str,
+        content: &str,
+    ) -> Option<String> {
+        self.scheduled_report_client_tokens
+            .get(token)
+            .and_then(|claim| claim.replayed_arn(content))
+            .map(str::to_string)
+    }
+
     /// Claim `token` for the `CreateScheduledReport` call that is about to create, or —
     /// when another create already claimed it — answer that claim and leave it alone.
     ///
@@ -1160,7 +1257,9 @@ impl ComAmazonawsBcmdashboardsAwsbcmdashboardsserviceState {
     /// only once the report was stored would leave a window in which a duplicate finds
     /// the token free and creates a second report. Of several calls presenting one token
     /// exactly one is therefore answered `None` and goes on to create; every other is
-    /// answered the claim it found and refused by its wording
+    /// answered the claim it found, which decides what it gets — the first call's ARN
+    /// where the request is the same one ([`Self::replayed_scheduled_report_creation`]),
+    /// and otherwise the refusal that claim's state words
     /// ([`ScheduledReportCreation::conflict_message`]).
     pub fn reserve_scheduled_report_creation(
         &mut self,
@@ -1175,18 +1274,20 @@ impl ComAmazonawsBcmdashboardsAwsbcmdashboardsserviceState {
         }
     }
 
-    /// Settle the claim `token` holds with `arn`, the report the call holding it stored:
-    /// from here the token is terminally spent, so every later call presenting it is
-    /// refused in the name of that report rather than told a creation is in progress.
+    /// Settle the claim `token` holds with `arn`, the report the call holding it stored,
+    /// and `content`, the content of the request that stored it: from here a repeat of
+    /// that request is answered `arn` and a different request under the same token is
+    /// refused in the name of that report.
     ///
     /// Only an unsettled claim is written: a claim another call settled under the same
     /// token — which it can only have taken once this one released its own — is left as
     /// that call settled it.
-    pub fn settle_scheduled_report_creation(&mut self, token: &str, arn: &str) {
+    pub fn settle_scheduled_report_creation(&mut self, token: &str, arn: &str, content: &str) {
         if let Some(claim) = self.scheduled_report_client_tokens.get_mut(token) {
             if claim.created_arn().is_none() {
                 *claim = ScheduledReportCreation::Created {
                     arn: arn.to_string(),
+                    content: content.to_string(),
                 };
             }
         }
@@ -1514,17 +1615,56 @@ pub fn schedule_config_state(config: &ScheduleConfig) -> &str {
         .unwrap_or(SCHEDULE_STATE_ENABLED)
 }
 
-/// The `scheduleConfig` to store for a CREATE: the supplied config with `state`
-/// resolved to [`SCHEDULE_STATE_ENABLED`] when the request left it unset, so every
-/// reader sees a schedule whose state is decided once, at write time, rather than each
+/// The `schedulePeriod` to STORE for a write made at `now`: the submitted period with
+/// each bound its own member documents a service-side default for resolved to that
+/// default, so the period a reader gets back is the one the schedule actually runs over.
+///
+/// Both bounds of `SchedulePeriod` document one — "The start time of the schedule period.
+/// If not specified, defaults to the time of the create or update request" and "The end
+/// time of the schedule period. If not specified, defaults to 3 years from the time of the
+/// create or update request" (`smithy_query(query="shape",shape="SchedulePeriod")`) — and a
+/// documented service-side default is resolved by the write that stores the value, not
+/// guessed by each reader: a member a request left unset reads back carrying the value the
+/// service chose for it.
+///
+/// A period the request omits ENTIRELY is the same case: every bound of it is unspecified,
+/// so the stored schedule carries the period both defaults spell out. The end default is
+/// the same instant as the ceiling the same member states on a SUBMITTED end time
+/// ([`schedule_period_end_time_ceiling`]) — "3 years from the time of the create or update
+/// request" and "3 years from the current time" are one instant — so the period this
+/// resolves is one the rule admits.
+pub fn resolved_schedule_period(submitted: Option<SchedulePeriod>, now: SystemTime) -> SchedulePeriod {
+    let submitted = submitted.unwrap_or_default();
+    SchedulePeriod {
+        start_time: Some(
+            submitted
+                .start_time
+                .unwrap_or_else(|| ::aws_smithy_types::DateTime::from(now)),
+        ),
+        end_time: Some(submitted.end_time.unwrap_or_else(|| {
+            ::aws_smithy_types::DateTime::from(schedule_period_end_time_ceiling(now))
+        })),
+    }
+}
+
+/// The `scheduleConfig` to store for a CREATE made at `now`: the supplied config with
+/// every member that carries a documented service-side default resolved to it, so every
+/// reader sees a schedule whose values are decided once, at write time, rather than each
 /// reader guessing.
 ///
-/// The default belongs to the create input alone — `ScheduledReportInput$scheduleConfig`
-/// is the member documented "If the schedule state is not specified, it defaults to
-/// ENABLED" (`smithy_query(query="shape",shape="ScheduledReportInput")`) — so an update
-/// resolves its config through [`updated_schedule_config`] instead.
-pub fn resolve_schedule_config(mut config: ScheduleConfig) -> ScheduleConfig {
+/// Two members document one:
+///
+/// * `state` defaults to [`SCHEDULE_STATE_ENABLED`] — `ScheduledReportInput$scheduleConfig`
+///   is the member documented "If the schedule state is not specified, it defaults to
+///   ENABLED" (`smithy_query(query="shape",shape="ScheduledReportInput")`), which belongs to
+///   the create input alone, so an update resolves its config through
+///   [`updated_schedule_config`] instead;
+/// * `schedulePeriod`'s two bounds default to the time of this request and to 3 years on
+///   from it ([`resolved_schedule_period`]), a sentence written for the create request and
+///   the update request alike, so both write paths resolve the period the same way.
+pub fn resolve_schedule_config(mut config: ScheduleConfig, now: SystemTime) -> ScheduleConfig {
     config.state = Some(schedule_config_state(&config).to_string());
+    config.schedule_period = Some(resolved_schedule_period(config.schedule_period, now));
     config
 }
 
@@ -1553,10 +1693,12 @@ pub fn resolve_schedule_config(mut config: ScheduleConfig) -> ScheduleConfig {
 /// documents ("defaults to the time of the create or update request" / "defaults to 3 years
 /// from the time of the create or update request",
 /// `smithy_query(query="shape",shape="SchedulePeriod")`), so a period the request carries
-/// is one whole parameter and replaces the stored period.
+/// is one whole parameter: it replaces the stored period, with its own bounds resolved at
+/// `now`, the instant of THIS update ([`resolved_schedule_period`]).
 pub fn updated_schedule_config(
     stored: &ScheduleConfig,
     submitted: ScheduleConfig,
+    now: SystemTime,
 ) -> ScheduleConfig {
     // Destructured rather than mutated, so a member added to `ScheduleConfig` later
     // cannot slip through this merge unconsidered: the build stops here until it is.
@@ -1570,7 +1712,9 @@ pub fn updated_schedule_config(
         schedule_expression: schedule_expression.or_else(|| stored.schedule_expression.clone()),
         schedule_expression_time_zone: schedule_expression_time_zone
             .or_else(|| stored.schedule_expression_time_zone.clone()),
-        schedule_period: schedule_period.or_else(|| stored.schedule_period.clone()),
+        schedule_period: schedule_period
+            .map(|period| resolved_schedule_period(Some(period), now))
+            .or_else(|| stored.schedule_period.clone()),
         // `state` is the one member whose target is an enum, so an empty string is no
         // value of it at all and counts as unnamed; the other three are strings and a
         // structure the model admits as submitted.

@@ -3,15 +3,16 @@
 //! `CreateScheduledReport` and the read that proves it, end to end over the wire.
 //!
 //! The rule under test: `CreateScheduledReport` mints a fresh `ScheduledReportArn`,
-//! persists the submitted `scheduledReport` configuration under it with
-//! `scheduleConfig.state` resolved to `ENABLED` when the request left it unset, and
-//! `GetScheduledReport` answers that stored record — every optional member exactly as
-//! it was stored, `createdAt == updatedAt` on a report that was never updated, and no
-//! execution time until something executes the report (its health reads HEALTHY from
-//! the moment the service accepted it).
-//! A `clientToken` is spent by the create it is presented to — a later call presenting it
-//! again is refused rather than served a report — and a `dashboardArn` no stored
-//! dashboard answers to is refused.
+//! persists the submitted `scheduledReport` configuration under it with the defaults its
+//! members document resolved (`scheduleConfig.state` to `ENABLED` when the request left it
+//! unset, and the bounds of `scheduleConfig.schedulePeriod` to the instants their own
+//! members name), and `GetScheduledReport` answers that stored record — every optional
+//! member exactly as it was stored, `createdAt == updatedAt` on a report that was never
+//! updated, and no execution time until something executes the report (its health reads
+//! HEALTHY from the moment the service accepted it).
+//! A `clientToken` keys ONE create — the repeat of the request that spent it is answered
+//! that create's ARN and a different request under it is refused — and a `dashboardArn`
+//! no stored dashboard answers to is refused.
 //!
 //! Each assertion spans the class rather than one recorded request: the table below
 //! differs in which optional members are present, in schedule state (absent, `ENABLED`,
@@ -288,6 +289,7 @@ async fn create_scheduled_report_persists_the_configuration_and_get_reads_it_bac
 
         // The schedule config is stored verbatim except for `state`, which is resolved
         // to ENABLED when the request left it unset.
+        let created_at = timestamp(report, "createdAt", label);
         let stored_schedule = report
             .get("scheduleConfig")
             .unwrap_or_else(|| panic!("case {label}: no scheduleConfig in {report}"));
@@ -304,23 +306,39 @@ async fn create_scheduled_report_persists_the_configuration_and_get_reads_it_bac
                 "case {label}: scheduleConfig.{member} must be stored verbatim, got {stored_schedule}"
             );
         }
-        match case.schedule_config.get("schedulePeriod") {
-            Some(submitted) => {
-                let stored = stored_schedule
-                    .get("schedulePeriod")
-                    .unwrap_or_else(|| panic!("case {label}: schedulePeriod was dropped: {stored_schedule}"));
-                for member in ["startTime", "endTime"] {
-                    assert_eq!(
-                        stored.get(member).and_then(Value::as_f64),
-                        submitted.get(member).and_then(Value::as_f64),
-                        "case {label}: schedulePeriod.{member} must round-trip, got {stored}"
+        // The schedule period is stored with each bound the request named verbatim and
+        // each bound it left unset resolved to the default that member documents: the
+        // instant of the create for the start, 3 years on for the end — where 3 calendar
+        // years span 1095 days (three 365-day years) plus the leap days the window holds.
+        // The resolution over the shapes a period can take is tabled in
+        // `tests/all/schedule_period_defaults.rs`.
+        let stored_period = stored_schedule
+            .get("schedulePeriod")
+            .unwrap_or_else(|| panic!("case {label}: the stored schedule has no schedulePeriod: {stored_schedule}"));
+        for (member, default_days) in [("startTime", 0.0..=0.0), ("endTime", 1095.0..=1096.0)] {
+            let submitted = case
+                .schedule_config
+                .get("schedulePeriod")
+                .and_then(|period| period.get(member))
+                .and_then(Value::as_f64);
+            let stored = stored_period
+                .get(member)
+                .and_then(Value::as_f64)
+                .unwrap_or_else(|| panic!("case {label}: schedulePeriod.{member} is absent or not an instant: {stored_period}"));
+            match submitted {
+                Some(submitted) => assert_eq!(
+                    stored, submitted,
+                    "case {label}: schedulePeriod.{member} must round-trip, got {stored_period}"
+                ),
+                None => {
+                    let days = (stored - created_at) / 86_400.0;
+                    assert!(
+                        default_days.contains(&days),
+                        "case {label}: schedulePeriod.{member} must default to {default_days:?} \
+                         days from the create at {created_at}, got {stored}, which is {days} days on"
                     );
                 }
             }
-            None => assert!(
-                stored_schedule.get("schedulePeriod").is_none(),
-                "case {label}: a schedule with no period must not grow one: {stored_schedule}"
-            ),
         }
 
         match &case.widget_ids {
@@ -341,7 +359,6 @@ async fn create_scheduled_report_persists_the_configuration_and_get_reads_it_bac
             case.widget_date_range_override
         );
 
-        let created_at = timestamp(report, "createdAt", label);
         let updated_at = timestamp(report, "updatedAt", label);
         assert_eq!(
             created_at, updated_at,
@@ -381,10 +398,11 @@ async fn create_scheduled_report_persists_the_configuration_and_get_reads_it_bac
 }
 
 /// A `clientToken` creates at most one report: the first call presenting it creates the
-/// report, and every later call presenting it — the identical request as much as a
-/// different one — is refused with the modelled ConflictException (409), leaving the
-/// first record untouched. The refusal's own rule, including the wording each conflict
-/// carries, is tabled in `tests/all/create_report_token_spent.rs`.
+/// report, the identical request presented again under it is answered that create's own
+/// answer — HTTP 200 and the same ARN, with nothing created — and a DIFFERENT request
+/// under it is refused with the modelled ConflictException (409), leaving the first record
+/// untouched. Both rules are tabled in `tests/all/create_report_token_spent.rs`, with the
+/// wording each conflict carries.
 #[tokio::test]
 async fn a_client_token_creates_at_most_one_scheduled_report() {
     let router = router();
@@ -404,19 +422,21 @@ async fn a_client_token_creates_at_most_one_scheduled_report() {
     let winner_arn = winner["arn"].as_str().expect("an arn").to_string();
     let winner_record = ok_call(&router, "GetScheduledReport", &json!({"arn": winner_arn})).await;
 
-    // The identical request again — what an SDK transport retry resends — presents a
-    // token the create above already spent, so it is refused rather than served.
+    // The identical request again — what an SDK transport retry resends — is the one
+    // logical create the token keys, so it is answered the ARN that create minted.
     let (status, body) = call(&router, "CreateScheduledReport", &first).await;
     assert_eq!(
-        status, 409,
-        "a clientToken the create already spent is refused with 409, got {status}: {body}"
+        status, 200,
+        "a retry under the same clientToken is replayed with 200, got {status}: {body}"
     );
-    assert!(
-        error_code(&body).ends_with("ConflictException"),
-        "expected ConflictException, got {body}"
+    assert_eq!(
+        body["arn"].as_str(),
+        Some(winner_arn.as_str()),
+        "the replay answers the arn the first create minted, got {body}"
     );
 
-    // So is a different request reusing the token.
+    // A different request reusing the token is refused: one token cannot answer for two
+    // reports.
     let mut different = first.clone();
     different["scheduledReport"]["name"] = json!("Token Loser");
     different["scheduledReport"]["scheduleConfig"] = json!({"scheduleExpression": "rate(1 day)", "state": "DISABLED"});
@@ -435,7 +455,7 @@ async fn a_client_token_creates_at_most_one_scheduled_report() {
     assert_eq!(
         ok_call(&router, "GetScheduledReport", &json!({"arn": winner_arn})).await,
         winner_record,
-        "no refused reuse of the token may touch the winning record"
+        "neither the replay nor the refused reuse of the token may touch the winning record"
     );
     let second = ok_call(
         &router,

@@ -214,6 +214,9 @@ async fn an_update_moves_the_schedule_state_only_when_it_names_one() {
             // the state it leaves behind is the state nothing in the request named.
             None => request["name"] = json!(format!("State Renamed-{index}")),
         }
+        // The schedule the create left, read before the update: a row that submits no
+        // period keeps it.
+        let before = stored_schedule(&router, &arn, label).await;
         ok_call(&router, "UpdateScheduledReport", &request).await;
 
         let schedule = stored_schedule(&router, &arn, label).await;
@@ -244,19 +247,27 @@ async fn an_update_moves_the_schedule_state_only_when_it_names_one() {
                     "case {label}: expected scheduleConfig.{member} {expected:?}, got {schedule}"
                 );
             }
-            // The create names no period, so a row that submits one reads it back and a
-            // row that submits none has none stored to keep.
+            // The create names no period, so it stored the period the two bounds of
+            // `SchedulePeriod` document defaults for; a row that submits one replaces that
+            // period whole, and a row that submits none keeps it.
             for member in ["startTime", "endTime"] {
+                let expected = submitted
+                    .get("schedulePeriod")
+                    .and_then(|period| period.get(member))
+                    .and_then(Value::as_f64)
+                    .or_else(|| {
+                        before
+                            .get("schedulePeriod")
+                            .and_then(|period| period.get(member))
+                            .and_then(Value::as_f64)
+                    });
                 assert_eq!(
                     schedule
                         .get("schedulePeriod")
                         .and_then(|period| period.get(member))
                         .and_then(Value::as_f64),
-                    submitted
-                        .get("schedulePeriod")
-                        .and_then(|period| period.get(member))
-                        .and_then(Value::as_f64),
-                    "case {label}: expected schedulePeriod.{member} to round-trip, got {schedule}"
+                    expected,
+                    "case {label}: expected schedulePeriod.{member} {expected:?}, got {schedule}"
                 );
             }
         }

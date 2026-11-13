@@ -292,6 +292,33 @@ async fn stored_report(router: &MultiServiceRouter, arn: &str, label: &str) -> V
         .clone()
 }
 
+/// A row's expected value for `member`, completed with the `schedulePeriod` the baseline
+/// record carries where the row expects a `scheduleConfig`.
+///
+/// No row above submits a `schedulePeriod`, and a submitted config that names none leaves
+/// the stored period alone — the period the create resolved from the defaults its two
+/// bounds document. So the expectation inherits it rather than restating it: what the
+/// bounds resolve to is the rule `tests/all/schedule_period_defaults.rs` pins, and this
+/// suite is about which members an update moves.
+fn with_stored_period(member: &str, expected: &Value, before: &Value) -> Value {
+    let mut expected = expected.clone();
+    if member != "scheduleConfig" {
+        return expected;
+    }
+    let stored = before
+        .get("scheduleConfig")
+        .and_then(|config| config.get("schedulePeriod"))
+        .cloned()
+        .unwrap_or_else(|| {
+            panic!("the baseline record's scheduleConfig carries a resolved schedulePeriod: {before}")
+        });
+    expected
+        .as_object_mut()
+        .expect("a scheduleConfig expectation is a JSON object")
+        .insert("schedulePeriod".to_string(), stored);
+    expected
+}
+
 /// Each row's update replaces exactly the members it carries, unsets exactly the members
 /// its `clear…` flags name, leaves every other member of the stored record untouched, and
 /// moves `updatedAt` to the instant of the call without moving `createdAt`.
@@ -339,7 +366,7 @@ async fn an_update_changes_exactly_the_members_the_request_carries() {
         for (member, value) in &case.expected {
             match value {
                 Some(value) => {
-                    members.insert((*member).to_string(), value.clone());
+                    members.insert((*member).to_string(), with_stored_period(member, value, &before));
                 }
                 None => {
                     members.remove(*member);
@@ -391,7 +418,7 @@ async fn successive_updates_each_change_only_their_own_members() {
     let router = router();
     let (dashboard, widget) = source_dashboard(&router, "ComposeSource").await;
     let label = "successive updates";
-    let (arn, _before) =
+    let (arn, before) =
         baseline_report(&router, &dashboard, &widget, "Composed Report", label).await;
 
     ok_call(
@@ -433,6 +460,8 @@ async fn successive_updates_each_change_only_their_own_members() {
         Some(&json!({
             "scheduleExpression": "cron(0 8 1 * ? *)",
             "scheduleExpressionTimeZone": "UTC",
+            // No update named the schedule, so the period the create resolved stands too.
+            "schedulePeriod": before["scheduleConfig"]["schedulePeriod"],
             "state": "ENABLED"
         })),
         "case {label}: no update named the schedule, so the created one stands: {after}"

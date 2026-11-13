@@ -295,6 +295,10 @@ async fn an_update_merges_the_submitted_schedule_config_into_the_stored_one() {
         )
         .await;
 
+        // The config the create left, read before the update: a row whose update names no
+        // period keeps this one.
+        let created_config = stored_config(&router, &arn, label).await;
+
         ok_call(
             &router,
             "UpdateScheduledReport",
@@ -303,11 +307,25 @@ async fn an_update_merges_the_submitted_schedule_config_into_the_stored_one() {
         .await;
 
         let stored = stored_config(&router, &arn, label).await;
+        // No row submits a `schedulePeriod` it does not also expect, and a submitted
+        // config that names none leaves the stored period alone — the period the create
+        // resolved from the defaults its two bounds document. So a row whose expectation
+        // names no period inherits the one the create stored: what those bounds resolve to
+        // is the rule `tests/all/schedule_period_defaults.rs` pins, and this suite is
+        // about which properties an update moves.
+        let mut expected = case.expected.clone();
+        if expected.get("schedulePeriod").is_none() {
+            if let Some(created_period) = created_config.get("schedulePeriod") {
+                expected
+                    .as_object_mut()
+                    .expect("a scheduleConfig row is a JSON object")
+                    .insert("schedulePeriod".to_string(), created_period.clone());
+            }
+        }
         assert_eq!(
             comparable(&stored),
-            comparable(&case.expected),
-            "case {label}: expected the stored scheduleConfig to read back as {}, got {stored}",
-            case.expected
+            comparable(&expected),
+            "case {label}: expected the stored scheduleConfig to read back as {expected}, got {stored}"
         );
 
         // The listing projects three of those properties, so it has to agree with the

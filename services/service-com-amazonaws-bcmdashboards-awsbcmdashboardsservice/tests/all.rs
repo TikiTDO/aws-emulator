@@ -23,6 +23,8 @@ mod constrained_text_grammars;
 mod create_report_client_token;
 #[path = "all/create_report_conflict_message.rs"]
 mod create_report_conflict_message;
+#[path = "all/create_report_idempotent_replay.rs"]
+mod create_report_idempotent_replay;
 #[path = "all/create_report_token_spent.rs"]
 mod create_report_token_spent;
 #[path = "all/create_time_tag_merge.rs"]
@@ -61,6 +63,8 @@ mod response_media_type;
 mod resource_tags;
 #[path = "all/schedule_period_ceiling.rs"]
 mod schedule_period_ceiling;
+#[path = "all/schedule_period_defaults.rs"]
+mod schedule_period_defaults;
 #[path = "all/scheduled_report_execution.rs"]
 mod scheduled_report_execution;
 #[path = "all/scheduled_report_execution_events.rs"]

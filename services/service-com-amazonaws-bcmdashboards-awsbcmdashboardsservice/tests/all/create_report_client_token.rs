@@ -3,12 +3,13 @@
 //! What a `CreateScheduledReport` `clientToken` is, end to end over the wire: the create
 //! key that makes one token answer for at most one scheduled report.
 //!
-//! The rule under test: a create SPENDS the `@idempotencyToken` it is presented with, so
-//! a later call presenting it is refused rather than served (tabled over the shape of
-//! that later call in `tests/all/create_report_token_spent.rs`) — and the claim a token
-//! holds lives exactly as long as the report it created: once this service no longer
-//! stores that report there is nothing left for the claim to name, so the token is free
-//! again and the same request under it creates a report of its own.
+//! The rule under test: the `@idempotencyToken` a create is presented with keys THAT
+//! create, so a later call presenting it is answered from it rather than served a second
+//! report (tabled over the shape of that later call in
+//! `tests/all/create_report_token_spent.rs`) — and the claim a token holds lives exactly
+//! as long as the report it created: once this service no longer stores that report there
+//! is nothing left for the claim to name, so the token is free again and the same request
+//! under it creates a report of its own.
 //!
 //! This suite owns the create the sibling suites present that token to, so there is one
 //! description of the request those rows start from.

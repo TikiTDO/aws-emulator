@@ -394,9 +394,10 @@ async fn the_quota_refusal_is_audited() {
 }
 
 /// `CreateScheduledReport`'s idempotency paths account for themselves by what they
-/// change: the create leaves one SUCCESS record, and every later call presenting the
-/// token that create spent — the identical request as much as a different one — leaves
-/// its ConflictException.
+/// answer: the create leaves one SUCCESS record naming the report it stored, the replay of
+/// that same request under its token leaves the same SUCCESS record naming the same report
+/// (it is that create, answered again), and a DIFFERENT request under that token leaves its
+/// ConflictException.
 #[tokio::test]
 async fn scheduled_report_create_reuses_are_audited_by_what_they_change() {
     use super::scheduled_report_lifecycle::EXECUTION_ROLE_ARN;
@@ -430,14 +431,19 @@ async fn scheduled_report_create_reuses_are_audited_by_what_they_change() {
         let (capture, _guard) = capture_events();
         let (status, body) = call(&router, "CreateScheduledReport", &request).await;
         assert_eq!(
-            status, 409,
-            "case the identical request again: expected 409, got {status}: {body}"
+            status, 200,
+            "case the identical request again: expected the replay's 200, got {status}: {body}"
+        );
+        assert_eq!(
+            body["arn"].as_str(),
+            Some(arn.as_str()),
+            "case the identical request again: the replay answers the created arn, got {body}"
         );
         assert_record(
             &capture.record_for("CreateScheduledReport"),
             "CreateScheduledReport",
-            "-",
-            "ConflictException",
+            &arn,
+            "SUCCESS",
         );
     }
 
@@ -458,12 +464,13 @@ async fn scheduled_report_create_reuses_are_audited_by_what_they_change() {
         );
     }
 
-    // The audited create is still the only report the token made.
+    // The audited create is still the only report the token made: neither the replay nor
+    // the refused reuse created a second one.
     let listed = ok_call(&router, "ListScheduledReports", &json!({})).await;
     assert_eq!(
         listed["scheduledReports"].as_array().map(Vec::len),
         Some(1),
-        "the refused reuses must have created no second report: {listed}"
+        "the replay and the refused reuse must have created no second report: {listed}"
     );
     assert_eq!(
         listed["scheduledReports"][0]["arn"].as_str(),

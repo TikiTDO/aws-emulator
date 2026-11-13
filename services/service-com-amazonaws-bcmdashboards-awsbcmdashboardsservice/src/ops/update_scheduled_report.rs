@@ -31,7 +31,11 @@
 //! (`smithy_query(query="shape",shape="SchedulePeriod")`), a sentence the member writes for
 //! the create and the update request alike, and the ceiling is measured from the instant of
 //! THIS call ([`crate::state::schedule_period_refusal`]). Refused that way, the stored
-//! record keeps the period it had.
+//! record keeps the period it had. A period this call stores carries both its bounds: the
+//! two members document their own service-side defaults for the create and the update
+//! request alike, so a bound the submitted period omits is resolved — to the time of this
+//! request, and to 3 years on from it ([`crate::state::resolved_schedule_period`]) — rather
+//! than stored absent.
 //!
 //! The refusals that come before the write:
 //!
@@ -381,8 +385,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // property: each property it names replaces the stored one and each property
             // it omits is left alone, since this request models no flag that clears or
             // re-defaults any of them (`crate::state::updated_schedule_config`).
-            report.schedule_config =
-                crate::state::updated_schedule_config(&report.schedule_config, schedule_config);
+            report.schedule_config = crate::state::updated_schedule_config(
+                &report.schedule_config,
+                schedule_config,
+                now,
+            );
         }
         if let Some(widget_ids) = input.widget_ids {
             report.widget_ids = Some(widget_ids);
