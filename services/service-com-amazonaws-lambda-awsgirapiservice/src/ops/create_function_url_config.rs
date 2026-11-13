@@ -194,20 +194,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // A function URL belongs to the function's unpublished version or to one of its
         // aliases, which is what the modelled qualifier pattern says: a published
         // version number, or the unpublished version named explicitly, is not a
-        // qualifier a function URL can be created on.
+        // qualifier a function URL can be created on. What a value outside a member's own
+        // `@pattern` is refused with is the boundary walk's own answer — 400
+        // `ValidationException` over the clause built from the request — and this check
+        // states it for a pattern that walk cannot decide; see
+        // `crate::state::admitted_qualifier`, which is the same refusal for the same
+        // reason on the operations addressing a function by a `Qualifier`.
         if let Some(named) =
             crate::state::named_qualifier(&input.function_name, input.qualifier.as_deref())
         {
             if !crate::state::is_function_url_qualifier(&named) {
-                return Err(
-                    CreateFunctionUrlConfigErrorModeled::InvalidParameterValueException(
-                        InvalidParameterValueException {
-                            r#type: None,
-                            message: Some(crate::state::function_url_qualifier_message(&named)),
-                        },
-                    )
-                    .into(),
-                );
+                return Err(crate::scaffolded::Scaffolded::validation(
+                    crate::state::function_url_qualifier_message(&named),
+                ));
             }
         }
 
@@ -271,10 +270,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // Stored exactly as configured: a member the caller did not set is not
             // reported with a value this emulator made up.
             cors: input.cors.clone(),
-            invoke_mode: input
-                .invoke_mode
-                .clone()
-                .unwrap_or_else(|| crate::state::DEFAULT_INVOKE_MODE.to_string()),
+            // The same, member for member: `InvokeMode` is optional, so a request that
+            // named none configured none. What such a URL SERVES IN is the documented
+            // default (`FunctionUrlConfigRecord::served_invoke_mode`, which is what a READ
+            // of the configuration reports), and that is a different claim from "the
+            // caller set this".
+            invoke_mode: input.invoke_mode.clone(),
             creation_time: crate::state::iso8601(now),
             // Nothing has changed the configuration yet, so the last change to it is its
             // creation.
@@ -287,7 +288,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             auth_type: created.auth_type.clone(),
             cors: created.cors.clone(),
             creation_time: created.creation_time.clone(),
-            invoke_mode: Some(created.invoke_mode.clone()),
+            // Answered as persisted: the member is absent when the request named no
+            // invoke mode, rather than reporting a value this call did not configure.
+            invoke_mode: created.invoke_mode.clone(),
         };
         record.url_configs.insert(version, created);
 

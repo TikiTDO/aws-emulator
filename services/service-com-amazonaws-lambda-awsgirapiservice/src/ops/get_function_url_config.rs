@@ -178,20 +178,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx);
 
         // Only the unpublished version and an alias can carry a function URL, so only
-        // those can be asked for one; see `state::is_function_url_qualifier`.
+        // those can be asked for one; see `state::is_function_url_qualifier`. A value
+        // outside its member's own `@pattern` is refused the way the boundary walk refuses
+        // one — 400 `ValidationException` over the clause built from the request — because
+        // what is wrong is the request's shape; see `crate::state::admitted_qualifier`.
         if let Some(named) =
             crate::state::named_qualifier(&input.function_name, input.qualifier.as_deref())
         {
             if !crate::state::is_function_url_qualifier(&named) {
-                return Err(
-                    GetFunctionUrlConfigErrorModeled::InvalidParameterValueException(
-                        InvalidParameterValueException {
-                            r#type: None,
-                            message: Some(crate::state::function_url_qualifier_message(&named)),
-                        },
-                    )
-                    .into(),
-                );
+                return Err(crate::scaffolded::Scaffolded::validation(
+                    crate::state::function_url_qualifier_message(&named),
+                ));
             }
         }
 
@@ -240,7 +237,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             cors: config.cors.clone(),
             creation_time: config.creation_time.clone(),
             last_modified_time: config.last_modified_time.clone(),
-            invoke_mode: Some(config.invoke_mode.clone()),
+            // A READ of the configuration reports the mode the URL SERVES IN, which is the
+            // documented default while no caller has configured one on it.
+            invoke_mode: Some(config.served_invoke_mode()),
         })
     }
 }

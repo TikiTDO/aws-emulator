@@ -398,8 +398,10 @@ async fn a_created_code_signing_config_is_persisted_and_reported() {
         );
         let last_modified = created.config_string("LastModified").unwrap_or_default();
         assert!(
-            last_modified.starts_with("20") && last_modified.ends_with('Z'),
-            "case {label:?}: expected an ISO-8601 LastModified, got {last_modified:?}"
+            last_modified.starts_with("20") && last_modified.ends_with("+0000"),
+            "case {label:?}: expected an ISO-8601 LastModified carrying the numeric UTC \
+             offset this service renders (the form the model's own instant example, \
+             `2018-11-27T15:10:45.123+0000`, spells), got {last_modified:?}"
         );
 
         // Read the configuration back: one that was answered but never persisted fails

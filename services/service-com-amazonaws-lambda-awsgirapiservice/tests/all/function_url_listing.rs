@@ -7,9 +7,10 @@
 //! `FunctionName` resolves to, every function URL that function holds — one per qualifier
 //! that has one, ordered by that qualifier, each entry the stored configuration
 //! `GetFunctionUrlConfig` reports for the same qualifier — cut into pages of at most
-//! `MaxItems` entries and never more than the documented fifty, with a `NextMarker`
-//! naming the last qualifier of a truncated page, and it refuses a function it does not
-//! hold and a `FunctionName` that qualifies one of the function's own qualifiers.
+//! `MaxItems` entries and never more than the documented fifty, with a `NextMarker` the
+//! listing MINTS for the position a truncated page ended on, and it refuses a function it
+//! does not hold and a `FunctionName` that qualifies one of the function's own
+//! qualifiers.
 //!
 //! Every suite drives real HTTP requests through the router, so the assertions are about
 //! the wire behaviour (status, body) rather than any handler's internals, and each listed
@@ -498,7 +499,8 @@ async fn list_function_url_configs_reports_every_stored_url_in_qualifier_order()
 }
 
 /// A paged walk reports every function URL of the function exactly once, in qualifier
-/// order, whatever the page size — and a marker continues after the qualifier it names.
+/// order, whatever the page size — and the marker a page hands back continues after the
+/// entries that page reported.
 #[tokio::test]
 async fn list_function_url_configs_pages_over_every_url() {
     let engine = Arc::new(engine::InMemoryEngine::new());
@@ -576,36 +578,72 @@ async fn list_function_url_configs_pages_over_every_url() {
         );
     }
 
-    // A marker continues AFTER the qualifier it names, whichever qualifier that is.
-    for start_after in &expected {
-        let answer = list_url_configs(&router, function, &format!("?Marker={start_after}")).await;
-        let arns = arns_of(&configs_of(&format!("marker {start_after}"), &answer));
+    // The marker a page hands back continues AFTER the entries that page reported,
+    // whichever position in the order that is: walked one entry at a time, the page that
+    // follows each marker is the rest of the order.
+    let mut marker: Option<String> = None;
+    for (index, qualifier) in expected.iter().enumerate() {
+        let answer = match &marker {
+            Some(marker) => {
+                list_url_configs(&router, function, &format!("?Marker={marker}")).await
+            }
+            None => list_url_configs(&router, function, "").await,
+        };
+        let arns = arns_of(&configs_of(&format!("after {index} entries"), &answer));
         let tail: Vec<String> = expected
             .iter()
-            .skip_while(|qualifier| *qualifier != start_after)
-            .skip(1)
+            .skip(index)
             .map(|qualifier| qualified_arn(function, qualifier))
             .collect();
         assert_eq!(
             arns, tail,
-            "case marker {start_after}: expected the function urls after it, got {arns:?}"
+            "case after {index} entries: expected the function urls from {qualifier:?} on, \
+             got {arns:?}"
+        );
+        // One more entry's worth of the order, so the next pass continues from here.
+        let page = list_url_configs(
+            &router,
+            function,
+            &match &marker {
+                Some(marker) => format!("?MaxItems=1&Marker={marker}"),
+                None => "?MaxItems=1".to_string(),
+            },
+        )
+        .await;
+        marker = page.json()["NextMarker"].as_str().map(str::to_string);
+        assert!(
+            marker.as_deref().is_none_or(|minted| !expected
+                .iter()
+                .any(|qualifier| minted == qualifier.as_str())),
+            "case after {index} entries: a marker is a token the listing minted for a \
+             position, never a qualifier a caller can address a resource by, got {marker:?}"
         );
     }
 
-    // A marker naming a qualifier the function does not hold still names a place in the
-    // order, so the page is the function urls ordered after it.
-    let answer = list_url_configs(&router, function, "?Marker=mz").await;
-    let arns = arns_of(&configs_of("marker between two qualifiers", &answer));
-    let tail: Vec<String> = expected
-        .iter()
-        .filter(|qualifier| qualifier.as_str() > "mz")
-        .map(|qualifier| qualified_arn(function, qualifier))
-        .collect();
-    assert_eq!(
-        arns, tail,
-        "case marker between two qualifiers: expected the function urls ordered after it, got \
-         {arns:?}"
-    );
+    // A value this listing did not mint names no position in the order, so it is refused
+    // rather than paged from — whether it is a qualifier, a value shaped like a token or
+    // one of another listing's markers.
+    let minted = list_url_configs(&router, function, "?MaxItems=1")
+        .await
+        .json()["NextMarker"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("a truncated page must hand back a marker"));
+    for (case, marker) in [
+        ("a qualifier", "mz".to_string()),
+        ("a qualifier the function holds", "beta".to_string()),
+        ("the unpublished version", VERSION_LATEST.to_string()),
+        ("a marker with a byte appended", format!("{minted}AA")),
+        ("an empty-looking token", "AAAAAAAAAAAA".to_string()),
+    ] {
+        let answer = list_url_configs(&router, function, &format!("?Marker={marker}")).await;
+        assert_eq!(
+            answer.status, 400,
+            "case {case:?}: expected 400 for a marker this listing did not mint, got {} {}",
+            answer.status,
+            answer.text()
+        );
+    }
 }
 
 /// "Note that ListFunctionUrlConfigs returns a maximum of 50 items in each response, even
@@ -637,7 +675,8 @@ async fn list_function_url_configs_caps_a_page_at_the_documented_fifty() {
         .collect();
 
     // No `MaxItems` at all: the documented ceiling still cuts the page, and the response
-    // carries the marker the rest continues from.
+    // carries the marker the rest continues from — a token the listing minted, not the
+    // qualifier the page ended on.
     let answer = list_url_configs(&router, function, "").await;
     let page = configs_of("unlimited page", &answer);
     assert_eq!(
@@ -646,11 +685,19 @@ async fn list_function_url_configs_caps_a_page_at_the_documented_fifty() {
         "case unlimited page: expected the documented {MAX_PAGE_SIZE}-entry ceiling, got {}",
         page.len()
     );
-    assert_eq!(
-        answer.json()["NextMarker"],
-        json!(expected[MAX_PAGE_SIZE - 1]),
-        "case unlimited page: expected a marker naming the last qualifier of the page, got {:?}",
-        answer.json()["NextMarker"]
+    let minted = answer.json()["NextMarker"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            panic!(
+                "case unlimited page: a truncated page carries a marker, got {:?}",
+                answer.json()["NextMarker"]
+            )
+        });
+    assert!(
+        !expected.contains(&minted),
+        "case unlimited page: expected a minted pagination token rather than a qualifier \
+         the caller can address a resource by, got {minted:?}"
     );
 
     // Walked through the marker, every function URL comes back exactly once, in order.

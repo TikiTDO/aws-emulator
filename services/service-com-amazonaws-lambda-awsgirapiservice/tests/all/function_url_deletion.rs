@@ -12,7 +12,7 @@
 //! URL is untouched, and a later create on the emptied qualifier mints a different URL
 //! address. A qualifier that holds no function URL names nothing to delete and is refused
 //! the same way, and a qualifier the modelled `FunctionUrlQualifier` pattern excludes is
-//! refused with `InvalidParameterValueException` without deleting anything.
+//! refused with `ValidationException` without deleting anything.
 //!
 //! Every row drives real HTTP requests through the router and checks the store and the
 //! `GetFunctionUrlConfig` reader afterwards, so a delete that answered 204 without
@@ -564,7 +564,8 @@ async fn deleting_a_function_url_that_does_not_exist_is_refused() {
 /// `FunctionUrlQualifier` pattern (`^((?!^\d+$)^[0-9a-zA-Z-_]+$)$`) and the qualifier
 /// group of `FunctionUrlFunctionName` say by excluding an all-digit qualifier (and the
 /// `$LATEST` spelling, whose `$` neither pattern admits). So a delete addressed by one is
-/// refused as an invalid parameter rather than reported as a missing resource.
+/// refused for failing that member's modelled pattern rather than reported as a missing
+/// resource.
 #[tokio::test]
 async fn a_function_url_is_not_deleted_on_a_published_version() {
     let engine = Arc::new(engine::InMemoryEngine::new());
@@ -605,10 +606,9 @@ async fn a_function_url_is_not_deleted_on_a_published_version() {
             answer.text()
         );
         assert!(
-            answer
-                .error_code()
-                .contains("InvalidParameterValueException"),
-            "case {label:?}: expected InvalidParameterValueException, got {}",
+            answer.error_code().contains("ValidationException"),
+            "case {label:?}: a value outside its member's modelled pattern is refused the \
+             way the boundary walk refuses one, so expected ValidationException, got {}",
             answer.error_code()
         );
     }

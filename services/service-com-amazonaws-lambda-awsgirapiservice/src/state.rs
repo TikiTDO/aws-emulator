@@ -388,6 +388,13 @@ pub mod durable_events;
 pub mod function_url;
 pub use function_url::{AddressedFunctionUrl, FunctionUrlTarget};
 
+/// The workspace's one reading of an authenticated pagination token, which this store's
+/// paginated reads mint their `NextMarker` with
+/// ([`function_url::function_url_marker`]): the secret lives on the store
+/// ([`ComAmazonawsLambdaAwsgirapiserviceState::page_token_key`]), so a token one store
+/// issued is the only one it reads back.
+pub use ::service_common::page_tokens::PageTokenKey;
+
 /// The region an ARN carries when the request is unsigned and therefore names no
 /// SigV4 credential scope to read a region from.
 pub const DEFAULT_REGION: &str = "us-east-1";
@@ -1479,9 +1486,12 @@ impl PolicyRecord {
     }
 }
 
-/// The `InvokeMode` a function URL gets when the caller names none, which the model's
-/// own member documentation states: "BUFFERED – This is the default option. Lambda
-/// invokes your function using the Invoke API operation."
+/// The `InvokeMode` a function URL SERVES IN when no caller ever configured one, which
+/// the model's own member documentation states: "BUFFERED – This is the default option.
+/// Lambda invokes your function using the Invoke API operation."
+///
+/// It is the behaviour of an unconfigured URL, not a value stored on it: see
+/// [`FunctionUrlConfigRecord::invoke_mode`].
 pub const DEFAULT_INVOKE_MODE: &str = "BUFFERED";
 
 /// The host suffix every Lambda function URL carries. AWS documents the form in
@@ -1714,15 +1724,34 @@ pub struct FunctionUrlConfigRecord {
     /// The CORS settings, exactly as configured; absent when the caller configured
     /// none, because nothing here invents settings the caller never asked for.
     pub cors: Option<Cors>,
-    /// The `InvokeMode`, defaulted to [`DEFAULT_INVOKE_MODE`] when the caller named
-    /// none.
-    pub invoke_mode: String,
+    /// The `InvokeMode` a caller CONFIGURED, and absent for a function URL no caller ever
+    /// named one on — which is a different thing from the mode such a URL serves in
+    /// ([`Self::served_invoke_mode`]): the member is optional, so a request that named
+    /// none configured none, and a write answers what it persisted.
+    pub invoke_mode: Option<String>,
     /// ISO-8601 instant the URL was created, "in ISO-8601 format
     /// (YYYY-MM-DDThh:mm:ss.sTZD)" as the model's `CreationTime` member documents.
     pub creation_time: String,
     /// ISO-8601 instant of the last change to this configuration; equal to
     /// [`Self::creation_time`] until one is made.
     pub last_modified_time: String,
+}
+
+impl FunctionUrlConfigRecord {
+    /// The `InvokeMode` this function URL SERVES IN: the one a caller configured, and
+    /// [`DEFAULT_INVOKE_MODE`] for a URL none was ever configured on, because that is the
+    /// behaviour the member's documentation gives an unset configuration ("BUFFERED –
+    /// This is the default option").
+    ///
+    /// This is what a READ of the configuration reports and what the data plane invokes
+    /// by; the member [`Self::invoke_mode`] holds is what a caller SET, which is what a
+    /// write answers.
+    #[must_use]
+    pub fn served_invoke_mode(&self) -> String {
+        self.invoke_mode
+            .clone()
+            .unwrap_or_else(|| DEFAULT_INVOKE_MODE.to_string())
+    }
 }
 
 /// `ProvisionedConcurrencyStatusEnum` values an allocation moves through, from the
@@ -3173,6 +3202,12 @@ pub struct ComAmazonawsLambdaAwsgirapiserviceState {
     /// The running clock's task handle, kept so the clock it replaces is aborted rather than
     /// merely forgotten.
     pub durable_event_clock: Option<::tokio::task::JoinHandle<()>>,
+    /// The secret this store's pagination tokens are authenticated under, drawn from the
+    /// system's randomness when the store is created
+    /// (`service_common::page_tokens::PageTokenKey`) — which is what lets a paginated read
+    /// tell a `Marker` it ISSUED from one a caller assembled; see
+    /// [`function_url::function_url_marker`].
+    pub page_token_key: PageTokenKey,
 }
 
 /// One code-signing configuration.
@@ -4065,15 +4100,29 @@ pub fn layer_version_without_policy_message(layer_version_arn: &str) -> String {
     format!("Layer version {layer_version_arn} does not have any resource policy.")
 }
 
+/// The time-zone designator every ISO-8601 instant this service reports carries: the
+/// NUMERIC UTC offset, not the `Z` designator.
+///
+/// Which of the two ISO-8601 designators Lambda writes is in the model's own example of
+/// such a member — `LayerVersionsListItem$CreatedDate` is documented as "in ISO 8601
+/// format. For example, `2018-11-27T15:10:45.123+0000`"
+/// (`smithy_query(query="doc", shape="LayerVersionsListItem", member="CreatedDate")`) —
+/// and every other instant member of this service is documented by the same phrase
+/// ("in ISO-8601 format (YYYY-MM-DDThh:mm:ss.sTZD)"), whose `TZD` is that designator. So
+/// one rendering serves them all, and a caller parsing any of them with the offset form
+/// reads every one of them.
+pub const UTC_DESIGNATOR: &str = "+0000";
+
 /// `at` as the ISO-8601 instant the model's `LastModified` member describes
-/// ("in ISO-8601 format (YYYY-MM-DDThh:mm:ss.sTZD)").
+/// ("in ISO-8601 format (YYYY-MM-DDThh:mm:ss.sTZD)"), with the designator
+/// [`UTC_DESIGNATOR`] spells.
 ///
 /// The subsecond field is TRUNCATED to whole milliseconds and rendered at a fixed three
 /// digits, so two instants this service reports always compare the same way as strings
 /// as they do as instants — two instants inside one millisecond render as the same
 /// string, so the order is not strict, but it is never reversed. The `DateTime`
 /// formatter trims trailing zeros instead, which makes one rendering a PREFIX of another
-/// (`…:43.848Z` against `…:43.848766Z`) and so reverses their order under a string
+/// (`…:43.848` against `…:43.848766`) and so reverses their order under a string
 /// comparison, and a caller reading `LastModified` of one resource twice, or of two
 /// resources, has only the string to order them by.
 #[must_use]
@@ -4083,7 +4132,10 @@ pub fn iso8601(at: SystemTime) -> String {
         .fmt(::aws_smithy_types::date_time::Format::DateTime)
         .unwrap_or_default();
     let millis = instant.subsec_nanos() / 1_000_000;
-    format!("{}.{millis:03}Z", seconds.trim_end_matches('Z'))
+    format!(
+        "{}.{millis:03}{UTC_DESIGNATOR}",
+        seconds.trim_end_matches('Z')
+    )
 }
 
 /// The base64-encoded SHA-256 of `bytes`, which is what the model's `CodeSha256`

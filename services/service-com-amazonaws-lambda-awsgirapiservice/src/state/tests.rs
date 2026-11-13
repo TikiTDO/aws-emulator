@@ -108,7 +108,7 @@ fn a_reported_instant_sorts_as_a_string_exactly_as_it_does_as_an_instant() {
         Duration::new(0, 999_999_999),
         Duration::from_secs(1),
     ];
-    let width = "2026-10-23T17:13:43.848Z".len();
+    let width = "2026-10-23T17:13:43.848+0000".len();
     let mut earlier: Option<(Duration, String)> = None;
     for offset in offsets {
         let rendered = iso8601(base + offset);

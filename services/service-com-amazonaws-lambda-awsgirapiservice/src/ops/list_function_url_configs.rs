@@ -177,6 +177,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let now = ::std::time::SystemTime::now();
         let region = crate::state::request_region(ctx);
         let mut store = state.lock();
+        // Taken off the store before the record is borrowed: `PageTokenKey` is `Copy`, so
+        // the page's own marker is minted under this store's secret while the entries it
+        // reports are being read.
+        let page_token_key = store.page_token_key;
 
         // "The name or ARN of the Lambda function": the function URLs listed are those of
         // the one function the name resolves to, resolved exactly the way every other
@@ -229,19 +233,41 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         cors: config.cors.clone(),
                         creation_time: config.creation_time.clone(),
                         last_modified_time: config.last_modified_time.clone(),
-                        invoke_mode: Some(config.invoke_mode.clone()),
+                        // A read reports the mode each URL SERVES IN, which is the
+                        // documented default while no caller has configured one on it.
+                        invoke_mode: Some(config.served_invoke_mode()),
                     },
                 )
             })
             .collect();
 
         // The next page starts at the first configuration ordered after the one the
-        // marker names, so no configuration is ever reported twice.
+        // previous page's marker names, so no configuration is ever reported twice. The
+        // marker is a token THIS store minted, so a value it did not issue names no
+        // position at all and is refused rather than paged from.
+        //
+        // The refusal is the MODELLED parameter error, not the boundary walk's
+        // `ValidationException`: `Marker` carries no modelled constraint for that walk to
+        // decide, so what refuses it is this operation's own reading of the value — the
+        // same answer, over the same clause, that every other paginated listing of this
+        // service gives a marker that names no place in its order
+        // (`crate::ops::list_layer_versions`,
+        // `crate::ops::list_durable_executions_by_function`). The qualifier check above is
+        // the other case: there the value fails a pattern the MODEL declares.
         let start = match input.marker.as_deref() {
-            Some(marker) => entries
-                .iter()
-                .position(|(qualifier, _)| qualifier.as_str() > marker)
-                .unwrap_or(entries.len()),
+            Some(marker) => {
+                let Some(after) =
+                    crate::state::function_url::function_url_marker_cursor(&page_token_key, marker)
+                else {
+                    return Err(invalid_parameter(
+                        crate::state::function_url::function_url_marker_message(marker),
+                    ));
+                };
+                entries
+                    .iter()
+                    .position(|(qualifier, _)| *qualifier > after)
+                    .unwrap_or(entries.len())
+            }
             None => 0,
         };
         let page = match entries.get(start..) {
@@ -253,12 +279,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         Ok(ListFunctionUrlConfigsOutput {
             function_url_configs: page.iter().map(|(_, item)| item.clone()).collect(),
             // "The pagination token that's included if more results are available" — so it
-            // is absent on the last page, and it is the qualifier of the last entry THIS
-            // page reported, which is what the next page continues after.
-            next_marker: page
-                .last()
-                .filter(|_| truncated)
-                .map(|(qualifier, _)| qualifier.clone()),
+            // is absent on the last page, and it is a token this listing mints for the
+            // position THIS page ended on, which is where the next page continues from.
+            next_marker: page.last().filter(|_| truncated).map(|(qualifier, _)| {
+                crate::state::function_url::function_url_marker(&page_token_key, qualifier)
+            }),
         })
     }
 }

@@ -201,12 +201,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let now = ::std::time::SystemTime::now();
 
         // Only the unpublished version and an alias can carry a function URL, so only
-        // those can have one updated; see `state::is_function_url_qualifier`.
+        // those can have one updated; see `state::is_function_url_qualifier`. A value
+        // outside its member's own `@pattern` is refused the way the boundary walk refuses
+        // one — 400 `ValidationException` over the clause built from the request — because
+        // what is wrong is the request's shape; see `crate::state::admitted_qualifier`.
         if let Some(named) =
             crate::state::named_qualifier(&input.function_name, input.qualifier.as_deref())
         {
             if !crate::state::is_function_url_qualifier(&named) {
-                return Err(invalid_parameter(
+                return Err(crate::scaffolded::Scaffolded::validation(
                     crate::state::function_url_qualifier_message(&named),
                 ));
             }
@@ -241,7 +244,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             config.cors = input.cors.clone();
         }
         if let Some(invoke_mode) = input.invoke_mode.clone() {
-            config.invoke_mode = invoke_mode;
+            config.invoke_mode = Some(invoke_mode);
         }
         // "When the function URL configuration was last updated": that is this call.
         config.last_modified_time = crate::state::iso8601(now);
@@ -256,7 +259,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             cors: config.cors.clone(),
             creation_time: config.creation_time.clone(),
             last_modified_time: config.last_modified_time.clone(),
-            invoke_mode: Some(config.invoke_mode.clone()),
+            // The invoke mode as CONFIGURED, which is absent while no caller has named one
+            // on this function URL: a write answers what it persisted, and the mode such a
+            // URL serves in is what a READ of the configuration reports.
+            invoke_mode: config.invoke_mode.clone(),
         })
     }
 }

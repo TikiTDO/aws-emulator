@@ -184,20 +184,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx);
 
         // Only the unpublished version and an alias can carry a function URL, so only
-        // those can have one deleted; see `state::is_function_url_qualifier`.
+        // those can have one deleted; see `state::is_function_url_qualifier`. A value
+        // outside its member's own `@pattern` is refused the way the boundary walk refuses
+        // one — 400 `ValidationException` over the clause built from the request — because
+        // what is wrong is the request's shape; see `crate::state::admitted_qualifier`.
         if let Some(named) =
             crate::state::named_qualifier(&input.function_name, input.qualifier.as_deref())
         {
             if !crate::state::is_function_url_qualifier(&named) {
-                return Err(
-                    DeleteFunctionUrlConfigErrorModeled::InvalidParameterValueException(
-                        InvalidParameterValueException {
-                            r#type: None,
-                            message: Some(crate::state::function_url_qualifier_message(&named)),
-                        },
-                    )
-                    .into(),
-                );
+                return Err(crate::scaffolded::Scaffolded::validation(
+                    crate::state::function_url_qualifier_message(&named),
+                ));
             }
         }
 

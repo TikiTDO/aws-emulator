@@ -217,6 +217,8 @@ mod function_url_data_plane;
 mod function_url_deletion;
 #[path = "all/function_url_listing.rs"]
 mod function_url_listing;
+#[path = "all/function_url_reported_members.rs"]
+mod function_url_reported_members;
 #[path = "all/function_url_update.rs"]
 mod function_url_update;
 #[path = "all/function_version_listing.rs"]

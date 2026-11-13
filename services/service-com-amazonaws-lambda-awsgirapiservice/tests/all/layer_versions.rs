@@ -412,8 +412,10 @@ async fn publish_layer_version_stores_the_archive_and_reports_it() {
             .unwrap_or_default()
             .to_string();
         assert!(
-            created.contains('T') && created.ends_with('Z'),
-            "case {:?}: expected an ISO-8601 CreatedDate, got {created:?}",
+            created.contains('T') && created.ends_with("+0000"),
+            "case {:?}: expected a CreatedDate in the form the member documents \
+             (\"in ISO 8601 format. For example, 2018-11-27T15:10:45.123+0000\"), got \
+             {created:?}",
             case.name
         );
 

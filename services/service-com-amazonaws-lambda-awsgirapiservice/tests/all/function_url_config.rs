@@ -7,11 +7,12 @@
 //! The rule under test: `CreateFunctionUrlConfig` creates, for the qualifier the request
 //! names, the ONE function URL that qualifier may have — persisting exactly the
 //! configuration the request described (`AuthType` as supplied, `Cors` as supplied and
-//! nothing more, `InvokeMode` as supplied or the documented `BUFFERED` default), minting
-//! its endpoint once in the form `https://<url-id>.lambda-url.<region>.on.aws/` — and
+//! nothing more, `InvokeMode` as supplied and UNSET when the request named none) — and
 //! answers that configuration with the ARN of the function it is attached to and the
-//! instant it was created; `GetFunctionUrlConfig` reports that same stored record, and a
-//! second create on a qualifier that already has a function URL is refused.
+//! instant it was created; `GetFunctionUrlConfig` reports that same stored record, with
+//! the mode the URL SERVES IN (the documented `BUFFERED` default while none is
+//! configured), and a second create on a qualifier that already has a function URL is
+//! refused.
 //!
 //! Every row drives real HTTP requests through the router and reads the configuration
 //! back through `GetFunctionUrlConfig`, so a URL that was answered but never stored
@@ -253,6 +254,11 @@ struct UrlCase {
     reference: Option<String>,
     request: Value,
     expected_auth_type: &'static str,
+    /// The `InvokeMode` the CREATE must answer: what the request configured, and nothing
+    /// at all when it configured none.
+    expected_created_invoke_mode: Value,
+    /// The `InvokeMode` a READ of the configuration must report: the mode the URL serves
+    /// in, which is the documented default while none is configured.
     expected_invoke_mode: &'static str,
     expected_cors: Value,
 }
@@ -273,6 +279,7 @@ fn url_cases() -> Vec<UrlCase> {
             reference: None,
             request: json!({ "AuthType": "NONE" }),
             expected_auth_type: "NONE",
+            expected_created_invoke_mode: Value::Null,
             expected_invoke_mode: DEFAULT_INVOKE_MODE,
             expected_cors: Value::Null,
         },
@@ -290,6 +297,7 @@ fn url_cases() -> Vec<UrlCase> {
                 "Cors": { "AllowOrigins": ["https://www.example.com"] },
             }),
             expected_auth_type: "AWS_IAM",
+            expected_created_invoke_mode: json!("RESPONSE_STREAM"),
             expected_invoke_mode: "RESPONSE_STREAM",
             expected_cors: json!({ "AllowOrigins": ["https://www.example.com"] }),
         },
@@ -312,6 +320,7 @@ fn url_cases() -> Vec<UrlCase> {
                 },
             }),
             expected_auth_type: "NONE",
+            expected_created_invoke_mode: json!("BUFFERED"),
             expected_invoke_mode: "BUFFERED",
             expected_cors: json!({
                 "AllowCredentials": true,
@@ -339,6 +348,7 @@ fn url_cases() -> Vec<UrlCase> {
                 },
             }),
             expected_auth_type: "AWS_IAM",
+            expected_created_invoke_mode: Value::Null,
             expected_invoke_mode: DEFAULT_INVOKE_MODE,
             expected_cors: json!({
                 "AllowCredentials": false,
@@ -358,6 +368,7 @@ fn url_cases() -> Vec<UrlCase> {
                 "Cors": { "AllowHeaders": [], "AllowOrigins": [] },
             }),
             expected_auth_type: "NONE",
+            expected_created_invoke_mode: Value::Null,
             expected_invoke_mode: DEFAULT_INVOKE_MODE,
             expected_cors: json!({ "AllowHeaders": [], "AllowOrigins": [] }),
         },
@@ -438,9 +449,10 @@ async fn a_function_url_is_created_from_the_request_and_read_back() {
         );
         assert_eq!(
             invoke_mode,
-            json!(case.expected_invoke_mode),
-            "case {label:?}: expected InvokeMode {:?}, got {invoke_mode:?}",
-            case.expected_invoke_mode
+            case.expected_created_invoke_mode,
+            "case {label:?}: the create must answer the InvokeMode it configured ({:?}), \
+             got {invoke_mode:?}",
+            case.expected_created_invoke_mode
         );
         let created_cors = created.json()["Cors"].clone();
         assert_eq!(
@@ -451,8 +463,10 @@ async fn a_function_url_is_created_from_the_request_and_read_back() {
         );
         let creation_time = created.string("CreationTime").unwrap_or_default();
         assert!(
-            creation_time.contains('T') && creation_time.ends_with('Z'),
-            "case {label:?}: CreationTime must be an ISO-8601 instant, got {creation_time:?}"
+            creation_time.contains('T') && creation_time.ends_with("+0000"),
+            "case {label:?}: CreationTime must be an ISO-8601 instant with the numeric UTC \
+             offset this service renders (the form the model's own instant example, \
+             `2018-11-27T15:10:45.123+0000`, spells), got {creation_time:?}"
         );
 
         // Read the configuration back: a URL that was answered but never persisted
@@ -467,8 +481,14 @@ async fn a_function_url_is_created_from_the_request_and_read_back() {
         );
         assert_eq!(
             reported(&fetched),
-            (json!(url), arn, auth_type, invoke_mode),
-            "case {label:?}: GetFunctionUrlConfig must report the created function URL, got {}",
+            (
+                json!(url),
+                arn,
+                auth_type,
+                json!(case.expected_invoke_mode)
+            ),
+            "case {label:?}: GetFunctionUrlConfig must report the created function URL and \
+             the mode it serves in, got {}",
             fetched.text()
         );
         let fetched_cors = fetched.json()["Cors"].clone();
@@ -761,10 +781,9 @@ async fn a_function_url_is_not_created_on_a_published_version() {
             answer.text()
         );
         assert!(
-            answer
-                .error_code()
-                .contains("InvalidParameterValueException"),
-            "case {label:?}: expected InvalidParameterValueException, got {}",
+            answer.error_code().contains("ValidationException"),
+            "case {label:?}: a value outside its member's modelled pattern is refused the \
+             way the boundary walk refuses one, so expected ValidationException, got {}",
             answer.error_code()
         );
 

@@ -299,7 +299,9 @@ pub struct FunctionUrlTarget {
     pub qualifier: String,
     /// The `AuthType` the URL enforces, as stored.
     pub auth_type: String,
-    /// The `InvokeMode` the URL serves in, as stored.
+    /// The `InvokeMode` the URL SERVES IN, which is the one configured on it or the
+    /// documented default when none ever was
+    /// ([`FunctionUrlConfigRecord::served_invoke_mode`]).
     pub invoke_mode: String,
     /// The `Cors` settings the URL was configured with, as stored, and absent when it was
     /// configured with none — which is what decides whether this endpoint answers a
@@ -332,7 +334,7 @@ pub fn held_function_url(
                 function_name: function.config.name.clone(),
                 qualifier: qualifier.clone(),
                 auth_type: config.auth_type.clone(),
-                invoke_mode: config.invoke_mode.clone(),
+                invoke_mode: config.served_invoke_mode(),
                 cors: config.cors.clone(),
                 request_path: normalized_path(addressed.request_path),
                 addressed_region: addressed.region.map(str::to_string),
@@ -383,9 +385,99 @@ fn first_segment(path: &str) -> Option<&str> {
     split_first_segment(path).map(|(first, _)| first)
 }
 
+/// The `NextMarker` a `ListFunctionUrlConfigs` page hands back once entries remain after
+/// it: the position it ended on, carried inside a token this store MINTED for it.
+///
+/// `NextMarker` is "The pagination token that's included if more results are available"
+/// (`smithy_query(query="shape", shape="ListFunctionUrlConfigsResponse")`), so what it
+/// names is a place in the listing and nothing else. It is therefore not any of the
+/// identifiers this API addresses a resource by — least of all the qualifier the entry
+/// sits on, which a caller would read as naming a function version or an alias — and a
+/// caller cannot act on it except by handing it back.
+///
+/// The position travels inside the token behind an authenticator over it
+/// ([`PageTokenKey`]), so the only values this listing continues from are the ones it
+/// issued; the bytes are rendered hexadecimal, which is the spelling a token on the wire
+/// has here — one fixed alphabet, so a token this listing minted reads the same whatever
+/// position it carries.
+#[must_use]
+pub fn function_url_marker(key: &PageTokenKey, qualifier: &str) -> String {
+    ::hex::encode(key.mint(qualifier))
+}
+
+/// The position `marker` names, or `None` for any value this store did not mint — a value
+/// of the wrong spelling, and one whose authenticator does not match the position it
+/// travels with.
+#[must_use]
+pub fn function_url_marker_cursor(key: &PageTokenKey, marker: &str) -> Option<String> {
+    let token = ::hex::decode(marker).ok()?;
+    key.cursor_of(&token)
+}
+
+/// What a listing refuses a `Marker` it did not issue with: the validation clause built
+/// from the request, naming the member and what the value has to be.
+///
+/// A `Marker` is "the pagination token that's returned by a previous request", so a value
+/// no page of this listing ever returned is a malformed request rather than a position
+/// holding no entries — the reading every other paginated listing of this service gives a
+/// marker that names no place in its order.
+#[must_use]
+pub fn function_url_marker_message(marker: &str) -> String {
+    format!(
+        "1 validation error detected: Value '{marker}' at 'marker' failed to satisfy \
+         constraint: Member must be the pagination token returned by a previous request"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A page marker round-trips under the key that minted it, and no value another store
+    /// minted or a caller assembled names a position at all.
+    #[test]
+    fn a_page_marker_round_trips_and_names_no_position_under_another_key() {
+        let key = PageTokenKey::new();
+        let other = PageTokenKey::new();
+        // The qualifiers a function URL can sit on: the unpublished version, and alias
+        // names spanning the lengths and characters the model's pattern admits.
+        for qualifier in [VERSION_LATEST, "a", "live", "Blue_green-2"] {
+            let marker = function_url_marker(&key, qualifier);
+            assert_eq!(
+                function_url_marker_cursor(&key, &marker).as_deref(),
+                Some(qualifier),
+                "case {qualifier:?}: expected the marker to name the position it was \
+                 minted for, got {:?}",
+                function_url_marker_cursor(&key, &marker)
+            );
+            assert!(
+                marker != qualifier && marker.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "case {qualifier:?}: a marker is a hexadecimal token of this store's own, \
+                 never the position it continues after, got {marker:?}"
+            );
+            for (case, value) in [
+                ("another store's key", function_url_marker(&other, qualifier)),
+                ("the bare qualifier", qualifier.to_string()),
+                (
+                    "a token shaped like a minted one",
+                    ::hex::encode(
+                        [
+                            &[0_u8; ::service_common::page_tokens::AUTHENTICATOR_BYTES][..],
+                            qualifier.as_bytes(),
+                        ]
+                        .concat(),
+                    ),
+                ),
+                ("not a hexadecimal token at all", format!("{marker}!!")),
+            ] {
+                assert_eq!(
+                    function_url_marker_cursor(&key, &value),
+                    None,
+                    "case {qualifier:?} / {case}: expected no position from {value:?}"
+                );
+            }
+        }
+    }
 
     /// A host reads as a function URL endpoint exactly when it is shaped like the one this
     /// service mints. The rows span what the reading generalises over: the minted form, a

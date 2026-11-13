@@ -185,8 +185,9 @@ async fn create_alias(router: &MultiServiceRouter, name: &str, alias: &str) {
     );
 }
 
-/// The stored function URL configuration of `qualifier`, as `(url id, auth type, invoke
-/// mode)`.
+/// The stored function URL configuration of `qualifier`, as `(url id, auth type, the
+/// invoke mode it SERVES IN)` — the last being the mode configured on it, or the
+/// documented default while none is.
 fn stored_config(
     engine: &Arc<engine::InMemoryEngine>,
     function: &str,
@@ -202,7 +203,7 @@ fn stored_config(
             (
                 config.url_id.clone(),
                 config.auth_type.clone(),
-                config.invoke_mode.clone(),
+                config.served_invoke_mode(),
             )
         })
 }
@@ -220,8 +221,13 @@ struct UpdateCase {
     reference: fn(&str) -> String,
     /// The `Qualifier` query parameter the update carries, if any.
     query_qualifier: Option<&'static str>,
-    /// What the configuration must report afterwards: `(AuthType, InvokeMode, Cors)`.
+    /// What the configuration must report afterwards: `(AuthType, the InvokeMode it
+    /// serves in, Cors)`.
     expected: (&'static str, &'static str, Value),
+    /// The `InvokeMode` the UPDATE itself must answer: the mode configured on the
+    /// configuration once this update has been applied, and nothing at all while no
+    /// caller has configured one.
+    answered_invoke_mode: Value,
 }
 
 /// The rows. Each states a different subset of the updatable members over a different
@@ -238,6 +244,7 @@ fn update_cases() -> Vec<UpdateCase> {
             reference: |name| name.to_string(),
             query_qualifier: None,
             expected: ("AWS_IAM", "BUFFERED", Value::Null),
+            answered_invoke_mode: Value::Null,
         },
         UpdateCase {
             name: "the invoke mode alone, on an alias addressed by the colon form",
@@ -248,6 +255,7 @@ fn update_cases() -> Vec<UpdateCase> {
             reference: |name| format!("{name}:live"),
             query_qualifier: None,
             expected: ("AWS_IAM", "RESPONSE_STREAM", Value::Null),
+            answered_invoke_mode: json!("RESPONSE_STREAM"),
         },
         UpdateCase {
             name: "the cors block alone, on the unpublished version by full arn",
@@ -264,6 +272,7 @@ fn update_cases() -> Vec<UpdateCase> {
                 "BUFFERED",
                 json!({ "AllowOrigins": ["https://www.example.com"], "MaxAge": 600 }),
             ),
+            answered_invoke_mode: Value::Null,
         },
         UpdateCase {
             name: "every updatable member at once, on an alias by the Qualifier parameter",
@@ -286,6 +295,7 @@ fn update_cases() -> Vec<UpdateCase> {
                 "RESPONSE_STREAM",
                 json!({ "AllowMethods": ["*"], "AllowOrigins": ["*"] }),
             ),
+            answered_invoke_mode: json!("RESPONSE_STREAM"),
         },
         UpdateCase {
             name: "no updatable member at all, which keeps every stored value",
@@ -304,16 +314,19 @@ fn update_cases() -> Vec<UpdateCase> {
                 "RESPONSE_STREAM",
                 json!({ "AllowOrigins": ["https://kept.example.com"] }),
             ),
+            answered_invoke_mode: json!("RESPONSE_STREAM"),
         },
     ]
 }
 
-/// The configuration's `(AuthType, InvokeMode, Cors)` as an answer reports them.
-fn reported(answer: &Answer) -> (String, String, Value) {
+/// The configuration's `(AuthType, InvokeMode, Cors)` as an answer reports them, with
+/// the invoke mode as the raw JSON member so a value the emulator invented for an unset
+/// one shows up as a difference.
+fn reported(answer: &Answer) -> (String, Value, Value) {
     let body = answer.json();
     (
         answer.string("AuthType").unwrap_or_default(),
-        answer.string("InvokeMode").unwrap_or_default(),
+        body.get("InvokeMode").cloned().unwrap_or(Value::Null),
         body.get("Cors").cloned().unwrap_or(Value::Null),
     )
 }
@@ -386,16 +399,25 @@ async fn an_update_replaces_the_members_it_states_and_keeps_the_rest() {
             updated.text()
         );
 
-        let expected = (
+        // The write answers what it persisted: the invoke mode is the one configured on
+        // the configuration, and absent while no caller has configured one.
+        let answered = (
             case.expected.0.to_string(),
-            case.expected.1.to_string(),
+            case.answered_invoke_mode.clone(),
             case.expected.2.clone(),
         );
         assert_eq!(
             reported(&updated),
-            expected,
-            "case {label:?}: expected the configuration to report {expected:?}, got {}",
+            answered,
+            "case {label:?}: expected the update to answer {answered:?}, got {}",
             updated.text()
+        );
+        // A read reports the mode the URL SERVES IN, which is the documented default
+        // while none is configured.
+        let expected = (
+            case.expected.0.to_string(),
+            json!(case.expected.1),
+            case.expected.2.clone(),
         );
         assert_eq!(
             (
@@ -545,8 +567,8 @@ async fn an_update_of_a_configuration_that_does_not_exist_is_refused() {
     }
 
     // A published version is not a qualifier a function URL can be attached to, so an
-    // update addressed by one is refused as an invalid parameter rather than as a missing
-    // resource — the same reading the create and the delete apply.
+    // update addressed by one is refused for failing that member's modelled pattern —
+    // the same reading the create and the delete apply.
     for (label, reference, qualifier) in [
         ("a version in the function name", "uu-refusals:1", None),
         ("a version in the Qualifier parameter", "uu-refusals", Some("1")),
@@ -572,10 +594,9 @@ async fn an_update_of_a_configuration_that_does_not_exist_is_refused() {
             answer.text()
         );
         assert!(
-            answer
-                .error_code()
-                .contains("InvalidParameterValueException"),
-            "case {label:?}: expected InvalidParameterValueException, got {}",
+            answer.error_code().contains("ValidationException"),
+            "case {label:?}: a value outside its member's modelled pattern is refused the \
+             way the boundary walk refuses one, so expected ValidationException, got {}",
             answer.error_code()
         );
     }
