@@ -54,7 +54,11 @@ const POLICY_DOCUMENT: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":
 
 /// AWS's sentence for a value outside the character class published for an entity NAME,
 /// with the member it was supplied for in place of `{member}`.
-fn invalid_name(member: &str) -> String {
+///
+/// Shared with the suite that drives the same sentence over the PATH-bearing names and the
+/// rename members (`tests/all/entity_name_path_prefix_refusal.rs`), so the sentence is
+/// written out once for the two tables that assert it.
+pub(crate) fn invalid_name(member: &str) -> String {
     format!(
         "The specified value for {member} is invalid. It must contain only alphanumeric \
          characters and/or the following: +=,.@_-"

@@ -83,6 +83,8 @@ mod delegation_request_rejection;
 mod delegation_request_updates;
 #[path = "all/entities_for_policy.rs"]
 mod entities_for_policy;
+#[path = "all/entity_name_path_prefix_refusal.rs"]
+mod entity_name_path_prefix_refusal;
 #[path = "all/entity_reference_and_namespace_refusals.rs"]
 mod entity_reference_and_namespace_refusals;
 #[path = "all/enum_refusal_wording.rs"]
