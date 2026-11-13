@@ -93,6 +93,11 @@ sha2 = { workspace = true }
 # a question only those services can answer.
 aws-sdk-redshift = { version = "1", default-features = false }
 aws-sdk-redshiftserverless = { version = "1", default-features = false }
+# `state::statement_events`: the EventBridge client a statement's status change is
+# published with, over the same in-process callback as the clients above. A submit
+# carrying `WithEvent` asks to be told how its statement ended through the
+# account's default event bus.
+aws-sdk-eventbridge = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
 # `Service::override_refusal`: the wording AWS states a boundary constraint
 # refusal with on the JSON protocols, which every service on one shares.
 service-common = { path = "../common" }
@@ -107,6 +112,11 @@ hex = { workspace = true }
 # resources: the suites create them there and then submit statements here.
 service-com-amazonaws-redshift-redshiftserviceversion20121201 = { workspace = true }
 service-com-amazonaws-redshiftserverless-redshiftserverless = { workspace = true }
+# EventBridge and SQS are mounted beside this service on one engine — the way the
+# assembled emulator runs them — so a statement's published status change travels
+# the real bus to a real SQS target, which is where the event suite observes it.
+service-com-amazonaws-eventbridge-awsevents = { workspace = true }
+service-com-amazonaws-sqs-amazonsqs = { workspace = true }
 
 [lints]
 workspace = true

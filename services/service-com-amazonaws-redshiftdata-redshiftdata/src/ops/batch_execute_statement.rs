@@ -432,6 +432,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // text before it was admitted.
             parameters,
             with_event: input.with_event.unwrap_or(false),
+            // Where the batch ran, who submitted it and the warehouse it ran on:
+            // recorded with the submission for the same reason one statement's
+            // are — an event about it is published by the transaction, which
+            // has no request.
+            region: crate::state::warehouse::request_region(ctx),
+            principal: crate::state::statement_events::submitting_principal(),
+            resource_arn: warehouse.arn.clone(),
             // "If no format is specified, the default is JSON."
             result_format: non_empty(input.result_format.as_ref())
                 .unwrap_or_else(|| "JSON".to_string()),
@@ -551,6 +558,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let engine = ::std::sync::Arc::clone(&self.engine);
         let recorded = id.clone();
         let absent = connection_database.clone();
+        // The callback this request was served over, carried into the
+        // transaction: a batch that asked for an event is published when it
+        // STOPS, which happens inside that transaction and not in this request.
+        let callback = ctx.callback().clone();
         let execution = tokio::spawn(async move {
             let Some((handle, mut slot)) = reserved else {
                 // No connection was ever made, so no statement of the batch
@@ -565,6 +576,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         ),
                     );
                 }
+                crate::state::statement_events::publish_pending(&callback, &*engine).await;
                 return;
             };
             slot.wait_for_turn().await;
@@ -597,6 +609,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 state.lock().complete(&recorded, produced);
             }
             drop(slot);
+            // The batch has stopped, so the status change a submission that
+            // asked for an event is owed is published here — by the transaction
+            // itself, so it reaches the bus whether or not anybody polls.
+            crate::state::statement_events::publish_pending(&callback, &*engine).await;
         });
 
         // "The number of seconds to wait for the SQL statement to complete

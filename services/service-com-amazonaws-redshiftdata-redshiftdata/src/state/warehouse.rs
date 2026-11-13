@@ -72,6 +72,13 @@ pub struct TargetFacts {
     /// and for one whose owner could not be asked — nothing is invented from
     /// silence.
     pub provisioned_databases: Vec<String>,
+    /// The ARN of the warehouse itself — the address a statement that ran on it
+    /// is reported against. A provisioned cluster's ARN is a documented function
+    /// of its identifier, Region and account ([`cluster_arn`]); a serverless
+    /// workgroup's is minted by the control plane that owns it, so it is READ
+    /// from that owner and is none when the owner could not be asked and the
+    /// request did not name the workgroup by ARN.
+    pub arn: Option<String>,
 }
 
 impl TargetFacts {
@@ -81,7 +88,14 @@ impl TargetFacts {
         Self {
             resolution,
             provisioned_databases: Vec::new(),
+            arn: None,
         }
+    }
+
+    /// The same facts, carrying the warehouse's own ARN.
+    fn with_arn(mut self, arn: Option<String>) -> Self {
+        self.arn = arn;
+        self
     }
 
     /// Whether the warehouse was provisioned with a database of this name.
@@ -108,6 +122,20 @@ impl TargetFacts {
                 .iter()
                 .any(|name| name == database)
     }
+}
+
+/// The ARN of a provisioned cluster:
+/// `arn:aws:redshift:<region>:<account>:cluster:<identifier>`.
+///
+/// Source: the Amazon Redshift Cluster Management Guide, "Constructing an Amazon
+/// Redshift Amazon Resource Name (ARN)" —
+/// `arn:aws:redshift:region:account-id:cluster:cluster-name`, which is also the
+/// example the Redshift model's own `CreateTagsMessage$ResourceName` carries
+/// ("arn:aws:redshift:us-east-2:123456789:cluster:t1"). A pure function of the
+/// identifier, the Region and this emulator's account, so the Data API names a
+/// cluster by the same ARN the service that owns it does.
+pub fn cluster_arn(identifier: &str, region: &str) -> String {
+    ::engine::emulator_arn("redshift", region, &format!("cluster:{identifier}"))
 }
 
 /// The message a connection to a database the warehouse has none of fails with.
@@ -251,6 +279,9 @@ async fn describe_cluster(
         .cluster_identifier(identifier)
         .send()
         .await;
+    // A cluster's ARN is a documented function of its identifier, Region and
+    // account, so it is the same string whatever the owner answers.
+    let arn = Some(cluster_arn(identifier, region));
     match answer {
         Ok(answer) => TargetFacts {
             resolution: TargetResolution::Exists,
@@ -260,13 +291,14 @@ async fn describe_cluster(
                 .filter_map(::aws_sdk_redshift::types::Cluster::db_name)
                 .map(str::to_string)
                 .collect(),
+            arn,
         },
         Err(error) => {
             if error
                 .as_service_error()
                 .is_some_and(::aws_sdk_redshift::operation::describe_clusters::DescribeClustersError::is_cluster_not_found_fault)
             {
-                return TargetFacts::without_databases(TargetResolution::Absent);
+                return TargetFacts::without_databases(TargetResolution::Absent).with_arn(arn);
             }
             // Visible at default verbosity: a statement admitted because the
             // owner could not be asked reads exactly like one admitted because
@@ -277,7 +309,7 @@ async fn describe_cluster(
                 error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
                 "the cluster a statement names could not be resolved"
             );
-            TargetFacts::without_databases(TargetResolution::Unresolvable)
+            TargetFacts::without_databases(TargetResolution::Unresolvable).with_arn(arn)
         }
     }
 }
@@ -294,17 +326,47 @@ async fn describe_workgroup(
     region: &str,
     name: &str,
 ) -> TargetFacts {
-    let (resolution, namespace) = resolve_workgroup(ctx, region, name).await;
-    if resolution != TargetResolution::Exists {
-        return TargetFacts::without_databases(resolution);
+    let resolved = resolve_workgroup(ctx, region, name).await;
+    // A workgroup's ARN is the serverless control plane's own, so it is taken
+    // from that owner's answer; a request that named the workgroup BY its ARN
+    // already carries it, which is what a target the owner could not be asked
+    // about is still addressable by.
+    let arn = resolved
+        .arn
+        .clone()
+        .or_else(|| name.starts_with("arn:").then(|| name.to_string()));
+    if resolved.resolution != TargetResolution::Exists {
+        return TargetFacts::without_databases(resolved.resolution).with_arn(arn);
     }
-    let provisioned_databases = match namespace {
+    let provisioned_databases = match resolved.namespace {
         Some(namespace) => namespace_databases(ctx, region, &namespace).await,
         None => Vec::new(),
     };
     TargetFacts {
-        resolution,
+        resolution: resolved.resolution,
         provisioned_databases,
+        arn,
+    }
+}
+
+/// What asking Amazon Redshift Serverless about one workgroup found: whether it
+/// exists, the namespace it serves, and its own ARN.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedWorkgroup {
+    resolution: TargetResolution,
+    namespace: Option<String>,
+    arn: Option<String>,
+}
+
+impl ResolvedWorkgroup {
+    /// A workgroup the owner answered about in `resolution` and reported nothing
+    /// else of.
+    fn unresolved(resolution: TargetResolution) -> Self {
+        Self {
+            resolution,
+            namespace: None,
+            arn: None,
+        }
     }
 }
 
@@ -319,7 +381,7 @@ async fn resolve_workgroup(
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
     name: &str,
-) -> (TargetResolution, Option<String>) {
+) -> ResolvedWorkgroup {
     if name.starts_with("arn:") {
         return resolve_workgroup_arn(ctx, region, name).await;
     }
@@ -329,26 +391,30 @@ async fn resolve_workgroup(
         .send()
         .await;
     match answer {
-        Ok(answer) => (
-            TargetResolution::Exists,
-            answer
+        Ok(answer) => ResolvedWorkgroup {
+            resolution: TargetResolution::Exists,
+            namespace: answer
                 .workgroup()
                 .and_then(::aws_sdk_redshiftserverless::types::Workgroup::namespace_name)
                 .map(str::to_string),
-        ),
+            arn: answer
+                .workgroup()
+                .and_then(::aws_sdk_redshiftserverless::types::Workgroup::workgroup_arn)
+                .map(str::to_string),
+        },
         Err(error) => {
             if error
                 .as_service_error()
                 .is_some_and(::aws_sdk_redshiftserverless::operation::get_workgroup::GetWorkgroupError::is_resource_not_found_exception)
             {
-                return (TargetResolution::Absent, None);
+                return ResolvedWorkgroup::unresolved(TargetResolution::Absent);
             }
             ::tracing::warn!(
                 %region,
                 error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
                 "the workgroup a statement names could not be resolved"
             );
-            (TargetResolution::Unresolvable, None)
+            ResolvedWorkgroup::unresolved(TargetResolution::Unresolvable)
         }
     }
 }
@@ -394,7 +460,7 @@ async fn resolve_workgroup_arn(
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
     arn: &str,
-) -> (TargetResolution, Option<String>) {
+) -> ResolvedWorkgroup {
     let client = redshift_serverless(ctx, region);
     let mut token: Option<String> = None;
     for page_number in 0..MAX_WORKGROUP_PAGES {
@@ -413,7 +479,7 @@ async fn resolve_workgroup_arn(
                     "the Region's workgroups could not be read, so the workgroup a statement \
                      names by ARN is unresolved"
                 );
-                return (TargetResolution::Unresolvable, None);
+                return ResolvedWorkgroup::unresolved(TargetResolution::Unresolvable);
             }
         };
         if let Some(workgroup) = page
@@ -421,14 +487,15 @@ async fn resolve_workgroup_arn(
             .iter()
             .find(|workgroup| workgroup.workgroup_arn() == Some(arn))
         {
-            return (
-                TargetResolution::Exists,
-                workgroup.namespace_name().map(str::to_string),
-            );
+            return ResolvedWorkgroup {
+                resolution: TargetResolution::Exists,
+                namespace: workgroup.namespace_name().map(str::to_string),
+                arn: workgroup.workgroup_arn().map(str::to_string),
+            };
         }
         token = page.next_token().map(str::to_string);
         if token.is_none() {
-            return (TargetResolution::Absent, None);
+            return ResolvedWorkgroup::unresolved(TargetResolution::Absent);
         }
         if page_number + 1 == MAX_WORKGROUP_PAGES {
             ::tracing::warn!(
@@ -438,5 +505,5 @@ async fn resolve_workgroup_arn(
             );
         }
     }
-    (TargetResolution::Unresolvable, None)
+    ResolvedWorkgroup::unresolved(TargetResolution::Unresolvable)
 }

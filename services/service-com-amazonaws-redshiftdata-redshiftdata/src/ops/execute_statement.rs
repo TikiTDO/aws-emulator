@@ -397,6 +397,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             statement_name: non_empty(input.statement_name.as_ref()),
             parameters: parameters.clone(),
             with_event: input.with_event.unwrap_or(false),
+            // Where the statement ran, who submitted it and the warehouse it
+            // ran on: recorded with the statement, because an event about it is
+            // published in that Region, names that principal and names that
+            // warehouse, and the task that publishes it has no request.
+            region: crate::state::warehouse::request_region(ctx),
+            principal: crate::state::statement_events::submitting_principal(),
+            resource_arn: warehouse.arn.clone(),
             // "If no format is specified, the default is JSON."
             result_format: non_empty(input.result_format.as_ref())
                 .unwrap_or_else(|| "JSON".to_string()),
@@ -510,6 +517,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let engine = ::std::sync::Arc::clone(&self.engine);
         let recorded = id.clone();
         let absent = connection_database.clone();
+        // The callback this request was served over, carried into the execution:
+        // a statement that asked for an event is published when it STOPS, which
+        // happens inside that execution and not inside this request.
+        let callback = ctx.callback().clone();
         let execution = tokio::spawn(async move {
             let Some((handle, mut slot)) = reserved else {
                 // No connection was ever made, so nothing ran: the statement
@@ -524,6 +535,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         ),
                     );
                 }
+                crate::state::statement_events::publish_pending(&callback, &*engine).await;
                 return;
             };
             slot.wait_for_turn().await;
@@ -555,6 +567,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 state.lock().complete(&recorded, produced);
             }
             drop(slot);
+            // The statement has stopped, so the status change a submission that
+            // asked for an event is owed is published here — by the execution
+            // itself, so it reaches the bus whether or not anybody polls.
+            crate::state::statement_events::publish_pending(&callback, &*engine).await;
         });
 
         // "The number of seconds to wait for the SQL statement to complete

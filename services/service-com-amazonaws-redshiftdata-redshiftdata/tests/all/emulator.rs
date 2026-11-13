@@ -457,7 +457,9 @@ pub fn list(value: &Value, member: &str) -> Vec<Value> {
 pub const REGION: &str = "us-east-1";
 
 /// One emulator carrying the Data API and BOTH Redshift control planes over ONE
-/// shared engine, the way the router mounts them in production.
+/// shared engine, the way the router mounts them in production — plus
+/// EventBridge and Amazon SQS, so a statement's published status change travels
+/// the real bus to a real queue.
 ///
 /// A cluster and a workgroup are THEIR resources, so every suite that needs the
 /// Data API to resolve a real compute target — or to read what that target was
@@ -465,6 +467,9 @@ pub const REGION: &str = "us-east-1";
 /// belongs.
 pub struct Warehouses {
     router: MultiServiceRouter,
+    /// The shared engine every mounted service was built over, kept so a suite
+    /// can read this service's own store ([`Warehouses::store`]).
+    engine: Arc<engine::InMemoryEngine>,
 }
 
 impl Warehouses {
@@ -480,25 +485,61 @@ impl Warehouses {
         );
         router.register_service(
             service_com_amazonaws_redshiftserverless_redshiftserverless::EmulatedService::new(
-                engine,
+                Arc::clone(&engine),
             ),
         );
-        Self { router }
+        router.register_service(
+            service_com_amazonaws_eventbridge_awsevents::EmulatedService::new(Arc::clone(&engine)),
+        );
+        router.register_service(service_com_amazonaws_sqs_amazonsqs::EmulatedService::new(
+            Arc::clone(&engine),
+        ));
+        Self { router, engine }
+    }
+
+    /// This service's own state store on the shared engine.
+    pub fn store(
+        &self,
+    ) -> engine::ServiceState<
+        service_com_amazonaws_redshiftdata_redshiftdata::state::ComAmazonawsRedshiftdataRedshiftdataState,
+    > {
+        service_state(&*self.engine).expect("the shared engine must hold this service's state")
+    }
+
+    /// Take and HOLD the turn on `database` of the provisioned cluster
+    /// `cluster`, exactly as [`Emulator::hold_turn`] does and under the same two
+    /// preconditions: every submission made to that database afterwards waits
+    /// for its turn, so it stays SUBMITTED until the returned guard is dropped.
+    pub fn hold_turn(&self, cluster: &str, database: &str) -> HeldTurn {
+        let state = service_state(&*self.engine)
+            .expect("the shared engine must hold this service's state store");
+        let (_handle, _pid, slot) = state
+            .lock()
+            .reserve_database(&ConnectionTarget::Cluster(cluster.to_string()), database)
+            .expect("the harness must be able to take a turn on a database's queue");
+        HeldTurn { _slot: slot }
     }
 
     /// Call one awsJson operation of the service whose signing name is
     /// `signing_name`, under the target prefix `prefix`.
-    pub async fn json(
+    ///
+    /// The awsJson VERSION is the mounted service's own: 1.1 for the Data API
+    /// and EventBridge, 1.0 for Amazon SQS.
+    pub async fn json_version(
         &self,
         signing_name: &str,
         prefix: &str,
+        json_version: &str,
         operation: &str,
         body: &Value,
     ) -> (u16, Value) {
         let request = http::Request::builder()
             .method("POST")
             .uri("/")
-            .header("content-type", "application/x-amz-json-1.1")
+            .header(
+                "content-type",
+                format!("application/x-amz-json-{json_version}"),
+            )
             .header("x-amz-target", format!("{prefix}.{operation}"))
             .header(
                 "authorization",
@@ -514,6 +555,41 @@ impl Warehouses {
         let status = response.status().as_u16();
         let parsed = serde_json::from_slice(response.body()).unwrap_or(Value::Null);
         (status, parsed)
+    }
+
+    /// Call one awsJson 1.1 operation of the service whose signing name is
+    /// `signing_name`, under the target prefix `prefix`.
+    pub async fn json(
+        &self,
+        signing_name: &str,
+        prefix: &str,
+        operation: &str,
+        body: &Value,
+    ) -> (u16, Value) {
+        self.json_version(signing_name, prefix, "1.1", operation, body)
+            .await
+    }
+
+    /// One EventBridge call, which must answer 200.
+    pub async fn events_ok(&self, operation: &str, body: &Value) -> Value {
+        let (status, response) = self.json("events", "AWSEvents", operation, body).await;
+        assert_eq!(
+            status, 200,
+            "EventBridge {operation} must succeed for {body}, got {status} {response}"
+        );
+        response
+    }
+
+    /// One Amazon SQS call, which must answer 200.
+    pub async fn sqs_ok(&self, operation: &str, body: &Value) -> Value {
+        let (status, response) = self
+            .json_version("sqs", "AmazonSQS", "1.0", operation, body)
+            .await;
+        assert_eq!(
+            status, 200,
+            "Amazon SQS {operation} must succeed for {body}, got {status} {response}"
+        );
+        response
     }
 
     /// Call one Data API operation.

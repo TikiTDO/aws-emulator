@@ -53,6 +53,9 @@ mod statement_lifecycle;
 #[path = "all/statement_run_states.rs"]
 mod statement_run_states;
 
+#[path = "all/statement_status_change_events.rs"]
+mod statement_status_change_events;
+
 #[path = "all/statement_submission_surface.rs"]
 mod statement_submission_surface;
 

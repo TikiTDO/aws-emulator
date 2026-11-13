@@ -46,6 +46,10 @@
 //! one it did not is left to finish on its own, which is what makes two
 //! concurrently submitted statements concurrent. A session's close is on the
 //! clock, through the `SessionTtl` it carries.
+//!
+//! A submission that asked to be TOLD how it ended rather than polled for
+//! (`WithEvent`) has the status change it makes when it stops published to
+//! EventBridge by the execution that produced it — see [`statement_events`].
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -69,6 +73,10 @@ pub mod redshift_sql;
 /// The Amazon Redshift SQL functions the engine does not carry, implemented and
 /// registered on every connection.
 pub mod functions;
+
+/// The EventBridge event a statement whose submission asked for one publishes
+/// when it stops.
+pub mod statement_events;
 
 /// Page size `ListStatements` uses when the request leaves `MaxResults` at its
 /// modelled default of 0 — the modelled maximum, so an unparameterised call
@@ -761,6 +769,16 @@ pub struct Statement {
     result_size: i64,
     /// Whether the caller asked for an EventBridge event.
     pub with_event: bool,
+    /// The Region the submission was signed for: where the statement ran, and
+    /// the Region an event about it is published in.
+    pub region: String,
+    /// The IAM principal that submitted the statement
+    /// ([`statement_events::submitting_principal`]).
+    pub principal: String,
+    /// The ARN of the warehouse the statement ran on, when this service could
+    /// name it: a provisioned cluster's documented ARN, or the ARN the
+    /// serverless control plane minted for a workgroup.
+    pub resource_arn: Option<String>,
     /// `ResultFormat` as the request SPELLED it: one of the modelled tokens,
     /// defaulted to JSON as the model documents. Read through
     /// [`Statement::reported_result_format`], which is the spelling the API
@@ -2656,6 +2674,13 @@ pub struct Submission {
     pub parameters: Vec<SqlParameter>,
     /// The caller's `WithEvent`.
     pub with_event: bool,
+    /// The Region the submit request was signed for.
+    pub region: String,
+    /// The IAM principal that made the submit request.
+    pub principal: String,
+    /// The ARN of the warehouse the submission runs on, as the service that
+    /// owns it names it.
+    pub resource_arn: Option<String>,
     /// The resolved `ResultFormat`.
     pub result_format: String,
     /// The session the statement runs in, when the caller uses one.
@@ -2953,9 +2978,47 @@ pub struct ComAmazonawsRedshiftdataRedshiftdataState {
     next_query_id: i64,
     /// The next `RedshiftPid`.
     next_pid: i64,
+    /// The status changes waiting to be published to EventBridge, oldest first:
+    /// one per submission that asked for an event and has stopped.
+    ///
+    /// Bounded by [`statement_events::MAX_PENDING_EVENTS`] and drained by the
+    /// call that produced its entries
+    /// ([`statement_events::publish_pending`]), so it holds only what has not
+    /// been published yet.
+    statement_events: Vec<statement_events::StatementEvent>,
 }
 
 impl ComAmazonawsRedshiftdataRedshiftdataState {
+    /// Queue the status change `event` reports for publication, dropping the
+    /// OLDEST queued event once the queue is full.
+    ///
+    /// Every terminal transition of a submission that asked for an event goes
+    /// through here, so one status change is queued exactly once however it was
+    /// reached, and the queue cannot grow without bound.
+    fn queue_statement_event(&mut self, event: statement_events::StatementEvent) {
+        self.statement_events.push(event);
+        let queued = self.statement_events.len();
+        if queued > statement_events::MAX_PENDING_EVENTS {
+            self.statement_events
+                .drain(..queued - statement_events::MAX_PENDING_EVENTS);
+        }
+    }
+
+    /// Take at most `limit` queued status changes out, oldest first, for
+    /// publication — which happens with no lock held.
+    pub fn take_statement_events(
+        &mut self,
+        limit: usize,
+    ) -> Vec<statement_events::StatementEvent> {
+        let taken = self.statement_events.len().min(limit);
+        self.statement_events.drain(..taken).collect()
+    }
+
+    /// How many status changes are still waiting to be published.
+    pub fn pending_statement_event_count(&self) -> usize {
+        self.statement_events.len()
+    }
+
     /// Materialise every outcome a submission's execution has already reported.
     ///
     /// Every operation calls this before it reads, so an outcome the engine
@@ -3095,11 +3158,20 @@ impl ComAmazonawsRedshiftdataRedshiftdataState {
     pub fn cancel(&mut self, id: &str) -> Cancellation {
         if let Some(statement) = self.statements.get_mut(id) {
             let observed = statement.status;
-            return if statement.cancel(SystemTime::now()) {
-                Cancellation::Cancelled
+            if !statement.cancel(SystemTime::now()) {
+                return Cancellation::AlreadyStopped(observed);
+            }
+            // Stopping a statement is a status change of it too, so a submission
+            // that asked to be told how it ended is told that it was aborted.
+            let event = if statement.with_event {
+                Some(statement_events::StatementEvent::of(statement))
             } else {
-                Cancellation::AlreadyStopped(observed)
+                None
             };
+            if let Some(event) = event {
+                self.queue_statement_event(event);
+            }
+            return Cancellation::Cancelled;
         }
         // One statement of a batch does not run on its own: the batch was
         // submitted as one request and its statements run serially inside it,
@@ -3664,6 +3736,18 @@ impl ComAmazonawsRedshiftdataRedshiftdataState {
             statement.apply(execution, now, now_wall);
         }
 
+        // A submission that asked to be TOLD how it ended has the status change
+        // it has just made queued for publication, read off the record this
+        // call wrote; one that asked for nothing queues nothing.
+        let event = if statement.with_event {
+            Some(statement_events::StatementEvent::of(statement))
+        } else {
+            None
+        };
+        if let Some(event) = event {
+            self.queue_statement_event(event);
+        }
+
         // The result this submission retains is part of what the history holds,
         // so the history is brought back inside its bounds as the outcome lands
         // rather than only when something else is submitted.
@@ -3824,6 +3908,9 @@ fn build_statement(shared: &Shared<'_>, recorded: Recorded) -> Statement {
         result_rows: 0,
         result_size: 0,
         with_event: submission.with_event,
+        region: submission.region.clone(),
+        principal: submission.principal.clone(),
+        resource_arn: submission.resource_arn.clone(),
         result_format: submission.result_format.clone(),
         parameters: submission.parameters.clone(),
         session_id: shared.session_id.clone(),

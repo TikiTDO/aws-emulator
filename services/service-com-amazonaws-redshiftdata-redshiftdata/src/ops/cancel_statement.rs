@@ -147,7 +147,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(CancelStatementErrorModeled::InternalServerException(
                 InternalServerException {
@@ -157,12 +156,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
-        let mut store = state.lock();
-        // A statement whose execution has already reported is no longer running,
-        // so those outcomes are materialised before this call decides.
-        store.materialise_due_transitions();
-        // ONE lookup decides the outcome and carries the status it observed.
-        match store.cancel(&input.id) {
+        let outcome = {
+            let mut store = state.lock();
+            // A statement whose execution has already reported is no longer
+            // running, so those outcomes are materialised before this call
+            // decides.
+            store.materialise_due_transitions();
+            // ONE lookup decides the outcome and carries the status it observed.
+            store.cancel(&input.id)
+        };
+        // Stopping a statement is a status change of it, so a submission that
+        // asked to be told how it ended is told here — with the store lock
+        // released, which is where every publication of this service happens.
+        crate::state::statement_events::publish_pending(ctx.callback(), &*self.engine).await;
+        match outcome {
             Cancellation::Cancelled => Ok(CancelStatementOutput { status: Some(true) }),
             // Already stopped: not a cancellation, and reporting one would tell
             // the caller it stopped a query it did not stop. The service names
