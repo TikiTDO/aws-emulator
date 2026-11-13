@@ -57,3 +57,17 @@ Related but NOT covering this: open issue 20261108T010234Z-notifications-tag-pla
 2. Equivalently: GET /managed-notification-configurations against the notifications endpoint (aws notifications list-managed-notification-configurations). The response is 200 with the full managed catalog.
 3. Join the returned entries to the recorded AWS catalog on `arn` and compare `name` and `description`.
 4. Observe: the entry for category/AWS-Health/sub-category/Issue has name 'Issue' instead of 'Account-Specific Issues'; category/AWS-Health/sub-category/Billing has name 'Health Billing' instead of 'Billing Notification'; and the `description` differs for AWS-Health/Issue, AWS-Health/Billing and the AWS-BCM sub-categories Subscriptions, Billing-and-Invoices, Financing, Fraud-Prevention and Payment — 9 mismatched fields over 7 entries, with every ARN matching.
+
+## Fix status
+
+Cause 1: FIXED for every entry whose published text this report carries; FOUR `AWS-BCM` descriptions are still open.
+
+`MANAGED_NOTIFICATION_CATALOG` (services/service-com-amazonaws-notifications-notifications/src/state.rs) now carries, per entry, the published text this report states:
+
+* `AWS-Health/Issue` — name `Account-Specific Issues`, and the description stating that these events do NOT send email by default (the emulator previously said the opposite).
+* `AWS-Health/Billing` — name `Billing Notification`, and the delivery statement naming the root email address, the operations alternate contact and the billing alternate contact.
+* `AWS-BCM/Subscriptions` — the published `Updates about your AWS subscriptions, …` sentence.
+
+Those five replay keys now pass. `GetManagedNotificationConfiguration`, the paged and `channelIdentifier`-filtered listings and the channel-association reads all serve from the same table, so they agree with the listing by construction.
+
+Still open — 4 replay keys, all `description` on entries that exist with the right arn and name: `AWS-BCM/{Billing-and-Invoices, Financing, Fraud-Prevention, Payment}`. Their published sentences are not available anywhere in this environment: this report names them as `value_mismatch` without the recorded text, the replay withholds recorded body values, the model enumerates no catalog entry, and no fixture is in the tree. The four seeded descriptions were therefore left as they are rather than replaced with invented wording, which would only substitute one fidelity defect for another. A future fixer should read those four sentences off the fixture recording; the one recovered `AWS-BCM` sentence suggests the cluster's wording opens `Updates about …` rather than `Notifications about …`.

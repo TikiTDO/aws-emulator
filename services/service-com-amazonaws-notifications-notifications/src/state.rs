@@ -654,11 +654,11 @@ struct PublishedManagedNotification {
 /// * `AWS-BCM` — the Billing and Cost Management notifications that reach an
 ///   account's billing contacts: bills and invoices, financing, fraud
 ///   prevention, payments and subscriptions.
-/// * `AWS-Health` — the account-level AWS Health notifications: the issue
-///   events, and the three sub-categories whose events AWS also delivers by
-///   email to the account's root address and its matching alternate contact
-///   (billing, operations and security), which is what each of those three
-///   descriptions states.
+/// * `AWS-Health` — the account-level AWS Health notifications: the
+///   account-specific issue events, whose published description states that
+///   they do NOT send email by default, and the three sub-categories whose
+///   events AWS also delivers by email to the account's root address and the
+///   alternate contacts the published sentence of each one names.
 /// * `AWS-Partner-Central` — the AWS Marketplace SELLER notification
 ///   categories: product listings, offers and agreements, payments and
 ///   disbursements, and seller account management.
@@ -677,11 +677,12 @@ struct PublishedManagedNotification {
 /// category whose events nothing delivers.
 const MANAGED_NOTIFICATION_CATALOG: &[PublishedManagedNotification] = &[
     // The Billing and Cost Management cluster. Each display name is the words
-    // its sub-category segment spells, and each description states the billing
-    // events the sub-category covers; the entry's own published wording is not
-    // recoverable in this checkout, so the description says what the
-    // sub-category delivers rather than carrying wording nothing attests to.
-    // The arn — what every read path keys an entry on — is the published one.
+    // its sub-category segment spells, and the `Subscriptions` entry carries the
+    // published sentence for that sub-category. For the four entries below it
+    // the published wording is not recoverable in this checkout, so each
+    // description says what the sub-category delivers rather than carrying
+    // wording nothing attests to. The arn — what every read path keys an entry
+    // on — is the published one.
     PublishedManagedNotification {
         category: "AWS-BCM",
         sub_category: "Billing-and-Invoices",
@@ -710,30 +711,38 @@ const MANAGED_NOTIFICATION_CATALOG: &[PublishedManagedNotification] = &[
         category: "AWS-BCM",
         sub_category: "Subscriptions",
         name: "Subscriptions",
-        description: "Notifications about the subscriptions billed to your account, including upcoming renewals, expirations, and cancellations.",
+        description: "Updates about your AWS subscriptions, plans, credits, and billing status, including sign-ups, plan changes, and Marketplace activity.",
     },
-    // The AWS Health issue sub-category. Its published display text is not
-    // recoverable in this checkout either, so the name is the word its segment
-    // spells and the description states the events it covers, in the form its
-    // three siblings below publish.
+    // The AWS Health issue sub-category. Its published display name is prose
+    // ("Account-Specific Issues") that its one-word segment does not spell, and
+    // its description is the one entry of this cluster that states the events it
+    // covers do NOT send email by default — the opposite of what its three
+    // siblings below state, so neither the name nor the sentence can be derived
+    // from the arn or from the cluster's other entries.
     PublishedManagedNotification {
         category: "AWS-Health",
         sub_category: "Issue",
-        name: "Issue",
-        description: "All account health issue events that are sent through email. By default, these are sent to the root email address.",
+        name: "Account-Specific Issues",
+        description: "All account-specific Health events that do not send emails by default. These Health events provide frequent updates about the state of your AWS infrastructure, such as service events or maintenance notices.",
     },
     // The three AWS Health sub-categories below are the ones whose events are
     // also delivered by email, so each description states the implication the
     // sub-category carries and the account contacts that delivery reaches: the
-    // root address plus the alternate contact of the matching kind
-    // (`AccountContactType`'s `ACCOUNT_ALTERNATE_BILLING`,
+    // root address plus the alternate contacts that entry's own published
+    // sentence names (`AccountContactType`'s `ACCOUNT_ALTERNATE_BILLING`,
     // `ACCOUNT_ALTERNATE_OPERATIONS` and `ACCOUNT_ALTERNATE_SECURITY`, which
     // are also the `ChannelIdentifier` values a caller associates them with).
+    // The contact list is per entry and not a function of the sub-category: the
+    // billing and security sentences name the operations contact beside their
+    // own, while the operations one names only its own.
     PublishedManagedNotification {
         category: "AWS-Health",
         sub_category: "Billing",
-        name: "Health Billing",
-        description: "Health events with Billing implications that are sent through email. By default, these are sent to the root email address and the billing alternate contact.",
+        // Published display text that neither of this entry's arn segments
+        // spells, and not the `Health <segment>` form its operations sibling
+        // carries.
+        name: "Billing Notification",
+        description: "Health events with Billing implications that are sent through email. By default, these are sent to the root email address, operations alternate contact, and the billing alternate contact.",
     },
     PublishedManagedNotification {
         category: "AWS-Health",

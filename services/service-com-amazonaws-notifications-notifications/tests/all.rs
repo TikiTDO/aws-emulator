@@ -27,6 +27,8 @@ mod event_rule_updates;
 mod event_rules;
 #[path = "all/harness.rs"]
 mod harness;
+#[path = "all/managed_catalog_health_and_billing_text.rs"]
+mod managed_catalog_health_and_billing_text;
 #[path = "all/managed_catalog_membership.rs"]
 mod managed_catalog_membership;
 #[path = "all/managed_catalog_published_text.rs"]
