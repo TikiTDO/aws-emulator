@@ -18,6 +18,12 @@
 //!   command's `input` IS the operation's input document, which is what an AWS JSON
 //!   protocol puts on the wire; the host builds, signs and dispatches the request
 //!   ([`super::aws_api`]) and the answer's document is what `send` resolves with.
+//! * It also exports the AGGREGATED client the same package publishes beside the bare one —
+//!   `DynamoDB` beside `DynamoDBClient` — which carries one method per operation the service
+//!   binds, named as the operation with its first character lower cased, taking that
+//!   operation's input and answering a promise of its output (or calling a node callback when
+//!   one is passed). A method of it sends the very command `send` takes, so a handler written
+//!   either way makes one call made one way.
 //! * A refusal is thrown as an instance of the error class the service's own model names for
 //!   it, with the `$metadata` the answer carried — the shape a v3 client throws — so a
 //!   handler that catches one by its class or by its name reads the emulated service's own
@@ -151,10 +157,17 @@ const SDK_GENERATION: &str = "3.0.0";
 fn client_source(token: &str) -> String {
     let exports = exports::client_exports(token);
     let client = client_name(token);
-    let exception = format!("{}ServiceException", client.trim_end_matches("Client"));
+    // The AGGREGATED client's name is the bare client's without that suffix, which is how the
+    // SDK names the pair: `DynamoDB` beside `DynamoDBClient`.
+    let aggregated = client
+        .strip_suffix("Client")
+        .unwrap_or(client.as_str())
+        .to_string();
+    let exception = format!("{aggregated}ServiceException");
     CLIENT_SOURCE
         .replace("__SERVICE_TOKEN__", token)
         .replace("__CLIENT_NAME__", &client)
+        .replace("__AGGREGATED_NAME__", &aggregated)
         .replace("__SERVICE_EXCEPTION__", &exception)
         .replace("__OPERATIONS__", &name_list(&exports.operations))
         .replace("__ERRORS__", &name_list(&exports.errors))
@@ -507,16 +520,94 @@ Client.prototype.send = function (command) {
 
 Client.prototype.destroy = function () { return undefined; };
 
+// The AGGREGATED client of this package: the SDK publishes `<Name>` beside `<Name>Client`,
+// and that class extends the bare client with one METHOD per operation the service binds —
+// the operation's own name with its first character lower cased — so a handler calls one as
+// `new DynamoDB({}).putItem(input)` rather than through a command. A method sends the very
+// command `send` takes, so the call it makes is the bare client's call.
+function Aggregated(configuration) {
+    Client.call(this, configuration);
+    if (OPERATIONS.length > 0) {
+        // Every method this client carries is installed below, out of the service's own
+        // model, so a name it does not carry names no operation of that service: it answers
+        // `undefined`, exactly as a misspelled export of this package does.
+        return this;
+    }
+    // A service this emulator holds no model for states no operation list, so there is
+    // nothing to install: the name asked for is what names the operation, which is the same
+    // answer this package gives a `<Op>Command` name it holds no class for. Whether the call
+    // is MADE is still the host's decision, so an operation or a service it does not bind is
+    // reported as a call not made rather than as a member that is not there.
+    return new Proxy(this, {
+        get: function (target, name) {
+            if (typeof name === 'string' && !(name in target) && namesOperation(name)) {
+                return operationMethod(name.charAt(0).toUpperCase() + name.slice(1));
+            }
+            return target[name];
+        }
+    });
+}
+Aggregated.prototype = Object.create(Client.prototype);
+Aggregated.prototype.constructor = Aggregated;
+Object.defineProperty(Aggregated, 'name', { value: '__AGGREGATED_NAME__' });
+
+// The names a promise resolution and a JSON serialization read off a value, which no
+// operation of a service is named: they stay absent, so a client is never taken for a
+// thenable and never asked to render itself.
+var NOT_OPERATIONS = ['then', 'catch', 'finally', 'toJSON'];
+
+// Whether `name` is of the form an operation method carries: an operation's own name with its
+// first character lower cased.
+function namesOperation(name) {
+    return /^[a-z][A-Za-z0-9]*$/.test(name) && NOT_OPERATIONS.indexOf(name) < 0;
+}
+
+// The method one operation is called by. The input is the command's own, and the answer is
+// what `send` resolves with; a node callback is called with that answer instead, which is the
+// other form the SDK's aggregated client takes — its methods are `(input, options, callback)`,
+// so the callback is whichever of the two trailing arguments is a function.
+function operationMethod(operation) {
+    return function (input, options, callback) {
+        var done = typeof options === 'function' ? options : callback;
+        var sent = this.send(new (commandFor(operation))(input));
+        if (typeof done !== 'function') {
+            return sent;
+        }
+        sent.then(
+            function (answered) { done(null, answered); },
+            function (error) { done(error); }
+        );
+        return undefined;
+    };
+}
+
+// The command class of one operation, which is the very class this package exports for it, so
+// the class a handler imported and the class a method sends are one class.
+function commandFor(operation) {
+    var name = operation + 'Command';
+    if (members[name] === undefined) {
+        members[name] = commandClass(name);
+    }
+    return members[name];
+}
+
+// The name the aggregated client carries one operation's method under.
+function methodName(operation) {
+    return operation.charAt(0).toLowerCase() + operation.slice(1);
+}
+
 // What this package exports, under the names the SDK's own package for this service exports
 // them by: the client — `S3Client` for `client-s3`, `DynamoDBClient` for `client-dynamodb` —
-// the command class of every operation the service binds, the error class of every error
-// shape it declares, and the base exception the others extend. They are OWN members so that
+// the aggregated client beside it — `S3`, `DynamoDB` — the command class of every operation
+// the service binds, the error class of every error shape it declares, and the base exception
+// the others extend. They are OWN members so that
 // an `import { … } from` of this package, which binds its names when the module is linked,
 // finds them. A name a handler asks for that this module holds no value for is answered as
 // the kind of member it names — a command class for a `…Command`, the client for a `…Client`
 // — and as nothing otherwise, so a typo is `undefined` rather than a stand-in.
 var members = Object.create(null);
 members.__CLIENT_NAME__ = Client;
+members.__AGGREGATED_NAME__ = Aggregated;
 members.__SERVICE_EXCEPTION__ = ServiceException;
 
 var OPERATIONS = __OPERATIONS__;
@@ -524,8 +615,15 @@ var ERRORS = __ERRORS__;
 
 (function () {
     var at = 0;
+    var method = '';
     for (at = 0; at < OPERATIONS.length; at += 1) {
         members[OPERATIONS[at] + 'Command'] = commandClass(OPERATIONS[at] + 'Command');
+        method = methodName(OPERATIONS[at]);
+        // A member the bare client already carries is never shadowed: `send` is what an
+        // operation method itself calls, so a method installed over it would call itself.
+        if (!(method in Client.prototype)) {
+            Aggregated.prototype[method] = operationMethod(OPERATIONS[at]);
+        }
     }
     for (at = 0; at < ERRORS.length; at += 1) {
         members[ERRORS[at]] = errorClass(ERRORS[at]);

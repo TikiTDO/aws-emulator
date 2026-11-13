@@ -345,6 +345,8 @@ mod layer_versions;
 mod missing_policy_refusal;
 #[path = "all/node_error_trace_lines.rs"]
 mod node_error_trace_lines;
+#[path = "all/node_handler_sdk_aggregated_client.rs"]
+mod node_handler_sdk_aggregated_client;
 #[path = "all/node_handler_sdk_esm.rs"]
 mod node_handler_sdk_esm;
 #[path = "all/node_initialization_type.rs"]
