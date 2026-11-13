@@ -20,7 +20,7 @@ aws-smithy-types = { workspace = true }
 # instant a health check's next probe becomes due, so this crate needs tokio's timer as well
 # as its runtime and macros: the feature is declared here rather than relied on from another
 # crate's resolution.
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["time", "net", "io-util", "rt"] }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
