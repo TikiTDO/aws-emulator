@@ -296,6 +296,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // is replaced by the merged one — re-indexed, so a search finds it under the
         // keys it just inherited.
         for (id, _) in participants.iter().skip(1) {
+            // "All the profileKeys in the `ProfileIdsToBeMerged` will be moved to the
+            // main profile", so they move while the profile that carried them is still
+            // there to move them off.
+            domain.move_profile_keys(id, &input.main_profile_id);
             domain.remove_profile(id);
             // The data of a merged profile belongs to the profile that absorbed it, so
             // the objects ingested onto it move rather than go.

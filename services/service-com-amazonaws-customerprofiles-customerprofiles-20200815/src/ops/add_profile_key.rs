@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op AddProfileKey
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `AddProfileKey`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`AddProfileKey::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Associates key values with one stored profile: each (`KeyName`, value) pair is
+//! persisted on the profile and indexed in its domain, so `SearchProfiles` finds the
+//! profile through the pair and reports it in `FoundByItems`.
 //!
 //! ## Shape of an operation
 //!
@@ -158,18 +152,74 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `AddProfileKey` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(AddProfileKeyErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("AddProfileKey"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(unavailable)?;
+
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+        // The key is associated inside one domain, with one of that domain's profiles, so
+        // both are resolved before anything is written and an unknown one is not found.
+        let domain = store
+            .domains
+            .get_mut(&input.domain_name)
+            .ok_or_else(|| not_found(crate::state::domain_not_found(&input.domain_name)))?;
+        if !domain.profiles.contains_key(&input.profile_id) {
+            return Err(not_found(crate::state::profile_not_found(&input.profile_id)));
+        }
+
+        // "A profile object can have a single unique key and any number of additional
+        // keys that can be used to identify the profile that it belongs to": the pairs
+        // are added to the ones the profile already carries, value by value, so an
+        // association another call made — under another key, or another value of this one
+        // — is kept rather than replaced. Past the store's cap nothing is written.
+        domain
+            .add_profile_key(&input.profile_id, &input.key_name, &input.values)
+            .map_err(|_| {
+                bad_request(format!(
+                    "The maximum number of profile keys for profile {} has been reached: {}",
+                    input.profile_id,
+                    crate::state::MAX_KEY_VALUES_PER_PROFILE
+                ))
+            })?;
+        // A profile's keys are part of the profile, so associating one is a write of that
+        // profile: it was last updated now.
+        if let Some(stored) = domain.profiles.get_mut(&input.profile_id) {
+            stored.last_updated_at = now;
+        }
+
+        // The key this call associated values under, and the values it associated: the
+        // requested ones, deduplicated, because a key carries a SET of values and a
+        // repeated value associates nothing further.
+        let mut associated = ::std::collections::BTreeSet::new();
+        let values = input
+            .values
+            .into_iter()
+            .filter(|value| associated.insert(value.clone()))
+            .collect();
+        Ok(AddProfileKeyOutput {
+            key_name: Some(input.key_name),
+            values: Some(values),
+        })
     }
+}
+
+/// The request is invalid — HTTP 400, the error code a client branches on.
+fn bad_request(message: String) -> AddProfileKeyError {
+    AddProfileKeyErrorModeled::BadRequestException(BadRequestException {
+        message: Some(message),
+    })
+    .into()
+}
+
+/// A domain or profile the request names is not stored.
+fn not_found(message: String) -> AddProfileKeyError {
+    AddProfileKeyErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+        message: Some(message),
+    })
+    .into()
+}
+
+/// The store is unreachable — a server fault, not a bad request.
+fn unavailable() -> AddProfileKeyError {
+    AddProfileKeyErrorModeled::InternalServerException(crate::state::store_unavailable()).into()
 }

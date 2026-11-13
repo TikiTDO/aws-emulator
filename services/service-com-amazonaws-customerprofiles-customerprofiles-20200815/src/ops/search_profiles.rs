@@ -240,10 +240,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 input.next_token.as_deref(),
                 input.max_results,
             );
-            let page: Vec<Profile> = ids
+            let page: Vec<(Profile, Vec<(String, String)>)> = ids
                 .iter()
                 .filter_map(|profile_id| {
-                    domain.profiles.get(profile_id).map(|stored| stored.profile.clone())
+                    domain.profiles.get(profile_id).map(|stored| {
+                        (
+                            stored.profile.clone(),
+                            domain.profile_index_keys(&stored.profile),
+                        )
+                    })
                 })
                 .collect();
             (page, next_token)
@@ -253,8 +258,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // exists, and "no profile carries this key" is an answer.
         let items = page
             .into_iter()
-            .map(|profile| Profile {
-                found_by_items: Some(found_by_items(&search_keys, &profile)),
+            .map(|(profile, own_keys)| Profile {
+                found_by_items: Some(found_by_items(&search_keys, &own_keys)),
                 ..profile
             })
             .collect();
@@ -273,13 +278,16 @@ fn unavailable() -> SearchProfilesError {
 /// Which of the search keys found this profile, and under which of their values — the
 /// `FoundByItems` the response carries beside each profile.
 ///
-/// A profile is reachable through exactly the standard keys its own attributes populate
-/// (that is what the domain's index is built from), so the keys that found it are the
-/// requested pairs that appear in that set. Computed once per profile ON THE PAGE, and
-/// the page is bounded by `MaxResults` while the requested values are bounded by
-/// [`crate::state::MAX_SEARCH_VALUES`].
-fn found_by_items(search_keys: &[(String, Vec<String>)], profile: &Profile) -> Vec<FoundByKeyValue> {
-    let own_keys = crate::state::standard_search_keys(profile);
+/// A profile is reachable through exactly the pairs its domain has it indexed under
+/// (`own_keys`, from `Domain::profile_index_keys`): the standard keys its own attributes
+/// populate, plus every key value `AddProfileKey` associated with it. The keys that found
+/// it are therefore the requested pairs that appear in that set. Computed once per profile
+/// ON THE PAGE, and the page is bounded by `MaxResults` while the requested values are
+/// bounded by [`crate::state::MAX_SEARCH_VALUES`].
+fn found_by_items(
+    search_keys: &[(String, Vec<String>)],
+    own_keys: &[(String, String)],
+) -> Vec<FoundByKeyValue> {
     let own: ::std::collections::HashSet<(&str, &str)> = own_keys
         .iter()
         .map(|(key_name, value)| (key_name.as_str(), value.as_str()))

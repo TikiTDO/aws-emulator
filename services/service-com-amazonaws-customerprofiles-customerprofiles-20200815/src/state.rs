@@ -81,6 +81,16 @@ pub const MAX_PROFILES_PER_DOMAIN: usize = 10_000;
 /// workload.
 pub const MAX_ATTRIBUTES_PER_PROFILE: usize = 1_000;
 
+/// Emulator resource guard, NOT an AWS quota (the service publishes no limit on the key
+/// values one profile carries): the most key values this emulator associates with one
+/// profile, across every key name.
+///
+/// `AddProfileKey` ACCUMULATES values on a profile, so one request's `Values` list does
+/// not bound what a sequence of requests stores: the cap is checked against the merged
+/// set, before anything is written, which is what keeps repeated calls from growing one
+/// profile without bound. Set well above any realistic emulator workload.
+pub const MAX_KEY_VALUES_PER_PROFILE: usize = 1_000;
+
 /// Emulator resource guard, NOT an AWS quota: the most profile object types this
 /// emulator stores for one domain. Set well above any realistic emulator workload, and
 /// checked before the insert so repeated `PutProfileObjectType` calls cannot grow the
@@ -311,6 +321,17 @@ pub struct Domain {
     /// `(KeyName, Value)` tuple so a lookup probes it with borrowed strings and
     /// allocates nothing per probe.
     pub key_index: HashMap<String, HashMap<String, BTreeSet<String>>>,
+    /// `ProfileId` -> `KeyName` -> the values `AddProfileKey` associated with that
+    /// profile under that key. The profile side of the index above: [`key_index`] answers
+    /// "which profiles carry this pair", this answers "which pairs does this profile
+    /// carry", which is what un-indexing a profile and reporting `FoundByItems` need.
+    ///
+    /// Only the ADDITIONAL keys live here. The predefined keys a profile's own attributes
+    /// populate are derived from the profile by [`standard_search_keys`], so they are
+    /// never stored twice.
+    ///
+    /// [`key_index`]: Domain::key_index
+    pub profile_keys: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
 }
 
 /// One stored profile object type: the configuration `PutProfileObjectType` persisted
@@ -669,6 +690,7 @@ impl Domain {
             calculated_attributes: BTreeMap::new(),
             recommender_schemas: BTreeMap::new(),
             key_index: HashMap::new(),
+            profile_keys: BTreeMap::new(),
         }
     }
 
@@ -726,41 +748,140 @@ impl Domain {
     }
 
     /// Store `stored` and index it under every standard search key its attributes
-    /// populate. A profile already held under the same id is replaced, index included.
+    /// populate, plus every additional key already associated with that id. A profile
+    /// already held under the same id is replaced, index included.
     pub fn put_profile(&mut self, stored: StoredProfile) {
         let Some(id) = stored.profile.profile_id.clone() else {
             return;
         };
+        // The additional keys associated with this profile belong to the PROFILE, not to
+        // the members a write carries, so they are read out before the profile is dropped
+        // and re-indexed with it: writing a profile's standard members associates no key
+        // and disassociates none.
+        let additional = self.profile_keys.get(&id).cloned().unwrap_or_default();
         self.remove_profile(&id);
         for (key_name, value) in standard_search_keys(&stored.profile) {
-            self.key_index
-                .entry(key_name)
-                .or_default()
-                .entry(value)
-                .or_default()
-                .insert(id.clone());
+            self.index_key(&id, key_name, value);
+        }
+        for (key_name, values) in &additional {
+            for value in values {
+                self.index_key(&id, key_name.clone(), value.clone());
+            }
+        }
+        if !additional.is_empty() {
+            self.profile_keys.insert(id.clone(), additional);
         }
         self.profiles.insert(id, stored);
     }
 
-    /// Remove the profile and every index entry that pointed at it.
+    /// Remove the profile, the additional keys associated with it, and every index entry
+    /// that pointed at it.
     pub fn remove_profile(&mut self, profile_id: &str) -> Option<StoredProfile> {
         let stored = self.profiles.remove(profile_id)?;
         for (key_name, value) in standard_search_keys(&stored.profile) {
-            let Some(by_value) = self.key_index.get_mut(&key_name) else {
-                continue;
-            };
-            if by_value.get_mut(&value).is_some_and(|ids| {
-                ids.remove(profile_id);
-                ids.is_empty()
-            }) {
-                by_value.remove(&value);
-            }
-            if by_value.is_empty() {
-                self.key_index.remove(&key_name);
+            self.unindex_key(profile_id, &key_name, &value);
+        }
+        for (key_name, values) in self.profile_keys.remove(profile_id).unwrap_or_default() {
+            for value in values {
+                self.unindex_key(profile_id, &key_name, &value);
             }
         }
         Some(stored)
+    }
+
+    /// Index one (key name, value) pair as reaching `profile_id`.
+    fn index_key(&mut self, profile_id: &str, key_name: String, value: String) {
+        self.key_index
+            .entry(key_name)
+            .or_default()
+            .entry(value)
+            .or_default()
+            .insert(profile_id.to_string());
+    }
+
+    /// Drop one (key name, value) pair's entry for `profile_id`, and the pair itself once
+    /// no profile is reached through it.
+    fn unindex_key(&mut self, profile_id: &str, key_name: &str, value: &str) {
+        let Some(by_value) = self.key_index.get_mut(key_name) else {
+            return;
+        };
+        if by_value.get_mut(value).is_some_and(|ids| {
+            ids.remove(profile_id);
+            ids.is_empty()
+        }) {
+            by_value.remove(value);
+        }
+        if by_value.is_empty() {
+            self.key_index.remove(key_name);
+        }
+    }
+
+    /// Associate every value in `values` with `profile_id` under `key_name`, indexing each
+    /// pair so a search finds the profile through it.
+    ///
+    /// A value the profile already carries under that key associates nothing further: the
+    /// key holds a SET of values. Applied in place, value by value, so one caller's
+    /// association never replaces another's.
+    ///
+    /// Nothing is written when the profile would be left carrying more than
+    /// [`MAX_KEY_VALUES_PER_PROFILE`] key values; the number it would then carry comes
+    /// back in `Err`, for the refusal's message.
+    pub fn add_profile_key(
+        &mut self,
+        profile_id: &str,
+        key_name: &str,
+        values: &[String],
+    ) -> Result<(), usize> {
+        {
+            let held = self.profile_keys.get(profile_id);
+            let held_count: usize = held
+                .map(|keys| keys.values().map(BTreeSet::len).sum())
+                .unwrap_or_default();
+            let under_key = held.and_then(|keys| keys.get(key_name));
+            let fresh: BTreeSet<&str> = values
+                .iter()
+                .map(String::as_str)
+                .filter(|value| !under_key.is_some_and(|held| held.contains(*value)))
+                .collect();
+            let resulting = held_count + fresh.len();
+            if resulting > MAX_KEY_VALUES_PER_PROFILE {
+                return Err(resulting);
+            }
+        }
+        for value in values {
+            self.profile_keys
+                .entry(profile_id.to_string())
+                .or_default()
+                .entry(key_name.to_string())
+                .or_default()
+                .insert(value.clone());
+            self.index_key(profile_id, key_name.to_string(), value.clone());
+        }
+        Ok(())
+    }
+
+    /// The (key name, value) pairs this domain has `profile` indexed under: the predefined
+    /// keys its own attributes populate, plus every key value associated with it by
+    /// `AddProfileKey`. Sorted and deduplicated, so a pair that is both appears once.
+    ///
+    /// This is the set a `SearchProfiles` key is tested against to report `FoundByItems`,
+    /// so a profile is reported as found by exactly the pairs it is reachable through.
+    pub fn profile_index_keys(&self, profile: &Profile) -> Vec<(String, String)> {
+        let mut keys = standard_search_keys(profile);
+        if let Some(additional) = profile
+            .profile_id
+            .as_deref()
+            .and_then(|id| self.profile_keys.get(id))
+        {
+            keys.extend(additional.iter().flat_map(|(key_name, values)| {
+                values
+                    .iter()
+                    .map(move |value| (key_name.clone(), value.clone()))
+            }));
+        }
+        keys.sort();
+        keys.dedup();
+        keys
     }
 
     /// The ids of the profiles indexed under `key_name` for ANY of `values` — the
@@ -787,6 +908,30 @@ impl Domain {
             .get(object_type_name)
             .and_then(|object_type| object_type.expiration_days)
             .unwrap_or(self.default_expiration_days)
+    }
+
+    /// Move every additional key value associated with `from` onto `to`, re-indexing each
+    /// pair under the profile that now carries it: "all the profileKeys in the
+    /// `ProfileIdsToBeMerged` will be moved to the main profile".
+    ///
+    /// A pair moves rather than being copied, so what the domain holds does not grow and
+    /// no cap applies here.
+    pub fn move_profile_keys(&mut self, from: &str, to: &str) {
+        if from == to {
+            return;
+        }
+        for (key_name, values) in self.profile_keys.remove(from).unwrap_or_default() {
+            for value in values {
+                self.unindex_key(from, &key_name, &value);
+                self.profile_keys
+                    .entry(to.to_string())
+                    .or_default()
+                    .entry(key_name.clone())
+                    .or_default()
+                    .insert(value.clone());
+                self.index_key(to, key_name.clone(), value);
+            }
+        }
     }
 
     /// Drop every ingested object whose retention has run out as of `now`.

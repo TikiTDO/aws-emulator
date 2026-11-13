@@ -27,6 +27,8 @@ mod delete_profile_object_type;
 mod domain_profile_lifecycle;
 #[path = "all/merge_profiles.rs"]
 mod merge_profiles;
+#[path = "all/profile_keys.rs"]
+mod profile_keys;
 #[path = "all/profile_not_found_message.rs"]
 mod profile_not_found_message;
 #[path = "all/profile_object_type_identity.rs"]
