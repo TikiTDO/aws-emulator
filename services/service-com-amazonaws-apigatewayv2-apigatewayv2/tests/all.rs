@@ -133,6 +133,8 @@ mod integration_pagination;
 mod integration_response_key_grammar;
 #[path = "all/integration_response_lifecycle.rs"]
 mod integration_response_lifecycle;
+#[path = "all/integration_response_patch.rs"]
+mod integration_response_patch;
 #[path = "all/integration_update.rs"]
 mod integration_update;
 #[path = "all/integration_uri_length.rs"]

@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateIntegrationResponse
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateIntegrationResponse`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: PATCHES the stored [`crate::state::IntegrationResponse`] the request
+//! addresses — a member the request carries replaces the stored one, a member it omits
+//! leaves the stored value alone — and answers with the record the store now holds. This
+//! is the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateIntegrationResponse::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! A patched `IntegrationResponseKey` goes through the SAME grammar the create holds a key
+//! to ([`crate::state::integration_response_key`]), so a patch cannot move a response onto
+//! a key the service could never select by.
 //!
 //! ## Shape of an operation
 //!
@@ -195,18 +194,167 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateIntegrationResponse` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateIntegrationResponseErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateIntegrationResponse"))
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            // Unreachable in the assembled emulator — see the note in `create_api`.
+            return Err(crate::scaffolded::Scaffolded::not_implemented(
+                "UpdateIntegrationResponse",
+            ));
+        };
+        let mut store = state.lock();
+
+        let Some(api) = store.apis.get_mut(&input.api_id) else {
+            return Err(not_found(crate::state::invalid_api_identifier_message(
+                &input.api_id,
+            )));
+        };
+
+        // An integration response belongs to the WebSocket two-way communication model
+        // (`IntegrationResponse$ContentHandlingStrategy` is "Supported only for WebSocket
+        // APIs"), so an api of another protocol type has no integration-response resource
+        // to patch — the same whole-resource gate `CreateIntegrationResponse` applies.
+        if let Err(message) = crate::state::validate_protocol_restricted_resource(
+            &api.protocol_type,
+            "Integration responses",
+            crate::state::WEBSOCKET_PROTOCOL_TYPE,
+        ) {
+            return Err(bad_request(&message));
+        }
+
+        let Some(integration) = api.integrations.get_mut(&input.integration_id) else {
+            return Err(not_found(crate::state::invalid_identifier_message(
+                crate::state::INTEGRATION_RESOURCE,
+            )));
+        };
+
+        // An integration response is resolvable only through the integration that owns it,
+        // so an id another integration minted names nothing here — the same reading
+        // `GetIntegrationResponse` does.
+        let Some(existing) = integration
+            .integration_responses
+            .get(&input.integration_response_id)
+        else {
+            return Err(not_found(
+                crate::state::integration_response_not_found_message(
+                    &input.integration_response_id,
+                    &input.integration_id,
+                ),
+            ));
+        };
+
+        // A template selection expression is a selection EXPRESSION, so it may name only
+        // the variable namespaces this service evaluates — the same requirement every other
+        // writer of one goes through. Checked after the path's own resources are resolved,
+        // so a request naming a response that does not exist is answered about THAT.
+        if let Some(expression) = input.template_selection_expression.as_deref() {
+            if let Err(message) = crate::state::validate_selection_expression(expression) {
+                return Err(bad_request(&message));
+            }
+        }
+
+        // The update is a PATCH (`PATCH
+        // /v2/apis/{ApiId}/integrations/{IntegrationId}/integrationresponses/{IntegrationResponseId}`):
+        // a member the request carries replaces the stored one, and a member it omits
+        // leaves the stored value exactly as it was. A map member is a VALUE like any
+        // other, so one the request carries replaces the stored map wholesale — including a
+        // map sent empty, which clears it. The `IntegrationResponseId` is the resource's
+        // identity and is never patched.
+        let mut updated = existing.clone();
+        if let Some(integration_response_key) = input.integration_response_key {
+            updated.integration_response_key = integration_response_key;
+        }
+        if let Some(content_handling_strategy) = input.content_handling_strategy {
+            updated.content_handling_strategy = Some(content_handling_strategy);
+        }
+        if let Some(response_parameters) = input.response_parameters {
+            updated.response_parameters = response_parameters.into_iter().collect();
+        }
+        if let Some(response_templates) = input.response_templates {
+            updated.response_templates = response_templates.into_iter().collect();
+        }
+        if let Some(expression) = input.template_selection_expression {
+            updated.template_selection_expression = Some(expression);
+        }
+
+        // The integration response KEY is what the response is selected by, so a patch
+        // cannot store one that is not a `SelectionKey` at all, nor — on an integration
+        // whose responses are selected by the status of the call — one that can match no
+        // status. The rule is `crate::state::integration_response_key`'s, the ONE grammar
+        // the create, this patch and the data plane that does the selecting share.
+        if let Err(message) =
+            crate::state::integration_response_key::validate_integration_response_key(
+                &updated.integration_response_key,
+                integration.integration_uri.as_deref(),
+            )
+        {
+            return Err(bad_request(&message));
+        }
+
+        // One key per integration: a patch cannot move a response onto a key a SIBLING
+        // response of the same integration already holds, since the second one under it
+        // would never be selected. The response being patched is excluded, so re-sending
+        // its own key is not a conflict with itself; the refusal is the sentence the create
+        // answers with (`crate::state::duplicate_identity`).
+        if integration
+            .integration_responses
+            .iter()
+            .any(|(id, response)| {
+                id != &input.integration_response_id
+                    && response.integration_response_key == updated.integration_response_key
+            })
+        {
+            return Err(bad_request(
+                &crate::state::duplicate_identity::integration_response_key_in_use_message(
+                    &updated.integration_response_key,
+                    &input.integration_id,
+                ),
+            ));
+        }
+
+        // Read the response back out of the STORE, so what the caller gets is what a later
+        // GetIntegrationResponse will report. The integration response exists (checked
+        // above), so this replaces its record rather than minting a second one.
+        integration
+            .integration_responses
+            .insert(input.integration_response_id.clone(), updated);
+        let stored = integration
+            .integration_responses
+            .get(&input.integration_response_id)
+            .map(crate::state::IntegrationResponse::to_wire)
+            .expect("the integration response just written is in the store");
+        // An integration response belongs to its integration, so the api's integrations
+        // have changed: every stage of it that auto-deploys has the new configuration
+        // released to it.
+        api.redeploy_auto_deploying_stages(::std::time::SystemTime::now());
+        Ok(UpdateIntegrationResponseOutput {
+            content_handling_strategy: stored.content_handling_strategy,
+            integration_response_id: stored.integration_response_id,
+            integration_response_key: Some(stored.integration_response_key),
+            response_parameters: stored.response_parameters,
+            response_templates: stored.response_templates,
+            template_selection_expression: stored.template_selection_expression,
+        })
     }
+}
+
+/// This operation's refusal of a request it models no more specific error for: the modelled
+/// `BadRequestException` ("The request is not valid, for example, the input is incomplete or
+/// incorrect"), whose message names what the request asked for. Takes the same `&str` the
+/// sibling helper in `create_integration_response` does.
+fn bad_request(message: &str) -> UpdateIntegrationResponseError {
+    UpdateIntegrationResponseErrorModeled::BadRequestException(BadRequestException {
+        message: Some(message.to_string()),
+    })
+    .into()
+}
+
+/// This operation's refusal of a request naming a resource no record holds: the modelled
+/// `NotFoundException` ("The resource specified in the request was not found"), whose
+/// message names the KIND of resource that resolved to nothing.
+fn not_found(message: String) -> UpdateIntegrationResponseError {
+    UpdateIntegrationResponseErrorModeled::NotFoundException(NotFoundException {
+        message: Some(message),
+        resource_type: ::std::option::Option::None,
+    })
+    .into()
 }

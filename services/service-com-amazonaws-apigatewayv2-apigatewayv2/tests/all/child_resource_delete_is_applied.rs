@@ -295,9 +295,9 @@ async fn rows(emulator: &MultiServiceRouter) -> Vec<Row> {
                 &integration_response_ids[0],
                 &integration_id,
             ),
-            // `UpdateIntegrationResponse` and `GetIntegrationResponses` are still 501
-            // stubs with issues of their own, so this row addresses neither.
-            patch: None,
+            // The patch names a status-code selection key, the form an integration
+            // response of a status-selected integration is keyed by.
+            patch: Some(json!({ "integrationResponseKey": "/500/" })),
             extra_reads: Vec::new(),
             collection: None,
             repeat_delete_status: 404,

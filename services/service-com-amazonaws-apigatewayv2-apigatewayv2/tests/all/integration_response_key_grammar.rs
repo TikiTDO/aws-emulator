@@ -26,10 +26,10 @@ use crate::api_lifecycle::{as_str, call, emulator, error_code};
 
 /// A Lambda function URI, which is what makes an integration one whose responses are
 /// selected on the function's error message rather than on a status code.
-const FUNCTION_URI: &str = "arn:aws:lambda:eu-west-1:000000000000:function:greeter";
+pub(crate) const FUNCTION_URI: &str = "arn:aws:lambda:eu-west-1:000000000000:function:greeter";
 
 /// A WebSocket api, the protocol whose integrations carry integration responses.
-async fn websocket_api(emulator: &MultiServiceRouter, name: &str) -> String {
+pub(crate) async fn websocket_api(emulator: &MultiServiceRouter, name: &str) -> String {
     let (status, created) = call(
         emulator,
         "POST",
@@ -49,7 +49,11 @@ async fn websocket_api(emulator: &MultiServiceRouter, name: &str) -> String {
 }
 
 /// One integration of `api_id`, from the request body the case needs.
-async fn integration(emulator: &MultiServiceRouter, api_id: &str, request: Value) -> String {
+pub(crate) async fn integration(
+    emulator: &MultiServiceRouter,
+    api_id: &str,
+    request: Value,
+) -> String {
     let (status, created) = call(
         emulator,
         "POST",
@@ -67,13 +71,13 @@ async fn integration(emulator: &MultiServiceRouter, api_id: &str, request: Value
 /// The `MOCK` integration the status-selected cases are judged on: "a MOCK integration lets
 /// API Gateway return a response without sending the request further to the backend", so it
 /// names no endpoint and still answers with a status.
-fn mock_integration() -> Value {
+pub(crate) fn mock_integration() -> Value {
     json!({ "integrationType": "MOCK" })
 }
 
 /// The Lambda integration the error-message-selected cases are judged on: an `AWS`
 /// integration of a WebSocket api whose `IntegrationUri` names a function.
-fn lambda_integration() -> Value {
+pub(crate) fn lambda_integration() -> Value {
     json!({
         "integrationType": "AWS",
         "integrationUri": FUNCTION_URI,
