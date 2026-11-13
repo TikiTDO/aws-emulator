@@ -27,6 +27,8 @@ mod deregistration_spares_what_it_was_not_asked_about;
 mod fail_closed_refusals_answer_401;
 #[path = "all/filter_operations.rs"]
 mod filter_operations;
+#[path = "all/front_door_refusal_header_set.rs"]
+mod front_door_refusal_header_set;
 #[path = "all/identity_authorization.rs"]
 mod identity_authorization;
 #[path = "all/identity_provider_deregistration.rs"]

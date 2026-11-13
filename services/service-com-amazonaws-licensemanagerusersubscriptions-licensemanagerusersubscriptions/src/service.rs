@@ -53,6 +53,12 @@ use std::sync::Arc;
 /// EVERY operation of this service.
 mod authorization;
 
+/// The envelope a refusal of this service leaves under: its status, the ONE error-type
+/// header that names its shape, and its `message` body.
+mod refusal_headers;
+
+use refusal_headers::refusal_response;
+
 /// The HTTP method every gated route below is bound to: each one is
 /// `@http(method: "POST", …)`, so a request arriving at one of those paths under any other
 /// method names no gated operation and the gate does not apply to it.
@@ -572,51 +578,6 @@ fn named_resource_arn(
 fn body_member(req: &aws_smithy_runtime_api::http::Request, member: &str) -> Option<String> {
     let body: serde_json::Value = serde_json::from_slice(req.body().bytes()?).ok()?;
     Some(body.get(member)?.as_str()?.to_string())
-}
-
-/// Render `refusal` in this service's own protocol envelope, with the code, the sentence and
-/// the STATUS the refusal carries.
-///
-/// The status is why this does not go through `ErasedServiceDefinition::refusal_response`:
-/// that renderer states a pre-dispatch refusal, whose status the protocol fixes (400 for an
-/// invalid request), and the fail-closed refusal is reported with its own
-/// ([`crate::scaffolded::UNAUTHORIZED_EXCEPTION_STATUS`]). Serializing the refusal itself
-/// through the protocol is also what makes this answer identical to the one a handler's
-/// error channel produces for the same value: the same `__type`, the same
-/// `x-amzn-errortype` header and the same `message` body member.
-///
-/// A refusal that will not serialize still has to refuse: it falls back to the pre-dispatch
-/// renderer, which carries the code and the sentence in this service's envelope even though
-/// it cannot carry the status.
-fn refusal_response(
-    svc: &dyn Service,
-    req: &aws_smithy_runtime_api::http::Request,
-    refusal: &crate::scaffolded::ServiceRefusal,
-) -> aws_smithy_runtime_api::http::Response {
-    match svc.definition().protocol().serialize_error(
-        refusal,
-        &crate::scaffolded::SERVICE_REFUSAL_SCHEMA,
-        refusal.code,
-        refusal.status,
-    ) {
-        Ok(response) => response,
-        Err(error) => {
-            tracing::warn!(
-                code = refusal.code,
-                %error,
-                "the fail-closed refusal would not serialize; it is answered through the \
-                 pre-dispatch renderer instead"
-            );
-            svc.definition().refusal_response(
-                aws_smithy_schema_server::ProtocolError::Invalid(Vec::new()),
-                Some(Refused {
-                    code: refusal.code.to_string(),
-                    message: refusal.message.clone(),
-                }),
-                req,
-            )
-        }
-    }
 }
 
 /// Record the refusal above as the operation row the framework's dispatch sequence would

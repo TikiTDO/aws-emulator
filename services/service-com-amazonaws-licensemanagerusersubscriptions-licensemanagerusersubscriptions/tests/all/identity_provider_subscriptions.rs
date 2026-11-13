@@ -328,25 +328,7 @@ pub(crate) async fn send(
     path_and_query: &str,
     body: Option<&Value>,
 ) -> Reply {
-    let request = http::Request::builder()
-        .method(method)
-        .uri(format!(
-            "https://{SIGNING_NAME}.{REGION}.amazonaws.com{path_and_query}"
-        ))
-        .header("content-type", "application/json")
-        .header(
-            "authorization",
-            format!(
-                "AWS4-HMAC-SHA256 Credential=AKIDTESTEXAMPLE/20260101/{REGION}/{SIGNING_NAME}\
-                 /aws4_request, SignedHeaders=host, Signature=0"
-            ),
-        )
-        .body(bytes::Bytes::from(match body {
-            Some(body) => serde_json::to_vec(body).expect("the request body serializes"),
-            None => Vec::new(),
-        }))
-        .expect("a well-formed request");
-    let response = h.router.dispatch(request).await;
+    let response = dispatch(h, method, path_and_query, body).await;
     let status = response.status().as_u16();
     let header_error = response
         .headers()
@@ -368,6 +350,37 @@ pub(crate) async fn send(
         error_type,
         body,
     }
+}
+
+/// The RAW response one request gets, before anything is read off it — the same dispatch
+/// [`send`] folds into a [`Reply`], for a suite whose rule is about the response ITSELF
+/// (its full header set) rather than about the status, the code and the body a client
+/// branches on.
+pub(crate) async fn dispatch(
+    h: &Harness,
+    method: &str,
+    path_and_query: &str,
+    body: Option<&Value>,
+) -> http::Response<bytes::Bytes> {
+    let request = http::Request::builder()
+        .method(method)
+        .uri(format!(
+            "https://{SIGNING_NAME}.{REGION}.amazonaws.com{path_and_query}"
+        ))
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            format!(
+                "AWS4-HMAC-SHA256 Credential=AKIDTESTEXAMPLE/20260101/{REGION}/{SIGNING_NAME}\
+                 /aws4_request, SignedHeaders=host, Signature=0"
+            ),
+        )
+        .body(bytes::Bytes::from(match body {
+            Some(body) => serde_json::to_vec(body).expect("the request body serializes"),
+            None => Vec::new(),
+        }))
+        .expect("a well-formed request");
+    h.router.dispatch(request).await
 }
 
 /// A `POST` of `body` to `path` — the shape every operation of this service's RPC-style
