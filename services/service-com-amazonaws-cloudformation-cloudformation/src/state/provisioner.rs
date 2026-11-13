@@ -488,7 +488,7 @@ use super::template::{
     COGNITO_USER_POOL_GROUP, DEFAULT_SCHEDULE_GROUP, EC2_LAUNCH_TEMPLATE, EC2_SECURITY_GROUP,
     EC2_SUBNET,
     EC2_VOLUME, EC2_VPC,
-    ECR_PUBLIC_REPOSITORY, ECR_REPOSITORY, ECS_CLUSTER, EKS_ACCESS_ENTRY, EKS_CLUSTER,
+    ECR_PUBLIC_REPOSITORY, ECR_REPOSITORY, ECS_CLUSTER, ECS_SERVICE, EKS_ACCESS_ENTRY, EKS_CLUSTER,
     EKS_POD_IDENTITY_ASSOCIATION,
     EMR_CLUSTER, EVENTS_RULE, FIREHOSE_DELIVERY_STREAM, FIS_EXPERIMENT_TEMPLATE,
     ELASTIC_BEANSTALK_APPLICATION, ELASTIC_BEANSTALK_APPLICATION_VERSION,
@@ -695,6 +695,7 @@ pub(super) enum Provisioner {
     /// CodeBuild read and every `StartBuild` resolves.
     CodeBuildProject,
     EcsCluster,
+    EcsService,
     SqsQueue,
     /// `AWS::SQS::QueuePolicy` and `AWS::SQS::QueueInlinePolicy`, which are not resources
     /// of Amazon SQS's own: each is the `Policy` ATTRIBUTE of the queues it names, so both
@@ -981,6 +982,7 @@ pub(super) fn provisioner_for(resource_type: &str) -> Option<Provisioner> {
         CODEBUILD_REPORT_GROUP => Some(Provisioner::CodeBuildReportGroup),
         CODEBUILD_PROJECT => Some(Provisioner::CodeBuildProject),
         ECS_CLUSTER => Some(Provisioner::EcsCluster),
+        ECS_SERVICE => Some(Provisioner::EcsService),
         SQS_QUEUE => Some(Provisioner::SqsQueue),
         SQS_QUEUE_POLICY | SQS_QUEUE_INLINE_POLICY => Some(Provisioner::SqsQueuePolicy),
         SAGEMAKER_MODEL_PACKAGE_GROUP => Some(Provisioner::SageMakerModelPackageGroup),
@@ -1179,6 +1181,7 @@ impl Provisioner {
                 create_custom_action_type(ctx, region, resource, propagated).await
             }
             Self::EcsCluster => create_cluster(ctx, region, resource, propagated).await,
+            Self::EcsService => create_service(ctx, region, resource, propagated).await,
             Self::SqsQueue => create_queue(ctx, region, resource, propagated).await,
             // Neither policy type publishes a `Tags` property — a policy is an attribute of
             // the queues it names, and those carry the tags — so no tags are propagated to
@@ -1667,6 +1670,7 @@ impl Provisioner {
                 // `CreatePipeline` runs.
                 | Self::CodePipelineCustomActionType
                 | Self::EcsCluster
+                | Self::EcsService
                 | Self::EcrPublicRepository
                 // Amazon ECR refuses a tag key in the reserved namespace on every call
                 // that takes tags — `CreateRepository`'s `tags` and `TagResource` alike —
@@ -2535,6 +2539,7 @@ impl Provisioner {
                 delete_custom_action_type(ctx, region, resource).await
             }
             Self::EcsCluster => delete_cluster(ctx, region, physical_resource_id).await,
+            Self::EcsService => delete_service(ctx, region, resource).await,
             Self::SqsQueue => delete_queue(ctx, region, physical_resource_id).await,
             Self::SqsQueuePolicy => delete_queue_policy(ctx, region, resource).await,
             Self::SageMakerModelPackageGroup => {
@@ -2979,6 +2984,15 @@ impl Provisioner {
                 describe_custom_action_type(ctx, region, resource).await
             }
             Self::EcsCluster => describe_cluster(ctx, region, physical_resource_id).await,
+            Self::EcsService => {
+                describe_service(
+                    ctx,
+                    region,
+                    physical_resource_id,
+                    resource.properties.get("Cluster").and_then(Value::as_str),
+                )
+                .await
+            }
             Self::SqsQueue => describe_queue(ctx, region, physical_resource_id).await,
             // A policy resource's configuration is the `Policy` attribute of the queues it
             // names, which is read back from Amazon SQS as the document those queues carry
