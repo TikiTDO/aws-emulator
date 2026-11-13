@@ -1987,6 +1987,13 @@ mod delete_local_gateway_route_table;
 // — declared at the tail of this file, which is where every new ec2 suite lands.
 #[path = "all/capacity_manager_monitored_tag_keys.rs"]
 mod capacity_manager_monitored_tag_keys;
+// `DescribeLaunchTemplates` for a template that is GONE: a key this service itself resolved
+// once — an id it minted, or a name a template carried — is reported absent with EC2's one
+// fixed sentence, and every template the read does report carries its operator and the version
+// counters its versions gave it — declared at the tail of this file, which is where every new
+// ec2 suite lands.
+#[path = "all/describe_launch_templates_after_delete.rs"]
+mod describe_launch_templates_after_delete;
 // The endpoint-type rule `CreateVpcEndpoint` holds a request to: the `VpcEndpointType` asked
 // for has to be one of the types the endpoint service it names is available through, whichever
 // source that service came from — declared at the tail of this file, which is where every new

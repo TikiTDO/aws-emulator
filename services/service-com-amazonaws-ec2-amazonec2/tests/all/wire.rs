@@ -167,3 +167,29 @@ pub fn is_long_id(prefix: &str, value: &str) -> bool {
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
 }
+
+/// The `(managed, principal)` the one LAUNCH TEMPLATE a response carries answers in its
+/// `operator` — the member a client reads to tell a customer-created template from a
+/// service-managed one.
+///
+/// The operator is read as a child of the element that carries the template's own
+/// `launchTemplateId`, so it is the template's and not a member of anything else the body
+/// holds; it panics naming the case when the template carries no `operator` at all, that
+/// absence being exactly what a reader of this member cannot act on. The ONE reading of that
+/// member for every suite that asserts on it, whichever operation answered the body.
+pub fn reported_operator(case: &str, body: &str) -> (Option<String>, Option<String>) {
+    let parsed = document(case, body);
+    let template = parsed
+        .descendants()
+        .find(|node| node.is_element() && child(*node, "launchTemplateId").is_some())
+        .unwrap_or_else(|| {
+            panic!("case {case:?}: no launch template (no <launchTemplateId>) in {body}")
+        });
+    let operator = child(template, "operator").unwrap_or_else(|| {
+        panic!("case {case:?}: no <operator> on the launch template in {body}")
+    });
+    (
+        child_text(operator, "managed"),
+        child_text(operator, "principal"),
+    )
+}

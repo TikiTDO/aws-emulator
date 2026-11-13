@@ -35,7 +35,7 @@ use smithy_server_runtime::MultiServiceRouter;
 use ec2::state::FIRST_LAUNCH_TEMPLATE_VERSION;
 
 use super::ec2_query::{call, element, error_code};
-use super::wire::{child, child_text, document};
+use super::wire::{child, child_text, document, reported_operator};
 
 /// The Region every call here is signed for. A launch template carries no Region member, so
 /// the Region only selects the ec2Query envelope.
@@ -164,20 +164,6 @@ async fn versions_flagged_default(
         .collect();
     flagged.sort_unstable();
     flagged
-}
-
-/// The `(managed, principal)` the one template a response carries reports in its `operator`,
-/// read through the parser so the member is the template's own.
-fn reported_operator(case: &str, body: &str) -> (Option<String>, Option<String>) {
-    let parsed = document(case, body);
-    let operator = parsed
-        .descendants()
-        .find(|node| node.is_element() && node.tag_name().name() == "operator")
-        .unwrap_or_else(|| panic!("case {case:?}: no <operator> on the template in {body}"));
-    (
-        child_text(operator, "managed"),
-        child_text(operator, "principal"),
-    )
 }
 
 /// RULES 1 and 2: each modify moves the template's default version to the version it names —
