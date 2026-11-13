@@ -2314,7 +2314,10 @@ impl ComAmazonawsCloudformationCloudformationState {
                 Some(DueRollback {
                     region: stack.region.clone(),
                     stack_id: stack.stack_id.clone(),
-                    provenance: stack.provenance(),
+                    provenance: provisioning::StackProvenance {
+                        restoring_tag_ownership: true,
+                        ..stack.provenance()
+                    },
                     // The role the rollback's own calls are made under, which is the one in
                     // force on the stack ([`service_role`]).
                     role_arn: stack.role_arn.clone(),

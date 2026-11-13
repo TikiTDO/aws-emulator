@@ -337,7 +337,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 stack.region.clone(),
                 declared,
                 against,
-                stack.provenance(),
+                crate::state::provisioning::StackProvenance {
+                    restoring_tag_ownership: true,
+                    ..stack.provenance()
+                },
                 // The role the resumed rollback's own calls are made under: the one in
                 // force on the stack, which this request may have just replaced.
                 stack.role_arn.clone(),

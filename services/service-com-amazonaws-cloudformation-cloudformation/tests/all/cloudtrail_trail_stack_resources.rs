@@ -471,6 +471,29 @@ async fn failed_update(drift_aware: bool) {
     )
     .await;
     let actual_before = trail_ok(&router, "GetTrail", json!({"Name":name})).await;
+    let arn = actual_before["Trail"]["TrailARN"]
+        .as_str()
+        .expect("owner trail ARN")
+        .to_owned();
+    if drift_aware {
+        // Actual-state rollback must restore this value without adopting its key
+        // into CFN's managed-tag set. Neither template declares externalU.
+        trail_ok(
+            &router,
+            "AddTags",
+            json!({
+                "ResourceId":arn, "TagsList":[{"Key":"externalU","Value":"outside-cfn"}]
+            }),
+        )
+        .await;
+        assert_eq!(
+            tags(&router, &arn)
+                .await
+                .get("externalU")
+                .map(String::as_str),
+            Some("outside-cfn")
+        );
+    }
     let before = if drift_aware {
         actual_before
     } else {
@@ -563,4 +586,49 @@ async fn failed_update(drift_aware: bool) {
         trail_ok(&router, "GetTrailStatus", json!({"Name":name})).await["IsLogging"],
         true
     );
+    if drift_aware {
+        assert_eq!(
+            tags(&router, &arn)
+                .await
+                .get("externalU")
+                .map(String::as_str),
+            Some("outside-cfn"),
+            "rollback must preserve the external tag"
+        );
+        let next = template(
+            name,
+            bucket,
+            json!({
+                "IsLogging":true, "S3KeyPrefix":"successful-after-rollback"
+            }),
+            true,
+        );
+        // This is an ordinary UpdateStack, not another drift-aware execution.
+        // UPDATE_FAILED requires an explicit preserve-successful-resources choice
+        // to fix forward; it does not change this update's tag ownership contract.
+        let (status, body) = call(
+            &router,
+            "UpdateStack",
+            &[
+                member("StackName", stack),
+                member("TemplateBody", &next.to_string()),
+                member("DisableRollback", "true"),
+            ],
+        )
+        .await;
+        assert_eq!(status, 200, "fix-forward UpdateStack: {body}");
+        settled(&router, stack, "UPDATE_COMPLETE").await;
+        assert_eq!(
+            trail_ok(&router, "GetTrail", json!({"Name":name})).await["Trail"]["S3KeyPrefix"],
+            "successful-after-rollback"
+        );
+        assert_eq!(
+            tags(&router, &arn)
+                .await
+                .get("externalU")
+                .map(String::as_str),
+            Some("outside-cfn"),
+            "rollback must not claim externalU and delete it on the next ordinary update"
+        );
+    }
 }

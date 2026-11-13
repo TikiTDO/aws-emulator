@@ -620,6 +620,7 @@ impl Owner {
         resource: &StoredResource,
         declared: &Value,
         propagated: &[(String, String)],
+        restoring_managed: Option<&[(String, String)]>,
     ) -> Result<(), Refusal> {
         match self {
             // A bucket's tags are Amazon S3's own `PutBucketTagging`/`DeleteBucketTagging`,
@@ -661,6 +662,7 @@ impl Owner {
                 cloudtrail_trail::retag(
                     ctx, region, resource, declared, propagated,
                     resource.managed_tags.as_deref().unwrap_or(&[]),
+                    restoring_managed,
                 ).await
             }
             Self::SecurityGroupIngress => Ok(()),

@@ -668,14 +668,13 @@ pub(super) async fn retag(
     declared: &Value,
     propagated: &[(String, String)],
     previous_managed: &[(String, String)],
+    restoring_managed: Option<&[(String, String)]>,
 ) -> Result<(), Refusal> {
     declaration(declared)?;
     let actual = snapshot(ctx, region, &resource.physical_resource_id)
         .await?
         .ok_or_else(|| malformed("GetTrail"))?;
-    let wanted: Tags = applicable_tags(&tags_of(declared, propagated))
-        .into_iter()
-        .collect();
+    let wanted = wanted_tags(declared, propagated, previous_managed, restoring_managed);
     let previous: Tags = applicable_tags(previous_managed).into_iter().collect();
     let managed: BTreeSet<String> = previous.keys().chain(wanted.keys()).cloned().collect();
     match write_tags(ctx, region, &actual.arn, &wanted, &managed).await {
@@ -685,6 +684,29 @@ pub(super) async fn retag(
             write_tags(ctx, region, &actual.arn, &actual.tags, &managed).await,
         )),
     }
+}
+fn wanted_tags(
+    declared: &Value,
+    propagated: &[(String, String)],
+    previous_managed: &[(String, String)],
+    restoring_managed: Option<&[(String, String)]>,
+) -> Tags {
+    let mut wanted: Tags = applicable_tags(&tags_of(declared, propagated))
+        .into_iter()
+        .collect();
+    // A drift snapshot supplies values, not ownership. Restore keys previously
+    // owned OR touched by the forward operation, including an external key it
+    // temporarily claimed. The caller restores ownership from the old witness
+    // alone; this broader mutation domain does not promote those external keys.
+    if let Some(restoring) = restoring_managed {
+        let keys: BTreeSet<String> = applicable_tags(restoring)
+            .into_iter()
+            .chain(applicable_tags(previous_managed))
+            .map(|(key, _)| key)
+            .collect();
+        wanted.retain(|key, _| keys.contains(key));
+    }
+    wanted
 }
 async fn write_tags(
     ctx: &OperationContext<'_>,
@@ -910,6 +932,48 @@ mod tests {
         let (removed, added) = tag_delta(&held, &desired, &managed);
         assert_eq!(removed, vec![json!({"Key":"old"})]);
         assert_eq!(added, vec![json!({"Key":"new","Value":"wanted"})]);
+    }
+    #[test]
+    fn restoring_tags_uses_witness_keys_not_external_snapshot_values() {
+        let declared = json!({"Tags":[
+            {"Key":"old","Value":"actual-predeployment"},
+            {"Key":"claimed","Value":"external-before-adoption"},
+            {"Key":"outside","Value":"stale-snapshot"}
+        ]});
+        let held: Tags = [
+            ("new".into(), "forward-value".into()),
+            ("claimed".into(), "forward-overwrite".into()),
+            ("outside".into(), "independently-changed".into()),
+        ]
+        .into();
+        let previous = [
+            ("new".into(), "forward-value".into()),
+            ("claimed".into(), "forward-overwrite".into()),
+        ];
+        let restoring = [("old".into(), "old-declared-value".into())];
+        let wanted = wanted_tags(&declared, &[], &previous, Some(&restoring));
+        let managed = previous
+            .iter()
+            .map(|(key, _)| key)
+            .chain(wanted.keys())
+            .cloned()
+            .collect();
+        let (removed, added) = tag_delta(&held, &wanted, &managed);
+        assert_eq!(removed, vec![json!({"Key":"new"})]);
+        assert_eq!(
+            added,
+            vec![
+                json!({"Key":"claimed","Value":"external-before-adoption"}),
+                json!({"Key":"old","Value":"actual-predeployment"})
+            ]
+        );
+        assert!(!wanted.contains_key("outside"));
+        assert!(wanted_tags(&declared, &[], &[], Some(&[])).is_empty());
+        assert_eq!(wanted_tags(&declared, &[], &previous, Some(&[])).len(), 1);
+        assert_eq!(
+            wanted_tags(&declared, &[], &previous, None)["outside"],
+            "stale-snapshot"
+        );
     }
     #[test]
     fn readback_accepts_owner_topic_arn_but_not_changed_logging() {

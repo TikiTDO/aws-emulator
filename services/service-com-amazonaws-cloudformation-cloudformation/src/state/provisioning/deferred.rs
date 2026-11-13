@@ -280,7 +280,13 @@ fn resumption_of(
     }
     Some(Resumption {
         stack_id: stack.stack_id.clone(),
-        provenance: stack.provenance(),
+        // A rollback can also withhold a recreation behind an asynchronous dependency.
+        // Resuming that same operation must not turn actual snapshot tags into ownership.
+        provenance: StackProvenance {
+            restoring_tag_ownership: stack.status
+                == super::super::status::UPDATE_ROLLBACK_IN_PROGRESS,
+            ..stack.provenance()
+        },
         create,
         resumed,
         failed,

@@ -56,14 +56,21 @@ fn parameters(properties: &Value) -> Result<Vec<(String, String)>, Refusal> {
     let object = properties
         .as_object()
         .ok_or_else(|| invalid("Properties must be an object"))?;
+    let mut rule = object.clone();
     for (name, value) in object {
         if name != "Description" && !REPLACEMENT_PROPERTIES.contains(&name.as_str()) {
             return Err(invalid(&format!("unsupported property {name}")));
         }
         if name == "FromPort" || name == "ToPort" {
-            if value.as_i64().and_then(|n| i32::try_from(n).ok()).is_none() {
-                return Err(invalid("ports must be signed 32-bit integers"));
+            // Number parameter Ref values arrive as text from template resolution.
+            // Normalize only lossless i32 forms; EC2 owns protocol/range semantics.
+            let port = match value {
+                Value::String(text) => text.parse::<i32>().ok(),
+                Value::Number(number) => number.as_i64().and_then(|n| i32::try_from(n).ok()),
+                _ => None,
             }
+            .ok_or_else(|| invalid("ports must be signed 32-bit integers"))?;
+            rule.insert(name.clone(), Value::from(port));
         } else if value.as_str().is_none() || (name != "Description" && value.as_str() == Some(""))
         {
             return Err(invalid(
@@ -94,7 +101,6 @@ fn parameters(properties: &Value) -> Result<Vec<(String, String)>, Refusal> {
             "SourceSecurityGroupOwnerId requires a source group",
         ));
     }
-    let mut rule = object.clone();
     let mut result = Vec::new();
     for target in ["GroupId", "GroupName"] {
         if let Some(Value::String(value)) = rule.remove(target) {
@@ -371,4 +377,62 @@ pub(super) async fn actual_configuration(
         }
     }
     Ok(Some(Value::Object(actual)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn port_preflight_normalizes_number_refs_without_lossy_coercion() {
+        for (value, expected) in [
+            (json!(443), "443"),
+            (json!("443"), "443"),
+            (json!("+00443"), "443"),
+            (json!(-1), "-1"),
+            (json!("-2147483648"), "-2147483648"),
+            (json!(2147483647), "2147483647"),
+        ] {
+            let request = parameters(&json!({"GroupId":"sg-fixture","IpProtocol":"tcp",
+                "CidrIp":"192.0.2.0/24","FromPort":value,"ToPort":value}))
+            .unwrap();
+            for member in ["IpPermissions.1.FromPort", "IpPermissions.1.ToPort"] {
+                assert_eq!(
+                    request
+                        .iter()
+                        .find(|(key, _)| key == member)
+                        .map(|(_, value)| value.as_str()),
+                    Some(expected)
+                );
+            }
+        }
+        for value in [
+            json!(443.0),
+            json!(443.5),
+            json!(true),
+            json!(null),
+            json!([]),
+            json!({}),
+            json!(""),
+            json!(" 443"),
+            json!("443 "),
+            json!("443.0"),
+            json!("4.43e2"),
+            json!(2147483648_i64),
+            json!(-2147483649_i64),
+            json!("2147483648"),
+            json!("-2147483649"),
+        ] {
+            for member in ["FromPort", "ToPort"] {
+                let mut properties = json!({"GroupId":"sg-fixture","IpProtocol":"tcp",
+                    "CidrIp":"192.0.2.0/24","FromPort":443,"ToPort":443});
+                properties[member] = value.clone();
+                assert!(
+                    parameters(&properties).is_err(),
+                    "accepted {member}: {value}"
+                );
+            }
+        }
+    }
 }

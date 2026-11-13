@@ -327,3 +327,46 @@ async fn standalone_ingress_invalid_or_duplicate_input_never_adopts_existing_rul
         rule(&router, &unrelated).await;
     }
 }
+
+#[tokio::test]
+async fn standalone_ingress_number_parameter_ports_reach_owner_and_delete_by_id() {
+    let router = router();
+    let target = group(&router, "number-parameter-target").await;
+    let unrelated = sibling(&router, &target).await;
+    let stack = "standalone-ingress-number-port";
+    let mut document = template(&target, 443, None);
+    document["Parameters"] = json!({"Port":{"Type":"Number","Default":443}});
+    document["Resources"]["Ingress"]["Properties"]["FromPort"] = json!({"Ref":"Port"});
+    document["Resources"]["Ingress"]["Properties"]["ToPort"] = json!({"Ref":"Port"});
+    let (code, answer) = create_stack(&router, stack, &document.to_string(), &[]).await;
+    assert_eq!(code, 200, "{answer}");
+    let stack_id = xml_text(&answer, "StackId").unwrap();
+    wait_for_the_transition().await;
+    assert_eq!(status(&router, stack).await, "CREATE_COMPLETE");
+    let id = physical(&router, stack, "Ingress").await;
+    assert!(id.starts_with("sgr-"));
+    let actual = rule(&router, &id).await;
+    assert_eq!(
+        xml_text(&actual, "groupId").as_deref(),
+        Some(target.as_str())
+    );
+    assert_eq!(xml_text(&actual, "fromPort").as_deref(), Some("443"));
+    assert_eq!(xml_text(&actual, "toPort").as_deref(), Some("443"));
+    let (code, described) = call(&router, "DescribeStacks", &[member("StackName", stack)]).await;
+    assert_eq!(code, 200, "{described}");
+    assert_eq!(
+        xml_text(&described, "OutputValue").as_deref(),
+        Some(id.as_str())
+    );
+    let (code, answer) = call(&router, "DeleteStack", &[member("StackName", stack)]).await;
+    assert_eq!(code, 200, "{answer}");
+    wait_for_the_transition().await;
+    assert_eq!(status(&router, &stack_id).await, "DELETE_COMPLETE");
+    absent(&router, &id).await;
+    assert_eq!(ids(&router, &target).await, vec![unrelated]);
+    let (code, answer) = ec2(&router, "DescribeSecurityGroups", &[("GroupId.1", &target)]).await;
+    assert_eq!(
+        code, 200,
+        "standalone delete must preserve the group: {answer}"
+    );
+}

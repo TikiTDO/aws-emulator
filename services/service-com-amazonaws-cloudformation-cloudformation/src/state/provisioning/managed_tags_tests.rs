@@ -2,7 +2,7 @@
 
 //! Pure transport/ownership fixtures; real owner calls belong to the Trail lifecycle tests.
 
-use super::{StoredResource, carry_forward, managed_tags_for};
+use super::{StackProvenance, StoredResource, carry_forward, managed_tags_for, successful_managed_tags};
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -107,5 +107,60 @@ fn rollback_snapshots_keep_applied_ownership_separate_from_restore_intent() {
             &tags(&[("stack-old", "old")])
         ),
         owed.previous[0].managed_tags
+    );
+}
+
+#[test]
+fn successful_drift_rollback_does_not_claim_external_tags_for_the_next_update() {
+    let mut before = trail(json!({"Tags": [
+        {"Key": "declared", "Value": "drift"},
+        {"Key": "external", "Value": "untouched"}
+    ]}));
+    before.managed_tags = Some(tags(&[("declared", "old"), ("old-stack", "old")]));
+    let mut applied = trail(json!({"Tags": [{"Key": "replacement", "Value": "new"}]}));
+    applied.managed_tags = Some(tags(&[("replacement", "new")]));
+    // The reverse walk captures these separately BEFORE carrying the applied state.
+    let restore_settings = before.properties.clone();
+    let restore_witness = before.managed_tags.clone();
+    carry_forward(&applied, &mut before);
+    assert_eq!(before.managed_tags, applied.managed_tags);
+    // This is the same success-selection function used by both create and retag.
+    before.managed_tags = successful_managed_tags(
+        &before.resource_type,
+        &restore_settings,
+        &tags(&[("old-stack", "old")]),
+        true,
+        &restore_witness,
+    );
+    assert_eq!(before.managed_tags, restore_witness);
+    // The next ordinary update uses the restored witness as its previous-managed domain,
+    // not every key present in the restored actual settings.
+    let desired = successful_managed_tags(
+        &before.resource_type,
+        &json!({}),
+        &[],
+        StackProvenance::default().restoring_tag_ownership,
+        &before.managed_tags,
+    ).unwrap();
+    let previous = before.managed_tags.as_ref().unwrap();
+    assert!(previous.iter().chain(&desired).all(|(key, _)| key != "external"));
+    assert!(desired.is_empty());
+}
+
+#[test]
+fn restoring_unknown_ownership_does_not_invent_an_empty_or_actual_tag_witness() {
+    let actual = json!({"Tags": [{"Key": "external", "Value": "untouched"}]});
+    assert_eq!(
+        successful_managed_tags("AWS::CloudTrail::Trail", &actual, &[], true, &None),
+        None,
+    );
+    assert_eq!(
+        successful_managed_tags("AWS::CloudTrail::Trail", &actual, &[], true, &Some(vec![])),
+        Some(vec![]),
+    );
+    // The same key explicitly authored by a forward deployment IS owned afterwards.
+    assert_eq!(
+        successful_managed_tags("AWS::CloudTrail::Trail", &actual, &[], false, &None),
+        Some(tags(&[("external", "untouched")])),
     );
 }

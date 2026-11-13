@@ -350,6 +350,23 @@ fn managed_tags_for(
         .then(|| applicable_tags(&super::provisioner::tags_of(declared, propagated)))
 }
 
+/// A successful restoration replays settings, not a new declaration of ownership. In
+/// particular a REVERT_DRIFT snapshot may contain unrelated actual tags; restoring those
+/// values must not grant the next deployment authority to remove their keys.
+fn successful_managed_tags(
+    resource_type: &str,
+    deployed: &Value,
+    propagated: &[(String, String)],
+    restoring: bool,
+    restored_witness: &Option<Vec<(String, String)>>,
+) -> Option<Vec<(String, String)>> {
+    if restoring {
+        restored_witness.clone()
+    } else {
+        managed_tags_for(resource_type, deployed, propagated)
+    }
+}
+
 /// One tag set as the `[{Key, Value}]` LIST most AWS models spell a `Tag` with — Amazon
 /// DynamoDB's `CreateTable$Tags` and AWS Secrets Manager's `CreateSecret$Tags` among them.
 ///
@@ -487,6 +504,9 @@ pub struct StackProvenance {
     pub stack_id: String,
     /// The stack-level `Tags` in force, in the order the stack records them.
     pub tags: Vec<(String, String)>,
+    /// Replaying a previous resource snapshot, rather than accepting newly authored tags.
+    /// Its ownership witness is restored separately from its (possibly actual-drift) settings.
+    pub restoring_tag_ownership: bool,
     /// The `Capabilities` in force on the stack — what the operation deploying it
     /// ACKNOWLEDGED. Carried because a resource that is itself a STACK is created under the
     /// parent operation's acknowledgement ("if you have IAM resources in nested stacks, you
@@ -1776,6 +1796,8 @@ pub async fn reconcile(
         let Some(mut resource) = declared.next() else {
             break;
         };
+        // Save restore intent before carry_forward replaces it with the applied witness.
+        let restored_managed_tags = resource.managed_tags.clone();
         // The resource's record carries the document the stack RECORDS — a secure
         // reference's value is never one of them — while the owning service is asked for
         // the resource with the resolved one.
@@ -2156,19 +2178,28 @@ pub async fn reconcile(
             // change. Only a type with a re-tagging arm has anything asked of its service
             // ([`super::provisioner::Provisioner::retag`]), and that arm is idempotent, so a
             // resource whose tags already agree with the set has nothing called about it.
-            // Capture from the resolved request, not the public declaration or live drift.
-            // The old witness stays on the resource until the tagging call succeeds.
-            let desired_managed_tags = managed_tags_for(
+            // Forward ownership comes from the resolved request; a rollback restores its
+            // separate witness, never ownership inferred from actual-drift settings.
+            // The applied witness stays on the resource until the tagging call succeeds.
+            let desired_managed_tags = successful_managed_tags(
                 &resource.resource_type,
                 &deployed_properties,
                 &stack.tags_for(&resource.logical_id),
+                stack.restoring_tag_ownership,
+                &restored_managed_tags,
             );
             let retagged = match owner_for(&resource.resource_type) {
                 Some(provisioner) => {
                     let tags = stack.tags_for(&resource.logical_id);
                     super::service_role::on_resource(
                         super::service_role::target_of(&resource),
-                        provisioner.retag(ctx, region, &resource, &deployed_properties, &tags),
+                        provisioner.retag(
+                            ctx, region, &resource, &deployed_properties, &tags,
+                            // Restore intent limits live-tag mutation as well as the next witness.
+                            stack.restoring_tag_ownership.then_some(
+                                desired_managed_tags.as_deref().unwrap_or(&[]),
+                            ),
+                        ),
                     )
                     .await
                 }
@@ -2178,9 +2209,7 @@ pub async fn reconcile(
                 // Both halves of the change landed, which is what ends a resource this
                 // deployment acted on.
                 Ok(()) => {
-                    if let Some(tags) = desired_managed_tags {
-                        resource.managed_tags = Some(tags);
-                    }
+                    resource.managed_tags = desired_managed_tags;
                     if changed {
                         outcome.transitions.push(ResourceTransition::finished(
                             &resource,
@@ -2415,10 +2444,12 @@ pub async fn reconcile(
         let owner = owner_for(&resource.resource_type);
         // The create below moves the resolved properties into its request. Keep the exact
         // managed set before that move, but record ownership only after owner success.
-        let desired_managed_tags = managed_tags_for(
+        let desired_managed_tags = successful_managed_tags(
             &resource.resource_type,
             &deployed_properties,
             &stack.tags_for(&resource.logical_id),
+            stack.restoring_tag_ownership,
+            &restored_managed_tags,
         );
         let created = match owner {
             // The resource is created WITH the tags CloudFormation gives it: the stack's
@@ -2466,9 +2497,7 @@ pub async fn reconcile(
             // itself, where that service ASSIGNS the id rather than taking it from a name
             // the template or CloudFormation decided.
             Ok(created) => {
-                if let Some(tags) = desired_managed_tags {
-                    resource.managed_tags = Some(tags);
-                }
+                resource.managed_tags = desired_managed_tags;
                 let computed = resource.physical_resource_id.clone();
                 let computed_attributes = resource.attributes.clone();
                 adopt_minted_identity(&mut resource, created.physical_resource_id);
