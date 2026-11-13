@@ -101,6 +101,8 @@ mod source_revision_overrides;
 mod stage_condition_overrides;
 #[path = "all/stage_condition_rules.rs"]
 mod stage_condition_rules;
+#[path = "all/stage_retry_refusal_wording.rs"]
+mod stage_retry_refusal_wording;
 #[path = "all/stage_transition_authorization.rs"]
 mod stage_transition_authorization;
 #[path = "all/stage_transitions.rs"]
