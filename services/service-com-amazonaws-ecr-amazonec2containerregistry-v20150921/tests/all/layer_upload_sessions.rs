@@ -313,6 +313,7 @@ async fn the_upload_past_the_cap_is_refused() {
             store.uploads.insert(
                 format!("seeded-upload-{index}"),
                 state::LayerUpload {
+                    registry_principal: None,
                     repository_name: "capped".to_string(),
                     part_size: state::REPORTED_LAYER_PART_SIZE,
                     started_at: std::time::SystemTime::now(),
@@ -516,6 +517,7 @@ async fn the_registry_bounds_the_caller_bytes_it_retains() {
             store.uploads.insert(
                 format!("abandoned-upload-{index}"),
                 state::LayerUpload {
+                    registry_principal: None,
                     repository_name: "accounted".to_string(),
                     part_size: state::REPORTED_LAYER_PART_SIZE,
                     started_at: abandoned_at,

@@ -12514,6 +12514,7 @@ dependencies = [
  "flate2",
  "hex",
  "http",
+ "reqwest",
  "serde_json",
  "service-com-amazonaws-cloudwatch-graniteserviceversion20100801",
  "service-com-amazonaws-iam-awsidentitymanagementv20100508",
@@ -12522,6 +12523,7 @@ dependencies = [
  "service-common",
  "sha2 0.10.9",
  "tar",
+ "tempfile",
  "tokio",
  "tracing",
 ]
