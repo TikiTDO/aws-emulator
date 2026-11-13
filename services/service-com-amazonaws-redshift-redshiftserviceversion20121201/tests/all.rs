@@ -29,6 +29,8 @@ mod cluster_credentials;
 mod cluster_db_revisions;
 #[path = "all/cluster_endpoint_publication.rs"]
 mod cluster_endpoint_publication;
+#[path = "all/cluster_health_metrics.rs"]
+mod cluster_health_metrics;
 #[path = "all/cluster_iam_roles.rs"]
 mod cluster_iam_roles;
 #[path = "all/cluster_lifecycle.rs"]

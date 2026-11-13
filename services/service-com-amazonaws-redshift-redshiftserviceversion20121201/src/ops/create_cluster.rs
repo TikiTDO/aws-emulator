@@ -400,6 +400,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // into another service and must not run under it.
         let (output, identifier) = self.create(input, ctx)?;
 
+        // The cluster is being brought up, and from the moment it is available the
+        // service publishes its health every minute — so this write starts the
+        // clock that publishes that series (`crate::state::cluster_metrics`).
+        crate::state::drive_cluster_health_metrics(&self.engine);
+
         // The cluster now exists, which is the event this write raises: every
         // subscription scoped to it is told, on its own topic.
         crate::state::notifications::raise(

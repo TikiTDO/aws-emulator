@@ -437,6 +437,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         }
 
+        // The cluster this restore created is being brought up, and from the
+        // moment it is available the service publishes its health every minute —
+        // so this write starts the clock that publishes that series
+        // (`crate::state::cluster_metrics`).
+        crate::state::drive_cluster_health_metrics(&self.engine);
+
         // The cluster was built from a snapshot, which is the event this write
         // raises — about the cluster it created, naming the snapshot it came
         // from. Every subscription scoped to it is told, on its own topic.

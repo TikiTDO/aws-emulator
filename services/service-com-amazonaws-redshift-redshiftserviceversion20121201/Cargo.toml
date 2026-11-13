@@ -16,7 +16,7 @@ emulator-server = { workspace = true }
 emulator-telemetry = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }
 aws-smithy-types = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
@@ -74,6 +74,12 @@ aws-sdk-dynamodb = { version = "1", default-features = false }
 # (`state::cluster_data`) rather than kept as a second copy of the data here. No
 # SQL type crosses into this crate: the capture is opaque.
 service-com-amazonaws-redshiftdata-redshiftdata = { workspace = true }
+# Amazon Redshift publishes the HealthStatus metric of every cluster it runs, and
+# a CloudWatch metric has ONE home: the datapoints go into the CloudWatch
+# emulator's own metric store — the store `PutMetricData` writes and
+# `GetMetricStatistics` reads — through that crate's `state` seam
+# (`state::cluster_metrics`), rather than into a second store here.
+service-com-amazonaws-cloudwatch-graniteserviceversion20100801 = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

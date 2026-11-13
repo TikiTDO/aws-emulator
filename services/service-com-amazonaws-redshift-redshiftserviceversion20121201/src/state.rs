@@ -114,6 +114,12 @@ mod snapshot_schedules;
 /// A cluster's DATA, which lives in the SQL engine the Redshift Data API runs
 /// statements on: what a snapshot of a cluster copies and a restore writes back.
 mod cluster_data;
+/// The CloudWatch series a cluster publishes about its own health, and the
+/// in-process clock that keeps publishing them. Re-exported below, so a handler
+/// reaches it as `crate::state::…` like every other part of this store.
+pub mod cluster_metrics;
+
+pub use cluster_metrics::*;
 
 pub use cluster_data::*;
 pub use clusters::*;
@@ -2683,6 +2689,15 @@ pub struct ComAmazonawsRedshiftRedshiftserviceversion20121201State {
     /// [`ComAmazonawsRedshiftRedshiftserviceversion20121201State::snapshot_copy_grants`],
     /// this collection needs no `Stored*` wrapper.
     pub recommendations: Vec<Recommendation>,
+    /// Where the health series of each cluster has got to, and the one in-process
+    /// clock that advances them: the schedule the AWS/Redshift `HealthStatus`
+    /// metric of every cluster this store holds is published on (see
+    /// [`cluster_metrics`]).
+    ///
+    /// Held here rather than per cluster record because the clock is the STORE's:
+    /// it is claimed once however many writes drive it, and it publishes for
+    /// every cluster the store holds.
+    pub health_metrics: cluster_metrics::HealthStatusPublisher,
 }
 
 /// Where in the store one resource an ARN names sits: its collection and its
@@ -2741,6 +2756,7 @@ impl Default for ComAmazonawsRedshiftRedshiftserviceversion20121201State {
             endpoint_accesses: Vec::new(),
             endpoint_authorizations: Vec::new(),
             recommendations: Vec::new(),
+            health_metrics: cluster_metrics::HealthStatusPublisher::default(),
         }
     }
 }
@@ -2759,6 +2775,15 @@ fn tagged_resource_entries<'a>(
             resource_type: Some(resource_type.to_string()),
         })
 }
+
+/// The `ClusterAvailabilityStatus` of a cluster that can serve queries: "Available - The
+/// cluster is available for queries"
+/// (`smithy_query(query="doc", shape="Cluster", member="ClusterAvailabilityStatus")`).
+///
+/// Named here because it is what the health the service publishes about a cluster is read off
+/// ([`cluster_metrics`]) as well as what [`availability_status`] reports, so the two cannot
+/// disagree about which clusters are serving.
+pub const AVAILABILITY_STATUS_AVAILABLE: &str = "Available";
 
 /// `ClusterAvailabilityStatus` for a `ClusterStatus`.
 ///
@@ -2788,7 +2813,7 @@ fn tagged_resource_entries<'a>(
 /// `Maintenance`.
 pub fn availability_status(cluster_status: &str) -> &'static str {
     if cluster_status.starts_with(STATUS_AVAILABLE) {
-        return "Available";
+        return AVAILABILITY_STATUS_AVAILABLE;
     }
     match cluster_status {
         STATUS_CREATING | STATUS_MODIFYING | "resizing" | "cancelling-resize" | "rebooting"

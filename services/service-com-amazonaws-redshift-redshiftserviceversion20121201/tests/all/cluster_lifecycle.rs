@@ -170,6 +170,48 @@ impl Emulator {
         .await
     }
 
+    /// An emulator with the Amazon CloudWatch service mounted beside Redshift on
+    /// the SAME engine, exactly as the assembled emulator mounts them.
+    ///
+    /// The health of a cluster is published as a CloudWatch metric, and a metric
+    /// has ONE home: a suite that asserts what a cluster publishes reads it where
+    /// a client reads it, through that service's own `GetMetricStatistics`.
+    pub(crate) fn with_cloudwatch() -> Self {
+        let mut emulator = Self::build(false);
+        emulator.router.register_service(
+            service_com_amazonaws_cloudwatch_graniteserviceversion20100801::EmulatedService::new(
+                Arc::clone(&emulator.engine),
+            ),
+        );
+        emulator
+    }
+
+    /// POST one Amazon CloudWatch operation with this JSON body, signed for
+    /// [`REGION`], and answer its status and parsed body.
+    ///
+    /// That service speaks awsJson1_0, so the operation travels in `x-amz-target`
+    /// rather than in a form field, and the credential scope names `monitoring`,
+    /// which is what routes the call to it. Panics unless
+    /// [`Emulator::with_cloudwatch`] built this emulator — there is no CloudWatch
+    /// to call otherwise.
+    pub(crate) async fn call_cloudwatch(
+        &self,
+        operation: &str,
+        body: &serde_json::Value,
+    ) -> (u16, serde_json::Value) {
+        self.call_json(
+            JsonService {
+                endpoint_prefix: "monitoring",
+                signing_name: "monitoring",
+                content_type: "application/x-amz-json-1.0",
+                target_prefix: "GraniteServiceVersion20100801",
+            },
+            operation,
+            body,
+        )
+        .await
+    }
+
     /// An emulator with the Redshift Data API mounted beside Redshift on the
     /// SAME engine, exactly as the assembled emulator mounts them.
     ///
