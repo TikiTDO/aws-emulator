@@ -27,6 +27,7 @@ use serde_json::{json, Value};
 
 use crate::collection_lifecycle::{call, emulator, text, CLIENT_ERROR};
 use crate::encryption_indexes_and_tagging::active_collection;
+use crate::index_not_found_wording::index_not_found_message;
 
 /// The error code a value the rule refuses carries
 /// (`smithy_query(query="shape", shape="ValidationException")`).
@@ -34,11 +35,6 @@ const VALIDATION: &str = "ValidationException";
 
 /// The error code a legal name that names no index carries.
 const NOT_FOUND: &str = "ResourceNotFoundException";
-
-/// How this service words an index that is not there, from the names the request used.
-fn index_not_found_message(index_name: &str, id: &str) -> String {
-    format!("The index '{index_name}' does not exist in the collection with Id '{id}'.")
-}
 
 /// An index schema naming one field after the index it belongs to, so each row round-trips
 /// a schema of its own rather than one shared document.
@@ -153,8 +149,8 @@ async fn a_name_the_rule_admits_is_absent_until_created_and_then_round_trips() {
     let id = text(&collection, "id");
 
     for (case, name) in admitted_names() {
-        // A legal name that names no index is the modelled not-found, naming the index and
-        // the collection the request addressed.
+        // A legal name that names no index is the modelled not-found, naming the index the
+        // request asked for.
         let (status, code, read) =
             call(&router, "GetIndex", json!({ "id": &id, "indexName": &name })).await;
         assert_eq!(
@@ -162,7 +158,7 @@ async fn a_name_the_rule_admits_is_absent_until_created_and_then_round_trips() {
             (CLIENT_ERROR, NOT_FOUND),
             "case GetIndex({case}, before the create): expected {CLIENT_ERROR} {NOT_FOUND}, got {status} {code} with {read}"
         );
-        let expected_message = index_not_found_message(&name, &id);
+        let expected_message = index_not_found_message(&name);
         let got_message = text(&read, "message");
         assert_eq!(
             got_message, expected_message,

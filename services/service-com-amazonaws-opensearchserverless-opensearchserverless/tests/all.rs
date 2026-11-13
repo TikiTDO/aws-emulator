@@ -65,6 +65,8 @@ mod index_create_retry_precedence;
 mod index_delete;
 #[path = "all/index_name_rule.rs"]
 mod index_name_rule;
+#[path = "all/index_not_found_wording.rs"]
+mod index_not_found_wording;
 #[path = "all/index_schema_update.rs"]
 mod index_schema_update;
 #[path = "all/lifecycle_policy.rs"]

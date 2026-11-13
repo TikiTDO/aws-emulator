@@ -184,10 +184,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if collection.indexes.remove(&input.index_name).is_none() {
             return Err(DeleteIndexErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
-                    message: Some(crate::state::index_not_found_message(
-                        &input.index_name,
-                        &input.id,
-                    )),
+                    message: Some(crate::state::index_not_found_message(&input.index_name)),
                 },
             )
             .into());

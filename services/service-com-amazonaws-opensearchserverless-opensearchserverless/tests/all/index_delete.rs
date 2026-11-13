@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 
 use crate::collection_lifecycle::{call, emulator, text, CLIENT_ERROR};
 use crate::encryption_indexes_and_tagging::active_collection;
+use crate::index_not_found_wording::index_not_found_message;
 
 /// The error code a collection or index the store does not hold carries
 /// (`smithy_query(query="operation", operation="DeleteIndex")` -> errors).
@@ -32,11 +33,6 @@ const VALIDATION: &str = "ValidationException";
 /// How this service words a collection id that names no collection, on an index request.
 fn collection_not_found_message(id: &str) -> String {
     format!("The Collection with Id '{id}' does not exist.")
-}
-
-/// How this service words an index that is not there, from the names the request used.
-fn index_not_found_message(index_name: &str, id: &str) -> String {
-    format!("The index '{index_name}' does not exist in the collection with Id '{id}'.")
 }
 
 /// `GetIndex` for one index: its HTTP status, error code and body.
@@ -151,7 +147,7 @@ async fn a_delete_removes_only_the_index_it_addresses() {
             "case DeleteIndex({case}): expected 200, got {status} {code} with {answer}"
         );
 
-        // The addressed index is gone, and the refusal names it and its collection.
+        // The addressed index is gone, and the refusal names the index asked for.
         let (status, code, answer) = read_index(&router, &id, target).await;
         assert_eq!(
             (status, code.as_str()),
@@ -160,7 +156,7 @@ async fn a_delete_removes_only_the_index_it_addresses() {
              {status} {code} with {answer}"
         );
         let got_message = text(&answer, "message");
-        let expected_message = index_not_found_message(target, &id);
+        let expected_message = index_not_found_message(target);
         assert_eq!(
             got_message, expected_message,
             "case GetIndex({case}, after the delete): expected {expected_message:?}, got \
@@ -309,7 +305,7 @@ async fn a_delete_that_addresses_nothing_is_refused_and_removes_nothing() {
             "an index name that names no index",
             json!({ "id": &id, "indexName": "never-created" }),
             NOT_FOUND,
-            Some(index_not_found_message("never-created", &id)),
+            Some(index_not_found_message("never-created")),
         ),
         (
             "an index name beginning with an underscore",

@@ -2774,14 +2774,16 @@ pub fn index_collection_not_found_message(id: &str) -> String {
     format!("The Collection with Id '{id}' does not exist.")
 }
 
-/// How the index operations word an index that is not there, from the index name and the
-/// id of the collection it was looked for in.
+/// How the index operations word an index that is not there: the fixed text below plus the
+/// `indexName` the request carried, and nothing else. The collection id does NOT appear —
+/// an `id` that names no collection is the DIFFERENT refusal worded by
+/// [`index_collection_not_found_message`], and that one keeps naming the collection.
 ///
 /// `GetIndex`, `UpdateIndex` and `DeleteIndex` each address an existing index this way, so
 /// the wording of that one refusal is read off one place and the three cannot disagree
 /// about it.
-pub fn index_not_found_message(index_name: &str, collection_id: &str) -> String {
-    format!("The index '{index_name}' does not exist in the collection with Id '{collection_id}'.")
+pub fn index_not_found_message(index_name: &str) -> String {
+    format!("Index not found: {index_name}")
 }
 
 /// How the index operations word an `indexSchema` past the bounds this emulator stores a

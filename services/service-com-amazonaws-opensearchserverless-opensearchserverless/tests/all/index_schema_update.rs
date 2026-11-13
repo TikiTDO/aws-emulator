@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 
 use crate::collection_lifecycle::{call, emulator, text, CLIENT_ERROR};
 use crate::encryption_indexes_and_tagging::active_collection;
+use crate::index_not_found_wording::index_not_found_message;
 
 /// The error code an index or collection the store does not hold carries
 /// (`smithy_query(query="operation", operation="UpdateIndex")` -> errors).
@@ -32,11 +33,6 @@ const VALIDATION: &str = "ValidationException";
 /// How this service words a collection id that names no collection, on an index request.
 fn collection_not_found_message(id: &str) -> String {
     format!("The Collection with Id '{id}' does not exist.")
-}
-
-/// How this service words an index that is not there, from the names the request used.
-fn index_not_found_message(index_name: &str, id: &str) -> String {
-    format!("The index '{index_name}' does not exist in the collection with Id '{id}'.")
 }
 
 /// The `indexSchema` `GetIndex` reports for `index_name`, asserting the read succeeded.
@@ -349,7 +345,7 @@ async fn an_update_that_addresses_no_index_is_refused_and_writes_nothing() {
             "an index name that names no index",
             json!({ "id": &id, "indexName": "never-created", "indexSchema": { "a": 1 } }),
             NOT_FOUND,
-            Some(index_not_found_message("never-created", &id)),
+            Some(index_not_found_message("never-created")),
         ),
         (
             "an index name beginning with an underscore",
