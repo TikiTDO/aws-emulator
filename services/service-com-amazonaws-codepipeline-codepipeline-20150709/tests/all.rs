@@ -133,6 +133,8 @@ mod update_pipeline;
 mod validation_and_messages;
 #[path = "all/webhook_definition_rules.rs"]
 mod webhook_definition_rules;
+#[path = "all/webhook_filter_pattern_wording.rs"]
+mod webhook_filter_pattern_wording;
 #[path = "all/webhook_trigger.rs"]
 mod webhook_trigger;
 #[path = "all/webhooks.rs"]
