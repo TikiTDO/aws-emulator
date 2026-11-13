@@ -235,7 +235,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        let id = crate::state::opaque_id(store.take_sequence());
+        let id = crate::state::opaque_id();
         let connector = crate::state::CloudConnector {
             id: id.clone(),
             region,

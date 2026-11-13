@@ -365,7 +365,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let sequence = store.take_sequence();
         // `DeviceDiscoveryId` is `^[A-Za-z0-9]+$`, len 1..200, which the lowercase-hex
         // opaque id satisfies.
-        let id = crate::state::opaque_id(sequence);
+        let id = crate::state::opaque_id();
         let discovery = crate::state::DeviceDiscovery {
             id: id.clone(),
             arn: crate::state::device_discovery_arn(&region, &id),

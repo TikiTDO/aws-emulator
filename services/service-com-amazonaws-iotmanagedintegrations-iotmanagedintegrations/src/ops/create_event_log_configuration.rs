@@ -258,7 +258,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let sequence = store.take_sequence();
-        let id = crate::state::opaque_id(sequence);
+        let id = crate::state::opaque_id();
         let configuration = crate::state::EventLogConfiguration {
             id: id.clone(),
             region: region.clone(),

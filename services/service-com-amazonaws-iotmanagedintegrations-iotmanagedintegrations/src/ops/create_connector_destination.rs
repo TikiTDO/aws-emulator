@@ -284,7 +284,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let sequence = store.take_sequence();
         // `ConnectorDestinationId` is `^[A-Za-z0-9-_]+$`, len 1..64, which the
         // lowercase-hex opaque id satisfies.
-        let id = crate::state::opaque_id(sequence);
+        let id = crate::state::opaque_id();
         let destination = crate::state::ConnectorDestination {
             id: id.clone(),
             region,

@@ -252,7 +252,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let sequence = store.take_sequence();
         // `AccountAssociationId` is `^[0-9a-zA-Z]+$`, len 1..64, which the lowercase-hex
         // opaque id satisfies.
-        let id = crate::state::opaque_id(sequence);
+        let id = crate::state::opaque_id();
         let arn = crate::state::account_association_arn(&region, &id);
         let association = crate::state::AccountAssociation {
             id: id.clone(),

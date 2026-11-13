@@ -268,7 +268,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let sequence = store.take_sequence();
-        let id = crate::state::opaque_id(sequence);
+        let id = crate::state::opaque_id();
         let arn = crate::state::managed_thing_arn(&region, &id);
 
         // The device bar code's named fields, read once at create time: they are what the

@@ -233,7 +233,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `CredentialLockerId` is `^[a-zA-Z0-9]*$`, len 1..64, and the resource segment of
         // `CredentialLockerArn` is `[0-9a-zA-Z]+`, which the lowercase-hex opaque id
         // satisfies.
-        let id = crate::state::opaque_id(sequence);
+        let id = crate::state::opaque_id();
         let arn = crate::state::credential_locker_arn(&region, &id);
         let locker = crate::state::CredentialLocker {
             id: id.clone(),

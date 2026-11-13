@@ -27,6 +27,9 @@ bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# Draws the random 128-bit value behind every identifier this service mints
+# (src/state.rs `opaque_id`), so an id carries no creation time and no creation order.
+uuid = { version = "1", features = ["v4"] }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

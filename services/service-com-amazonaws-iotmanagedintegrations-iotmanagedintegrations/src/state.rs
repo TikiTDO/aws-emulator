@@ -945,11 +945,11 @@ pub const AWS_DNS_SUFFIX: &str = "amazonaws.com";
 pub const CUSTOM_ENDPOINT_LABEL_LENGTH: usize = 14;
 
 /// The dedicated label of one custom endpoint: the low [`CUSTOM_ENDPOINT_LABEL_LENGTH`]
-/// characters of a fresh opaque identifier ([`opaque_id`]), whose per-store counter occupies
-/// the end — so two registrations in one run never mint the same label. Lowercase hex, which
-/// the modelled `EndpointAddress` pattern (`^[A-Za-z0-9._@-]+$`) admits.
-pub fn custom_endpoint_label(counter: u64) -> String {
-    let id = opaque_id(counter);
+/// characters of a fresh opaque identifier ([`opaque_id`]), so the label is drawn from the
+/// same randomness and no two registrations mint the same one. Lowercase hex, which the
+/// modelled `EndpointAddress` pattern (`^[A-Za-z0-9._@-]+$`) admits.
+pub fn custom_endpoint_label() -> String {
+    let id = opaque_id();
     let from = id.len().saturating_sub(CUSTOM_ENDPOINT_LABEL_LENGTH);
     id.split_at(from).1.to_string()
 }
@@ -1269,7 +1269,7 @@ impl ComAmazonawsIotmanagedintegrationsIotmanagedintegrationsState {
         if self.custom_endpoints.len() >= MAX_CONFIGURED_REGIONS {
             return None;
         }
-        let label = custom_endpoint_label(self.take_sequence());
+        let label = custom_endpoint_label();
         let address = custom_endpoint_address(&label, region);
         self.custom_endpoints
             .insert(region.to_string(), address.clone());
@@ -1994,15 +1994,24 @@ pub fn default_wifi_simple_setup_configuration() -> WiFiSimpleSetupConfiguration
     }
 }
 
-/// A fresh opaque identifier: lowercase hex of the wall clock in nanoseconds plus a
-/// per-store counter, so it is unique within a run and matches both the
-/// `ManagedThingId` pattern (`^[a-zA-Z0-9:_-]*$`, len 1..64) and the `NextToken`
-/// pattern (`^[a-zA-Z0-9=_-]+$`).
-pub fn opaque_id(counter: u64) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_nanos());
-    format!("{:016x}{counter:08x}", nanos as u64)
+/// A fresh opaque identifier: the 32 lowercase hex digits of a random 128-bit value.
+///
+/// An identifier this service MINTS is opaque to its caller: it carries no part of the
+/// creating request, no creation instant and no creation order, so two resources made in
+/// the same second share no prefix, holding one tells a caller nothing about the next, and
+/// nothing downstream can read a creation time or a position out of it. Drawn from the
+/// operating system's randomness (a v4 UUID's hex form), which is also what makes it
+/// unique across every resource this service holds.
+///
+/// The form satisfies every identifier shape minted from it — `CredentialLockerId` and
+/// `OtaTaskConfigurationId` (`^[a-zA-Z0-9]*$`, len 1..64), `LogConfigurationId` and
+/// `DeviceDiscoveryId` (`^[A-Za-z0-9]+$`, len 1..200), `ManagedThingId`
+/// (`^[a-zA-Z0-9:_-]*$`, len 1..64), `CloudConnectorId` and `ConnectorDestinationId`
+/// (`^[A-Za-z0-9-_]+$`, len 1..64), `AccountAssociationId` (`^[0-9a-zA-Z]+$`, len 1..64)
+/// — the `[0-9a-zA-Z]+` resource segment every ARN of this service carries, and the
+/// `NextToken` pattern (`^[a-zA-Z0-9=_-]+$`).
+pub fn opaque_id() -> String {
+    ::uuid::Uuid::new_v4().simple().to_string()
 }
 
 /// A `NextToken` carrying the [`ManagedThing::sequence`] a page resumes at, encoded so

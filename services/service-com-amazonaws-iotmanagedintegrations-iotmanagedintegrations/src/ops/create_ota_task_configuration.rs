@@ -201,7 +201,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let sequence = store.take_sequence();
         // `OtaTaskConfigurationId` is `^[a-zA-Z0-9]*$`, len 1..64, which the lowercase-hex
         // opaque id satisfies.
-        let id = crate::state::opaque_id(sequence);
+        let id = crate::state::opaque_id();
         let configuration = crate::state::OtaTaskConfiguration {
             id: id.clone(),
             region,

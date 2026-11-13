@@ -59,6 +59,8 @@ mod managed_thing_capabilities;
 mod managed_thing_lifecycle;
 #[path = "all/managed_thing_read_side_attributes.rs"]
 mod managed_thing_read_side_attributes;
+#[path = "all/minted_identifier_opacity.rs"]
+mod minted_identifier_opacity;
 #[path = "all/not_found_messages.rs"]
 mod not_found_messages;
 #[path = "all/notification_configuration_lifecycle.rs"]
