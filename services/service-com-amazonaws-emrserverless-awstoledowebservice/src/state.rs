@@ -81,6 +81,30 @@ pub const MAX_JOB_RUNS_PER_APPLICATION: usize = 1_000;
 /// could not be reported at all.
 pub const MAX_TAGS_PER_RESOURCE: usize = 200;
 
+/// The HTTP status a successful TAG MUTATION answers with.
+///
+/// `TagResource` and `UntagResource` both leave their success code DEFAULTED in the
+/// model — `@http` names a method and a URI and no `code:` — so the protocol's 200
+/// default states nothing about this service, and the status a success carries is
+/// behaviour the recorded AWS answers state. Both mutations write only the tag set of
+/// the resource their `resourceArn` names and report nothing back:
+/// `TagResourceResponse` and `UntagResourceResponse` declare no members
+/// (`smithy_query(query="shape",shape="TagResourceResponse,UntagResourceResponse")`), so
+/// there is no entity for a caller to parse and the answer is 204 No Content. A 200 there
+/// promises a body the answer does not carry, and every client path gated on the
+/// no-content status — conditional body parsing, caches and proxies that key on it — takes
+/// the wrong branch. The two operations share the `/tags/{resourceArn}` route and this one
+/// status, so the rule lives here rather than twice in the handlers; the status itself is
+/// the cross-service one, and the FRAMING of an answer carrying it is `service_common`'s
+/// too (see `crate::service`) — what belongs to this service is only which of its
+/// operations answers it.
+///
+/// This does NOT extend to every output structure of this service that happens to declare
+/// no members: `DeleteApplication`, `StartApplication` and `StopApplication` report nothing
+/// either, and the recorded AWS answers for those carry the defaulted 200, which they keep.
+pub const TAG_MUTATION_SUCCESS_STATUS: u16 =
+    ::service_common::no_content_responses::NO_CONTENT_STATUS;
+
 /// The same bound, for the interactive sessions one application holds. `StartSession`
 /// models `ServiceQuotaExceededException` ("The maximum number of resources per account
 /// has been reached"), which is what it answers past this bound.

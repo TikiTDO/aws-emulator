@@ -39,6 +39,15 @@ use super::session_lifecycle::{get_session, minimal_session, session_application
 /// 201 is one past it.
 const MAX_TAGS_PER_RESOURCE: usize = 200;
 
+/// The status a successful TAG MUTATION answers with: 204 No Content, because
+/// `TagResourceResponse` and `UntagResourceResponse` declare no members
+/// (`smithy_query(query="shape",shape="TagResourceResponse,UntagResourceResponse")`) and
+/// so leave the caller nothing to parse. Written out here rather than read from
+/// `crate::state` for the same reason as the bound above; the suite that OWNS this rule,
+/// with the body bytes and the framing a no-content answer carries, is
+/// `tag_mutation_status.rs`.
+const TAG_MUTATION_SUCCESS_STATUS: u16 = 204;
+
 /// Every character `TagKey`'s pattern `^[A-Za-z0-9 /_.:=+@-]+$` admits beyond the
 /// alphanumerics, in one key — and the same set is `TagValue`'s pattern
 /// (`smithy_query(query="shape",shape="TagKey,TagValue")`).
@@ -208,8 +217,9 @@ async fn tags_round_trip_through_the_stored_resource_for_every_resource_class() 
         for (case, pairs) in tag_set_cases() {
             let wrote = tag_resource(&router, &resource_arn, tag_map(&pairs)).await;
             assert_eq!(
-                wrote.status, 200,
-                "case {class}/{case:?}: TagResource expected 200, got {} with {:?}",
+                wrote.status, TAG_MUTATION_SUCCESS_STATUS,
+                "case {class}/{case:?}: TagResource expected {TAG_MUTATION_SUCCESS_STATUS}, \
+                 got {} with {:?}",
                 wrote.status, wrote.body
             );
 
@@ -261,8 +271,9 @@ async fn tags_round_trip_through_the_stored_resource_for_every_resource_class() 
             }
             let removed = untag_resource(&router, &resource_arn, &keys).await;
             assert_eq!(
-                removed.status, 200,
-                "case {class}/{case:?}: UntagResource expected 200, got {} with {:?}",
+                removed.status, TAG_MUTATION_SUCCESS_STATUS,
+                "case {class}/{case:?}: UntagResource expected {TAG_MUTATION_SUCCESS_STATUS}, \
+                 got {} with {:?}",
                 removed.status, removed.body
             );
             let emptied = list_tags(&router, &resource_arn).await;
@@ -346,8 +357,8 @@ async fn a_tag_write_touches_exactly_the_keys_it_names() {
             TagStep::Remove(keys) => untag_resource(&router, &resource_arn, keys).await,
         };
         assert_eq!(
-            answer.status, 200,
-            "case {case:?}: expected 200, got {} with {:?}",
+            answer.status, TAG_MUTATION_SUCCESS_STATUS,
+            "case {case:?}: expected {TAG_MUTATION_SUCCESS_STATUS}, got {} with {:?}",
             answer.status, answer.body
         );
         let listed = list_tags(&router, &resource_arn).await;
@@ -490,8 +501,9 @@ async fn a_write_past_the_modelled_tag_bound_is_refused() {
         .collect();
     let at_bound = tag_resource(&router, &resource_arn, tag_map(&full)).await;
     assert_eq!(
-        at_bound.status, 200,
-        "case at the bound: {MAX_TAGS_PER_RESOURCE} tags expected 200, got {} with {:?}",
+        at_bound.status, TAG_MUTATION_SUCCESS_STATUS,
+        "case at the bound: {MAX_TAGS_PER_RESOURCE} tags expected \
+         {TAG_MUTATION_SUCCESS_STATUS}, got {} with {:?}",
         at_bound.status, at_bound.body
     );
     let listed = list_tags(&router, &resource_arn).await;
@@ -526,8 +538,8 @@ async fn a_write_past_the_modelled_tag_bound_is_refused() {
     // not grow the set, so it is accepted.
     let overwrite = tag_resource(&router, &resource_arn, json!({ "key-0": "rewritten" })).await;
     assert_eq!(
-        overwrite.status, 200,
-        "case overwrite at the bound: expected 200, got {} with {:?}",
+        overwrite.status, TAG_MUTATION_SUCCESS_STATUS,
+        "case overwrite at the bound: expected {TAG_MUTATION_SUCCESS_STATUS}, got {} with {:?}",
         overwrite.status, overwrite.body
     );
     let rewritten = list_tags(&router, &resource_arn).await;

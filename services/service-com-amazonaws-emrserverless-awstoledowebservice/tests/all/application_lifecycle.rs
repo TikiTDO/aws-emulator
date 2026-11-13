@@ -102,12 +102,15 @@ impl Answer {
     }
 }
 
-pub(crate) async fn call(
+/// One signed request, answered as the WHOLE HTTP response, so a suite can assert on the
+/// status, the body BYTES and the response headers — the framing a parsed [`Answer`]
+/// cannot show. [`call`] is this with the body parsed as JSON.
+pub(crate) async fn call_http(
     router: &MultiServiceRouter,
     method: &str,
     uri: &str,
     body: Option<Value>,
-) -> Answer {
+) -> ::http::Response<Bytes> {
     let payload = body.map(|value| value.to_string()).unwrap_or_default();
     let mut builder = ::http::Request::builder()
         .method(method)
@@ -121,7 +124,16 @@ pub(crate) async fn call(
         .body(Bytes::from(payload))
         .expect("the test request is well formed");
 
-    let response = router.dispatch(request).await;
+    router.dispatch(request).await
+}
+
+pub(crate) async fn call(
+    router: &MultiServiceRouter,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> Answer {
+    let response = call_http(router, method, uri, body).await;
     let status = response.status().as_u16();
     let error_type = response
         .headers()

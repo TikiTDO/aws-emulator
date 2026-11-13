@@ -40,12 +40,26 @@
 //!
 //! A sixth seam, `override_protocol`, is one this service DOES take: the codec every
 //!   modelled response is rendered through. It is the model's own `restJson1` in every
-//!   respect but one — a read of an application or a session carries the whole
-//!   effective-configuration projection the service's wire response carries, including
-//!   the keys the model does not declare. See [`read_projection`] for that rule; it is
-//!   applied here, at the one place every response of this service passes through,
-//!   rather than per operation, because no handler can reach the rendering of its own
-//!   output.
+//!   respect but two:
+//!
+//!   * a read of an application or a session carries the whole effective-configuration
+//!     projection the service's wire response carries, including the keys the model does
+//!     not declare — see [`read_projection`] for that rule;
+//!   * an answer whose status carries NO CONTENT carries no body, and states the length
+//!     such an answer has. The two tag mutations answer `204` (see
+//!     [`crate::state::TAG_MUTATION_SUCCESS_STATUS`]) and declare an output STRUCTURE with
+//!     no members rather than `smithy.api#Unit`, which the protocol's serializer renders as
+//!     the empty JSON object `{}` — a body a 204 has no room for. The correction itself is
+//!     not written here: it is [`service_common::no_content_responses::without_content`],
+//!     the one shared rule every service whose success answers 204 calls, and only the
+//!     delegation below is this crate's. An answer served over HTTP/1.1 reaches a client
+//!     WITHOUT the framing header, which is below anything this crate decides;
+//!     `tests/all/tag_mutation_status.rs` pins what this service states and what a socket
+//!     then delivers.
+//!
+//!   Both are applied here, at the one place every response of this service passes
+//!   through, rather than per operation, because no handler can reach the rendering of its
+//!   own output.
 //!
 //! The model-derived half of this service — its identity, wire protocol, routing
 //! table, and the default error renderers — lives in the generated `ServiceDefinition`
@@ -58,6 +72,7 @@ use aws_smithy_runtime_api::http::{Request as WireRequest, Response as WireRespo
 use aws_smithy_schema::Schema;
 use aws_smithy_schema_server::constraints::{Violation, ViolationKind};
 use aws_smithy_schema_server::{ProtocolError, ServerProtocol};
+use service_common::no_content_responses::without_content;
 use smithy_server_runtime::{
     http, ErasedOperation, Refusal, Refused, Service,
 };
@@ -348,12 +363,16 @@ impl<Eng: Send + Sync + 'static> ServerProtocol for EmulatedService<Eng> {
         // The status, the headers and every modelled member stay the framework's: only
         // the resource a read carries gains the rest of its effective-configuration
         // projection, from the record the handler already returned.
-        self.entry.protocol().serialize_output(
+        let response = self.entry.protocol().serialize_output(
             &ReadProjection::new(output),
             output_schema,
             operation_name,
             success_status,
-        )
+        )?;
+        // An answer whose status carries no content carries no body: the empty JSON object
+        // the serializer renders for a members-less output goes no further. The rule is the
+        // shared one, not a copy of it.
+        Ok(without_content(response))
     }
 
     fn serialize_error(
@@ -364,7 +383,9 @@ impl<Eng: Send + Sync + 'static> ServerProtocol for EmulatedService<Eng> {
         http_status: u16,
     ) -> Result<WireResponse, ProtocolError> {
         // No error shape of this model carries a configuration block, so a failure is
-        // rendered exactly as the framework renders it.
+        // rendered exactly as the framework renders it. Nor is any of them a no-content
+        // status — every modelled failure of this service carries a JSON error envelope at
+        // a 4xx or 5xx — so there is nothing here to reframe either.
         self.entry
             .protocol()
             .serialize_error(error, error_schema, error_code, http_status)

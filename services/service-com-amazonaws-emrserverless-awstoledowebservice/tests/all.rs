@@ -41,6 +41,8 @@ mod session_refusal_semantics;
 mod session_termination;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/tag_mutation_status.rs"]
+mod tag_mutation_status;
 #[path = "all/update_application.rs"]
 mod update_application;
 #[path = "all/update_application_while_started.rs"]

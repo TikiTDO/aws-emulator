@@ -130,7 +130,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     const NAME: &'static str = "TagResource";
     const INPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::TAG_RESOURCE_INPUT_SCHEMA;
     const OUTPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::TAG_RESOURCE_OUTPUT_SCHEMA;
-    const SUCCESS_STATUS: u16 = 200u16;
+    // A successful tag write answers 204 No Content: this output structure declares no
+    // members, so the answer carries nothing for a caller to parse and says so with the
+    // status for it rather than with the 200 the protocol leaves defaulted. The rule, and
+    // which operations it covers, is on [`crate::state::TAG_MUTATION_SUCCESS_STATUS`].
+    const SUCCESS_STATUS: u16 = crate::state::TAG_MUTATION_SUCCESS_STATUS;
 
     async fn handle(
         &self,
