@@ -3,7 +3,8 @@
 //! The per-mapping EVENT-COUNT metrics of an event source mapping on an Amazon SQS queue,
 //! end to end over the wire with Amazon SQS and CloudWatch mounted beside Lambda on ONE
 //! engine — so the messages are sent where a client sends them and the series are read back
-//! where a client reads them (`GetMetricStatistics`).
+//! where a client reads them (`GetMetricStatistics` for one series and its datapoints,
+//! `GetMetricData` for several series in one answer).
 //!
 //! The RULE asserted over the tables below: while an event source mapping's `MetricsConfig`
 //! selects `EventCount` ("the metrics you want your event source mapping to produce […]
@@ -29,6 +30,14 @@
 //! matches a plain-text one, how many of the waiting messages the filter admits, the
 //! `BatchSize` they are polled in, and which `EventSourceMappingMetric` values the
 //! `MetricsConfig` selects.
+//!
+//! The counting table waits for CONDITIONS and never for a span: every barrier of a row — a
+//! count published, a queue drained, a mapping removed — is looked for again until it holds
+//! or the generous ceiling [`BUDGET`] passes, nothing asserts on how long it took, the four
+//! counts the invariants relate are read as ONE answer ([`family_sums`]), and the row retires
+//! its mapping once it is read ([`retire_mapping`]) — so one wake-up of the single poll loop
+//! serving the engine does the work of the row that is running and not also the work of every
+//! mapping an earlier row left polling.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -56,13 +65,24 @@ const CLOUDWATCH_TARGET_PREFIX: &str = "GraniteServiceVersion20100801";
 const STATE_ENABLED: &str = "Enabled";
 
 /// How long a wait for work the mapping has to do — a batch polled, a queue drained, a
-/// datapoint appearing — is given before the row is a failure. Well above the poll interval
-/// and the state-settle span, so a row fails only when the mapping did not do the work at
-/// all.
-const BUDGET: Duration = Duration::from_secs(25);
+/// datapoint appearing, a retired mapping removed — is given before the row is a failure.
+///
+/// A CEILING on a wait, not a span anything here waits out: every wait below looks again
+/// until its condition holds and returns the instant it does, and no row asserts on how long
+/// that took. The work behind a condition is a handful of the poll loop's wake-ups — one
+/// mapping polls at a time, since a row retires its own ([`retire_mapping`]) — so the ceiling
+/// is an order of magnitude above what that costs, far above the poll interval and the
+/// state-settle span with whatever a loaded host adds to them, and still near enough that a
+/// row which really does no work reports it rather than holding the suite up.
+const BUDGET: Duration = Duration::from_secs(60);
 
 /// How long between two looks while waiting.
 const LOOK_AGAIN: Duration = Duration::from_millis(50);
+
+/// How far either side of now the series below are read, in seconds: a window wide enough to
+/// hold every datapoint a row's passes publish, at the one-minute resolution they are stored
+/// at.
+const WINDOW_SECONDS: f64 = 600.0;
 
 /// Several of the poller's wake-ups: long enough that a pass which was going to publish
 /// anything has published it.
@@ -130,6 +150,19 @@ async fn cloudwatch(router: &MultiServiceRouter, operation: &str, body: &Value) 
     (status, parsed)
 }
 
+/// Now, as epoch seconds: the instant a read's window is centred on.
+fn now_secs() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}
+
+/// The dimensions the series of the mapping `uuid` names carry, as a client states them.
+fn mapping_dimensions(uuid: &str) -> Value {
+    json!([{ "Name": EVENT_SOURCE_MAPPING_UUID_DIMENSION, "Value": uuid }])
+}
+
 /// The datapoints CloudWatch holds for one metric of the mapping `uuid` names, as a client
 /// reads them: one per minute, over a window wide enough to hold the whole row.
 async fn datapoints(
@@ -138,19 +171,16 @@ async fn datapoints(
     metric: &str,
     uuid: &str,
 ) -> Vec<Value> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64();
+    let now = now_secs();
     let (status, stats) = cloudwatch(
         router,
         "GetMetricStatistics",
         &json!({
             "Namespace": METRIC_NAMESPACE,
             "MetricName": metric,
-            "Dimensions": [{ "Name": EVENT_SOURCE_MAPPING_UUID_DIMENSION, "Value": uuid }],
-            "StartTime": now - 600.0,
-            "EndTime": now + 600.0,
+            "Dimensions": mapping_dimensions(uuid),
+            "StartTime": now - WINDOW_SECONDS,
+            "EndTime": now + WINDOW_SECONDS,
             "Period": 60,
             "Statistics": ["Sum", "SampleCount"],
         }),
@@ -172,13 +202,76 @@ async fn metric_sum(router: &MultiServiceRouter, case: &str, metric: &str, uuid:
         .sum()
 }
 
-/// Every metric of the family, summed, in the order [`EVENT_COUNT_FAMILY`] names them.
+/// Every metric of the family, summed, in the order [`EVENT_COUNT_FAMILY`] names them — read
+/// as ONE answer.
+///
+/// The relations asserted between the four counts hold of what one pass did, so the four
+/// series are read in a single call (`GetMetricData` "can retrieve as many as 500 different
+/// metrics in a single request") rather than one after another: a family assembled from four
+/// answers taken at four instants, while the mapping's poller is still polling its queue,
+/// belongs to no one instant, so whether it satisfied those relations would depend on how
+/// much the poller got done between the reads.
 async fn family_sums(router: &MultiServiceRouter, case: &str, uuid: &str) -> Vec<f64> {
-    let mut sums = Vec::with_capacity(EVENT_COUNT_FAMILY.len());
-    for metric in EVENT_COUNT_FAMILY {
-        sums.push(metric_sum(router, case, metric, uuid).await);
-    }
-    sums
+    let now = now_secs();
+    let queries: Vec<Value> = EVENT_COUNT_FAMILY
+        .iter()
+        .enumerate()
+        .map(|(index, metric)| {
+            json!({
+                "Id": query_id(index),
+                "MetricStat": {
+                    "Metric": {
+                        "Namespace": METRIC_NAMESPACE,
+                        "MetricName": metric,
+                        "Dimensions": mapping_dimensions(uuid),
+                    },
+                    "Period": 60,
+                    "Stat": "Sum",
+                },
+            })
+        })
+        .collect();
+    let (status, data) = cloudwatch(
+        router,
+        "GetMetricData",
+        &json!({
+            "MetricDataQueries": queries,
+            "StartTime": now - WINDOW_SECONDS,
+            "EndTime": now + WINDOW_SECONDS,
+        }),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "case {case:?}: GetMetricData for the event-count family answered {status} {data}"
+    );
+    EVENT_COUNT_FAMILY
+        .iter()
+        .enumerate()
+        .map(|(index, metric)| {
+            let id = query_id(index);
+            let result = data["MetricDataResults"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|result| result["Id"] == json!(id))
+                .unwrap_or_else(|| {
+                    panic!("case {case:?}: GetMetricData must answer the {metric} query, got {data}")
+                });
+            result["Values"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|value| value.as_f64())
+                .sum()
+        })
+        .collect()
+}
+
+/// The `Id` the `index`th metric of the family is queried under, as `MetricDataQuery$Id`
+/// spells one: "must start with a lowercase letter".
+fn query_id(index: usize) -> String {
+    format!("m{index}")
 }
 
 /// Wait until one metric of the mapping `uuid` names sums to at least `wanted`, answering
@@ -320,6 +413,46 @@ async fn given_mapping(
     (uuid, url)
 }
 
+/// Retire the mapping `uuid` names when a row is done with it: `DeleteEventSourceMapping`,
+/// and a wait until the clock has removed it.
+///
+/// A mapping left `Enabled` goes on polling its queue and invoking its function for the whole
+/// of the test. A row that did not retire its mapping would leave every later row's poll
+/// loop doing its work as well — one wake-up's work, and with it how long a later row's
+/// conditions take to hold, would grow with how many rows had already run, which is exactly
+/// the dependence on how much the host has to spare that a row must not have.
+async fn retire_mapping(router: &MultiServiceRouter, case: &str, uuid: &str) {
+    let deleted = call(
+        router,
+        "DELETE",
+        &format!("{MAPPINGS_URI}/{uuid}"),
+        &Value::Null,
+    )
+    .await;
+    assert_eq!(
+        deleted.status,
+        202,
+        "case {case:?}: expected DeleteEventSourceMapping to answer 202, got {} {}",
+        deleted.status,
+        deleted.text()
+    );
+    let deadline = Instant::now() + BUDGET;
+    loop {
+        let reading = get_mapping(router, uuid).await;
+        if reading.status == 404 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "case {case:?}: the retired mapping was never removed, GetEventSourceMapping \
+             still answers {} {}",
+            reading.status,
+            reading.text()
+        );
+        tokio::time::sleep(LOOK_AGAIN).await;
+    }
+}
+
 /// One row of the counting table: what the mapping filters with, and what is waiting on its
 /// queue.
 struct CountRow {
@@ -451,6 +584,14 @@ async fn the_event_count_family_reports_what_each_poll_did() {
 
         let sums = family_sums(&router, case, &uuid).await;
         let (polled, filtered_out, invoked, deleted) = (sums[0], sums[1], sums[2], sums[3]);
+        // The reading the relations below are taken from carries the same poll count the
+        // row's first barrier was met on, so none of them can be satisfied by a family of
+        // zeros.
+        assert!(
+            polled >= f64::from(sent),
+            "case {case:?}: the family must count every one of the {sent} messages sent as \
+             polled, got {sums:?}"
+        );
         // A rejected message is deleted, so it is never polled again: the count of rejected
         // events is exactly what the row sent and the filter did not admit.
         assert_eq!(
@@ -472,6 +613,9 @@ async fn the_event_count_family_reports_what_each_poll_did() {
             "case {case:?}: no more events can be invoked than the filter admitted, got \
              {invoked} invoked against {polled} polled and {filtered_out} filtered out"
         );
+        // The row is read: its mapping is retired, so the next row's poller polls its queue
+        // and no other.
+        retire_mapping(&router, case, &uuid).await;
     }
 }
 
