@@ -53,7 +53,11 @@ use crate::usage_plan_lifecycle::create_usage_plan;
 const API_KEY_TYPE: &str = "API_KEY";
 
 /// The stage every deployed api of this suite is invoked through.
-const STAGE: &str = "prod";
+///
+/// The items below are `pub(crate)` so the sibling suite over the GRANT of a remaining quota
+/// (`usage_plan_quota_extension`) drives the same metered api, the same keys and the same
+/// report reader rather than standing a second copy of this harness up.
+pub(crate) const STAGE: &str = "prod";
 
 /// The region the invoke host is addressed in; any region is served, so one is enough.
 const REGION: &str = "us-east-1";
@@ -63,30 +67,36 @@ const SERVED: &str = r#"{"served":true}"#;
 
 /// The `message` API Gateway answers a request past a usage plan's quota with, through the
 /// `QUOTA_EXCEEDED` gateway response the catalog gives HTTP 429.
-const LIMIT_EXCEEDED: &str = "Limit Exceeded";
+pub(crate) const LIMIT_EXCEEDED: &str = "Limit Exceeded";
 
 /// The UTC day the emulator is counting usage on, which every interval below is stated
 /// relative to.
-fn today() -> NaiveDate {
+pub(crate) fn today() -> NaiveDate {
     DateTime::<Utc>::from(SystemTime::now()).date_naive()
 }
 
 /// `day` as this surface spells a date: the format `GetUsage`'s own members document, "the
 /// starting date (e.g., 2016-01-01) of the usage data"
 /// (`smithy_query(query="doc", shape="GetUsageRequest", member="startDate")`).
-fn date(day: NaiveDate) -> String {
+pub(crate) fn date(day: NaiveDate) -> String {
     day.format("%Y-%m-%d").to_string()
 }
 
 /// The day `days` after `from`.
-fn plus(from: NaiveDate, days: u64) -> NaiveDate {
+pub(crate) fn plus(from: NaiveDate, days: u64) -> NaiveDate {
     from.checked_add_days(Days::new(days))
         .expect("a day inside the calendar")
 }
 
 /// `GetUsage` for `plan` over the interval `from` through `through`, with `query` appended
 /// verbatim (`&keyId=…`, `&limit=…`, `&position=…`).
-async fn get_usage(gateway: &Gateway, plan: &str, from: &str, through: &str, query: &str) -> Answer {
+pub(crate) async fn get_usage(
+    gateway: &Gateway,
+    plan: &str,
+    from: &str,
+    through: &str,
+    query: &str,
+) -> Answer {
     gateway
         .call(
             "GET",
@@ -98,7 +108,7 @@ async fn get_usage(gateway: &Gateway, plan: &str, from: &str, through: &str, que
 
 /// The report's daily logs, as the `values` member carries them: the key id each log is
 /// indexed by, with that key's `[used, remaining]` entries.
-fn logs(body: &Value, case: &str) -> Vec<(String, Vec<Vec<i64>>)> {
+pub(crate) fn logs(body: &Value, case: &str) -> Vec<(String, Vec<Vec<i64>>)> {
     let values = body["values"]
         .as_object()
         .unwrap_or_else(|| panic!("case {case}: expected a values map, got {body:?}"));
@@ -129,14 +139,14 @@ fn logs(body: &Value, case: &str) -> Vec<(String, Vec<Vec<i64>>)> {
 }
 
 /// The key ids the report is indexed by, sorted so a set can be compared.
-fn indexed_keys(body: &Value, case: &str) -> Vec<String> {
+pub(crate) fn indexed_keys(body: &Value, case: &str) -> Vec<String> {
     let mut keys: Vec<String> = logs(body, case).into_iter().map(|(key, _)| key).collect();
     keys.sort();
     keys
 }
 
 /// The daily log of ONE key the report covers.
-fn log_of(body: &Value, key_id: &str, case: &str) -> Vec<Vec<i64>> {
+pub(crate) fn log_of(body: &Value, key_id: &str, case: &str) -> Vec<Vec<i64>> {
     logs(body, case)
         .into_iter()
         .find(|(reported, _)| reported == key_id)
@@ -146,7 +156,7 @@ fn log_of(body: &Value, key_id: &str, case: &str) -> Vec<Vec<i64>> {
 
 /// `CreateApiKey` for a distinct 40-character value, answering `(id, value)`: a key's value
 /// is unique per account, so no two keys of one suite may carry the same one.
-async fn api_key(gateway: &Gateway, case: &str, n: usize) -> (String, String) {
+pub(crate) async fn api_key(gateway: &Gateway, case: &str, n: usize) -> (String, String) {
     let value = format!("{}{n:04}", "u".repeat(36));
     let created = create_key(
         gateway,
@@ -159,7 +169,7 @@ async fn api_key(gateway: &Gateway, case: &str, n: usize) -> (String, String) {
 
 /// A usage plan over the api stage `api`/[`STAGE`] carrying `quota`, metering every key in
 /// `key_ids`.
-async fn metering_plan(
+pub(crate) async fn metering_plan(
     gateway: &Gateway,
     case: &str,
     quota: Option<Value>,
@@ -187,15 +197,15 @@ async fn metering_plan(
 }
 
 /// One answered invoke of a deployed stage: its status and its body verbatim.
-struct Invoked {
-    status: u16,
-    body: String,
+pub(crate) struct Invoked {
+    pub(crate) status: u16,
+    pub(crate) body: String,
 }
 
 impl Invoked {
     /// The `message` member of a JSON body — what every gateway response carries — or the
     /// body itself when it carries none.
-    fn message(&self) -> String {
+    pub(crate) fn message(&self) -> String {
         serde_json::from_str::<Value>(&self.body)
             .ok()
             .and_then(|body| body.get("message")?.as_str().map(str::to_owned))
@@ -204,7 +214,7 @@ impl Invoked {
 }
 
 /// Issue one unsigned GET to `api`'s own invoke endpoint, presenting `key_value`.
-async fn invoke(gateway: &Gateway, api: &str, key_value: &str) -> Invoked {
+pub(crate) async fn invoke(gateway: &Gateway, api: &str, key_value: &str) -> Invoked {
     let host = format!("{api}.execute-api.{REGION}.amazonaws.com");
     let request = http::Request::builder()
         .method("GET")
@@ -221,7 +231,7 @@ async fn invoke(gateway: &Gateway, api: &str, key_value: &str) -> Invoked {
 
 /// One served invoke, asserting the stage answered the integration's own body: the request
 /// the records admitted is the one the usage data counts.
-async fn send_one(gateway: &Gateway, api: &str, key_value: &str, case: &str) {
+pub(crate) async fn send_one(gateway: &Gateway, api: &str, key_value: &str, case: &str) {
     let served = invoke(gateway, api, key_value).await;
     assert_eq!(
         served.status, 200,
@@ -237,7 +247,7 @@ async fn send_one(gateway: &Gateway, api: &str, key_value: &str, case: &str) {
 
 /// An api with ONE key-required method behind a `MOCK` integration, deployed to [`STAGE`];
 /// answers the api id.
-async fn metered_api(gateway: &Gateway, name: &str) -> String {
+pub(crate) async fn metered_api(gateway: &Gateway, name: &str) -> String {
     let (api, root) = create_api(gateway, name).await;
     let resource = create_resource(gateway, &api, &root, "metered").await;
     let resource = string_member(&resource, "id", name);

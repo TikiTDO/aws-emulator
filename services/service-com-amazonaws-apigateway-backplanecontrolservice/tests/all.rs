@@ -528,3 +528,8 @@ mod stage_internal_error_class;
 // other answer omits, beside the status a call that earned no decision reports.
 #[path = "all/test_invoke_authorizer_cognito_claims.rs"]
 mod test_invoke_authorizer_cognito_claims;
+// Appended for the reason the note above gives: the GRANT of a remaining quota — what
+// `UpdateUsage` writes into the metering period of one `(usage plan, API key)` pair, and what
+// the data plane then admits against it.
+#[path = "all/usage_plan_quota_extension.rs"]
+mod usage_plan_quota_extension;
