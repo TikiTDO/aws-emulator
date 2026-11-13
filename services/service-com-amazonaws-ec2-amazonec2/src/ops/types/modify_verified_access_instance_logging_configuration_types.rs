@@ -22,6 +22,7 @@ pub struct ModifyVerifiedAccessInstanceLoggingConfigurationInput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessLogOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessLogOptions {
     pub s3: Option<VerifiedAccessLogS3DestinationOptions>,
     pub cloud_watch_logs: Option<VerifiedAccessLogCloudWatchLogsDestinationOptions>,
@@ -32,6 +33,7 @@ pub struct VerifiedAccessLogOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessLogS3DestinationOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessLogS3DestinationOptions {
     pub enabled: bool,
     pub bucket_name: Option<String>,
@@ -41,6 +43,7 @@ pub struct VerifiedAccessLogS3DestinationOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessLogCloudWatchLogsDestinationOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessLogCloudWatchLogsDestinationOptions {
     pub enabled: bool,
     pub log_group: Option<String>,
@@ -48,6 +51,7 @@ pub struct VerifiedAccessLogCloudWatchLogsDestinationOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessLogKinesisDataFirehoseDestinationOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessLogKinesisDataFirehoseDestinationOptions {
     pub enabled: bool,
     pub delivery_stream: Option<String>,

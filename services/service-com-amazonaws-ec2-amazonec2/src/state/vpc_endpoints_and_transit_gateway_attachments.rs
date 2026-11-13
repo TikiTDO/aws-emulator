@@ -483,11 +483,13 @@ pub fn connection_notification_payload_bytes(notification: &ConnectionNotificati
 /// slept for, and [`ComAmazonawsEc2Amazonec2State::materialize_due_transitions`] applies it
 /// once the clock has passed it. A resource an operation hands back ready carries none.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PendingStateMove {
     /// The state the record moves to once `due_at` has passed.
     pub to: String,
     /// When the move falls due, on the same monotonic clock and at the same
     /// [`TRANSITION_DELAY`] span as every other transition this store owes.
+    #[serde(with = "::service_common::persist::instant")]
     pub due_at: Instant,
 }
 
@@ -810,6 +812,7 @@ pub struct TransitGatewayAttachmentStates {
 /// kind keeps the shape the operations that report it answer with, so a member a writer
 /// sets round-trips without a field-by-field copy.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum TransitGatewayAttachmentView {
     /// A VPC attachment (`AcceptTransitGatewayVpcAttachment`,
     /// `RejectTransitGatewayVpcAttachment`).
@@ -1060,6 +1063,7 @@ pub fn transit_gateway_connect_payload_bytes(attachment: &TransitGatewayConnect)
 /// One stored transit gateway attachment: the modelled view its describe reports, plus the
 /// state move the clock still owes it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayAttachmentRecord {
     /// The attachment itself.
     pub view: TransitGatewayAttachmentView,
@@ -1087,6 +1091,7 @@ impl TransitGatewayAttachmentRecord {
 /// association IS per subnet, so the record is per subnet and [`Self::view`] builds the
 /// modelled shape when one is reported.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MulticastDomainAssociationRecord {
     /// The attachment whose resource is associated with the domain.
     pub transit_gateway_attachment_id: String,
@@ -1138,6 +1143,7 @@ pub const MULTICAST_ASSOCIATION_STATE_ASSOCIATED: &str = "associated";
 
 /// One transit gateway multicast domain and the resources associated with it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayMulticastDomainRecord {
     /// The domain's own id, minted by the store.
     pub transit_gateway_multicast_domain_id: String,
@@ -1192,6 +1198,7 @@ impl ComAmazonawsEc2Amazonec2State {
 
 /// One stored transit gateway route table announcement.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayRouteTableAnnouncementRecord {
     /// The announcement itself, as the modelled shape its operations answer with.
     pub view: TransitGatewayRouteTableAnnouncement,
@@ -1268,6 +1275,7 @@ pub const INVALID_TRANSIT_GATEWAY_CONNECT_PEER_ID_MALFORMED: &str =
 /// field-by-field copy, and the non-terminal state a create leaves the peer in carries the
 /// [`PendingStateMove`] to its terminal one.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayConnectPeerRecord {
     /// The Connect peer itself.
     pub view: TransitGatewayConnectPeer,
@@ -1699,6 +1707,7 @@ pub const TRANSIT_GATEWAY_POLICY_TABLE_STATE_AVAILABLE: &str = "available";
 /// `GetTransitGatewayPolicyTableAssociations` without a field-by-field copy that can
 /// silently drop one.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayPolicyTableAssociationRecord {
     /// The association as the model shapes it, carrying the state reached so far.
     pub view: TransitGatewayPolicyTableAssociation,
@@ -1713,6 +1722,7 @@ pub struct TransitGatewayPolicyTableAssociationRecord {
 /// per (table, attachment): one attachment cannot be associated with one table twice, and
 /// the key order is the stable order a report of them pages over.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayPolicyTableRecord {
     /// The policy table itself, as the modelled shape its own operations report.
     pub view: TransitGatewayPolicyTable,

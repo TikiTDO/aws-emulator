@@ -3006,6 +3006,7 @@ pub const MAX_VPN_GATEWAYS: usize = 1_000;
 /// One stored virtual private gateway: what every operation that reports one answers with,
 /// plus the move the clock owes it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpnGatewayRecord {
     /// The gateway as `CreateVpnGateway` and `DescribeVpnGateways` report it.
     pub view: VpnGateway,
@@ -3290,6 +3291,7 @@ pub fn lookup_ipam_policy<'store, E>(
 /// here holds one: a member a writer sets round-trips through `DescribeIpamPolicies` without
 /// a field-by-field copy that can silently drop one.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamPolicyRecord {
     /// The policy as the model shapes it, carrying the state reached so far.
     pub view: IpamPolicy,
@@ -3884,6 +3886,7 @@ pub fn flow_log_payload_bytes(spec: &FlowLogSpec) -> usize {
 /// that names this flow log directly, instead of walking every entry of
 /// [`ComAmazonawsEc2Amazonec2State::flow_log_client_tokens`].
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FlowLogRecord {
     /// The flow log as every reader of it reports it.
     pub view: FlowLog,

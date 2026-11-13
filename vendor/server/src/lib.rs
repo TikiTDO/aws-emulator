@@ -5,7 +5,10 @@
 //! Provides AKID extraction, error response helpers, tenant isolation,
 //! and reusable HTTP infrastructure for building in-process AWS service emulators.
 
+pub mod boot_identity;
 pub mod cli;
+pub mod runtime_profile;
+pub mod transport;
 pub mod ecr_capacity;
 
 use std::future::Future;
@@ -182,6 +185,11 @@ pub use http_body_util;
 ///
 /// Implement this to use `impl_emulator_http_traits!` and `serve_on_ephemeral_port()`.
 pub trait EmulatorService: Clone + Send + Sync + 'static {
+    /// Optional header-selected payload path; ordinary services remain buffered.
+    fn select_transport(&self, _parts: &http::request::Parts) -> transport::TransportSelection {
+        transport::TransportSelection::Buffered
+    }
+
     fn handle_request(
         &self,
         req: http::Request<bytes::Bytes>,
@@ -215,6 +223,23 @@ pub async fn http_connector_call<S: EmulatorService>(
         .try_into_http1x()
         .map_err(|e| ConnectorError::user(Box::new(e)))?;
     let (parts, body) = http_req.into_parts();
+    match svc.select_transport(&parts) {
+        transport::TransportSelection::Buffered => {}
+        selected => {
+            let response = match selected {
+                transport::TransportSelection::Payload(exchange) => transport::execute(
+                    exchange, http::Request::from_parts(parts, transport::TransportBody::new(body)),
+                ).await,
+                transport::TransportSelection::Refused(response) => transport::normalize_refusal(response).map(transport::TransportBody::from),
+                transport::TransportSelection::Buffered => unreachable!(),
+            };
+            let response = response.map(|body| aws_smithy_types::body::SdkBody::from_body_1_x(
+                transport::SdkTransportBody::new(body),
+            ));
+            return aws_smithy_runtime_api::client::orchestrator::HttpResponse::try_from(response)
+                .map_err(|e| ConnectorError::other(Box::new(e), None));
+        }
+    }
     let body_bytes = http_body_util::BodyExt::collect(body)
         .await
         .map_err(ConnectorError::io)?
@@ -841,13 +866,17 @@ pub async fn serve_on_ephemeral_port<S: EmulatorService>(service: S) -> (String,
     std_listener.set_nonblocking(true).expect("set nonblocking");
 
     let endpoint = format!("http://localhost:{}", port);
+    service.serving_at(&endpoint);
     let svc = service.clone();
 
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
     tokio::spawn(async move {
+        let scope = transport::ExchangeScope::default();
+        let _scope_guard = scope.guard();
         let make_svc =
-            hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+            hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
+                req.extensions_mut().insert(scope.clone());
                 let svc = svc.clone();
                 async move {
                     // Panic containment: this path has no axum router to layer,
@@ -855,9 +884,16 @@ pub async fn serve_on_ephemeral_port<S: EmulatorService>(service: S) -> (String,
                     // panic in the handler answers 500 instead of unwinding the
                     // connection task and leaving the caller on a dead socket.
                     let facts = RequestFacts::from_request(&req);
-                    let resp: http::Response<bytes::Bytes> =
+                    let resp: http::Response<transport::TransportBody> =
                         contain_panics(facts.clone(), async move {
                             let (parts, body) = req.into_parts();
+                            match svc.select_transport(&parts) {
+                                transport::TransportSelection::Buffered => {}
+                                transport::TransportSelection::Refused(response) => return transport::normalize_refusal(response).map(transport::TransportBody::from),
+                                transport::TransportSelection::Payload(exchange) => return transport::execute(
+                                    exchange, http::Request::from_parts(parts, transport::TransportBody::new(body)),
+                                ).await,
+                            }
                             let body_bytes = match http_body_util::BodyExt::collect(body).await {
                                 Ok(collected) => collected.to_bytes(),
                                 Err(e) => {
@@ -874,13 +910,13 @@ pub async fn serve_on_ephemeral_port<S: EmulatorService>(service: S) -> (String,
                                 }
                             };
                             let req = http::Request::from_parts(parts, body_bytes);
-                            svc.handle_request(req).await
+                            svc.handle_request(req).await.map(transport::TransportBody::from)
                         })
                         .await;
                     let (parts, body_bytes) = resp.into_parts();
                     Ok::<_, std::convert::Infallible>(http::Response::from_parts(
                         parts,
-                        http_body_util::Full::new(body_bytes),
+                        body_bytes,
                     ))
                 }
             });
@@ -970,10 +1006,23 @@ impl std::error::Error for ServeError {
 /// AWS surface is a fallback because AWS wire protocols route by header/body,
 /// not by URL path.
 async fn emulator_service_fallback<S: EmulatorService>(
-    axum::extract::State(service): axum::extract::State<Arc<S>>,
-    req: axum::extract::Request,
+    axum::extract::State((service, scope)): axum::extract::State<(Arc<S>, transport::ExchangeScope)>,
+    mut req: axum::extract::Request,
 ) -> axum::response::Response {
+    req.extensions_mut().insert(scope);
     let (parts, body) = req.into_parts();
+    match service.select_transport(&parts) {
+        transport::TransportSelection::Buffered => {}
+        transport::TransportSelection::Refused(response) => {
+            let mut response = transport::normalize_refusal(response);
+            response.headers_mut().insert(http::header::CONNECTION, http::HeaderValue::from_static("close"));
+            return response.map(axum::body::Body::from);
+        }
+        transport::TransportSelection::Payload(exchange) => {
+            return transport::execute(exchange, http::Request::from_parts(parts, transport::TransportBody::new(body)))
+                .await.map(axum::body::Body::new);
+        }
+    }
     let deadline = tokio::time::Instant::now() + BODY_READ_TIMEOUT;
     // Bound active collection AND waiting writers. Hold the active permit through
     // dispatch so decoding/copying/store mutation cannot overlap another upload.
@@ -1206,13 +1255,8 @@ fn bind_production_listener(
 /// Delegates to [`serve_production_on_address`]; callers that must pin explicit
 /// ports (e.g. tests) can call [`serve_production_on`] directly.
 pub async fn serve_production<S: EmulatorService>(service: S) -> Result<(), ServeError> {
-    let (bind_override, port_override) = cli::listen_overrides();
-    let bind_address = match bind_override {
-        Some(bind_address) => bind_address,
-        None => bind_address_from_env()?,
-    };
-    let data_port = port_override.unwrap_or_else(data_port_from_env);
-    serve_production_on_address(service, bind_address, data_port).await
+    let profile = runtime_profile::network()?;
+    serve_production_on_address(service, profile.bind_address(), profile.data_port()).await
 }
 
 /// Serve a [`EmulatorService`] as a long-lived production emulator on an
@@ -1296,11 +1340,13 @@ pub async fn serve_production_on_address<S: EmulatorService>(
     // handler, extra route, or health probe is answered with a protocol-shaped
     // `500 InternalFailure` and the listener keeps serving, instead of unwinding
     // the connection task and leaving the caller on a dead socket.
+    let scope = transport::ExchangeScope::default();
+    let _scope_guard = scope.guard();
     let data_router = with_panic_guard(
         axum::Router::new()
             .route(HEALTH_PATH, axum::routing::get(|| async { "ok" }))
             .fallback(emulator_service_fallback::<S>)
-            .with_state(Arc::new(service)),
+            .with_state((Arc::new(service), scope)),
     );
 
     // Listen before publishing: a client that stops the emulator once it sees the published
@@ -1656,6 +1702,16 @@ impl<S: EmulatorService> WithExtraRoutes<S> {
 }
 
 impl<S: EmulatorService> EmulatorService for WithExtraRoutes<S> {
+    fn select_transport(&self, parts: &http::request::Parts) -> transport::TransportSelection {
+        // Body-dependent predicates keep their precedence; never probe fabricated bytes.
+        let may_match = self.routes.iter().any(|route| match &route.matcher {
+            RouteMatcher::Exact { method, path } => parts.method == *method && parts.uri.path() == path,
+            RouteMatcher::Prefix { method, prefix } => parts.method == *method && parts.uri.path().starts_with(prefix.as_str()),
+            RouteMatcher::Predicate(_) => true,
+        });
+        if may_match { transport::TransportSelection::Buffered } else { self.smithy.select_transport(parts) }
+    }
+
     async fn handle_request(
         &self,
         req: http::Request<bytes::Bytes>,
@@ -2655,6 +2711,9 @@ mod tests {
     }
 
     impl<S: EmulatorService> EmulatorService for ReportsItsUrl<S> {
+        fn select_transport(&self, parts: &http::request::Parts) -> transport::TransportSelection {
+            self.inner.select_transport(parts)
+        }
         fn handle_request(
             &self,
             req: http::Request<bytes::Bytes>,
@@ -4434,7 +4493,11 @@ mod ecr_body_capacity_tests {
             observed.store(0, std::sync::atomic::Ordering::SeqCst);
             let req = http::Request::builder().method("PATCH").uri(path)
                 .body(axum::body::Body::from(vec![42u8; length])).unwrap();
-            let response = emulator_service_fallback(axum::extract::State(service.clone()), req).await;
+            let response = emulator_service_fallback(
+                axum::extract::State((service.clone(), transport::ExchangeScope::default())),
+                req,
+            )
+            .await;
             assert_eq!(response.status(), expected, "{path}");
             assert_eq!(observed.load(std::sync::atomic::Ordering::SeqCst),
                 if expected == http::StatusCode::CREATED { length } else { 0 });

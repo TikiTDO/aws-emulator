@@ -56,6 +56,8 @@
 // yours; this file, `router/Cargo.toml` and the workspace `Cargo.toml` are replaced
 // whenever a service is added, so an edit here is lost.
 
+pub mod persistence;
+
 use smithy_server_runtime::MultiServiceRouter;
 use std::sync::Arc;
 pub use engine::InMemoryEngine;

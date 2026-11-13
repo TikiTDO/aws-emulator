@@ -92,11 +92,13 @@ pub fn host_reservation_payload_bytes(tags: &[Tag]) -> usize {
 /// `view.state` is NOT stored: the word a reader sees comes from [`Self::state_at`], so the
 /// record cannot hold a state the clock has already moved past.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct HostReservationRecord {
     /// The reservation as `DescribeHostReservations` reports it, less its `State`.
     pub view: HostReservation,
     /// When the upfront charge settles: `payment-pending` before this instant,
     /// [`RESERVATION_STATE_ACTIVE`] from it on. One [`TRANSITION_DELAY`] after the purchase.
+    #[serde(with = "::service_common::persist::instant")]
     pub active_at: Instant,
     /// When the term runs out — the instant [`HostReservation::end`] reports — from which the
     /// reservation is [`RESERVATION_STATE_RETIRED`].

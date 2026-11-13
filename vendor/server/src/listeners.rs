@@ -35,8 +35,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_LISTENER_ALPN: &[&[u8]] = &[b"h2", b"http/1.1"];
 
 /// Resolve the interface the resource listeners bind. This is the SAME
-/// operator control the main emulator port uses ([`crate::bind_address_from_env`]
-/// — `EMULATOR_BIND_ADDRESS`, defaulting to `127.0.0.1`), so a resource port and
+/// operator control the main emulator port uses ([`crate::runtime_profile::network`]
+/// — CLI `--bind` before `EMULATOR_BIND_ADDRESS`, defaulting to `127.0.0.1`), so a resource port and
 /// the API share one exposure decision instead of the listeners being pinned to
 /// loopback. The default keeps every listener host-only; binding a routable or
 /// wildcard interface is the operator's explicit declaration (needed in a
@@ -44,7 +44,9 @@ const HTTP_LISTENER_ALPN: &[&[u8]] = &[b"h2", b"http/1.1"];
 /// browser-safety checks on the HTTP path (CORS, cross-site origin, WebSocket
 /// refusal, TLS-only) apply on every interface regardless.
 fn bind_ip_from_env() -> Result<IpAddr, SurfaceError> {
-    crate::bind_address_from_env().map_err(|e| SurfaceError::Bind(e.to_string()))
+    crate::runtime_profile::network()
+        .map(|profile| profile.bind_address())
+        .map_err(|e| SurfaceError::Bind(e.to_string()))
 }
 
 /// Resolve [`LISTENER_PORT_RANGE_ENV`] into a [`PortRange`], refusing a value
@@ -190,6 +192,8 @@ impl Listeners {
     /// client that verifies the hostname matches the address [`ResourceListener::url`]
     /// reports.
     fn rustls_server_config(&self) -> Result<rustls::ServerConfig, SurfaceError> {
+        // Refuse a malformed selected bind before creating the process CA.
+        bind_ip_from_env()?;
         let ca = TlsCertificateAuthority::covering(None)
             .map_err(|e| SurfaceError::Tls(e.to_string()))?;
         ca.server_config().map_err(|e| SurfaceError::Tls(e.to_string()))

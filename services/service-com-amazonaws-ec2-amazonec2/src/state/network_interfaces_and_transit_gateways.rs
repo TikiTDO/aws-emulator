@@ -1065,6 +1065,7 @@ pub const ADDRESS_TRANSFER_ACCEPTED_VISIBILITY: Duration =
 /// Built in exactly one place ([`ComAmazonawsEc2Amazonec2State::offer_address_transfer`]),
 /// so the instant beside the record and the timestamps on it cannot disagree.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AddressTransferRecord {
     /// The transfer as every operation that reports one answers with it.
     pub transfer: AddressTransfer,
@@ -1852,6 +1853,7 @@ pub const PROPAGATION_STATE_DISABLING: &str = "disabling";
 /// propagation of that route table — the same reading as [`FastLaunchMove::Discontinued`],
 /// where the state catalog has no word for "not configured" either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum PropagationMove {
     /// `enabling` -> `enabled`: the attachment's routes are in the table.
     Enabled,
@@ -1871,6 +1873,8 @@ pub type PropagationTransition = ClockTransition<PropagationMove>;
 /// [`Self::view`] and [`Self::route_table_view`] build each from the one stored record and
 /// the two reports cannot disagree.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "'de: 'static"))]
 pub struct TransitGatewayPropagationRecord {
     /// The propagation route table the routes go into.
     pub transit_gateway_route_table_id: String,
@@ -2146,6 +2150,7 @@ impl ComAmazonawsEc2Amazonec2State {
 /// stored record and the reports cannot disagree about one association. The same arrangement
 /// as [`TransitGatewayPropagationRecord`] above, whose two reports differ the same way.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayRouteTableAssociationRecord {
     /// The route table the attachment is associated with.
     pub transit_gateway_route_table_id: String,

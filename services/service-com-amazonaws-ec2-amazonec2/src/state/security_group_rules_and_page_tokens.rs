@@ -1665,16 +1665,19 @@ pub const MAX_SECURITY_GROUP_VPC_ASSOCIATIONS: usize = 2_500;
 /// the owning accounts the modelled shape reports are derived from the group and the VPC
 /// themselves ([`ComAmazonawsEc2Amazonec2State::security_group_vpc_association_view`]).
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SecurityGroupVpcAssociationRecord {
     /// The instant from which this association's `associating` -> `associated` move is due.
     /// Monotonic ([`Instant`]) for the reason every other owed move of this store is: it is
     /// only ever compared against the clock, never reported, so a wall-clock adjustment
     /// cannot move an association back to `associating`.
+    #[serde(with = "::service_common::persist::instant")]
     pub associated_at: Instant,
     /// The instant from which this association's `disassociating` -> `disassociated` move is
     /// due, and `None` for as long as nothing has asked for the association to be taken
     /// down. Monotonic on the same terms as [`Self::associated_at`]; set once, by the
     /// disassociate, and cleared only by an associate that establishes the pair afresh.
+    #[serde(with = "::service_common::persist::instant_opt")]
     pub disassociated_at: Option<Instant>,
 }
 

@@ -20,6 +20,7 @@ use super::*;
 /// Telling those two apart needs the REQUEST, which is why a recorded change carries the pair
 /// and the direction and not just the instance it named.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessTrustProviderAttachmentRequest {
     /// The Verified Access instance the request named.
     pub verified_access_instance_id: String,

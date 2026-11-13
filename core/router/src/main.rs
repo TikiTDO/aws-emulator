@@ -33,6 +33,8 @@ use engine::InMemoryEngine;
 use std::io::Write;
 use std::sync::Arc;
 
+mod boot_profile;
+
 /// The version `--version` prints and telemetry reports: the release version the
 /// release build stamps as `EMULATOR_VERSION`, and the package version with `-dev`
 /// appended for any other build.
@@ -67,7 +69,8 @@ const TELEMETRY_PROJECT_ID: &str = "proj-a85d506b35244f71850223e92be29acb";
 const EMULATOR_HOME_DIR: &str = ".aws/emulator";
 
 /// The telemetry configuration endpoint. `None` leaves the client inert.
-const TELEMETRY_CONFIG_ENDPOINT: Option<&str> = Some("https://aws-emulator-telemetry.us-west-2.api.aws/v1/config");
+const TELEMETRY_CONFIG_ENDPOINT: Option<&str> =
+    Some("https://aws-emulator-telemetry.us-west-2.api.aws/v1/config");
 
 /// Environment variable overriding [`EMULATOR_STACK_SIZE`], in BYTES, for a host that
 /// refuses a large thread stack. A malformed or too-small value falls back to the
@@ -106,17 +109,18 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     }
-    let options = match emulator_server::cli::parse_command_line(std::env::args().skip(1), BUILD_INFO) {
-        Ok(Command::Run(options)) => options,
-        Ok(Command::Print(text)) => {
-            let _ = writeln!(std::io::stdout(), "{text}"); // closed stdout (`-v | head -1`) is fine
-            return;
-        }
-        Err(message) => {
-            eprintln!("{message}");
-            std::process::exit(2);
-        }
-    };
+    let options =
+        match emulator_server::cli::parse_command_line(std::env::args().skip(1), BUILD_INFO) {
+            Ok(Command::Run(options)) => options,
+            Ok(Command::Print(text)) => {
+                let _ = writeln!(std::io::stdout(), "{text}"); // closed stdout (`-v | head -1`) is fine
+                return;
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(2);
+            }
+        };
     emulator_server::set_authentication(options.authentication);
     emulator_server::cli::listen_on(options.bind_address, options.port);
     let stack_bytes = emulator_stack_size();
@@ -169,13 +173,25 @@ fn run(options: RunOptions) {
 async fn build_and_serve(options: RunOptions) {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .json()
         .init();
 
     tracing::info!("aws-emulator emulator starting");
+
+    let profile = boot_profile::BootProfile::from_environment().unwrap_or_else(|error| {
+        eprintln!("emulator bootstrap failed: {error}");
+        std::process::exit(1);
+    });
+    if let Err(error) = emulator_server::transport::prepare() {
+        eprintln!("emulator transport configuration refused: {error}");
+        std::process::exit(1);
+    }
+    if let Err(error) = profile.prepare_identity() {
+        eprintln!("emulator identity selection failed: {error}");
+        std::process::exit(1);
+    }
 
     let telemetry = start_telemetry(options.telemetry);
     if let Some(idle_timeout) = options.idle_timeout {
@@ -184,9 +200,82 @@ async fn build_and_serve(options: RunOptions) {
 
     let engine: Arc<InMemoryEngine> = Arc::new(InMemoryEngine::new());
 
+    // Store binding MUST precede B5 snapshot restoration, router construction and listeners.
+    if let Err(error) = profile.install_payload_store(&engine).await {
+        eprintln!("emulator bootstrap failed: {error}");
+        std::process::exit(1);
+    }
+    // The same frozen B5 selection feeds payloads and snapshots, never a second env read.
+    // Private identity was selected from that same tuple before any legacy getter or restore.
+    // With a state directory, every persisted service's state comes back BEFORE the router is
+    // built or a listener opens, and a snapshot that cannot be read honestly stops the boot.
+    let persistence = match profile.state_dir.clone() {
+        Some(state_dir) => {
+            match aws_emulator_router::persistence::Persistence::all(engine.clone(), state_dir) {
+                Ok(persistence) => Some(Arc::new(persistence)),
+                Err(error) => {
+                    eprintln!("emulator state directory refused: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => None,
+    };
+    if let Some(persistence) = &persistence {
+        match persistence.restore() {
+            Ok(outcome) => tracing::info!(
+                restored = ?outcome.restored,
+                started_empty = ?outcome.empty,
+                "persisted state restored"
+            ),
+            Err(error) => {
+                eprintln!("emulator state could not be restored: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let router = aws_emulator_router::build_router(engine);
 
-    let outcome = emulator_server::serve_emulator_until_shutdown(router).await;
+    let outcome = match &persistence {
+        Some(persistence) => {
+            // Work that changes state after its response (a container a task launched, a clock
+            // move) has no request behind it to write it; this writes it within two seconds.
+            let periodic = persistence.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+                loop {
+                    tick.tick().await;
+                    // A failure is logged by save_changed and retried on the next tick.
+                    let _ = periodic.save_changed().await;
+                }
+            });
+            let served = emulator_server::serve_emulator_until_shutdown(
+                aws_emulator_router::persistence::PersistingRouter::new(
+                    router,
+                    persistence.clone(),
+                ),
+            )
+            .await;
+            match persistence.save_changed().await {
+                Ok(_) => served,
+                Err(not_durable) => {
+                    eprintln!(
+                        "emulator state not written at shutdown: {:?}",
+                        not_durable.failed
+                    );
+                    // Preserve an earlier serve error; otherwise this failed final save
+                    // must take the nonzero/flush branch, not report a clean shutdown.
+                    served.and_then(|()| {
+                        Err(emulator_server::ServeError::Io(std::io::Error::other(
+                            "final emulator state snapshot was not durable",
+                        )))
+                    })
+                }
+            }
+        }
+        None => emulator_server::serve_emulator_until_shutdown(router).await,
+    };
     // Only a clean end may send the final batch: a session without one is how an
     // abnormal end is recognised, so a failed serve flushes without marking it final.
     match outcome {
@@ -236,7 +325,8 @@ fn start_telemetry(switch: Option<bool>) -> Option<&'static emulator_telemetry::
     if switch == Some(false) {
         options.embedding_opt_out = true;
     }
-    let telemetry = emulator_telemetry::init_global(emulator_telemetry::TelemetryClient::start(options));
+    let telemetry =
+        emulator_telemetry::init_global(emulator_telemetry::TelemetryClient::start(options));
     telemetry.install_panic_hook();
     Some(telemetry)
 }

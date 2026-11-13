@@ -29,11 +29,13 @@ pub struct DescribeKeyPairsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#KeyPairInfo")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct KeyPairInfo {
     pub key_pair_id: Option<String>,
     pub key_type: Option<String>,
     pub tags: Option<Vec<Tag>>,
     pub public_key: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_time: Option<::aws_smithy_types::DateTime>,
     pub key_name: Option<String>,
     pub key_fingerprint: Option<String>,

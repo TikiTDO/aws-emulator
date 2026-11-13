@@ -30,6 +30,7 @@ pub struct DescribeImportImageTasksOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ImportImageTask")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ImportImageTask {
     pub architecture: Option<String>,
     pub description: Option<String>,

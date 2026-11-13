@@ -429,6 +429,88 @@ fn authenticator_for(
 }
 
 impl EmulatorService for MultiServiceRouter {
+    fn select_transport(&self, parts: &http::request::Parts) -> emulator_server::transport::TransportSelection {
+        use emulator_server::transport::TransportSelection;
+        use crate::transport::{PayloadAdmission, PayloadOperation, RuntimeExchange, Verification};
+        // The ordinary selector resolves multiple claimants using the body. Never replace
+        // that decision with a probe over fabricated empty bytes.
+        let mut claimants = self.services.iter().filter(|service| service.can_handle(parts));
+        let Some(svc) = claimants.next() else { return TransportSelection::Buffered; };
+        if claimants.next().is_some() { return TransportSelection::Buffered; }
+        let Some(route) = svc.payload_route(parts) else { return TransportSelection::Buffered; };
+        let depth = parts.extensions.get::<crate::CallbackRecursionDepth>().map_or(0, |depth| depth.0);
+        if depth > crate::CALLBACK_RECURSION_LIMIT {
+            return TransportSelection::Refused(callback_recursion_limit_response(depth));
+        }
+        // Metadata-only probe for known header/path-routed protocols. It is never passed
+        // to an operation handler, deserializer, authenticator or body-dependent selector.
+        let mut probe = runtime_api_request_from_parts(parts, Vec::new());
+        if path_style_for_virtual_hosted(&mut probe, parts, svc.definition().identity().virtual_host_addressing()).is_err() {
+            return TransportSelection::Refused(invalid_virtual_hosted_address_response());
+        }
+        let wire = svc.definition().wire_protocol(&probe);
+        let refuse = |error| TransportSelection::Refused(http_response_from_runtime_api(
+            svc.definition().framework_error_response(error, &probe),
+        ));
+        if let Err(denied) = refuse_cross_site_browsers(parts) {
+            if matches!(&route.operation, PayloadOperation::Native(_)) {
+                return TransportSelection::Refused(route.handler.refuse(crate::transport::PayloadReceiveError::Begin(
+                    emulator_server::request_authentication::StreamAuthenticationError::Denied(denied),
+                )));
+            }
+            return refuse(aws_smithy_schema_server::ProtocolError::Unauthenticated { code: denied.code, message: denied.message });
+        }
+        let protocol = wire.protocol().protocol_id().to_string();
+        let header_routed = matches!(protocol.as_str(), "aws.protocols#restXml" | "aws.protocols#restJson1" | "aws.protocols#awsJson1_0" | "aws.protocols#awsJson1_1" | "smithy.protocols#rpcv2Cbor");
+        // A native registry route need not speak any Smithy protocol. Only probe a
+        // recognized, known header-routed model; never ask a Query codec for a fake body.
+        let modeled = if header_routed && !wire.is_unrecognised() {
+            wire.protocol().routing_key(&probe).ok()
+                .and_then(|key| svc.definition().routing_table().get(key).map(|operation| (key, operation)))
+        } else { None };
+        let (verification, admission) = match route.operation {
+            PayloadOperation::Modeled(expected) => {
+                if !header_routed || wire.is_unrecognised() {
+                    return refuse(aws_smithy_schema_server::ProtocolError::Malformed("payload route requires a recognized header-addressable protocol".into()));
+                }
+                let Some((key, operation)) = modeled else {
+                    return refuse(aws_smithy_schema_server::ProtocolError::Malformed("payload route has no modeled operation".into()));
+                };
+                if key != expected {
+                    return refuse(aws_smithy_schema_server::ProtocolError::Malformed("payload route does not match modeled operation".into()));
+                }
+                if self.authenticators.is_empty() {
+                    (Verification::Uncredentialed, PayloadAdmission::AuthenticationDisabled)
+                } else if operation.auth_schemes().is_some_and(<[_]>::is_empty) {
+                    (Verification::Uncredentialed, PayloadAdmission::ModelUnsigned)
+                } else {
+                    let auth = match authenticator_for(&self.authenticators, operation.auth_schemes().unwrap_or(&[]), parts) {
+                        Ok(auth) => auth,
+                        Err(denied) => return refuse(aws_smithy_schema_server::ProtocolError::Unauthenticated { code: denied.code, message: denied.message }),
+                    };
+                    (Verification::Authenticator(auth), PayloadAdmission::Signed)
+                }
+            }
+            PayloadOperation::Native(_) => {
+                if !header_routed && !wire.is_unrecognised() {
+                    return TransportSelection::Refused(route.handler.refuse(crate::transport::PayloadReceiveError::Framing(
+                        "native route cannot disambiguate a body-routed modeled operation",
+                    )));
+                }
+                if modeled.is_some() {
+                    return TransportSelection::Refused(route.handler.refuse(crate::transport::PayloadReceiveError::Framing(
+                        "native payload route cannot override modeled authentication",
+                    )));
+                }
+                (Verification::Uncredentialed, PayloadAdmission::NativeOwner)
+            }
+        };
+        TransportSelection::Payload(std::sync::Arc::new(RuntimeExchange {
+            handler: route.handler, verification, credentials: self.credential_store.clone(),
+            signing_name: svc.definition().identity().signing_name_static(), admission,
+        }))
+    }
+
     async fn handle_request(
         &self,
         req: http::Request<bytes::Bytes>,
@@ -1235,4 +1317,55 @@ mod tests {
             "a non-framing header the handler set is carried through"
         );
     }
+
+    struct NativePayloadFixture(SelectingService);
+    struct PayloadFixtureHandler;
+    impl crate::transport::PayloadHandler for PayloadFixtureHandler {
+        fn authorize(&self, _: &http::request::Parts) -> Result<(), http::Response<bytes::Bytes>> { Ok(()) }
+        fn refuse(&self, _: crate::transport::PayloadReceiveError) -> http::Response<bytes::Bytes> {
+            http::Response::builder().status(400).body(bytes::Bytes::from_static(b"native refusal")).unwrap()
+        }
+        fn run(self: std::sync::Arc<Self>, _: crate::transport::PayloadRequest, _: emulator_server::transport::ExchangeContext)
+            -> emulator_server::transport::ExchangeFuture {
+            Box::pin(async { panic!("selection fixture must not execute") })
+        }
+    }
+    impl Service for NativePayloadFixture {
+        fn definition(&self) -> &dyn crate::service::ErasedServiceDefinition { self.0.definition() }
+        fn can_handle(&self, parts: &http::request::Parts) -> bool { self.0.can_handle(parts) }
+        fn payload_route(&self, _: &http::request::Parts) -> Option<crate::transport::PayloadRoute> {
+            Some(crate::transport::PayloadRoute {
+                operation: crate::transport::PayloadOperation::Native("registry-blob"),
+                handler: std::sync::Arc::new(PayloadFixtureHandler),
+            })
+        }
+    }
+
+    #[test]
+    fn native_payload_selection_does_not_require_a_smithy_wire_marker() {
+        let mut fixture = SelectingService::always_claiming("ecr");
+        fixture.entry.speaks = false;
+        let mut router = MultiServiceRouter::default();
+        router.register_service(NativePayloadFixture(fixture));
+        let (parts, _) = http::Request::builder().uri("/v2/repository/blobs/uploads/id").body(()).unwrap().into_parts();
+        assert!(matches!(router.select_transport(&parts), emulator_server::transport::TransportSelection::Payload(_)));
+    }
+
+    #[test]
+    fn ambiguous_payload_claimants_remain_buffered_without_a_fake_body_probe() {
+        let mut router = MultiServiceRouter::default();
+        router.register_service(NativePayloadFixture(SelectingService::always_claiming("first")));
+        router.register_service(SelectingService::always_claiming("second"));
+        let (parts, _) = http::Request::new(()).into_parts();
+        assert!(matches!(router.select_transport(&parts), emulator_server::transport::TransportSelection::Buffered));
+    }
+
+    #[test]
+    fn native_payload_cannot_replace_a_modeled_authenticated_operation() {
+        let mut router = MultiServiceRouter::default();
+        router.register_service(NativePayloadFixture(SelectingService::always_claiming_modeling("ecr", &["Write"])));
+        let (parts, _) = http::Request::builder().header("x-amz-target", "Ecr.Write").body(()).unwrap().into_parts();
+        assert!(matches!(router.select_transport(&parts), emulator_server::transport::TransportSelection::Refused(_)));
+    }
+
 }

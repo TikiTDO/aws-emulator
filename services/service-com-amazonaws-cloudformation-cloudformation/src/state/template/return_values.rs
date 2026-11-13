@@ -969,6 +969,44 @@ pub(super) fn return_values(
             attributes.insert("Id".to_string(), arn.clone());
             (arn, attributes)
         }
+        // "Ref returns the ARN of the secret"; Fn::GetAtt: Id. Until `SecretTargetAttachment`
+        // resolves `SecretId` against Secrets Manager on create, stand in with the declared
+        // `SecretId` when it is already an ARN or a Secrets Manager ARN built on `name`.
+        SECRETSMANAGER_SECRET_TARGET_ATTACHMENT => {
+            let declared_secret = properties
+                .get("SecretId")
+                .and_then(|value| text(value, scope, 0, budget))
+                .filter(|secret| !secret.is_empty());
+            let arn = match declared_secret {
+                Some(secret) if secret.starts_with("arn:") => secret,
+                Some(secret_name) => {
+                    let suffix = service_assigned_label(
+                        SECRET_ARN_SUFFIX_SALT,
+                        &secret_name,
+                        SECRET_ARN_SUFFIX_CHARACTERS,
+                    );
+                    ::emulator_server::emulator_arn(
+                        "secretsmanager",
+                        region,
+                        &format!("secret:{secret_name}-{suffix}"),
+                    )
+                }
+                None => {
+                    let suffix = service_assigned_label(
+                        SECRET_ARN_SUFFIX_SALT,
+                        name,
+                        SECRET_ARN_SUFFIX_CHARACTERS,
+                    );
+                    ::emulator_server::emulator_arn(
+                        "secretsmanager",
+                        region,
+                        &format!("secret:{name}-{suffix}"),
+                    )
+                }
+            };
+            attributes.insert("Id".to_string(), arn.clone());
+            (arn, attributes)
+        }
         // The Amazon EC2 VPC-network types ([`EC2_VPC`] and its siblings), each of which
         // publishes "Ref returns the ID of …" and one `Fn::GetAtt` attribute that IS that
         // id: a VPC's `VpcId`, a subnet's `SubnetId`, a security group's `GroupId`, an
@@ -1780,6 +1818,44 @@ pub(super) fn return_values(
             without_terminal_dot(name).to_string(),
             attributes,
         ),
+        "AWS::WAFv2::LoggingConfiguration" => {
+            attributes.insert("ManagedByFirewallManager".to_string(), "false".to_string());
+            let resource_arn = properties
+                .get("ResourceArn")
+                .and_then(|v| text(v, scope, 0, budget))
+                .unwrap_or_else(|| name.to_string());
+            attributes.insert("ResourceArn".to_string(), resource_arn.clone());
+            (resource_arn, attributes)
+        }
+        "AWS::SES::VdmAttributes" => {
+            attributes.insert("VdmAttributesResourceId".to_string(), name.to_string());
+            (name.to_string(), attributes)
+        }
+        "AWS::SES::EmailIdentity" => {
+            let identity = properties
+                .get("EmailIdentity")
+                .and_then(|v| text(v, scope, 0, budget))
+                .unwrap_or_else(|| name.to_string());
+            let token1 = derived_digits("ses/dkim-token-1", &identity, 24, Alphabet::Lower);
+            let token2 = derived_digits("ses/dkim-token-2", &identity, 24, Alphabet::Lower);
+            let token3 = derived_digits("ses/dkim-token-3", &identity, 24, Alphabet::Lower);
+            attributes.insert("DkimDNSTokenName1".to_string(), format!("{token1}._domainkey.{identity}"));
+            attributes.insert("DkimDNSTokenValue1".to_string(), format!("{token1}.dkim.amazonses.com"));
+            attributes.insert("DkimDNSTokenName2".to_string(), format!("{token2}._domainkey.{identity}"));
+            attributes.insert("DkimDNSTokenValue2".to_string(), format!("{token2}.dkim.amazonses.com"));
+            attributes.insert("DkimDNSTokenName3".to_string(), format!("{token3}._domainkey.{identity}"));
+            attributes.insert("DkimDNSTokenValue3".to_string(), format!("{token3}.dkim.amazonses.com"));
+            (identity, attributes)
+        }
+        "AWS::SES::ConfigurationSetEventDestination" => {
+            let event_dest_name = properties
+                .get("EventDestination")
+                .and_then(|v| v.get("Name"))
+                .and_then(|v| text(v, scope, 0, budget))
+                .unwrap_or_else(|| name.to_string());
+            attributes.insert("Id".to_string(), event_dest_name.clone());
+            (event_dest_name, attributes)
+        }
         _ => (name.to_string(), attributes),
     }
 }
@@ -1885,6 +1961,17 @@ pub fn published_attribute_names(resource_type: &str) -> &'static [&'static str]
         S3VECTORS_VECTOR_BUCKET => &["VectorBucketArn"],
         S3VECTORS_INDEX => &["IndexArn"],
         "AWS::DynamoDB::Table" => &["Arn"],
+        "AWS::SES::EmailIdentity" => &[
+            "DkimDNSTokenName1",
+            "DkimDNSTokenValue1",
+            "DkimDNSTokenName2",
+            "DkimDNSTokenValue2",
+            "DkimDNSTokenName3",
+            "DkimDNSTokenValue3",
+        ],
+        "AWS::WAFv2::LoggingConfiguration" => &["ManagedByFirewallManager", "ResourceArn"],
+        "AWS::SES::VdmAttributes" => &["VdmAttributesResourceId"],
+        "AWS::SES::ConfigurationSetEventDestination" => &["Id"],
         "AWS::Lambda::Function" => &["Arn"],
         // "Fn::GetAtt … FunctionArn: the ARN of the version. Version: the version number."
         LAMBDA_VERSION => &["FunctionArn", "Version"],
@@ -1940,7 +2027,7 @@ pub fn published_attribute_names(resource_type: &str) -> &'static [&'static str]
             "Endpoint.Address",
             "Endpoint.Port",
         ],
-        SECRETSMANAGER_SECRET => &["Id"],
+        SECRETSMANAGER_SECRET | SECRETSMANAGER_SECRET_TARGET_ATTACHMENT => &["Id"],
         EC2_VPC => &["VpcId"],
         EC2_SUBNET => &["SubnetId"],
         EC2_SECURITY_GROUP => &["GroupId"],
@@ -2411,6 +2498,7 @@ pub fn identity_is_service_assigned(resource_type: &str) -> bool {
         // in force is carried forward and a later deployment applies its declaration to the
         // rotation that exists ([`SECRETSMANAGER_ROTATION_SCHEDULE`]).
         || resource_type == SECRETSMANAGER_ROTATION_SCHEDULE
+        || resource_type == SECRETSMANAGER_SECRET_TARGET_ATTACHMENT
         // A NESTED STACK is one more, and the clearest case of it: "Ref returns the stack
         // ID" of the stack CloudFormation created for the resource, which carries the unique
         // id that service minted for it — the name the naming rules compute is only what the
@@ -3635,6 +3723,12 @@ pub const SECRETSMANAGER_SECRET: &str = "AWS::SecretsManager::Secret";
 /// the one in force forward and the declaration is applied to the rotation that exists
 /// rather than read as a different resource.
 pub const SECRETSMANAGER_ROTATION_SCHEDULE: &str = "AWS::SecretsManager::RotationSchedule";
+
+/// The attachment binding a Secrets Manager secret to a database instance or cluster. "Ref
+/// returns the ARN of the secret" and `Fn::GetAtt` reads `Id` (that same ARN), which is
+/// resolved from Secrets Manager on create and carried forward across deployments.
+pub const SECRETSMANAGER_SECRET_TARGET_ATTACHMENT: &str =
+    "AWS::SecretsManager::SecretTargetAttachment";
 
 /// A Systems Manager Parameter Store parameter's resource type (the SSM model:
 /// `cloudFormationName: SSM`). This is a type `super::provisioning` creates in Systems

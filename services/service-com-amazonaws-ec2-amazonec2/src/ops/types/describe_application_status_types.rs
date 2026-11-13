@@ -56,18 +56,23 @@ pub struct ApplicationStatus {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ApplicationStatusDetail")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ApplicationStatusDetail {
     pub application_status_check_id: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub check_update_time: Option<::aws_smithy_types::DateTime>,
     pub aggregation: Option<String>,
     pub status: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub status_time_stamp: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub status_since: Option<::aws_smithy_types::DateTime>,
     pub reason: Option<ApplicationStatusReason>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ApplicationStatusReason")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ApplicationStatusReason {
     pub code: Option<String>,
     pub status_code: Option<i32>,

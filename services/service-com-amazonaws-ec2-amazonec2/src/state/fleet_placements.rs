@@ -107,6 +107,7 @@ pub const MAX_FLEET_MIN_TARGET_CAPACITY: i32 = 1000;
 /// launching the instances" beside "the IDs of the instances"
 /// (`CreateFleetInstance$LaunchTemplateAndOverrides` / `$InstanceIds`).
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FleetPoolView {
     /// `CreateFleetInstance$LaunchTemplateAndOverrides` — "the values that you specify in
     /// the Overrides replace the values in the launch template".

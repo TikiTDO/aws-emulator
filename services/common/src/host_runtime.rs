@@ -11,8 +11,12 @@
 //!
 //! The runtime is the Docker Engine API, spoken over HTTP/1.1 on its Unix socket
 //! ([`SOCKET_VARIABLE`], default [`DEFAULT_SOCKET`]). Every container this emulator starts is
-//! attached to ONE network ([`NETWORK_VARIABLE`], default [`DEFAULT_NETWORK`]) and carries the
-//! label [`MANAGED_LABEL`], so a restarted emulator can find what it started and nothing it did
+//! attached to ONE network ([`NETWORK_VARIABLE`], default [`DEFAULT_NETWORK`]) on ONE subnet
+//! ([`SUBNET_VARIABLE`], default [`DEFAULT_SUBNET`], gateway its first address — the address the
+//! emulator binds so containers reach it, and the sandbox DNS answers on) and carries the
+//! label [`MANAGED_LABEL`] and the emulator's namespace ([`NAMESPACE_LABEL`], from
+//! [`NAMESPACE_VARIABLE`]; its named volumes carry both too), so a restarted emulator can find what
+//! it started, two emulators on one host never adopt or remove each other's, and nothing it did
 //! not start is ever touched.
 //!
 //! Nothing here runs unless host workloads are on: a service checks
@@ -34,8 +38,19 @@ pub const DEFAULT_SOCKET: &str = "/var/run/docker.sock";
 pub const NETWORK_VARIABLE: &str = "EMULATOR_HOST_NETWORK";
 /// The network every started container joins when the variable is unset.
 pub const DEFAULT_NETWORK: &str = "aws-emulator";
+/// The environment variable naming the network's IPv4 subnet, as a CIDR.
+pub const SUBNET_VARIABLE: &str = "EMULATOR_HOST_SUBNET";
+/// The subnet when the variable is unset: its gateway, 172.25.0.1, is the emulator's bind address
+/// and the sandbox DNS server's.
+pub const DEFAULT_SUBNET: &str = "172.25.0.0/16";
 /// The label every container this emulator starts carries.
 pub const MANAGED_LABEL: &str = "aws-emulator.managed";
+/// The label naming which emulator instance a container or volume belongs to.
+pub const NAMESPACE_LABEL: &str = "aws-emulator.namespace";
+/// The environment variable naming this emulator instance's namespace.
+pub const NAMESPACE_VARIABLE: &str = "EMULATOR_NAMESPACE";
+/// The namespace when the variable is unset.
+pub const DEFAULT_NAMESPACE: &str = "default";
 /// The Docker Engine API version spoken.
 const API_VERSION: &str = "v1.43";
 /// How long one runtime call may take, except pulling an image.
@@ -107,6 +122,8 @@ pub struct ContainerStatus {
 pub struct HostRuntime {
     socket: PathBuf,
     network: String,
+    subnet: String,
+    namespace: String,
 }
 
 impl Default for HostRuntime {
@@ -115,21 +132,27 @@ impl Default for HostRuntime {
             socket: std::env::var(SOCKET_VARIABLE)
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from(DEFAULT_SOCKET)),
-            network: std::env::var(NETWORK_VARIABLE).unwrap_or_else(|_| DEFAULT_NETWORK.to_string()),
+            network: std::env::var(NETWORK_VARIABLE)
+                .unwrap_or_else(|_| DEFAULT_NETWORK.to_string()),
+            subnet: std::env::var(SUBNET_VARIABLE).unwrap_or_else(|_| DEFAULT_SUBNET.to_string()),
+            namespace: std::env::var(NAMESPACE_VARIABLE)
+                .unwrap_or_else(|_| DEFAULT_NAMESPACE.to_string()),
         }
     }
 }
 
 impl HostRuntime {
-    /// The network every container this runtime starts joins.
-    /// The runtime behind `socket`, starting its containers on `network`.
+    /// The runtime behind `socket`, starting its containers on `network`, on the configured
+    /// subnet.
     pub fn at(socket: impl Into<PathBuf>, network: impl Into<String>) -> Self {
         Self {
             socket: socket.into(),
             network: network.into(),
+            ..Self::default()
         }
     }
 
+    /// The network every container this runtime starts joins.
     pub fn network(&self) -> &str {
         &self.network
     }
@@ -138,6 +161,9 @@ impl HostRuntime {
     /// Returns the container id.
     pub async fn run(&self, spec: &ContainerSpec) -> Result<String, RuntimeError> {
         self.ensure_network().await?;
+        for (volume, _) in &spec.volumes {
+            self.ensure_volume(volume).await?;
+        }
         let id = match self.create(spec).await {
             Err(RuntimeError {
                 status: Some(404), ..
@@ -147,19 +173,32 @@ impl HostRuntime {
             }
             created => created?,
         };
-        self.call("POST", &format!("/containers/{id}/start"), None, CALL_TIMEOUT)
-            .await?;
+        self.call(
+            "POST",
+            &format!("/containers/{id}/start"),
+            None,
+            CALL_TIMEOUT,
+        )
+        .await?;
         Ok(id)
     }
 
     /// Start container `id`, which already exists. Starting a running container is not an error.
     pub async fn start(&self, id: &str) -> Result<(), RuntimeError> {
         match self
-            .call("POST", &format!("/containers/{id}/start"), None, CALL_TIMEOUT)
+            .call(
+                "POST",
+                &format!("/containers/{id}/start"),
+                None,
+                CALL_TIMEOUT,
+            )
             .await
         {
             // 304: already started.
-            Ok(_) | Err(RuntimeError { status: Some(304), .. }) => Ok(()),
+            Ok(_)
+            | Err(RuntimeError {
+                status: Some(304), ..
+            }) => Ok(()),
             Err(error) => Err(error),
         }
     }
@@ -184,7 +223,10 @@ impl HostRuntime {
             .await
         {
             // 304: already stopped.
-            Ok(_) | Err(RuntimeError { status: Some(304), .. }) => Ok(()),
+            Ok(_)
+            | Err(RuntimeError {
+                status: Some(304), ..
+            }) => Ok(()),
             Err(error) => Err(error),
         }
     }
@@ -192,21 +234,43 @@ impl HostRuntime {
     /// Remove container `id`, stopping it if it still runs. Its named volumes are kept.
     pub async fn remove(&self, id: &str) -> Result<(), RuntimeError> {
         match self
-            .call("DELETE", &format!("/containers/{id}?force=true"), None, CALL_TIMEOUT)
+            .call(
+                "DELETE",
+                &format!("/containers/{id}?force=true"),
+                None,
+                CALL_TIMEOUT,
+            )
             .await
         {
-            Ok(_) | Err(RuntimeError { status: Some(404), .. }) => Ok(()),
+            Ok(_)
+            | Err(RuntimeError {
+                status: Some(404), ..
+            }) => Ok(()),
             Err(error) => Err(error),
         }
     }
 
-    /// Remove named volume `name`. A volume that does not exist is already removed.
+    /// Remove named volume `name`. A volume that does not exist is already removed; one that
+    /// belongs to another namespace is refused.
     pub async fn remove_volume(&self, name: &str) -> Result<(), RuntimeError> {
+        match self
+            .call("GET", &format!("/volumes/{name}"), None, CALL_TIMEOUT)
+            .await
+        {
+            Ok((_, volume)) => check_namespace(&volume, name, &self.namespace)?,
+            Err(RuntimeError {
+                status: Some(404), ..
+            }) => return Ok(()),
+            Err(error) => return Err(error),
+        }
         match self
             .call("DELETE", &format!("/volumes/{name}"), None, CALL_TIMEOUT)
             .await
         {
-            Ok(_) | Err(RuntimeError { status: Some(404), .. }) => Ok(()),
+            Ok(_)
+            | Err(RuntimeError {
+                status: Some(404), ..
+            }) => Ok(()),
             Err(error) => Err(error),
         }
     }
@@ -214,11 +278,19 @@ impl HostRuntime {
     /// The ids of every container this emulator started that carries `label=value`, running or
     /// not.
     pub async fn find(&self, label: &str, value: &str) -> Result<Vec<String>, RuntimeError> {
-        let filters = json!({ "label": [MANAGED_LABEL, format!("{label}={value}")] }).to_string();
+        let filters = json!({ "label": [
+            MANAGED_LABEL,
+            format!("{NAMESPACE_LABEL}={}", self.namespace),
+            format!("{label}={value}"),
+        ] })
+        .to_string();
         let (_, body) = self
             .call(
                 "GET",
-                &format!("/containers/json?all=true&filters={}", query_escaped(&filters)),
+                &format!(
+                    "/containers/json?all=true&filters={}",
+                    query_escaped(&filters)
+                ),
                 None,
                 CALL_TIMEOUT,
             )
@@ -240,7 +312,12 @@ impl HostRuntime {
             path.push_str(&format!("&platform={}", query_escaped(platform)));
         }
         let (_, body) = self
-            .call("POST", &path, Some(create_body(spec, &self.network)), CALL_TIMEOUT)
+            .call(
+                "POST",
+                &path,
+                Some(create_body(spec, &self.network, &self.namespace)),
+                CALL_TIMEOUT,
+            )
             .await?;
         body["Id"]
             .as_str()
@@ -268,22 +345,48 @@ impl HostRuntime {
         }
     }
 
+    /// Make sure named volume `name` exists and is this namespace's. Docker would otherwise
+    /// create it unlabelled on first mount, and an unlabelled volume cannot be told apart from
+    /// another emulator's.
+    async fn ensure_volume(&self, name: &str) -> Result<(), RuntimeError> {
+        let body = json!({
+            "Name": name,
+            "Labels": { MANAGED_LABEL: "true", NAMESPACE_LABEL: self.namespace },
+        });
+        // Creating a volume that exists answers with the existing one, labels as they were.
+        let (_, volume) = self
+            .call("POST", "/volumes/create", Some(body), CALL_TIMEOUT)
+            .await?;
+        check_namespace(&volume, name, &self.namespace)
+    }
+
+    /// Make sure the network exists on the configured subnet. A network of that name on another
+    /// subnet is refused rather than joined: the emulator's address would not be on it.
     async fn ensure_network(&self) -> Result<(), RuntimeError> {
         let network = self.network.clone();
         match self
-            .call("GET", &format!("/networks/{}", query_escaped(&network)), None, CALL_TIMEOUT)
+            .call(
+                "GET",
+                &format!("/networks/{}", query_escaped(&network)),
+                None,
+                CALL_TIMEOUT,
+            )
             .await
         {
-            Ok(_) => Ok(()),
-            Err(RuntimeError { status: Some(404), .. }) => {
-                let body = json!({
-                    "Name": network,
-                    "Driver": "bridge",
-                    "Labels": { MANAGED_LABEL: "true" },
-                });
-                match self.call("POST", "/networks/create", Some(body), CALL_TIMEOUT).await {
+            Ok((_, existing)) => check_subnet(&existing, &network, &self.subnet),
+            Err(RuntimeError {
+                status: Some(404), ..
+            }) => {
+                let body = network_body(&network, &self.subnet)?;
+                match self
+                    .call("POST", "/networks/create", Some(body), CALL_TIMEOUT)
+                    .await
+                {
                     // 409: created concurrently by another service.
-                    Ok(_) | Err(RuntimeError { status: Some(409), .. }) => Ok(()),
+                    Ok(_)
+                    | Err(RuntimeError {
+                        status: Some(409), ..
+                    }) => Ok(()),
                     Err(error) => Err(error),
                 }
             }
@@ -359,10 +462,73 @@ impl HostRuntime {
     }
 }
 
-/// The body of `POST /containers/create` for `spec` on `network`.
-fn create_body(spec: &ContainerSpec, network: &str) -> Value {
+/// The gateway of an IPv4 `subnet` CIDR: its first address.
+fn gateway_of(subnet: &str) -> Result<std::net::Ipv4Addr, RuntimeError> {
+    let invalid = || unreachable(format!("{SUBNET_VARIABLE}={subnet:?} is not an IPv4 CIDR"));
+    let (address, prefix) = subnet.split_once('/').ok_or_else(invalid)?;
+    let address: std::net::Ipv4Addr = address.parse().map_err(|_| invalid())?;
+    let prefix: u32 = prefix
+        .parse()
+        .ok()
+        .filter(|prefix| *prefix <= 30)
+        .ok_or_else(invalid)?;
+    let mask = u32::MAX.checked_shl(32 - prefix).unwrap_or(0);
+    Ok(std::net::Ipv4Addr::from((u32::from(address) & mask) + 1))
+}
+
+/// The body of `POST /networks/create` for `network` on `subnet`.
+fn network_body(network: &str, subnet: &str) -> Result<Value, RuntimeError> {
+    let gateway = gateway_of(subnet)?;
+    Ok(json!({
+        "Name": network,
+        "Driver": "bridge",
+        "Labels": { MANAGED_LABEL: "true" },
+        "IPAM": { "Config": [{ "Subnet": subnet, "Gateway": gateway.to_string() }] },
+    }))
+}
+
+/// Whether an existing network (`GET /networks/{name}`) is on `subnet`.
+fn check_subnet(existing: &Value, network: &str, subnet: &str) -> Result<(), RuntimeError> {
+    let subnets: Vec<&str> = existing["IPAM"]["Config"]
+        .as_array()
+        .map(|configs| {
+            configs
+                .iter()
+                .filter_map(|config| config["Subnet"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    if subnets.contains(&subnet) {
+        Ok(())
+    } else {
+        Err(RuntimeError {
+            status: Some(409),
+            message: format!(
+                "network {network} exists on {subnets:?}, not {subnet}; remove it or set {SUBNET_VARIABLE}"
+            ),
+        })
+    }
+}
+
+/// Whether a volume (`GET /volumes/{name}` or `POST /volumes/create`) belongs to `namespace`.
+fn check_namespace(volume: &Value, name: &str, namespace: &str) -> Result<(), RuntimeError> {
+    match volume["Labels"][NAMESPACE_LABEL].as_str() {
+        Some(owner) if owner == namespace => Ok(()),
+        owner => Err(RuntimeError {
+            status: Some(409),
+            message: format!(
+                "volume {name} belongs to namespace {}, not {namespace}",
+                owner.unwrap_or("(none)")
+            ),
+        }),
+    }
+}
+
+/// The body of `POST /containers/create` for `spec` on `network`, in `namespace`.
+fn create_body(spec: &ContainerSpec, network: &str, namespace: &str) -> Value {
     let mut labels: BTreeMap<String, String> = spec.labels.clone();
     labels.insert(MANAGED_LABEL.to_string(), "true".to_string());
+    labels.insert(NAMESPACE_LABEL.to_string(), namespace.to_string());
     let mut body = json!({
         "Image": spec.image,
         "Env": spec.env.iter().map(|(name, value)| format!("{name}={value}")).collect::<Vec<_>>(),
@@ -442,7 +608,10 @@ mod tests {
     fn a_reference_splits_at_its_tag_but_not_at_a_registry_port() {
         assert_eq!(split_reference("postgres:16"), ("postgres", Some("16")));
         assert_eq!(split_reference("host:5000/app"), ("host:5000/app", None));
-        assert_eq!(split_reference("host:5000/app:1"), ("host:5000/app", Some("1")));
+        assert_eq!(
+            split_reference("host:5000/app:1"),
+            ("host:5000/app", Some("1"))
+        );
         assert_eq!(split_reference("app@sha256:ab"), ("app@sha256:ab", None));
     }
 
@@ -457,12 +626,16 @@ mod tests {
             aliases: vec!["db.local".into()],
             ..ContainerSpec::default()
         };
-        let body = create_body(&spec, "net");
+        let body = create_body(&spec, "net", "ns-a");
         assert_eq!(body["HostConfig"]["NetworkMode"], "net");
         assert_eq!(body["Labels"][MANAGED_LABEL], "true");
+        assert_eq!(body["Labels"][NAMESPACE_LABEL], "ns-a");
         assert_eq!(body["Labels"]["aws-emulator.resource"], "arn:db");
         assert_eq!(body["Env"][0], "POSTGRES_USER=admin");
-        assert_eq!(body["NetworkingConfig"]["EndpointsConfig"]["net"]["Aliases"][0], "db.local");
+        assert_eq!(
+            body["NetworkingConfig"]["EndpointsConfig"]["net"]["Aliases"][0],
+            "db.local"
+        );
         assert!(body.get("Cmd").is_none());
     }
 
@@ -488,5 +661,37 @@ mod tests {
     #[test]
     fn a_label_filter_is_query_escaped() {
         assert_eq!(query_escaped("a=b c"), "a%3Db%20c");
+    }
+
+    #[test]
+    fn the_network_is_created_on_the_subnet_with_its_first_address_as_gateway() {
+        let body = network_body("net", "172.25.0.0/16").unwrap();
+        assert_eq!(body["IPAM"]["Config"][0]["Subnet"], "172.25.0.0/16");
+        assert_eq!(body["IPAM"]["Config"][0]["Gateway"], "172.25.0.1");
+        assert_eq!(gateway_of("10.9.8.7/24").unwrap().to_string(), "10.9.8.1");
+        assert!(gateway_of("172.25.0.0").is_err());
+        assert!(gateway_of("not-an-address/16").is_err());
+    }
+
+    #[test]
+    fn an_existing_network_on_another_subnet_is_refused() {
+        let on = json!({ "IPAM": { "Config": [{ "Subnet": "172.25.0.0/16" }] } });
+        let off = json!({ "IPAM": { "Config": [{ "Subnet": "172.18.0.0/16" }] } });
+        assert!(check_subnet(&on, "net", "172.25.0.0/16").is_ok());
+        let error = check_subnet(&off, "net", "172.25.0.0/16").unwrap_err();
+        assert_eq!(error.status, Some(409));
+        assert!(error.message.contains("172.18.0.0/16"));
+    }
+
+    #[test]
+    fn a_volume_of_another_namespace_is_refused() {
+        let ours = json!({ "Labels": { NAMESPACE_LABEL: "ns-a" } });
+        let theirs = json!({ "Labels": { NAMESPACE_LABEL: "ns-b" } });
+        let unlabelled = json!({ "Labels": null });
+        assert!(check_namespace(&ours, "vol", "ns-a").is_ok());
+        let error = check_namespace(&theirs, "vol", "ns-a").unwrap_err();
+        assert_eq!(error.status, Some(409));
+        assert!(error.message.contains("ns-b"));
+        assert!(check_namespace(&unlabelled, "vol", "ns-a").is_err());
     }
 }

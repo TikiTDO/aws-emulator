@@ -31,6 +31,7 @@ pub struct DescribeClientVpnTargetNetworksOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TargetNetwork")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TargetNetwork {
     pub association_id: Option<String>,
     pub vpc_id: Option<String>,

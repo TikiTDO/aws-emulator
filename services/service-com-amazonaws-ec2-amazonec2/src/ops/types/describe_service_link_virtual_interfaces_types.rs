@@ -30,6 +30,7 @@ pub struct DescribeServiceLinkVirtualInterfacesOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ServiceLinkVirtualInterface")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ServiceLinkVirtualInterface {
     pub service_link_virtual_interface_id: Option<String>,
     pub service_link_virtual_interface_arn: Option<String>,
