@@ -14,8 +14,8 @@
 //!   a time to wait for events" (every `PipeSource*Parameters` shape that batches carries
 //!   both). Those two bound the POLL; they say nothing about how many calls the target
 //!   stage makes. WHICH source is polled is the kind of resource the pipe's `Source`
-//!   names: an Amazon SQS queue is received from, and a DynamoDB stream is read shard by
-//!   shard from the position `StartingPosition` names, so the changes made to one
+//!   names: an Amazon SQS queue is received from, and a DynamoDB or Kinesis stream is read
+//!   shard by shard from the position `StartingPosition` names, so the changes made to one
 //!   partition key reach the target in the order they were applied — the records of a
 //!   shard are ordered, and the batches of one shard are moved one after another.
 //! * FILTER. A pipe carrying `FilterCriteria` admits only the records that match one of
@@ -110,7 +110,7 @@
 //!
 //! Every call this module makes goes to the emulator it is running inside, over the
 //! in-process callback ([`smithy_server_runtime::EmbeddedEmulator`]): the pipe reaches
-//! the sqs, dynamodbstreams, lambda and states surfaces of this same emulator and
+//! the sqs, dynamodbstreams, kinesis, lambda and states surfaces of this same emulator and
 //! nothing else.
 //!
 //! Every one of those calls is made AS THE PIPE'S EXECUTION ROLE, so each stage asks
@@ -135,12 +135,14 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use ::serde_json::{json, Value};
 
 use super::{pipe_state, ComAmazonawsPipesPipesState, PipeRecord};
 use crate::ops::types::PipeTargetParameters;
+
+mod kinesis_source;
 
 /// How long the poller waits before looking at an idle source again. Short enough that
 /// a record sent to the source is moved promptly, long enough not to spin.
@@ -237,10 +239,11 @@ const MAX_FILTER_STEPS_PER_BATCH: u64 =
 const SQS_EVENT_SOURCE: &str = "aws:sqs";
 
 /// The ARN service namespaces the stages below address: an SQS queue, a DynamoDB table's
-/// stream, a Lambda function and a Step Functions state machine (`states`, the namespace
-/// Step Functions signs and publishes its endpoint under).
+/// stream, a Kinesis data stream, a Lambda function and a Step Functions state machine
+/// (`states`, the namespace Step Functions signs and publishes its endpoint under).
 const SQS_NAMESPACE: &str = "sqs";
 const DYNAMODB_NAMESPACE: &str = "dynamodb";
+const KINESIS_NAMESPACE: &str = "kinesis";
 const LAMBDA_NAMESPACE: &str = "lambda";
 const STATES_NAMESPACE: &str = "states";
 
@@ -253,6 +256,10 @@ const STATE_MACHINE_RESOURCE: &str = "stateMachine";
 /// `arn:…:dynamodb:…:table/<name>/stream/<label>`.
 const TABLE_RESOURCE: &str = "table";
 const STREAM_SEGMENT: &str = "/stream/";
+
+/// The resource type a Kinesis data stream ARN names:
+/// `arn:…:kinesis:…:stream/<name>`.
+const KINESIS_STREAM_RESOURCE: &str = "stream";
 
 /// The `StartingPosition` values a DynamoDB stream source may name, as the shard
 /// iterator type each one reads from. Source: `DynamoDBStreamStartPosition` in
@@ -476,8 +483,9 @@ async fn poll_pipe(
         pipe: &pipe_name,
     };
     let mut clients = Clients::default();
-    // Where a DynamoDB-stream source has been read up to, for the length of this poller.
-    let mut cursors = StreamCursors::default();
+    // Where the stream sources this poller may read have been read up to, for the length
+    // of this poller.
+    let mut positions = SourcePositions::default();
     let mut failures = 0u32;
     // When this poller may read its source again. A batch it could not move left its
     // records checked out of that source, and they are the source's to hand to its other
@@ -501,7 +509,7 @@ async fn poll_pipe(
                 // be read FROM, which is what keeps a change made while the pipe was
                 // settling from falling outside a `LATEST` read.
                 if let Err(detail) =
-                    establish_cursors(callback, &mut clients, &record, &run, &mut cursors).await
+                    establish_cursors(callback, &mut clients, &record, &run, &mut positions).await
                 {
                     ::tracing::debug!(
                         pipe = %pipe_name,
@@ -556,7 +564,7 @@ async fn poll_pipe(
                     continue;
                 }
                 hold_source_until = None;
-                let moved = move_one_batch(callback, &mut clients, &mut cursors, &record, &run).await;
+                let moved = move_one_batch(callback, &mut clients, &mut positions, &record, &run).await;
                 match moved {
                     Batch::Moved { events } => {
                         metrics.count(super::metrics::EVENT_COUNT_METRIC, events);
@@ -849,11 +857,11 @@ enum Batch {
 async fn move_one_batch(
     callback: &smithy_server_runtime::EmbeddedEmulator,
     clients: &mut Clients,
-    cursors: &mut StreamCursors,
+    positions: &mut SourcePositions,
     record: &LiveRecord<'_>,
     run: &RunningPipe,
 ) -> Batch {
-    let polled = match collect_batch(callback, clients, record, run, cursors).await {
+    let polled = match collect_batch(callback, clients, record, run, positions).await {
         Ok(polled) => polled,
         Err(detail) => {
             return Batch::Failed {
@@ -909,7 +917,7 @@ async fn move_one_batch(
         let advance = finish_batch(
             callback,
             clients,
-            cursors,
+            positions,
             record,
             decided,
             &polled,
@@ -1036,7 +1044,7 @@ async fn move_one_batch(
         Finished::Records(processed.iter().map(String::as_str).collect())
     };
     let advance =
-        finish_batch(callback, clients, cursors, record, decided, &polled, &finished).await;
+        finish_batch(callback, clients, positions, record, decided, &polled, &finished).await;
     moved_or_standing_still(advance, decided, taken, checked_out)
 }
 
@@ -1167,7 +1175,7 @@ enum SourceAdvance {
 async fn finish_batch(
     callback: &smithy_server_runtime::EmbeddedEmulator,
     clients: &mut Clients,
-    cursors: &mut StreamCursors,
+    positions: &mut SourcePositions,
     record: &LiveRecord<'_>,
     run: &RunningPipe,
     polled: &Polled,
@@ -1221,7 +1229,9 @@ async fn finish_batch(
                 // on. A shard whose answer carried no next position is closed and drained,
                 // so it is taken off the walk rather than read from its start again.
                 Finished::WholeBatch => {
-                    cursors.advance(&batch.shard, batch.next_iterator.clone());
+                    positions
+                        .stream
+                        .advance(&batch.shard, batch.next_iterator.clone());
                     return SourceAdvance::MovedOn;
                 }
                 Finished::Records(processed) => processed,
@@ -1237,7 +1247,7 @@ async fn finish_batch(
             match shard_iterator_after(callback, clients, record, run, &batch.shard, through).await
             {
                 Ok(iterator) => {
-                    cursors.advance(&batch.shard, iterator);
+                    positions.stream.advance(&batch.shard, iterator);
                     SourceAdvance::MovedOn
                 }
                 // The position this poller holds is kept, so the batch is read again in
@@ -1252,6 +1262,23 @@ async fn finish_batch(
                     );
                     SourceAdvance::PositionUnavailable(detail)
                 }
+            }
+        }
+        // A Kinesis shard is read on from after the records the target processed, which is
+        // the run at the HEAD of the batch: the position is the pipe's own and needs no
+        // call to take up, so nothing here can fail.
+        Polled::KinesisRecords(batch) => {
+            let batch_identifiers = kinesis_source::identifiers(&batch.records);
+            let through = match finished {
+                Finished::WholeBatch => batch_identifiers.last().map(String::as_str),
+                Finished::Records(processed) => {
+                    checkpointed_through(&batch_identifiers, processed)
+                }
+            };
+            if kinesis_source::finish(&mut positions.kinesis, batch, through) {
+                SourceAdvance::MovedOn
+            } else {
+                SourceAdvance::HeadUnprocessed
             }
         }
     }
@@ -1383,6 +1410,8 @@ enum Polled {
     },
     /// One shard's stream records, in the order the changes were applied.
     Records(StreamBatch),
+    /// One shard's Kinesis records, in the order they were put.
+    KinesisRecords(kinesis_source::Batch),
 }
 
 impl Polled {
@@ -1391,6 +1420,7 @@ impl Polled {
         match self {
             Self::Messages { messages, .. } => messages.len(),
             Self::Records(batch) => batch.records.len(),
+            Self::KinesisRecords(batch) => batch.records.len(),
         }
     }
 
@@ -1409,7 +1439,7 @@ impl Polled {
     fn checked_out(&self) -> Option<Instant> {
         match self {
             Self::Messages { checked_out, .. } => Some(*checked_out),
-            Self::Records(_) => None,
+            Self::Records(_) | Self::KinesisRecords(_) => None,
         }
     }
 
@@ -1426,6 +1456,7 @@ impl Polled {
                 .map(|message| message.message_id.clone().unwrap_or_default())
                 .collect(),
             Self::Records(batch) => stream_identifiers(&batch.records),
+            Self::KinesisRecords(batch) => kinesis_source::identifiers(&batch.records),
         }
     }
 
@@ -1448,6 +1479,11 @@ impl Polled {
                     )
                 })
                 .collect(),
+            Self::KinesisRecords(batch) => Ok(batch
+                .records
+                .iter()
+                .map(|record| kinesis_source::record_envelope(record, &batch.shard, run))
+                .collect()),
         }
     }
 }
@@ -1513,6 +1549,21 @@ impl StreamCursors {
     }
 }
 
+/// Where the STREAM sources this poller may read have been read up to, for the length of
+/// one poller.
+///
+/// A pipe reads from exactly one source, so only the member for the kind its `Source`
+/// names is ever filled; they are held together so one poller carries one position for
+/// whatever its record names, and a reconfiguration that changes the source kind cannot
+/// hand the new source the old one's place.
+#[derive(Default)]
+struct SourcePositions {
+    /// Where a DynamoDB-stream source has been read up to.
+    stream: StreamCursors,
+    /// Where a Kinesis-stream source has been read up to.
+    kinesis: kinesis_source::Cursors,
+}
+
 /// Poll the source for up to `BatchSize` records, collecting for up to the batching
 /// window once the first record has arrived.
 ///
@@ -1529,7 +1580,7 @@ async fn collect_batch(
     clients: &mut Clients,
     record: &LiveRecord<'_>,
     run: &RunningPipe,
-    cursors: &mut StreamCursors,
+    positions: &mut SourcePositions,
 ) -> Result<Polled, String> {
     match &run.source {
         Source::Queue { url } => {
@@ -1572,10 +1623,22 @@ async fn collect_batch(
             })
         }
         Source::Stream { starting_position } => {
-            let batch =
-                collect_stream_batch(callback, clients, record, run, starting_position, cursors)
-                    .await?;
+            let batch = collect_stream_batch(
+                callback,
+                clients,
+                record,
+                run,
+                starting_position,
+                &mut positions.stream,
+            )
+            .await?;
             Ok(Polled::Records(batch))
+        }
+        Source::KinesisStream { .. } => {
+            let batch =
+                kinesis_source::collect(callback, clients, record, run, &mut positions.kinesis)
+                    .await?;
+            Ok(Polled::KinesisRecords(batch))
         }
     }
 }
@@ -1621,13 +1684,26 @@ async fn establish_cursors(
     clients: &mut Clients,
     record: &LiveRecord<'_>,
     run: &RunningPipe,
-    cursors: &mut StreamCursors,
+    positions: &mut SourcePositions,
 ) -> Result<(), String> {
-    let Source::Stream { starting_position } = &run.source else {
-        return Ok(());
-    };
-    open_shards(callback, clients, record, run, starting_position, cursors).await?;
-    Ok(())
+    match &run.source {
+        Source::Queue { .. } => Ok(()),
+        Source::Stream { starting_position } => {
+            open_shards(
+                callback,
+                clients,
+                record,
+                run,
+                starting_position,
+                &mut positions.stream,
+            )
+            .await?;
+            Ok(())
+        }
+        Source::KinesisStream { .. } => {
+            kinesis_source::establish(callback, clients, record, run, &mut positions.kinesis).await
+        }
+    }
 }
 
 /// Take up the position every shard the stream lists NOW is read from — minting the
@@ -2004,11 +2080,21 @@ fn admitted(filters: &[Value], batch: Vec<Value>) -> Vec<Value> {
 /// is the producer's and not the envelope's.
 const RECORD_BODY: &str = "body";
 
+/// The member a Kinesis record envelope carries its payload under, which travels
+/// base64-encoded because a record's data is bytes the producer put — so the payload a
+/// reader looks inside is what that encoding undoes.
+const RECORD_DATA: &str = "data";
+
+/// The member a record envelope names the source it came from under, which is what says
+/// how its payload member travels.
+const RECORD_EVENT_SOURCE: &str = "eventSource";
+
 /// The format the message a record carries is in.
 ///
-/// A record envelope reports the message body as the text it was sent as, whatever that
-/// text spells; the filter stage is the one reader that cares which of the two formats a
-/// producer used, because a pattern is written for one of them.
+/// A record envelope reports its payload as the text it was sent as — under the encoding
+/// its source carries one with — whatever that text spells; the filter stage is the one
+/// reader that cares which of the two formats a producer used, because a pattern is written
+/// for one of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BodyFormat {
     /// The body is in "a valid JSON format" — it spells a JSON document — so it is read
@@ -2020,20 +2106,22 @@ enum BodyFormat {
 
 /// How the FILTER stage reads one polled record.
 ///
-/// A record's message body travels as text, and a pattern's `body` clause is written
-/// either for the document a JSON body spells or for the text a plain body carries. So
-/// the filter decides the body's FORMAT once per record and reads the record accordingly:
-/// a body in "a valid JSON format" is matched as the document it parses to, a body that
-/// spells none as its text, and a pattern whose `body` clause is written for the other
-/// format admits the record no more than it would admit one whose values disagreed. A
-/// record envelope carrying no message body at all — a stream record, whose change is
-/// already a document — is read exactly as it was built.
+/// A record's payload travels as text — an Amazon SQS body as the text its producer sent,
+/// a Kinesis record's data as the base64 of the bytes it put — and a pattern's clause for
+/// that member is written either for the document the payload spells or for the text it
+/// carries. So the filter decides the payload's FORMAT once per record and reads the record
+/// accordingly: a payload in "a valid JSON format" is matched as the document it parses to,
+/// a payload that spells none as its text, and a pattern whose clause is written for the
+/// other format admits the record no more than it would admit one whose values disagreed. A
+/// record envelope carrying no payload member at all — a DynamoDB stream record, whose
+/// change is already a document — is read exactly as it was built.
 ///
 /// This view lives only for the length of the match: the payload the enrichment and the
-/// target are handed is the record envelope with the body as sent.
+/// target are handed is the record envelope with its payload member as sent.
 struct FilterView<'a> {
-    /// The format of the record's message body, or `None` for an envelope that has none.
-    format: Option<BodyFormat>,
+    /// Which member carries the record's payload and the format it is in, or `None` for an
+    /// envelope that carries none.
+    reading: Option<PayloadReading>,
     /// The record as the patterns see it.
     event: Cow<'a, Value>,
 }
@@ -2041,14 +2129,15 @@ struct FilterView<'a> {
 impl<'a> FilterView<'a> {
     /// How the filter stage reads `event`.
     fn of(event: &'a Value) -> Self {
-        let (format, event) = read_body(event);
-        Self { format, event }
+        let (reading, event) = read_payload(event);
+        Self { reading, event }
     }
 
     /// Whether `pattern` admits this record, spending `budget`.
     ///
-    /// The format of the body is decided BEFORE any value is compared, so a pattern whose
-    /// `body` clause is written for the other format drops the record whatever it holds.
+    /// The format of the payload is decided BEFORE any value is compared, so a pattern
+    /// whose clause for the payload member is written for the other format drops the record
+    /// whatever it holds.
     fn admits(
         &self,
         pattern: &Value,
@@ -2058,66 +2147,128 @@ impl<'a> FilterView<'a> {
             && ::service_common::event_pattern::matches_within(pattern, &self.event, budget)
     }
 
-    /// Whether `pattern`'s `body` clause is written for the format this record's body
-    /// carries. A pattern with no `body` clause constrains neither format and fits both.
+    /// Whether `pattern`'s clause for this record's PAYLOAD member is written for the
+    /// format that payload carries. A pattern with no such clause constrains neither format
+    /// and fits both.
     fn format_fits(&self, pattern: &Value) -> bool {
-        let form = match self.format {
-            None => return true,
-            Some(BodyFormat::Document) => ::service_common::event_pattern::ClauseForm::Document,
-            Some(BodyFormat::Text) => ::service_common::event_pattern::ClauseForm::Values,
+        let Some(reading) = self.reading else {
+            return true;
         };
-        ::service_common::event_pattern::reads_as(pattern, RECORD_BODY, form)
+        let form = match reading.format {
+            BodyFormat::Document => ::service_common::event_pattern::ClauseForm::Document,
+            BodyFormat::Text => ::service_common::event_pattern::ClauseForm::Values,
+        };
+        ::service_common::event_pattern::reads_as(pattern, reading.member, form)
     }
 }
 
-/// The record `event` as every reader that looks INSIDE it reads it: the format its
-/// message body is in, and the record with a body spelling a JSON document replaced by
-/// that document.
+/// How one record envelope carries its payload: the member that holds it, and the format
+/// the payload that member spells is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PayloadReading {
+    /// The member the payload travels under ([`RECORD_BODY`], [`RECORD_DATA`]).
+    member: &'static str,
+    format: BodyFormat,
+}
+
+/// The record `event` as every reader that looks INSIDE it reads it: how its payload member
+/// is read, and the record with that member replaced by the payload it spells.
 ///
-/// A record's message body travels as the text its producer sent, whatever that text
-/// spells, and a reader that looks inside the record — the filter's patterns
-/// ([`FilterView`]) and the JSON paths a template placeholder or a target parameter
-/// carries ([`path_view`]) — reads it in the format that text is in: a body in "a valid
-/// JSON format" is the document it parses to, so a clause or a path can name what is
-/// inside it, and a body spelling no document is the text it carries. An envelope with no
-/// message body at all — a stream record, whose change is already a document — is read
-/// exactly as it was built, and the format is then `None`.
+/// A record's payload travels as the text its producer sent, under whatever encoding its
+/// source carries it with — an Amazon SQS body as that text itself, a Kinesis record's data
+/// as the base64 of the bytes that were put — and a reader that looks inside the record
+/// (the filter's patterns [`FilterView`], and the JSON paths a template placeholder or a
+/// target parameter carries [`path_view`]) reads the payload that encoding undoes, in the
+/// format that payload is in: a payload in "a valid JSON format" is the document it parses
+/// to, so a clause or a path can name what is inside it, and a payload spelling no document
+/// is the text it carries. An envelope with no payload member at all — a DynamoDB stream
+/// record, whose change is already a document — is read exactly as it was built, and the
+/// reading is then `None`.
 ///
-/// The body is parsed at most once per reader per record, and what it may be is already
-/// bounded by the largest message its source accepts, so the parse is bounded by the poll
-/// that collected the record. The view lives only for the length of the reading: the
-/// payload a stage handed the event itself receives is the envelope with the body as sent.
-fn read_body(event: &Value) -> (Option<BodyFormat>, Cow<'_, Value>) {
-    let Some(text) = event.get(RECORD_BODY).and_then(Value::as_str) else {
+/// The payload is decoded and parsed at most once per reader per record, and what it may be
+/// is already bounded by the largest record its source accepts, so the work is bounded by
+/// the poll that collected the record. The view lives only for the length of the reading:
+/// the payload a stage handed the event itself receives is the envelope with its payload
+/// member as sent.
+fn read_payload(event: &Value) -> (Option<PayloadReading>, Cow<'_, Value>) {
+    let Some((member, payload)) = payload_as_read(event) else {
         return (None, Cow::Borrowed(event));
     };
-    // A body is in a JSON format when it spells a JSON DOCUMENT — an object or a
+    // A payload is in a JSON format when it spells a JSON DOCUMENT — an object or a
     // list, which is what a clause names fields inside and what a path descends into. A
-    // body spelling a bare scalar names nothing to descend into and is read as the text it
-    // is, the same reading the Amazon SQS event-source poller of a Lambda function takes.
-    let document = ::serde_json::from_str::<Value>(text)
+    // payload spelling a bare scalar names nothing to descend into and is read as the text
+    // it is, the same reading the event-source poller of a Lambda function takes.
+    let document = ::serde_json::from_str::<Value>(&payload)
         .ok()
-        .filter(|body| body.is_object() || body.is_array());
-    let Some(document) = document else {
-        return (Some(BodyFormat::Text), Cow::Borrowed(event));
+        .filter(|payload| payload.is_object() || payload.is_array());
+    let reading = PayloadReading {
+        member,
+        format: if document.is_some() {
+            BodyFormat::Document
+        } else {
+            BodyFormat::Text
+        },
+    };
+    // What the member is REPLACED by, and nothing at all when the envelope already carries
+    // exactly what a reader reads — a borrowed payload is the envelope's own text, an owned
+    // one is what undoing the encoding it travelled under produced.
+    let read_as = match document {
+        Some(document) => Some(document),
+        None => match payload {
+            Cow::Borrowed(_) => None,
+            Cow::Owned(text) => Some(Value::String(text)),
+        },
+    };
+    let Some(read_as) = read_as else {
+        return (Some(reading), Cow::Borrowed(event));
     };
     let mut view = event.clone();
     if let Value::Object(members) = &mut view {
-        members.insert(RECORD_BODY.to_string(), document);
+        members.insert(member.to_string(), read_as);
     }
-    (Some(BodyFormat::Document), Cow::Owned(view))
+    (Some(reading), Cow::Owned(view))
 }
 
-/// The record `event` as a JSON PATH reads it — the reading [`read_body`] states, without
-/// the format the filter also decides by.
+/// Which member of `event` carries its payload and the text that payload spells, or `None`
+/// for an envelope that carries no payload member and for one whose payload is no text at
+/// all.
 ///
-/// A path is resolved against this: `$.body` selects the document a valid-JSON body
-/// spells, so `$.body.<member>` selects that member of it, and a body spelling no document
-/// is the text a path selects as it was sent. It is what both readers of a path are given,
-/// the placeholders of an `InputTemplate` ([`render_template`]) and a target parameter's
-/// own value ([`resolved_parameter`]), so one pipe cannot read a record two ways.
+/// The text is BORROWED where the envelope carries it as it is, and OWNED where undoing the
+/// encoding it travels under produced it — which is what tells a reading that replaces the
+/// member from one that leaves the envelope alone.
+///
+/// A Kinesis record's data that is not base64 of UTF-8 text is bytes rather than text, so
+/// there is no payload for a clause or a path to look inside and the envelope is read as it
+/// was built.
+fn payload_as_read(event: &Value) -> Option<(&'static str, Cow<'_, str>)> {
+    if let Some(text) = event.get(RECORD_BODY).and_then(Value::as_str) {
+        return Some((RECORD_BODY, Cow::Borrowed(text)));
+    }
+    // The `data` member is read as the base64 it travels as only for a record whose own
+    // `eventSource` says it came off a Kinesis stream: a member of that name carries an
+    // encoded payload nowhere else, and an event an enrichment answered with one of its own
+    // is read as the value it holds.
+    if event.get(RECORD_EVENT_SOURCE).and_then(Value::as_str)
+        != Some(kinesis_source::KINESIS_EVENT_SOURCE)
+    {
+        return None;
+    }
+    let encoded = event.get(RECORD_DATA).and_then(Value::as_str)?;
+    let decoded = ::aws_smithy_types::base64::decode(encoded).ok()?;
+    Some((RECORD_DATA, Cow::Owned(String::from_utf8(decoded).ok()?)))
+}
+
+/// The record `event` as a JSON PATH reads it — the reading [`read_payload`] states,
+/// without the format the filter also decides by.
+///
+/// A path is resolved against this: `$.body` selects the document a valid-JSON body spells
+/// and `$.data` the document a Kinesis record's decoded data spells, so
+/// `$.<member>.<field>` selects that field of it, and a payload spelling no document is the
+/// text a path selects. It is what both readers of a path are given, the placeholders of an
+/// `InputTemplate` ([`render_template`]) and a target parameter's own value
+/// ([`resolved_parameter`]), so one pipe cannot read a record two ways.
 fn path_view(event: &Value) -> Cow<'_, Value> {
-    read_body(event).1
+    read_payload(event).1
 }
 
 /// The member a record envelope reports the digest of its MESSAGE ATTRIBUTES under —
@@ -2694,6 +2845,13 @@ enum Source {
     /// A DynamoDB stream, read shard by shard from the position `StartingPosition`
     /// names.
     Stream { starting_position: String },
+    /// A Kinesis data stream, read shard by shard from the position `StartingPosition`
+    /// names — and, where that position is a stated instant, from the one
+    /// `StartingPositionTimestamp` carries ([`kinesis_source`]).
+    KinesisStream {
+        starting_position: String,
+        starting_position_timestamp: Option<SystemTime>,
+    },
 }
 
 /// The enrichment a batch is handed to, by the resource its ARN names.
@@ -2817,10 +2975,41 @@ fn resolve_run(pipe: &PipeRecord) -> Result<RunningPipe, String> {
                 DEFAULT_STREAM_BATCH_SIZE,
             )
         }
+        KINESIS_NAMESPACE => {
+            // A Kinesis source is the data stream itself, which is the resource the ARN
+            // has to name: `stream/<name>`.
+            if parsed.resource_type() != KINESIS_STREAM_RESOURCE {
+                return Err(format!(
+                    "its Source {} names no Kinesis stream",
+                    pipe.source
+                ));
+            }
+            let stream = parameters
+                .and_then(|p| p.kinesis_stream_parameters.as_ref())
+                .ok_or_else(|| {
+                    "it carries no KinesisStreamParameters, so there is no position to \
+                     read its stream from"
+                        .to_string()
+                })?;
+            (
+                Source::KinesisStream {
+                    starting_position: stream.starting_position.clone(),
+                    // "The time from which to start reading, in Unix time seconds"
+                    // (`StartingPositionTimestamp`): the instant itself, read through the
+                    // one conversion the SDK's timestamp type offers.
+                    starting_position_timestamp: stream
+                        .starting_position_timestamp
+                        .and_then(|at| SystemTime::try_from(at).ok()),
+                },
+                stream.batch_size,
+                stream.maximum_batching_window_in_seconds,
+                DEFAULT_STREAM_BATCH_SIZE,
+            )
+        }
         other => {
             return Err(format!(
-                "its Source names a {other} resource, and only an Amazon SQS queue or a \
-                 DynamoDB stream source is polled by this emulator"
+                "its Source names a {other} resource, and only an Amazon SQS queue, a \
+                 DynamoDB stream or a Kinesis stream source is polled by this emulator"
             ))
         }
     };
@@ -2970,6 +3159,9 @@ pub(super) fn source_record_action(source: &str) -> Option<&'static str> {
     match parsed.vendor {
         SQS_NAMESPACE => Some(RECEIVE_MESSAGE_ACTION),
         DYNAMODB_NAMESPACE if parsed.resource.contains(STREAM_SEGMENT) => Some(GET_RECORDS_ACTION),
+        KINESIS_NAMESPACE if parsed.resource_type() == KINESIS_STREAM_RESOURCE => {
+            Some(kinesis_source::GET_RECORDS_ACTION)
+        }
         _ => None,
     }
 }
@@ -2980,8 +3172,9 @@ pub(super) fn source_record_action(source: &str) -> Option<&'static str> {
 /// The resource is asked for through that service's own read — the queue's attributes, the
 /// stream's description — so a source is reported absent only where the component that owns
 /// it says so. `false` for everything this emulator cannot show: a source whose kind no
-/// owner here is asked (only an Amazon SQS queue and a DynamoDB stream are), a source of
-/// another account, a service that answered something else, and one that did not answer.
+/// owner here is asked (only an Amazon SQS queue, a DynamoDB stream and a Kinesis stream
+/// are), a source of another account, a service that answered something else, and one that
+/// did not answer.
 pub(super) async fn source_is_absent(
     callback: &smithy_server_runtime::EmbeddedEmulator,
     source: &str,
@@ -3028,6 +3221,19 @@ pub(super) async fn source_is_absent(
                     .is_some_and(::aws_sdk_dynamodbstreams::operation::describe_stream::DescribeStreamError::is_resource_not_found_exception)
             })
         }
+        KINESIS_NAMESPACE if parsed.resource_type() == KINESIS_STREAM_RESOURCE => {
+            let answered = clients
+                .kinesis(callback, parsed.region)
+                .describe_stream_summary()
+                .stream_arn(source)
+                .send()
+                .await;
+            answered.err().is_some_and(|error| {
+                error
+                    .as_service_error()
+                    .is_some_and(::aws_sdk_kinesis::operation::describe_stream_summary::DescribeStreamSummaryError::is_resource_not_found_exception)
+            })
+        }
         _ => false,
     }
 }
@@ -3056,6 +3262,7 @@ struct Clients {
     lambda: Option<(String, ::aws_sdk_lambda::Client)>,
     sfn: Option<(String, ::aws_sdk_sfn::Client)>,
     dynamodbstreams: Option<(String, ::aws_sdk_dynamodbstreams::Client)>,
+    kinesis: Option<(String, ::aws_sdk_kinesis::Client)>,
 }
 
 /// Build each client the same way: over the in-process callback into this same
@@ -3114,6 +3321,39 @@ impl Clients {
     // DynamoDB Streams publishes its own endpoint under the DynamoDB one
     // (`streams.dynamodb.<region>.amazonaws.com`) and signs as `dynamodb`.
     callback_client!(dynamodbstreams, aws_sdk_dynamodbstreams, "streams.dynamodb");
+    callback_client!(kinesis, aws_sdk_kinesis, "kinesis");
+}
+
+#[cfg(test)]
+mod test_support {
+    use super::{Duration, RunningPipe, Source, Target};
+
+    /// A resolved pipe whose source is a Kinesis stream read from `starting_position` and
+    /// whose target is an Amazon SQS queue: what the unit tests of the Kinesis source stage
+    /// read their configuration off.
+    pub(super) fn kinesis_run(starting_position: &str) -> RunningPipe {
+        RunningPipe {
+            source: Source::KinesisStream {
+                starting_position: starting_position.to_string(),
+                starting_position_timestamp: None,
+            },
+            source_arn: "arn:aws:kinesis:us-east-1:000000000000:stream/orders".to_string(),
+            source_region: "us-east-1".to_string(),
+            batch_size: 10,
+            batching_window: Duration::ZERO,
+            filters: Vec::new(),
+            enrichment: None,
+            enrichment_template: None,
+            target_template: None,
+            target: Target::Queue {
+                url: "https://sqs.us-east-1.amazonaws.com/000000000000/results".to_string(),
+                region: "us-east-1".to_string(),
+                message_group_id: None,
+                message_deduplication_id: None,
+            },
+            target_arn: "arn:aws:sqs:us-east-1:000000000000:results".to_string(),
+        }
+    }
 }
 
 #[cfg(test)]

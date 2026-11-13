@@ -363,7 +363,11 @@ async fn send(router: &MultiServiceRouter, url: &str, case: &str, body: &str) {
 /// One payload in a form two of them can be compared by: the JSON it spells, with every
 /// object's members in one order, or the text it is when it spells no JSON. A render is
 /// asserted on the VALUE it carries and not on the byte order a serializer chose for it.
-fn canonical(payload: &str) -> String {
+///
+/// `pub(crate)` so the suite that asserts the same reading of a Kinesis record's payload
+/// (`tests/all/pipe_kinesis_stream_source.rs`) compares a render the same way rather than
+/// copying it.
+pub(crate) fn canonical(payload: &str) -> String {
     match serde_json::from_str::<Value>(payload) {
         Ok(value) => ordered(&value).to_string(),
         Err(_) => payload.to_string(),

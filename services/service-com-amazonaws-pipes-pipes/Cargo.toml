@@ -42,6 +42,11 @@ aws-sdk-sfn = { version = "1", default-features = false }
 # `DescribeStream` for the stream's shards, `GetShardIterator` for the position
 # `StartingPosition` names, and `GetRecords` for the changes themselves.
 aws-sdk-dynamodbstreams = { version = "1", default-features = false }
+# The Kinesis Data Streams surface a Kinesis-sourced pipe reads its records through:
+# `ListShards` for the stream's shards, `GetShardIterator` for the position
+# `StartingPosition` names, `GetRecords` for the records themselves, and
+# `DescribeStreamSummary` for whether the stream a pipe names is there at all.
+aws-sdk-kinesis = { version = "1", default-features = false }
 # A binary message attribute travels as base64 in a record envelope.
 base64 = "0.22"
 # The CloudWatch store a RUNNING pipe publishes its own metrics to (the
@@ -78,6 +83,10 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 # changes are applied with `PutItem`/`DeleteItem` and the pipe reads them off the stream.
 service-com-amazonaws-dynamodb-dynamodb-20120810 = { workspace = true }
 service-com-amazonaws-dynamodbstreams-dynamodbstreams-20120810 = { workspace = true }
+# A Kinesis-sourced pipe reads the very records `PutRecord`/`PutRecords` wrote, so the
+# Kinesis service is mounted beside pipes in that suite and the records are put the way a
+# client puts them.
+service-com-amazonaws-kinesis-kinesis-20131202 = { workspace = true }
 # The role a pipe's stages act as lives in IAM, and the metrics a running pipe publishes
 # about its executions are read back through CloudWatch, so both are mounted beside pipes
 # on one engine in the metrics suite.
