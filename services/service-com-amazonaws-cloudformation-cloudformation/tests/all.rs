@@ -121,8 +121,8 @@ mod duplicate_resource_identifiers;
 mod dynamic_reference_names;
 #[path = "all/dynamic_references.rs"]
 mod dynamic_references;
-#[path = "all/dynamodb_table_creation_window.rs"]
-mod dynamodb_table_creation_window;
+#[path = "all/dynamodb_kinesis_streaming_estate.rs"]
+mod dynamodb_kinesis_streaming_estate;
 #[path = "all/dynamodb_table_resources.rs"]
 mod dynamodb_table_resources;
 #[path = "all/dynamodb_table_settings.rs"]
@@ -595,3 +595,5 @@ mod expired_wait_rollback;
 mod ssm_parameter_types;
 #[path = "all/mwaa_environment_resource_type.rs"]
 mod mwaa_environment_resource_type;
+#[path = "all/dynamodb_table_creation_window.rs"]
+mod dynamodb_table_creation_window;
