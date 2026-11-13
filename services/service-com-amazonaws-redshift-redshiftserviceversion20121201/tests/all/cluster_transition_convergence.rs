@@ -26,11 +26,9 @@
 //! service resolves none: a well-formed ARN naming nothing is associated like any
 //! other, which is the row that pins it.
 
-use std::time::{Duration, Instant};
-
 use service_com_amazonaws_redshift_redshiftserviceversion20121201::state;
 
-use crate::cluster_lifecycle::{all_text, Answer, Emulator};
+use crate::cluster_lifecycle::{all_text, Answer, Emulator, POLL_INTERVAL};
 
 /// The example role ARN the model gives for `ClusterIamRole$IamRoleArn`
 /// ("for example, `arn:aws:iam::123456789012:role/RedshiftCopyUnload`").
@@ -39,14 +37,6 @@ const ROLE_COPY_UNLOAD: &str = "arn:aws:iam::123456789012:role/RedshiftCopyUnloa
 const ROLE_SPECTRUM: &str = "arn:aws:iam::123456789012:role/RedshiftSpectrum";
 /// A well-formed ARN naming a role nothing ever created.
 const ROLE_NONEXISTENT: &str = "arn:aws:iam::123456789012:role/RedshiftCopyUnload-does-not-exist";
-
-/// How long a poll loop is given before the suite calls the transition
-/// unobservable — generous next to the span one is due after, so a loaded runner
-/// cannot fail the suite, and far short of a client's patience.
-const POLL_DEADLINE: Duration = Duration::from_secs(10);
-
-/// The gap between two polls of one loop.
-const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// `call` takes borrowed pairs; the rows build owned parameters.
 fn borrowed(params: &[(String, String)]) -> Vec<(&str, &str)> {
@@ -84,41 +74,27 @@ fn settled_set(arns: &[&str]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Poll `DescribeClusters` until `settled` holds, answering the body it held on
-/// and how many polls that took; panics quoting the last answer when the deadline
-/// passes first.
+/// Poll `DescribeClusters` until `settled` holds of the body, answering the answer
+/// it held on and how many polls that took.
 ///
-/// This loop makes NO mutating call, so only a transition the clock owes can end
-/// it — which is exactly the property under test.
+/// The loop itself is the harness's ([`Emulator::poll_until`]), so this suite keeps
+/// only what is its own: which reporting call to make, and what settled looks like
+/// in its body. That loop makes NO mutating call, so only a transition the clock
+/// owes can end it — which is exactly the property under test.
 async fn poll_until(
     emulator: &Emulator,
     case: &str,
     cluster: &str,
     settled: impl Fn(&str) -> bool,
 ) -> (Answer, usize) {
-    let deadline = Instant::now() + POLL_DEADLINE;
-    let mut polls = 0usize;
-    let mut last = String::new();
-    while Instant::now() < deadline {
-        let read = emulator
-            .call("DescribeClusters", &[("ClusterIdentifier", cluster)])
-            .await;
-        polls += 1;
-        assert_eq!(
-            read.status, 200,
-            "case {case:?}: poll {polls} expected DescribeClusters 200, got {} with body {}",
-            read.status, read.body
-        );
-        if settled(&read.body) {
-            return (read, polls);
-        }
-        last = read.body;
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-    panic!(
-        "case {case:?}: the poll loop never settled within {POLL_DEADLINE:?} ({polls} polls); \
-         last answer: {last}"
-    );
+    emulator
+        .poll_until(
+            case,
+            "DescribeClusters",
+            &[("ClusterIdentifier", cluster)],
+            |answer| settled(&answer.body),
+        )
+        .await
 }
 
 /// One row: the case name, the action, the parameters it carries, the

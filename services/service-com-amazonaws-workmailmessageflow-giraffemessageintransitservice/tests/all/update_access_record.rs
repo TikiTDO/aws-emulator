@@ -14,8 +14,8 @@
 //! eligibility refusals (`ResourceNotFoundException`, `MessageFrozen`), the content
 //! refusal (`MessageRejected`) and the location refusal
 //! (`InvalidContentLocation`) — each driven over the wire through the same harness
-//! as the rest of the suite, with a capturing `tracing` subscriber scoped to the
-//! calling thread. Nothing is written to disk and no global subscriber is installed.
+//! as the rest of the suite, with a capturing `tracing` subscriber whose records are
+//! scoped to the calling thread. Nothing is written to disk.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};

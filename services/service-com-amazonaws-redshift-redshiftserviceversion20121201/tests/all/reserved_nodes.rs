@@ -25,7 +25,7 @@
 //! EXCHANGE suite reads the offering catalog, buys a reservation and polls a
 //! clock-owed state change through this one copy of them.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use service_com_amazonaws_redshift_redshiftserviceversion20121201::state;
 
@@ -61,12 +61,12 @@ pub(crate) const ONE_YEAR: &str = "31536000";
 pub(crate) const THREE_YEARS: &str = "94608000";
 
 /// How long a poll loop is given before the suite calls the clock-owed payment
-/// confirmation unobservable — generous next to the span it is due after, so a
-/// loaded runner cannot fail the suite.
-pub(crate) const POLL_DEADLINE: Duration = Duration::from_secs(10);
-
-/// The gap between two polls of one loop.
-pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// confirmation unobservable, and the gap between two polls of one loop: the
+/// harness's, so every suite of this crate waits on one set of bounds.
+///
+/// Re-exported for the sibling exchange suite, which polls through the helper
+/// below and reports the same bounds in its own messages.
+pub(crate) use crate::cluster_lifecycle::{POLL_DEADLINE, POLL_INTERVAL};
 
 /// The value of `<tag>` in one served record, asserting the record carries
 /// exactly one.

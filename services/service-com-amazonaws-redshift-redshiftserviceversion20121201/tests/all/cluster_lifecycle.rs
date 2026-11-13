@@ -11,7 +11,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use service_com_amazonaws_redshift_redshiftserviceversion20121201::ops::types::Snapshot;
 use service_com_amazonaws_redshift_redshiftserviceversion20121201::state;
@@ -24,6 +24,30 @@ use smithy_server_runtime::MultiServiceRouter;
 /// `pub(crate)` so a sibling suite that builds an ARN for the same endpoint reads
 /// the region from here rather than repeating the literal.
 pub(crate) const REGION: &str = "us-west-2";
+
+/// How long a poll loop of this harness is given before it calls the condition it
+/// waits on unobservable — generous next to the span a clock-owed transition is
+/// due after, so a loaded runner cannot fail a suite, and far short of a client's
+/// patience.
+///
+/// `pub(crate)` with [`POLL_INTERVAL`] and [`Emulator::poll_until`] so a suite
+/// waits for the CONDITION through this one copy of the loop rather than sleeping
+/// for a fixed time, which is what makes a test pass or fail by how fast the host
+/// runs.
+pub(crate) const POLL_DEADLINE: Duration = Duration::from_secs(10);
+
+/// The gap between two polls of one loop.
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// How many FRESH resources a case is allowed to start before it calls a
+/// transient state unobservable.
+///
+/// A resource is transient for a whole span, and two reads of it take
+/// microseconds, so only an attempt that happens to straddle the due instant
+/// misses the window — and each attempt starts its own resource, so a loaded
+/// runner costs a case more attempts rather than failing it. An implementation
+/// where reading settles the resource leaves no attempt a window at all.
+const TRANSIENT_ATTEMPTS: usize = 64;
 
 /// One emulator: a single shared engine behind a router mounting Redshift and
 /// Amazon EC2 — the service that owns the subnets a cluster subnet group is made
@@ -625,6 +649,43 @@ impl Emulator {
         Answer {
             status: response.status().as_u16(),
             body: String::from_utf8_lossy(response.body()).into_owned(),
+        }
+    }
+
+    /// Call this REPORTING action until `settled` holds of the answer it serves,
+    /// answering that answer and how many polls it took; panics quoting the last
+    /// answer when [`POLL_DEADLINE`] passes first.
+    ///
+    /// The loop makes no mutating call, so only a transition the clock already
+    /// owed can end it — and it waits for that CONDITION rather than for a fixed
+    /// time, so a slow or loaded host only costs it more polls.
+    pub(crate) async fn poll_until(
+        &self,
+        case: &str,
+        action: &str,
+        params: &[(&str, &str)],
+        settled: impl Fn(&Answer) -> bool,
+    ) -> (Answer, usize) {
+        let deadline = Instant::now() + POLL_DEADLINE;
+        let mut polls = 0usize;
+        loop {
+            let read = self.call(action, params).await;
+            polls += 1;
+            assert_eq!(
+                read.status, 200,
+                "case {case}: poll {polls} expected {action} 200, got {} with body {}",
+                read.status, read.body
+            );
+            if settled(&read) {
+                return (read, polls);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "case {case}: {action} never reported the condition within \
+                 {POLL_DEADLINE:?} ({polls} polls); last answer: {}",
+                read.body
+            );
+            tokio::time::sleep(POLL_INTERVAL).await;
         }
     }
 
@@ -1455,71 +1516,103 @@ async fn pagination_walks_the_whole_collection_through_the_marker() {
     );
 }
 
+/// Provisioning settles on the CLOCK alone, and a read materialises only what
+/// the clock already owed: it neither moves the resource on by itself nor jumps
+/// the span.
+///
+/// Both halves are decided by a CONDITION, never by how fast the host runs. The
+/// transient half retries on a FRESH cluster until one attempt's two
+/// back-to-back reads both land inside the span: a read never advances a
+/// resource, so such an attempt reports the transient status twice, while an
+/// attempt whose reads straddle the due instant observed no transient window at
+/// all and is retried rather than asserted on. An implementation where a read
+/// settles the resource — before or after reporting it — produces no such
+/// attempt for any cluster, so [`TRANSIENT_ATTEMPTS`] attempts all failing to
+/// see it is what fails the test; nothing here is bounded by the clock. The
+/// settled half then polls each reporting operation until the clock-owed
+/// transition is materialised, making no mutating call while it waits.
 #[tokio::test]
 async fn provisioning_settles_on_the_clock_and_a_read_changes_nothing_else() {
     let emulator = Emulator::new();
 
-    let started = std::time::Instant::now();
-    let created = emulator.create_minimal("clock-cluster").await;
-    assert_eq!(
-        created.text("ClusterStatus").as_deref(),
-        Some("creating"),
-        "case create: the span is never zero, so the caller sees the transient status, got {:?}",
-        created.text("ClusterStatus")
-    );
-    let snapshot = emulator
-        .call(
-            "CreateClusterSnapshot",
-            &[
-                ("SnapshotIdentifier", "clock-snap"),
-                ("ClusterIdentifier", "clock-cluster"),
-            ],
-        )
-        .await;
-    assert_eq!(
-        snapshot.text("Status").as_deref(),
-        Some("creating"),
-        "case snapshot: expected the transient status, got {:?}",
-        snapshot.text("Status")
-    );
+    let mut observed_transient = None;
+    for attempt in 1..=TRANSIENT_ATTEMPTS {
+        let cluster = format!("clock-cluster-{attempt}");
+        let snapshot_id = format!("clock-snap-{attempt}");
 
-    // Two reads before the transition falls due both report the transient
-    // status: a read never moves the resource on by itself. The guard keeps the
-    // assertion honest on a loaded runner — if the span has already elapsed the
-    // transient state was simply not observable, and the only claim left is that
-    // the two reads agree.
-    let first = emulator
-        .call("DescribeClusters", &[("ClusterIdentifier", "clock-cluster")])
-        .await;
-    let second = emulator
-        .call("DescribeClusters", &[("ClusterIdentifier", "clock-cluster")])
-        .await;
-    if started.elapsed() < state::PROVISIONING_SPAN {
+        let created = emulator.create_minimal(&cluster).await;
         assert_eq!(
-            (first.text("ClusterStatus"), second.text("ClusterStatus")),
-            (
-                Some("creating".to_string()),
-                Some("creating".to_string())
-            ),
-            "case repeated read: expected both reads before the due instant to report creating, got {:?} then {:?}",
-            first.text("ClusterStatus"),
-            second.text("ClusterStatus")
+            created.text("ClusterStatus").as_deref(),
+            Some("creating"),
+            "case create {cluster}: the span is never zero, so the caller sees the transient \
+             status, got {:?}",
+            created.text("ClusterStatus")
         );
-    } else {
+        let snapshot = emulator
+            .call(
+                "CreateClusterSnapshot",
+                &[
+                    ("SnapshotIdentifier", snapshot_id.as_str()),
+                    ("ClusterIdentifier", cluster.as_str()),
+                ],
+            )
+            .await;
         assert_eq!(
-            first.text("ClusterStatus"),
-            second.text("ClusterStatus"),
-            "case repeated read: expected both reads to agree, got {:?} then {:?}",
-            first.text("ClusterStatus"),
-            second.text("ClusterStatus")
+            snapshot.text("Status").as_deref(),
+            Some("creating"),
+            "case snapshot {snapshot_id}: expected the transient status, got {:?}",
+            snapshot.text("Status")
+        );
+
+        // Two reads back to back. Both reporting the transient status is the
+        // claim: a read never moves the resource on by itself.
+        let first = emulator
+            .call("DescribeClusters", &[("ClusterIdentifier", &cluster)])
+            .await;
+        let second = emulator
+            .call("DescribeClusters", &[("ClusterIdentifier", &cluster)])
+            .await;
+        let read_statuses = (first.text("ClusterStatus"), second.text("ClusterStatus"));
+        let observed = (read_statuses.0.as_deref(), read_statuses.1.as_deref());
+        if observed == (Some(state::STATUS_CREATING), Some(state::STATUS_CREATING)) {
+            observed_transient = Some((cluster, snapshot_id));
+            break;
+        }
+        // Neither read may ever REGRESS, whichever side of the due instant it
+        // fell on: the only transition this cluster owes is creating ->
+        // available.
+        for (which, status) in [("first", observed.0), ("second", observed.1)] {
+            assert!(
+                status == Some(state::STATUS_CREATING) || status == Some(state::STATUS_AVAILABLE),
+                "case repeated read of {cluster}: expected the {which} read to report creating \
+                 or available, got {status:?}"
+            );
+        }
+        assert!(
+            observed.0 != Some(state::STATUS_AVAILABLE)
+                || observed.1 != Some(state::STATUS_CREATING),
+            "case repeated read of {cluster}: expected no read to regress, got {:?} then {:?}",
+            observed.0,
+            observed.1
         );
     }
+    let Some((cluster, snapshot_id)) = observed_transient else {
+        panic!(
+            "case repeated read: none of {TRANSIENT_ATTEMPTS} fresh clusters reported the \
+             transient status to two reads in a row — a read that settles the resource it \
+             reports leaves no transient window for any of them"
+        );
+    };
 
-    // Past the due instant the clock-owed transition is materialised.
-    let remaining = state::PROVISIONING_SPAN.saturating_sub(started.elapsed());
-    tokio::time::sleep(remaining + Duration::from_millis(250)).await;
-    let settled = emulator
-        .call("DescribeClusters", &[("ClusterIdentifier", "clock-cluster")])
+    // Past the due instant the clock-owed transition is materialised — reached
+    // by polling the read alone, so nothing but the clock can have moved it.
+    let (settled, _) = emulator
+        .poll_until(
+            "settled cluster",
+            "DescribeClusters",
+            &[("ClusterIdentifier", &cluster)],
+            |answer| answer.text("ClusterStatus").as_deref() == Some(state::STATUS_AVAILABLE),
+        )
         .await;
     assert_eq!(
         settled.text("ClusterStatus").as_deref(),
@@ -1533,10 +1626,31 @@ async fn provisioning_settles_on_the_clock_and_a_read_changes_nothing_else() {
         "case settled cluster: expected the availability status to follow, got {:?}",
         settled.text("ClusterAvailabilityStatus")
     );
-    let settled_snapshots = emulator
-        .call(
+    // And a read of the settled cluster still changes nothing: the next one
+    // reports the same thing.
+    let again = emulator
+        .call("DescribeClusters", &[("ClusterIdentifier", &cluster)])
+        .await;
+    assert_eq!(
+        (
+            again.text("ClusterStatus"),
+            again.text("ClusterAvailabilityStatus")
+        ),
+        (
+            settled.text("ClusterStatus"),
+            settled.text("ClusterAvailabilityStatus")
+        ),
+        "case settled cluster read twice: expected the second read to agree, got {:?} / {:?}",
+        again.text("ClusterStatus"),
+        again.text("ClusterAvailabilityStatus")
+    );
+
+    let (settled_snapshots, _) = emulator
+        .poll_until(
+            "settled snapshot",
             "DescribeClusterSnapshots",
-            &[("SnapshotIdentifier", "clock-snap")],
+            &[("SnapshotIdentifier", &snapshot_id)],
+            |answer| answer.text("Status").as_deref() == Some(state::STATUS_AVAILABLE),
         )
         .await;
     assert_eq!(
