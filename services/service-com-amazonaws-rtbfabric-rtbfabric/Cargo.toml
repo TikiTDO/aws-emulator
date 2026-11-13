@@ -30,6 +30,11 @@ hex = { workspace = true }
 # by, so a caller-chosen clientToken cannot grow the bytes retained per record.
 sha2 = { workspace = true }
 tracing = { workspace = true }
+# `validation_message`: the cross-service home for the words AWS states a boundary
+# refusal with — the `N validation error(s) detected:` envelope, the requirement
+# sentences and the unanchored `@pattern` expression — which `src/service/validation.rs`
+# delegates this service's refusal wording to.
+service-common = { path = "../common" }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

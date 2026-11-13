@@ -38,10 +38,11 @@ pub const DEFAULT_REGION: &str = "us-east-1";
 /// emulator models neither Service Quotas nor an account's adjustments, so this
 /// is the emulator's OWN bound on the store rather than a claim about any
 /// account's limit. It sits far above any workflow an emulator serves, and it is
-/// what stops the state growing without end: `DeleteRequesterGateway` /
-/// `DeleteResponderGateway` are still stubs, so until they exist nothing releases
-/// a gateway record and this bound is the only one. When they land, they release
-/// the record AND forget that gateway's client tokens.
+/// what stops the state growing without end: `DeleteRequesterGateway` releases a
+/// requester gateway's record, its links and its client tokens
+/// ([`ComAmazonawsRtbfabricRtbfabricState::release_requester_gateway`]), while
+/// `DeleteResponderGateway` is still a stub, so for a responder gateway this bound
+/// is the only thing that holds.
 pub const GATEWAY_QUOTA: usize = 1_000;
 
 /// How many links the store holds before `CreateLink` refuses with the modelled
@@ -68,6 +69,13 @@ pub const IDEMPOTENCY_QUOTA: usize = 2 * GATEWAY_QUOTA;
 pub const GATEWAY_STATUS_PENDING_CREATION: &str = "PENDING_CREATION";
 /// `RequesterGatewayStatus`/`ResponderGatewayStatus` member: the gateway is usable.
 pub const GATEWAY_STATUS_ACTIVE: &str = "ACTIVE";
+/// `RequesterGatewayStatus`/`ResponderGatewayStatus` member: terminal, the
+/// gateway is gone.
+pub const GATEWAY_STATUS_DELETED: &str = "DELETED";
+
+/// The message this service's `ResourceNotFoundException` carries: fixed text
+/// naming neither the resource asked for nor its id.
+pub const RESOURCE_NOT_FOUND_MESSAGE: &str = "The requested resource was not found.";
 
 /// `LinkStatus` member: the link request is accepted and not yet put to the peer.
 pub const LINK_STATUS_PENDING_REQUEST: &str = "PENDING_REQUEST";
@@ -261,7 +269,8 @@ pub struct LinkCounts {
 #[derive(Debug, Default)]
 pub struct ComAmazonawsRtbfabricRtbfabricState {
     /// Keyed by `gatewayId`. Bounded by [`GATEWAY_QUOTA`]; released by
-    /// `DeleteRequesterGateway` once that is implemented.
+    /// `DeleteRequesterGateway` through
+    /// [`release_requester_gateway`](Self::release_requester_gateway).
     pub requester_gateways: HashMap<String, RequesterGateway>,
     /// Keyed by `gatewayId`. Bounded by [`GATEWAY_QUOTA`]; released by
     /// `DeleteResponderGateway` once that is implemented.
@@ -366,6 +375,26 @@ impl ComAmazonawsRtbfabricRtbfabricState {
             }
         }
         counts
+    }
+
+    /// Release the requester gateway `gateway_id`: everything the store holds
+    /// BECAUSE of that gateway goes with it, so no later read can report a
+    /// resource whose gateway is gone.
+    ///
+    /// `None` when no requester gateway of that id is stored, which is the
+    /// not-found the caller is answered with. Otherwise the record removed, and
+    /// with it:
+    ///
+    /// * every link the gateway was an end of — a link is one record joining two
+    ///   stored gateways and cannot outlive either of them;
+    /// * every client-token record that minted it, so the id a replayed token
+    ///   would answer with is never one the store no longer holds.
+    pub fn release_requester_gateway(&mut self, gateway_id: &str) -> Option<RequesterGateway> {
+        let released = self.requester_gateways.remove(gateway_id)?;
+        self.links.retain(|_, link| !link.has_end(gateway_id));
+        self.idempotency
+            .retain(|_, record| record.resource_id != gateway_id);
+        Some(released)
     }
 }
 

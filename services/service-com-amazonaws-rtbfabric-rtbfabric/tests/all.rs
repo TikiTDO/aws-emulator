@@ -15,7 +15,11 @@
 mod gateway_link_lifecycle;
 #[path = "all/link_rejection.rs"]
 mod link_rejection;
+#[path = "all/requester_gateway_deletion.rs"]
+mod requester_gateway_deletion;
 #[path = "all/requester_gateway_listing.rs"]
 mod requester_gateway_listing;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/validation_message_wording.rs"]
+mod validation_message_wording;
