@@ -1818,6 +1818,19 @@ pub(super) fn return_values(
             without_terminal_dot(name).to_string(),
             attributes,
         ),
+        "AWS::WAFv2::LoggingConfiguration" => {
+            attributes.insert("ManagedByFirewallManager".to_string(), "false".to_string());
+            let resource_arn = properties
+                .get("ResourceArn")
+                .and_then(|v| text(v, scope, 0, budget))
+                .unwrap_or_else(|| name.to_string());
+            attributes.insert("ResourceArn".to_string(), resource_arn.clone());
+            (resource_arn, attributes)
+        }
+        "AWS::SES::VdmAttributes" => {
+            attributes.insert("VdmAttributesResourceId".to_string(), name.to_string());
+            (name.to_string(), attributes)
+        }
         _ => (name.to_string(), attributes),
     }
 }

@@ -144,6 +144,10 @@ fn identifying_return_value(resource_type: &str) -> Option<&'static str> {
         // service minted, and an activation by the ARN of the CA it activates.
         ACMPCA_CERTIFICATE_AUTHORITY | ACMPCA_CERTIFICATE => "Arn",
         ACMPCA_CERTIFICATE_AUTHORITY_ACTIVATION => "CertificateAuthorityArn",
+        "AWS::EC2::VPNGatewayRoutePropagation" => "Id",
+        "AWS::WAFv2::LoggingConfiguration" => "ResourceArn",
+        "AWS::SES::VdmAttributes" => "VdmAttributesResourceId",
+        "AWS::SES::ConfigurationSetEventDestination" => "Id",
         _ => return None,
     };
     Some(identifier)
