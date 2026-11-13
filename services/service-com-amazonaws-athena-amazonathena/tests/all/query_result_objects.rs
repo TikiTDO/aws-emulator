@@ -524,6 +524,231 @@ async fn the_saved_results_hold_the_rows_the_run_produced() {
     }
 }
 
+/// Which of the two results locations one query writes under, where a workgroup names one
+/// and the request names another.
+struct Enforcement {
+    /// What the row is.
+    case: &'static str,
+    /// The workgroup the query runs in.
+    work_group: &'static str,
+    /// That workgroup's configuration, as `CreateWorkGroup` takes it.
+    configuration: Value,
+    /// The prefix the request names a results location at, where it names one.
+    requested: Option<&'static str>,
+    /// The prefix the results object must land under.
+    honored: &'static str,
+    /// A prefix that must hold nothing afterwards, where this row has one the resolution
+    /// passed over.
+    ignored: Option<&'static str>,
+}
+
+/// `WorkGroupConfiguration$EnforceWorkGroupConfiguration` decides WHICH of the two results
+/// locations a query writes under: with it set, the workgroup's own configuration replaces
+/// whatever the request named, and with it unset the request's own configuration stands
+/// with the workgroup's location only behind it. A workgroup that specifies no results
+/// location has none to enforce, so the request's stands there as well.
+///
+/// The rows differ along what the rule generalises over: the enforcement setting, whether
+/// the request names a location of its own, and whether the workgroup specifies one at all.
+#[tokio::test]
+async fn enforcement_decides_which_resolved_location_the_results_land_under() {
+    let router = emulator();
+    create_bucket(&router, BUCKET).await;
+
+    let cases: Vec<Enforcement> = vec![
+        Enforcement {
+            case: "enforced over a location the request named",
+            work_group: "enforced-over-client",
+            configuration: json!({
+                "ResultConfiguration": { "OutputLocation": format!("s3://{BUCKET}/enforced-wg/") },
+                "EnforceWorkGroupConfiguration": true,
+            }),
+            requested: Some("enforced-client"),
+            honored: "enforced-wg",
+            ignored: Some("enforced-client"),
+        },
+        Enforcement {
+            case: "enforcement off, with a location the request named",
+            work_group: "unenforced-with-client",
+            configuration: json!({
+                "ResultConfiguration": {
+                    "OutputLocation": format!("s3://{BUCKET}/unenforced-wg/")
+                },
+                "EnforceWorkGroupConfiguration": false,
+            }),
+            requested: Some("unenforced-client"),
+            honored: "unenforced-client",
+            ignored: Some("unenforced-wg"),
+        },
+        Enforcement {
+            case: "enforcement off, with no location of the request's own",
+            work_group: "unenforced-without-client",
+            configuration: json!({
+                "ResultConfiguration": { "OutputLocation": format!("s3://{BUCKET}/fallback-wg/") },
+                "EnforceWorkGroupConfiguration": false,
+            }),
+            requested: None,
+            honored: "fallback-wg",
+            ignored: None,
+        },
+        Enforcement {
+            case: "enforcement on with no location to enforce",
+            work_group: "enforcing-nothing",
+            configuration: json!({ "EnforceWorkGroupConfiguration": true }),
+            requested: Some("nothing-enforced-client"),
+            honored: "nothing-enforced-client",
+            ignored: None,
+        },
+    ];
+
+    for enforcement in &cases {
+        create_work_group(
+            &router,
+            enforcement.work_group,
+            enforcement.configuration.clone(),
+        )
+        .await;
+    }
+
+    // The same statement in every row, so what differs is only the resolution.
+    let sql = "SELECT 'resolved' AS marker";
+    let mut started: Vec<(&Enforcement, String)> = Vec::new();
+    for enforcement in &cases {
+        let mut request = json!({ "QueryString": sql, "WorkGroup": enforcement.work_group });
+        if let Some(prefix) = enforcement.requested {
+            request["ResultConfiguration"] =
+                json!({ "OutputLocation": format!("s3://{BUCKET}/{prefix}/") });
+        }
+        started.push((enforcement, start(&router, enforcement.case, &request).await));
+    }
+
+    for (enforcement, id) in &started {
+        let case = enforcement.case;
+        let found = succeeded(&router, case, id).await;
+        let key = format!("{}/{id}{RESULT_OBJECT_ROWS_SUFFIX}", enforcement.honored);
+
+        // The key the control plane NAMES is the key the data plane HOLDS.
+        assert_eq!(
+            found["ResultConfiguration"]["OutputLocation"].as_str(),
+            Some(format!("s3://{BUCKET}/{key}").as_str()),
+            "case {case:?}: expected the results object s3://{BUCKET}/{key}, got {found:?}"
+        );
+        // Listed under the prefix as a FOLDER — with its separator — so a key that merely
+        // starts with the same characters cannot be counted as one of this row's.
+        let listed = listed_keys(&router, BUCKET, &format!("{}/", enforcement.honored)).await;
+        assert_eq!(
+            listed,
+            vec![key.clone(), format!("{key}{RESULT_METADATA_SUFFIX}")],
+            "case {case:?}: expected s3://{BUCKET}/{} to hold {key} and its metadata, got \
+             {listed:?}",
+            enforcement.honored
+        );
+        let (status, body) = object(&router, BUCKET, &key).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: GetObject(s3://{BUCKET}/{key}) must answer 200, got {status} with \
+             {body:?}"
+        );
+        assert_eq!(
+            body, "\"marker\"\n\"resolved\"\n",
+            "case {case:?}: expected the rows the run produced, got {body:?}"
+        );
+
+        // The location the resolution passed over received nothing at all.
+        if let Some(ignored) = enforcement.ignored {
+            let passed_over = listed_keys(&router, BUCKET, &format!("{ignored}/")).await;
+            assert!(
+                passed_over.is_empty(),
+                "case {case:?}: expected s3://{BUCKET}/{ignored} to stay empty, got \
+                 {passed_over:?}"
+            );
+        }
+    }
+}
+
+/// Enforcement is read AT SUBMIT TIME: turning it off on a workgroup that was enforcing its
+/// own location sends the next query's results to the location that query names, and
+/// turning it back on sends them to the workgroup's again — while everything already saved
+/// stays where it was saved.
+#[tokio::test]
+async fn flipping_enforcement_moves_where_the_next_query_writes() {
+    let router = emulator();
+    create_bucket(&router, BUCKET).await;
+    let work_group = "flipping";
+    create_work_group(
+        &router,
+        work_group,
+        json!({
+            "ResultConfiguration": { "OutputLocation": format!("s3://{BUCKET}/governed/") },
+            "EnforceWorkGroupConfiguration": true,
+        }),
+    )
+    .await;
+
+    // The same submission at every step: one statement, naming one location of its own.
+    let submission = json!({
+        "QueryString": "SELECT 'flipped' AS marker",
+        "WorkGroup": work_group,
+        "ResultConfiguration": { "OutputLocation": format!("s3://{BUCKET}/client/") },
+    });
+
+    // (case, the enforcement setting in force, the prefix the results must land under).
+    let steps: Vec<(&str, bool, &str)> = vec![
+        ("enforced", true, "governed"),
+        ("enforcement turned off", false, "client"),
+        ("enforcement turned back on", true, "governed"),
+    ];
+
+    let mut started: Vec<(&str, String, &str)> = Vec::new();
+    for (case, enforce, prefix) in &steps {
+        update_work_group(
+            &router,
+            work_group,
+            json!({ "EnforceWorkGroupConfiguration": enforce }),
+        )
+        .await;
+        started.push((case, start(&router, case, &submission).await, prefix));
+    }
+
+    for (case, id, prefix) in &started {
+        succeeded(&router, case, id).await;
+        let key = format!("{prefix}/{id}{RESULT_OBJECT_ROWS_SUFFIX}");
+        let (status, body) = object(&router, BUCKET, &key).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: GetObject(s3://{BUCKET}/{key}) must answer 200, got {status} with \
+             {body:?}"
+        );
+        assert_eq!(
+            body, "\"marker\"\n\"flipped\"\n",
+            "case {case:?}: expected the rows the run produced, got {body:?}"
+        );
+    }
+
+    // Each prefix holds exactly the executions the setting in force sent to it, and no
+    // query's results moved after they were saved.
+    for (prefix, expected) in [
+        ("governed", vec![&started[0].1, &started[2].1]),
+        ("client", vec![&started[1].1]),
+    ] {
+        let mut wanted: Vec<String> = expected
+            .iter()
+            .flat_map(|id| {
+                let key = format!("{prefix}/{id}{RESULT_OBJECT_ROWS_SUFFIX}");
+                [format!("{key}{RESULT_METADATA_SUFFIX}"), key]
+            })
+            .collect();
+        wanted.sort();
+        let mut listed = listed_keys(&router, BUCKET, &format!("{prefix}/")).await;
+        listed.sort();
+        assert_eq!(
+            listed, wanted,
+            "case {prefix:?}: expected s3://{BUCKET}/{prefix} to hold exactly {wanted:?}, got \
+             {listed:?}"
+        );
+    }
+}
+
 /// The location a query's results are saved under is the workgroup's configuration in
 /// force AT SUBMIT TIME, not the one the workgroup was created with: a workgroup whose
 /// output location is removed runs no query at all, and one restored under a new prefix
