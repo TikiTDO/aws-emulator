@@ -142,15 +142,17 @@ impl Default for HostRuntime {
 }
 
 impl HostRuntime {
-    /// The network every container this runtime starts joins.
-    /// The runtime behind `socket`, starting its containers on `network`.
+    /// The runtime behind `socket`, starting its containers on `network`, on the configured
+    /// subnet.
     pub fn at(socket: impl Into<PathBuf>, network: impl Into<String>) -> Self {
         Self {
             socket: socket.into(),
             network: network.into(),
+            ..Self::default()
         }
     }
 
+    /// The network every container this runtime starts joins.
     pub fn network(&self) -> &str {
         &self.network
     }
