@@ -127,6 +127,8 @@ mod merge_branches_fast_forward;
 mod merge_branches_squash;
 #[path = "all/merge_branches_three_way.rs"]
 mod merge_branches_three_way;
+#[path = "all/merge_commit_read.rs"]
+mod merge_commit_read;
 #[path = "all/merge_conflicts.rs"]
 mod merge_conflicts;
 #[path = "all/merge_options.rs"]

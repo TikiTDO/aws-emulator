@@ -959,6 +959,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // pull request reading from that branch follows it, through the one
         // place a branch tip moves.
         repository.set_branch_tip(&destination_branch, &merge_commit_id, now, Some(&merged_by));
+        // The merge this call made is recorded against the pair of commits it
+        // merged, so `GetMergeCommit` reports the commit this merge wrote for
+        // that pair.
+        repository.record_merge_commit(&source_tip, &destination_tip, &merge_commit_id);
         // Writing a commit and moving a reference modifies the repository, so
         // `lastModifiedDate` moves with it, exactly as it does for `PutFile` or
         // `CreateCommit`.

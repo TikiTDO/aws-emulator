@@ -793,6 +793,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // this response hands back readable through `GetCommit` and serveable to a
         // `git fetch` instead of released as unreachable by the next write.
         repository.retain_unreferenced(commit_id.clone());
+        // The merge this call made is recorded against the pair of commits it
+        // merged, so the commit it wrote is what `GetMergeCommit` reports for
+        // that pair instead of being lost with this response.
+        repository.record_merge_commit(&source_id, &destination_id, &commit_id);
         // Nothing else moved: no branch was created or advanced, and the
         // repository's own `lastModifiedDate` reports when the repository was last
         // modified, which an unreferenced commit does not do.

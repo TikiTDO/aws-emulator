@@ -52,6 +52,7 @@ impl Repository {
             unreferenced_commits: BTreeSet::new(),
             pull_requests: BTreeMap::new(),
             pull_request_tokens: BTreeMap::new(),
+            merge_commits: BTreeMap::new(),
             trigger_configuration: None,
         }
     }
@@ -772,5 +773,9 @@ impl Repository {
                 excess -= 1;
             }
         }
+
+        // A recorded merge names a commit, so the records follow the projection:
+        // one whose merge commit was just released is released with it.
+        self.release_stale_merge_commits();
     }
 }

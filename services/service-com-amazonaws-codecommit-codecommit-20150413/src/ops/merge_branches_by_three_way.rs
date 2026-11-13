@@ -810,7 +810,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let (commit_id, tree_id) = repository
             .commit_snapshot(
                 files,
-                vec![destination_id, source_id],
+                vec![destination_id.clone(), source_id.clone()],
                 user.clone(),
                 user,
                 input.commit_message.as_deref(),
@@ -828,6 +828,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // — through the one place a branch tip moves, so every OPEN pull request
         // reading from it follows the new tip.
         repository.set_branch_tip(&target, &commit_id, now, Some(&actor));
+        // The merge this call made is recorded against the pair of commits it
+        // merged, so `GetMergeCommit` reports the commit this merge wrote for
+        // that pair.
+        repository.record_merge_commit(&source_id, &destination_id, &commit_id);
         // Writing a commit and moving a reference modifies the repository, so
         // `lastModifiedDate` moves with it, exactly as it does for `PutFile` or
         // `CreateCommit`.

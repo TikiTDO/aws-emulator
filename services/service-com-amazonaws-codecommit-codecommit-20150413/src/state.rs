@@ -22,6 +22,7 @@
 pub mod conflict_report;
 pub mod git_object;
 pub mod merge;
+mod merge_record;
 mod repository;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1524,6 +1525,23 @@ pub struct Repository {
     /// carrying the same token returns that pull request instead of opening a
     /// second one.
     pub pull_request_tokens: BTreeMap<String, u64>,
+    /// The merge commits this repository already holds, keyed by the PAIR of
+    /// commits that were merged — `(source commit id, destination commit id)` —
+    /// each naming the commit that merge wrote.
+    ///
+    /// Making a merge is a write (`CreateUnreferencedMergeCommit` and the branch
+    /// and pull-request merge handlers) and reading one back is `GetMergeCommit`,
+    /// so the merge commit a merge wrote is RECORDED here rather than recomputed
+    /// from history: a squash merge's commit records the destination parent
+    /// alone, so nothing in the commit object itself says which source it
+    /// collapsed. A fast-forward merge writes no merge commit at all, so it
+    /// records none.
+    ///
+    /// Bounded by the commit projection: an entry whose merge commit or whose
+    /// merged pair the repository no longer holds is released by
+    /// [`Repository::release_stale_merge_commits`], which
+    /// [`Repository::prune_history`] runs.
+    pub merge_commits: BTreeMap<(String, String), String>,
     /// The trigger configuration `PutRepositoryTriggers` last wrote for this
     /// repository, or `None` while no caller has written one. The triggers and
     /// the id of the write that stored them are held TOGETHER

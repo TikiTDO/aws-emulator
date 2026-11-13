@@ -143,6 +143,7 @@ impl Diverged {
 }
 
 const REPOSITORY: &str = "merges";
+pub(crate) const SEEDED_REPOSITORY: &str = REPOSITORY;
 
 /// A `CreateCommit` body carrying one side's changes.
 fn commit_body(branch: &str, parent: Option<&str>, changes: &[Change<'_>]) -> Value {
@@ -618,7 +619,7 @@ fn identity() -> UserInfo {
 
 /// Store `content` as a blob of this repository and hand back the tree entry that
 /// names it.
-fn entry(repository: &mut Repository, content: &[u8]) -> FileEntry {
+pub(crate) fn entry(repository: &mut Repository, content: &[u8]) -> FileEntry {
     let blob_id = repository.insert_blob(content.to_vec());
     FileEntry {
         blob_id,
@@ -629,7 +630,7 @@ fn entry(repository: &mut Repository, content: &[u8]) -> FileEntry {
 
 /// Commit a whole tree snapshot on `branch`, moving that branch to the new
 /// commit, and hand back its id.
-fn commit_on(
+pub(crate) fn commit_on(
     repository: &mut Repository,
     branch: &str,
     parents: Vec<String>,
@@ -661,7 +662,7 @@ fn commit_on(
 /// those bounds — unrelated histories, or snapshots larger than a commit may
 /// carry — is reachable only by writing it here, as a push of such a history
 /// would have.
-fn seeded(fill: impl FnOnce(&mut Repository)) -> MultiServiceRouter {
+pub(crate) fn seeded(fill: impl FnOnce(&mut Repository)) -> MultiServiceRouter {
     let (router, engine) = emulator_with_engine();
     let mut repository = Repository::new(
         REPOSITORY,
