@@ -65,6 +65,8 @@ mod refused_member_payload_wording;
 mod region_opt_in;
 #[path = "all/region_opt_in_listing.rs"]
 mod region_opt_in_listing;
+#[path = "all/region_opt_target_refusal_over_the_whole_catalog.rs"]
+mod region_opt_target_refusal_over_the_whole_catalog;
 #[path = "all/region_opt_target_rule.rs"]
 mod region_opt_target_rule;
 #[path = "all/schema_finding_refusal_wording.rs"]
