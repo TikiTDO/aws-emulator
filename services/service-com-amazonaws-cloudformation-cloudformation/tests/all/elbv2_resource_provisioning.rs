@@ -27,15 +27,11 @@
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::stack_lifecycle::{
-    call, create_stack, describe_stack, member, resource_event_reason, router,
+    call, create_stack, describe_stack, elbv2, member, resource_event_reason, router,
     wait_for_the_transition, xml_blocks, xml_text, xml_texts, ACCOUNT_ID, REGION,
 };
 use crate::stack_outputs::wire_outputs;
 use service_com_amazonaws_cloudformation_cloudformation::state::{resource_status, status};
-
-/// The API version an Elastic Load Balancing v2 awsQuery request names beside its action,
-/// from that service's own model (`version: 2015-12-01`).
-const ELB_API_VERSION: &str = "2015-12-01";
 
 /// How many reads a stack is polled through before the case gives up on it: the load balancer
 /// its template declares comes up in `provisioning` and the deployment is held open until
@@ -64,41 +60,6 @@ const NETWORK: &str = concat!(
     "      CidrBlock: 10.9.2.0/24\n",
     "      AvailabilityZone: us-east-1b\n",
 );
-
-/// One Elastic Load Balancing v2 request over the awsQuery wire that service publishes, as
-/// the HTTP status and the XML body.
-async fn elbv2(
-    router: &MultiServiceRouter,
-    action: &str,
-    members: &[(String, String)],
-) -> (u16, String) {
-    let mut form = form_urlencoded::Serializer::new(String::new());
-    form.append_pair("Action", action);
-    form.append_pair("Version", ELB_API_VERSION);
-    for (key, value) in members {
-        form.append_pair(key, value);
-    }
-    let request = http::Request::builder()
-        .method("POST")
-        .uri(format!(
-            "https://elasticloadbalancing.{REGION}.amazonaws.com/"
-        ))
-        .header("content-type", "application/x-www-form-urlencoded")
-        .header(
-            "authorization",
-            format!(
-                "AWS4-HMAC-SHA256 \
-                 Credential=AKIDEXAMPLE/20260101/{REGION}/elasticloadbalancing/aws4_request, \
-                 SignedHeaders=host, Signature=0123456789abcdef"
-            ),
-        )
-        .body(bytes::Bytes::from(form.finish()))
-        .expect("a well-formed request");
-    let response = router.dispatch(request).await;
-    let status_code = response.status().as_u16();
-    let body = String::from_utf8_lossy(&response.into_body()).to_string();
-    (status_code, body)
-}
 
 /// One row: a template, and what the stack it deploys must report and leave behind in Elastic
 /// Load Balancing.

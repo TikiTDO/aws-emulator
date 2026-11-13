@@ -246,6 +246,51 @@ pub(crate) async fn ec2(
     (status, body)
 }
 
+/// One awsQuery call to Elastic Load Balancing v2 over the same router, answered with the
+/// HTTP status and the XML body.
+///
+/// The ONE Elastic Load Balancing v2 caller of this crate's suites: the load balancer, target
+/// group, listener and rule an `AWS::ElasticLoadBalancingV2::*` resource declares are CREATED
+/// in that service, so a case that reads one back — or drives it through the stack's later
+/// operations — goes through that service's own wire here, signed for `elasticloadbalancing`
+/// in the Region the stack was created in, under its own API version (`version: 2015-12-01`).
+///
+/// The members are the pairs [`call`] takes, since an Elastic Load Balancing list member is
+/// an indexed key whose value a case builds from an identifier it read
+/// (`ListenerArns.member.1`).
+pub(crate) async fn elbv2(
+    router: &MultiServiceRouter,
+    action: &str,
+    members: &[(String, String)],
+) -> (u16, String) {
+    let mut form = form_urlencoded::Serializer::new(String::new());
+    form.append_pair("Action", action);
+    form.append_pair("Version", "2015-12-01");
+    for (key, value) in members {
+        form.append_pair(key, value);
+    }
+    let request = http::Request::builder()
+        .method("POST")
+        .uri(format!(
+            "https://elasticloadbalancing.{REGION}.amazonaws.com/"
+        ))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header(
+            "authorization",
+            format!(
+                "AWS4-HMAC-SHA256 \
+                 Credential=AKIDEXAMPLE/20260101/{REGION}/elasticloadbalancing/aws4_request, \
+                 SignedHeaders=host, Signature=0123456789abcdef"
+            ),
+        )
+        .body(bytes::Bytes::from(form.finish()))
+        .expect("a well-formed Elastic Load Balancing request");
+    let response = router.dispatch(request).await;
+    let status = response.status().as_u16();
+    let body = String::from_utf8_lossy(response.body()).to_string();
+    (status, body)
+}
+
 /// One awsQuery call to Amazon EC2 Auto Scaling over the same router, answered with the HTTP
 /// status and the XML body.
 ///
