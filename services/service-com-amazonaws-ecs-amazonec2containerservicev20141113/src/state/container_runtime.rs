@@ -47,6 +47,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::ops::types::PortMapping;
+
 use super::*;
 
 /// How many container runs this store holds at once. THIS NUMBER IS THE EMULATOR'S, not an
@@ -131,18 +133,33 @@ pub struct ContainerRun {
 #[derive(Debug)]
 pub struct ContainerLaunch {
     /// The container this run is of.
-    container_arn: String,
-    /// The program it runs, resolved from the revision's `entryPoint`/`command` and the
-    /// launch's own container overrides.
-    program: ContainerProgram,
+    pub container_arn: String,
+    /// The container's name from its definition.
+    pub container_name: String,
+    /// The task this container belongs to.
+    pub task_arn: String,
+    /// The task id.
+    pub task_id: String,
+    /// The container image, when specified.
+    pub image: Option<String>,
+    /// The entrypoint, when specified.
+    pub entry_point: Option<Vec<String>>,
+    /// The command, when specified.
+    pub command: Option<Vec<String>>,
+    /// The program it runs in simulated shell mode.
+    pub program: Option<ContainerProgram>,
     /// The environment it runs with: the revision's `environment` with the launch's
     /// override applied.
-    environment: BTreeMap<String, String>,
+    pub environment: BTreeMap<String, String>,
     /// Where its output is delivered, and `None` for a container whose `logConfiguration`
     /// describes no `awslogs` delivery.
-    log_target: Option<AwsLogsTarget>,
+    pub log_target: Option<AwsLogsTarget>,
     /// The signals it answers.
-    signals: Arc<ContainerSignals>,
+    pub signals: Arc<ContainerSignals>,
+    /// Port mappings declared by the container definition.
+    pub port_mappings: Vec<PortMapping>,
+    /// The private IPv4 address allocated to the task interface, if any.
+    pub eni_ipv4: Option<String>,
 }
 
 impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
@@ -255,11 +272,17 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
                 let command = override_for
                     .and_then(|over| over.command.as_deref())
                     .or(stored.command.as_deref());
-                let Some(program) =
-                    ContainerProgram::resolve(stored.entry_point.as_deref(), command)
-                else {
+                let program =
+                    ContainerProgram::resolve(stored.entry_point.as_deref(), command);
+                if !::service_common::host_workloads::enabled() && program.is_none() {
                     continue;
-                };
+                }
+                if ::service_common::host_workloads::enabled()
+                    && program.is_none()
+                    && stored.image.is_none()
+                {
+                    continue;
+                }
                 let mut environment = environment_of(stored.environment.as_deref());
                 // `ContainerOverride$environment`: "The environment variables to send to
                 // the container ... This parameter maps to Env in the docker container
@@ -281,14 +304,28 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
                     &container_id,
                     &launch_region,
                 );
+                let port_mappings = stored.port_mappings.clone().unwrap_or_default();
+                let eni_ipv4 = task
+                    .attachments
+                    .iter()
+                    .find_map(AttachmentRecord::private_ipv4_address)
+                    .map(str::to_string);
                 let signals = Arc::new(ContainerSignals::new());
                 started.push((container.container_arn.clone(), Arc::clone(&signals)));
                 launches.push(ContainerLaunch {
                     container_arn: container.container_arn.clone(),
+                    container_name: name.to_string(),
+                    task_arn: task_arn.clone(),
+                    task_id: task.task_id.clone(),
+                    image: stored.image.clone(),
+                    entry_point: stored.entry_point.clone(),
+                    command: command.map(|cmd| cmd.to_vec()),
                     program,
                     environment,
                     log_target,
                     signals,
+                    port_mappings,
+                    eni_ipv4,
                 });
             }
             for (container_arn, signals) in started {
@@ -417,33 +454,213 @@ pub fn settle_container_runtime<Eng: Send + Sync + 'static>(
         let container_arn = launch.container_arn.clone();
         let run_state = ::engine::ServiceState::clone(&state);
         let callback = callback.clone();
-        let handle = runtime.spawn(async move { run_container(run_state, callback, launch).await });
+        let engine = ::std::sync::Arc::clone(engine);
+        let handle = runtime.spawn(async move { run_container(run_state, callback, engine, launch).await });
         // The handle is kept with the run, so a run whose task is gone is aborted rather
         // than merely forgotten.
         state.lock().attach_container_run(&container_arn, handle);
     }
 }
 
+/// Helper to extract HostWorkloads state from engine if present.
+fn host_workloads<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+) -> Option<::engine::ServiceState<::service_common::host_workloads::HostWorkloads>> {
+    (engine as &dyn ::std::any::Any)
+        .downcast_ref::<::engine::InMemoryEngine>()
+        .map(::engine::InMemoryEngine::state::<::service_common::host_workloads::HostWorkloads>)
+}
+
+fn sanitize_container_name(raw: &str) -> String {
+    raw.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect()
+}
+
+/// A drop guard that withdraws published workloads and cleans up any started container
+/// if the tokio task is aborted or finishes.
+struct ContainerCleanupGuard {
+    runtime: ::service_common::host_runtime::HostRuntime,
+    container_name: String,
+    task_arn: String,
+    engine_workloads: Option<::engine::ServiceState<::service_common::host_workloads::HostWorkloads>>,
+    active: bool,
+}
+
+impl Drop for ContainerCleanupGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        if let Some(ref workloads) = self.engine_workloads {
+            workloads.lock().withdraw(&self.task_arn);
+        }
+        let runtime = self.runtime.clone();
+        let name = self.container_name.clone();
+        if let Ok(handle) = ::tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = runtime.stop(&name, Duration::from_secs(5)).await;
+                let _ = runtime.remove(&name).await;
+            });
+        }
+    }
+}
+
 /// Run ONE container's program to its end, delivering what it writes and recording what it
 /// exited with.
-async fn run_container(
+async fn run_container<Eng: Send + Sync + 'static>(
     state: ::engine::ServiceState<ComAmazonawsEcsAmazonec2containerservicev20141113State>,
     callback: ::smithy_server_runtime::EmbeddedEmulator,
+    engine: ::std::sync::Arc<Eng>,
     launch: ContainerLaunch,
 ) {
-    let output = Arc::new(ContainerOutput::new(&callback, launch.log_target));
-    // The stream the driver delivers to exists before the container writes its first line,
-    // which is the order the driver itself does it in.
-    output.open().await;
-    let deadline = Instant::now() + CONTAINER_RUN_LIFETIME;
-    let mut shell = ContainerShell::new(
-        launch.environment,
-        Arc::clone(&output),
-        Arc::clone(&launch.signals),
-        deadline,
-    );
-    let outcome = shell.run(&launch.program).await;
-    state
-        .lock()
-        .record_container_outcome(&launch.container_arn, outcome);
+    if ::service_common::host_workloads::enabled() {
+        let runtime = ::service_common::host_runtime::HostRuntime::default();
+        let sanitized_task = sanitize_container_name(&launch.task_id);
+        let sanitized_container = sanitize_container_name(&launch.container_name);
+        let host_name = format!("aws-emulator-ecs-{sanitized_task}-{sanitized_container}");
+
+        let mut labels = BTreeMap::new();
+        labels.insert("aws-emulator.ecs.task-arn".to_string(), launch.task_arn.clone());
+        labels.insert("aws-emulator.ecs.container-arn".to_string(), launch.container_arn.clone());
+        labels.insert("aws-emulator.ecs.container-name".to_string(), launch.container_name.clone());
+
+        let spec = ::service_common::host_runtime::ContainerSpec {
+            name: host_name.clone(),
+            image: launch.image.clone().unwrap_or_default(),
+            platform: None,
+            env: launch.environment.into_iter().collect(),
+            labels,
+            command: launch.command.unwrap_or_default(),
+            entrypoint: launch.entry_point.unwrap_or_default(),
+            volumes: Vec::new(),
+            aliases: vec![launch.container_name.clone()],
+        };
+
+        // Remove any stale leftover container from earlier run
+        let _ = runtime.remove(&host_name).await;
+
+        let workloads = host_workloads(&*engine);
+        let mut cleanup_guard = ContainerCleanupGuard {
+            runtime: runtime.clone(),
+            container_name: host_name.clone(),
+            task_arn: launch.task_arn.clone(),
+            engine_workloads: workloads.clone(),
+            active: true,
+        };
+
+        match runtime.run(&spec).await {
+            Ok(id) => {
+                let status = runtime.inspect(&id).await.ok();
+                if let Some(status) = status {
+                    if let Some(ip) = status.address {
+                        if let Some(ref wl) = workloads {
+                            let mut targets = vec![ip.to_string()];
+                            if let Some(ref eni_ip) = launch.eni_ipv4 {
+                                targets.push(eni_ip.clone());
+                            }
+                            let mut ports: Vec<i32> = launch
+                                .port_mappings
+                                .iter()
+                                .filter_map(|m| m.container_port)
+                                .collect();
+                            if ports.is_empty() {
+                                ports.push(80);
+                            }
+                            let mut w = wl.lock();
+                            for port in ports {
+                                let addr = std::net::SocketAddr::new(ip, port as u16);
+                                w.publish(&launch.task_arn, &targets, port, addr);
+                                ::tracing::info!(
+                                    task_arn = %launch.task_arn,
+                                    container = %launch.container_name,
+                                    port = port,
+                                    target_addr = %addr,
+                                    "ECS container published to HostWorkloads"
+                                );
+                            }
+                        }
+                    }
+                }
+
+                let mut outcome = ContainerOutcome::Exited(0);
+                let deadline = Instant::now() + CONTAINER_RUN_LIFETIME;
+
+                loop {
+                    if Instant::now() >= deadline {
+                        let _ = runtime.stop(&id, Duration::from_secs(5)).await;
+                        outcome = ContainerOutcome::Abandoned;
+                        break;
+                    }
+
+                    tokio::select! {
+                        _ = launch.signals.notified() => {
+                            let _ = runtime.stop(&id, Duration::from_secs(10)).await;
+                            if let Ok(st) = runtime.inspect(&id).await {
+                                outcome = ContainerOutcome::Exited(st.exit_code.unwrap_or(0) as i32);
+                            }
+                            break;
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                            match runtime.inspect(&id).await {
+                                Ok(st) => {
+                                    if !st.running {
+                                        outcome = ContainerOutcome::Exited(st.exit_code.unwrap_or(0) as i32);
+                                        break;
+                                    }
+                                }
+                                Err(err) => {
+                                    ::tracing::warn!("ECS container inspect failed for {id}: {err}");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Explicit cleanup on normal exit
+                cleanup_guard.active = false;
+                if let Some(ref wl) = workloads {
+                    wl.lock().withdraw(&launch.task_arn);
+                }
+                let _ = runtime.remove(&id).await;
+
+                state
+                    .lock()
+                    .record_container_outcome(&launch.container_arn, outcome);
+            }
+            Err(err) => {
+                ::tracing::error!(
+                    task_arn = %launch.task_arn,
+                    container = %launch.container_name,
+                    error = %err,
+                    "failed to run ECS host container"
+                );
+                cleanup_guard.active = false;
+                state
+                    .lock()
+                    .record_container_outcome(&launch.container_arn, ContainerOutcome::Exited(1));
+            }
+        }
+    } else {
+        let output = Arc::new(ContainerOutput::new(&callback, launch.log_target));
+        output.open().await;
+        let deadline = Instant::now() + CONTAINER_RUN_LIFETIME;
+        if let Some(program) = launch.program {
+            let mut shell = ContainerShell::new(
+                launch.environment,
+                Arc::clone(&output),
+                Arc::clone(&launch.signals),
+                deadline,
+            );
+            let outcome = shell.run(&program).await;
+            state
+                .lock()
+                .record_container_outcome(&launch.container_arn, outcome);
+        } else {
+            state
+                .lock()
+                .record_container_outcome(&launch.container_arn, ContainerOutcome::Exited(0));
+        }
+    }
 }
