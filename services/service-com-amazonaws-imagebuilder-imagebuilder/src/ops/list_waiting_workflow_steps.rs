@@ -1,15 +1,24 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListWaitingWorkflowSteps
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListWaitingWorkflowSteps`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListWaitingWorkflowSteps::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! "Lists the workflow steps in your Amazon Web Services account that have paused at a
+//! `WaitForAction` step, and are waiting for you to respond" — read out of the index this
+//! service holds those paused steps in
+//! ([`crate::state::ComAmazonawsImagebuilderImagebuilderState::paused_workflow_steps`]).
+//!
+//! A step pauses inside a workflow RUN, and nothing in this service starts one: no operation
+//! of it creates a workflow execution, and an image build it files records only what the
+//! build observed about the image. So the index holds no step and this listing reports none
+//! — a step reported here would be one nothing ever paused at, and
+//! `SendWorkflowStepAction` would have nothing to answer for it. Whatever comes to RUN a
+//! build's workflows files its paused steps in that index, and they are listed from there
+//! without this handler changing.
+//!
+//! The paging rules are the ones every listing of this service follows: a page carries at
+//! most `maxResults` entries, `nextToken` is answered only while an entry this page did not
+//! carry remains, and a token this store did not issue — or one issued for another Region —
+//! is refused rather than read as a position.
 //!
 //! ## Shape of an operation
 //!
@@ -104,13 +113,22 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-imagebuilder-imagebuild
 // here — hence the `ListWaitingWorkflowStepsError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
-#[smithy_macros::operation_error("com.amazonaws.imagebuilder#ListWaitingWorkflowSteps")]
+//
+// `InvalidParameterValueException` is widened in through `extra_errors`, for the reason the
+// other listings of this service widen it in: it is the class Image Builder refuses a
+// parameter of a request with, and a `nextToken` this service did not issue is a value that
+// parameter does not admit.
+#[smithy_macros::operation_error(
+    "com.amazonaws.imagebuilder#ListWaitingWorkflowSteps",
+    extra_errors = ["InvalidParameterValueException"]
+)]
 #[derive(Debug)]
 pub enum ListWaitingWorkflowStepsErrorModeled {
     CallRateLimitExceededException(CallRateLimitExceededException),
     ClientException(ClientException),
     ForbiddenException(ForbiddenException),
     InvalidPaginationTokenException(InvalidPaginationTokenException),
+    InvalidParameterValueException(InvalidParameterValueException),
     InvalidRequestException(InvalidRequestException),
     ServiceException(ServiceException),
     ServiceUnavailableException(ServiceUnavailableException),
@@ -167,18 +185,84 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListWaitingWorkflowSteps` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListWaitingWorkflowStepsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListWaitingWorkflowSteps"))
+        // The `maxResults` 1..25 range and the token's length have been refused past by the
+        // centralized walk before this body runs.
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            ListWaitingWorkflowStepsErrorModeled::ServiceException(ServiceException {
+                message: Some(crate::state::store_unavailable_message()),
+            })
+        })?;
+
+        let region = crate::state::request_region(ctx.parts());
+
+        // The secret this store authenticates its page tokens under, taken off the store so
+        // a `nextToken` is minted and read back as the opaque value this store issued.
+        let page_token_key = state.lock().page_token_key;
+
+        // Which listing this page belongs to. This request selects nothing beyond the
+        // account and Region it is served in — the modelled input carries only the two
+        // paging members — so the listing is named by the operation and the Region alone.
+        let mut cursor = crate::state::PageCursor {
+            operation: crate::state::LIST_WAITING_WORKFLOW_STEPS_OPERATION.to_string(),
+            region: region.clone(),
+            query: String::new(),
+            after: String::new(),
+        };
+        let after = match input.next_token.as_deref() {
+            None => String::new(),
+            Some(token) => match crate::state::decode_page_token(&page_token_key, token, &cursor) {
+                Some(after) => after,
+                None => {
+                    return Err(
+                        ListWaitingWorkflowStepsErrorModeled::InvalidParameterValueException(
+                            InvalidParameterValueException {
+                                message: Some(crate::state::invalid_pagination_token_message()),
+                            },
+                        )
+                        .into(),
+                    )
+                }
+            },
+        };
+
+        // A page carries at most `maxResults` entries, and at most the modelled maximum
+        // when the request names none.
+        let page_size = input
+            .max_results
+            .and_then(|requested| usize::try_from(requested).ok())
+            .unwrap_or(crate::state::MAX_WAITING_WORKFLOW_STEPS_PER_PAGE)
+            .clamp(1, crate::state::MAX_WAITING_WORKFLOW_STEPS_PER_PAGE);
+
+        // A pure read: the guard is taken, this page is copied out of the paused-step index,
+        // and nothing is written. The index is keyed by step execution id, which is what
+        // orders the listing and what a token names a position in.
+        let store = state.lock();
+        let waiting = store.paused_workflow_steps(&region);
+        let mut remaining_steps = waiting.iter().filter(|step| {
+            step.step_execution_id
+                .as_deref()
+                .is_some_and(|id| id > after.as_str())
+        });
+        let page: Vec<WorkflowStepExecution> = remaining_steps
+            .by_ref()
+            .take(page_size)
+            .map(|step| (*step).clone())
+            .collect();
+        // A `nextToken` is answered only when an entry this page did not carry remains.
+        let remaining = remaining_steps.next().is_some();
+        let next_token = page
+            .last()
+            .filter(|_| remaining)
+            .and_then(|last| last.step_execution_id.clone())
+            .map(|last| {
+                cursor.after = last;
+                crate::state::encode_page_token(&page_token_key, &cursor)
+            });
+        drop(store);
+
+        Ok(ListWaitingWorkflowStepsOutput {
+            steps: Some(page),
+            next_token,
+        })
     }
 }

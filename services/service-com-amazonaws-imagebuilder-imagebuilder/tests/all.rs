@@ -33,12 +33,16 @@ mod image_packages;
 mod image_pipeline_execution;
 #[path = "all/infrastructure_configuration.rs"]
 mod infrastructure_configuration;
+#[path = "all/infrastructure_configuration_listing.rs"]
+mod infrastructure_configuration_listing;
 #[path = "all/parameter_value_refusals.rs"]
 mod parameter_value_refusals;
 #[path = "all/resource_not_found.rs"]
 mod resource_not_found;
 #[path = "all/resource_tags.rs"]
 mod resource_tags;
+#[path = "all/semantic_version_bounds.rs"]
+mod semantic_version_bounds;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/tag_resource_resource_kinds.rs"]
@@ -47,3 +51,5 @@ mod tag_resource_resource_kinds;
 mod untag_resource;
 #[path = "all/versioned_resource_responses.rs"]
 mod versioned_resource_responses;
+#[path = "all/waiting_workflow_steps.rs"]
+mod waiting_workflow_steps;

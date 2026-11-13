@@ -670,7 +670,7 @@ async fn a_retried_start_answers_the_original_run() {
             &body,
             400,
             "IdempotentParameterMismatchException",
-            "The clientToken was already used for a request with different parameter values.",
+            "The request parameters do not match those in the original idempotent request.",
         );
     }
 }

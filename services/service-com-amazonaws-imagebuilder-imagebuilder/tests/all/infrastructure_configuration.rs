@@ -13,11 +13,15 @@
 //! documented default or as absent, and an ARN nothing was stored under is reported
 //! missing.
 //!
-//! None of the EC2 or IAM values a configuration names is resolved at create time: the
-//! modelled `s3BucketName` documentation says the bucket "isn't validated when you
-//! create or update the configuration", and the same holds for the instance profile,
-//! the instance types, the subnet and the security groups — so the rows below name
-//! values no other service in this emulator holds and still expect a 200.
+//! Most of the EC2 values a configuration names are not resolved at create time: the
+//! modelled `s3BucketName` documentation says the bucket "isn't validated when you create or
+//! update the configuration", and the same holds for the instance types, the subnet and the
+//! security groups — so the rows below name values no other service in this emulator holds
+//! and still expect a 200. The one value that IS resolved is `instanceProfileName`, against
+//! the account's own IAM, and a refusal is grounded in IAM's answer: this suite mounts
+//! imagebuilder ALONE, so nothing answers that lookup, nothing about the profile is
+//! established and no row is refused for it. What that resolution does when an IAM IS
+//! mounted beside this service is asserted in `infrastructure_configuration_listing.rs`.
 
 use std::sync::Arc;
 

@@ -1,15 +1,27 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListInfrastructureConfigurations
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListInfrastructureConfigurations`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListInfrastructureConfigurations::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! "Returns a list of infrastructure configurations" — the ones this service's state holds
+//! for the Region the request was served in, so a configuration a create stored is listed
+//! and one nothing stored is not.
+//!
+//! The rules it follows, each from the modelled documentation quoted beside it:
+//!
+//! * each entry is the stored configuration rendered as the modelled
+//!   `InfrastructureConfigurationSummary`, read off the same record
+//!   `GetInfrastructureConfiguration` reports, so a listing and a read never disagree;
+//! * "You can filter on name to streamline results": a filter naming any other member is a
+//!   value of `filters` this operation does not admit, and one carrying no name or no
+//!   values is an incomplete filter — both refused rather than ignored, since a filter
+//!   nothing applies would answer with configurations the caller did not ask for;
+//! * the listing is ordered by the ARN each entry carries, which is the store's own key
+//!   order, so one page's position in it is stable;
+//! * a page carries at most `maxResults` entries, and `nextToken` is answered only while an
+//!   entry this page did not carry remains. A token is authenticated under this store's own
+//!   secret and carries the listing it was issued for, so a token this store did not issue
+//!   — or one issued for another query or Region — is refused rather than read as a
+//!   position.
 //!
 //! ## Shape of an operation
 //!
@@ -103,13 +115,17 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-imagebuilder-imagebuild
 // here — hence the `ListInfrastructureConfigurationsError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
-#[smithy_macros::operation_error("com.amazonaws.imagebuilder#ListInfrastructureConfigurations")]
+#[smithy_macros::operation_error(
+    "com.amazonaws.imagebuilder#ListInfrastructureConfigurations",
+    extra_errors = ["InvalidParameterValueException"]
+)]
 #[derive(Debug)]
 pub enum ListInfrastructureConfigurationsErrorModeled {
     CallRateLimitExceededException(CallRateLimitExceededException),
     ClientException(ClientException),
     ForbiddenException(ForbiddenException),
     InvalidPaginationTokenException(InvalidPaginationTokenException),
+    InvalidParameterValueException(InvalidParameterValueException),
     InvalidRequestException(InvalidRequestException),
     ServiceException(ServiceException),
     ServiceUnavailableException(ServiceUnavailableException),
@@ -166,18 +182,130 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListInfrastructureConfigurations` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListInfrastructureConfigurationsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListInfrastructureConfigurations"))
+        // The `maxResults` 1..25 range, the filter list's 1..10 bound and the token's
+        // length have all been refused past by the centralized walk before this body runs.
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            ListInfrastructureConfigurationsErrorModeled::ServiceException(ServiceException {
+                message: Some(crate::state::store_unavailable_message()),
+            })
+        })?;
+
+        let region = crate::state::request_region(ctx.parts());
+
+        // The secret this store authenticates its page tokens under, taken off the store so
+        // a `nextToken` is minted and read back as the opaque value this store issued.
+        let page_token_key = state.lock().page_token_key;
+
+        // Each filter names one member and the values it admits. An unnamed filter, one
+        // with no values, and a name this operation does not filter on are all refused
+        // rather than ignored.
+        for filter in input.filters.iter().flatten() {
+            let Some(name) = filter.name.as_deref() else {
+                return Err(
+                    ListInfrastructureConfigurationsErrorModeled::InvalidRequestException(
+                        InvalidRequestException {
+                            message: Some(crate::state::incomplete_filter_message()),
+                        },
+                    )
+                    .into(),
+                );
+            };
+            if filter.values.as_ref().is_none_or(|values| values.is_empty()) {
+                return Err(
+                    ListInfrastructureConfigurationsErrorModeled::InvalidRequestException(
+                        InvalidRequestException {
+                            message: Some(crate::state::incomplete_filter_message()),
+                        },
+                    )
+                    .into(),
+                );
+            }
+            if !crate::state::INFRASTRUCTURE_CONFIGURATION_FILTER_NAMES.contains(&name) {
+                return Err(
+                    ListInfrastructureConfigurationsErrorModeled::InvalidParameterValueException(
+                        InvalidParameterValueException {
+                            message: Some(crate::state::unsupported_filter_message(
+                                Self::NAME,
+                                crate::state::INFRASTRUCTURE_CONFIGURATION_FILTER_NAMES,
+                            )),
+                        },
+                    )
+                    .into(),
+                );
+            }
+        }
+
+        // Which listing this page belongs to: the filters it was issued for, so a token
+        // issued for one listing is refused for another.
+        let mut cursor = crate::state::PageCursor {
+            operation: crate::state::LIST_INFRASTRUCTURE_CONFIGURATIONS_OPERATION.to_string(),
+            region: region.clone(),
+            query: crate::state::infrastructure_configuration_query_fingerprint(
+                input.filters.as_deref(),
+            ),
+            after: String::new(),
+        };
+        let after = match input.next_token.as_deref() {
+            None => String::new(),
+            Some(token) => match crate::state::decode_page_token(&page_token_key, token, &cursor) {
+                Some(after) => after,
+                None => {
+                    return Err(
+                        ListInfrastructureConfigurationsErrorModeled::InvalidParameterValueException(
+                            InvalidParameterValueException {
+                                message: Some(crate::state::invalid_pagination_token_message()),
+                            },
+                        )
+                        .into(),
+                    )
+                }
+            },
+        };
+
+        // A page carries at most `maxResults` entries, and at most the modelled maximum
+        // when the request names none.
+        let page_size = input
+            .max_results
+            .and_then(|requested| usize::try_from(requested).ok())
+            .unwrap_or(crate::state::MAX_INFRASTRUCTURE_CONFIGURATIONS_PER_PAGE)
+            .clamp(1, crate::state::MAX_INFRASTRUCTURE_CONFIGURATIONS_PER_PAGE);
+
+        // A pure read: the guard is taken, this page is copied out as modelled entries, and
+        // nothing is written. The store is keyed by the ARN each entry reports, so walking
+        // it IS the listing's order and a token's position in it is stable.
+        let store = state.lock();
+        let mut matching = store
+            .infrastructure_configurations
+            .iter()
+            .filter(|(arn, record)| record.region == region && arn.as_str() > after.as_str())
+            .filter(|(_, record)| {
+                input.filters.iter().flatten().all(|filter| {
+                    filter.name.as_deref().is_some_and(|name| {
+                        record.admits_filter(name, filter.values.as_deref().unwrap_or_default())
+                    })
+                })
+            });
+        let page: Vec<InfrastructureConfigurationSummary> = matching
+            .by_ref()
+            .take(page_size)
+            .map(|(_, record)| record.summary())
+            .collect();
+        // A `nextToken` is answered only when an entry this page did not carry remains.
+        let remaining = matching.next().is_some();
+        let next_token = page
+            .last()
+            .filter(|_| remaining)
+            .and_then(|last| last.arn.clone())
+            .map(|last| {
+                cursor.after = last;
+                crate::state::encode_page_token(&page_token_key, &cursor)
+            });
+        drop(store);
+
+        Ok(ListInfrastructureConfigurationsOutput {
+            request_id: Some(crate::state::new_request_id()),
+            infrastructure_configuration_summary_list: Some(page),
+            next_token,
+        })
     }
 }

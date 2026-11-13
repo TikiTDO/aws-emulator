@@ -9,8 +9,9 @@
 //!
 //! * `semanticVersion`'s three nodes are the caller's to ASSIGN — "you can assign any
 //!   positive integer value, including zero. The upper limit is 2^30-1" — so a node past
-//!   that bound, and the `x` wildcard the version pattern admits for FILTERING, are
-//!   `InvalidVersionNumberException`;
+//!   that bound, and the `x` wildcard the version pattern admits for FILTERING, are values
+//!   of that parameter this service cannot accept, refused the way it refuses every such
+//!   value;
 //! * every `componentArn` must name a stored component, resolved the way every other
 //!   component reference is, each component named only once "regardless of version", at
 //!   most the documented 20 per recipe, and the components of one recipe all target one
@@ -197,9 +198,15 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-imagebuilder-imagebuild
 // `types/shared_types.rs`), and this operation's own `errors` list omits it. So a
 // reference that resolves to nothing is reported MISSING rather than dressed up as an
 // invalid request, which is a different claim a client branches on.
+//
+// `InvalidParameterValueException` is widened in for the same kind of reason: the SERVICE
+// models that shape (a client error, `@httpError` 400 — "The value that you provided for the
+// specified parameter is invalid.") and other operations declare it, while this operation's
+// own error list does not. It is the class Image Builder refuses a parameter of this request
+// with, which is what a `semanticVersion` outside the bound its nodes are assignable in is.
 #[smithy_macros::operation_error(
     "com.amazonaws.imagebuilder#CreateImageRecipe",
-    extra_errors = ["ResourceNotFoundException"]
+    extra_errors = ["ResourceNotFoundException", "InvalidParameterValueException"]
 )]
 #[derive(Debug)]
 pub enum CreateImageRecipeErrorModeled {
@@ -208,6 +215,7 @@ pub enum CreateImageRecipeErrorModeled {
     DryRunOperationException(DryRunOperationException),
     ForbiddenException(ForbiddenException),
     IdempotentParameterMismatchException(IdempotentParameterMismatchException),
+    InvalidParameterValueException(InvalidParameterValueException),
     InvalidRequestException(InvalidRequestException),
     InvalidVersionNumberException(InvalidVersionNumberException),
     ResourceAlreadyExistsException(ResourceAlreadyExistsException),
@@ -283,13 +291,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // The modelled `WildcardVersionNumber` admits an `x` node, which is a FILTERING
         // pattern: the three nodes of a version a create assigns are integers inside the
-        // documented bound, and nothing else.
+        // documented bound, and nothing else. A value that is not one is a value of that
+        // parameter this service cannot accept, and the requirement it states names the
+        // wildcard rule too, because this member's own pattern admits wildcards
+        // ([`crate::state::invalid_wildcard_semantic_version_message`]).
         if crate::state::parse_semantic_version(&input.semantic_version).is_none() {
             return Err(
-                CreateImageRecipeErrorModeled::InvalidVersionNumberException(
-                    InvalidVersionNumberException {
-                        message: Some(crate::state::invalid_version_number_message(
-                            &input.semantic_version,
+                CreateImageRecipeErrorModeled::InvalidParameterValueException(
+                    InvalidParameterValueException {
+                        message: Some(crate::state::invalid_wildcard_semantic_version_message(
+                            crate::state::SEMANTIC_VERSION_MEMBER,
                         )),
                     },
                 )

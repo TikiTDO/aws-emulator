@@ -11,6 +11,11 @@
 //!   (`crate::state::normalized_name`), and that normalized name must be unique in the
 //!   Region — a second create under it is `ResourceAlreadyExistsException`;
 //! * naming a `subnetId` without any `securityGroupIds` fails the request;
+//! * `instanceProfileName` names "the instance profile to associate with the instance used
+//!   to customize your Amazon EC2 AMI" — an IAM resource of the caller's account, so it is
+//!   RESOLVED against IAM at create time ([`crate::state::instance_profile_named`]) and a
+//!   name that account holds no profile under is refused as that parameter's value, with
+//!   nothing stored;
 //! * the four reserved `resourceTags` keys may not be assigned;
 //! * `clientToken` is an idempotency token: a retry carrying it answers with the
 //!   ORIGINAL response, and the same token carrying different creation parameters is
@@ -194,7 +199,17 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-imagebuilder-imagebuild
 // here — hence the `CreateInfrastructureConfigurationError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
-#[smithy_macros::operation_error("com.amazonaws.imagebuilder#CreateInfrastructureConfiguration")]
+//
+// `InvalidParameterValueException` is widened in through `extra_errors`: the SERVICE models
+// the shape (a client error, `@httpError` 400 — "The value that you provided for the
+// specified parameter is invalid.") and other operations declare it, while this operation's
+// own error list does not. It is the class Image Builder refuses a parameter of this request
+// with, which is what an `instanceProfileName` naming no instance profile of this account
+// is.
+#[smithy_macros::operation_error(
+    "com.amazonaws.imagebuilder#CreateInfrastructureConfiguration",
+    extra_errors = ["InvalidParameterValueException"]
+)]
 #[derive(Debug)]
 pub enum CreateInfrastructureConfigurationErrorModeled {
     CallRateLimitExceededException(CallRateLimitExceededException),
@@ -202,6 +217,7 @@ pub enum CreateInfrastructureConfigurationErrorModeled {
     DryRunOperationException(DryRunOperationException),
     ForbiddenException(ForbiddenException),
     IdempotentParameterMismatchException(IdempotentParameterMismatchException),
+    InvalidParameterValueException(InvalidParameterValueException),
     InvalidRequestException(InvalidRequestException),
     ResourceAlreadyExistsException(ResourceAlreadyExistsException),
     ResourceInUseException(ResourceInUseException),
@@ -304,6 +320,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 CreateInfrastructureConfigurationErrorModeled::InvalidRequestException(
                     InvalidRequestException {
                         message: Some(crate::state::reserved_resource_tag_key_message(reserved)),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // `instanceProfileName` names an IAM resource of this account: "the instance
+        // profile to associate with the instance used to customize your Amazon EC2 AMI".
+        // The model constrains only the SHAPE of the name, so whether a profile exists
+        // under it is resolved against IAM itself, BEFORE anything is minted — a
+        // configuration referencing a profile that does not exist would otherwise only
+        // fail at build time, or never. A lookup NOTHING answered establishes nothing and
+        // refuses nothing (see [`crate::state::instance_profile_named`]).
+        if crate::state::instance_profile_named(ctx, &input.instance_profile_name).await
+            == crate::state::InstanceProfileLookup::Absent
+        {
+            return Err(
+                CreateInfrastructureConfigurationErrorModeled::InvalidParameterValueException(
+                    InvalidParameterValueException {
+                        message: Some(crate::state::missing_instance_profile_message(
+                            crate::state::INSTANCE_PROFILE_NAME_MEMBER,
+                        )),
                     },
                 )
                 .into(),

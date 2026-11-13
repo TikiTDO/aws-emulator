@@ -39,6 +39,11 @@ hex = { workspace = true }
 # over the in-process callback into this same emulator (no network client feature: the
 # transport is the emulator's own).
 aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# The AWS SDK for IAM, driven over the same in-process callback:
+# `CreateInfrastructureConfiguration` resolves the `instanceProfileName` a configuration
+# names against the account's own IAM before writing anything. Only the generated client is
+# needed — the emulator supplies the transport.
+aws-sdk-iam = { version = "1", default-features = false }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -51,6 +56,10 @@ percent-encoding = "2.3"
 # The Amazon S3 service, mounted beside imagebuilder on one engine so a component document
 # staged with `PutObject` is the one a `uri`-named create resolves.
 service-com-amazonaws-s3-amazons3 = { workspace = true }
+# IAM, mounted beside imagebuilder on one engine so the instance profile a configuration
+# names is one a `CreateInstanceProfile` really created — and a name nothing created
+# resolves to nothing.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 
 [lints]
 workspace = true

@@ -785,7 +785,7 @@ async fn a_create_this_service_cannot_serve_is_refused_the_documented_way() {
             "a component version one past the documented bound",
             component_body("over-bound", "1073741824.0.0", "rtok-0003", json!({})),
             400,
-            "InvalidVersionNumberException",
+            "InvalidParameterValueException",
         ),
         (
             "a component version whose nodes are not numbers at all, refused by the modelled \
@@ -869,13 +869,13 @@ async fn a_create_this_service_cannot_serve_is_refused_the_documented_way() {
             "a recipe version carrying a wildcard node",
             recipe_body("wildcard-recipe", "1.x.x", "rtok-0101", json!({})),
             400,
-            "InvalidVersionNumberException",
+            "InvalidParameterValueException",
         ),
         (
             "a recipe version one past the documented bound",
             recipe_body("over-bound-recipe", "0.0.1073741824", "rtok-0102", json!({})),
             400,
-            "InvalidVersionNumberException",
+            "InvalidParameterValueException",
         ),
         (
             "a recipe dry run",

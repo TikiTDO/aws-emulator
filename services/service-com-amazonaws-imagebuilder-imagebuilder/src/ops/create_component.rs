@@ -10,8 +10,9 @@
 //! * the document is named by "exactly one of the following methods": `data` or `uri`,
 //!   so naming both or neither is the parameter-value refusal this service states for a
 //!   request it cannot accept a parameter of, naming both members;
-//! * `semanticVersion`'s three assignable nodes each take an integer up to 2^30-1, so a
-//!   version past that bound is `InvalidVersionNumberException`;
+//! * `semanticVersion`'s three assignable nodes each take an integer up to 2^30-1 — a bound
+//!   the modelled pattern cannot state — so a version past it is a value of THAT parameter
+//!   this service cannot accept, refused the way it refuses every such value;
 //! * the component TYPE is read from the document, never submitted: "If the document
 //!   contains a single phase named test, the component type is TEST. Otherwise, the
 //!   component type is BUILD". A component named by `uri` carries its document in Amazon
@@ -318,10 +319,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // each assigned node is read here.
         if crate::state::parse_semantic_version(&input.semantic_version).is_none() {
             return Err(
-                CreateComponentErrorModeled::InvalidVersionNumberException(
-                    InvalidVersionNumberException {
-                        message: Some(crate::state::invalid_version_number_message(
-                            &input.semantic_version,
+                CreateComponentErrorModeled::InvalidParameterValueException(
+                    InvalidParameterValueException {
+                        message: Some(crate::state::invalid_semantic_version_message(
+                            crate::state::SEMANTIC_VERSION_MEMBER,
                         )),
                     },
                 )

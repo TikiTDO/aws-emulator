@@ -759,8 +759,8 @@ async fn one_client_token_creates_at_most_one_configuration() {
             400,
             "IdempotentParameterMismatchException",
         );
-        let expected =
-            "The clientToken was already used for a request with different parameter values.";
+        let expected = "The request parameters do not match those in the original idempotent \
+                        request.";
         let actual = error_message(case, &answer);
         assert_eq!(
             actual, expected,

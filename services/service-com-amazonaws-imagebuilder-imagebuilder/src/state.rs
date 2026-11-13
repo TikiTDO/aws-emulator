@@ -99,6 +99,10 @@ use std::time::{Duration, SystemTime};
 mod component_document_object;
 pub use component_document_object::*;
 
+/// Whether the instance profile a configuration names is one this account's IAM holds.
+mod instance_profile;
+pub use instance_profile::*;
+
 use crate::ops::types::{
     AdditionalInstanceConfiguration, AmiDistributionConfiguration, Component,
     ComponentConfiguration, ComponentParameterDetail,
@@ -109,9 +113,11 @@ use crate::ops::types::{
     FastLaunchConfiguration, ImageLoggingConfiguration, ImagePipeline,
     ImageRecipe, ImageRecipeSummary,
     ImageScanningConfiguration, ImageState, ImageSummary, ImageTestsConfiguration,
-    InfrastructureConfiguration, InstanceBlockDeviceMapping, InstanceMetadataOptions,
+    InfrastructureConfiguration, InfrastructureConfigurationSummary, InstanceBlockDeviceMapping,
+    InstanceMetadataOptions,
     LatestVersionReferences, Logging, ParentInstanceConfiguration, PipelineLoggingConfiguration,
     Placement, Schedule, StartImagePipelineExecutionInput, WorkflowConfiguration,
+    WorkflowStepExecution,
 };
 
 /// This service's ARN namespace and SigV4 signing name (`arnNamespace` / `sigv4Name`
@@ -196,6 +202,12 @@ pub const LIST_COMPONENTS_OPERATION: &str = "ListComponents";
 /// See [`LIST_IMAGE_RECIPES_OPERATION`].
 pub const LIST_COMPONENT_BUILD_VERSIONS_OPERATION: &str = "ListComponentBuildVersions";
 
+/// See [`LIST_IMAGE_RECIPES_OPERATION`].
+pub const LIST_INFRASTRUCTURE_CONFIGURATIONS_OPERATION: &str = "ListInfrastructureConfigurations";
+
+/// See [`LIST_IMAGE_RECIPES_OPERATION`].
+pub const LIST_WAITING_WORKFLOW_STEPS_OPERATION: &str = "ListWaitingWorkflowSteps";
+
 /// How many nodes of a semantic version a caller assigns.
 ///
 /// From `semanticVersion`'s own documentation, which `CreateComponent` and
@@ -278,6 +290,18 @@ pub const IMAGE_RECIPE_FILTER_NAMES: &[&str] = &["name", "parentImage", "platfor
 /// The most items one `ListImageRecipes` page carries when the request names no
 /// `maxResults`: the modelled `maxResults` range's own maximum (1..25).
 pub const MAX_IMAGE_RECIPES_PER_PAGE: usize = 25;
+
+/// The filter names `ListInfrastructureConfigurations` accepts, from the `filters`
+/// member's own documentation: "You can filter on name to streamline results."
+pub const INFRASTRUCTURE_CONFIGURATION_FILTER_NAMES: &[&str] = &["name"];
+
+/// The most items one `ListInfrastructureConfigurations` page carries when the request
+/// names no `maxResults`: the modelled `maxResults` range's own maximum (1..25).
+pub const MAX_INFRASTRUCTURE_CONFIGURATIONS_PER_PAGE: usize = 25;
+
+/// The most items one `ListWaitingWorkflowSteps` page carries when the request names no
+/// `maxResults`: the modelled `maxResults` range's own maximum (1..25).
+pub const MAX_WAITING_WORKFLOW_STEPS_PER_PAGE: usize = 25;
 
 /// The most items one `ListImagePackages` page carries when the request names no
 /// `maxResults`: the modelled `maxResults` range's own maximum (1..25).
@@ -586,6 +610,45 @@ impl InfrastructureConfigurationRecord {
             terminate_instance_on_completion: Some(self.terminate_instance_on_completion),
             parent_instance: self.parent_instance.clone(),
         }
+    }
+
+    /// This record as the modelled `InfrastructureConfigurationSummary` one listed page
+    /// entry carries: the members that shape names, read off the same stored record
+    /// [`Self::view`] reports, so a listing and a read never disagree about one
+    /// configuration.
+    #[must_use]
+    pub fn summary(&self) -> InfrastructureConfigurationSummary {
+        InfrastructureConfigurationSummary {
+            arn: Some(self.arn.clone()),
+            name: Some(self.name.clone()),
+            description: self.description.clone(),
+            date_created: Some(self.date_created.clone()),
+            date_updated: Some(self.date_updated.clone()),
+            resource_tags: self.resource_tags.clone().map(into_tag_map),
+            tags: Some(reported_tags(self.tags.as_ref())),
+            instance_types: self.instance_types.clone(),
+            instance_profile_name: Some(self.instance_profile_name.clone()),
+            placement: self.placement.clone(),
+        }
+    }
+
+    /// The value of the member `filter_name` filters on, or `None` when this record
+    /// reports none. See [`INFRASTRUCTURE_CONFIGURATION_FILTER_NAMES`].
+    #[must_use]
+    pub fn filterable(&self, filter_name: &str) -> Option<&str> {
+        match filter_name {
+            "name" => Some(self.name.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Whether the filter `filter_name` carrying `values` admits this record: one of its
+    /// values IS the value the record reports for the member the filter names — "Filter
+    /// values are case-sensitive" (the modelled `values`).
+    #[must_use]
+    pub fn admits_filter(&self, filter_name: &str, values: &[String]) -> bool {
+        self.filterable(filter_name)
+            .is_some_and(|reported| values.iter().any(|value| value == reported))
     }
 }
 
@@ -1221,6 +1284,16 @@ pub struct ComAmazonawsImagebuilderImagebuilderState {
     /// ARN carries the Region, and the resource lookup a policy call makes first is what
     /// keeps a regional endpoint to its own Region's resources.
     pub resource_policies: BTreeMap<String, String>,
+    /// The workflow step executions this account has WAITING: the steps of a workflow run
+    /// that have paused at a `WaitForAction` step, keyed by their own step execution id —
+    /// what `ListWaitingWorkflowSteps` reports and `SendWorkflowStepAction` answers for.
+    ///
+    /// Filed by whatever RUNS a workflow of an image build. Nothing in this service does:
+    /// no operation of it starts a workflow execution, and an image build's record holds
+    /// only what the build itself observed about the image
+    /// ([`ImageBuildVersionRecord`]) — so this index is empty, and a waiting-step listing
+    /// reports none rather than a step nothing ever paused at.
+    pub waiting_workflow_steps: BTreeMap<String, WorkflowStepExecution>,
     /// The secret this store's page tokens are authenticated under, drawn from the system's
     /// randomness when the store is created ([`PageTokenKey`]) — which is what lets a
     /// paginated read tell a `nextToken` it ISSUED from one a caller built, and refuse the
@@ -1587,6 +1660,28 @@ impl ComAmazonawsImagebuilderImagebuilderState {
         self.images
             .get(arn)
             .filter(|record| record.region == request_region)
+    }
+
+    /// The workflow steps of `request_region` that have paused at a `WaitForAction` step
+    /// and are waiting for a response, in the step-execution-id order the index holds them
+    /// in — so two reads of one page report the same entries and a token's position in the
+    /// listing is stable.
+    ///
+    /// A step is reported only when the build version its run belongs to is one THIS Region
+    /// holds ([`Self::image`]): a regional endpoint serves only its own Region's resources,
+    /// and a paused step belongs to the build it paused in. The index whatever runs a
+    /// workflow files those steps in is the `waiting_workflow_steps` field, which nothing
+    /// in this service writes yet — see its documentation.
+    #[must_use]
+    pub fn paused_workflow_steps(&self, request_region: &str) -> Vec<&WorkflowStepExecution> {
+        self.waiting_workflow_steps
+            .values()
+            .filter(|step| {
+                step.image_build_version_arn
+                    .as_deref()
+                    .is_some_and(|arn| self.image(arn, request_region).is_some())
+            })
+            .collect()
     }
 
     /// Store one image build version, with whatever the build recorded about it.
@@ -2762,6 +2857,17 @@ pub fn image_recipe_query_fingerprint(owner: Option<&str>, filters: Option<&[Fil
     )
 }
 
+/// A deterministic rendering of which configurations one
+/// `ListInfrastructureConfigurations` request asked for, so a token issued for one query is
+/// refused for another.
+///
+/// `maxResults` is deliberately NOT part of it, for the reason
+/// [`image_recipe_query_fingerprint`] states.
+#[must_use]
+pub fn infrastructure_configuration_query_fingerprint(filters: Option<&[Filter]>) -> String {
+    format!("filters={};", filter_list(filters))
+}
+
 /// A deterministic rendering of which components one `ListComponents` request asked for,
 /// so a token issued for one query is refused for another.
 ///
@@ -3724,9 +3830,15 @@ pub fn dry_run_message() -> String {
 }
 
 /// Why the same `clientToken` carrying different creation parameters is refused.
+///
+/// The modelled `IdempotentParameterMismatchException` is "You have specified a client token
+/// for an operation using parameter values that differ from a previous request that used the
+/// same client token", and the sentence this service states it in is FIXED text: it names
+/// neither the token nor the parameters that differ, so one wording serves every create of
+/// this service.
 #[must_use]
 pub fn idempotent_parameter_mismatch_message() -> String {
-    "The clientToken was already used for a request with different parameter values.".to_string()
+    "The request parameters do not match those in the original idempotent request.".to_string()
 }
 
 /// Why a create is refused once the configuration store is full.
@@ -3777,17 +3889,69 @@ pub fn store_unavailable_message() -> String {
     "The Image Builder resource store is unavailable.".to_string()
 }
 
-/// Why a create naming a version node out of bounds is refused.
+/// The member a semantic version arrives in, as the API addresses it — the parameter a
+/// refusal of such a value names.
+pub const SEMANTIC_VERSION_MEMBER: &str = "semanticVersion";
+
+/// The requirement clause a semantic version this service cannot accept is refused with.
 ///
 /// The rule is `semanticVersion`'s own: the three assignable nodes take "any positive
-/// integer value, including zero. The upper limit is 2^30-1, or 1073741823, for each
-/// node", and the fourth node is Image Builder's to assign. The wording names the member,
-/// the version the request carried and the bound it has to satisfy.
+/// integer value, including zero. The upper limit is 2^30-1, or 1073741823, for each node",
+/// and the fourth node is Image Builder's to assign — a bound no `@pattern` can state, so a
+/// value that satisfies the modelled pattern and misses the bound is a value of that
+/// parameter this service cannot accept. The clause states the FORM the value had to follow
+/// and echoes none of what the request carried.
+const SEMANTIC_VERSION_REQUIREMENT: &str =
+    "The supplied semantic version does not follow the required format.";
+
+/// The additional clause stated for a member whose own modelled pattern admits the `x`
+/// wildcard node, since how many of them one version may carry is part of the format such a
+/// value has to follow.
+const ONE_WILDCARD_PER_VERSION_REQUIREMENT: &str =
+    "Only one 'x' wildcard is allowed per version.";
+
+/// Why a create naming a semantic version outside the documented bound is refused, for a
+/// member whose modelled pattern admits assigned nodes only
+/// (`CreateComponentRequest.semanticVersion`, `^[0-9]+\.[0-9]+\.[0-9]+$`).
+///
+/// Stated in the sentence this service states every refused parameter in
+/// (`service_common::validation_message::parameter_value_mismatch`), whose only variable
+/// part is the member the value arrived in. See [`SEMANTIC_VERSION_REQUIREMENT`].
 #[must_use]
-pub fn invalid_version_number_message(semantic_version: &str) -> String {
+pub fn invalid_semantic_version_message(member: &str) -> String {
+    ::service_common::validation_message::parameter_value_mismatch(
+        member,
+        SEMANTIC_VERSION_REQUIREMENT,
+    )
+}
+
+/// [`invalid_semantic_version_message`] for a member whose modelled pattern also admits the
+/// `x` wildcard node (`CreateImageRecipeRequest.semanticVersion`,
+/// `^(?:[0-9]+|x)\.(?:[0-9]+|x)\.(?:[0-9]+|x)$`): the requirement states the wildcard rule
+/// too.
+#[must_use]
+pub fn invalid_wildcard_semantic_version_message(member: &str) -> String {
+    ::service_common::validation_message::parameter_value_mismatch(
+        member,
+        &format!("{SEMANTIC_VERSION_REQUIREMENT} {ONE_WILDCARD_PER_VERSION_REQUIREMENT}"),
+    )
+}
+
+/// The member an instance profile name arrives in, as the API addresses it.
+pub const INSTANCE_PROFILE_NAME_MEMBER: &str = "instanceProfileName";
+
+/// Why a create naming an instance profile this account does not hold is refused.
+///
+/// `instanceProfileName` is "the instance profile to associate with the instance used to
+/// customize your Amazon EC2 AMI" — an IAM resource of the caller's account, which the model
+/// can only constrain the SHAPE of, so whether it exists is resolved against IAM itself
+/// ([`instance_profile_named`]). The wording names the member the value arrived in and
+/// states that no such profile exists; nothing of the value is echoed.
+#[must_use]
+pub fn missing_instance_profile_message(member: &str) -> String {
     format!(
-        "The semanticVersion {semantic_version} is not valid. Each of the three assignable nodes \
-         must be an integer from 0 to {MAX_VERSION_NODE}."
+        "Invalid parameter value for {member}: The provided instance profile does not exist. \
+         Please specify a different instance profile and try again."
     )
 }
 

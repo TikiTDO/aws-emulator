@@ -765,7 +765,7 @@ async fn one_client_token_queues_one_build() {
         &mismatch,
         400,
         "IdempotentParameterMismatchException",
-        "The clientToken was already used for a request with different parameter values.",
+        "The request parameters do not match those in the original idempotent request.",
     );
     let listed = listed_arns(&router, REGION, &version).await;
     assert_eq!(
