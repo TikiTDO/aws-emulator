@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeTags
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeTags`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeTags::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Implemented: reports the tags the store holds, read off the ONE list of taggable stores
+//! `CreateTags` writes through and `DeleteTags` removes from
+//! ([`crate::state::ComAmazonawsEc2Amazonec2State::tag_descriptions`]), so every tag this
+//! service persists is reported here with the resource that carries it and that resource's
+//! `ResourceType`, and nothing else is.
+//!
+//! The documented filters narrow the report, every filter having to hold, and the page is
+//! taken in a stable order the opaque `NextToken` names a position in.
 //!
 //! ## Shape of an operation
 //!
@@ -149,18 +149,263 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeTags` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeTagsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        use crate::state::{
+            CompiledFilter, MAX_FILTERS, MAX_FILTER_MATCH_STEPS, MAX_FILTER_VALUES,
+            MAX_FILTER_VALUE_BYTES, MatchBudget, PageTokenRule,
+        };
+
+        // `ctx` carries request metadata only, and a tag is a fact of the resource that
+        // carries it rather than of the Region a request names, so nothing here reads it.
+        // The store is reached through the engine held on `self`.
+        let _ = ctx;
+
+        // "Checks whether you have the required permissions for the action, without actually
+        // making the request, and provides an error response. If you have the required
+        // permissions, the error response is DryRunOperation"
+        // (`DescribeTagsRequest$DryRun`). Every caller that reaches this handler is one the
+        // service-wide authorization gate admitted, so it is answered the permitted side of
+        // the probe and reads nothing.
+        if input.dry_run.unwrap_or(false) {
+            return Err(crate::state::dry_run_operation());
+        }
+
+        let state = crate::state::require_service_state(&*self.engine)?;
+
+        // "The token returned from a previous paginated request"
+        // (`DescribeTagsRequest$NextToken`) — anything else is refused rather than read as a
+        // position, and it is refused before any other member is looked at, so whether a
+        // bogus token is caught never depends on the rest of the request.
+        let start_at = match input.next_token.as_deref() {
+            None => None,
+            Some(token) => Some(
+                crate::state::decode_page_token(token)
+                    .ok_or_else(|| crate::state::invalid_pagination_token_for(token))?,
+            ),
+        };
+
+        // "This value can be between 5 and 1000" (`DescribeTagsRequest$MaxResults`). The
+        // model declares no `@range` on it, so the handler is the only place that published
+        // range is enforced, and it is refused through the one template this crate words a
+        // page size outside a published range with.
+        if let Some(max_results) = input.max_results {
+            if !(MIN_TAGS_PER_PAGE..=MAX_TAGS_PER_PAGE).contains(&max_results) {
+                return Err(crate::state::max_results_outside_published_range(
+                    MIN_TAGS_PER_PAGE,
+                    MAX_TAGS_PER_PAGE,
+                ));
+            }
+        }
+
+        // Matching cost is filters x values x value length x stored tags, and the model
+        // bounds none of them (`FilterList` and `Filter$Values` carry no `@length`), so every
+        // request-controlled factor is capped HERE, before any work proportional to it is
+        // done and before the store is locked — the same ceilings the other describes of this
+        // crate enforce, from `crate::state`.
+        let filters: &[Filter] = input.filters.as_deref().unwrap_or_default();
+        if filters.len() > MAX_FILTERS {
+            return Err(crate::state::invalid_parameter_value(format!(
+                "The request carries {} filters, above the maximum of {MAX_FILTERS}",
+                filters.len()
+            )));
+        }
+        // A filter name this operation does not document is refused whether or not any tag
+        // would have matched it, so an unsupported filter can never read as "no results".
+        // Each value is compiled into its pattern ONCE here, rather than recompiled for every
+        // tag the store holds.
+        let mut compiled: Vec<CompiledFilter> = Vec::with_capacity(filters.len());
+        for filter in filters {
+            let name = filter.name.as_deref().unwrap_or_default();
+            if !is_documented_filter(name) {
+                return Err(crate::state::invalid_parameter_value(format!(
+                    "The filter '{name}' is invalid"
+                )));
+            }
+            let values: &[String] = filter.values.as_deref().unwrap_or_default();
+            if values.len() > MAX_FILTER_VALUES {
+                return Err(crate::state::invalid_parameter_value(format!(
+                    "The filter '{name}' carries {} values, above the maximum of \
+                     {MAX_FILTER_VALUES}",
+                    values.len()
+                )));
+            }
+            // A capped NUMBER of comparisons is not capped WORK: the matcher's cost is the
+            // product of the pattern's length and the value's, so a value's size is bounded
+            // here too.
+            if let Some(oversize) = values
+                .iter()
+                .find(|value| value.len() > MAX_FILTER_VALUE_BYTES)
+            {
+                return Err(crate::state::invalid_parameter_value(format!(
+                    "A value of the filter '{name}' carries {} bytes, above the maximum of \
+                     {MAX_FILTER_VALUE_BYTES}",
+                    oversize.len()
+                )));
+            }
+            compiled.push(CompiledFilter::new(name.to_string(), values.to_vec()));
+        }
+
+        let mut store = state.lock();
+        // The clock-owed transitions this read is allowed to apply — the same call the other
+        // describes of this crate make: a resource whose due instant has passed is in its
+        // settled state whether or not anybody called, and one that settling creates carries
+        // the tags its own request asked for, so applying it here reports nothing a later
+        // caller would not have seen anyway.
+        store.materialize_due_transitions();
+
+        // "Describes the specified tags for your EC2 resources": every tag the store holds,
+        // narrowed by the filters the request carries ("If you specify multiple filters, the
+        // filters are joined with an AND" — `Filter`).
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeTags"))
+        // Every comparison is charged to ONE budget, so the product of stored tags, filters,
+        // values and value length is bounded however the caller combines them — which is also
+        // what bounds how long this holds the store's lock.
+        let mut budget = MatchBudget::new(MAX_FILTER_MATCH_STEPS);
+        let mut selected: Vec<Reported> = Vec::new();
+        for described in store.tag_descriptions() {
+            if budget.exhausted() {
+                break;
+            }
+            if crate::state::matches_every_filter(&compiled, &mut budget, &|name| {
+                filter_values(&described, name)
+            }) {
+                selected.push(Reported {
+                    position: crate::state::tag_description_cursor(&described),
+                    described,
+                });
+            }
+        }
+        // A spent budget means the answer is INCOMPLETE, which is not something to report as
+        // a result: the request asked for more filtering than one call will do, and is told
+        // so.
+        if budget.exhausted() {
+            return Err(crate::scaffolded::Scaffolded::request_limit_exceeded(
+                format!(
+                    "The request's filters would take more than {MAX_FILTER_MATCH_STEPS} \
+                     comparisons to evaluate; narrow them or page with MaxResults"
+                ),
+            ));
+        }
+
+        // No sort here: the store answers its tags in [`crate::state::tag_description_cursor`]
+        // order already and the narrowing above preserves it, which is the invariant the
+        // cursor depends on — and `page_from_cursor` debug-asserts it at the point of use, so
+        // a set that ever reached it unordered would fail loudly rather than silently skip a
+        // page.
+        //
+        // "The maximum number of items to return for this request" (`MaxResults`). A request
+        // that names none gets the largest page this operation serves, so the `NextToken`
+        // path below behaves the same whether or not a page size was asked for; anything
+        // outside the published range has already been refused above.
+        let limit = input
+            .max_results
+            .and_then(|max_results| usize::try_from(max_results).ok())
+            .unwrap_or(DEFAULT_MAX_RESULTS);
+
+        // "This value is null when there are no more items to return" (`NextToken`): a token
+        // only when a tag follows this page.
+        let (page, next_token) = crate::state::page_from_cursor(
+            &selected,
+            start_at.as_deref(),
+            Some(limit),
+            PageTokenRule::WhenAnotherItemFollows,
+            |reported| reported.position.as_str(),
+        );
+
+        Ok(DescribeTagsOutput {
+            next_token,
+            tags: Some(
+                page.iter()
+                    .map(|reported| reported.described.clone())
+                    .collect(),
+            ),
+        })
+    }
+}
+
+/// One tag this report selected, with the position it is paged from beside it.
+///
+/// The position is [`crate::state::tag_description_cursor`]'s, held here so the sort, the
+/// cursor the request resumed from and the token the answer carries are all the same reading
+/// of where a tag sits in the report.
+struct Reported {
+    position: String,
+    described: TagDescription,
+}
+
+/// The smallest page this operation serves: "This value can be between 5 and 1000"
+/// (`DescribeTagsRequest$MaxResults`).
+const MIN_TAGS_PER_PAGE: i32 = 5;
+
+/// The largest page this operation serves, from the same sentence.
+const MAX_TAGS_PER_PAGE: i32 = 1000;
+
+/// The page size a request that names no `MaxResults` gets: the largest page this operation
+/// serves, so a request that asked for no limit is paged like one that asked for the most.
+const DEFAULT_MAX_RESULTS: usize = MAX_TAGS_PER_PAGE as usize;
+
+/// The filter names this operation documents, from `DescribeTagsRequest$Filters`:
+///
+/// ```text
+/// smithy_query(query="doc",shape="DescribeTagsRequest",member="Filters",model_path="services/service-com-amazonaws-ec2-amazonec2/smithy-model/com-amazonaws-ec2-amazonec2.json")
+/// ```
+///
+/// `tag:<key>` is the one name with a variable part, so it is matched by prefix rather than
+/// listed here. The items this operation reports are TAGS rather than the resources that
+/// carry them, so the member documents `key` and `value` where a describe of a resource kind
+/// documents `tag-key` and `tag-value`; those two name no attribute of a tag description and
+/// are as undocumented here as any other misspelling. Every entry must be answered by
+/// [`filter_values`].
+const TAG_FILTERS: [&str; 4] = ["key", "resource-id", "resource-type", "value"];
+
+/// The prefix of the tag filter: "the key/value combination of the tag. For example, specify
+/// `tag:Owner` for the filter name and `TeamA` for the filter value"
+/// (`DescribeTagsRequest$Filters`).
+const TAG_FILTER_PREFIX: &str = "tag:";
+
+/// Is `name` a filter this operation documents? "Filter names are case-sensitive"
+/// (`Filter$Name`), so the comparison is exact — and a `tag:` prefix with no key names no
+/// tag, so it is as undocumented as any other misspelling.
+///
+/// A name this answers `false` for is refused HTTP 400 `InvalidParameterValue` with EC2's
+/// sentence for a filter this read cannot resolve — `The filter '<name>' is invalid`, which
+/// names the entry at fault — the refusal the recorded contract of this operation answers,
+/// and the one every describe of this crate that resolves its OWN filters answers.
+fn is_documented_filter(name: &str) -> bool {
+    name.strip_prefix(TAG_FILTER_PREFIX)
+        .is_some_and(|key| !key.is_empty())
+        || TAG_FILTERS.contains(&name)
+}
+
+/// The values the EC2 filter `name` compares against this tag description.
+///
+/// A filter naming an attribute this description does not carry compares against NO values,
+/// so it selects nothing rather than everything — which is what makes `tag:<key>` select only
+/// the tags held under that key.
+fn filter_values<'a>(described: &'a TagDescription, name: &str) -> Vec<::std::borrow::Cow<'a, str>> {
+    use ::std::borrow::Cow;
+
+    let text = |value: Option<&'a str>| -> Vec<Cow<'a, str>> {
+        value.map(Cow::Borrowed).into_iter().collect()
+    };
+
+    // "`tag:<key>` - The key/value combination of the tag": the filter selects on the VALUE
+    // of the tag held under that key, so a description of a tag under any other key carries
+    // no value for it to match.
+    if let Some(key) = name.strip_prefix(TAG_FILTER_PREFIX) {
+        if described.key.as_deref() != Some(key) {
+            return Vec::new();
+        }
+        return text(described.value.as_deref());
+    }
+
+    match name {
+        "key" => text(described.key.as_deref()),
+        "resource-id" => text(described.resource_id.as_deref()),
+        "resource-type" => text(described.resource_type.as_deref()),
+        "value" => text(described.value.as_deref()),
+        // Unreachable: `is_documented_filter` has already refused every other name. An
+        // undefined name compares against nothing, so it could never widen a result even if
+        // that check were bypassed.
+        _ => Vec::new(),
     }
 }

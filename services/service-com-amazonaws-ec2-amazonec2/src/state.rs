@@ -2133,18 +2133,122 @@ pub use instance_detail::*;
 pub mod iam_instance_profile_associations;
 pub use iam_instance_profile_associations::*;
 
-/// The stores whose resources carry the modelled `Tag` list, for
-/// [`ComAmazonawsEc2Amazonec2State::resource_tags_mut`].
+/// Hand the ONE list of stores whose resources carry the modelled `Tag` list to `consumer`,
+/// which is given the bindings in the brackets ahead of it.
 ///
-/// `field` names a store whose record IS the modelled shape; `field => member` one that
-/// keeps that shape on a member, beside the facts the shape carries no member for. A
-/// resource kind is taggable exactly when it is named here, so this list is the one place
-/// the tag operations' reach is written down.
+/// `field` names a store whose record IS the modelled shape; `field.member` one that keeps
+/// that shape on a member, beside the facts the shape carries no member for; and `as` names
+/// the `ResourceType` the kind is reported under
+/// (`smithy_query(query="shape",shape="ResourceType")`). A resource kind is taggable exactly
+/// when it is named here, so this list is the one place the tag operations' reach is written
+/// down — and every consumer below reads the same list, so a store added here becomes
+/// taggable, untaggable and described at once.
+macro_rules! taggable_tag_list_stores {
+    ($consumer:ident [$($bindings:tt)*]) => {
+        $consumer!(
+            [$($bindings)*]
+            addresses as "elastic-ip",
+            capacity_reservation_fleets.view as "capacity-reservation-fleet",
+            capacity_reservation_cancellation_quotes.view
+                as "capacity-reservation-cancellation-quote",
+            capacity_reservations.view as "capacity-reservation",
+            carrier_gateways as "carrier-gateway",
+            client_vpn_endpoints as "client-vpn-endpoint",
+            coip_pools as "coip-pool",
+            customer_gateways.view as "customer-gateway",
+            dedicated_hosts as "dedicated-host",
+            dhcp_options as "dhcp-options",
+            export_image_tasks.view as "export-image-task",
+            export_tasks.view as "export-instance-task",
+            fleets.fleet as "fleet",
+            fpga_images.view as "fpga-image",
+            images as "image",
+            import_image_tasks.view as "import-image-task",
+            import_snapshot_tasks as "import-snapshot-task",
+            internet_gateways as "internet-gateway",
+            ipam_policies.view as "ipam-policy",
+            ipam_pools as "ipam-pool",
+            ipam_resource_discoveries as "ipam-resource-discovery",
+            ipam_resource_discovery_associations as "ipam-resource-discovery-association",
+            ipam_scopes as "ipam-scope",
+            ipams as "ipam",
+            launch_templates.template as "launch-template",
+            local_gateway_route_table_virtual_interface_group_associations.view
+                as "local-gateway-route-table-virtual-interface-group-association",
+            local_gateway_route_table_vpc_associations.view
+                as "local-gateway-route-table-vpc-association",
+            local_gateway_route_tables.view as "local-gateway-route-table",
+            mac_modification_tasks.view as "mac-modification-task",
+            managed_prefix_lists.view as "prefix-list",
+            nat_gateways as "natgateway",
+            network_insights_access_scope_analyses.view
+                as "network-insights-access-scope-analysis",
+            network_insights_access_scopes as "network-insights-access-scope",
+            network_insights_analyses.view as "network-insights-analysis",
+            network_insights_paths as "network-insights-path",
+            placement_groups as "placement-group",
+            replace_root_volume_tasks.view as "replace-root-volume-task",
+            reserved_instances as "reserved-instances",
+            route_server_endpoints as "route-server-endpoint",
+            route_server_peers as "route-server-peer",
+            route_servers.view as "route-server",
+            route_tables as "route-table",
+            secondary_interfaces as "secondary-interface",
+            secondary_networks.view as "secondary-network",
+            secondary_subnets as "secondary-subnet",
+            security_groups as "security-group",
+            snapshots.view as "snapshot",
+            spot_instance_requests.view as "spot-instances-request",
+            spot_fleet_requests.view as "spot-fleet-request",
+            subnet_cidr_reservations as "subnet-cidr-reservation",
+            subnets as "subnet",
+            traffic_mirror_filters as "traffic-mirror-filter",
+            traffic_mirror_sessions as "traffic-mirror-session",
+            transit_gateway_connect_peers.view as "transit-gateway-connect-peer",
+            transit_gateway_metering_policies as "transit-gateway-metering-policy",
+            transit_gateway_policy_tables.view as "transit-gateway-policy-table",
+            transit_gateway_route_tables as "transit-gateway-route-table",
+            transit_gateways as "transit-gateway",
+            verified_access_endpoints.view as "verified-access-endpoint",
+            verified_access_groups.view as "verified-access-group",
+            volumes.view as "volume",
+            vpc_block_public_access_exclusions.view as "vpc-block-public-access-exclusion",
+            vpc_endpoint_services as "vpc-endpoint-service",
+            vpc_endpoints as "vpc-endpoint",
+            vpc_peering_connections.view as "vpc-peering-connection",
+            vpcs as "vpc",
+            vpn_connections.view as "vpn-connection",
+            vpn_gateways.view as "vpn-gateway",
+        );
+    };
+}
+
+/// Resolve `$id` against every store [`taggable_tag_list_stores`] names, answering the
+/// resource's tags for writing — the consumer
+/// [`ComAmazonawsEc2Amazonec2State::resource_tags_mut`] drives.
 macro_rules! resource_tag_lists {
-    ($store:ident, $id:ident, $($field:ident $(=> $member:ident)?),+ $(,)?) => {
+    ([$store:ident, $id:ident] $($field:ident $(. $member:ident)? as $kind:literal),+ $(,)?) => {
         $(
             if let Some(record) = $store.$field.get_mut($id) {
                 return Some(ResourceTagsMut::List(&mut record $(.$member)?.tags));
+            }
+        )+
+    };
+}
+
+/// Report every stored resource of every store [`taggable_tag_list_stores`] names to
+/// `$report`, as `(resource id, resource type, tags)` — the consumer
+/// [`ComAmazonawsEc2Amazonec2State::tag_descriptions`] drives, so what `DescribeTags`
+/// reports is read off the same list the two writers resolve an id against.
+macro_rules! resource_tag_descriptions {
+    ([$store:ident, $report:ident] $($field:ident $(. $member:ident)? as $kind:literal),+ $(,)?) => {
+        $(
+            for (resource_id, record) in &$store.$field {
+                $report(
+                    resource_id,
+                    $kind,
+                    record $(.$member)?.tags.as_deref().unwrap_or_default(),
+                );
             }
         )+
     };
@@ -2483,6 +2587,11 @@ mod volumes;
 mod local_gateways_and_filter_patterns;
 pub mod outpost_lags;
 mod service_link_virtual_interfaces;
+/// Every tag this store holds, as `DescribeTags` reports one — read off the same list of
+/// stores the two tag writers resolve an id against. Everything it declares is re-exported
+/// below, so a handler reaches it as `crate::state::tag_description_cursor` like any
+/// primitive of this module.
+mod tag_descriptions;
 mod instance_ids_and_instance_types;
 /// The display data AWS publishes for a Region — its long name, its geography and its
 /// sub-geography — as the zones of that Region report it. Re-exported below, so a zone's
@@ -2509,6 +2618,7 @@ pub use availability_zone_display::*;
 pub use local_gateways_and_filter_patterns::*;
 pub use outpost_lags::*;
 pub use service_link_virtual_interfaces::*;
+pub use tag_descriptions::*;
 pub use volumes::*;
 pub use import_image_tasks_and_verified_access::*;
 pub use export_image_tasks::*;

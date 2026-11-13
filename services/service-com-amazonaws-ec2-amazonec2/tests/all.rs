@@ -220,7 +220,6 @@ mod replace_network_acl_entry;
 // the clock-owed moves each starts, the narrowing and paging of the report, and the refusals
 // each answers. Declared beside `prefix_lists` for the reason the note above gives: the
 // sorted neighbourhood and the tail of this file are where every new ec2 suite inserts its
-// lines.
 #[path = "all/vpc_encryption_controls.rs"]
 mod vpc_encryption_controls;
 // The route path out of a VPC: an internet gateway attached to exactly one VPC, a route
@@ -1994,3 +1993,8 @@ mod capacity_manager_monitored_tag_keys;
 // ec2 suite lands.
 #[path = "all/vpc_endpoint_type_matches_service.rs"]
 mod vpc_endpoint_type_matches_service;
+// `DescribeTags`: the tags of every taggable resource the store holds, the filters that
+// narrow that report, the pages it is walked in and what it refuses — declared at the tail of
+// this file, which is where every new ec2 suite lands.
+#[path = "all/describe_tags.rs"]
+mod describe_tags;

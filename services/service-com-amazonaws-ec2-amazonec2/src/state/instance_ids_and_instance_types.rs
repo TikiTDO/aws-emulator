@@ -23,8 +23,9 @@ impl ComAmazonawsEc2Amazonec2State {
     /// `CreateTags` and `DeleteTags` act on a resource id without being told its kind, so
     /// this is where an id is resolved against every store that holds a taggable resource.
     /// Both reach a resource's tags ONLY through here, so neither can accept an id the
-    /// other refuses, and a store added to the list below becomes taggable for both at
-    /// once.
+    /// other refuses, and a store added to [`taggable_tag_list_stores`] becomes taggable
+    /// for both — and reported by `DescribeTags`
+    /// ([`ComAmazonawsEc2Amazonec2State::tag_descriptions`]) — at once.
     pub fn resource_tags_mut(&mut self, resource_id: &str) -> Option<ResourceTagsMut<'_>> {
         let store = self;
         // The instance record keeps its tags as a map rather than as the modelled list,
@@ -38,78 +39,7 @@ impl ComAmazonawsEc2Amazonec2State {
         if let Some(interface) = store.network_interfaces.get_mut(resource_id) {
             return Some(ResourceTagsMut::List(&mut interface.tag_set));
         }
-        resource_tag_lists!(
-            store,
-            resource_id,
-            addresses,
-            capacity_reservation_fleets => view,
-            capacity_reservation_cancellation_quotes => view,
-            capacity_reservations => view,
-            carrier_gateways,
-            client_vpn_endpoints,
-            coip_pools,
-            customer_gateways => view,
-            dedicated_hosts,
-            dhcp_options,
-            export_image_tasks => view,
-            export_tasks => view,
-            fleets => fleet,
-            fpga_images => view,
-            images,
-            import_image_tasks => view,
-            import_snapshot_tasks,
-            internet_gateways,
-            ipam_policies => view,
-            ipam_pools,
-            ipam_resource_discoveries,
-            ipam_resource_discovery_associations,
-            ipam_scopes,
-            ipams,
-            launch_templates => template,
-            local_gateway_route_table_virtual_interface_group_associations => view,
-            local_gateway_route_table_vpc_associations => view,
-            local_gateway_route_tables => view,
-            mac_modification_tasks => view,
-            managed_prefix_lists => view,
-            nat_gateways,
-            network_insights_access_scope_analyses => view,
-            network_insights_access_scopes,
-            network_insights_analyses => view,
-            network_insights_paths,
-            placement_groups,
-            replace_root_volume_tasks => view,
-            reserved_instances,
-            route_server_endpoints,
-            route_server_peers,
-            route_servers => view,
-            route_tables,
-            secondary_interfaces,
-            secondary_networks => view,
-            secondary_subnets,
-            security_groups,
-            snapshots => view,
-            spot_instance_requests => view,
-            spot_fleet_requests => view,
-            subnet_cidr_reservations,
-            subnets,
-            traffic_mirror_filters,
-            traffic_mirror_sessions,
-            transit_gateway_connect_peers => view,
-            transit_gateway_metering_policies,
-            transit_gateway_policy_tables => view,
-            transit_gateway_route_tables,
-            transit_gateways,
-            verified_access_endpoints => view,
-            verified_access_groups => view,
-            volumes => view,
-            vpc_block_public_access_exclusions => view,
-            vpc_endpoint_services,
-            vpc_endpoints,
-            vpc_peering_connections => view,
-            vpcs,
-            vpn_connections => view,
-            vpn_gateways => view,
-        );
+        taggable_tag_list_stores!(resource_tag_lists[store, resource_id]);
         None
     }
 }
