@@ -210,7 +210,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // user" — the one identity this emulator authenticates every request as. "If you
         // specify the root user, it modifies the account setting for all users, roles,
         // and the root user of the account unless a user or role explicitly overrides
-        // these settings", which is what the store's defaults map holds.
+        // these settings", which is what the store's defaults map holds — and a principal
+        // other than the caller's own is one only the account's root user may write
+        // ([`crate::state::account_setting_principal_refusal`]).
         let principal_arn = match input.principal_arn.as_deref() {
             Some(arn) if !crate::state::is_principal_arn(arn) => {
                 return Err(PutAccountSettingErrorModeled::InvalidParameterException(
@@ -220,7 +222,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
                 .into())
             }
-            Some(arn) => arn.to_string(),
+            Some(arn) => {
+                if let Some(message) = crate::state::account_setting_principal_refusal(arn) {
+                    return Err(PutAccountSettingErrorModeled::InvalidParameterException(
+                        InvalidParameterException {
+                            message: Some(message),
+                        },
+                    )
+                    .into());
+                }
+                arn.to_string()
+            }
             None => crate::state::caller_identity_arn(),
         };
 

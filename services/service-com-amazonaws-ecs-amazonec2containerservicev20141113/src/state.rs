@@ -284,6 +284,12 @@ pub use container_shell::*;
 mod container_logs;
 pub use container_logs::*;
 
+/// The cross-field rules a registration's CONTAINER DEFINITIONS have to meet: the members
+/// whose values the agent fetches under the task execution role, the log driver that needs
+/// a log router beside it, and a resource limit whose halves bound each other.
+mod container_credentials;
+pub use container_credentials::*;
+
 /// The container data plane: which containers are running, what signal a stop sends them,
 /// and the exit code a run records.
 mod container_runtime;

@@ -135,6 +135,8 @@ mod managed_instances_monitoring_spelling;
 // one of them optional, and what a create makes of each.
 #[path = "all/managed_instances_provider_members.rs"]
 mod managed_instances_provider_members;
+#[path = "all/mutating_request_authorization.rs"]
+mod mutating_request_authorization;
 #[path = "all/name_pattern_refusals.rs"]
 mod name_pattern_refusals;
 #[path = "all/page_size_range_refusals.rs"]
@@ -147,6 +149,8 @@ mod primary_task_set;
 // follows its file, as the layout rule requires.
 #[path = "all/probe_monitoring.rs"]
 mod probe_monitoring;
+#[path = "all/registration_credential_rules.rs"]
+mod registration_credential_rules;
 #[path = "all/reserved_tag_prefix.rs"]
 mod reserved_tag_prefix;
 #[path = "all/resource_scoping_and_agent_plane.rs"]

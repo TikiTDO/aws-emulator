@@ -958,6 +958,10 @@ pub fn container_instance_id_length_violation<'a>(
 /// one this emulator emits the same way, with the empty region a global service carries).
 /// A value that is not one names no principal a setting could belong to, and is refused
 /// before it can become a key — as is one longer than [`MAX_PRINCIPAL_ARN_LENGTH`].
+///
+/// This is the FORM of the value alone. WHOSE settings the caller may then reach — its own,
+/// or any principal of the account when it is the root user — is
+/// [`account_setting_principal_refusal`].
 pub fn is_principal_arn(principal_arn: &str) -> bool {
     if principal_arn.len() > MAX_PRINCIPAL_ARN_LENGTH {
         return false;
@@ -981,6 +985,35 @@ pub fn is_principal_arn(principal_arn: &str) -> bool {
 /// value is refused with the same sentence whichever of them a client calls.
 pub fn invalid_principal_arn_message(principal_arn: &str) -> String {
     format!("Invalid PrincipalArn: {principal_arn}")
+}
+
+/// `InvalidParameterException$message` for an account-setting request that names a
+/// principal OTHER than the one it is signed for, from a caller that is not the account's
+/// root user.
+///
+/// One account setting belongs to one principal, and whose settings a caller may reach is
+/// the account's own boundary: the root user's setting is the account-wide default
+/// ("Modifies an account setting for all users on an account for whom no individual account
+/// setting has been specified"), so only the root user may read or write what another
+/// principal holds, and every other caller reaches its own. Recorded behavior: this is the
+/// sentence the refusal carries.
+pub const PRINCIPAL_ARN_ROOT_ONLY_MESSAGE: &str =
+    "Only the root user can view or modify the account settings for another user. You do \
+     not need to specify a principalArn value to change your own account settings.";
+
+/// `Some(message)` when the request's `principalArn` names a principal this caller may not
+/// view or modify the account settings of ([`PRINCIPAL_ARN_ROOT_ONLY_MESSAGE`]), `None`
+/// when it may.
+///
+/// A caller reaches its OWN principal (the identity every request of this emulator is
+/// authenticated as, [`caller_identity_arn`]) — and the ROOT user reaches every principal
+/// of the account, which is what makes its own setting the account-wide default. Shared by
+/// every account-setting operation that takes a `principalArn`, so the same request is
+/// refused by all of them alike, whether it reads or writes.
+pub fn account_setting_principal_refusal(principal_arn: &str) -> Option<String> {
+    let caller = caller_identity_arn();
+    let reachable = principal_arn == caller || caller == root_principal_arn();
+    (!reachable).then(|| PRINCIPAL_ARN_ROOT_ONLY_MESSAGE.to_string())
 }
 
 /// The ARN resource type a task-definition revision is named under, as the resource

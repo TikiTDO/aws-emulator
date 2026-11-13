@@ -538,11 +538,15 @@ async fn requires_attributes_are_derived_from_the_features_the_revision_declares
             containers: vec![
                 json!({ "logConfiguration": { "logDriver": "awsfirelens" } }),
                 json!({ "logConfiguration": { "logDriver": "awslogs" } }),
+                // The `awsfirelens` driver of the first container delivers to the task's
+                // log router, so the definition has to carry one.
+                json!({ "firelensConfiguration": { "type": "fluentbit" } }),
             ],
             expected: vec![
                 DRIVER_AWSFIRELENS,
                 DRIVER_AWSLOGS,
                 EXECUTION_ROLE_AWSLOGS,
+                "ecs.capability.firelens.fluentbit",
             ],
         },
         Row {

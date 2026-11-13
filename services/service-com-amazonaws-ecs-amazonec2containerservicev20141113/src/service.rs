@@ -40,10 +40,28 @@
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
 
+pub mod authorization;
+pub mod request_pipeline;
+
+use aws_smithy_schema::Schema;
 use smithy_server_runtime::{
-    http, ErasedOperation, Refusal, Refused, Service, Violation, ViolationKind,
+    http, DeserializableStruct, ErasedOperation, Refusal, Refused, ServerHttpProtocol, Service,
+    Violation, ViolationKind,
 };
 use std::sync::Arc;
+
+/// Read a request into `T` through the protocol and schema the dispatch sequence uses, so a
+/// layer that runs before dispatch reads exactly the value the handler would be given, or
+/// `None` for a body it cannot read at all — which is the framework's refusal, not that
+/// layer's question.
+pub fn read_input<T: DeserializableStruct>(
+    protocol: &dyn ServerHttpProtocol,
+    schema: &'static Schema,
+    req: &aws_smithy_runtime_api::http::Request,
+) -> Option<T> {
+    let mut deserializer = protocol.deserialize_input(req, schema).ok()?;
+    T::deserialize(&mut *deserializer).ok()
+}
 
 /// The error this service answers a request refused before any handler ran with: "The
 /// specified parameter isn't valid. Review the available parameters for the API
@@ -187,6 +205,12 @@ fn refusal_message(violations: &[Violation]) -> String {
 /// router builds one shared engine and hands it to `new`.
 pub struct EmulatedService<Eng: Send + Sync + 'static> {
     entry: crate::ServiceDefinition<Eng>,
+    /// What this service does with a request before a handler runs: the IAM authorization
+    /// decision, then the modelled operation the routing key names (see
+    /// [`request_pipeline`]). Held on the service because [`Service::override_operation`]
+    /// hands back a borrow of one of its own operations, and holding the shared engine
+    /// because that decision is answered from this emulator's IAM and STS stores.
+    pipeline: request_pipeline::RequestPipeline<Eng>,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -195,7 +219,8 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// operation's behaviour lives in that operation's own `impl Operation`.
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
-            entry: crate::ServiceDefinition::new(engine),
+            entry: crate::ServiceDefinition::new(Arc::clone(&engine)),
+            pipeline: request_pipeline::RequestPipeline::new(engine),
         }
     }
 }
@@ -226,8 +251,20 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // correctly; `None` (the default) lets the generated routing table resolve
         // it. `req` is the whole request, so a decision that depends on the body —
         // the `Action` form field on a query protocol, say — is reachable here.
-        let _ = req;
-        None
+        //
+        // EDITED HERE: every request this service serves is handed to
+        // [`request_pipeline`], which takes the IAM authorization decision this service
+        // makes BEFORE any handler runs ([`authorization`]) and then hands the request to
+        // the modelled operation the routing key names. That decision needs both the
+        // operation, which only this seam knows, and the request context, which only a
+        // claimed operation is handed — which is why it lives behind this one claim.
+        //
+        // Claimed only for a routing key the generated table actually serves, so a request
+        // naming no operation of this service still reaches `override_routing_error` rather
+        // than a layer with nothing to run.
+        let key = self.entry.protocol().routing_key(req).ok()?;
+        self.entry.routing_table().get(key)?;
+        Some(&self.pipeline as &dyn ErasedOperation)
     }
 
     fn override_refusal(&self, refusal: &Refusal) -> Option<Refused> {

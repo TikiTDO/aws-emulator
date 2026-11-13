@@ -560,6 +560,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
+        // The rules about the container list that are not about ONE container's own
+        // values: the members whose values the Amazon ECS agent fetches on the task's
+        // behalf and so need the task execution role, the log driver that only delivers
+        // to a log router some container of the list provides, and a resource limit whose
+        // soft half may not cross its hard one
+        // ([`crate::state::container_credential_violation`]). Checked here, before any
+        // revision is allocated, so a registration Amazon ECS refuses advances the
+        // family's revision counter by nothing.
+        let credential_views: Vec<crate::state::ContainerCredentials<'_>> = input
+            .container_definitions
+            .iter()
+            .map(crate::state::ContainerCredentials::of_container)
+            .collect();
+        if let Some(message) = crate::state::container_credential_violation(
+            &credential_views,
+            input.execution_role_arn.as_deref(),
+        ) {
+            return Err(RegisterTaskDefinitionErrorModeled::ClientException(
+                ClientException {
+                    message: Some(message),
+                },
+            )
+            .into());
+        }
+
         // A caller-supplied tag may not write into the namespace Amazon Web Services keeps
         // for its own tags, whichever operation carries the `tags` list.
         if let Some(message) =

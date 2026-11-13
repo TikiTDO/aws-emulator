@@ -46,7 +46,15 @@ service-com-amazonaws-ecr-amazonec2containerregistry-v20150921 = { workspace = t
 # that service's own records, held in its own store in the shared engine, so this is a
 # cross-service READ of them rather than a copy kept here. No cycle: that crate depends on no
 # service crate.
+# ALSO the account's identity-based policy documents and permissions boundaries: the
+# authorization decision every mutating request is judged by
+# (`src/service/authorization.rs`) reads them through IAM's own accessors.
 service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+# The session registry in that same shared engine, which is where `sts:GetCallerIdentity`
+# answers from: the authorization decision resolves the principal a request's credential
+# speaks for through STS's OWN resolution rather than guessing it
+# (`src/service/authorization.rs`). No cycle: that crate does not depend on this one.
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
 # The Amazon EC2 Auto Scaling service, for ONE read of the Auto Scaling group a capacity
 # provider's `autoScalingGroupProvider` names: whether the account holds that group, which
 # decides whether the provider can be created at all

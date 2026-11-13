@@ -23,10 +23,14 @@
 //!   read-only, so a write of it is refused.
 //! * `DeleteAccountSetting` "disables an account setting for a specified user, role, or
 //!   the root user for an account": the principal's stored value is removed, so the
-//!   value in effect for it falls back to the account-wide default (and, for the root
-//!   user, to the setting's documented default), and the response reports the setting
-//!   that stopped applying. A principal that holds no setting of that name has nothing to
-//!   disable, so the call is refused rather than answered with what is already in effect.
+//!   value in effect for it falls back to the account-wide default, and the response
+//!   reports the setting that stopped applying. A principal that holds no setting of that
+//!   name has nothing to disable, so the call is refused rather than answered with what is
+//!   already in effect.
+//! * A `principalArn` that names a principal OTHER than the caller's own is reached by the
+//!   root user alone, whichever of these operations names it: every other caller reads and
+//!   writes its own settings, and the account-wide default is written through
+//!   `PutAccountSettingDefault`, which names no principal.
 //! * `ClusterSetting$value`: "If a cluster value is specified, it will override the
 //!   `containerInsights` value set with PutAccountSetting or PutAccountSettingDefault" —
 //!   so a cluster that set nothing reports the account setting in effect.
@@ -82,6 +86,30 @@ fn authenticated_principal() -> String {
 /// The root user — the principal whose settings ARE the account-wide defaults.
 fn root_principal() -> String {
     format!("arn:aws:iam::{ACCOUNT}:root")
+}
+
+/// The sentence an account-setting call that names a principal other than the caller's own
+/// is refused with: whose settings a caller may reach is the account's own boundary, and
+/// only the root user reaches another principal's.
+const ROOT_ONLY_MESSAGE: &str =
+    "Only the root user can view or modify the account settings for another user. You do \
+     not need to specify a principalArn value to change your own account settings.";
+
+/// Assert that `operation` refuses `body` because it names a principal the caller may not
+/// reach — the one refusal every account-setting operation answers such a request with.
+async fn refused_as_another_principal(
+    router: &MultiServiceRouter,
+    operation: &str,
+    body: Value,
+    case: &str,
+) {
+    let (code, message) = refusal(router, operation, body, case).await;
+    assert_eq!(
+        (code.as_str(), message.as_str()),
+        ("InvalidParameterException", ROOT_ONLY_MESSAGE),
+        "case {case:?}: expected {operation} to refuse another principal's settings, got \
+         {code:?} with {message:?}"
+    );
 }
 
 /// One `ListAccountSettings` page.
@@ -391,19 +419,16 @@ async fn an_account_default_is_the_root_users_setting_and_a_principals_own_shado
             "case {case:?}: the account default is in effect for the authenticated user, \
              got {in_effect}"
         );
-        // ... and it is the root user's own setting, so the root user has it explicitly.
-        let root_explicit = all_settings(
+        // ... and it is the ROOT user's own setting, which only the root user may read:
+        // this caller is a user, so a listing that names the root user's principal is
+        // refused rather than answered.
+        refused_as_another_principal(
             &router,
+            "ListAccountSettings",
             json!({ "name": name, "principalArn": root_principal(), "effectiveSettings": false }),
             case,
         )
         .await;
-        assert_eq!(
-            values(&root_explicit),
-            vec![(name.to_string(), default_value.to_string())],
-            "case {case:?}: the root user holds the account default explicitly, got \
-             {root_explicit:?}"
-        );
         // The authenticated user wrote nothing, so a non-effective listing for it
         // reports nothing of this name.
         let own_explicit = all_settings(
@@ -436,17 +461,24 @@ async fn an_account_default_is_the_root_users_setting_and_a_principals_own_shado
             "case {case:?}: a principal's own setting overrides the account default, got \
              {shadowed}"
         );
-        let root_after = all_settings(
+        // ... and taking that write away leaves the account default where it was, which is
+        // what the principal falls back to.
+        ok(
             &router,
-            json!({ "name": name, "principalArn": root_principal(), "effectiveSettings": true }),
+            "DeleteAccountSetting",
+            json!({ "name": name }),
             case,
         )
         .await;
+        let fell_back = effective(&router, name, case).await;
         assert_eq!(
-            values(&root_after),
-            vec![(name.to_string(), default_value.to_string())],
+            (
+                fell_back["value"].clone(),
+                fell_back["principalArn"].clone()
+            ),
+            (json!(default_value), json!(root_principal())),
             "case {case:?}: one principal's write must leave the account default where it \
-             was, got {root_after:?}"
+             was, got {fell_back}"
         );
     }
 }
@@ -629,16 +661,22 @@ async fn a_request_outside_the_documented_parameters_is_refused() {
 async fn a_principal_an_account_setting_may_belong_to_is_an_iam_arn() {
     // `PutAccountSetting$principalArn`: "The ARN of the principal, which can be a user,
     // role, or the root user" — an IAM ARN, `arn:<partition>:iam::<account>:<resource>`.
-    // The rows differ along the FORM of the value: the principal kinds AWS mints, a
-    // partition other than `aws`, a resource with a path — and, refused, each field that
-    // makes it something else, plus a key longer than the emulator stores.
-    let accepted: [(&str, String); 4] = [
+    // The rows differ along the FORM of the value: the caller's OWN principal, which is the
+    // one every caller but the root user may write; the other principal kinds AWS mints, a
+    // partition other than `aws`, a resource with a path and a principal of another account,
+    // each a well-formed ARN whose settings only the root user reaches; and the fields that
+    // make a value no principal ARN at all, plus a key longer than the emulator stores.
+    let own = authenticated_principal();
+    let another_principal: [(&str, String); 4] = [
         ("the root user", root_principal()),
-        ("a user", authenticated_principal()),
         ("a role", format!("arn:aws:iam::{ACCOUNT}:role/deployer")),
         (
             "a user under a path",
             format!("arn:aws-us-gov:iam::{ACCOUNT}:user/team/lead"),
+        ),
+        (
+            "a user of another account",
+            "arn:aws:iam::111122223333:user/outsider".to_string(),
         ),
     ];
     let refused_arns: [(&str, String); 6] = [
@@ -659,7 +697,8 @@ async fn a_principal_an_account_setting_may_belong_to_is_an_iam_arn() {
         ),
     ];
 
-    for (case, principal_arn) in accepted {
+    {
+        let case = "the caller's own principal";
         let router = service();
         let written = ok(
             &router,
@@ -667,14 +706,14 @@ async fn a_principal_an_account_setting_may_belong_to_is_an_iam_arn() {
             json!({
                 "name": "awsvpcTrunking",
                 "value": "enabled",
-                "principalArn": principal_arn,
+                "principalArn": own,
             }),
             case,
         )
         .await;
         assert_eq!(
             written["setting"]["principalArn"],
-            json!(principal_arn),
+            json!(own),
             "case {case:?}: the write must report the principal it stored the setting \
              for, got {written}"
         );
@@ -682,7 +721,7 @@ async fn a_principal_an_account_setting_may_belong_to_is_an_iam_arn() {
             &router,
             json!({
                 "name": "awsvpcTrunking",
-                "principalArn": principal_arn,
+                "principalArn": own,
                 "effectiveSettings": false,
             }),
             case,
@@ -697,6 +736,34 @@ async fn a_principal_an_account_setting_may_belong_to_is_an_iam_arn() {
     }
 
     let router = service();
+    for (case, principal_arn) in another_principal {
+        refused_as_another_principal(
+            &router,
+            "PutAccountSetting",
+            json!({
+                "name": "awsvpcTrunking",
+                "value": "enabled",
+                "principalArn": principal_arn,
+            }),
+            case,
+        )
+        .await;
+        refused_as_another_principal(
+            &router,
+            "ListAccountSettings",
+            json!({ "principalArn": principal_arn, "effectiveSettings": true }),
+            case,
+        )
+        .await;
+        refused_as_another_principal(
+            &router,
+            "DeleteAccountSetting",
+            json!({ "name": "awsvpcTrunking", "principalArn": principal_arn }),
+            case,
+        )
+        .await;
+    }
+
     for (case, principal_arn) in refused_arns {
         refused(
             &router,
@@ -722,86 +789,68 @@ async fn a_principal_an_account_setting_may_belong_to_is_an_iam_arn() {
 }
 
 #[tokio::test]
-async fn the_store_holds_settings_for_a_bounded_number_of_principals() {
+async fn the_store_holds_the_callers_own_settings_and_the_account_default() {
     let router = service();
-    // The emulator-chosen cap on distinct principals
-    // (`state::MAX_ACCOUNT_SETTING_PRINCIPALS`), so a caller cannot grow the in-memory
-    // store without limit.
-    const MAX_PRINCIPALS: usize = 64;
+    // Whose settings a caller may write is the account's boundary: its OWN principal, and
+    // the account-wide default the root user holds (written through
+    // `PutAccountSettingDefault`, which names no principal). So the store grows with those
+    // two and with nothing else, whatever principal a request names — which is also what
+    // keeps a caller from growing the in-memory store without limit
+    // (`state::MAX_ACCOUNT_SETTING_PRINCIPALS`).
+    let case = "the caller's own principal and the account default";
+    for (operation, body) in [
+        (
+            "PutAccountSetting",
+            json!({ "name": "awsvpcTrunking", "value": "enabled" }),
+        ),
+        (
+            "PutAccountSetting",
+            json!({ "name": "containerInsights", "value": "enabled" }),
+        ),
+        (
+            "PutAccountSettingDefault",
+            json!({ "name": "awsvpcTrunking", "value": "disabled" }),
+        ),
+    ] {
+        ok(&router, operation, body, case).await;
+    }
 
-    let principal = |index: usize| format!("arn:aws:iam::{ACCOUNT}:user/principal-{index}");
+    let own = all_settings(&router, json!({ "effectiveSettings": false }), case).await;
+    assert_eq!(
+        values(&own),
+        vec![
+            ("awsvpcTrunking".to_string(), "enabled".to_string()),
+            ("containerInsights".to_string(), "enabled".to_string()),
+        ],
+        "case {case:?}: the caller holds the settings it wrote for itself, got {own:?}"
+    );
 
-    for index in 0..MAX_PRINCIPALS {
-        let case = format!("principal {index}");
-        ok(
+    // Any other principal is refused, so nothing is stored for it — one row per principal
+    // kind a request can name.
+    for (row, principal_arn) in [
+        ("the root user", root_principal()),
+        ("a role", format!("arn:aws:iam::{ACCOUNT}:role/deployer")),
+        ("another user", format!("arn:aws:iam::{ACCOUNT}:user/other")),
+    ] {
+        refused_as_another_principal(
             &router,
             "PutAccountSetting",
             json!({
                 "name": "awsvpcTrunking",
                 "value": "enabled",
-                "principalArn": principal(index),
+                "principalArn": principal_arn,
             }),
-            &case,
+            row,
         )
         .await;
     }
 
-    // A further NAME for a principal already stored is still accepted: the cap counts
-    // principals, not settings.
-    ok(
-        &router,
-        "PutAccountSetting",
-        json!({
-            "name": "containerInsights",
-            "value": "enabled",
-            "principalArn": principal(0),
-        }),
-        "a second setting for a stored principal",
-    )
-    .await;
-
-    let case = "one principal too many";
-    refused(
-        &router,
-        "PutAccountSetting",
-        json!({
-            "name": "awsvpcTrunking",
-            "value": "enabled",
-            "principalArn": principal(MAX_PRINCIPALS),
-        }),
-        "ClientException",
-        case,
-    )
-    .await;
-
-    // The refusal stored nothing for that principal, and left every stored one alone.
-    let refused_principal = all_settings(
-        &router,
-        json!({
-            "principalArn": principal(MAX_PRINCIPALS),
-            "effectiveSettings": false,
-        }),
-        case,
-    )
-    .await;
-    assert!(
-        refused_principal.is_empty(),
-        "case {case:?}: a refused write must store nothing, got {refused_principal:?}"
-    );
-    let first = all_settings(
-        &router,
-        json!({ "principalArn": principal(0), "effectiveSettings": false }),
-        case,
-    )
-    .await;
+    // The refusals stored nothing and left what the caller wrote alone.
+    let after = all_settings(&router, json!({ "effectiveSettings": false }), case).await;
     assert_eq!(
-        values(&first),
-        vec![
-            ("awsvpcTrunking".to_string(), "enabled".to_string()),
-            ("containerInsights".to_string(), "enabled".to_string()),
-        ],
-        "case {case:?}: the settings already stored must survive the refusal, got \
-         {first:?}"
+        values(&after),
+        values(&own),
+        "case {case:?}: a refused write must store nothing, got {after:?}"
     );
 }
 
@@ -902,29 +951,25 @@ async fn a_disabled_setting_stops_applying_and_the_account_default_takes_over() 
              {in_effect}"
         );
 
-        // Disabling the ROOT user's setting is disabling the account-wide default, so
-        // the name falls back to the value it has for an account that never wrote it.
-        let root_disabled = disable(
+        // Disabling the ROOT user's setting is disabling the account-wide default, which
+        // is the root user's own call: this caller is a user, so it is refused and the
+        // default stays in effect.
+        refused_as_another_principal(
             &router,
+            "DeleteAccountSetting",
             json!({ "name": name, "principalArn": root_principal() }),
             case,
         )
         .await;
-        assert_eq!(
-            (
-                root_disabled["value"].clone(),
-                root_disabled["principalArn"].clone()
-            ),
-            (json!(account_value), json!(root_principal())),
-            "case {case:?}: the disable must report the account default it cleared, got \
-             {root_disabled}"
-        );
         let after_root = effective(&router, name, case).await;
         assert_eq!(
-            after_root["value"],
-            json!(documented_default(name)),
-            "case {case:?}: with no account default left, the setting's own default is in \
-             effect, got {after_root}"
+            (
+                after_root["value"].clone(),
+                after_root["principalArn"].clone()
+            ),
+            (json!(account_value), json!(root_principal())),
+            "case {case:?}: a refused disable must leave the account default in effect, \
+             got {after_root}"
         );
     }
 }
@@ -946,12 +991,10 @@ struct AbsentSettingCase {
 #[tokio::test]
 async fn disabling_a_setting_the_principal_does_not_hold_is_refused_and_changes_nothing() {
     // One row per way a principal can hold NO setting of the name a disable names: nobody
-    // ever wrote it, ANOTHER principal wrote it, only the ACCOUNT DEFAULT holds it (so it
-    // belongs to the root user alone), this principal wrote it and already disabled it
-    // (the re-delete a teardown or a converge loop makes), and the ROOT user's own default
-    // was never written. The rows also span the value forms a setting takes: off, on, a
-    // word pair and a number.
-    let other = format!("arn:aws:iam::{ACCOUNT}:role/deployer");
+    // ever wrote it, this principal wrote ANOTHER name, only the ACCOUNT DEFAULT holds it
+    // (so it belongs to the root user alone), and this principal wrote it and already
+    // disabled it (the re-delete a teardown or a converge loop makes). The rows also span
+    // the value forms a setting takes: off, on, a word pair and a number.
     let rows = [
         AbsentSettingCase {
             case: "nobody wrote it",
@@ -960,14 +1003,13 @@ async fn disabling_a_setting_the_principal_does_not_hold_is_refused_and_changes_
             request: json!({ "name": "fargateFIPSMode" }),
         },
         AbsentSettingCase {
-            case: "another principal wrote it",
+            case: "this principal wrote another name",
             name: "serviceLongArnFormat",
             setup: vec![(
                 "PutAccountSetting",
                 json!({
-                    "name": "serviceLongArnFormat",
+                    "name": "taskLongArnFormat",
                     "value": "disabled",
-                    "principalArn": other,
                 }),
             )],
             request: json!({ "name": "serviceLongArnFormat" }),
@@ -995,12 +1037,6 @@ async fn disabling_a_setting_the_principal_does_not_hold_is_refused_and_changes_
                 ),
             ],
             request: json!({ "name": "fargateTaskRetirementWaitPeriod" }),
-        },
-        AbsentSettingCase {
-            case: "the root user holds no default",
-            name: "taskLongArnFormat",
-            setup: Vec::new(),
-            request: json!({ "name": "taskLongArnFormat", "principalArn": root_principal() }),
         },
     ];
 
@@ -1056,21 +1092,25 @@ async fn disabling_a_setting_the_principal_does_not_hold_is_refused_and_changes_
 async fn a_disable_touches_one_principal_and_one_name_only() {
     let router = service();
     let case = "one principal, one name";
-    let other = format!("arn:aws:iam::{ACCOUNT}:role/deployer");
 
-    for (principal, name) in [
-        (authenticated_principal(), "awsvpcTrunking"),
-        (authenticated_principal(), "containerInsights"),
-        (other.clone(), "awsvpcTrunking"),
-    ] {
+    for name in ["awsvpcTrunking", "containerInsights"] {
         ok(
             &router,
             "PutAccountSetting",
-            json!({ "name": name, "value": "enabled", "principalArn": principal }),
+            json!({ "name": name, "value": "enabled" }),
             case,
         )
         .await;
     }
+    // The ACCOUNT DEFAULT of the same name belongs to the root user, so it is the other
+    // principal the disable must leave alone.
+    ok(
+        &router,
+        "PutAccountSettingDefault",
+        json!({ "name": "awsvpcTrunking", "value": "disabled" }),
+        case,
+    )
+    .await;
 
     disable(&router, json!({ "name": "awsvpcTrunking" }), case).await;
 
@@ -1081,17 +1121,15 @@ async fn a_disable_touches_one_principal_and_one_name_only() {
         "case {case:?}: the disable must leave this principal's other names alone, got \
          {own:?}"
     );
-    let others = all_settings(
-        &router,
-        json!({ "principalArn": other, "effectiveSettings": false }),
-        case,
-    )
-    .await;
+    let in_effect = effective(&router, "awsvpcTrunking", case).await;
     assert_eq!(
-        values(&others),
-        vec![("awsvpcTrunking".to_string(), "enabled".to_string())],
-        "case {case:?}: the disable must leave another principal's setting of the same \
-         name alone, got {others:?}"
+        (
+            in_effect["value"].clone(),
+            in_effect["principalArn"].clone()
+        ),
+        (json!("disabled"), json!(root_principal())),
+        "case {case:?}: the disable must leave the account default of the same name alone, \
+         got {in_effect}"
     );
 }
 
