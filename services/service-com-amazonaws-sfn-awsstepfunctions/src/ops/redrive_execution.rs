@@ -237,20 +237,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
 
             let machine = store.state_machines.get(&execution.state_machine_arn);
-            // "This API action is not supported by EXPRESS state machines."
+            // "This API action is not supported by EXPRESS state machines": an
+            // execution of an Express workflow is one this action is not for, which is
+            // a defect in the REQUEST rather than an execution that cannot be
+            // redriven. It is refused by the RESOURCE TYPE an Express execution
+            // carries ([`crate::state::EXPRESS_EXECUTION_RESOURCE`]) — the one refusal
+            // every reader of an ARN this service does not serve answers with, worded
+            // the same way whichever operation read it.
             if machine
                 .is_some_and(|machine| machine.sm_type == crate::state::STATE_MACHINE_TYPE_EXPRESS)
             {
-                return Err(RedriveExecutionErrorModeled::ValidationException(
-                    ValidationException {
-                        message: Some(format!(
-                            "RedriveExecution does not support execution {}, which belongs to \
-                             an EXPRESS state machine",
-                            input.execution_arn
-                        )),
-                        reason: None,
-                    },
-                )
+                return Err(RedriveExecutionErrorModeled::InvalidArn(InvalidArn {
+                    message: Some(crate::state::resource_type_not_valid_message(
+                        crate::state::EXPRESS_EXECUTION_RESOURCE,
+                    )),
+                })
                 .into());
             }
 
