@@ -10,11 +10,14 @@
 //! `GetProvisionedLimit` reports the rate in force for the identified limit
 //! beside the rate that category includes at no additional cost — the included
 //! rate itself while nothing has adjusted the limit — and changes nothing.
-//! `UpdateProvisionedLimit` stores any rate in the account's range, which runs
+//! `UpdateProvisionedLimit` stores any rate in the account's range that this
+//! account has not provisioned already, the range running
 //! from the limit's included rate up to the account's Service Quotas ceiling
 //! for that limit, and refuses a rate outside it: below the included rate as a
 //! malformed parameter, above the ceiling as a quota excess naming the rate
-//! asked for and the ceiling it passed. A refused request stores nothing.
+//! asked for and the ceiling it passed. A rate a previous provisioning already
+//! stored adjusts nothing and is refused as a malformed parameter too. A
+//! refused request stores nothing.
 //!
 //! Stated plainly, because it decides how the tests below reach a provisioned
 //! rate at all: that ceiling is a Service Quotas value of the ACCOUNT, and
@@ -200,21 +203,60 @@ async fn an_adjusted_rate_is_what_every_reader_renders() {
         );
 
         // The rows differ along where in the account's range the rate sits:
-        // both bounds, rates inside it, the same rate twice, and a release back
-        // to the included rate.
+        // both bounds, rates inside it, a release back to the included rate,
+        // and — after each stored rate — the SAME rate again, which asks for
+        // the rate this account has already provisioned and so adjusts nothing.
         let midpoint = (limit.included + ceiling) / 2;
-        let rows: Vec<(String, i64)> = vec![
-            ("one above the included rate".to_string(), limit.included + 1),
-            ("a rate inside the range".to_string(), midpoint),
-            ("that same rate again".to_string(), midpoint),
-            ("the account's ceiling".to_string(), ceiling),
-            ("back down to the included rate".to_string(), limit.included),
-            ("the included rate again".to_string(), limit.included),
+        let rows: Vec<(String, i64, bool)> = vec![
+            (
+                "one above the included rate".to_string(),
+                limit.included + 1,
+                true,
+            ),
+            ("a rate inside the range".to_string(), midpoint, true),
+            ("that same rate again".to_string(), midpoint, false),
+            ("the account's ceiling".to_string(), ceiling, true),
+            (
+                "back down to the included rate".to_string(),
+                limit.included,
+                true,
+            ),
+            ("the included rate again".to_string(), limit.included, false),
         ];
 
-        for (position, requested) in rows {
+        // What the limit held before the row ran, so a row that adjusts nothing
+        // can be asserted to have left it there.
+        let mut in_force = limit.included;
+        for (position, requested, adjusts) in rows {
             let case = format!("{} provisioned at {requested} ({position})", limit.category);
             let (status, answered) = provision(&router, limit.category, requested).await;
+            if !adjusts {
+                // A rate this account has already provisioned names no
+                // adjustment, so it is refused as a malformed parameter and the
+                // limit stays put.
+                assert_eq!(
+                    (
+                        status,
+                        error_code(&answered),
+                        error_message(&answered).to_string()
+                    ),
+                    (
+                        400,
+                        "InvalidParameterException",
+                        already_provisioned_message()
+                    ),
+                    "case {case:?}: the rate already provisioned is refused, got {status} \
+                     with {answered}"
+                );
+                let reported = read_back(&router, &case, limit.category).await;
+                assert_eq!(
+                    reported,
+                    rendered(limit, in_force),
+                    "case {case:?}: a refused update must leave the limit at the rate it \
+                     held, got {reported}"
+                );
+                continue;
+            }
             assert_eq!(
                 status, 200,
                 "case {case:?}: a rate inside the account's range is stored, got {status} \
@@ -225,6 +267,7 @@ async fn an_adjusted_rate_is_what_every_reader_renders() {
                 Some(&rendered(limit, requested)),
                 "case {case:?}: the update must answer the limit it stored, got {answered}"
             );
+            in_force = requested;
 
             // The stored rate is what the reader renders, so the adjustment
             // round-trips rather than living in the response alone.
@@ -441,11 +484,33 @@ async fn an_account_with_no_increase_has_the_included_rate_as_its_ceiling() {
 
         // The ceiling itself is inside the range, so the refusals above are
         // about passing it rather than about the operation refusing everything.
+        // Nothing has provisioned this limit yet, so asking for the rate it
+        // REPORTS is still an adjustment: it stores a provisioned rate where
+        // the account had none.
         let case = format!("{} asked for its ceiling", limit.category);
         let (status, answered) = provision(&router, limit.category, limit.included).await;
         assert_eq!(
             status, 200,
             "case {case:?}: the rate at the ceiling is served, got {status} with {answered}"
+        );
+
+        // Asked for again it adjusts nothing, the account having provisioned it
+        // just now.
+        let case = format!("{} asked for its ceiling twice", limit.category);
+        let (status, payload) = provision(&router, limit.category, limit.included).await;
+        assert_eq!(
+            (
+                status,
+                error_code(&payload),
+                error_message(&payload).to_string()
+            ),
+            (
+                400,
+                "InvalidParameterException",
+                already_provisioned_message()
+            ),
+            "case {case:?}: the rate already provisioned is refused, got {status} \
+             with {payload}"
         );
     }
 }
@@ -535,6 +600,13 @@ fn below_included_message(requested: i64, included: i64) -> String {
 /// nothing else.
 fn above_ceiling_message(requested: i64, ceiling: i64) -> String {
     format!("Requested value {requested} exceeds Service Quota ceiling of {ceiling}")
+}
+
+/// What a refusal says for a rate this account has already provisioned: fixed
+/// text that states neither the rate nor the limit, both halves being the value
+/// the caller sent.
+fn already_provisioned_message() -> String {
+    "Requested value is the same as the current provisioned limit".to_string()
 }
 
 /// What a refusal says for a category value the service publishes no limit of:

@@ -374,6 +374,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(feature_unavailable_in_tier(message));
         }
 
+        // A validity member and its time unit together name a token's lifetime,
+        // and each member's modelled range bounds that DURATION
+        // ([`crate::state::token_validity_defect`]), the same question the create
+        // path asks — so a configuration naming a lifetime outside it leaves the
+        // app client exactly as it was.
+        if let Some(defect) = crate::state::token_validity_defect(
+            &crate::state::RequestedTokenValidity {
+                refresh_token_validity: input.refresh_token_validity,
+                access_token_validity: input.access_token_validity,
+                id_token_validity: input.id_token_validity,
+                token_validity_units: input.token_validity_units.as_ref(),
+            },
+        ) {
+            return Err(invalid_parameter(defect.to_string()));
+        }
+
         // A scope an app client may be permitted to authorize is a standard one
         // or one a resource server of THIS pool defines
         // ([`crate::state::UserPool::authorizes_scope`]), the same question the

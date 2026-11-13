@@ -45,6 +45,9 @@ mod openid_discovery;
 /// What a pool says about a token another service was presented: the server-side
 /// validation an integrated identity pool asks for.
 mod presented_tokens;
+/// The token lifetimes an app client may be configured with, and the range each
+/// one's duration has to lie in.
+mod token_validity;
 pub use attributes::*;
 pub use presented_tokens::*;
 pub use identity_providers::*;
@@ -53,6 +56,7 @@ pub use pool_preconditions::*;
 pub use pool_resources::*;
 pub use refresh_token_jwe::*;
 pub use saml_signing_certificate::*;
+pub use token_validity::*;
 pub use tokens::*;
 pub use user_pool::*;
 pub use users::*;
@@ -1477,14 +1481,17 @@ pub const JOB_STATUS_EXPIRED: &str = "Expired";
 /// after starting it still sees the transient status.
 pub const JOB_START_SPAN: Duration = Duration::from_millis(500);
 
-/// The message a start refused because the job's CSV file was never uploaded
+/// The sentence a start refused because the job's CSV file was never uploaded
 /// carries: a job "imports users from a CSV file" that the client writes to the
 /// job's `PreSignedUrl` (`StartUserImportJob` and
 /// `UserImportJobType.PreSignedUrl` in this service's model), so the refusal
-/// reports that the file is missing and names no value from the request.
-pub const NO_CSV_UPLOADED_MESSAGE: &str =
-    "No users are available for import. Upload the CSV file to the job's pre-signed URL before \
-     starting it.";
+/// reports that no file was uploaded for the job it names.
+///
+/// The fixed text is `No csv file was uploaded for `, which carries no trailing
+/// period, and the one variable part is the `JobId` the REQUEST carried.
+pub fn no_csv_uploaded_message(job_id: &str) -> String {
+    format!("No csv file was uploaded for {job_id}")
+}
 
 /// How long a stopped job stays `Stopping` before the clock owes it `Stopped`.
 ///
@@ -4314,6 +4321,9 @@ pub enum RateRefusal {
     /// The requested rate is above the account's Service Quotas ceiling for
     /// this limit, so provisioning it would need a quota increase first.
     AboveQuotaCeiling { requested: i32, ceiling: i32 },
+    /// The requested rate is the one a previous provisioning stored for this
+    /// limit, so there is no adjustment to make.
+    AlreadyProvisioned,
 }
 
 impl RateRefusal {
@@ -4340,6 +4350,13 @@ impl RateRefusal {
             // step for this sentence to name.
             Self::AboveQuotaCeiling { requested, ceiling } => {
                 format!("Requested value {requested} exceeds Service Quota ceiling of {ceiling}")
+            }
+            // A rate a previous provisioning already stored names no
+            // adjustment, so the sentence reports that the request asks for the
+            // limit in force and states no rate: both halves — what was asked
+            // for and what is provisioned — are the same value the caller sent.
+            Self::AlreadyProvisioned => {
+                "Requested value is the same as the current provisioned limit".to_string()
             }
         }
     }
@@ -4467,12 +4484,18 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
     /// Provision `requested` requests per second for `category` and return the
     /// limit as it now stands.
     ///
-    /// Every rate in the account's range is stored, the rate already in force
-    /// included: the range runs from the rate the category includes up to the
-    /// account's Service Quotas ceiling for that limit
-    /// ([`Self::api_category_quota_ceiling`]), and a rate outside it is
-    /// refused. A refused call stores nothing, so the limit a later read
-    /// reports is the one that was already in force.
+    /// Every rate in the account's range is stored but the rate this account has
+    /// already PROVISIONED: the range runs from the rate the category includes
+    /// up to the account's Service Quotas ceiling for that limit
+    /// ([`Self::api_category_quota_ceiling`]), a rate outside it is refused, and
+    /// so is the rate a previous provisioning stored — "use this operation to
+    /// adjust" a limit (`UpdateProvisionedLimit` in this service's model), and a
+    /// rate equal to the one provisioned adjusts nothing. A limit NOTHING has
+    /// provisioned holds no such rate, so the first provisioning of any rate in
+    /// the range is an adjustment, the rate the limit reports until then being
+    /// the one the category includes rather than one this account provisioned.
+    /// A refused call stores nothing, so the limit a later read reports is the
+    /// one that was already in force.
     pub fn set_api_category_limit(
         &mut self,
         category: &ApiCategory,
@@ -4487,6 +4510,9 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
         let ceiling = self.api_category_quota_ceiling(category);
         if requested > ceiling {
             return Err(RateRefusal::AboveQuotaCeiling { requested, ceiling });
+        }
+        if self.provisioned_api_rates.get(category.name) == Some(&requested) {
+            return Err(RateRefusal::AlreadyProvisioned);
         }
         self.provisioned_api_rates
             .insert(category.name.to_string(), requested);

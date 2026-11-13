@@ -301,6 +301,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 "Invalid attributes given, {unknown} is not a valid attribute of this user pool"
             )));
         }
+        // A submitted value whose attribute has a FORM of its own has to have
+        // that form, whichever operation submitted it
+        // ([`crate::state::attribute_value_defect`]).
+        if let Some(defect) = requested_attributes.iter().find_map(|attribute| {
+            crate::state::attribute_value_defect(
+                &attribute.name,
+                attribute.value.as_deref().unwrap_or_default(),
+            )
+        }) {
+            return Err(invalid_parameter(defect.to_string()));
+        }
+        // In a pool that signs its users in WITH an attribute value, the
+        // submitted `Username` is that value rather than a name of its own, so
+        // it has to be a value one of those attributes can hold
+        // ([`crate::state::UserPool::username_defect`]) — the same rule a
+        // self-service registration is held to.
+        if let Some(defect) = pool.username_defect(&input.username) {
+            return Err(invalid_parameter(defect));
+        }
 
         // A welcome message needs an address to go to: "specify EMAIL if email will
         // be used to send the welcome message. Specify SMS if the phone number will

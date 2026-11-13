@@ -396,6 +396,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         }
 
+        // A validity member and its time unit together name a token's lifetime,
+        // and each member's modelled range bounds that DURATION
+        // ([`crate::state::token_validity_defect`]), so a configuration naming a
+        // lifetime outside it stores no app client.
+        if let Some(defect) = crate::state::token_validity_defect(
+            &crate::state::RequestedTokenValidity {
+                refresh_token_validity: input.refresh_token_validity,
+                access_token_validity: input.access_token_validity,
+                id_token_validity: input.id_token_validity,
+                token_validity_units: input.token_validity_units.as_ref(),
+            },
+        ) {
+            return Err(invalid_parameter(defect.to_string()));
+        }
+
         // "The OAuth, OpenID Connect (OIDC), and custom scopes that you want to
         // permit your app client to authorize access with ... Custom scopes with
         // resource servers authorize access to external APIs"

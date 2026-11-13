@@ -985,17 +985,18 @@ async fn token_lifetimes_come_from_the_app_clients_validity_settings() {
     .await;
 
     // The rows differ along the validity value AND its unit; the unit defaults
-    // to hours for an access token.
+    // to hours for an access token. Each names a lifetime inside the window the
+    // model documents for an access token, five minutes to one day.
     let cases = [
         ("no validity at all", json!({}), 3_600_i64),
         ("hours by default", json!({ "AccessTokenValidity": 2 }), 7_200),
         (
             "an explicit unit of seconds",
             json!({
-                "AccessTokenValidity": 30,
+                "AccessTokenValidity": 300,
                 "TokenValidityUnits": { "AccessToken": "seconds" },
             }),
-            30,
+            300,
         ),
         (
             "an explicit unit of minutes",

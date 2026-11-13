@@ -238,6 +238,44 @@ impl RiskConfiguration {
 /// lookups and the server-side search cannot disagree about it.
 pub const CASE_INSENSITIVE_ALIAS_ATTRIBUTES: [&str; 2] = ["email", "preferred_username"];
 
+/// The value `name` names, as a sentence that reports a submitted sign-in name
+/// of the wrong shape names it: an address for `email` and a phone number for
+/// `phone_number`, the two values `UsernameAttributeType` admits
+/// (`smithy_query(query="shape",shape="UsernameAttributeType")`), and nothing
+/// for a name that is neither.
+fn sign_in_value_wording(name: &str) -> Option<&'static str> {
+    match name {
+        "email" => Some("an email"),
+        "phone_number" => Some("a phone number"),
+        _ => None,
+    }
+}
+
+/// The sentence a creation under a name of no configured sign-in attribute's
+/// shape is refused with, for a pool that signs its users in with
+/// `username_attributes`, or `None` for a list that names no sign-in value at
+/// all.
+///
+/// `UsernameAttributes` "specifies whether a user can use an email address or
+/// phone number as a username when they sign up" (this service's model), so the
+/// refusal states the value the pool's own configuration asks for: one sign-in
+/// attribute names its value, and a pool that admits both names either of them.
+/// Built from the STORED configuration rather than from the request, so the
+/// sentence reports the rule the pool enforces and echoes nothing the caller
+/// sent.
+fn sign_in_name_shape_message(username_attributes: &[String]) -> Option<String> {
+    let mut wordings: Vec<&'static str> = username_attributes
+        .iter()
+        .filter_map(|name| sign_in_value_wording(name))
+        .collect();
+    wordings.dedup();
+    match wordings.as_slice() {
+        [] => None,
+        [one] => Some(format!("Username should be {one}.")),
+        _ => Some(format!("Username should be either {}.", wordings.join(" or "))),
+    }
+}
+
 /// The user-pool endpoint a request is SERVED on, as a URL: the endpoint the
 /// request REACHED this service at ([`serves_pool`]), and the published regional
 /// endpoint for a request that reached none this emulator serves the pool at.
@@ -571,6 +609,37 @@ impl UserPool {
             .iter()
             .map(String::as_str)
             .find(|name| *name == shape)
+    }
+
+    /// Why `submitted` is no name a user of this pool may be created under, or
+    /// `None` when it is one.
+    ///
+    /// "You can only provide a value if usernames are a valid sign-in attribute
+    /// for your user pool. If your user pool only supports phone numbers or
+    /// email addresses as sign-in attributes, Amazon Cognito automatically
+    /// generates a username value" (`AdminCreateUser.Username` in this service's
+    /// model): in such a pool the submitted value is not a username but the
+    /// value of a sign-in attribute, so it has to be a value of one of the
+    /// attributes the pool signs users in with — an address for `email`, a
+    /// number for `phone_number` ([`UserPool::sign_in_attribute`] resolves
+    /// which). A value of no configured sign-in attribute's shape names no user
+    /// of such a pool at all, so a creation under it is a bad parameter, and the
+    /// sentence states which value the pool expects. A pool whose users sign in
+    /// with a username of their own takes the submitted name as it is, so
+    /// nothing is refused there.
+    ///
+    /// The value a pool signs users in with also has to have the form THAT
+    /// attribute's values take ([`crate::state::attribute_value_defect`]): the
+    /// submitted value is stored under the attribute, so it is judged as a value
+    /// of it.
+    pub fn username_defect(&self, submitted: &str) -> Option<String> {
+        if self.username_attributes.is_empty() {
+            return None;
+        }
+        match self.sign_in_attribute(submitted) {
+            Some(attribute) => attribute_value_defect(attribute, submitted).map(str::to_string),
+            None => sign_in_name_shape_message(&self.username_attributes),
+        }
     }
 
     /// Whether this pool resolves a username it does not hold through its

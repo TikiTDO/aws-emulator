@@ -24,6 +24,9 @@ use super::*;
 /// * "To delete an attribute from your user, submit the attribute in your API
 ///   request with a blank value", so a blank value REMOVES the stored
 ///   attribute rather than storing an empty one.
+/// * A value whose attribute has a FORM of its own has to have that form
+///   ([`attribute_value_defect`]), so a `phone_number` that is not a phone
+///   number in E.164 form is refused rather than stored.
 /// * A new `email` or `phone_number` is no longer the value its verified flag
 ///   vouched for ([`verified_flag`]), so the flag goes unconfirmed unless the
 ///   request sets it itself, and a deleted one takes its flag with it.
@@ -123,6 +126,11 @@ pub fn plan_attribute_update(
             continue;
         }
         let value = (*value).to_string();
+        // A value whose attribute has a FORM of its own has to have that form
+        // ([`attribute_value_defect`]), whatever else the request asks for.
+        if let Some(defect) = attribute_value_defect(&name, &value) {
+            return Err(AttributeUpdateRefusal::Invalid(defect.to_string()));
+        }
         if value.is_empty() {
             // An attribute the schema marks required must hold a value, so it
             // is not one a blank value may delete.
@@ -315,6 +323,55 @@ pub fn plan_attribute_deletion(
         username: user.username.clone(),
         deletions,
     })
+}
+
+/// The message `InvalidParameterException` carries for a `phone_number` value
+/// that is not a phone number: the fixed sentence Amazon Cognito answers, which
+/// names neither the attribute nor the value the request submitted.
+pub const INVALID_PHONE_NUMBER_MESSAGE: &str = "Invalid phone number format.";
+
+/// The ATTRIBUTE whose value is a phone number, and so has a form of its own to
+/// satisfy ([`attribute_value_defect`]).
+const PHONE_NUMBER_ATTRIBUTE: &str = "phone_number";
+
+/// The most digits a phone number in E.164 form carries, country calling code
+/// included (the form `AdminCreateUser.UserAttributes` requires: "a phone number
+/// must be in E.164 format", this service's model).
+const E164_MAX_DIGITS: usize = 15;
+
+/// Why `value` is not a value the attribute `name` can hold, or `None` when the
+/// value has the form that attribute's values take.
+///
+/// A user attribute whose values have a FORM is checked against that form before
+/// it is stored, whichever operation submitted it: "a phone number must be in
+/// E.164 format" (`AdminCreateUser.UserAttributes` in this service's model),
+/// which is a `+` followed by the number's digits, so a `phone_number` that is
+/// not one is a bad parameter rather than a value a user may hold. Every other
+/// attribute's values are judged by the pool's schema alone, so none is refused
+/// here.
+///
+/// A BLANK value is no value at all — "to delete an attribute from your user,
+/// submit the attribute in your API request with a blank value" (this service's
+/// model) — so it is not refused for the form it does not have.
+pub fn attribute_value_defect(name: &str, value: &str) -> Option<&'static str> {
+    if name != PHONE_NUMBER_ATTRIBUTE || value.is_empty() || is_e164(value) {
+        return None;
+    }
+    Some(INVALID_PHONE_NUMBER_MESSAGE)
+}
+
+/// Whether `value` is a phone number in E.164 form: a `+`, then between one and
+/// [`E164_MAX_DIGITS`] decimal digits and nothing else.
+///
+/// The digit count is read off the bytes before they are examined, so a long
+/// value is rejected on its length rather than scanned.
+fn is_e164(value: &str) -> bool {
+    let Some(digits) = value.strip_prefix('+') else {
+        return false;
+    };
+    !digits.is_empty()
+        && digits.len() <= E164_MAX_DIGITS
+        && digits.bytes().all(|digit| digit.is_ascii_digit())
 }
 
 /// The attribute whose confirmation `flag` records, or `None` when `flag` is

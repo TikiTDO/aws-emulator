@@ -412,6 +412,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> SignUp<Eng> {
             return Err(not_authorized(SIGN_UP_NOT_PERMITTED_MESSAGE));
         }
 
+        // In a pool that signs its users in WITH an attribute value, the
+        // submitted `Username` is that value rather than a name of its own, so
+        // it has to be a value one of those attributes can hold
+        // ([`crate::state::UserPool::username_defect`]). Checked before the
+        // request's password and attributes, the `Username` being the parameter
+        // the registration is addressed by.
+        if let Some(defect) = pool.username_defect(&input.username) {
+            return Err(invalid_parameter(defect));
+        }
+
         // "The password must comply with the password requirements of your user pool"
         // (`SignUp.Password`). The member is optional — "To create a user with no
         // password, omit this parameter or submit a blank value" — so only a password
@@ -441,6 +451,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> SignUp<Eng> {
             return Err(invalid_parameter(format!(
                 "Invalid attributes given, {unknown} is not a valid attribute of this user pool"
             )));
+        }
+        // A submitted value whose attribute has a FORM of its own has to have
+        // that form, whichever operation submitted it
+        // ([`crate::state::attribute_value_defect`]).
+        if let Some(defect) = requested_attributes.iter().find_map(|attribute| {
+            crate::state::attribute_value_defect(
+                &attribute.name,
+                attribute.value.as_deref().unwrap_or_default(),
+            )
+        }) {
+            return Err(invalid_parameter(defect.to_string()));
         }
         // An attribute submitted with an empty value is stored for no user
         // (`crate::state::stored_attribute_values`).

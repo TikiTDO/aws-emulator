@@ -50,7 +50,8 @@ const DEFAULT_REFRESH_TOKEN_VALIDITY: i64 = 30;
 /// holds: the minimum of the member's modelled 3..15 range.
 const DEFAULT_AUTH_SESSION_VALIDITY: i64 = 3;
 
-/// The largest `RefreshTokenValidity` the member's modelled range admits.
+/// The largest `RefreshTokenValidity` the member's modelled range admits, which
+/// the member documents as a range "displayed below in seconds".
 const MAX_REFRESH_TOKEN_VALIDITY: i64 = 315_360_000;
 
 /// One emulator with just this service mounted.
@@ -184,11 +185,14 @@ fn validity_cases() -> Vec<ValidityCase> {
             token_validity_units: json!({}),
         },
         ValidityCase {
-            case: "RefreshTokenValidity at the top of its modelled range",
-            members: json!({ "RefreshTokenValidity": MAX_REFRESH_TOKEN_VALIDITY }),
+            case: "RefreshTokenValidity at the top of its modelled range, which is in seconds",
+            members: json!({
+                "RefreshTokenValidity": MAX_REFRESH_TOKEN_VALIDITY,
+                "TokenValidityUnits": { "RefreshToken": "seconds" }
+            }),
             refresh_token_validity: MAX_REFRESH_TOKEN_VALIDITY,
             auth_session_validity: DEFAULT_AUTH_SESSION_VALIDITY,
-            token_validity_units: json!({}),
+            token_validity_units: json!({ "RefreshToken": "seconds" }),
         },
         ValidityCase {
             case: "AuthSessionValidity 3, the bottom of its modelled range",

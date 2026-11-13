@@ -195,7 +195,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // leaves the job `Created` and startable once its CSV arrives.
         if !job.has_uploaded_csv() {
             return Err(precondition_not_met(
-                crate::state::NO_CSV_UPLOADED_MESSAGE.to_string(),
+                crate::state::no_csv_uploaded_message(&input.job_id),
             ));
         }
 

@@ -209,7 +209,9 @@ fn invalid_definition(failure: crate::state::LimitLookupFailure) -> UpdateProvis
 /// quota increase, which is what `ServiceQuotaExceededException` reports: "The
 /// request exceeded your account's service quota. To increase your limit, use
 /// or submit a Service Quotas increase request" (this service's model). A rate
-/// below the rate the limit includes is a malformed parameter.
+/// below the rate the limit includes, and a rate equal to the one already in
+/// force, is a malformed parameter: neither names an adjustment this operation
+/// can make.
 fn refused(refusal: crate::state::RateRefusal) -> UpdateProvisionedLimitError {
     use crate::state::RateRefusal;
     let message = Some(refusal.message());
@@ -219,7 +221,7 @@ fn refused(refusal: crate::state::RateRefusal) -> UpdateProvisionedLimitError {
                 ServiceQuotaExceededException { message },
             )
         }
-        RateRefusal::BelowFreeRate { .. } => {
+        RateRefusal::BelowFreeRate { .. } | RateRefusal::AlreadyProvisioned => {
             UpdateProvisionedLimitErrorModeled::InvalidParameterException(
                 InvalidParameterException {
                     message,

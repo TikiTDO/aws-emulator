@@ -20,7 +20,8 @@
 //! whether they are asked for at all or taken from the app client's configuration, which
 //! of several resource servers defines them, a resource server identifier that itself
 //! carries the `/` separator, and the access-token validity the lifetime is read off —
-//! with a row on each published bound of `AccessTokenValidity` (1..86400 seconds).
+//! with a row on each bound of the window the model documents for an access token's
+//! lifetime (five minutes to one day).
 //!
 //! A token issued to an app client is NOT the "access token that Amazon Cognito issued
 //! to the currently signed-in user" the self-service operations ask for, and those
@@ -385,18 +386,20 @@ async fn a_client_credentials_grant_issues_one_scoped_access_token_of_the_app_cl
             pool_name: "no-scopes-pool",
             resource_servers: &[],
             configured_scopes: &[],
-            // The lower published bound of `AccessTokenValidity` (range 1..86400).
-            access_token_validity: Some((1, "seconds")),
+            // The lower bound of the window the model documents for an access
+            // token's lifetime: five minutes, named in seconds.
+            access_token_validity: Some((300, "seconds")),
             requested_scopes: None,
             expected_scopes: &[],
-            expected_expires_in: 1,
+            expected_expires_in: 300,
         },
         GrantCase {
             case: "a resource server identifier that carries the scope separator itself",
             pool_name: "separator-pool",
             resource_servers: &[("https://api.example.test/v2", &["read"])],
             configured_scopes: &[],
-            // The upper published bound of `AccessTokenValidity` (range 1..86400).
+            // The upper bound of that window: one day, named in seconds, which
+            // is also the member's modelled maximum.
             access_token_validity: Some((86_400, "seconds")),
             requested_scopes: Some(&["https://api.example.test/v2/read"]),
             expected_scopes: &["https://api.example.test/v2/read"],

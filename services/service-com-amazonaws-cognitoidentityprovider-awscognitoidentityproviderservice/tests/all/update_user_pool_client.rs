@@ -317,10 +317,10 @@ fn update_cases() -> Vec<UpdateCase> {
             ]),
         },
         UpdateCase {
-            case: "token lifetimes at the low end of each modelled range, with units",
+            case: "token lifetimes at the low end of each documented window, with units",
             request: json!({
-                "AccessTokenValidity": 1,
-                "IdTokenValidity": 1,
+                "AccessTokenValidity": 5,
+                "IdTokenValidity": 5,
                 "RefreshTokenValidity": 1,
                 "AuthSessionValidity": 3,
                 "TokenValidityUnits": {
@@ -330,8 +330,8 @@ fn update_cases() -> Vec<UpdateCase> {
                 }
             }),
             expected: overriding(vec![
-                ("AccessTokenValidity", json!(1)),
-                ("IdTokenValidity", json!(1)),
+                ("AccessTokenValidity", json!(5)),
+                ("IdTokenValidity", json!(5)),
                 ("RefreshTokenValidity", json!(1)),
                 ("AuthSessionValidity", json!(3)),
                 (

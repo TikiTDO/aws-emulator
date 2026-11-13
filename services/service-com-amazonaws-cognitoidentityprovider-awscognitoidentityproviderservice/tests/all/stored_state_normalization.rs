@@ -519,6 +519,10 @@ enum ExpectedUsername {
 /// where usernames are case-insensitive, and the submitted name otherwise. A
 /// pool that minted the username still resolves the user by the sign-in value it
 /// was given.
+///
+/// Every row submits a name such a pool admits: a value of no configured
+/// sign-in attribute's shape names no user of one at all and is refused rather
+/// than stored, which `tests/all/request_validation_gates.rs` covers.
 #[tokio::test]
 async fn a_pool_stores_the_username_its_sign_in_configuration_implies() {
     let rows = [
@@ -563,23 +567,6 @@ async fn a_pool_stores_the_username_its_sign_in_configuration_implies() {
             submitted: "+15555550124",
             sign_in_attribute: Some("phone_number"),
             expected: ExpectedUsername::Minted,
-        },
-        UsernameRow {
-            // A value of no configured sign-in attribute's shape is no sign-in
-            // value of the pool, so nothing is stored under an attribute it
-            // does not belong to and the name is the username.
-            case: "an email sign-in pool and a value that is no address",
-            configuration: json!({ "UsernameAttributes": ["email"] }),
-            submitted: "mary",
-            sign_in_attribute: None,
-            expected: ExpectedUsername::AsSubmitted,
-        },
-        UsernameRow {
-            case: "a phone-number sign-in pool and a value that is an address",
-            configuration: json!({ "UsernameAttributes": ["phone_number"] }),
-            submitted: "mary@example.com",
-            sign_in_attribute: None,
-            expected: ExpectedUsername::AsSubmitted,
         },
     ];
 
