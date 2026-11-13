@@ -10,6 +10,24 @@ Issue-Commit: 483d650f1d2fec6203edc8ec91bc65f69df3bd2d
 
 # CloudTrail accepts three calls real AWS refuses: CreateEventDataStore, PutInsightSelectors on an unpolicied bucket, and UpdateTrail after the bucket policy is revoked
 
+## Resolution
+
+Causes 2 and 3 are fixed: every write of a trail's log-delivery configuration now
+re-resolves the trail's destination bucket and its policy at the instant of the call and
+refuses before persisting anything — `PutInsightSelectors` on a trail resolves it at all
+(it never did), and `UpdateTrail` resolves it on every call rather than only when a
+destination member moves.
+
+Cause 1 (CreateEventDataStore) is DECLINED, so the trace
+`cloudtrail.list-insights-data-unsupported-operation-rejected` is not expected to replay
+green: the refusal recorded there is an entitlement of the recorded ACCOUNT (CloudTrail
+Lake closed to accounts that have not onboarded) and not a rule any parameter of the
+request states — the model binds a 200 response plus `InvalidParameterException` for an
+invalid parameter, and the recorded request's parameters are all valid — so the only way
+to serve it would be an unconditional literal refusal, which would also make the
+emulator's whole implemented CloudTrail Lake surface, and the Lake-capable branch another
+recorded unit takes, unreachable.
+
 > _Note: this issue was identified against the code base at commit `483d650f1d2fec6203edc8ec91bc65f69df3bd2d`. If you are an issue fixer working on this, the code base you are currently working in can have drifted, so you might need to trace the issue back to the current code base._
 
 ## Operation

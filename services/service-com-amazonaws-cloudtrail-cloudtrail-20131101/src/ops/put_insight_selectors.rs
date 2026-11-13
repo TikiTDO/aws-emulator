@@ -293,25 +293,112 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 },
             )
         })?;
-        let mut store = state.lock();
-
         match &target {
             InsightsTarget::Trail(identifier) => {
+                // A trail's Insights events are delivered as log files into the
+                // trail's own destination bucket, so writing the trail's Insights
+                // configuration resolves that destination in the object store first —
+                // the same resolution `CreateTrail` and `UpdateTrail` make
+                // ([`crate::state::referenced_resources`]). The trail is located, the
+                // delivery it carries is cloned out and the registry's lock is RELEASED
+                // again before the object store is read, which is the lock order that
+                // module documents; and the statement is written only once the
+                // destination holds, so a refused call leaves Insights as they were.
+                let delivery = {
+                    let mut store = state.lock();
+                    let record = locate_trail(&mut store, identifier, &region)?;
+                    TrailDelivery {
+                        trail_arn: record.trail_arn.clone(),
+                        s3_bucket_name: record.s3_bucket_name.clone(),
+                        s3_key_prefix: record.s3_key_prefix.clone(),
+                    }
+                };
+                if let Some(refusal) = self.resolve_destination(&delivery, &region) {
+                    return Err(refusal);
+                }
+                let mut store = state.lock();
                 configure_trail(&mut store, identifier, &region, selectors)
             }
             InsightsTarget::EventDataStore {
                 source,
                 destination,
-            } => configure_event_data_store(
-                &mut store,
-                source,
-                destination,
-                &region,
-                selectors,
-                ::std::time::SystemTime::now(),
+            } => {
+                let mut store = state.lock();
+                configure_event_data_store(
+                    &mut store,
+                    source,
+                    destination,
+                    &region,
+                    selectors,
+                    ::std::time::SystemTime::now(),
+                )
+            }
+        }
+    }
+}
+
+impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutInsightSelectors<Eng> {
+    /// Resolve the trail's log-delivery destination in the object store, and hand back
+    /// the modelled refusal when CloudTrail may not write the trail's log files there —
+    /// or `None` when the destination holds.
+    ///
+    /// Insights events a trail logs are delivered into that same bucket, under the same
+    /// key prefix, so the question this asks is the one every operation that configures
+    /// a trail's delivery asks, answered by the one resolver they share. It runs with no
+    /// guard of this service's store held.
+    fn resolve_destination(
+        &self,
+        delivery: &TrailDelivery,
+        region: &str,
+    ) -> Option<PutInsightSelectorsError> {
+        use crate::state::referenced_resources as referenced;
+
+        match referenced::destination_verdict(
+            &*self.engine,
+            &delivery.s3_bucket_name,
+            delivery.s3_key_prefix.as_deref(),
+            region,
+            &delivery.trail_arn,
+        ) {
+            referenced::DestinationVerdict::Accepted => None,
+            referenced::DestinationVerdict::NoSuchBucket => {
+                // The model says 404 for a destination that does not exist and
+                // CloudTrail answers 400 (`crate::state::S3_BUCKET_DOES_NOT_EXIST_STATUS`).
+                Some(crate::scaffolded::Scaffolded::modeled_with_status(
+                    PutInsightSelectorsErrorModeled::S3BucketDoesNotExistException(
+                        S3BucketDoesNotExistException {
+                            message: Some(crate::state::s3_bucket_does_not_exist_message(
+                                &delivery.s3_bucket_name,
+                            )),
+                        },
+                    ),
+                    crate::state::S3_BUCKET_DOES_NOT_EXIST_STATUS,
+                ))
+            }
+            referenced::DestinationVerdict::PolicyInsufficient => Some(
+                PutInsightSelectorsErrorModeled::InsufficientS3BucketPolicyException(
+                    InsufficientS3BucketPolicyException {
+                        message: Some(referenced::insufficient_s3_bucket_policy_message(
+                            &delivery.s3_bucket_name,
+                        )),
+                    },
+                )
+                .into(),
             ),
         }
     }
+}
+
+/// The log-delivery settings the located trail carries: where its log files — Insights
+/// events among them — are delivered, and the trail a grant to the CloudTrail service
+/// principal is scoped by.
+///
+/// Owned values, cloned out of the registry while its lock is held, so the destination
+/// can be resolved in the object store after that lock is released.
+struct TrailDelivery {
+    trail_arn: String,
+    s3_bucket_name: String,
+    s3_key_prefix: Option<String>,
 }
 
 /// Which resource a `PutInsightSelectors` call configures.
@@ -466,12 +553,42 @@ fn read_selectors(
 /// `InvalidInsightSelectorsException` makes a prerequisite a refusal only for the event
 /// data store form; refusing a trail against a rule the model does not state there
 /// would reject calls the service accepts.
+///
+/// WHERE the trail delivers is checked, and before this writes anything: the caller
+/// resolves the destination bucket ([`PutInsightSelectors::resolve_destination`]) while
+/// no lock of this registry is held.
 fn configure_trail(
     store: &mut crate::state::ComAmazonawsCloudtrailCloudtrail20131101State,
     identifier: &str,
     region: &str,
     selectors: Vec<InsightSelector>,
 ) -> Result<PutInsightSelectorsOutput, PutInsightSelectorsError> {
+    let record = locate_trail(store, identifier, region)?;
+
+    // The statement REPLACES whatever was configured before: "If EventCategories is
+    // provided, the given event categories will overwrite the existing ones."
+    record.insight_selectors = selectors;
+
+    // Report the STORED configuration, so this answer and every later read of the
+    // trail are the same values.
+    Ok(PutInsightSelectorsOutput {
+        trail_arn: Some(record.trail_arn.clone()),
+        insight_selectors: Some(record.insight_selectors.clone()),
+        event_data_store_arn: None,
+        insights_destination: None,
+    })
+}
+
+/// Locate the trail `identifier` names for a write of its Insights configuration, or
+/// the modelled refusal for an identifier that names none.
+///
+/// Called TWICE per request — once to read the log-delivery destination the trail
+/// carries today and once to write the statement — so both passes refuse exactly alike.
+fn locate_trail<'store>(
+    store: &'store mut crate::state::ComAmazonawsCloudtrailCloudtrail20131101State,
+    identifier: &str,
+    region: &str,
+) -> Result<&'store mut crate::state::TrailRecord, PutInsightSelectorsError> {
     let located = store
         .resolve_for_mutation(identifier, region)
         .map_err(|rejection| match rejection {
@@ -529,19 +646,7 @@ fn configure_trail(
             ))
         }
     };
-
-    // The statement REPLACES whatever was configured before: "If EventCategories is
-    // provided, the given event categories will overwrite the existing ones."
-    record.insight_selectors = selectors;
-
-    // Report the STORED configuration, so this answer and every later read of the
-    // trail are the same values.
-    Ok(PutInsightSelectorsOutput {
-        trail_arn: Some(record.trail_arn.clone()),
-        insight_selectors: Some(record.insight_selectors.clone()),
-        event_data_store_arn: None,
-        insights_destination: None,
-    })
+    Ok(record)
 }
 
 /// Configure Insights event logging on the event data store `source` names, logging the

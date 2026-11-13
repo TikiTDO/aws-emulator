@@ -146,6 +146,16 @@ impl Emulator {
         }
     }
 
+    /// Delete the bucket named `bucket` from the one object store — the `DeleteBucket` a
+    /// client makes out of band, after a trail was already pointed at it. `false` when
+    /// the object store held no such bucket.
+    pub fn delete_bucket(&self, bucket: &str) -> bool {
+        let state = service_com_amazonaws_s3_amazons3::state::service_state(&*self.engine)
+            .expect("the in-memory engine carries the object store");
+        let mut store = state.lock();
+        store.remove_bucket(bucket, std::time::SystemTime::now())
+    }
+
     /// Record an Amazon SNS topic at `topic_arn` carrying the access policy that lets
     /// CloudTrail publish a log-file-delivered notification to it — the `CreateTopic` plus
     /// `SetTopicAttributes` a client makes before naming the topic on a trail.

@@ -533,9 +533,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> UpdateTrail<Eng> 
     /// A member the request leaves out keeps the value the trail already has, so the
     /// settings judged here are the MERGED ones: a request that moves only the key
     /// prefix is judged against the bucket the trail already delivers to, and one that
-    /// moves only the bucket against the prefix it already delivers under. Each
-    /// resolution takes only the OWNING service's lock, so this runs with no guard of
-    /// the trail registry held — the lock order
+    /// moves only the bucket against the prefix it already delivers under — and the
+    /// destination it would deliver to is resolved whatever the request carries, because
+    /// an update re-designates the trail's delivery and the destination has to be
+    /// writable at THIS call's instant. Each resolution takes only the OWNING service's
+    /// lock, so this runs with no guard of the trail registry held — the lock order
     /// [`crate::state::referenced_resources`] documents.
     fn resolve_referenced_resources(
         &self,
@@ -546,9 +548,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> UpdateTrail<Eng> 
         use crate::state::referenced_resources as referenced;
 
         // Where the trail would deliver after this request: the destination and the key
-        // prefix it would carry. Either member moving changes which keys the delivery
-        // writes, so either makes the destination's policy a question again.
-        if input.s3_bucket_name.is_some() || input.s3_key_prefix.is_some() {
+        // prefix it would carry. The destination is resolved on EVERY call, not only
+        // when one of those members moves — a bucket that was writable when the trail
+        // was created can have been deleted or had its policy revoked since, and the
+        // trail cannot be re-designated against a destination CloudTrail may no longer
+        // write to.
+        {
             let bucket = input
                 .s3_bucket_name
                 .as_deref()

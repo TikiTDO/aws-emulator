@@ -219,3 +219,8 @@ mod trail_log_file_delivery_of_other_services;
 // operation that addresses a trail by `Name` / `TrailName`.
 #[path = "all/trail_not_found_identifier_echo.rs"]
 mod trail_not_found_identifier_echo;
+// `trail_destination_revalidation` pins WHEN a trail's log-delivery destination is
+// resolved: on every write of the trail's delivery, against what the account holds at
+// that call's instant, and before anything is persisted.
+#[path = "all/trail_destination_revalidation.rs"]
+mod trail_destination_revalidation;
