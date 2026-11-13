@@ -538,3 +538,8 @@ mod usage_plan_quota_extension;
 // call of it answers inside the request, and each outcome it drives is observable.
 #[path = "all/stage_logging_role_sequence.rs"]
 mod stage_logging_role_sequence;
+// Appended for the reason the note above gives: the CONTAINERS an exported OpenAPI 3.0
+// document carries in every serialization — its Components Object and each Response
+// Object's `content` map.
+#[path = "all/stage_export_oas30_containers.rs"]
+mod stage_export_oas30_containers;

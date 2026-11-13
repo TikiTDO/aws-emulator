@@ -362,7 +362,11 @@ type YamlLineCase<'a> = (&'a str, &'a str);
 
 /// `document` as the JSON value it spells, so a YAML export and a JSON export of one stage
 /// can be compared as the same document.
-fn yaml_as_json(document: &::yaml_rust2::yaml::Yaml) -> Value {
+///
+/// `pub(crate)` for the sibling `stage_export_oas30_containers` suite, which compares the
+/// serializations of a 3.0 export the same way: this crate reads a YAML export back
+/// through ONE conversion.
+pub(crate) fn yaml_as_json(document: &::yaml_rust2::yaml::Yaml) -> Value {
     use ::yaml_rust2::yaml::Yaml;
     match document {
         Yaml::Null | Yaml::BadValue => Value::Null,
