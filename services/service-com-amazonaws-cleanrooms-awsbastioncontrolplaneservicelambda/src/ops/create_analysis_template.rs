@@ -203,9 +203,9 @@ fn claim(
     if let Some(existing) = store.analysis_template_named(&membership.id, name) {
         return Err(CreateAnalysisTemplateErrorModeled::ConflictException(
             ConflictException {
-                message: Some(format!(
-                    "analysis template {} already uses name {} in membership {}",
-                    existing.id, existing.name, membership.id
+                message: Some(st::analysis_template_exists_message(
+                    &existing.id,
+                    &membership.id,
                 )),
                 resource_id: Some(existing.id.clone()),
                 // `ResourceType` (CONFIGURED_TABLE | COLLABORATION | MEMBERSHIP |

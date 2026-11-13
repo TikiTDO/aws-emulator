@@ -307,7 +307,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 CreateConfiguredTableAssociationErrorModeled::ConflictException(
                     ConflictException {
                         message: Some(st::configured_table_association_exists_message(
-                            &input.name,
+                            &existing.id,
                             &membership.id,
                         )),
                         resource_id: Some(existing.id.clone()),

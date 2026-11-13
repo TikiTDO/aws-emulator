@@ -2150,15 +2150,55 @@ pub fn role_arn_is_passable(role_arn: &str, account_id: &str) -> bool {
 /// decision, which names no value of the request.
 pub const CROSS_ACCOUNT_PASS_ROLE_MESSAGE: &str = "Cross-account pass role is not allowed.";
 
+/// The message a create reports when the membership it addresses already holds the
+/// resource it would create — the "already exists" conflict class
+/// ([`CONFLICT_REASON_ALREADY_EXISTS`]) of every resource a membership owns.
+///
+/// Fixed text: the leading `The `, the `: with membership id: ` that introduces the
+/// membership, and the trailing ` already exists.`. The variable parts are `resource` —
+/// the STORED resource this create collided with, named by its kind and the identifier
+/// the service minted for it, so it is read from the store rather than echoed from the
+/// request — and the membership the request addressed, which is the scope the resource is
+/// unique in. Written once here, so every membership-scoped create reports one sentence
+/// with its own resource in it; a conflict scoped to something OTHER than a membership —
+/// a collaboration-wide one, say — is a different class and words itself.
+pub fn resource_exists_in_membership_message(resource: &str, membership_id: &str) -> String {
+    format!("The {resource}: with membership id: {membership_id} already exists.")
+}
+
+/// A stored resource named by its kind and the identifier the service minted for it,
+/// which is how [`resource_exists_in_membership_message`] names the resource a create
+/// collided with.
+fn resource_with_id(kind: &str, id: &str) -> String {
+    format!("{kind} with id: {id}")
+}
+
+/// The message `CreateAnalysisTemplate` reports when the membership already holds a
+/// template under the name the request carries.
+///
+/// A template's `name` identifies it within its membership, so the conflict is reported
+/// as the stored template already existing in that membership: the id is the one the
+/// service minted for the template that is in the way, read from the store.
+pub fn analysis_template_exists_message(template_id: &str, membership_id: &str) -> String {
+    resource_exists_in_membership_message(
+        &resource_with_id("analysis template", template_id),
+        membership_id,
+    )
+}
+
 /// The message `CreateConfiguredTableAssociation` reports when the membership already
 /// holds an association under the table alias the request carries.
 ///
-/// Composed from the alias and the membership: the alias is "used to query the underlying
-/// configured table", so it is the value whose uniqueness the create collides on.
-pub fn configured_table_association_exists_message(name: &str, membership_id: &str) -> String {
-    format!(
-        "A configured table association named {name} already exists in membership \
-         {membership_id}"
+/// The alias is "used to query the underlying configured table", so it is the value whose
+/// uniqueness the create collides on, and the conflict is reported as the association
+/// stored under it already existing in that membership.
+pub fn configured_table_association_exists_message(
+    association_id: &str,
+    membership_id: &str,
+) -> String {
+    resource_exists_in_membership_message(
+        &resource_with_id("configured table association", association_id),
+        membership_id,
     )
 }
 
