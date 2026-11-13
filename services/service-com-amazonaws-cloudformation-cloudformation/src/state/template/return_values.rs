@@ -2795,6 +2795,10 @@ pub const CLOUDWATCH_METRIC_STREAM: &str = "AWS::CloudWatch::MetricStream";
 /// creates in CloudWatch itself, through that service's own `PutDashboard`.
 pub const CLOUDWATCH_DASHBOARD: &str = "AWS::CloudWatch::Dashboard";
 
+/// An Amazon CloudWatch metric alarm's resource type, which `super::provisioning` creates
+/// in CloudWatch itself through that service's own `PutMetricAlarm`.
+pub const CLOUDWATCH_ALARM: &str = "AWS::CloudWatch::Alarm";
+
 /// The same for an Amazon SNS topic: the SNS model carries
 /// `awsService.cloudFormationName: SNS`.
 pub const SNS_TOPIC: &str = "AWS::SNS::Topic";

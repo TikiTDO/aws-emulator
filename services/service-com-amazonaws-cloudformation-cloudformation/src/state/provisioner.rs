@@ -479,7 +479,7 @@ use super::template::{
     APIGATEWAYV2_STAGE, BACKUP_PLAN, BACKUP_SELECTION, BACKUP_VAULT, BATCH_COMPUTE_ENVIRONMENT,
     BATCH_JOB_QUEUE, BATCH_SERVICE_ENVIRONMENT, BEDROCK_GUARDRAIL, BEDROCK_KNOWLEDGE_BASE,
     BRAKET_SPENDING_LIMIT,
-    CLOUDWATCH_DASHBOARD,
+    CLOUDWATCH_ALARM, CLOUDWATCH_DASHBOARD,
     CLOUDWATCH_METRIC_STREAM, CODEARTIFACT_DOMAIN, CODEARTIFACT_REPOSITORY,
     CODEBUILD_PROJECT,
     CODEBUILD_REPORT_GROUP, CODECOMMIT_REPOSITORY, CODEDEPLOY_APPLICATION,
@@ -625,6 +625,9 @@ pub(super) enum Provisioner {
     KinesisStream,
     CloudWatchMetricStream,
     CloudWatchDashboard,
+    /// `AWS::CloudWatch::Alarm`: a metric alarm, which `PutMetricAlarm` creates and updates,
+    /// `DeleteAlarms` deletes and `DescribeAlarms` reads back.
+    CloudWatchAlarm,
     EcrPublicRepository,
     /// `AWS::ECR::Repository`: a repository of the PRIVATE Amazon ECR registry — a
     /// different service from the public one above — which `CreateRepository` creates
@@ -956,6 +959,7 @@ pub(super) fn provisioner_for(resource_type: &str) -> Option<Provisioner> {
         KINESIS_STREAM => Some(Provisioner::KinesisStream),
         CLOUDWATCH_METRIC_STREAM => Some(Provisioner::CloudWatchMetricStream),
         CLOUDWATCH_DASHBOARD => Some(Provisioner::CloudWatchDashboard),
+        CLOUDWATCH_ALARM => Some(Provisioner::CloudWatchAlarm),
         ECR_PUBLIC_REPOSITORY => Some(Provisioner::EcrPublicRepository),
         ECR_REPOSITORY => Some(Provisioner::EcrRepository),
         EC2_VPC => Some(Provisioner::Ec2Vpc),
@@ -1136,6 +1140,7 @@ impl Provisioner {
             Self::CloudWatchDashboard => {
                 put_dashboard(ctx, region, resource, propagated).await
             }
+            Self::CloudWatchAlarm => put_metric_alarm(ctx, region, resource, propagated).await,
             Self::EmrCluster => run_job_flow(ctx, region, resource, propagated).await,
             Self::EcrPublicRepository => {
                 create_public_repository(ctx, region, resource, propagated).await
@@ -2114,6 +2119,16 @@ impl Provisioner {
                     .await
                     .map(Some)
             }
+            // `PutMetricAlarm` is documented "Creates or updates an alarm", so the call that
+            // created the alarm is the call that applies a changed declaration to it.
+            Self::CloudWatchAlarm => put_metric_alarm_declaration(
+                ctx,
+                region,
+                &resource.physical_resource_id,
+                declared,
+            )
+            .await
+            .map(Some),
             // `PutRule` is documented "Creates or updates the specified rule", so the call
             // that created the rule is the call that applies a changed declaration to it,
             // with the declared target list reconciled against the one it carries.
@@ -2392,6 +2407,9 @@ impl Provisioner {
             Self::CloudWatchDashboard => {
                 retag_dashboard(ctx, region, resource, declared, propagated).await
             }
+            Self::CloudWatchAlarm => {
+                retag_metric_alarm(ctx, region, resource, declared, propagated).await
+            }
             // A role's tags are IAM's own `TagRole`/`UntagRole`, which is also why
             // [`update_role`] does not carry them: this is the one place the tag set a role
             // is to end up with is reconciled.
@@ -2481,6 +2499,7 @@ impl Provisioner {
             Self::CloudWatchDashboard => {
                 delete_dashboard(ctx, region, physical_resource_id).await
             }
+            Self::CloudWatchAlarm => delete_metric_alarm(ctx, region, physical_resource_id).await,
             Self::EcrPublicRepository => {
                 delete_public_repository(ctx, region, physical_resource_id).await
             }
@@ -2939,6 +2958,9 @@ impl Provisioner {
             }
             Self::CloudWatchDashboard => {
                 describe_dashboard(ctx, region, physical_resource_id).await
+            }
+            Self::CloudWatchAlarm => {
+                describe_metric_alarm(ctx, region, physical_resource_id).await
             }
             Self::EcrPublicRepository => {
                 describe_public_repository(ctx, region, physical_resource_id).await

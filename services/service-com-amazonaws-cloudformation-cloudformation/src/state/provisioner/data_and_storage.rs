@@ -1085,6 +1085,207 @@ pub(super) async fn describe_dashboard(
 }
 
 // ---------------------------------------------------------------------------
+// Amazon CloudWatch: AWS::CloudWatch::Alarm
+// ---------------------------------------------------------------------------
+
+/// Create the metric alarm an `AWS::CloudWatch::Alarm` declares.
+///
+/// The type's properties are `PutMetricAlarm`'s own members, spelled identically
+/// (`AlarmName`, `MetricName`, `Namespace`, `Statistic`, `ExtendedStatistic`, `Dimensions`,
+/// `Period`, `Unit`, `EvaluationPeriods`, `DatapointsToAlarm`, `Threshold`,
+/// `ThresholdMetricId`, `ComparisonOperator`, `TreatMissingData`,
+/// `EvaluateLowSampleCountPercentile`, `Metrics`, `ActionsEnabled`, `AlarmActions`,
+/// `OKActions`, `InsufficientDataActions`, `AlarmDescription`, `Tags`), so the declaration
+/// travels as the request. `AlarmName` is the one member CloudFormation decides: it is this
+/// resource's physical id ("Ref returns the alarm name").
+///
+/// The alarm carries the tags its own declaration asks for plus the ones CloudFormation
+/// gives the resource ([`tags_of`]), on the CREATE only: "If you are using this operation to
+/// update an existing alarm, any tags you specify in this parameter are ignored"
+/// (`PutMetricAlarmInput$Tags`), which is why a later deployment's tag change travels in
+/// [`retag_metric_alarm`].
+pub(super) async fn put_metric_alarm(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    resource: &StoredResource,
+    propagated: &[(String, String)],
+) -> Result<Created, Refusal> {
+    let mut properties = match &resource.properties {
+        Value::Object(object) => object.clone(),
+        _ => Map::new(),
+    };
+    let tags = tags_of(&resource.properties, propagated);
+    if !tags.is_empty() {
+        properties.insert("Tags".to_string(), tags_as_list(&tags, UPPER_CASED_TAG));
+    }
+    put_metric_alarm_declaration(
+        ctx,
+        region,
+        &resource.physical_resource_id,
+        &Value::Object(properties),
+    )
+    .await
+}
+
+/// `PutMetricAlarm` with what `properties` declares and `name` as the alarm's name: the
+/// call behind both this type's create and its update ("Creates or updates an alarm"), so
+/// the two cannot send a different request for the same declaration.
+///
+/// A member the declaration leaves out is left out of the request, and CloudWatch refuses a
+/// call missing one it requires rather than this module inventing a value. `Tags` is carried
+/// as the caller put it: the whole set on the CREATE ([`put_metric_alarm`]), and the
+/// declaration's own list on an update, where CloudWatch ignores it.
+pub(super) async fn put_metric_alarm_declaration(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    name: &str,
+    properties: &Value,
+) -> Result<Created, Refusal> {
+    let mut request = match properties {
+        Value::Object(object) => object.clone(),
+        _ => Map::new(),
+    };
+    request.insert("AlarmName".to_string(), Value::String(name.to_string()));
+    call_json_rpc(
+        ctx,
+        CLOUDWATCH_SIGNING_NAME,
+        region,
+        AWS_JSON_1_0,
+        &format!("{CLOUDWATCH_TARGET_PREFIX}.PutMetricAlarm"),
+        &Value::Object(request),
+    )
+    .await?;
+    Ok(Created::default())
+}
+
+/// Bring the tags of the alarm a resource record names to the ones this deployment gives
+/// it, through CloudWatch's own `TagResource` and `UntagResource`, addressed by the
+/// `AlarmArn` CloudWatch reports. The same reconciliation [`retag_dashboard`] performs; an
+/// alarm CloudWatch no longer holds has no tags to reconcile.
+pub(super) async fn retag_metric_alarm(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    resource: &StoredResource,
+    declared: &Value,
+    propagated: &[(String, String)],
+) -> Result<(), Refusal> {
+    let desired = tags_of(declared, propagated);
+    let Some(arn) = describe_metric_alarm(ctx, region, &resource.physical_resource_id)
+        .await?
+        .as_ref()
+        .and_then(|alarm| alarm.get("AlarmArn"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+    else {
+        return Ok(());
+    };
+    let held = declared_tags(
+        &call_json_rpc(
+            ctx,
+            CLOUDWATCH_SIGNING_NAME,
+            region,
+            AWS_JSON_1_0,
+            &format!("{CLOUDWATCH_TARGET_PREFIX}.ListTagsForResource"),
+            &serde_json::json!({ "ResourceARN": &arn }),
+        )
+        .await?,
+    );
+    let (added, removed) = tag_delta(&held, &desired);
+    if !added.is_empty() {
+        call_json_rpc(
+            ctx,
+            CLOUDWATCH_SIGNING_NAME,
+            region,
+            AWS_JSON_1_0,
+            &format!("{CLOUDWATCH_TARGET_PREFIX}.TagResource"),
+            &serde_json::json!({
+                "ResourceARN": &arn,
+                "Tags": tags_as_list(&added, UPPER_CASED_TAG),
+            }),
+        )
+        .await?;
+    }
+    if !removed.is_empty() {
+        call_json_rpc(
+            ctx,
+            CLOUDWATCH_SIGNING_NAME,
+            region,
+            AWS_JSON_1_0,
+            &format!("{CLOUDWATCH_TARGET_PREFIX}.UntagResource"),
+            &serde_json::json!({
+                "ResourceARN": &arn,
+                "TagKeys": tag_keys_as_list(&removed),
+            }),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Delete the alarm a stack created. `DeleteAlarms` models `ResourceNotFound` for a name
+/// it does not hold, and an alarm that is already gone is what a delete asks for, so that
+/// code is success here.
+pub(super) async fn delete_metric_alarm(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    physical_resource_id: &str,
+) -> Result<(), Refusal> {
+    let request = serde_json::json!({ "AlarmNames": [physical_resource_id] });
+    match call_json_rpc(
+        ctx,
+        CLOUDWATCH_SIGNING_NAME,
+        region,
+        AWS_JSON_1_0,
+        &format!("{CLOUDWATCH_TARGET_PREFIX}.DeleteAlarms"),
+        &request,
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(refusal) if refusal.code == ALARM_RESOURCE_NOT_FOUND => Ok(()),
+        Err(refusal) => Err(refusal),
+    }
+}
+
+/// The code `DeleteAlarms` answers for an alarm name CloudWatch does not hold.
+pub(super) const ALARM_RESOURCE_NOT_FOUND: &str = "ResourceNotFound";
+
+/// The alarm's configuration as CloudWatch reports it, for drift detection: the one
+/// `MetricAlarms` entry `DescribeAlarms` answers for this name, whose members are the
+/// type's own property names. `DescribeAlarms` refuses nothing for an unknown name; it
+/// answers an empty list, which means the alarm was deleted.
+pub(super) async fn describe_metric_alarm(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    physical_resource_id: &str,
+) -> Result<Option<Value>, Refusal> {
+    let request = serde_json::json!({
+        "AlarmNames": [physical_resource_id],
+        "AlarmTypes": ["MetricAlarm"],
+    });
+    let answer = call_json_rpc(
+        ctx,
+        CLOUDWATCH_SIGNING_NAME,
+        region,
+        AWS_JSON_1_0,
+        &format!("{CLOUDWATCH_TARGET_PREFIX}.DescribeAlarms"),
+        &request,
+    )
+    .await?;
+    Ok(answer
+        .get("MetricAlarms")
+        .and_then(Value::as_array)
+        .and_then(|alarms| {
+            alarms
+                .iter()
+                .find(|alarm| {
+                    alarm.get("AlarmName").and_then(Value::as_str) == Some(physical_resource_id)
+                })
+                .cloned()
+        }))
+}
+
+// ---------------------------------------------------------------------------
 // Amazon ECR Public: AWS::ECR::PublicRepository
 // ---------------------------------------------------------------------------
 
