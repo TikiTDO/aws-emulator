@@ -22,6 +22,11 @@
 //! filters for, and which of the two writers (the upsert or the group create) stored the
 //! hook. Every row reads the hooks back through `DescribeLifecycleHooks`, so no row can
 //! pass on an accepted-but-unstored change.
+//!
+//! This suite OWNS the hook harness for this crate's tests — the writers, the reader and
+//! the projection they are asserted through are defined here once, and
+//! `describe_lifecycle_hooks_projection.rs`, which covers what the reader projects out of
+//! a group's collection, drives the same helpers rather than keeping a second copy.
 
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -42,14 +47,14 @@ const ZONE: (&str, &str) = ("AvailabilityZones.member.1", "us-west-2a");
 /// `PutLifecycleHookType$LifecycleTransition` ("To create a lifecycle hook for scale-out
 /// events, specify autoscaling:EC2_INSTANCE_LAUNCHING. To create a lifecycle hook for
 /// scale-in events, specify autoscaling:EC2_INSTANCE_TERMINATING").
-const TRANSITIONS: [&str; 2] = [
+pub(crate) const TRANSITIONS: [&str; 2] = [
     "autoscaling:EC2_INSTANCE_LAUNCHING",
     "autoscaling:EC2_INSTANCE_TERMINATING",
 ];
 
 /// The results a hook may default to, from the model's own documentation for
 /// `PutLifecycleHookType$DefaultResult` ("Valid values: CONTINUE | ABANDON").
-const RESULTS: [&str; 2] = ["CONTINUE", "ABANDON"];
+pub(crate) const RESULTS: [&str; 2] = ["CONTINUE", "ABANDON"];
 
 /// `DefaultResult` for a hook created without one, from the same documentation ("The
 /// default value is ABANDON").
@@ -62,8 +67,8 @@ const DEFAULT_HEARTBEAT_TIMEOUT: i32 = 3600;
 
 /// The published bounds of `HeartbeatTimeout`, from the same documentation ("The range is
 /// from 30 to 7200 seconds").
-const MIN_HEARTBEAT_TIMEOUT: i32 = 30;
-const MAX_HEARTBEAT_TIMEOUT: i32 = 7200;
+pub(crate) const MIN_HEARTBEAT_TIMEOUT: i32 = 30;
+pub(crate) const MAX_HEARTBEAT_TIMEOUT: i32 = 7200;
 
 /// The ceiling on a hook's `GlobalTimeout`, from the model's own documentation for
 /// `LifecycleHook$GlobalTimeout` ("The maximum is 172800 seconds (48 hours) or 100 times
@@ -91,21 +96,21 @@ fn stated(catalog: &[&str]) -> String {
 /// spelled it, `""` for one the answer omits, so an assertion can tell a cleared member
 /// from a stored one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ReportedHook {
-    name: String,
-    group: String,
-    transition: String,
-    notification_target_arn: String,
-    role_arn: String,
-    notification_metadata: String,
-    heartbeat_timeout: String,
-    global_timeout: String,
-    default_result: String,
+pub(crate) struct ReportedHook {
+    pub(crate) name: String,
+    pub(crate) group: String,
+    pub(crate) transition: String,
+    pub(crate) notification_target_arn: String,
+    pub(crate) role_arn: String,
+    pub(crate) notification_metadata: String,
+    pub(crate) heartbeat_timeout: String,
+    pub(crate) global_timeout: String,
+    pub(crate) default_result: String,
 }
 
 /// Create an empty group (nothing to launch, so nothing settles on the clock while the
 /// hooks are written and read).
-async fn create_group(router: &MultiServiceRouter, name: &str) {
+pub(crate) async fn create_group(router: &MultiServiceRouter, name: &str) {
     create_group_with(router, name, &[]).await;
 }
 
@@ -140,7 +145,7 @@ async fn create_group_result(
 
 /// Post one `PutLifecycleHook` naming `members` beyond the group and hook names, and
 /// answer its status, wire error code and message.
-async fn put_hook(
+pub(crate) async fn put_hook(
     router: &MultiServiceRouter,
     group: &str,
     hook: &str,
@@ -201,7 +206,7 @@ async fn describe_result(
 }
 
 /// The hooks the group reports, in the order the answer carries them.
-async fn described_hooks(
+pub(crate) async fn described_hooks(
     router: &MultiServiceRouter,
     group: &str,
     names: &[&str],
@@ -249,7 +254,11 @@ async fn described_hooks(
 }
 
 /// The one hook the group reports under `hook`.
-async fn described_hook(router: &MultiServiceRouter, group: &str, hook: &str) -> ReportedHook {
+pub(crate) async fn described_hook(
+    router: &MultiServiceRouter,
+    group: &str,
+    hook: &str,
+) -> ReportedHook {
     let reported = described_hooks(router, group, &[hook]).await;
     assert_eq!(
         reported.len(),
@@ -268,7 +277,7 @@ struct CreateRow {
 }
 
 /// What a created hook must look like, filled in per row.
-fn expect(
+pub(crate) fn expect(
     group: &str,
     hook: &str,
     transition: &str,
