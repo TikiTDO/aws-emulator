@@ -21,6 +21,8 @@ mod ab_tests;
 mod batch_evaluations;
 #[path = "all/browser_sessions.rs"]
 mod browser_sessions;
+#[path = "all/code_interpreter_session_stop.rs"]
+mod code_interpreter_session_stop;
 #[path = "all/code_interpreter_sessions.rs"]
 mod code_interpreter_sessions;
 #[path = "all/code_interpreter_tools.rs"]
