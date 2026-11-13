@@ -218,6 +218,7 @@ pub const MAX_IMPORT_PARAMETERS: usize = 200;
 ///
 /// `Debug` is written by hand rather than derived so the private key is REDACTED.
 #[derive(Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ImportParameters {
     /// The key id of the KMS key the parameters were issued for.
     pub key_id: String,
@@ -278,6 +279,7 @@ const IMPORT_TOKEN_LEN: usize = 32;
 /// It holds no key material: the digest identifies the bytes without keeping them, so a
 /// key remembers which material is its own without holding material it no longer has.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ImportedMaterialIdentity {
     /// What identifies the material to this store, for every kind whose bytes it holds
     /// ([`KeyMaterial::digest`]).

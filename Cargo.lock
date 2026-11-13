@@ -14788,6 +14788,7 @@ dependencies = [
  "hex",
  "http",
  "ring",
+ "serde",
  "serde_json",
  "service-com-amazonaws-cloudhsmv2-baldrapiservice",
  "service-com-amazonaws-iam-awsidentitymanagementv20100508",
