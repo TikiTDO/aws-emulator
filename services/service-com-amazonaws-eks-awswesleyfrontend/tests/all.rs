@@ -107,6 +107,8 @@ mod connected_clusters;
 mod control_plane_log_export;
 #[path = "all/control_plane_log_suppression.rs"]
 mod control_plane_log_suppression;
+#[path = "all/eks_anywhere_subscription_mutations.rs"]
+mod eks_anywhere_subscription_mutations;
 #[path = "all/eks_anywhere_subscriptions.rs"]
 mod eks_anywhere_subscriptions;
 #[path = "all/encryption_config_association.rs"]

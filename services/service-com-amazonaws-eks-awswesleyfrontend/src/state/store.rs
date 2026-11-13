@@ -228,6 +228,13 @@ impl ComAmazonawsEksAwswesleyfrontendState {
         for capability in self.capabilities.values_mut() {
             capability.materialize_due_transitions(now);
         }
+        // A subscription whose removal the clock has finished is no longer a
+        // subscription of the account, the same way an add-on's removal above is:
+        // it is "removed from list/describe API responses"
+        // (`DeleteEksAnywhereSubscription`), and that was due at its stored instant
+        // whether or not anybody called.
+        self.eks_anywhere_subscriptions
+            .retain(|_, subscription| subscription.removed_at.is_none_or(|due| now < due));
         for subscription in self.eks_anywhere_subscriptions.values_mut() {
             subscription.materialize_due_transitions(now);
         }

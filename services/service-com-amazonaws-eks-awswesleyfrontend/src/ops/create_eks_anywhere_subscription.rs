@@ -335,6 +335,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .unwrap_or_else(|| state::SUBSCRIPTION_TERM_UNIT_MONTHS.to_string()),
             status: SUBSCRIPTION_STATUS_CREATING.to_string(),
             active_at: Some(now + SUBSCRIPTION_ACTIVATION_DELAY),
+            // A subscription this call creates is on its way IN: nothing owes its
+            // removal, and no update has been taken on it yet.
+            removed_at: None,
+            update_token: None,
             auto_renew: input.auto_renew,
             tags: input
                 .tags

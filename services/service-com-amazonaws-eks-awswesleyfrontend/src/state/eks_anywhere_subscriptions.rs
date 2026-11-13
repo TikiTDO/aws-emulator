@@ -11,15 +11,23 @@ use super::*;
 /// (`smithy_query query="shape" shape="EksAnywhereSubscriptionStatus"`) is
 /// `CREATING | ACTIVE | UPDATING | EXPIRING | EXPIRED | DELETING`;
 /// `EksAnywhereSubscription$status` is a plain string member, so the status is
-/// stored as the wire token. `UPDATING`, `EXPIRING` and `DELETING` belong to the
-/// operations that update and delete a subscription, each with its own gap
-/// issue.
+/// stored as the wire token. `EXPIRING` is the only member no operation of this
+/// service puts a subscription in: a term that runs out moves straight to
+/// `EXPIRED` at its expiration date.
 pub const SUBSCRIPTION_STATUS_CREATING: &str = "CREATING";
 /// See [`SUBSCRIPTION_STATUS_CREATING`].
 pub const SUBSCRIPTION_STATUS_ACTIVE: &str = "ACTIVE";
+/// See [`SUBSCRIPTION_STATUS_CREATING`] — the status a subscription reports
+/// while an accepted `UpdateEksAnywhereSubscription` is being applied, until the
+/// clock owes it `ACTIVE` again.
+pub const SUBSCRIPTION_STATUS_UPDATING: &str = "UPDATING";
 /// See [`SUBSCRIPTION_STATUS_CREATING`] — the status a subscription reports once
 /// its term has run out, which the clock owes it at its expiration date.
 pub const SUBSCRIPTION_STATUS_EXPIRED: &str = "EXPIRED";
+/// See [`SUBSCRIPTION_STATUS_CREATING`] — the status a subscription reports
+/// while an accepted `DeleteEksAnywhereSubscription` removes it, until the clock
+/// owes the store its removal.
+pub const SUBSCRIPTION_STATUS_DELETING: &str = "DELETING";
 
 /// The only `EksAnywhereSubscriptionTermUnit` the API defines: "The term unit of
 /// the subscription. Valid value is `MONTHS`"
@@ -59,6 +67,17 @@ pub const SUBSCRIPTION_LICENSE_TYPE_CLUSTER: &str = "Cluster";
 /// enough to be worth waiting for. The due instant is stored on the record;
 /// nothing sleeps for it.
 pub const SUBSCRIPTION_ACTIVATION_DELAY: Duration = CLUSTER_ACTIVATION_DELAY;
+
+/// How long a subscription whose delete was accepted reports `DELETING` before
+/// the store drops it.
+///
+/// `DeleteEksAnywhereSubscription` publishes no duration for the removal it
+/// starts, so this span is CHOSEN rather than cited, and matches
+/// [`SUBSCRIPTION_ACTIVATION_DELAY`] for the same reason: non-zero, so a caller
+/// that reads the subscription straight after deleting it still observes
+/// `DELETING` rather than a subscription that was never there. The due instant is
+/// stored on the record; nothing sleeps for it.
+pub const SUBSCRIPTION_DELETION_DELAY: Duration = SUBSCRIPTION_ACTIVATION_DELAY;
 
 /// The number of days in the month a subscription term is counted in.
 ///
@@ -104,11 +123,20 @@ pub struct EksAnywhereSubscriptionRecord {
     pub term_unit: String,
     pub status: String,
     /// When set, the instant at which the clock owes this subscription the move
-    /// from `CREATING` to `ACTIVE`. Cleared once the move is materialised.
+    /// to `ACTIVE` — out of `CREATING` after the create, and out of `UPDATING`
+    /// after an accepted update. Cleared once the move is materialised.
     pub active_at: Option<SystemTime>,
+    /// When set, the instant at which the clock owes the store this
+    /// subscription's removal: the record a `DeleteEksAnywhereSubscription`
+    /// accepted, reporting `DELETING` until then.
+    pub removed_at: Option<SystemTime>,
     pub auto_renew: bool,
     pub tags: BTreeMap<String, String>,
     pub client_request_token: Option<String>,
+    /// The `clientRequestToken` of the last `UpdateEksAnywhereSubscription` this
+    /// record took, so an SDK that RESENDS the same token is answered with the
+    /// subscription that update produced rather than starting a second one.
+    pub update_token: Option<String>,
 }
 
 impl EksAnywhereSubscriptionRecord {
@@ -123,6 +151,12 @@ impl EksAnywhereSubscriptionRecord {
     /// expires" (`EksAnywhereSubscription$autoRenew`) — so its term rolls
     /// forward instead of ending.
     pub fn materialize_due_transitions(&mut self, now: SystemTime) {
+        // A subscription whose removal the clock owes is on its way out: nothing
+        // else is owed on it, and the store drops it at that instant (see
+        // [`ComAmazonawsEksAwswesleyfrontendState::materialize_due_transitions`]).
+        if self.removed_at.is_some() {
+            return;
+        }
         if self.active_at.is_some_and(|due| now >= due) {
             self.status = SUBSCRIPTION_STATUS_ACTIVE.to_string();
             self.active_at = None;
@@ -211,6 +245,53 @@ impl EksAnywhereSubscriptionRecord {
 /// `eks`-namespace form every other ARN this service mints takes.
 pub fn eks_anywhere_subscription_arn(region: &str, id: &str) -> String {
     ::engine::emulator_arn("eks", region, &format!("eksanywheresubscription/{id}"))
+}
+
+/// The sentence `DeleteEksAnywhereSubscription` refuses a subscription whose
+/// status is not one it may remove with.
+///
+/// The rule is the operation's own: it "deletes an expired or inactive
+/// subscription", and a live one "can only be cancelled within 7 days of
+/// creation and [is] cancelled by creating a ticket in the Amazon Web Services
+/// Support Center" (`DeleteEksAnywhereSubscription`) — so the status the
+/// subscription is actually in is the only part of the sentence that varies.
+pub fn subscription_not_deletable_message(status: &str) -> String {
+    format!(
+        "Subscription in {status} status cannot be deleted. Only an expired or \
+         inactive subscription can be deleted."
+    )
+}
+
+/// Why the subscription in `status` is not one `DeleteEksAnywhereSubscription`
+/// may remove, or `None` when it is one.
+///
+/// Only a subscription whose term has run out is removable: every other status
+/// is a subscription that is still live, which this API does not cancel.
+pub fn subscription_delete_refusal(status: &str) -> Option<String> {
+    (status != SUBSCRIPTION_STATUS_EXPIRED).then(|| subscription_not_deletable_message(status))
+}
+
+/// The sentence `UpdateEksAnywhereSubscription` refuses a subscription whose
+/// status leaves nothing to renew with. See [`subscription_update_refusal`].
+pub fn subscription_not_updatable_message(status: &str) -> String {
+    format!("Subscription in {status} status cannot be updated.")
+}
+
+/// Why the subscription in `status` is not one `UpdateEksAnywhereSubscription`
+/// may change, or `None` when it is one.
+///
+/// The operation changes whether the subscription "will auto renew when it
+/// expires" (`EksAnywhereSubscription$autoRenew`), so a subscription whose term
+/// has already run out has nothing left for it to act on, and one whose removal
+/// has been accepted is on its way out of the account: both are refused as the
+/// request's being invalid given the state rather than silently reviving the
+/// subscription.
+pub fn subscription_update_refusal(status: &str) -> Option<String> {
+    matches!(
+        status,
+        SUBSCRIPTION_STATUS_EXPIRED | SUBSCRIPTION_STATUS_DELETING
+    )
+    .then(|| subscription_not_updatable_message(status))
 }
 
 /// Why `term` is not a term a subscription may be created for, or `None` when it
