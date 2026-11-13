@@ -69,6 +69,10 @@ mod current_generation_instance_types;
 mod data_plane_iam_authorization;
 #[path = "all/data_plane_identity_evidence.rs"]
 mod data_plane_identity_evidence;
+#[path = "all/data_plane_identity_grant_evidence.rs"]
+mod data_plane_identity_grant_evidence;
+#[path = "all/data_plane_unreadable_identity_grant.rs"]
+mod data_plane_unreadable_identity_grant;
 #[path = "all/data_source_attachment_authorization.rs"]
 mod data_source_attachment_authorization;
 #[path = "all/data_source_attachments.rs"]

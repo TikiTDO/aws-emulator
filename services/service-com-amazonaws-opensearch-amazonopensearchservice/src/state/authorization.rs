@@ -178,25 +178,63 @@ pub fn request_principal_arn<Eng: Send + Sync + 'static>(
     Some(identity.arn)
 }
 
-/// The identity-based policy documents in force on the principal a request speaks for, or
-/// `None` for a caller this gate does not bound (see the module docs) — including the
-/// account's own published credential and a principal carrying a grant this emulator
-/// cannot read, for both of which "no evidence" is the answer rather than "no permissions".
+/// What this emulator can show about the identity-based policies in force on the principal
+/// a request speaks for, or `None` for a caller this gate does not bound (see the module
+/// docs) — including the account's own published credential, for which "no evidence" is the
+/// answer rather than "no permissions".
 ///
 /// The companion of [`request_principal_arn`] for a decision taken OUTSIDE a modelled
 /// operation's own gate, and the SAME lookup [`authorize`] performs, so the documents a
-/// data-plane decision reads are the ones the control plane reads for that credential.
-pub fn request_identity_documents<Eng: Send + Sync + 'static>(
+/// data-plane decision reads are the ones the control plane reads for that credential. The
+/// grant this emulator CANNOT read is reported beside them ([`HeldIdentity`]) rather than
+/// collapsed into "no documents": to a decision that also reads a resource-based policy the
+/// two mean different things.
+pub fn request_identity<Eng: Send + Sync + 'static>(
     engine: &Eng,
     ctx: &::smithy_server_runtime::OperationContext<'_>,
-) -> Option<Vec<String>> {
-    let caller = caller(engine, ctx)?;
-    (!caller.unreadable_attachment).then_some(caller.documents)
+) -> Option<HeldIdentity> {
+    caller(engine, ctx).map(HeldIdentity::of_caller)
 }
 
-/// The identity-based policy documents in force on the IAM ROLE `role_arn` names, or
-/// `None` when this emulator holds none for it: an engine carrying no IAM store, a value
-/// that is not a role ARN, or a role the IAM store does not hold.
+/// What this emulator can show about the identity-based policies in force on ONE principal:
+/// the documents it holds for it, and whether the principal carries a grant whose document
+/// cannot be read here.
+///
+/// The pair every decision of this service reads the identity side from, so the gate that
+/// authorizes a modelled operation and the one that authorizes a data-plane request are
+/// shown the same two facts about a caller.
+#[derive(Debug, Clone, Default)]
+pub struct HeldIdentity {
+    /// The identity-based policy documents in force on the principal.
+    pub documents: Vec<String>,
+    /// Set when the principal carries a managed policy whose document cannot be read here —
+    /// an AWS-managed ARN outside the catalog the IAM emulator publishes — so what that
+    /// grant allows is unknown (see the module docs).
+    pub unreadable_grant: bool,
+}
+
+impl HeldIdentity {
+    /// The evidence as a data-plane decision reads it ([`super::ingest::iam_decision`]).
+    #[must_use]
+    pub fn policies(&self) -> super::ingest::IdentityPolicies<'_> {
+        super::ingest::IdentityPolicies {
+            documents: Some(&self.documents),
+            unreadable_grant: self.unreadable_grant,
+        }
+    }
+
+    /// What one resolved caller carries.
+    fn of_caller(caller: Caller) -> Self {
+        Self {
+            documents: caller.documents,
+            unreadable_grant: caller.unreadable_attachment,
+        }
+    }
+}
+
+/// What this emulator can show about the identity-based policies in force on the IAM ROLE
+/// `role_arn` names, or `None` when this emulator holds none for it: an engine carrying no
+/// IAM store, a value that is not a role ARN, or a role the IAM store does not hold.
 ///
 /// The same lookup [`identity_policies`] performs for a request's own principal, reached
 /// by a caller that does not hold the request — a producer OUTSIDE this service writing to
@@ -204,10 +242,10 @@ pub fn request_identity_documents<Eng: Send + Sync + 'static>(
 /// the configured role rather than whoever signed. `None` is "no evidence", not "no
 /// permissions": a caller decides what to do with that, the way this module's own gate
 /// does for a grant it cannot read.
-pub fn role_identity_documents<Eng: Send + Sync + 'static>(
+pub fn role_identity<Eng: Send + Sync + 'static>(
     engine: &Eng,
     role_arn: &str,
-) -> Option<Vec<String>> {
+) -> Option<HeldIdentity> {
     let iam = iam_store::service_state(engine)?;
     let role_name = ::service_common::arn::parse(role_arn)
         .filter(|parsed| parsed.vendor == IAM_ARN_NAMESPACE)
@@ -225,7 +263,10 @@ pub fn role_identity_documents<Eng: Send + Sync + 'static>(
     if !iam.roles.contains_key(&iam_store::name_key(&role_name)) {
         return None;
     }
-    Some(identity_policies(&iam, NamedIdentity::Role(&role_name)).documents)
+    Some(HeldIdentity::of_caller(identity_policies(
+        &iam,
+        NamedIdentity::Role(&role_name),
+    )))
 }
 
 /// Whether `principal_arn` is the principal the account's OWN published credential speaks

@@ -12,9 +12,10 @@
 //!
 //! Every item is applied through the ONE data-plane write path
 //! ([`ingest::index_into`]) and is held to the same two conditions a single document write
-//! is ([`super::write_conflict`]) — so a document loaded in bulk is authorized, mapped,
-//! numbered and refused exactly as one written on its own, and a bulk load is not a second
-//! way into an index with rules of its own.
+//! is ([`super::write_conflict`]) — so a document loaded in bulk is mapped, numbered and
+//! refused exactly as one written on its own, and a bulk load is not a second way into an
+//! index with rules of its own. The IAM decision is the request's, taken once at this
+//! plane's front door against the resource the bulk path addresses.
 
 use std::time::{Instant, SystemTime};
 
@@ -340,7 +341,7 @@ fn index(
         principal_arn: request.principal,
         now,
     };
-    match ingest::index_into(domain, &write, request.identity) {
+    match ingest::index_into(domain, &write) {
         Ok(indexed) => {
             let Some(written) = super::written_document(domain, &indexed) else {
                 return failure(

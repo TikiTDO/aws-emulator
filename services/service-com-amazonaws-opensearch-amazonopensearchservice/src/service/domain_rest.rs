@@ -543,9 +543,10 @@ pub fn serve<Eng: Send + Sync + 'static>(
         .unwrap_or_default();
     // The identity policies live in ANOTHER service's store, so they are read before this
     // one is locked: no call holds two service stores at once. `None` is a caller this
-    // emulator holds no policy evidence for — the account's own credential, or a grant it
-    // cannot read — which is the posture `crate::state::authorization` documents.
-    let identity = ctx.and_then(|ctx| state::authorization::request_identity_documents(engine, ctx));
+    // emulator holds no policy evidence for — the account's own credential — which is the
+    // posture `crate::state::authorization` documents; a caller carrying a grant that cannot
+    // be READ is reported with that grant marked, which is a different thing.
+    let held_identity = ctx.and_then(|ctx| state::authorization::request_identity(engine, ctx));
     let now = SystemTime::now();
     let request = Request {
         method: &method,
@@ -553,7 +554,10 @@ pub fn serve<Eng: Send + Sync + 'static>(
         query: uri.query().unwrap_or_default(),
         body,
         principal: &principal,
-        identity: identity.as_ref(),
+        identity: held_identity
+            .as_ref()
+            .map(state::authorization::HeldIdentity::policies)
+            .unwrap_or_default(),
         started: ::std::time::Instant::now(),
         at: now,
         published: ::std::cell::RefCell::new(Vec::new()),
@@ -821,9 +825,10 @@ struct Request<'a> {
     body: &'a [u8],
     /// The ARN of the principal the request speaks for, empty when none was resolved.
     principal: &'a str,
-    /// The identity-based policy documents in force on that principal, or `None` when this
-    /// emulator holds none for it.
-    identity: Option<&'a Vec<String>>,
+    /// What this emulator can show about the identity-based policies in force on that
+    /// principal: the documents it holds for it, and whether the principal carries a grant
+    /// whose document cannot be read here.
+    identity: ingest::IdentityPolicies<'a>,
     /// When this plane began serving the request, so the work it does can state how long it
     /// really took ([`Request::took`]) — which is what a slow-log threshold is compared
     /// against.
@@ -2625,10 +2630,12 @@ fn document_write(
         principal_arn: request.principal,
         now,
     };
-    // The write goes through the ONE data-plane write path, which owns the authorization
-    // decision, the auto-created index and the mapping rules — so a document written over
-    // the wire is judged exactly as a producer's delivery is.
-    match ingest::index_into(domain, &write, request.identity) {
+    // The write goes through the ONE data-plane write path, which owns the auto-created
+    // index and the mapping rules — so a document written over the wire and one written by a
+    // producer land under one set of cluster rules. The IAM decision about this request was
+    // taken at this plane's front door, against the resource the request's own path
+    // addresses, and is not taken again here.
+    match ingest::index_into(domain, &write) {
         Ok(indexed) => {
             let Some(written) = written_document(domain, &indexed) else {
                 return unreadable_write(&indexed).response();
@@ -2658,13 +2665,12 @@ fn document_write(
                 }),
             )
         }
-        // The write path states BOTH the IAM decision and the CLUSTER's own (a principal
-        // fine-grained access control binds to no role) as a `security_exception`, and the
-        // refusal does not say which layer refused — so it is answered in the engine's
-        // envelope, which is right for the cluster's half. The IAM decision this surface
-        // takes is the one above ([`iam_refused`]); separating the two inside the shared
-        // write path means a refusal kind of its own on `ingest::WriteRefusal`, which the
-        // producer path reads too.
+        // What is left for the write path to refuse is the CLUSTER's own (a principal
+        // fine-grained access control binds to no role, or a document the index's mappings
+        // do not accept), so it is answered in the engine's envelope, which is right for
+        // every one of them. The IAM decision this surface takes is the one at its front
+        // door ([`iam_refused`]), where a request is decided once, against the resource its
+        // own path addresses.
         Err(refusal) => refused(&refusal),
     }
 }

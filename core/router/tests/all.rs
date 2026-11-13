@@ -110,6 +110,12 @@ mod apigateway_iam_authenticated_invoke;
 // Declared here, in this same head region, for the reason the entry above records.
 #[path = "all/cloudformation_rollback_triggers_revert_the_operation.rs"]
 mod cloudformation_rollback_triggers_revert_the_operation;
+// Declared in this span of the sorted list, beside the other `cloudformation…` suites,
+// rather than at the head of this file or in its appended tail: both of those are where
+// concurrently landing suites put their line, so a declaration there loses a squash merge to
+// every one of them, while these neighbouring lines are stable.
+#[path = "all/cloudformation_role_trusted_by_the_s3_service.rs"]
+mod cloudformation_role_trusted_by_the_s3_service;
 // Declared here, in this same head region, for the reason the entry above records: this
 // suite holds the committed `Cargo.lock` to the workspace's manifests, so it belongs to no
 // service's span of the sorted list.
@@ -788,6 +794,9 @@ mod lambda_execution_role_trust;
 mod lambda_capacity_provider_operator_role;
 #[path = "all/lambda_execution_role_session_identity.rs"]
 mod lambda_execution_role_session_identity;
+// Declared in this span of the sorted list, for the reason the lines above state.
+#[path = "all/lambda_execution_role_search_domain_grant.rs"]
+mod lambda_execution_role_search_domain_grant;
 // Declared in this span of the sorted list, beside the other `l…` suites, rather than at
 // the head of this file or in its appended tail: both of those are where concurrently
 #[path = "all/lakeformation_catalog_resource_resolution.rs"]

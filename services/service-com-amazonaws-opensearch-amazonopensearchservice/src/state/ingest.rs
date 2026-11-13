@@ -18,12 +18,15 @@
 //!    nothing yet and is owed again rather than refused). An index the domain does not
 //!    hold is CREATED by the write, which is what a cluster does by default
 //!    (`action.auto_create_index`), with no mappings of its own.
-//! 2. WHETHER — the principal the producer writes as has to be allowed to perform the
+//! 2. WHETHER — the principal the PRODUCER writes as has to be allowed to perform the
 //!    data-plane write action on that index: the domain's own access policy, when it
 //!    carries one, and the identity policies the IAM store holds for the principal, both
 //!    read through the one shared evaluator ([`::service_common::iam_authorization`]). A
 //!    write nothing allows is refused the way the engine refuses an unauthorized request,
-//!    with a `security_exception`.
+//!    with a `security_exception`. The decision is taken ONCE per call, against the resource
+//!    THAT call is addressed at: a producer's at the index it was configured with, and a
+//!    signed request's at the path it carries, which its own plane decides at its front door
+//!    ([`crate::service::domain_rest`]) before the write path is reached at all.
 //! 3. WHAT — the bytes have to be one JSON object, and every field of it has to agree
 //!    with the index's mappings: a field the mappings do not carry is refused where they
 //!    are `strict`, and a value that is not of a mapped field's type is refused whatever
@@ -134,6 +137,26 @@ pub struct DocumentWrite<'a> {
     pub now: SystemTime,
 }
 
+/// What this emulator can show about the identity-based policies in force on the principal
+/// a data-plane request speaks for — the identity side of [`iam_decision`].
+///
+/// Two things a decision has to tell apart. The DOCUMENTS in force on the principal say what
+/// it may do, and a set of them that allows nothing is a principal IAM's default deny
+/// refuses. A grant whose document cannot be READ here — an attachment naming one of AWS's
+/// own managed policies this emulator publishes no document for — is not that case: what it
+/// allows is UNKNOWN, so the absence of an allow among the readable documents is no evidence
+/// about the identity side and cannot refuse on its own.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IdentityPolicies<'d> {
+    /// The documents in force on the principal, or `None` where this emulator holds none for
+    /// it: a principal its IAM store does not know, or an engine carrying no IAM store at
+    /// all.
+    pub documents: Option<&'d Vec<String>>,
+    /// Whether the principal carries a grant this emulator cannot read, so what the identity
+    /// side allows is unknown rather than nothing.
+    pub unreadable_grant: bool,
+}
+
 /// What a written document landed as.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Indexed {
@@ -185,9 +208,19 @@ pub const ILLEGAL_ARGUMENT_EXCEPTION: &str = "illegal_argument_exception";
 /// Write `write`'s document into the index it names, answering what it landed as or why
 /// the cluster would not take it.
 ///
-/// The ONE entry point: every producer writing into a domain of this service goes through
-/// it, so the authorization decision, the auto-created index and the mapping rules are the
-/// same for all of them. Takes the store's lock itself and holds it for this one write.
+/// The ONE entry point for a PRODUCER: every producer writing into a domain of this service
+/// goes through it, so the authorization decision, the auto-created index and the mapping
+/// rules are the same for all of them. Takes the store's lock itself and holds it for this
+/// one write.
+///
+/// The IAM decision belongs HERE and not to [`index_into`], because it is a decision about
+/// the CALL: a producer makes its own call, addressed at the index it was configured with, so
+/// the resource it is decided against is that index ([`index_resource`]). A request that
+/// arrived over the domain's own REST wire was already decided — once, against the resource
+/// its own path addresses — by the plane that serves it
+/// ([`crate::service::domain_rest`]), which is the one decision AWS takes for such a
+/// request; taking a second one here, against a resource of this module's choosing, would
+/// refuse writes the policy covering the request's path allows.
 pub fn index_document<Eng: Send + Sync + 'static>(
     engine: &Eng,
     write: &DocumentWrite<'_>,
@@ -202,28 +235,40 @@ pub fn index_document<Eng: Send + Sync + 'static>(
     };
     // The identity policies are read from ANOTHER service's store, so they are read
     // before this one is locked: no call holds two service stores at once.
-    let identity = principal_documents(engine, write.principal_arn);
+    let identity = super::authorization::role_identity(engine, write.principal_arn);
     let mut store = state.lock();
     let domain = provisioned_domain(&mut store, write.domain, write.now)?;
-    index_into(domain, write, identity.as_ref())
+    let domain_arn = domain.arn.clone();
+    authorize(
+        write,
+        &domain_arn,
+        domain,
+        identity
+            .as_ref()
+            .map(super::authorization::HeldIdentity::policies)
+            .unwrap_or_default(),
+    )?;
+    index_into(domain, write)
 }
 
-/// [`index_document`] against a domain record the caller ALREADY holds, with the identity
-/// policies it already read.
+/// [`index_document`] against a domain record the caller ALREADY holds, for a caller that has
+/// taken the IAM decision about the call itself.
 ///
-/// The same three decisions in the same order; it is the entry point for a caller that is
-/// already inside this service's store — the domain's own REST data plane
+/// The same decisions in the same order from the CLUSTER's on: it is the entry point for a
+/// caller that is already inside this service's store — the domain's own REST data plane
 /// ([`crate::service::domain_rest`]), which resolved the domain to answer the request at
-/// all — so a document written over the wire and one written by a producer land under one
-/// set of rules.
-pub fn index_into(
+/// all and authorized the request at its front door — so a document written over the wire
+/// and one written by a producer land under one set of cluster rules.
+///
+/// `pub(crate)` and not `pub`, because it takes no authorization decision of its own: the
+/// only callers that may reach it are the ones inside this crate that have already taken one
+/// ([`crate::service::domain_rest`]'s front door), which is what keeps "decided once, at the
+/// front door" a property the compiler holds rather than a sentence in this comment.
+pub(crate) fn index_into(
     domain: &mut Domain,
     write: &DocumentWrite<'_>,
-    identity: Option<&Vec<String>>,
 ) -> Result<Indexed, WriteRefusal> {
-    let domain_arn = domain.arn.clone();
-    authorize(write, &domain_arn, domain, identity)?;
-    // IAM lets the request reach the cluster; the CLUSTER decides next. On a domain with
+    // IAM has let the request reach the cluster; the CLUSTER decides next. On a domain with
     // fine-grained access control switched on, a principal that is neither the master
     // user nor bound by a role mapping may do nothing at all, whatever IAM allows — the
     // one decision every path into a domain takes ([`super::fgac`]).
@@ -253,19 +298,6 @@ pub fn index_into(
     }
     let index = index_for(domain, write.index_name, mappings)?;
     store_document(index, write, document)
-}
-
-/// The identity-based policy documents in force on `principal_arn`, or `None` when this
-/// emulator holds none for it — a principal the IAM store does not know, or an engine
-/// carrying no IAM store at all, where what the principal may do is not evidence this
-/// emulator has. The same posture [`super::authorization`] takes for a grant it cannot
-/// read: refusing on it would deny access AWS permits.
-pub fn principal_documents<Eng: Send + Sync + 'static>(
-    engine: &Eng,
-    principal_arn: &str,
-) -> Option<Vec<String>> {
-    let documents = super::authorization::role_identity_documents(engine, principal_arn)?;
-    Some(documents)
 }
 
 /// The domain `address` names — its ARN, or the host of the endpoint it publishes — with
@@ -306,18 +338,20 @@ fn provisioned_domain<'s>(
     Ok(domain)
 }
 
-/// Whether the principal the producer writes as may write this document.
+/// Whether the principal the PRODUCER writes as may write this document.
 ///
 /// The decision is [`iam_decision`], the ONE reading of what IAM allows a data-plane
 /// request of this service — a producer's write here and a signed request to the domain's
-/// own REST surface alike — so the two cannot answer differently. A write nothing allows
-/// is refused the way the engine refuses an unauthorized request, with a
-/// `security_exception`.
+/// own REST surface alike — so the two cannot answer differently. What differs is the
+/// RESOURCE each is decided against, because each is a different call: a producer's call is
+/// addressed at the index it was configured with ([`index_resource`]), and a signed request
+/// at the path it carries. A write nothing allows is refused the way the engine refuses an
+/// unauthorized request, with a `security_exception`.
 fn authorize(
     write: &DocumentWrite<'_>,
     domain_arn: &str,
     domain: &Domain,
-    identity: Option<&Vec<String>>,
+    identity: IdentityPolicies<'_>,
 ) -> Result<(), WriteRefusal> {
     iam_decision(
         domain,
@@ -331,20 +365,23 @@ fn authorize(
 /// Whether IAM lets `principal_arn` perform this service's data-plane `action_name`
 /// (`ESHttpPost`, `ESHttpGet`, …) on `resource` of `domain`.
 ///
-/// The decision a document write takes ([`authorize`]) and the one the domain's REST data
-/// plane takes ([`crate::service::domain_rest`]) are THIS one, so the two paths into a
-/// domain cannot disagree about what IAM allows.
+/// The decision a PRODUCER's write takes ([`authorize`]) and the one the domain's REST data
+/// plane takes at its front door ([`crate::service::domain_rest`]) are THIS one, so the two
+/// paths into a domain cannot disagree about what IAM allows. What each caller supplies is
+/// the `resource` ITS call is addressed at and what can be shown about the principal's own
+/// grants ([`IdentityPolicies`]).
 pub fn iam_decision(
     domain: &Domain,
     principal_arn: &str,
     action_name: &str,
     resource: &str,
-    identity: Option<&Vec<String>>,
+    identity: IdentityPolicies<'_>,
 ) -> Result<(), WriteRefusal> {
     let action = format!("{}:{action_name}", super::ARN_NAMESPACE);
     let principals = principal_spellings(principal_arn);
     let request = iam::Request::new(&action, resource, &principals);
     let identity_decision = identity
+        .documents
         .map(|documents| iam::identity_decision(documents, &request))
         .unwrap_or(Decision::NotStated);
     let access_policy = domain.access_policies.as_deref().filter(|policy| {
@@ -371,10 +408,23 @@ pub fn iam_decision(
     {
         return Ok(());
     }
+    // The principal carries a grant whose document this emulator cannot read, so what its
+    // identity side allows is UNKNOWN: the absence of an allow among the documents that could
+    // be read is no evidence, and a domain's access policy saying nothing about the principal
+    // does not refuse it either. What still refuses it is the rule that wins over every allow
+    // whichever side states it: an explicit `Deny`. The posture this service's control-plane
+    // gate takes for the same grant ([`super::authorization::authorize`]), so the two planes
+    // of this service cannot answer differently about one principal.
+    if identity.unreadable_grant
+        && identity_decision != Decision::Denied
+        && resource_decision != Decision::Denied
+    {
+        return Ok(());
+    }
     // Neither side states anything and there is no policy on either side to state it: an
     // engine holding no identity store, and a domain carrying no access policy, is a domain
     // nothing bounds.
-    if identity.is_none()
+    if identity.documents.is_none()
         && access_policy.is_none()
         && identity_decision == Decision::NotStated
         && resource_decision == Decision::NotStated

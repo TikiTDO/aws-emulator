@@ -7,6 +7,13 @@
 
 use super::*;
 
+/// The `ReplicationConfiguration` an `AWS::S3::Bucket` declares, which is a concern of its
+/// own: the property is the whole of Amazon S3's replication request shape, so its reading
+/// lives beside this file rather than inside it.
+mod bucket_replication;
+
+use bucket_replication::declared_replication_configuration;
+
 /// Amazon Data Firehose's signing name and `X-Amz-Target` prefix, from its model
 /// (`sigv4Name: firehose`, service shape `Firehose_20150804`), which speaks
 /// `awsJson1_1`.
@@ -2090,7 +2097,8 @@ pub(super) const NO_SUCH_BUCKET: &str = "NoSuchBucket";
 /// Create the bucket an `AWS::S3::Bucket` declares, and apply the
 /// `VersioningConfiguration`, the `NotificationConfiguration`, the
 /// `AnalyticsConfigurations`, the `InventoryConfigurations`, the
-/// `IntelligentTieringConfigurations` and the tags it carries.
+/// `IntelligentTieringConfigurations`, the `ReplicationConfiguration` and the tags it
+/// carries.
 ///
 /// "Ref returns the bucket name" for this type, so the physical resource id the stack
 /// reports IS the bucket a client addresses, and it is the bucket created here.
@@ -2321,6 +2329,20 @@ async fn configure_bucket(
             .put_bucket_encryption()
             .bucket(bucket)
             .server_side_encryption_configuration(configuration)
+            .send()
+            .await
+            .map_err(|error| s3_refusal_of(&error))?;
+    }
+    // "ReplicationConfiguration — configuration for replicating objects in an S3 bucket"
+    // (this type's own property): the whole configuration is ONE `PutBucketReplication`, the
+    // call Amazon S3 publishes for it, so a bucket a template declares replication for really
+    // replicates the writes it takes — under the role the configuration names, which S3
+    // assumes to make each copy.
+    if let Some(configuration) = declared_replication_configuration(resource)? {
+        client
+            .put_bucket_replication()
+            .bucket(bucket)
+            .replication_configuration(configuration)
             .send()
             .await
             .map_err(|error| s3_refusal_of(&error))?;
