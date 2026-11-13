@@ -281,11 +281,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
 
             let mut notification = input.notification;
-            // The one member of a notification the SERVICE owns rather than the caller —
-            // the alarm state, which it reads off the spend behind the budget — is
-            // dropped here rather than stored, so no later read echoes a state this
-            // request asked for (`crate::state::drop_notification_derived`).
-            crate::state::drop_notification_derived(&mut notification);
+            // The members of a notification the SERVICE owns rather than the caller — the
+            // alarm state and the breach counter it reads off the spend behind the
+            // budget, and the threshold type it keeps in one spelling — are settled here
+            // rather than stored as sent, so no later read echoes a state this request
+            // asked for (`crate::state::stamp_notification_owned`).
+            crate::state::stamp_notification_owned(&mut notification);
             // A notification in alarm has passed its threshold, so it owes the alert it
             // exists to deliver to every subscriber this call attaches to it, decided
             // from the state this call leaves behind — the service's own, over the budget

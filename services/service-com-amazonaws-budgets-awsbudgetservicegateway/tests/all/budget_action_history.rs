@@ -40,6 +40,7 @@ use service_com_amazonaws_budgets_awsbudgetservicegateway::state::{
 };
 
 use super::budget_lifecycle::{caller_account, call, is_error, router, router_with_engine, same};
+use super::recorded_response_members::as_action_subscribers;
 
 /// An `ExecutionRoleArn` satisfying `RoleArn`'s modelled `@pattern` and `@length(32, 618)`
 /// (`smithy_query(query="shape",shape="RoleArn")`), in the account the action lives in:
@@ -206,7 +207,8 @@ impl Row {
 
     /// The `Action` a read must report for this row once created: every member the
     /// caller supplied, plus the two the SERVICE owns (the minted `ActionId` and the
-    /// `Status` a new action starts in).
+    /// `Status` a new action starts in) and the verification state it records for each
+    /// subscriber's address (`tests/all/recorded_response_members.rs`).
     fn expected_action(&self, account_id: &str, budget_name: &str, action_id: &str) -> Value {
         json!({
             "ActionId": action_id,
@@ -218,7 +220,7 @@ impl Row {
             "ExecutionRoleArn": execution_role(account_id),
             "ApprovalModel": self.approval_model,
             "Status": self.created_status(),
-            "Subscribers": subscribers(self.subscriber_count),
+            "Subscribers": as_action_subscribers(&subscribers(self.subscriber_count)),
         })
     }
 }
@@ -561,7 +563,12 @@ async fn each_update_appends_one_update_action_event() {
             same(&old_action, &current),
             "case {case}: expected OldAction {current}, got {old_action}"
         );
-        let expected_new = merged(&current, &patch);
+        let mut expected_new = merged(&current, &patch);
+        // A replacement subscriber set reads back with the member of each subscriber the
+        // SERVICE owns stamped on it, exactly as the create path establishes one.
+        if patch.get("Subscribers").is_some() {
+            expected_new["Subscribers"] = as_action_subscribers(&patch["Subscribers"]);
+        }
         let new_action = body.get("NewAction").cloned().unwrap_or(Value::Null);
         assert!(
             same(&new_action, &expected_new),

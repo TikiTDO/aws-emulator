@@ -11,6 +11,7 @@
 use serde_json::{json, Value};
 
 use super::budget_lifecycle::{call, caller_account, router, same};
+use super::recorded_response_members::without;
 
 /// One row of the table: a budget name and the `FilterExpression` it is created with
 /// (`None` for a budget that carries none at all).
@@ -228,7 +229,8 @@ async fn the_filter_expression_flag_governs_one_member_in_every_read() {
 
 /// RULE: both reads that model `ShowFilterExpression` project one stored budget the same
 /// way, so for any setting of the flag the single read and the listing report the same
-/// budget.
+/// budget — apart from the computed spend the listing leaves out
+/// (`tests/all/recorded_response_members.rs`).
 #[tokio::test]
 async fn both_reads_report_the_same_projection_for_every_flag_setting() {
     let router = router();
@@ -256,7 +258,7 @@ async fn both_reads_report_the_same_projection_for_every_flag_setting() {
             let listed =
                 read_budget(&router, "DescribeBudgets", row.budget_name, show, row.case).await;
             assert!(
-                same(&single, &listed),
+                same(&without(&single, &["CalculatedSpend"]), &listed),
                 "case {:?} show={show:?}: expected DescribeBudgets to report the budget \
                  DescribeBudget does ({single}), got {listed}",
                 row.case

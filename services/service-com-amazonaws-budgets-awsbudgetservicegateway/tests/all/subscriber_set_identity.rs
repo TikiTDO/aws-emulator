@@ -32,6 +32,7 @@ use service_com_amazonaws_budgets_awsbudgetservicegateway::state::{
 
 use super::budget_action_execution::{create_body, definition_for, describe_action, seed_budget};
 use super::budget_lifecycle::{caller_account, call, is_error, router_with_engine, same};
+use super::recorded_response_members::as_action_subscribers;
 
 /// Every refusal this service renders over awsJson answers this status, whichever
 /// modelled error it carries — the sibling suites assert the same one.
@@ -542,7 +543,7 @@ async fn budget_action_writes_hold_each_subscriber_once() {
         );
         let action_id = body["ActionId"].as_str().unwrap_or_default().to_string();
 
-        let distinct = Value::Array(row.distinct.clone());
+        let distinct = as_action_subscribers(&Value::Array(row.distinct.clone()));
         let (status, body) = describe_action(&router, &account_id, budget_name, &action_id).await;
         assert_eq!(
             status, 200,

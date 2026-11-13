@@ -9,6 +9,17 @@
 //! or not anybody called. A budget or action this account does not hold is a
 //! `NotFoundException`.
 //!
+//! ## `Subscriber$VerificationStatus`, a member added to this service's model
+//!
+//! The shipped model declares `Subscriber` with its two caller-owned members only, while
+//! the recorded AWS answers carry the verification state of the address on every
+//! subscriber of an `Action` — the recorded reads of a NOTIFICATION's subscribers carry no
+//! such member. A schema-driven serializer cannot emit a member the model does not
+//! declare, so `VerificationStatus` was ADDED to
+//! `smithy-model/com-amazonaws-budgets-awsbudgetservicegateway.json`. The value is the one
+//! the action write paths stamped on the stored subscriber
+//! ([`crate::state::action_subscribers`]); this read only reports it.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements

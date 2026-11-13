@@ -350,8 +350,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
         if let Some(subscribers) = input.subscribers {
             // A replacement set is still a set: a repeat names a subscriber it already
-            // holds, collapsed into it before it is stored.
-            action.subscribers = crate::state::distinct_subscribers(subscribers);
+            // holds, collapsed into it before it is stored. Each subscriber of the
+            // replacement set is stored with the verification state this service records
+            // for its address, exactly as the create path establishes one — a replaced
+            // address is a new address, which nobody has confirmed.
+            action.subscribers = crate::state::action_subscribers(subscribers);
         }
         let new_action = held.action.clone();
         crate::state::record_action_event(held, crate::state::EVENT_TYPE_UPDATE_ACTION, now);

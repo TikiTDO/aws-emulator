@@ -101,7 +101,7 @@ pub struct StoredBudget {
 /// are stored together.
 ///
 /// The notification holds only what the CALLER owns: its `NotificationState` is dropped on
-/// the write path ([`drop_notification_derived`]) and computed on every read
+/// the write path ([`stamp_notification_owned`]) and computed on every read
 /// ([`project_notification`]), the way a budget's `CalculatedSpend` is.
 #[derive(Debug, Clone)]
 pub struct StoredNotification {
@@ -1030,22 +1030,31 @@ pub(crate) fn stamped_time_period(budget: &Budget, at: SystemTime) -> TimePeriod
 ///
 /// * `LastUpdatedTime` — "the last time that you updated this budget", so a value the
 ///   caller sent is replaced by the time of this write.
+/// * `CreatedAt` — the instant the budget CAME INTO BEING. `previous` carries the budget
+///   this write replaces, if any: a write that edits a budget keeps the creation instant
+///   that budget already carried, since editing a budget does not create one, and only a
+///   write that establishes a budget stamps this instant. Recorded behaviour: the shipped
+///   model declared no such member, so it was added to this service's model (see
+///   [`crate::ops::types::Budget`]).
 /// * `TimePeriod` — a budget always covers a period; an absent `Start` or `End` takes
 ///   its documented default (see [`stamped_time_period`]).
 /// * `CostTypes` — the unset members of a `COST` budget's cost types take their
 ///   documented defaults, and a budget whose type has no cost types at all is stored
 ///   with none whatever the request carried (see [`settle_cost_types`]).
 /// * `HealthStatus` — the operational state of the billing-view-derived resource, which
-///   the caller does not set. `previous` carries the status the budget already had: the
-///   status did not change because somebody edited the budget, so neither does its
-///   `LastUpdatedTime`.
+///   the caller does not set. The status the budget already had (out of `previous`) is
+///   kept: the status did not change because somebody edited the budget, so neither does
+///   its `LastUpdatedTime`.
 /// * the members the service DERIVES from the cost and usage it tracks, which a request
 ///   cannot set at all (see [`drop_service_derived`]).
 /// * `BudgetLimit` — the documented default of a utilization or coverage budget whose
 ///   request carried none (see [`apply_percentage_limit_default`]).
-pub fn stamp_service_owned(budget: &mut Budget, at: SystemTime, previous: Option<HealthStatus>) {
+pub fn stamp_service_owned(budget: &mut Budget, at: SystemTime, previous: Option<&Budget>) {
     let stamped = ::aws_smithy_types::DateTime::from(at);
     budget.last_updated_time = Some(stamped);
+    budget.created_at = previous
+        .and_then(|held| held.created_at)
+        .or(Some(stamped));
 
     drop_service_derived(budget);
     apply_percentage_limit_default(budget);
@@ -1054,11 +1063,15 @@ pub fn stamp_service_owned(budget: &mut Budget, at: SystemTime, previous: Option
 
     settle_cost_types(budget);
 
-    budget.health_status = Some(previous.unwrap_or_else(|| HealthStatus {
-        status: Some(HEALTH_STATUS_HEALTHY.to_string()),
-        status_reason: None,
-        last_updated_time: Some(stamped),
-    }));
+    budget.health_status = Some(
+        previous
+            .and_then(|held| held.health_status.clone())
+            .unwrap_or_else(|| HealthStatus {
+                status: Some(HEALTH_STATUS_HEALTHY.to_string()),
+                status_reason: None,
+                last_updated_time: Some(stamped),
+            }),
+    );
 }
 
 /// Discard every member of `budget` whose value the SERVICE derives from the cost and
@@ -1134,31 +1147,90 @@ fn apply_percentage_limit_default(budget: &mut Budget) {
     });
 }
 
-/// Discard the member of `notification` whose value the SERVICE derives, on every write
-/// path that stores one, so that nothing a request carried for it is persisted or echoed
-/// back by a later read.
+/// Settle the members of `notification` the SERVICE owns, on every write path that stores
+/// one, so that nothing a request carried for them is persisted or echoed back by a later
+/// read:
 ///
-/// `NotificationState` "specifies whether this notification is in alarm. If a budget
-/// notification is in the `ALARM` state, you passed the set threshold for the budget"
-/// (`Notification$NotificationState`): it is the service's own reading of the spend it
-/// tracks against the notification's threshold, not a value a caller chooses — exactly
-/// like `Budget$CalculatedSpend`, which the write path drops for the same reason
-/// ([`drop_service_derived`]). Every read reports the state computed from the budget's
-/// own figures instead ([`notification_state`]).
-pub fn drop_notification_derived(notification: &mut Notification) {
+/// * `NotificationState` "specifies whether this notification is in alarm. If a budget
+///   notification is in the `ALARM` state, you passed the set threshold for the budget"
+///   (`Notification$NotificationState`): it is the service's own reading of the spend it
+///   tracks against the notification's threshold, not a value a caller chooses — exactly
+///   like `Budget$CalculatedSpend`, which the write path drops for the same reason
+///   ([`drop_service_derived`]). Every read reports the state computed from the budget's
+///   own figures instead ([`notification_state`]).
+/// * `ConsecutiveBreachCount` is counted off those same figures
+///   ([`consecutive_breach_count`]) and is dropped here for the same reason.
+/// * `ThresholdType` is stored only when it says something the default does not:
+///   "thresholds are always a percentage" (`Notification$Threshold`), so
+///   [`THRESHOLD_TYPE_PERCENTAGE`] is what an absent member already means and a request
+///   that spells it out names the same notification as one that leaves it out
+///   ([`same_notification`]). The service keeps the one spelling, so no read reports a
+///   member whose value is the default — the member set a read reports does not depend on
+///   whether the create wrote the default out.
+pub fn stamp_notification_owned(notification: &mut Notification) {
     notification.notification_state = None;
+    notification.consecutive_breach_count = None;
+    if notification
+        .threshold_type
+        .as_deref()
+        .is_some_and(|named| named == THRESHOLD_TYPE_PERCENTAGE)
+    {
+        notification.threshold_type = None;
+    }
 }
 
-/// `notification` as a READ reports it: the members the caller supplied, plus the
-/// `NotificationState` the service computes for it ([`notification_state`]).
+/// `notification` as a READ reports it: the members the caller supplied, plus the two the
+/// service counts off the figures behind the budget that owns it — the
+/// `NotificationState` it is in ([`notification_state`]) and how many periods in a row it
+/// has been in that state ([`consecutive_breach_count`]).
 ///
-/// `budget` is the budget as a read reports it ([`project_budget`] / [`budget_as_read`]),
-/// so the alarm state a notification is reported in is read off the same figures
-/// `DescribeBudget` reports for the budget that owns it.
-pub fn project_notification(budget: &Budget, notification: &Notification) -> Notification {
+/// Both are read off `stored` as of `now`, the same figures `DescribeBudget` reports for
+/// that budget, so no two reads of one notification can disagree. Nothing is written.
+pub fn project_notification(
+    stored: &StoredBudget,
+    notification: &Notification,
+    now: SystemTime,
+) -> Notification {
+    let budget = project_budget(stored, now);
     let mut reported = notification.clone();
-    reported.notification_state = Some(notification_state(budget, notification).to_string());
+    reported.notification_state = Some(notification_state(&budget, notification).to_string());
+    reported.consecutive_breach_count = Some(consecutive_breach_count(stored, notification, now));
     reported
+}
+
+/// How many budget periods IN A ROW, ending with the period in progress, the spend
+/// `notification` watches has passed the threshold it alerts on — the count a read reports
+/// for `Notification$ConsecutiveBreachCount`.
+///
+/// Recorded behaviour: the SHIPPED model declared no such member, so it was added to this
+/// service's model (see [`crate::ops::types::Notification`]). What it counts follows from
+/// what a notification IS — one alert condition over the spend a budget tracks, evaluated
+/// per period of that budget — so it is counted over the periods the budget has actually
+/// been measured over ([`covered_periods`]), each judged on the figures that period ran
+/// under ([`budget_as_read_at_epoch`]), newest first and stopping at the first period that
+/// was not in breach.
+///
+/// `0` for a notification that is not in alarm now, whatever happened before it, and for a
+/// budget none of whose periods has begun: nothing has been evaluated yet, so nothing has
+/// breached. The count is therefore non-zero exactly while the notification's own
+/// `NotificationState` is [`NOTIFICATION_STATE_ALARM`], since both read the same figures.
+pub fn consecutive_breach_count(
+    stored: &StoredBudget,
+    notification: &Notification,
+    now: SystemTime,
+) -> i32 {
+    let breaches = covered_periods(&stored.budget, now)
+        .iter()
+        .rev()
+        .take_while(|period| {
+            let at = period.start.as_ref().map_or(i64::MIN, |start| start.secs());
+            notification_in_alarm(&budget_as_read_at_epoch(&stored.budget, at), notification)
+        })
+        .count();
+    // The series is bounded by the periods a budget retains ([`RETAINED_PERIODS`]), so the
+    // count is a small number; the saturating conversion is what keeps the member's type
+    // honest rather than a cast that could wrap.
+    i32::try_from(breaches).unwrap_or(i32::MAX)
 }
 
 /// The `NotificationState` the service reports for `notification` of `budget` — whether
@@ -1469,12 +1541,58 @@ fn set_holds<'a>(set: impl IntoIterator<Item = &'a Subscriber>, candidate: &Subs
 /// nothing a later `DeleteSubscriber` / `UpdateSubscriber` could never name is stored.
 pub fn distinct_subscribers(supplied: impl IntoIterator<Item = Subscriber>) -> Vec<Subscriber> {
     let mut set: Vec<Subscriber> = Vec::new();
-    for subscriber in supplied {
+    for mut subscriber in supplied {
+        drop_subscriber_derived(&mut subscriber);
         if !set_holds(set.iter(), &subscriber) {
             set.push(subscriber);
         }
     }
     set
+}
+
+/// Discard the member of `subscriber` whose value the SERVICE owns, on every write path
+/// that stores one — the same treatment a notification's own derived member gets
+/// ([`stamp_notification_owned`]).
+///
+/// `VerificationStatus` says whether the address has been CONFIRMED, which is a fact
+/// about the mailbox or topic behind it rather than anything a request can assert: a
+/// caller that could set it could claim an address it does not own had been confirmed.
+/// So nothing a request carried for it is persisted, and the write path that establishes
+/// a set the service does report it for stamps it instead
+/// ([`action_subscribers`]).
+pub fn drop_subscriber_derived(subscriber: &mut Subscriber) {
+    subscriber.verification_status = None;
+}
+
+/// `VerificationStatus` for an address nobody has confirmed — the state a subscriber of a
+/// budget action is established in and the only one this service's records reach.
+///
+/// Recorded behaviour: the SHIPPED model declared no such member, so it was added to this
+/// service's model (see [`crate::ops::types::Subscriber`]). An address is confirmed by
+/// whoever holds it, out of band: an email subscriber has to accept the subscription and
+/// an SNS topic subscription has to be confirmed on the topic, and no operation of this
+/// service — nor any call it makes — does either. So the status this service records for a
+/// subscriber stays the one its write stamped, for the life of the action that holds it.
+pub const SUBSCRIBER_VERIFICATION_PENDING: &str = "PENDING";
+
+/// The subscriber set a budget ACTION write establishes: the set the supplied list names
+/// ([`distinct_subscribers`]), each subscriber carrying the verification state this
+/// service records for its address ([`SUBSCRIBER_VERIFICATION_PENDING`]).
+///
+/// An action's subscribers are the ones a read reports that state for — the recorded
+/// `Action$Subscribers` carry it, while the recorded reads of a NOTIFICATION's
+/// subscribers carry only the two members the model declares — so it is stamped on the
+/// action write paths (`CreateBudgetAction`, `UpdateBudgetAction`) rather than on every
+/// set this service stores, and a read reports what the write stamped rather than
+/// deciding it per request.
+pub fn action_subscribers(supplied: impl IntoIterator<Item = Subscriber>) -> Vec<Subscriber> {
+    distinct_subscribers(supplied)
+        .into_iter()
+        .map(|subscriber| Subscriber {
+            verification_status: Some(SUBSCRIBER_VERIFICATION_PENDING.to_string()),
+            ..subscriber
+        })
+        .collect()
 }
 
 /// "A budget can have up to ten notifications" (`Notification`), which is also the
@@ -2095,7 +2213,7 @@ pub fn foreign_account_refusal(account_id: &str) -> Option<String> {
 pub const ACCESS_DENIED_MESSAGE: &str =
     "You are not authorized to use this operation with the given parameters.";
 
-/// Every budget stored for `account_id`, as a read reports it at `at`, ordered by
+/// Every budget stored for `account_id`, as the LISTING reports it at `at`, ordered by
 /// `BudgetName`.
 ///
 /// The order is the one the pagination token indexes into, so it must not depend
@@ -2115,8 +2233,25 @@ pub fn budgets_for_account(
     found.sort_by(|a, b| a.budget.budget_name.cmp(&b.budget.budget_name));
     found
         .into_iter()
-        .map(|stored| project_budget(stored, at))
+        .map(|stored| budget_as_listed(project_budget(stored, at)))
         .collect()
+}
+
+/// `budget` as the account-wide LISTING reports it: without the `CalculatedSpend` the
+/// single-budget read reports for it.
+///
+/// Recorded behaviour, not modelled: the model documents `Budget$CalculatedSpend` on the
+/// shape both reads report and says nothing about either read leaving it out, while the
+/// recorded `DescribeBudgets` listing of a budget carries no `CalculatedSpend` and the
+/// recorded `DescribeBudget` of that same budget carries it. The two reads differ in
+/// exactly that one member: `BudgetLimit`, the other member a read derives rather than
+/// stores ([`budget_as_read_at_epoch`]), is documented for BOTH — "`DescribeBudget` and
+/// `DescribeBudgets` response along with `PlannedBudgetLimits` also contain
+/// `BudgetLimit`" (`Budget$PlannedBudgetLimits`) — so the listing reports it, and a
+/// client reads the spend a budget tracks by asking about that budget.
+pub fn budget_as_listed(mut budget: Budget) -> Budget {
+    budget.calculated_spend = None;
+    budget
 }
 
 /// How many budgets `account_id` already holds — what the per-account quota below is
@@ -2467,6 +2602,40 @@ pub fn retained_periods(time_unit: &str, now: SystemTime) -> Vec<TimePeriod> {
         .collect()
 }
 
+/// The periods `stored` HAS BEEN MEASURED OVER as of `now`, OLDEST FIRST and ending with
+/// the period in progress.
+///
+/// A budget is measured per period of its own `TimeUnit` ([`retained_periods`]), bounded
+/// by two things:
+///
+/// * the budget's own `TimePeriod` — "the period of time that's covered by a budget" — so
+///   a period the budget does not cover was never measured for it;
+/// * the clock: a period still ahead of `now` has nothing to report yet.
+///
+/// A time unit that names no repeating period ([`TIME_UNIT_ANNUALLY`],
+/// [`TIME_UNIT_CUSTOM`]) has ONE such period, the budget's own, which is the whole of
+/// that budget's history.
+///
+/// The one answer to "which periods has this budget run for?", so the history a read
+/// reports ([`amounts_in_period`]) and the breach counter a notification of it reports
+/// ([`consecutive_breach_count`]) cannot come to count different periods.
+pub fn covered_periods(budget: &Budget, now: SystemTime) -> Vec<TimePeriod> {
+    let mut candidates = retained_periods(&budget.time_unit, now);
+    if candidates.is_empty() {
+        candidates = budget.time_period.clone().into_iter().collect();
+    }
+    let covered = budget.time_period.clone().unwrap_or_default();
+    let begun = TimePeriod {
+        start: None,
+        end: Some(::aws_smithy_types::DateTime::from(now)),
+    };
+    candidates
+        .into_iter()
+        .filter(|period| period_overlaps(period, &begun))
+        .filter(|period| period_overlaps(period, &covered))
+        .collect()
+}
+
 /// The budgeted and actual amounts `stored` reports for one `period` it covers — "the
 /// amount of cost or usage that you created the budget for, compared to your actual costs
 /// or usage" (`BudgetedAndActualAmounts`).
@@ -2478,7 +2647,10 @@ pub fn retained_periods(time_unit: &str, now: SystemTime) -> Vec<TimePeriod> {
 /// * `BudgetedAmount` is "the amount of cost or usage that you created the budget for" —
 ///   the limit in force while the period ran, which for a `PlannedBudgetLimits` budget is
 ///   the planned entry that period started under ([`planned_limit_in_force`]) and for
-///   every other budget is its one `BudgetLimit`.
+///   every other budget is its one `BudgetLimit`. It is the amount the caller WROTE, in
+///   the spelling they wrote it in: `Spend$Amount` is a decimal STRING
+///   (`NumericValue`, `@pattern ^([0-9]*\.)?[0-9]+$`), so its textual form is part of the
+///   value and no read renders it through a numeric type.
 /// * `ActualAmount` is "your actual costs or usage for a budget period": the cost or usage
 ///   this emulator has attributed to the budget ([`ATTRIBUTED_SPEND_AMOUNT`]), measured in
 ///   the unit that limit names.

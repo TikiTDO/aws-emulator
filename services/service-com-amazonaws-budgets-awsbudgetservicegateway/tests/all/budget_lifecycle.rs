@@ -23,6 +23,8 @@ use service_com_amazonaws_budgets_awsbudgetservicegateway::state::{
     ComAmazonawsBudgetsAwsbudgetservicegatewayState, StoredBudget, MAX_BUDGETS_PER_ACCOUNT,
 };
 
+use super::notification_lifecycle::named_threshold_type;
+
 /// A router carrying only this service, over one shared engine — what
 /// `core/router/src/lib.rs` builds, narrowed to the service under test. Request
 /// authentication is off so the suite needs no signing keys; routing still goes
@@ -480,6 +482,22 @@ async fn a_budget_round_trips_through_its_whole_lifecycle() {
                 // the budget, not a member a read echoes back from the request — the rule
                 // is asserted in `tests/all/notification_alarm_state.rs`.
                 if member == "NotificationState" {
+                    continue;
+                }
+                // A `ThresholdType` naming the default percentage is kept in the one
+                // spelling an absent member already means, so no read reports it — the
+                // rule `tests/all/recorded_response_members.rs` asserts.
+                if member == "ThresholdType" {
+                    assert!(
+                        same(
+                            &named_threshold_type(got),
+                            &named_threshold_type(want)
+                        ),
+                        "case {case:?}: notification {position} expected the threshold type \
+                         it names ({:?}), got {:?}",
+                        named_threshold_type(want),
+                        got.get("ThresholdType")
+                    );
                     continue;
                 }
                 let seen = got.get(member).unwrap_or(&Value::Null);

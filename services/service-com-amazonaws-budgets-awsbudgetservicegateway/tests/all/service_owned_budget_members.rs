@@ -89,10 +89,14 @@ async fn write_and_read(
         .into_iter()
         .find(|listed| listed["BudgetName"] == json!(name))
         .unwrap_or_else(|| panic!("case {case:?}: {name} is not listed after {operation}: {body}"));
+    // Both read paths report the same stored budget, apart from the `CalculatedSpend` the
+    // single read computes and the listing leaves out
+    // (`tests/all/recorded_response_members.rs`).
     assert!(
-        same(&read, &listed),
-        "case {case:?}: the two read paths must report the same budget after {operation}, \
-         got {read} from DescribeBudget and {listed} from DescribeBudgets"
+        same(&without(&read, &["CalculatedSpend"]), &listed),
+        "case {case:?}: the two read paths must report the same budget after {operation} \
+         apart from the tracked spend, got {read} from DescribeBudget and {listed} from \
+         DescribeBudgets"
     );
     // Every row of this suite is also a row of the spend rule: the budget reads back with
     // the spend the SERVICE computes for it, whether or not the request carried one.

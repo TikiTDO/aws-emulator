@@ -97,6 +97,20 @@ fn notification(notification_type: &str, operator: &str, threshold: Value) -> Va
     })
 }
 
+/// The threshold type a notification NAMES: the member when it carries one, and the
+/// percentage "thresholds are always" (`Notification$Threshold`) when it does not — the
+/// one spelling the service keeps, so a read of a notification created with the default
+/// reports no such member (`tests/all/recorded_response_members.rs`).
+///
+/// `pub(crate)` so every suite that names a notification by what it alerts on reads its
+/// threshold type the same way.
+pub(crate) fn named_threshold_type(notification: &Value) -> Value {
+    match notification.get("ThresholdType") {
+        Some(named) if !named.is_null() => named.clone(),
+        _ => json!(THRESHOLD_TYPE_PERCENTAGE),
+    }
+}
+
 /// The notification a read reported, found by what it alerts on, or `Value::Null`.
 fn read_notification(body: &Value, wanted: &Value) -> Value {
     body["Notifications"]
@@ -104,9 +118,10 @@ fn read_notification(body: &Value, wanted: &Value) -> Value {
         .into_iter()
         .flatten()
         .find(|found| {
-            ["NotificationType", "ComparisonOperator", "Threshold", "ThresholdType"]
+            ["NotificationType", "ComparisonOperator", "Threshold"]
                 .iter()
                 .all(|member| same(&found[member], &wanted[member]))
+                && same(&named_threshold_type(found), &named_threshold_type(wanted))
         })
         .cloned()
         .unwrap_or(Value::Null)
@@ -264,12 +279,7 @@ async fn a_created_notification_and_its_subscribers_read_back() {
             "case {case:?}: expected the budget to hold exactly one notification, got {body}"
         );
         let found = read_notification(&body, &notification);
-        for member in [
-            "NotificationType",
-            "ComparisonOperator",
-            "Threshold",
-            "ThresholdType",
-        ] {
+        for member in ["NotificationType", "ComparisonOperator", "Threshold"] {
             assert!(
                 same(&found[member], &notification[member]),
                 "case {case:?}: expected {member} to read back as {:?}, got {:?}",
@@ -277,6 +287,16 @@ async fn a_created_notification_and_its_subscribers_read_back() {
                 found[member]
             );
         }
+        assert!(
+            same(
+                &named_threshold_type(&found),
+                &named_threshold_type(&notification)
+            ),
+            "case {case:?}: expected the notification to read back as the threshold type \
+             it names ({:?}), got {:?}",
+            named_threshold_type(&notification),
+            found["ThresholdType"]
+        );
         assert_eq!(
             found["NotificationState"].as_str(),
             Some(state),
@@ -359,8 +379,8 @@ async fn every_modelled_notification_combination_reads_back() {
                 .await;
                 let found = read_notification(&body, &notification);
                 assert_eq!(
-                    found["ThresholdType"].as_str(),
-                    Some(*threshold_type),
+                    named_threshold_type(&found),
+                    json!(threshold_type),
                     "case {case:?}: expected the notification to read back, got {body}"
                 );
             }

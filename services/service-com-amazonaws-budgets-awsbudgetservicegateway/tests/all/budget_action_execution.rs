@@ -45,6 +45,7 @@ use service_com_amazonaws_budgets_awsbudgetservicegateway::state::{
 };
 
 use super::budget_lifecycle::{caller_account, call, is_error, router, router_with_engine, same};
+use super::recorded_response_members::as_action_subscribers;
 
 /// A budget that satisfies every modelled constraint and documented cross-member rule,
 /// so an action row varies only the action.
@@ -610,7 +611,6 @@ async fn a_created_action_round_trips_as_supplied() {
             "Definition",
             "ExecutionRoleArn",
             "ApprovalModel",
-            "Subscribers",
         ] {
             assert!(
                 same(&action[member], &request[member]),
@@ -619,6 +619,15 @@ async fn a_created_action_round_trips_as_supplied() {
                 action[member]
             );
         }
+        // `Subscribers` reads back as supplied too, each subscriber carrying the one
+        // member of it the SERVICE owns — the verification state of its address, which
+        // `tests/all/recorded_response_members.rs` states the rule for.
+        let expected_subscribers = as_action_subscribers(&request["Subscribers"]);
+        assert!(
+            same(&action["Subscribers"], &expected_subscribers),
+            "case {case:?}: expected Subscribers to read back as {expected_subscribers}, got {}",
+            action["Subscribers"]
+        );
 
         // A read reports; it does not change what the next caller sees.
         let (_, again) = describe_action(&router, &account_id, budget_name, &action_id).await;

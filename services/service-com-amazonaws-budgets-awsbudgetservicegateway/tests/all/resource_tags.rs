@@ -714,8 +714,9 @@ async fn a_tag_outside_a_modelled_constraint_is_refused_at_validation() {
 }
 
 /// RULE 5: `ListTagsForResource` reports what the store holds and changes nothing — a
-/// resource nobody tagged has an EMPTY tag list (which is not the same answer as "no such
-/// resource"), repeated reads agree, and a read neither creates a resource nor a tag.
+/// resource nobody tagged reports NO tags (HTTP 200 without the member, which is not the
+/// same answer as "no such resource"), repeated reads agree, and a read neither creates a
+/// resource nor a tag.
 ///
 /// The rows are both kinds of taggable resource, each read before any tag is written,
 /// twice in a row, and again after a write.
@@ -741,9 +742,13 @@ async fn reading_tags_reports_the_empty_set_and_changes_nothing() {
                 "case {kind:?} read {attempt}: expected 200 for an untagged resource, got \
                  {status} {body}"
             );
+            // An optional collection a read has nothing to report for is left out, not
+            // reported empty (`tests/all/recorded_response_members.rs`), and the resource
+            // is still located: the answer is 200 rather than a `NotFoundException`.
             assert!(
-                body.get("ResourceTags").is_some(),
-                "case {kind:?} read {attempt}: expected an empty ResourceTags list, got {body}"
+                body.get("ResourceTags").is_none(),
+                "case {kind:?} read {attempt}: expected no ResourceTags member for an \
+                 untagged resource, got {body}"
             );
             assert!(
                 reported(&body).is_empty(),

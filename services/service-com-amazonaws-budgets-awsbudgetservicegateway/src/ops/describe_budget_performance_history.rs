@@ -261,35 +261,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         }
 
-        // The periods this budget HAS: the retained series of its own time unit, or — for
-        // the time unit that names no repeating period — the single period its caller
-        // chose, which is the whole of such a budget's history.
-        let candidates = if stored.budget.time_unit == crate::state::TIME_UNIT_CUSTOM {
-            stored.budget.time_period.clone().into_iter().collect()
-        } else {
-            crate::state::retained_periods(&stored.budget.time_unit, now)
-        };
-
-        // A history covers the periods of the budget's own `TimePeriod` — "the period of
-        // time that's covered by a budget" — and only those that have BEGUN: a period
-        // still ahead of the clock has no performance to report yet.
-        let covered = stored.budget.time_period.clone().unwrap_or_default();
-        let begun = TimePeriod {
-            start: None,
-            end: Some(::aws_smithy_types::DateTime::from(now)),
-        };
-        let records: Vec<BudgetedAndActualAmounts> = candidates
-            .iter()
-            .filter(|period| crate::state::period_overlaps(period, &begun))
-            .filter(|period| crate::state::period_overlaps(period, &covered))
-            .filter(|period| {
-                input
-                    .time_period
-                    .as_ref()
-                    .is_none_or(|window| crate::state::period_overlaps(period, window))
-            })
-            .map(|period| crate::state::amounts_in_period(stored, period))
-            .collect();
+        // The periods this budget HAS been measured over: the retained series of its own
+        // time unit, bounded by the budget's own `TimePeriod` and by the clock
+        // (`crate::state::covered_periods`) — the same series the breach counter a
+        // notification of this budget reports is counted over, so a history and a
+        // notification cannot disagree about which periods have run. Of those, this read
+        // reports the ones the window the caller asked about overlaps.
+        let records: Vec<BudgetedAndActualAmounts> =
+            crate::state::covered_periods(&stored.budget, now)
+                .iter()
+                .filter(|period| {
+                    input
+                        .time_period
+                        .as_ref()
+                        .is_none_or(|window| crate::state::period_overlaps(period, window))
+                })
+                .map(|period| crate::state::amounts_in_period(stored, period))
+                .collect();
 
         // `MaxResults` documents no default here, so an absent one is served the biggest
         // page this operation can report: `MaxResults`' own `@range(max: 100)` — "The

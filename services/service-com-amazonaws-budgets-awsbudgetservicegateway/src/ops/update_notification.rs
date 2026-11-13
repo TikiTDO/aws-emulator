@@ -278,7 +278,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // nor the one the replaced notification was stored with is kept: the state is
             // computed on every read from the budget's own figures, so an update changes
             // it only by changing what the notification alerts on.
-            crate::state::drop_notification_derived(&mut notification);
+            crate::state::stamp_notification_owned(&mut notification);
             held.notification = notification;
             // A notification this write leaves in alarm has passed its threshold, so it
             // owes the alert it exists to deliver to every subscriber still attached to

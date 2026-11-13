@@ -43,6 +43,7 @@ fn the_services_own_status_constants_are_the_modelled_values() {
 use super::budget_lifecycle::{
     caller_account, call, limit_amount_for, router, router_with_engine, same,
 };
+use super::recorded_response_members::without;
 
 /// `06/15/87 00:00 UTC` — the end date `TimePeriod$End` documents for a budget created
 /// without one ("If you didn't specify an end date, Amazon Web Services set your end
@@ -238,10 +239,13 @@ async fn create_and_read(
         .into_iter()
         .find(|listed| listed["BudgetName"] == json!(name))
         .unwrap_or_else(|| panic!("case {case:?}: the created budget is not listed: {body}"));
+    // Both read paths report the same stored budget, apart from the `CalculatedSpend`
+    // the single read computes and the listing leaves out
+    // (`tests/all/recorded_response_members.rs`).
     assert!(
-        same(&read, &listed),
-        "case {case:?}: the two read paths must report the same budget, \
-         got {read} from DescribeBudget and {listed} from DescribeBudgets"
+        same(&without(&read, &["CalculatedSpend"]), &listed),
+        "case {case:?}: the two read paths must report the same budget apart from the \
+         tracked spend, got {read} from DescribeBudget and {listed} from DescribeBudgets"
     );
     read
 }
@@ -933,7 +937,7 @@ async fn a_notification_is_reported_with_the_state_the_service_computes() {
                     "case {case:?}: expected the created notification to be reported, got {body}"
                 );
                 let read = &reported[0];
-                for member in ["NotificationType", "ComparisonOperator", "Threshold", "ThresholdType"] {
+                for member in ["NotificationType", "ComparisonOperator", "Threshold"] {
                     let expected = &notification[member];
                     let actual = read.get(member).unwrap_or(&Value::Null);
                     assert!(
@@ -941,6 +945,14 @@ async fn a_notification_is_reported_with_the_state_the_service_computes() {
                         "case {case:?}: expected {member} = {expected}, got {actual}"
                     );
                 }
+                // `ThresholdType` is the default percentage here, which the service keeps
+                // in the one spelling an absent member already means, so no read reports
+                // it (`tests/all/recorded_response_members.rs`).
+                assert!(
+                    read.get("ThresholdType").is_none(),
+                    "case {case:?}: expected the default ThresholdType to be left out, got \
+                     {read}"
+                );
                 // The reported state is one the model declares, and it is the service's
                 // own: the comparison across the three requests below is what pins that
                 // the request had no say in it.

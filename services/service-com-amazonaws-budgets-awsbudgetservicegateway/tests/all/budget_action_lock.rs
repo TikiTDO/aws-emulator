@@ -34,6 +34,7 @@ use super::budget_action_execution::{
 };
 use super::budget_action_history::read_history;
 use super::budget_lifecycle::{caller_account, call, is_error, router_with_engine, same};
+use super::recorded_response_members::as_action_subscribers;
 
 /// Whether `status` is one of the `*_IN_PROGRESS` statuses — work this service started
 /// and has not settled yet. Written as the shape of the status name rather than as a
@@ -207,9 +208,17 @@ async fn update_is_refused_while_the_action_is_in_flight() {
             );
             let after = read_action(&router, &account_id, budget_name, &action_id, &case).await;
             for (updated, value) in patch.as_object().cloned().unwrap_or_default() {
+                // A replacement subscriber set reads back with the member of each
+                // subscriber the SERVICE owns stamped on it
+                // (`tests/all/recorded_response_members.rs`).
+                let expected = if updated == "Subscribers" {
+                    as_action_subscribers(&value)
+                } else {
+                    value
+                };
                 assert!(
-                    same(&after[&updated], &value),
-                    "case {case:?}: expected {updated} to read back as {value}, got {}",
+                    same(&after[&updated], &expected),
+                    "case {case:?}: expected {updated} to read back as {expected}, got {}",
                     after[&updated]
                 );
             }
@@ -369,9 +378,14 @@ async fn the_clock_releases_the_lock_an_execution_took() {
     );
     let settled = read_action(&router, &account_id, budget_name, &action_id, "settled").await;
     for (member, value) in patch.as_object().cloned().unwrap_or_default() {
+        let expected = if member == "Subscribers" {
+            as_action_subscribers(&value)
+        } else {
+            value
+        };
         assert!(
-            same(&settled[&member], &value),
-            "case {member:?}: expected the accepted update to store {value}, got {}",
+            same(&settled[&member], &expected),
+            "case {member:?}: expected the accepted update to store {expected}, got {}",
             settled[&member]
         );
     }

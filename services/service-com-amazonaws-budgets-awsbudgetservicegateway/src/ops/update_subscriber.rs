@@ -349,8 +349,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // Replaced IN PLACE at the position just resolved, so the notification's
             // subscribers keep their relative order and the set keeps its size — "each
             // notification must have at least one subscriber", which a swap cannot
-            // violate.
-            held.subscribers[index] = input.new_subscriber;
+            // violate. The member of a subscriber the SERVICE owns is dropped rather than
+            // stored as sent (`crate::state::drop_subscriber_derived`).
+            let mut replacement = input.new_subscriber;
+            crate::state::drop_subscriber_derived(&mut replacement);
+            held.subscribers[index] = replacement;
             if attached {
                 crate::state::alerts::owed(
                     &source,

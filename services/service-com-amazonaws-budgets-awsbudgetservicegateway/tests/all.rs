@@ -111,6 +111,8 @@ mod pagination_token_opacity;
 mod per_notification_page_sizes;
 #[path = "all/percentage_budget_limit_amount.rs"]
 mod percentage_budget_limit_amount;
+#[path = "all/recorded_response_members.rs"]
+mod recorded_response_members;
 #[path = "all/request_borne_refusal_precedence.rs"]
 mod request_borne_refusal_precedence;
 #[path = "all/resource_tag_deletion.rs"]

@@ -307,8 +307,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 ::std::slice::from_ref(&input.subscriber),
             );
             // Appended, so the subscribers keep the order they were created in — the
-            // order a paginated `DescribeSubscribersForNotification` indexes into.
-            held.subscribers.push(input.subscriber);
+            // order a paginated `DescribeSubscribersForNotification` indexes into. The
+            // member of a subscriber the SERVICE owns is dropped rather than stored as
+            // sent (`crate::state::drop_subscriber_derived`).
+            let mut subscriber = input.subscriber;
+            crate::state::drop_subscriber_derived(&mut subscriber);
+            held.subscribers.push(subscriber);
             alerts
         };
 

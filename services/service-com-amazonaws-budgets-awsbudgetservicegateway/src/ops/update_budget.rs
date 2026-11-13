@@ -223,12 +223,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // `calculatedSpend` this operation documents a caller cannot change. The
             // `HealthStatus` the budget already carried is kept: the operational state of
             // the billing view it derives from did not change because the caller edited
-            // the budget.
-            crate::state::stamp_service_owned(
-                &mut budget,
-                now,
-                stored.budget.health_status.clone(),
-            );
+            // the budget. So is its `CreatedAt`: this call edits a budget that already
+            // exists, it does not create one.
+            crate::state::stamp_service_owned(&mut budget, now, Some(&stored.budget));
             stored.budget = budget;
 
             // Whether a notification is in alarm is read off the budget's own figures —

@@ -365,9 +365,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into_iter()
                 .map(|supplied| {
                     let mut notification = supplied.notification;
-                    // The alarm state is the service's own reading of the spend behind
-                    // this budget, so nothing the request carried for it is stored.
-                    crate::state::drop_notification_derived(&mut notification);
+                    // The alarm state and the breach counter are the service's own reading
+                    // of the spend behind this budget, and the threshold type is kept in
+                    // one spelling, so nothing the request carried for them is stored.
+                    crate::state::stamp_notification_owned(&mut notification);
                     crate::state::StoredNotification {
                         notification,
                         // The subscribers attached with a notification are a SET keyed by

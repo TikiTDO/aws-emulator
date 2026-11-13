@@ -5,6 +5,13 @@
 //! Lists the notifications persisted for one budget, in the order they were created,
 //! paginated with `MaxResults` / `NextToken`. Reporting only — nothing is written.
 //!
+//! Each notification is reported with the two members the service counts off the budget's
+//! own figures — the `NotificationState` it is in and the
+//! `ConsecutiveBreachCount` added to this service's model (see
+//! [`crate::ops::describe_budget_notifications_for_account`], which reports the same
+//! projection) — and without a `ThresholdType` that names the percentage thresholds always
+//! are.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -200,14 +207,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // `NotificationState` "specifies whether this notification is in alarm" — the
         // service's own reading of the spend behind the budget against the threshold the
-        // notification alerts on, which no request sets, so it is computed here from the
-        // budget as a read reports it rather than read out of the stored notification
-        // (`crate::state::project_notification`). Nothing is written.
-        let budget = crate::state::project_budget(stored, now);
+        // notification alerts on, which no request sets, so it and the breach counter
+        // beside it are computed here from the budget as a read reports it rather than
+        // read out of the stored notification (`crate::state::project_notification`).
+        // Nothing is written.
         let notifications: Vec<Notification> = stored
             .notifications
             .iter()
-            .map(|held| crate::state::project_notification(&budget, &held.notification))
+            .map(|held| crate::state::project_notification(stored, &held.notification, now))
             .collect();
         // `MaxResults` documents no default here, so an absent one is served the biggest
         // page this operation can report: its own `@range(max: 100)`

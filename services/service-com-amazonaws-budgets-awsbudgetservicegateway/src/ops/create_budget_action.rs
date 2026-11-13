@@ -387,8 +387,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // The subscribers of an action are the same modelled `Subscribers` set a
             // notification holds, keyed by subscription type and address, so a repeat in
             // the supplied list names a subscriber the set already holds and is collapsed
-            // into it.
-            subscribers: crate::state::distinct_subscribers(input.subscribers),
+            // into it. Each one is stored with the verification state this service
+            // records for its address, which a read of the action reports
+            // (`crate::state::action_subscribers`).
+            subscribers: crate::state::action_subscribers(input.subscribers),
         };
         let mut held = crate::state::StoredAction::new(
             action,

@@ -1103,6 +1103,7 @@ fn an_alert_is_owed_only_on_a_topic_of_the_budgets_own_account() {
         threshold: 80.0,
         threshold_type: None,
         notification_state: None,
+        consecutive_breach_count: None,
     };
     // An account that is NOT the one this emulator answers for; 12 digits, as
     // `AccountId`'s `^\d{12}$` requires.
@@ -1132,6 +1133,7 @@ fn an_alert_is_owed_only_on_a_topic_of_the_budgets_own_account() {
         let subscribers = vec![Subscriber {
             subscription_type: "SNS".to_string(),
             address: address.clone(),
+            verification_status: None,
         }];
         let owed = alerts::owed(&source, &notification, &subscribers);
         assert_eq!(

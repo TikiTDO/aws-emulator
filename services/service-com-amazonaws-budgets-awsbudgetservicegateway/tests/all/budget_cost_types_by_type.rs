@@ -30,6 +30,7 @@ use service_com_amazonaws_budgets_awsbudgetservicegateway::ops::types::BUDGET_TY
 
 use super::budget_lifecycle::{call, caller_account, limit_amount_for, router, same};
 use super::budget_read_projection::COST_TYPE_DEFAULTS;
+use super::recorded_response_members::without;
 
 /// The one `BudgetType` whose budget HAS cost types.
 ///
@@ -127,10 +128,13 @@ async fn read_back(
         .into_iter()
         .find(|listed| listed["BudgetName"] == json!(name))
         .unwrap_or_else(|| panic!("case {case:?}: {name} is not listed: {body}"));
+    // Both read paths report the same stored budget, apart from the `CalculatedSpend`
+    // the single read computes and the listing leaves out
+    // (`tests/all/recorded_response_members.rs`).
     assert!(
-        same(&read, &listed),
-        "case {case:?}: the two read paths must report the same budget, got {read} from \
-         DescribeBudget and {listed} from DescribeBudgets"
+        same(&without(&read, &["CalculatedSpend"]), &listed),
+        "case {case:?}: the two read paths must report the same budget apart from the \
+         tracked spend, got {read} from DescribeBudget and {listed} from DescribeBudgets"
     );
     read
 }

@@ -2,7 +2,8 @@
 
 //! What a budget READ reports for `Budget$CalculatedSpend` — "the actual and forecasted
 //! cost or usage that the budget tracks", a figure the SERVICE computes and
-//! `CalculatedSpend$ActualSpend` makes `@required`, so every read carries it.
+//! `CalculatedSpend$ActualSpend` makes `@required`, so the single-budget read carries it
+//! for every budget that names a unit of measurement.
 //!
 //! Every test states a RULE and asserts it over a table; the request the issue recorded
 //! is one row. The harness (`router`, `call`, `caller_account`, `same`) is the one
@@ -57,8 +58,8 @@ async fn describe(
     body["Budget"].clone()
 }
 
-/// The `Budget` `DescribeBudgets` lists for `name` — the other read path, which shares the
-/// same projection.
+/// The `Budget` `DescribeBudgets` lists for `name` — the other read path, which reports
+/// the same stored budget without the computed spend.
 async fn describe_in_list(
     router: &MultiServiceRouter,
     case: &str,
@@ -242,8 +243,9 @@ fn rows() -> Vec<Row> {
 
 /// RULE: a read of a budget reports the `CalculatedSpend` the SERVICE computes for it —
 /// the cost or usage attributed to that budget, measured in the unit the budget tracks
-/// (the unit of the limit the same read reports) — on every read path, and reading it
-/// again reports the same figure.
+/// (the unit of the limit the same read reports) — and reading it again reports the same
+/// figure. The account-wide listing reports the same budget without that member, the rule
+/// `tests/all/recorded_response_members.rs` states.
 #[tokio::test]
 async fn a_read_reports_the_computed_spend_in_the_unit_the_budget_tracks() {
     // One store per row, so rows cannot see each other's budgets: every request names
@@ -261,7 +263,14 @@ async fn a_read_reports_the_computed_spend_in_the_unit_the_budget_tracks() {
         assert_spend(row.case, &read, row.unit);
 
         let listed = describe_in_list(&router, row.case, &account_id, &name).await;
-        assert_spend(row.case, &listed, row.unit);
+        // The listing leaves the computed spend out, which
+        // `tests/all/recorded_response_members.rs` states the rule for; what it reports
+        // for the budget is otherwise the same read.
+        assert!(
+            listed.get("CalculatedSpend").is_none(),
+            "case {:?}: expected the listing to leave the computed spend out, got {listed}",
+            row.case
+        );
 
         // A read reports a figure, it does not establish one: the next read answers the
         // same.

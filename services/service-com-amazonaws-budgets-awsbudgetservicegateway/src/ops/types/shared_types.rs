@@ -29,6 +29,13 @@ pub struct Budget {
     pub metrics: Option<Vec<String>>,
     pub billing_view_arn: Option<String>,
     pub health_status: Option<HealthStatus>,
+    /// `Budget$CreatedAt` — the instant the budget was created. The SHIPPED model declares
+    /// no such member while the recorded AWS responses carry it on every `Budget`, and a
+    /// schema-driven serializer cannot emit a member the model does not declare, so
+    /// `CreatedAt` was ADDED to
+    /// `smithy-model/com-amazonaws-budgets-awsbudgetservicegateway.json`. The value is the
+    /// one the write path persists ([`crate::state::stamp_service_owned`]).
+    pub created_at: Option<::aws_smithy_types::DateTime>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.budgets#Spend")]
@@ -143,6 +150,13 @@ pub struct Notification {
     pub threshold: f64,
     pub threshold_type: Option<String>,
     pub notification_state: Option<String>,
+    /// `Notification$ConsecutiveBreachCount` — how many budget periods in a row the
+    /// notification has been in alarm for. Added to this service's model for the same
+    /// reason as `Budget$CreatedAt` above: the shipped model declares no such member and
+    /// the recorded AWS responses carry it on every notification a read reports. The value
+    /// is counted off the budget's own figures
+    /// ([`crate::state::consecutive_breach_count`]).
+    pub consecutive_breach_count: Option<i32>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.budgets#Subscriber")]
@@ -150,6 +164,12 @@ pub struct Notification {
 pub struct Subscriber {
     pub subscription_type: String,
     pub address: String,
+    /// `Subscriber$VerificationStatus` — whether the address has been confirmed. Added to
+    /// this service's model for the same reason as `Budget$CreatedAt` above: the shipped
+    /// model declares no such member and the recorded AWS responses carry it on the
+    /// subscribers of a budget ACTION. The value is the one the action write paths stamp
+    /// ([`crate::state::action_subscribers`]).
+    pub verification_status: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.budgets#ResourceTag")]

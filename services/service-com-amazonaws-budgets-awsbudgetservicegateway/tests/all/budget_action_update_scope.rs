@@ -35,6 +35,7 @@ use service_com_amazonaws_budgets_awsbudgetservicegateway::state::{
 
 use super::budget_action_history::read_history;
 use super::budget_lifecycle::{call, caller_account, router, same};
+use super::recorded_response_members::as_action_subscribers;
 
 /// `NotificationThreshold`'s published `@range` — "range 0..15000000000000", from
 /// `smithy_query(query="shape",shape="NotificationThreshold")`, which is the target of
@@ -341,10 +342,19 @@ fn patch_for(row: &str, account_id: &str, action_type: &str, current: &Value) ->
 }
 
 /// `left` with every member of `patch` written over it — what an update leaves behind.
+///
+/// A replacement `Subscribers` set is left behind with the one member of a subscriber the
+/// SERVICE owns stamped on it — the verification state of its address, whose rule
+/// `tests/all/recorded_response_members.rs` states.
 fn merged(left: &Value, patch: &Value) -> Value {
     let mut merged = left.as_object().cloned().unwrap_or_default();
     for (member, value) in patch.as_object().cloned().unwrap_or_default() {
-        merged.insert(member, value);
+        let written = if member == "Subscribers" {
+            as_action_subscribers(&value)
+        } else {
+            value
+        };
+        merged.insert(member, written);
     }
     Value::Object(merged)
 }

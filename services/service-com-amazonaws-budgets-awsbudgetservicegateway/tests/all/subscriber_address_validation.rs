@@ -43,6 +43,7 @@ use super::budget_action_execution::{
 use super::budget_action_subscriber_limits::stored_action_count;
 use super::budget_lifecycle::{account, caller_account, call, is_error, router_with_engine, same};
 use super::client_error_envelopes::message;
+use super::recorded_response_members::as_action_subscribers;
 
 /// The error every write that establishes a subscriber answers a malformed address with:
 /// "An error on the client occurred. Typically, the cause is an invalid input value."
@@ -622,9 +623,11 @@ async fn a_well_formed_address_of_either_type_is_stored_and_read_back() {
             status, 200,
             "case {case:?}: expected the action to read back, got {status} {body}"
         );
+        let expected_subscribers = as_action_subscribers(&json!([&row]));
         assert!(
-            same(&body["Action"]["Subscribers"], &json!([&row])),
-            "case {case:?}: expected the action to hold the subscriber as supplied, got {}",
+            same(&body["Action"]["Subscribers"], &expected_subscribers),
+            "case {case:?}: expected the action to hold the subscriber as supplied \
+             ({expected_subscribers}), got {}",
             body["Action"]["Subscribers"]
         );
     }

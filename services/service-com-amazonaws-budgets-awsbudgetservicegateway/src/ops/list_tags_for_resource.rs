@@ -190,12 +190,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })
         })?;
 
-        // A resource that holds no tags has an EMPTY tag list, not an absent one: the
-        // resource was located, and "the tags associated with the resource" is then the
-        // empty set. Reported in the order the keys were first created in, which is the
-        // order the store holds them in.
+        // A resource that holds no tags has NOTHING to report: `ResourceTags` is "the
+        // tags associated with the resource", an optional member, and the recorded answer
+        // for an untagged resource leaves it out rather than carrying the empty list — the
+        // same way this service's other optional collection members report an empty
+        // selection by absence (`DescribeSubscribersForNotification`). The tags of a
+        // resource that holds some are reported in the order the keys were first created
+        // in, which is the order the store holds them in.
         Ok(ListTagsForResourceOutput {
-            resource_tags: Some(held.clone()),
+            resource_tags: (!held.is_empty()).then(|| held.clone()),
         })
     }
 }

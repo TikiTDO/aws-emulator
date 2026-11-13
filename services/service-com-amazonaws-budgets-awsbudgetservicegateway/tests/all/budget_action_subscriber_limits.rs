@@ -38,6 +38,7 @@ use super::budget_action_execution::{
     simple_create_body, sns_subscriber,
 };
 use super::budget_lifecycle::{caller_account, call, is_error, router_with_engine, same};
+use super::recorded_response_members::as_action_subscribers;
 
 /// A second (and third, …) SNS subscriber, each with its own topic, so a row that is
 /// past the SNS limit is past it on the subscription TYPE and not on a repeated address.
@@ -259,7 +260,10 @@ async fn creating_an_action_holds_the_documented_subscribers_of_each_type() {
                     "case {case:?}: expected the created action to read back, got {status} {body}"
                 );
                 assert!(
-                    same(&body["Action"]["Subscribers"], &row.subscribers),
+                    same(
+                        &body["Action"]["Subscribers"],
+                        &as_action_subscribers(&row.subscribers)
+                    ),
                     "case {case:?}: expected the accepted set to read back as supplied, \
                      got {}",
                     body["Action"]["Subscribers"]
@@ -351,11 +355,14 @@ async fn updating_an_action_holds_the_documented_subscribers_of_each_type() {
                     body["OldAction"]["Subscribers"]
                 );
                 assert!(
-                    same(&body["NewAction"]["Subscribers"], &row.subscribers),
+                    same(
+                        &body["NewAction"]["Subscribers"],
+                        &as_action_subscribers(&row.subscribers)
+                    ),
                     "case {case:?}: expected NewAction to carry the replacement, got {}",
                     body["NewAction"]["Subscribers"]
                 );
-                held = row.subscribers.clone();
+                held = as_action_subscribers(&row.subscribers);
             }
             refused => {
                 let expected = match refused {

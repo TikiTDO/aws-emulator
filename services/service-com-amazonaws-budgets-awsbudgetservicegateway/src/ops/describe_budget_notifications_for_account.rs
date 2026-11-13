@@ -9,6 +9,18 @@
 //! with `MaxResults` / `NextToken`. A budget holding no notification contributes no
 //! notification, so it is not reported. Reporting only — nothing is written.
 //!
+//! ## `Notification$ConsecutiveBreachCount`, a member added to this service's model
+//!
+//! The shipped model declares `Notification` without it, while the recorded AWS answers
+//! carry on every notification they report how many budget periods in a row it has been in
+//! alarm for. A schema-driven serializer cannot emit a member the model does not declare,
+//! so `ConsecutiveBreachCount` was ADDED to
+//! `smithy-model/com-amazonaws-budgets-awsbudgetservicegateway.json`; the count is read
+//! off the budget's own figures ([`crate::state::consecutive_breach_count`]), like the
+//! `NotificationState` beside it. The recorded answers also leave `ThresholdType` out
+//! where it names the percentage thresholds always are, which is the one spelling the
+//! write path keeps ([`crate::state::stamp_notification_owned`]).
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -225,12 +237,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let reported: Vec<BudgetNotificationsForAccount> = page
             .into_iter()
             .map(|stored| {
-                // The alarm state a notification is reported in is the SERVICE's own
-                // reading of the spend behind the budget that owns it, so it is computed
-                // from that budget as a read reports it — the same projection
+                // The alarm state a notification is reported in, and the number of
+                // periods in a row it has been in, are the SERVICE's own reading of the
+                // spend behind the budget that owns it, so they are computed from that
+                // budget as a read reports it — the same projection
                 // `DescribeNotificationsForBudget` reports, so the two listings cannot
                 // disagree. Nothing is written.
-                let budget = crate::state::project_budget(stored, now);
                 BudgetNotificationsForAccount {
                     budget_name: Some(stored.budget.budget_name.clone()),
                     notifications: Some(
@@ -238,7 +250,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                             .notifications
                             .iter()
                             .map(|held| {
-                                crate::state::project_notification(&budget, &held.notification)
+                                crate::state::project_notification(stored, &held.notification, now)
                             })
                             .collect(),
                     ),

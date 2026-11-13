@@ -10,9 +10,9 @@
 //! 1. The tags a resource is CREATED with are the tags its ARN reports, for a budget
 //!    (`CreateBudget$ResourceTags`) and for a budget action
 //!    (`CreateBudgetAction$ResourceTags`) alike, since both are "a budget or budget action
-//!    resource", and a resource created with no `ResourceTags` member reports an empty
-//!    list. Asserted over the sibling suite's own tag-set table, so one table spans the
-//!    class for the write path and the create path alike.
+//!    resource", and a resource created with no `ResourceTags` member reports no tags.
+//!    Asserted over the sibling suite's own tag-set table, so one table spans the class
+//!    for the write path and the create path alike.
 //! 2. That round trip holds over the whole range of tag COUNTS a resource can hold, not
 //!    only the counts a table happens to name.
 //! 3. A budget name the modelled `@pattern` admits is carried unchanged inside the ARN, so
@@ -134,7 +134,7 @@ fn create_rows() -> Vec<CreateRow> {
 }
 
 /// RULE 1: the tags a resource is created with are the tags its ARN reports, for either
-/// kind of taggable resource, and a resource created with none reports an empty list.
+/// kind of taggable resource, and a resource created with none reports no tags at all.
 #[tokio::test]
 async fn the_tags_a_resource_is_created_with_are_reported_for_its_arn() {
     let router = router();
@@ -171,12 +171,14 @@ async fn the_tags_a_resource_is_created_with_are_reported_for_its_arn() {
                 expected,
                 "case {case:?} on a {kind}: expected the tags it was created with, got {body}"
             );
-            // The member is present even for a resource carrying no tag: `ResourceTagList`
-            // is `@length(min: 0)`, and an empty list is a different answer from an absent
-            // resource.
-            assert!(
+            // The member is reported only for a resource that HOLDS tags: an optional
+            // collection with nothing to report is left out
+            // (`tests/all/recorded_response_members.rs`).
+            assert_eq!(
                 body["ResourceTags"].is_array(),
-                "case {case:?} on a {kind}: expected a ResourceTags list, got {body}"
+                !expected.is_empty(),
+                "case {case:?} on a {kind}: expected the ResourceTags member only for a \
+                 resource holding tags, got {body}"
             );
         }
     }
@@ -204,8 +206,8 @@ async fn every_tag_count_reads_back_the_tags_it_was_created_with() {
             "case {count} tags: expected 200, got {status} {body}"
         );
         assert_eq!(
-            body["ResourceTags"].as_array().map(Vec::len),
-            Some(count),
+            body["ResourceTags"].as_array().map(Vec::len).unwrap_or(0),
+            count,
             "case {count} tags: expected {count} tags back, got {body}"
         );
         assert_eq!(

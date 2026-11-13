@@ -29,6 +29,7 @@ use service_com_amazonaws_budgets_awsbudgetservicegateway::ops::types::METRIC_VA
 
 use super::budget_lifecycle::{caller_account, call, civil_secs, is_error, router, same};
 use super::budget_read_projection::COST_TYPE_DEFAULTS;
+use super::recorded_response_members::without;
 
 /// The refusal both write paths answer a broken cross-member rule with.
 const REFUSAL: &str = "InvalidParameterException";
@@ -189,20 +190,21 @@ async fn read_back(store: &MultiServiceRouter, account_id: &str, name: &str) -> 
         .find(|budget| budget["BudgetName"] == json!(name))
         .unwrap_or(Value::Null);
     assert!(
-        same(&read, &from_list),
-        "expected both read paths to report the same budget for {name:?}, got {read} from \
-         DescribeBudget and {from_list} from DescribeBudgets"
+        same(&without(&read, &["CalculatedSpend"]), &from_list),
+        "expected both read paths to report the same budget for {name:?} apart from the \
+         tracked spend, got {read} from DescribeBudget and {from_list} from DescribeBudgets"
     );
     read
 }
 
-/// `read` without the members two separate writes cannot agree on: the
-/// `LastUpdatedTime` the service stamps at the instant of the write — the budget's own,
-/// and the one its `HealthStatus` carries — and the empty collection member under test,
-/// which the budget that never carried it cannot report.
+/// `read` without the members two separate writes cannot agree on: the instants the
+/// service stamps on a write — the `CreatedAt` of the budget, the `LastUpdatedTime` of
+/// the budget and the one its `HealthStatus` carries — and the empty collection member
+/// under test, which the budget that never carried it cannot report.
 fn comparable(read: &Value, member: &str) -> Value {
     let mut stripped = read.clone();
     if let Some(object) = stripped.as_object_mut() {
+        object.remove("CreatedAt");
         object.remove("LastUpdatedTime");
         object.remove(member);
         if let Some(health) = object.get_mut("HealthStatus").and_then(Value::as_object_mut) {
@@ -236,10 +238,11 @@ async fn an_empty_collection_member_is_judged_like_an_absent_one() {
                 status, 200,
                 "case {case:?}: expected CreateBudget to answer 200, got {status} {read}"
             );
-            let (with_empty, without) = (comparable(&read, member), comparable(&base_read, member));
+            let (with_empty, with_none) =
+                (comparable(&read, member), comparable(&base_read, member));
             assert!(
-                same(&with_empty, &without),
-                "case {case:?}: expected the stored budget to be {without}, got {with_empty}"
+                same(&with_empty, &with_none),
+                "case {case:?}: expected the stored budget to be {with_none}, got {with_empty}"
             );
         }
     }

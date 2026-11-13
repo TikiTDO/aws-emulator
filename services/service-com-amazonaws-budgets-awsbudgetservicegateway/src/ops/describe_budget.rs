@@ -6,6 +6,16 @@
 //! only — nothing is written. `FilterExpression` is withheld unless the caller asks
 //! for it with `ShowFilterExpression`.
 //!
+//! ## `CreatedAt`, a member added to this service's model
+//!
+//! The shipped model declares `Budget` without a `CreatedAt` member, while the recorded
+//! AWS answers carry the instant the budget was created on the `Budget` this read and
+//! `DescribeBudgets` report. A schema-driven serializer cannot emit a member the model
+//! does not declare, so `CreatedAt` was ADDED to
+//! `smithy-model/com-amazonaws-budgets-awsbudgetservicegateway.json`. The value is the one
+//! the create persisted and an update leaves alone
+//! ([`crate::state::stamp_service_owned`]); this read only reports it.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements

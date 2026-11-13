@@ -162,6 +162,7 @@ fn the_address_gate_and_the_alert_path_agree_on_which_addresses_name_a_topic() {
         threshold: 80.0,
         threshold_type: None,
         notification_state: None,
+        consecutive_breach_count: None,
     };
 
     for row in rows() {
@@ -169,6 +170,7 @@ fn the_address_gate_and_the_alert_path_agree_on_which_addresses_name_a_topic() {
         let subscribers = vec![Subscriber {
             subscription_type: "SNS".to_string(),
             address: address.clone(),
+            verification_status: None,
         }];
         let accepted = subscriber_address_violation(&caller_account(), &subscribers).is_ok();
         assert_eq!(
