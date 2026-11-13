@@ -55,6 +55,13 @@
 //! `override_refusal` delegates to, so the two cannot drift: only which value a
 //! clause quotes differs, and the code, the status, the envelope, the member
 //! paths and every requirement stay the framework's.
+//!
+//! A MAP is the one collection that walk cannot rebuild — it reaches the built
+//! input as an unordered map, so the order the request wrote its entries in is
+//! gone by then — and this layer has the REQUEST too, which still carries that
+//! order. So a clause about a map member is quoted from the body
+//! ([`quoting_submitted_maps`]), under the same bounds and in the order this
+//! service states one ([`in_this_services_entry_order`]).
 
 use std::cell::RefCell;
 use std::marker::PhantomData;
@@ -420,9 +427,66 @@ fn probe<O: Operation>(
     if violations.is_empty() {
         return None;
     }
-    Some(PreDispatchRefusal::Invalid(
-        service_common::validation::with_submitted_values(violations, &input, O::INPUT_SCHEMA),
-    ))
+    let restored =
+        service_common::validation::with_submitted_values(violations, &input, O::INPUT_SCHEMA);
+    Some(PreDispatchRefusal::Invalid(quoting_submitted_maps(
+        restored, req,
+    )))
+}
+
+/// `violations` with every clause about a MAP member quoting the map the request
+/// carried, where the framework's walk stored its own summary of its SIZE.
+///
+/// The shared restoring walk above quotes a LIST — its elements are recorded one
+/// step below the member, so the collection can be rebuilt from them — but a
+/// map's entries reach that walk as the built input's own unordered map, so the
+/// order a request wrote them in is not recoverable there and the clause keeps
+/// the `<n> entries` summary, which is not a value any caller sent. The ORDER is
+/// still in the request, which this layer has, so the map is quoted from the body
+/// by `service_common`'s own restating pass
+/// ([`service_common::submitted_collections::quoting_submitted_maps`]) — the one
+/// this tree's other services reach through its per-operation wrapper — and the
+/// one fact this service supplies to it is the order it states those entries in
+/// ([`in_this_services_entry_order`]).
+///
+/// Every guard, the rendering, the bound on what one clause quotes and the bound
+/// on how often one refusal reads the body are that pass's, so this layer cannot
+/// word a collection differently from a service served through the wrapper, and
+/// nothing one message carries or does is sized by the request.
+fn quoting_submitted_maps(violations: Vec<Violation>, req: &RtRequest) -> Vec<Violation> {
+    service_common::submitted_collections::quoting_submitted_maps(
+        violations,
+        req,
+        in_this_services_entry_order,
+    )
+}
+
+/// The entries of one map in the order THIS service states them in a clause: the
+/// reverse of the order the request wrote them.
+///
+/// Source: the refusals recorded for this service, which state a map's entries
+/// back-to-front — the order a renderer that pushes each entry it reads onto the
+/// HEAD of a list walks them in. It is a fact about this service's own renderer,
+/// which is why it is stated here: a service states the order it quotes a map in
+/// ([`service_common::submitted_collections::MapEntryOrder`], beside
+/// `in_submitted_order` for a service whose recordings show the order sent), and
+/// everything else about the clause is shared.
+///
+/// Taken over the REQUEST's order rather than over the keys, which the refusals
+/// this is read from cannot tell apart (their keys were sent in ascending order,
+/// so back-to-front and descending-by-key render the same text): the order a
+/// clause quotes is a rendering of what the request carried, so the order it was
+/// carried in is what this reads. A refusal of a map whose keys were NOT sent in
+/// order is what would separate the two, and the day one is recorded this is the
+/// one function that changes.
+fn in_this_services_entry_order(entries: &[(String, String)]) -> Option<Vec<(&str, &str)>> {
+    Some(
+        entries
+            .iter()
+            .rev()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect(),
+    )
 }
 
 /// The refusal for the value the submitted body carries under `member`, when it

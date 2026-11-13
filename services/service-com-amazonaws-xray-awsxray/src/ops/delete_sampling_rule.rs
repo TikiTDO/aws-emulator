@@ -167,12 +167,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The account's service-managed rule is not the caller's to remove: it
         // exists in every account without being created
         // (`crate::state::default_sampling_rule`), so a delete naming it is
-        // refused and the listing keeps reporting it.
+        // refused with the service's own FIXED sentence for that condition
+        // ([`crate::state::DEFAULT_SAMPLING_RULE_UNDELETABLE_MESSAGE`]) and the
+        // listing keeps reporting it.
         if rule_name == crate::state::DEFAULT_SAMPLING_RULE_NAME {
-            return Err(invalid(format!(
-                "the service-managed `{}` sampling rule cannot be deleted",
-                crate::state::DEFAULT_SAMPLING_RULE_NAME
-            )));
+            return Err(invalid(
+                crate::state::DEFAULT_SAMPLING_RULE_UNDELETABLE_MESSAGE,
+            ));
         }
 
         let Some(removed) = store.remove_sampling_rule(&rule_name, crate::state::now_epoch_seconds())

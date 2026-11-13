@@ -156,34 +156,51 @@ pub const SAMPLING_RULE_FIXED_RATE_MAX: f64 = 1.0;
 /// The modelled minimum of `SamplingRule$ReservoirSize`.
 pub const SAMPLING_RULE_RESERVOIR_SIZE_MIN: i32 = 0;
 
+/// What X-Ray answers an `UpdateSamplingRule` carrying a value outside one of
+/// the BOUNDS the modelled `SamplingRule` declares: the request as a whole is
+/// not a usable update.
+///
+/// FIXED text: `SamplingRuleUpdate`'s own members carry no such bound for the
+/// boundary to report (they target the unconstrained `NullableInteger` /
+/// `NullableDouble`), so this refusal is the service's own and it states the
+/// condition alone — neither the member that was out of range, nor the value it
+/// carried, nor the bound reaches it.
+///
+/// It is the sentence for THAT class and not for every refusal of an update: a
+/// `ResourceARN` that is not ARN syntax is a different class, judged by
+/// [`validate_resource_arn`] and stated in the sentence that value earns
+/// wherever it is submitted — through `CreateSamplingRule` as well, which is why
+/// the check and its wording live in one place.
+pub const INVALID_SAMPLING_RULE_UPDATE_MESSAGE: &str = "Invalid update request for sampling rule";
+
 /// Check an update's values against those bounds, before anything is written.
+///
+/// A value outside one of them makes the whole update unusable, which is what
+/// the refusal states ([`INVALID_SAMPLING_RULE_UPDATE_MESSAGE`]): one sentence
+/// for the request, whichever of those members carried the value and whatever it
+/// was. A `ResourceARN` is the other class, and keeps its own sentence.
 pub fn validate_sampling_rule_update(
     update: &SamplingRuleUpdateDraft,
 ) -> Result<(), SamplingRuleRejection> {
-    let invalid =
-        |message: String| -> SamplingRuleRejection { SamplingRuleRejection::Invalid(message) };
+    let unusable = || -> SamplingRuleRejection {
+        SamplingRuleRejection::Invalid(INVALID_SAMPLING_RULE_UPDATE_MESSAGE.to_string())
+    };
     if let Some(resource_arn) = update.resource_arn.as_deref() {
         validate_resource_arn(resource_arn)?;
     }
     if let Some(priority) = update.priority {
         if !(SAMPLING_RULE_PRIORITY_MIN..=SAMPLING_RULE_PRIORITY_MAX).contains(&priority) {
-            return Err(invalid(format!(
-                "Priority must be between {SAMPLING_RULE_PRIORITY_MIN} and {SAMPLING_RULE_PRIORITY_MAX}, not {priority}"
-            )));
+            return Err(unusable());
         }
     }
     if let Some(fixed_rate) = update.fixed_rate {
         if !(SAMPLING_RULE_FIXED_RATE_MIN..=SAMPLING_RULE_FIXED_RATE_MAX).contains(&fixed_rate) {
-            return Err(invalid(format!(
-                "FixedRate must be between {SAMPLING_RULE_FIXED_RATE_MIN} and {SAMPLING_RULE_FIXED_RATE_MAX}, not {fixed_rate}"
-            )));
+            return Err(unusable());
         }
     }
     if let Some(reservoir_size) = update.reservoir_size {
         if reservoir_size < SAMPLING_RULE_RESERVOIR_SIZE_MIN {
-            return Err(invalid(format!(
-                "ReservoirSize must be at least {SAMPLING_RULE_RESERVOIR_SIZE_MIN}, not {reservoir_size}"
-            )));
+            return Err(unusable());
         }
     }
     Ok(())
@@ -214,6 +231,14 @@ pub const ANY_MATCHER: &str = "*";
 /// just "rule definitions and metadata" — so the rule is recorded service
 /// behaviour, written down here once.
 pub const DEFAULT_SAMPLING_RULE_NAME: &str = "Default";
+
+/// What X-Ray answers a `DeleteSamplingRule` that selects the account's
+/// service-managed rule.
+///
+/// FIXED text: the rule is protected for WHAT it is, so the refusal states that
+/// condition and interpolates nothing — neither the selector the request used
+/// nor the reserved name itself — whichever of the two selectors named it.
+pub const DEFAULT_SAMPLING_RULE_UNDELETABLE_MESSAGE: &str = "Cannot delete default sampling rule";
 
 /// The service-managed rule's `Priority`, deliberately PAST the `@range(min: 1,
 /// max: 9999)` a caller may set on a rule of its own

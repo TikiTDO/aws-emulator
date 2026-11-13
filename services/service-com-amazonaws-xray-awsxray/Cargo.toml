@@ -28,6 +28,9 @@ service-common = { path = "../common" }
 # destination is CloudWatch Logs — the one CloudWatch Logs' own readers answer
 # from, so a delivered span and `FilterLogEvents` cannot disagree.
 service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
+# `DescribeKey`: the read that resolves the KMS key selector a
+# `PutEncryptionConfig` names to the key whose ARN the configuration reports.
+aws-sdk-kms = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -35,6 +38,10 @@ emulator-core-build-support = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
+# The KMS this emulator's own X-Ray resolves an encryption key selector
+# through, mounted beside it on one engine so the key the configuration reports
+# is the key KMS holds.
+service-com-amazonaws-kms-trentservice = { workspace = true }
 
 [lints]
 workspace = true

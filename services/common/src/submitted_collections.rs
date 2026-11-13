@@ -57,25 +57,35 @@
 //! states — so the shared walk, which reads the BUILT input, can only state one map in key
 //! order. The order the request wrote is still in the request, which this layer has, so a
 //! service that states another order supplies it as a [`MapEntryOrder`] over the entries
-//! read back from the request ([`submitted_map_entries`]); [`in_submitted_order`] is the
-//! order the request carried, which is what a service whose recordings show the submitted
-//! order passes.
+//! read back from the request ([`submitted_map_entries_at`], at the member path the clause
+//! names, so a map declared on a nested structure member is reached too);
+//! [`in_submitted_order`] is the order the request carried, which is what a service whose
+//! recordings show the submitted order passes.
+//!
+//! A service that words its constraint refusal in its own PRE-DISPATCH layer, rather than
+//! through the wrapper, states the same one fact and reaches the same restating through
+//! [`quoting_submitted_maps`]: such a layer holds the request but has no echo to restate
+//! from, so the map is quoted from the body under the shared echo ceiling. Both paths share
+//! the guards ([`restated_map`]) and the rendering, so neither can word one collection
+//! differently from the other.
 //!
 //! What this layer may NOT do is enlarge the clause: every bound on what one message quotes
 //! belongs to the shared walk, so a restated map is taken only when it renders to exactly
 //! the length that walk had already decided to carry — the same entries in another order,
 //! and therefore the same bytes. A clause that fails any of the guards keeps the shared
 //! walk's own rendering: a value that is not a map (a list, whose order the built value does
-//! keep), a member below the top level of the body, a body this cannot read, a member whose
-//! entry count differs from the one the walk counted, and an order the service's own rule
-//! declines to state. A clause stated at a map MEMBER is bounded the same way: it quotes the
-//! map up to the ceiling the shared walk quotes one clause to
+//! keep), a member the body carries no map of strings at, a body this cannot read, a member
+//! whose entry count differs from the one the walk counted, and an order the service's own
+//! rule declines to state. A clause stated at a map MEMBER is bounded the same way: it quotes
+//! the map up to the ceiling the shared walk quotes one clause to
 //! ([`crate::validation::quoted_echo`]).
 //!
-//! The request is read AT MOST ONCE PER MEMBER per refusal ([`SubmittedMaps`]), the negative
-//! answer included, so the parses one refusal performs are bounded by the number of members
-//! the operation's input declares — a constant of the model — rather than by the violation
-//! count a request chooses.
+//! The request is read AT MOST ONCE PER MEMBER PATH per refusal, and for at most a fixed
+//! number of paths ([`SubmittedMaps`], [`MAX_PARSED_PATHS`]), the negative answer included —
+//! so both the parses one refusal performs and the keys it retains are bounded by constants
+//! rather than by the violation count a request chooses. That bound is what keeps a clause
+//! stated at `<map member>.<key>`, whose last step is the caller's own text, from being able
+//! to drive one parse per entry sent.
 
 use std::collections::{HashMap, HashSet};
 
@@ -446,7 +456,7 @@ fn map_value_clause<Op: Operation>(
 ) -> Option<(String, String)> {
     let (member, key) = entry_of(&violation.path)?;
     let declared = element_constraint_set(&[Op::INPUT_SCHEMA], member)?;
-    let entries = submitted.of_member(member)?;
+    let entries = submitted.of_path(member)?;
     if !entries.iter().any(|(held, _)| held == key) {
         return None;
     }
@@ -493,34 +503,22 @@ fn stated_requirement(kind: ViolationKind, pattern: PatternRendering) -> String 
 /// order the built input leaves them in.
 ///
 /// Only the ORDER changes: the entries, the braces and the `<key>=<value>` form are the
-/// shared rendering's ([`rendered_map`]). See the module header for every guard that keeps
-/// `quoted` instead.
+/// shared rendering's ([`rendered_map`]), and the restated map is taken only when it
+/// renders to exactly the length the shared walk had already decided to carry — the same
+/// entries in another order, and therefore the same bytes. See the module header for every
+/// guard that keeps `quoted` instead.
 fn as_stated(
     violation: &Violation,
     quoted: Violation,
     submitted: &mut SubmittedMaps<'_>,
     order: MapEntryOrder,
 ) -> Violation {
-    let (Some(summary), Some(rendered)) = (violation.value.as_deref(), quoted.value.as_deref())
-    else {
+    let Some(rendered) = quoted.value.as_deref() else {
         return quoted;
     };
-    let Some(entries) = map_entry_count(summary) else {
+    let Some(restated) = restated_map(violation, submitted, order) else {
         return quoted;
     };
-    if violation.path.contains('.') {
-        return quoted;
-    }
-    let Some(held) = submitted.of_member(&violation.path) else {
-        return quoted;
-    };
-    if held.len() != entries {
-        return quoted;
-    }
-    let Some(ordered) = order(held) else {
-        return quoted;
-    };
-    let restated = rendered_map(&ordered);
     if restated.len() != rendered.len() {
         return quoted;
     }
@@ -530,23 +528,105 @@ fn as_stated(
     }
 }
 
-/// The maps the REQUEST carried, each read at most ONCE however many clauses ask for it.
+/// `violations` with every clause about a MAP member quoting the map `req` carried, in the
+/// order the service states one (`order`), where the validating walk stored its own summary
+/// of that map's SIZE.
+///
+/// For a service that words its constraint refusal in its own PRE-DISPATCH layer rather
+/// than through [`QuotingSubmittedCollections`]: such a layer holds the request, which is
+/// where the entry order still is, but it has no echo to restate from — the shared walk
+/// renders a map it reaches as the built input's own unordered map, so a clause about one
+/// arrives carrying `<n> entries`, which is not a value any caller sent. This quotes it
+/// from the body instead, under [`crate::validation::quoted_echo`]'s ceiling, which is the
+/// same ceiling the shared walk quotes one clause to.
+///
+/// Everything but the order is this module's, exactly as for the wrapper: the guards
+/// ([`restated_map`]), the rendering ([`rendered_map`]) and the reading
+/// ([`submitted_map_entries_at`]) — so a pre-dispatch layer and the wrapper cannot word one
+/// collection two ways. The request is read at most once per member path asked for and for
+/// at most [`MAX_PARSED_PATHS`] paths ([`SubmittedMaps`]), so the parses one refusal
+/// performs are bounded by constants rather than by the violation count a request chooses.
+#[must_use]
+pub fn quoting_submitted_maps(
+    violations: Vec<Violation>,
+    req: &RtRequest,
+    order: MapEntryOrder,
+) -> Vec<Violation> {
+    let mut submitted = SubmittedMaps::of(req);
+    violations
+        .into_iter()
+        .map(|violation| {
+            match restated_map(&violation, &mut submitted, order) {
+                Some(restated) => Violation {
+                    value: Some(crate::validation::quoted_echo(&restated).into_owned()),
+                    ..violation
+                },
+                None => violation,
+            }
+        })
+        .collect()
+}
+
+/// The MAP the request carried at the member `violation` names, rendered in `order` — or
+/// `None` for a clause this states nothing about.
+///
+/// The one place the guards live, so the two restating paths above cannot disagree about
+/// which clause is a map's and which map is the one it is about: the clause has to be a
+/// `@length` one whose stored value IS the walk's rendering of a map's size
+/// ([`map_entry_count`]), the request has to carry a map of strings at that member's path,
+/// its entry count has to be the one the walk counted, and the service's own rule has to
+/// state an order for those entries.
+fn restated_map(
+    violation: &Violation,
+    submitted: &mut SubmittedMaps<'_>,
+    order: MapEntryOrder,
+) -> Option<String> {
+    if !matches!(
+        violation.kind,
+        ViolationKind::MinLength(_) | ViolationKind::MaxLength(_)
+    ) {
+        return None;
+    }
+    let entries = map_entry_count(violation.value.as_deref()?)?;
+    let held = submitted.of_path(&violation.path)?;
+    if held.len() != entries {
+        return None;
+    }
+    let ordered = order(held)?;
+    Some(rendered_map(&ordered))
+}
+
+/// The most distinct member paths ONE refusal reads the body for.
+///
+/// The parse count has to be bounded by the MODEL and not by the request, and a clause's
+/// member path is not always the model's: a constraint broken by one of a map's VALUES is
+/// reported at `<map member>.<key>`, where the key is the caller's own text, so a request
+/// can present as many distinct paths as it sent entries. This is that bound — well above
+/// the map members any emulated input declares, and a constant — so a refusal reads the
+/// body a fixed number of times whatever a request chooses. A path past it is answered as
+/// a member no map was found at, which keeps the validating walk's own rendering.
+const MAX_PARSED_PATHS: usize = 16;
+
+/// The maps the REQUEST carried, each read at most ONCE however many clauses ask for it,
+/// and at most [`MAX_PARSED_PATHS`] of them read at all.
 ///
 /// Why it exists: a clause is restated per VIOLATION, and the walk can report one violation
 /// per element of a collection, so reading the body inside that loop would re-parse the whole
 /// body once per clause — work one request chooses twice over, in its body's length and in
-/// its violation count. Here the answer for a member is remembered the first time it is asked
-/// for, the NEGATIVE answer included (a member the body does not carry, or carries as
-/// something other than an object of strings, is never re-read), so the parses one refusal
-/// performs are bounded by the number of MEMBERS the operation's input declares — a constant
-/// of the model — rather than by anything the request chooses.
+/// its violation count. Here the answer for a member path is remembered the first time it is
+/// asked for, the NEGATIVE answer included (a path the body does not carry a map of strings
+/// at is never re-read), and only [`MAX_PARSED_PATHS`] paths are read at all — so both the
+/// parses one refusal performs and the keys it retains are bounded by constants rather than
+/// by anything the request chooses.
 struct SubmittedMaps<'r> {
     /// The buffered request body, already read and deserialized once by the shared walk
     /// before this layer looks at it.
     body: &'r [u8],
-    /// What the body holds at each member asked for so far, `None` for a member this layer
-    /// found no map of strings at.
+    /// What the body holds at each member path asked for so far, `None` for a path this
+    /// layer found no map of strings at. At most [`MAX_PARSED_PATHS`] entries.
     read: HashMap<String, Option<Vec<(String, String)>>>,
+    /// How many more distinct paths this refusal may read the body for.
+    budget: usize,
 }
 
 impl<'r> SubmittedMaps<'r> {
@@ -555,17 +635,28 @@ impl<'r> SubmittedMaps<'r> {
         Self {
             body: req.body().bytes().unwrap_or_default(),
             read: HashMap::new(),
+            budget: MAX_PARSED_PATHS,
         }
     }
 
-    /// The entries `member` carried, in the order the request wrote them, or `None` when the
-    /// body carries no map of strings there ([`submitted_map_entries`]).
-    fn of_member(&mut self, member: &str) -> Option<&[(String, String)]> {
-        if !self.read.contains_key(member) {
-            let read = submitted_map_entries(self.body, member);
-            self.read.insert(member.to_string(), read);
+    /// The entries the member at `path` carried, in the order the request wrote them, or
+    /// `None` when the body carries no map of strings there — and `None` for every path
+    /// past this refusal's [`MAX_PARSED_PATHS`] reads, without reading the body again.
+    ///
+    /// `path` is the member path a clause is stated at, so a map declared on a nested
+    /// structure member is reached at the dotted path it is reported under
+    /// ([`submitted_map_entries_at`]) and a top-level one at its own name.
+    fn of_path(&mut self, path: &str) -> Option<&[(String, String)]> {
+        if !self.read.contains_key(path) {
+            if self.budget == 0 {
+                return None;
+            }
+            self.budget -= 1;
+            let steps: Vec<&str> = path.split('.').collect();
+            let read = submitted_map_entries_at(self.body, &steps);
+            self.read.insert(path.to_string(), read);
         }
-        self.read.get(member)?.as_deref()
+        self.read.get(path)?.as_deref()
     }
 }
 
@@ -589,16 +680,37 @@ impl<'r> SubmittedMaps<'r> {
 /// case would make the first one the body carries the one read.
 #[must_use]
 pub fn submitted_map_entries(body: &[u8], member: &str) -> Option<Vec<(String, String)>> {
+    submitted_map_entries_at(body, &[member])
+}
+
+/// The entries the request carried at `path` — the member names from the body's root down
+/// to the map, as the dotted member path a clause is stated at spells them — in the order
+/// its JSON object wrote them, or `None` when the body does not carry a map of strings
+/// there.
+///
+/// [`submitted_map_entries`] is this over a path of one step, which is the member a clause
+/// at the TOP level of the body names; a map declared on a nested structure member is
+/// reported at `<member>.<member>.…`, and that is the whole difference. Every guard, the
+/// parser seam that keeps the order and the case-insensitive matching of a member are the
+/// same, and so is the one parse per question: the members not on the path are skipped
+/// without being built.
+#[must_use]
+pub fn submitted_map_entries_at(body: &[u8], path: &[&str]) -> Option<Vec<(String, String)>> {
+    if path.is_empty() {
+        return None;
+    }
     let mut deserializer = ::serde_json::Deserializer::from_slice(body);
-    ::serde::de::DeserializeSeed::deserialize(MemberEntries { member }, &mut deserializer)
+    ::serde::de::DeserializeSeed::deserialize(MemberEntries { path }, &mut deserializer)
         .ok()
         .flatten()
 }
 
-/// Reads ONE named member of a JSON object as the string map it holds, keeping the order
-/// the document wrote the entries in. Every other member is skipped without being built.
+/// Reads the member a PATH names as the string map it holds, keeping the order the
+/// document wrote the entries in. Every member off the path is skipped without being
+/// built, and a path of more than one step descends through the structure members ahead of
+/// the map by reading each of them with this same seed.
 struct MemberEntries<'a> {
-    member: &'a str,
+    path: &'a [&'a str],
 }
 
 impl<'de> ::serde::de::DeserializeSeed<'de> for MemberEntries<'_> {
@@ -616,17 +728,30 @@ impl<'de> ::serde::de::Visitor<'de> for MemberEntries<'_> {
     type Value = Option<Vec<(String, String)>>;
 
     fn expecting(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        write!(formatter, "a JSON object carrying the member {}", self.member)
+        write!(
+            formatter,
+            "a JSON object carrying the member {}",
+            self.path.first().copied().unwrap_or_default()
+        )
     }
 
     fn visit_map<A: ::serde::de::MapAccess<'de>>(
         self,
         mut members: A,
     ) -> Result<Self::Value, A::Error> {
+        let Some((step, rest)) = self.path.split_first() else {
+            return Ok(None);
+        };
         let mut found: Option<Vec<(String, String)>> = None;
         while let Some(name) = members.next_key::<String>()? {
-            if found.is_none() && name.eq_ignore_ascii_case(self.member) {
-                found = Some(members.next_value::<OrderedStringMap>()?.0);
+            if found.is_none() && name.eq_ignore_ascii_case(step) {
+                found = if rest.is_empty() {
+                    Some(members.next_value::<OrderedStringMap>()?.0)
+                } else {
+                    // The map is deeper: the member on the path is itself read with this
+                    // same seed, over the rest of the path.
+                    members.next_value_seed(MemberEntries { path: rest })?
+                };
             } else {
                 members.next_value::<::serde::de::IgnoredAny>()?;
             }
@@ -669,6 +794,47 @@ impl<'de> ::serde::Deserialize<'de> for OrderedStringMap {
 mod tests {
     use super::*;
 
+    /// RULE: one refusal reads the body for at most [`MAX_PARSED_PATHS`] distinct member
+    /// paths, however many clauses ask — a clause stated at `<map member>.<key>` carries
+    /// the CALLER's own text in its last step, so the path count is not the model's.
+    #[test]
+    fn one_refusal_reads_the_body_for_a_bounded_number_of_paths() {
+        let body = ::aws_smithy_runtime_api::http::Request::new(
+            ::aws_smithy_types::body::SdkBody::from(r#"{"Attributes":{"a":"1"}}"#),
+        );
+        let mut submitted = SubmittedMaps::of(&body);
+
+        // The member the body does carry a map at answers it, and answers it again
+        // without spending a second read.
+        for read in 1..=3 {
+            assert!(
+                submitted.of_path("attributes").is_some(),
+                "read {read}: the member carrying a map must be read back"
+            );
+        }
+        assert_eq!(
+            submitted.budget,
+            MAX_PARSED_PATHS - 1,
+            "one member path must spend one read however often it is asked for"
+        );
+
+        // Every path a caller could shape spends at most the rest of the budget: past it
+        // nothing is read and nothing is kept.
+        for index in 0..100 {
+            assert!(
+                submitted.of_path(&format!("attributes.key-{index}")).is_none(),
+                "path {index}: a caller-shaped path carries no map of strings"
+            );
+        }
+        assert_eq!(submitted.budget, 0, "the reads must be spent, not exceeded");
+        assert_eq!(
+            submitted.read.len(),
+            MAX_PARSED_PATHS,
+            "at most one remembered answer per read, got {}",
+            submitted.read.len()
+        );
+    }
+
     /// RULE: the member a clause is about is read back in the order the document wrote it,
     /// whatever else the body carries — and nothing is read where there is nothing to read.
     #[test]
@@ -698,6 +864,40 @@ mod tests {
         ] {
             assert!(
                 submitted_map_entries(body, member).is_none(),
+                "case {case:?}: expected nothing to be read"
+            );
+        }
+    }
+
+    /// RULE: a map a NESTED member carries is read back at the dotted path a clause names
+    /// it by, in document order — and a path that names nothing reads nothing.
+    #[test]
+    fn a_nested_members_map_is_read_back_at_its_path() {
+        let body = br#"{"SamplingRule":{"RuleName":"r","Attributes":{"z":"1","a":"2"}},"Other":3}"#;
+        let entries = submitted_map_entries_at(body, &["samplingRule", "attributes"])
+            .expect("the nested member is a map");
+        assert_eq!(
+            entries,
+            vec![
+                ("z".to_string(), "1".to_string()),
+                ("a".to_string(), "2".to_string()),
+            ],
+            "expected the entries in document order, got {entries:?}"
+        );
+
+        // (case, path)
+        for (case, path) in [
+            ("a step that is not there", &["rule", "attributes"][..]),
+            ("a leaf that is not there", &["samplingRule", "tags"][..]),
+            ("a leaf that is not a map", &["samplingRule", "ruleName"][..]),
+            ("no path at all", &[][..]),
+            (
+                "a path deeper than the body nests",
+                &["samplingRule", "attributes", "z"][..],
+            ),
+        ] {
+            assert!(
+                submitted_map_entries_at(body, path).is_none(),
                 "case {case:?}: expected nothing to be read"
             );
         }

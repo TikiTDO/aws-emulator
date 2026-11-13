@@ -66,8 +66,32 @@ impl Xray {
         (Self { router }, engine)
     }
 
+    /// One emulator with this service and the service `mount` builds on the SAME
+    /// engine, for a case whose rule reaches another service of this emulator —
+    /// which is how the production router assembles them too.
+    pub fn beside<S: smithy_server_runtime::Service>(
+        mount: impl FnOnce(Arc<engine::InMemoryEngine>) -> S,
+    ) -> Self {
+        let (mut emulator, engine) = Self::with_engine();
+        emulator.router.register_service(mount(engine));
+        emulator
+    }
+
+    /// The in-process callback into this emulator, which is what an AWS SDK
+    /// client is configured over to reach a service mounted beside this one.
+    pub fn callback(&self) -> smithy_server_runtime::EmbeddedEmulator {
+        smithy_server_runtime::EmbeddedEmulator::from_router(self.router.clone())
+    }
+
     pub async fn call(&self, path: &str, body: &Value) -> Answer {
         self.call_in_region(DEFAULT_REGION, path, body).await
+    }
+
+    /// The same call with the body sent as the BYTES given, for a case whose rule
+    /// is about something a document cannot carry — the order a JSON object
+    /// writes its members in, which a `Value` holds in an order of its own.
+    pub async fn call_raw(&self, path: &str, body: &str) -> Answer {
+        self.dispatch(DEFAULT_REGION, path, body).await
     }
 
     /// The same call, signed for `region`.
@@ -77,6 +101,12 @@ impl Xray {
     /// `Authorization` header carries the scope even though signature
     /// verification is off.
     pub async fn call_in_region(&self, region: &str, path: &str, body: &Value) -> Answer {
+        self.dispatch(region, path, &body.to_string()).await
+    }
+
+    /// The one request every call above makes: the signing-name host, the
+    /// credential scope of `region`, and `body` as the bytes sent.
+    async fn dispatch(&self, region: &str, path: &str, body: &str) -> Answer {
         let request = ::http::Request::builder()
             .method("POST")
             .uri(format!("https://xray.{region}.amazonaws.com{path}"))

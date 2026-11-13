@@ -11,11 +11,14 @@
 //! selector, a `KMS` request without one, and a `NONE` request that carries one
 //! are each refused with `InvalidRequestException` rather than stored.
 //!
-//! What is stored under `KMS` is the key's ARN
-//! ([`crate::state::kms_key_arn`]), whatever of the three selector forms the
-//! request used: the configuration a reader takes to a KMS policy or compares
-//! across accounts has to identify WHICH key protects the data, and a bare id or
-//! alias is the same text in every account and region.
+//! What is stored under `KMS` is the ARN of the KEY the submitted selector
+//! RESOLVES to ([`crate::state::resolved_key_arn`]), whatever of the three
+//! selector forms the request used: the configuration a reader takes to a KMS
+//! policy or compares across accounts has to identify WHICH key protects the
+//! data, and an alias names whatever key it currently targets while a bare id is
+//! the same text in every account and region. A selector no KMS answered for
+//! keeps the qualified form it was submitted in
+//! ([`crate::state::kms_key_arn`]).
 //!
 //! ## Shape of an operation
 //!
@@ -194,11 +197,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                          (alias/MyKey), a key id, or the full ARN of either"
                     )));
                 }
-                // Stored as the key's ARN, not as the selector the request
-                // happened to use: the configuration a reader reports has to
-                // identify WHICH key, in which account and region, protects the
-                // account's trace data.
-                Some(crate::state::kms_key_arn(&key_id, &region))
+                // Stored as the ARN of the KEY the selector resolves to, which
+                // is the one `EncryptionConfig$KeyId` reports: an alias names
+                // whatever key it currently targets, so only the key's own ARN
+                // identifies what protects the account's trace data
+                // ([`crate::state::resolved_key_arn`]). A selector no KMS
+                // answered for keeps the qualified form it was submitted in.
+                Some(
+                    match crate::state::resolved_key_arn(ctx, &region, &key_id).await {
+                        Some(resolved) => resolved,
+                        None => crate::state::kms_key_arn(&key_id, &region),
+                    },
+                )
             }
             crate::state::ENCRYPTION_TYPE_NONE => {
                 if let Some(key_id) = input.key_id {

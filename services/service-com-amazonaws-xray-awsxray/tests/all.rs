@@ -20,6 +20,9 @@ mod enablement_then_period_bucketing;
 #[path = "all/encryption_config.rs"]
 mod encryption_config;
 
+#[path = "all/encryption_key_resolution.rs"]
+mod encryption_key_resolution;
+
 #[path = "all/enum_value_set_order.rs"]
 mod enum_value_set_order;
 
@@ -53,6 +56,9 @@ mod malformed_retrieval_token_message;
 #[path = "all/query_surface_selection.rs"]
 mod query_surface_selection;
 
+#[path = "all/quoted_collection_clause.rs"]
+mod quoted_collection_clause;
+
 #[path = "all/refusal_message_rules.rs"]
 mod refusal_message_rules;
 
@@ -82,6 +88,9 @@ mod sampling_rule_default_and_update;
 
 #[path = "all/sampling_rule_deletion.rs"]
 mod sampling_rule_deletion;
+
+#[path = "all/sampling_rule_fixed_refusals.rs"]
+mod sampling_rule_fixed_refusals;
 
 #[path = "all/sampling_rules.rs"]
 mod sampling_rules;

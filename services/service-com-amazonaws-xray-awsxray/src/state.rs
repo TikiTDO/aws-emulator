@@ -86,6 +86,7 @@
 //! can be a value a reader cannot convert to the modelled `Timestamp`; the
 //! conversion itself goes through [`timestamp_of`].
 
+pub mod encryption_key;
 pub mod filter;
 pub mod group_scope;
 pub mod graphs;
@@ -99,6 +100,7 @@ pub mod span_delivery;
 // Each part above owns one concern of this service's state and is re-exported
 // here, so every handler keeps reaching the store through `crate::state::…` and
 // no caller has to know which part a record, a bound or a wording lives in.
+pub use encryption_key::*;
 pub use graphs::*;
 pub use pagination::*;
 pub use query_window::*;
