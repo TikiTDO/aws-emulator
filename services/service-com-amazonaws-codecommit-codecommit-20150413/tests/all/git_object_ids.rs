@@ -65,7 +65,11 @@ async fn put_file(
 // ---------------------------------------------------------------------------
 
 /// The name of a git object: SHA-1 over `"<kind> <len>\0"` and the payload.
-fn object_name(kind: &str, payload: &[u8]) -> String {
+///
+/// `pub(crate)` so the sibling suite that checks WHICH DATE a commit carries
+/// ([`crate::commit_date_identity`]) names a commit with this one oracle rather
+/// than a second copy of it.
+pub(crate) fn object_name(kind: &str, payload: &[u8]) -> String {
     let mut hasher = Sha1::new();
     hasher.update(format!("{kind} {}\0", payload.len()).as_bytes());
     hasher.update(payload);
