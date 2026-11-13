@@ -133,9 +133,14 @@ impl WebSocketTransport {
     }
 }
 
-/// How many bytes a minted `ConnectionId` carries before base64: 11 bytes, which is what
-/// encodes to the 16-character single-padded form API Gateway's own ids have.
-const CONNECTION_ID_BYTES: usize = 11;
+/// How many bytes a minted `ConnectionId` carries before base64: the length the
+/// `@connections` registry reads an id by
+/// (`service_com_amazonaws_apigatewaymanagementapi_apigatewaymanagementapi::state::CONNECTION_ID_BYTES`,
+/// 11 bytes), which is what encodes to the 16-character single-padded form API Gateway's own
+/// ids have. Read from there so a minted id and an id those operations accept cannot drift
+/// apart.
+const CONNECTION_ID_BYTES: usize =
+    ::service_com_amazonaws_apigatewaymanagementapi_apigatewaymanagementapi::state::CONNECTION_ID_BYTES;
 
 /// What the id mixing is domain-separated by, so a connection id cannot coincide with
 /// another id this service derives from the same counter.

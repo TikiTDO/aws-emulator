@@ -9,7 +9,8 @@ build = "build.rs"
 [dependencies]
 engine = { workspace = true }
 # The tree's shared service helpers: the ONE caller-supplied-ARN parse
-# (`arn::parse_of`) and the ONE derived-id mixer (`stable_hex_id`).
+# (`arn::parse_of`), the ONE derived-id mixer (`stable_hex_id`) and the ONE reading of a
+# data-plane connection whose encryption is negotiated in band (`in_band_tls`).
 service-common = { path = "../common" }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }
@@ -61,6 +62,15 @@ futures-util = { version = "0.3", default-features = false }
 # completed, because the decision it needs — the `$connect` route's integration and the
 # authorizer in front of it — is awaited.
 httparse = "1"
+# The HTTP/1.1 server a WEBSOCKET api's socket answers every request on it that is NOT an
+# opening handshake with: that socket is the api's whole `ApiEndpoint`, where the
+# `@connections` management API is published too, so an ordinary request made there is
+# served by this emulator's own front door (`src/service/websocket/endpoint_http.rs`).
+# `hyper-util` carries the tokio IO and timer adapters for it, `http-body-util` the bounded
+# body reader and the one-shot body.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 # Matches an `IntegrationResponseKey` written as a regular expression (`/2\d\d/`), which is
 # how a WebSocket integration's responses are selected by the status a call produced.
 regex = "1"

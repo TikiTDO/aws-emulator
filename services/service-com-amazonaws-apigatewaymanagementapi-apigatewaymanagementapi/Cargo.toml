@@ -21,6 +21,10 @@ bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# Base64, for the ONE shape a `ConnectionId` has: API Gateway mints one as base64 of 11
+# bytes, so `src/state.rs` decodes a caller's id with this maintained implementation rather
+# than with a hand-written alphabet or length rule.
+base64 = "0.22"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

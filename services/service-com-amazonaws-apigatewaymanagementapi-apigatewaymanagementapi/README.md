@@ -111,12 +111,15 @@ service's operations.
 This service's whole state is a registry of WebSocket connections, keyed by
 `ConnectionId`:
 `ComAmazonawsApigatewaymanagementapiApigatewaymanagementapiState::connections`, beside
-the set of every `ConnectionId` the service has ISSUED (`::issued`). All three modelled
-operations address one entry of the registry, and the two refusals are split along that
-set: **a missing entry for an ISSUED id is the single source of truth for
-`GoneException` (HTTP 410)**, while an id the service never issued identifies no
-connection at all and is refused `400 BadRequestException` with
-`Invalid connectionId: <id>` before any connection is looked up.
+the set of addresses that are a data-plane ENDPOINT of an api whose connections it holds
+(`::endpoints`). All three modelled operations address one entry of the registry, and the
+two refusals are split along the SHAPE of the id the request sent: **a missing entry for a
+well-formed id is the single source of truth for `GoneException` (HTTP 410)** — never
+minted, closed, or another api's — while an id that could never have been minted
+(`state::is_well_formed_connection_id`: standard base64 of `state::CONNECTION_ID_BYTES`
+bytes, the 16-character single-padded token API Gateway mints) names no connection
+anywhere and is refused `400 BadRequestException` with `Invalid connectionId: <id>` from
+the value alone, before the registry is consulted.
 
 None of the three CREATES a connection: in real AWS a connection exists because a
 client completed a WebSocket handshake against the API's own invoke endpoint, which
@@ -124,10 +127,10 @@ this management API never serves. The emulator therefore registers one through e
 one seam, and that is the rule this crate follows:
 
 ```rust
-// Emulator-internal: a test, or a future WebSocket data plane for the owning API.
+// Emulator-internal: a test, or the WebSocket data plane of the owning API.
 service_com_amazonaws_apigatewaymanagementapi_apigatewaymanagementapi::state::register_connection(
     &*engine,
-    "abc123",
+    "Lx9ZKcvPmjQCJhA=",
     // the modelled Identity shape: SourceIp / UserAgent
     state::Identity { source_ip: "192.0.2.10".into(), user_agent: "wscat/5".into() },
     std::time::SystemTime::now(), // becomes ConnectedAt, and the initial LastActiveAt
@@ -138,9 +141,13 @@ service_com_amazonaws_apigatewaymanagementapi_apigatewaymanagementapi::state::re
   `DeleteConnection` that removes it. There is deliberately **no auto-registration on
   first reference**: that would make `GetConnection` answer `200` for an id that never
   existed, which the real service never does.
-* Registering a connection is what ISSUES its id, and the id stays issued after the
-  connection closes — that is what keeps a closed connection answering `GoneException`
-  while a value nothing ever issued is refused as an invalid `ConnectionId`.
+* Only an id of the shape the service mints can be registered, so the shape check above
+  can never hide a connection the registry holds.
+* A connection is addressed through the ENDPOINT it was established at (`::endpoint`, told
+  to the registry by the data plane that opened the socket through
+  `state::serve_connections_at`): a request that reached one api's endpoint addresses only
+  the connections established there, so another api's live id is `GoneException` on it. An
+  address that is no api's endpoint addresses the registry as a whole.
 * `ConnectedAt` is fixed at registration and never moves; re-registering a present id
   changes nothing.
 * `LastActiveAt` moves only when data actually flows to the connection — a successful

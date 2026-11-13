@@ -24,7 +24,7 @@ use engine::InMemoryEngine;
 
 use service_com_amazonaws_apigatewaymanagementapi_apigatewaymanagementapi as mgmt;
 
-use crate::support::{call, register};
+use crate::support::{call, minted, register};
 
 /// Registration instants and the RFC 3339 text a `@timestampFormat("date-time")` member
 /// renders them as. Written out by hand (the format is the model's, not this crate's)
@@ -53,10 +53,10 @@ fn register_at(engine: &Arc<InMemoryEngine>, connection_id: &str, connected_at_s
 async fn get_connection_renders_iso8601_date_times_and_the_modeled_json_names() {
     for (secs, expected) in TIMESTAMP_TABLE {
         let engine: Arc<InMemoryEngine> = Arc::new(InMemoryEngine::new());
-        let connection_id = "probe-ts";
-        register_at(&engine, connection_id, secs);
+        let connection_id = minted("probe-ts");
+        register_at(&engine, &connection_id, secs);
 
-        let (status, body) = call(&engine, "GET", connection_id, Vec::new()).await;
+        let (status, body) = call(&engine, "GET", &connection_id, Vec::new()).await;
         assert_eq!(
             status, 200,
             "case {secs}: GetConnection must answer 200, got {status}"
@@ -88,55 +88,55 @@ async fn get_connection_renders_iso8601_date_times_and_the_modeled_json_names() 
     }
 }
 
-/// Each failure this service answers renders in the restJson1 error envelope with its
-/// own status: one row per error it can answer from a request. The two refusals of a
-/// `ConnectionId` differ — an id the service never issued is the 400
-/// `BadRequestException`, an id it issued whose connection is closed is the modelled 410
+/// Each failure this service answers in its own envelope renders in the restJson1 error
+/// envelope with its own status: one row per such failure. The two refusals of a
+/// `ConnectionId` differ — an id that could never have been minted is the 400
+/// `BadRequestException`, a well-formed id naming no open connection is the modelled 410
 /// `GoneException` — so both are pinned here.
 #[tokio::test]
 async fn modeled_errors_render_with_their_own_status_and_type() {
     /// Which connection id a row addresses.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     enum Target {
-        /// An id this service never issued.
-        NeverIssued,
-        /// An id it issued whose connection the row deletes first.
+        /// An id that could never have been minted.
+        Malformed,
+        /// A well-formed id no connection was ever opened for.
+        NeverMinted,
+        /// An id whose connection the row deletes first.
         Deleted,
-        /// A registered, open connection.
-        Open,
     }
 
     // (case, method, request body length, target, expected status, expected __type)
-    let table: [(&str, &str, usize, Target, u16, &str); 7] = [
+    let table: [(&str, &str, usize, Target, u16, &str); 6] = [
         (
-            "get on an id this service never issued",
+            "get on an id that could never have been minted",
             "GET",
             0,
-            Target::NeverIssued,
+            Target::Malformed,
             400,
             "BadRequestException",
         ),
         (
-            "post to an id this service never issued",
+            "post to an id that could never have been minted",
             "POST",
             4,
-            Target::NeverIssued,
+            Target::Malformed,
             400,
             "BadRequestException",
         ),
         (
-            "delete an id this service never issued",
+            "delete an id that could never have been minted",
             "DELETE",
             0,
-            Target::NeverIssued,
+            Target::Malformed,
             400,
             "BadRequestException",
         ),
         (
-            "get on a closed connection",
+            "get on a well-formed id nothing minted",
             "GET",
             0,
-            Target::Deleted,
+            Target::NeverMinted,
             410,
             "GoneException",
         ),
@@ -156,37 +156,30 @@ async fn modeled_errors_render_with_their_own_status_and_type() {
             410,
             "GoneException",
         ),
-        (
-            "post one byte past the modelled maximum",
-            "POST",
-            mgmt::ops::post_to_connection::MAX_DATA_BYTES + 1,
-            Target::Open,
-            413,
-            "PayloadTooLargeException",
-        ),
     ];
 
     for (case, method, body_len, target, expected_status, expected_type) in table {
         let engine: Arc<InMemoryEngine> = Arc::new(InMemoryEngine::new());
-        // The oversized row needs a registered connection, so that its refusal is
-        // about the payload and not about the id.
-        register_at(&engine, "probe-err", 1_700_000_000);
+        // One open connection, so every failure below is about the id that was asked for
+        // and not about an empty registry.
+        register_at(&engine, &minted("probe-err"), 1_700_000_000);
 
         let connection_id = match target {
-            Target::NeverIssued => "not-registered",
-            Target::Open => "probe-err",
+            Target::Malformed => "not-registered".to_string(),
+            Target::NeverMinted => minted("probe-never"),
             Target::Deleted => {
-                register_at(&engine, "probe-gone", 1_700_000_000);
-                let (status, _) = call(&engine, "DELETE", "probe-gone", Vec::new()).await;
+                let gone = minted("probe-gone");
+                register_at(&engine, &gone, 1_700_000_000);
+                let (status, _) = call(&engine, "DELETE", &gone, Vec::new()).await;
                 assert_eq!(
                     status, 204,
                     "case {case:?}: the delete that closes the connection must answer 204, \
                      got {status}"
                 );
-                "probe-gone"
+                gone
             }
         };
-        let (status, body) = call(&engine, method, connection_id, vec![b'x'; body_len]).await;
+        let (status, body) = call(&engine, method, &connection_id, vec![b'x'; body_len]).await;
         assert_eq!(
             status, expected_status,
             "case {case:?}: expected HTTP {expected_status}, got {status} with body {body:?}"
@@ -201,27 +194,30 @@ async fn modeled_errors_render_with_their_own_status_and_type() {
     }
 }
 
-/// `PayloadTooLargeException` models a `message` member (`@jsonName("message")`), and
-/// the text names the size that was sent and the bound it broke, so the row that is
-/// one byte over and the row that is far over do not read the same.
+/// An over-limit `PostToConnection` payload is refused by the `@connections` endpoint in
+/// front of the modelled operations, so it is the one answer of this surface that carries
+/// NO error envelope at all: the status alone, with no body to decode. Sizes span the first
+/// byte past the published maximum and well past it.
 #[tokio::test]
-async fn the_payload_too_large_message_states_the_size_and_the_bound() {
+async fn an_oversized_payload_is_refused_with_the_status_alone() {
     let max = mgmt::ops::post_to_connection::MAX_DATA_BYTES;
     for size in [max + 1, max + 1024, max * 3] {
         let engine: Arc<InMemoryEngine> = Arc::new(InMemoryEngine::new());
-        register_at(&engine, "probe-big", 1_700_000_000);
+        let connection_id = minted("probe-big");
+        register_at(&engine, &connection_id, 1_700_000_000);
 
-        let (status, body) = call(&engine, "POST", "probe-big", vec![b'x'; size]).await;
+        let (status, body) = call(&engine, "POST", &connection_id, vec![b'x'; size]).await;
         assert_eq!(status, 413, "case {size}: expected HTTP 413, got {status}");
-        let value: serde_json::Value = serde_json::from_slice(&body)
-            .unwrap_or_else(|e| panic!("case {size}: error body must be JSON ({e}): {body:?}"));
-        let message = value
-            .get("message")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
         assert!(
-            message.contains(&size.to_string()) && message.contains(&max.to_string()),
-            "case {size}: the message must name the payload size and the maximum, got {message:?}"
+            body.is_empty(),
+            "case {size}: the refusal carries no body, got {body:?}"
+        );
+        let stored = mgmt::state::connection(&*engine, &connection_id)
+            .expect("the connection must still be registered");
+        assert_eq!(
+            stored.delivered_count, 0,
+            "case {size}: a refused payload must not be delivered, got {} deliveries",
+            stored.delivered_count
         );
     }
 }
@@ -231,9 +227,10 @@ async fn the_payload_too_large_message_states_the_size_and_the_bound() {
 #[tokio::test]
 async fn delete_connection_answers_204_with_an_empty_body() {
     let engine: Arc<InMemoryEngine> = Arc::new(InMemoryEngine::new());
-    register_at(&engine, "probe-del", 1_600_000_000);
+    let connection_id = minted("probe-del");
+    register_at(&engine, &connection_id, 1_600_000_000);
 
-    let (status, body) = call(&engine, "DELETE", "probe-del", Vec::new()).await;
+    let (status, body) = call(&engine, "DELETE", &connection_id, Vec::new()).await;
     assert_eq!(status, 204, "expected HTTP 204, got {status}");
     assert!(body.is_empty(), "a 204 carries no body, got {body:?}");
 }
@@ -242,9 +239,10 @@ async fn delete_connection_answers_204_with_an_empty_body() {
 #[tokio::test]
 async fn post_to_connection_answers_200_with_an_empty_body() {
     let engine: Arc<InMemoryEngine> = Arc::new(InMemoryEngine::new());
-    register_at(&engine, "probe-post", 1_600_000_000);
+    let connection_id = minted("probe-post");
+    register_at(&engine, &connection_id, 1_600_000_000);
 
-    let (status, body) = call(&engine, "POST", "probe-post", b"payload".to_vec()).await;
+    let (status, body) = call(&engine, "POST", &connection_id, b"payload".to_vec()).await;
     assert_eq!(status, 200, "expected HTTP 200, got {status}");
     assert!(body.is_empty(), "the success response carries no body, got {body:?}");
 }

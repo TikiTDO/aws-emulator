@@ -40,9 +40,7 @@
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
 
-use smithy_server_runtime::{
-    http, BoxFuture, ErasedOperation, OperationError, Refusal, Refused, Service,
-};
+use smithy_server_runtime::{http, BoxFuture, ErasedOperation, Refusal, Refused, Service};
 use std::sync::Arc;
 
 /// The path segment every modeled operation of this service is bound under:
@@ -244,22 +242,23 @@ impl ErasedOperation for InvokePathPrefixed {
     }
 }
 
-/// Answers a `PostToConnection` whose `Data` payload is larger than the model allows
-/// with that operation's own modeled `PayloadTooLargeException` (HTTP 413).
+/// Answers a `PostToConnection` whose `Data` payload is larger than the model allows with
+/// a BARE HTTP 413: the status alone, no body and no `x-amzn-errortype`.
 ///
 /// WHY this is a seam and not a line in the handler: `Data` carries
-/// `@length(min: 0, max: 131072)` AND `PostToConnection` declares
-/// `PayloadTooLargeException` with `@httpError(413)`. The framework validates every
-/// modeled constraint BEFORE a handler runs and renders a violation as the
-/// protocol's generic refusal (HTTP 400), so the modeled 413 is unreachable from
-/// inside `handle` — the request is refused before it gets there. The model's routing
-/// key cannot distinguish an over-limit payload either, which is exactly what
-/// [`Service::override_operation`] exists for: it routes that one request here, and
-/// this answers the error the model declares for it.
+/// `@length(min: 0, max: 131072)`, and the framework validates every modelled constraint
+/// BEFORE a handler runs and renders a violation as the protocol's generic refusal (HTTP
+/// 400), so the 413 is unreachable from inside `handle` — the request is refused before it
+/// gets there. The model's routing key cannot distinguish an over-limit payload either,
+/// which is exactly what [`Service::override_operation`] exists for.
 ///
-/// Every wire fact comes from the model, through the operation's own error enum: the
-/// status, the error code and the error schema are read off
-/// [`OperationError`], never spelled out here.
+/// WHY the answer is bare rather than the modelled `PayloadTooLargeException` envelope: the
+/// ceiling is enforced by the `@connections` endpoint IN FRONT of the modelled surface, and
+/// what that endpoint answers is recorded as the status with no error shape named at all —
+/// so a restJson1 client resolves no modelled error from it and reports the status itself as
+/// the error code. It is answered BEFORE the `ConnectionId` is read for the same reason:
+/// the request is refused on its size by the endpoint, whatever the id says, which is why
+/// `override_operation` routes it here ahead of everything else.
 struct OversizedPayload;
 
 impl ErasedOperation for OversizedPayload {
@@ -270,27 +269,31 @@ impl ErasedOperation for OversizedPayload {
         _ctx: &'r smithy_server_runtime::OperationContext<'r>,
     ) -> BoxFuture<'r, aws_smithy_runtime_api::http::Response> {
         Box::pin(async move {
-            // `Data` is the `@httpPayload` member, so the request body IS the payload
-            // whose size broke the bound. `override_operation` only routes here for a
-            // buffered body it already measured, so this read agrees with that measure;
-            // 0 is the inert fallback for a body that is somehow no longer buffered.
-            let actual = req.body().bytes().map_or(0, <[u8]>::len);
-            let modeled =
-                crate::ops::post_to_connection::PostToConnectionErrorModeled::PayloadTooLargeException(
-                    crate::ops::post_to_connection::payload_too_large(actual),
-                );
-            svc.definition()
-                .protocol()
-                .serialize_error(
-                    modeled.as_serializable(),
-                    modeled.variant_schema(),
-                    modeled.shape_name(),
-                    modeled.http_status(),
-                )
-                .unwrap_or_else(|e| svc.definition().framework_error_response(e, req))
+            let _ = (svc, req);
+            oversized_payload_response()
         })
     }
 }
+
+/// The bare HTTP 413 [`OversizedPayload`] answers: the status, an empty body, and nothing
+/// that names an error shape.
+///
+/// The status is this module's own constant, so the conversion cannot fail.
+fn oversized_payload_response() -> aws_smithy_runtime_api::http::Response {
+    let status = aws_smithy_runtime_api::http::StatusCode::try_from(PAYLOAD_TOO_LARGE_STATUS)
+        .expect("the payload ceiling's status is a valid constant");
+    let mut response = aws_smithy_runtime_api::http::Response::new(
+        status,
+        aws_smithy_types::body::SdkBody::empty(),
+    );
+    response.headers_mut().insert("content-length", "0");
+    response
+}
+
+/// The status the `@connections` endpoint refuses an over-limit `Data` payload with: 413,
+/// the status the model also declares for `PayloadTooLargeException`
+/// (`smithy_query(query="shape", shape="PayloadTooLargeException")`, `@httpError(413)`).
+const PAYLOAD_TOO_LARGE_STATUS: u16 = 413;
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// Build this service from the shared engine. The engine is threaded into the
@@ -341,9 +344,9 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         let addressed = routing_view.as_ref().unwrap_or(req);
 
         // The second is a `PostToConnection` whose `Data` payload is past the modeled
-        // `@length` maximum. See [`OversizedPayload`] for why the modeled
-        // `PayloadTooLargeException` (413) cannot be answered from the handler. Both
-        // the operation name and the bound are read from the model, not spelled out.
+        // `@length` maximum. See [`OversizedPayload`] for what the `@connections` endpoint
+        // answers such a request and why the handler cannot. Both the operation name and
+        // the bound are read from the model, not spelled out.
         let routing_key = self.definition().protocol().routing_key(addressed).ok()?;
         if routing_key
             == <crate::ops::post_to_connection::PostToConnection<Eng> as smithy_server_runtime::Operation>::NAME
@@ -360,8 +363,9 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
                 .bytes()
                 .is_some_and(|body| body.len() > crate::ops::post_to_connection::MAX_DATA_BYTES);
             if over_limit {
-                // The payload is judged before the path: an over-limit post answers the
-                // same modeled 413 whether or not it carried an invoke-path prefix.
+                // The payload is judged before the path AND before the `ConnectionId`: an
+                // over-limit post answers the same 413 whether or not it carried an
+                // invoke-path prefix and whatever its id says.
                 return Some(&self.oversized_payload as &dyn ErasedOperation);
             }
         }

@@ -7,14 +7,14 @@
 //! (in send order) and advances its `LastActiveAt` — data flowed, so the connection was
 //! active.
 //!
-//! A connection id this service ISSUED whose connection has since been deleted answers
-//! the modeled `GoneException` (HTTP 410) and delivers nothing. A `ConnectionId` it never
-//! issued identifies no connection at all and is refused HTTP 400 `BadRequestException`
-//! before any connection is looked up; see [`crate::state`] for the registration rule
-//! and for why the two refusals are split. A
-//! payload past the modeled `@length` maximum answers `PayloadTooLargeException`
-//! (HTTP 413) — see [`MAX_DATA_BYTES`] and `crate::service::OversizedPayload` for where
-//! that bound is enforced.
+//! A `ConnectionId` of the shape API Gateway mints whose connection is not open at the
+//! endpoint the request reached answers the modeled `GoneException` (HTTP 410) and delivers
+//! nothing. A `ConnectionId` that could never have been minted is refused HTTP 400
+//! `BadRequestException`; see [`crate::state`] for the shape rule, for the endpoint a
+//! connection is addressed through, and for why the two refusals are split. A
+//! payload past the modeled `@length` maximum is refused by the endpoint in front of this
+//! operation — see [`MAX_DATA_BYTES`] and `crate::service::OversizedPayload` for where
+//! that bound is enforced and what it answers.
 //!
 //! ## Shape of an operation
 //!
@@ -79,22 +79,9 @@ use super::types::*;
 /// Source: the model's `@length(min: 0, max: 131072)` on the `Data` blob shape
 /// (`smithy_query(query="shape", shape="Data")`), which is the same 128 KiB frame limit
 /// the modeled `PayloadTooLargeException` (HTTP 413) describes. Anything past it is
-/// refused; nothing is delivered.
+/// refused by the endpoint in front of this operation (`crate::service::OversizedPayload`);
+/// nothing is delivered.
 pub const MAX_DATA_BYTES: usize = 131_072;
-
-/// The modeled `PayloadTooLargeException` for a `Data` payload of `actual` bytes.
-///
-/// The message is built from the request — the size that was sent and the bound it
-/// broke — so a caller can fix the request from the text alone. Shared with
-/// `crate::service`, which refuses an over-limit payload the framework's own
-/// constraint boundary would otherwise answer for.
-pub fn payload_too_large(actual: usize) -> PayloadTooLargeException {
-    PayloadTooLargeException {
-        message: Some(format!(
-            "Data payload of {actual} bytes exceeds the maximum of {MAX_DATA_BYTES} bytes"
-        )),
-    }
-}
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -191,38 +178,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
-        // Backstop for the modelled `@length` bound. In the served path an over-limit
-        // payload never reaches here — `crate::service::EmulatedService::override_operation`
-        // answers it with the same modelled error before any handler runs, because the
-        // framework's constraint boundary would otherwise refuse it as a generic 400.
-        // Keeping the check here means the bound holds for any caller of `handle`, and
-        // it states the order: the payload is judged before the connection is resolved,
-        // so an over-limit payload is `PayloadTooLargeException` whether or not the id
-        // is registered. Nothing is delivered either way.
-        if input.data.len() > MAX_DATA_BYTES {
-            return Err(PostToConnectionErrorModeled::PayloadTooLargeException(
-                payload_too_large(input.data.len()),
-            )
-            .into());
-        }
-
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(crate::state::registry_unavailable(Self::NAME));
         };
-
-        let mut guard = state.lock();
-        // A `ConnectionId` this service never issued identifies no connection of its, so
-        // the request is refused before any connection is looked up: `GoneException`
-        // would tell the caller an id it never minted once named a live connection, and a
-        // caller prunes its own record of a connection on that answer
+        // A `ConnectionId` that is not of the shape this service mints names no connection
+        // anywhere, so the request is refused from the VALUE alone, before the registry is
+        // consulted: a caller prunes its own record of a connection on the 410, so
+        // answering that for a malformed id would make it delete a record it should keep
         // (`crate::state::invalid_connection_id`).
-        if !guard.identifies_a_connection(&input.connection_id) {
+        if !crate::state::is_well_formed_connection_id(&input.connection_id) {
             return Err(crate::state::invalid_connection_id(&input.connection_id));
         }
-        let Some(connection) = guard.connections.get_mut(&input.connection_id) else {
-            // Nothing is recorded for a connection that was issued and has since been
-            // deleted.
+        // Which api's connections this request addresses is decided by the endpoint it
+        // reached; see `crate::state`.
+        let addressed_at = crate::state::addressed_at(ctx.parts());
+
+        let mut guard = state.lock();
+        let Some(connection) =
+            guard.connection_at_mut(&input.connection_id, addressed_at.as_deref())
+        else {
+            // Nothing is recorded for a connection that is not open at this endpoint: it
+            // was never minted, it was deleted, or it belongs to another api.
             return Err(PostToConnectionErrorModeled::GoneException(GoneException {}).into());
         };
         // DELIVER it first, where the connection is carried on a live socket: a post is

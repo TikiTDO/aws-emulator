@@ -7,11 +7,11 @@
 //!
 //! Removal is what makes the connection gone: every later `GetConnection`,
 //! `PostToConnection` and `DeleteConnection` on the same id answers the modeled
-//! `GoneException` (HTTP 410), since a missing entry for an ISSUED id is this service's
-//! single source of truth for that error. A `ConnectionId` this service never issued
-//! identifies no connection to delete and is refused HTTP 400 `BadRequestException`
-//! instead. See [`crate::state`] for the registration rule and for why the two refusals
-//! are split.
+//! `GoneException` (HTTP 410), since a missing entry for a well-formed id is this service's
+//! single source of truth for that error. A `ConnectionId` that could never have been
+//! minted names no connection to delete and is refused HTTP 400 `BadRequestException`
+//! instead. See [`crate::state`] for the shape rule, for the endpoint a connection is
+//! addressed through, and for why the two refusals are split.
 //!
 //! ## Shape of an operation
 //!
@@ -161,21 +161,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(crate::state::registry_unavailable(Self::NAME));
         };
-
-        // Removing the entry IS the delete: the registry is the only record of the
-        // connection, so a second delete of the same id finds nothing. An id this
-        // service never issued is refused as an invalid `ConnectionId` instead, before
-        // anything is removed (`crate::state::invalid_connection_id`).
-        let mut guard = state.lock();
-        if !guard.identifies_a_connection(&input.connection_id) {
+        // A `ConnectionId` that is not of the shape this service mints names no connection
+        // anywhere, so it is refused from the VALUE alone, before anything is removed
+        // (`crate::state::invalid_connection_id`).
+        if !crate::state::is_well_formed_connection_id(&input.connection_id) {
             return Err(crate::state::invalid_connection_id(&input.connection_id));
         }
-        let removed = guard.connections.remove(&input.connection_id);
-        if removed.is_none() {
+        // Which api's connections this request addresses is decided by the endpoint it
+        // reached; see `crate::state`.
+        let addressed_at = crate::state::addressed_at(ctx.parts());
+
+        // Removing the entry IS the delete: the registry is the only record of the
+        // connection, so a second delete of the same id finds nothing. The connection's own
+        // live socket is served by the task that holds the other end of its channel, so
+        // dropping the record is also what closes that socket.
+        let removed = state
+            .lock()
+            .remove_connection_at(&input.connection_id, addressed_at.as_deref());
+        if !removed {
             return Err(DeleteConnectionErrorModeled::GoneException(GoneException {}).into());
         }
 

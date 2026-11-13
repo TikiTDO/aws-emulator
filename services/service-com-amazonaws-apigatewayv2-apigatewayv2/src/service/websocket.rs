@@ -98,6 +98,11 @@
 
 pub mod connect_authorizer;
 pub mod dispatch;
+// What the api's own socket answers a request on it that is NOT an opening handshake: the
+// address that socket landed on is the api's whole `ApiEndpoint`, and the `@connections`
+// management API is published at that same endpoint, so an ordinary HTTP request made there
+// is answered by this emulator's own front door rather than dropped.
+pub mod endpoint_http;
 pub mod event;
 pub mod integration;
 // The DATA MAPPING `Integration$RequestParameters` applies to a WebSocket call, which the
@@ -215,6 +220,29 @@ impl<'r> Handshake<'r> {
             connection: req.headers().get("connection"),
             upgrade: req.headers().get("upgrade"),
             key: req.headers().get(SEC_WEBSOCKET_KEY),
+        }
+    }
+
+    /// The reading of a handshake read off a SOCKET, whose request head this service parsed
+    /// itself ([`transport`]) rather than received as a built request.
+    ///
+    /// The same six fields, so one rule ([`Self::is_opening`]) decides what an opening
+    /// handshake is wherever the bytes came from.
+    pub(crate) fn of_fields(
+        method: &'r str,
+        host: &'r str,
+        path: &'r str,
+        connection: Option<&'r str>,
+        upgrade: Option<&'r str>,
+        key: Option<&'r str>,
+    ) -> Self {
+        Self {
+            method,
+            host,
+            path,
+            connection,
+            upgrade,
+            key,
         }
     }
 

@@ -27,9 +27,14 @@
 //! Each row of each table differs along what the rule generalises over: the operation
 //! (all three), the endpoint form the caller addresses (the modelled path, a deployed
 //! stage's invoke path, a custom domain's two-segment base path, on three different
-//! hosts), the connection-id form, the failure class (`GoneException` for a connection
-//! that was issued and then deleted, `BadRequestException` for an id this service never
-//! issued, `PayloadTooLargeException` for an over-limit payload) and the payload size.
+//! hosts), the connection-id form, the failure class (`GoneException` for a well-formed id
+//! naming no open connection, `BadRequestException` for an id that could never have been
+//! minted) and the payload size.
+//!
+//! The ONE answer of this surface that is NOT in this envelope is the refusal of an
+//! over-limit `PostToConnection` payload, which the endpoint in front of the modelled
+//! operations answers itself; `the_oversized_payload_refusal` pins that, and
+//! `crate::service::OversizedPayload` says why.
 //!
 //! The router, request builder and response readers live in `crate::support`.
 
@@ -42,7 +47,7 @@ use http::HeaderMap;
 
 use service_com_amazonaws_apigatewaymanagementapi_apigatewaymanagementapi as mgmt;
 
-use crate::support::{call_with_headers, register, HOST};
+use crate::support::{call_with_headers, minted, register, HOST};
 
 /// `GoneException` is a client error with `@httpError(410)`
 /// (`smithy_query(query="shape",shape="GoneException")`), and it is the common error all
@@ -50,18 +55,18 @@ use crate::support::{call_with_headers, register, HOST};
 const GONE_STATUS: u16 = 410;
 const GONE_TYPE: &str = "GoneException";
 
-/// The refusal of a `ConnectionId` this service never ISSUED. The model declares no
+/// The refusal of a `ConnectionId` that could never have been minted. The model declares no
 /// client-input error for these operations, so the status and code are the ones API
 /// Gateway words such a refusal in (`crate::state::invalid_connection_id`), and the
 /// envelope is the service's own restJson1 one, exactly as a modelled failure's is.
 const INVALID_ID_STATUS: u16 = 400;
 const INVALID_ID_TYPE: &str = "BadRequestException";
 
-/// `PayloadTooLargeException` is a client error with `@httpError(413)`
-/// (`smithy_query(query="shape",shape="PayloadTooLargeException")`), declared by
-/// `PostToConnection` for a `Data` payload past the modelled `@length` maximum.
+/// The status the `@connections` endpoint refuses an over-limit `Data` payload with — the
+/// same 413 the model declares for `PayloadTooLargeException`
+/// (`smithy_query(query="shape",shape="PayloadTooLargeException")`), answered by the
+/// endpoint in front of the modelled operations and so NOT in the modelled envelope.
 const TOO_LARGE_STATUS: u16 = 413;
-const TOO_LARGE_TYPE: &str = "PayloadTooLargeException";
 
 /// The media type restJson1 serializes a body in, success or failure.
 const JSON: &str = "application/json";
@@ -100,20 +105,29 @@ const ENDPOINTS: [(&str, &str, &str); 3] = [
 ///
 /// `GetConnectionRequest.ConnectionId` targets `__string` with `@httpLabel` and
 /// `@required` and NO `@pattern` or `@length`
-/// (`smithy_query(query="shape",shape="GetConnectionRequest")`), so the model declares no
-/// syntax for a connection id: whether the registry HOLDS the id is the only thing that
-/// decides which answer a request gets. The rows therefore span the padded base64-shaped
-/// form AWS mints, an unpadded one, a dashed one, a single character and a long
-/// underscore-separated one — every one of them answers alike.
-const ID_FORMS: [(&str, &str); 5] = [
-    ("a padded base64-shaped id", "Lx9ZKcvPmjQCJhA="),
-    ("an unpadded hex-shaped id", "0123456789abcdef"),
-    ("a dashed id", "cid-with-dashes"),
+/// (`smithy_query(query="shape",shape="GetConnectionRequest")`), so what decides the answer
+/// is the shape API Gateway MINTS an id in (`crate::state::is_well_formed_connection_id`).
+/// These rows are of that shape — the token this service hands out — since every row here
+/// addresses a connection that exists or existed.
+fn id_forms() -> Vec<(&'static str, String)> {
+    vec![
+        ("a token carrying this case's name", minted("envelope-1")),
+        ("another token of that shape", minted("envelope-2")),
+        (
+            "an all-A token of that shape",
+            "AAAAAAAAAAAAAAA=".to_string(),
+        ),
+    ]
+}
+
+/// Connection-id forms that could never have been minted, which is what the 400 refusal is
+/// about: a single character, text that is not base64, an unpadded token and base64 of the
+/// wrong number of bytes.
+const MALFORMED_ID_FORMS: [(&str, &str); 4] = [
     ("a single character", "x"),
-    (
-        "a long underscore-separated id",
-        "ZZZ_0000000000000000000000000000",
-    ),
+    ("a dashed id", "cid-with-dashes"),
+    ("an unpadded token", "Fabc1cWIPHcCJ7A"),
+    ("base64 of too many bytes", "0123456789abcdef"),
 ];
 
 /// A registration instant in the past, so an instant the service writes later is
@@ -175,19 +189,20 @@ fn assert_modelled_envelope(
     );
 }
 
-/// An id this service never ISSUED identifies no connection of its, so it is refused as
-/// an invalid `ConnectionId` — HTTP 400 `BadRequestException` — in the SAME envelope the
+/// An id that could never have been minted names no connection anywhere, so it is refused
+/// as an invalid `ConnectionId` — HTTP 400 `BadRequestException` — in the SAME envelope the
 /// modelled failures travel in, for every operation, every endpoint form and every id
 /// form.
 #[tokio::test]
-async fn an_id_this_service_never_issued_is_refused_in_the_same_envelope() {
+async fn a_malformed_connection_id_is_refused_in_the_same_envelope() {
     for (endpoint, host, prefix) in ENDPOINTS {
-        for (id_form, connection_id) in ID_FORMS {
+        for (id_form, connection_id) in MALFORMED_ID_FORMS {
             for method in METHODS {
                 // One OTHER connection is registered, so each failure below is about the
                 // id that was asked for and not about an empty registry.
                 let engine: Arc<InMemoryEngine> = Arc::new(InMemoryEngine::new());
-                register(&engine, "registered", "192.0.2.1", "other/1", connected_at());
+                let open = minted("open");
+                register(&engine, &open, "192.0.2.1", "other/1", connected_at());
 
                 let path = format!("{prefix}/@connections/{connection_id}");
                 let payload = if method == "POST" {
@@ -218,9 +233,9 @@ async fn an_id_this_service_never_issued_is_refused_in_the_same_envelope() {
 #[tokio::test]
 async fn a_deleted_connection_answers_gone_in_the_modelled_envelope() {
     for (endpoint, host, prefix) in ENDPOINTS {
-        for (id_form, connection_id) in ID_FORMS {
+        for (id_form, connection_id) in id_forms() {
             let engine: Arc<InMemoryEngine> = Arc::new(InMemoryEngine::new());
-            register(&engine, connection_id, "198.51.100.7", "sender/1", connected_at());
+            register(&engine, &connection_id, "198.51.100.7", "sender/1", connected_at());
 
             let path = format!("{prefix}/@connections/{connection_id}");
             let case = format!("{path} on {host} ({endpoint}, {id_form})");
@@ -236,7 +251,7 @@ async fn a_deleted_connection_answers_gone_in_the_modelled_envelope() {
                 String::from_utf8_lossy(&body)
             );
             assert!(
-                mgmt::state::connection(&*engine, connection_id).is_none(),
+                mgmt::state::connection(&*engine, &connection_id).is_none(),
                 "case {case:?}: the deleted record must be gone from the registry"
             );
 
@@ -258,32 +273,44 @@ async fn a_deleted_connection_answers_gone_in_the_modelled_envelope() {
     }
 }
 
-/// The other failure this service answers from a request is `PostToConnection`'s
-/// `PayloadTooLargeException`, and it travels in the SAME envelope: the model's 413, the
-/// restJson1 media type and its own shape in `x-amzn-errortype`. Sizes span the first
-/// byte past the published maximum and well past it.
+/// The ONE answer of this surface that is not in the modelled envelope: the refusal of an
+/// over-limit `PostToConnection` payload, which the `@connections` ENDPOINT answers in
+/// front of the modelled operations — the status alone, with no body and nothing naming an
+/// error shape, so a restJson1 client resolves no modelled error from it and reports the
+/// status itself. Sizes span the first byte past the published maximum and well past it.
 #[tokio::test]
-async fn an_oversized_payload_answers_413_in_the_modelled_envelope() {
+async fn the_oversized_payload_refusal_is_the_status_alone() {
     for (endpoint, host, prefix) in ENDPOINTS {
         for size in [MAX_DATA_BYTES + 1, MAX_DATA_BYTES + 1024, MAX_DATA_BYTES * 2] {
             let engine: Arc<InMemoryEngine> = Arc::new(InMemoryEngine::new());
-            let connection_id = "Lx9ZKcvPmjQCJhA=";
-            register(&engine, connection_id, "203.0.113.9", "sender/2", connected_at());
+            let connection_id = minted("oversize");
+            register(&engine, &connection_id, "203.0.113.9", "sender/2", connected_at());
 
             let path = format!("{prefix}/@connections/{connection_id}");
-            let answer =
+            let case = format!("POST {size} bytes to {path} on {host} ({endpoint})");
+            let (status, headers, body) =
                 call_with_headers(&engine, host, "POST", &path, vec![b'x'; size]).await;
-            assert_modelled_envelope(
-                &format!("POST {size} bytes to {path} on {host} ({endpoint})"),
-                TOO_LARGE_STATUS,
-                TOO_LARGE_TYPE,
-                &answer,
+            assert_eq!(
+                status, TOO_LARGE_STATUS,
+                "case {case:?}: expected HTTP {TOO_LARGE_STATUS}, got {status} {:?}",
+                String::from_utf8_lossy(&body)
             );
-            let stored = mgmt::state::connection(&*engine, connection_id)
+            assert_eq!(
+                header(&headers, "x-amzn-errortype"),
+                "<absent>",
+                "case {case:?}: the refusal names no error shape, got {:?}",
+                header(&headers, "x-amzn-errortype")
+            );
+            assert!(
+                body.is_empty(),
+                "case {case:?}: the refusal carries no body, got {:?}",
+                String::from_utf8_lossy(&body)
+            );
+            let stored = mgmt::state::connection(&*engine, &connection_id)
                 .expect("the connection must still be registered");
             assert_eq!(
                 stored.delivered_count, 0,
-                "case POST {size} bytes: a refused payload must not be delivered, got \
+                "case {case:?}: a refused payload must not be delivered, got \
                  {} deliveries",
                 stored.delivered_count
             );
@@ -297,9 +324,9 @@ async fn an_oversized_payload_answers_413_in_the_modelled_envelope() {
 #[tokio::test]
 async fn a_registered_connection_is_reported_in_the_restjson_media_type() {
     for (endpoint, host, prefix) in ENDPOINTS {
-        for (id_form, connection_id) in ID_FORMS {
+        for (id_form, connection_id) in id_forms() {
             let engine: Arc<InMemoryEngine> = Arc::new(InMemoryEngine::new());
-            register(&engine, connection_id, "192.0.2.44", "reader/1", connected_at());
+            register(&engine, &connection_id, "192.0.2.44", "reader/1", connected_at());
 
             let path = format!("{prefix}/@connections/{connection_id}");
             let case = format!("GET {path} on {host} ({endpoint}, {id_form})");

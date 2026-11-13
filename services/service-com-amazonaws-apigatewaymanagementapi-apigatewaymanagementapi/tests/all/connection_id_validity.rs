@@ -1,31 +1,32 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! How the three `@connections` operations refuse a `ConnectionId` that identifies no
-//! connection of this service, driven over HTTP through the same `MultiServiceRouter` the
-//! production emulator serves with.
+//! How the three `@connections` operations read the `ConnectionId` a request sent, driven
+//! over HTTP through the same `MultiServiceRouter` the production emulator serves with.
 //!
-//! The rule these cases assert, one level above the recorded case (one `PostToConnection`
-//! to a padded base64-shaped id nothing had issued):
+//! The rule these cases assert, one level above the recorded case (one well-formed token
+//! nothing had minted, and four malformed ones):
 //!
-//! > A connection id is not an arbitrary string: API Gateway issues it when a client's
-//! > handshake completes, and the three `@connections` operations address a connection BY
-//! > it. So a `ConnectionId` this service never issued identifies no connection at all and
-//! > is refused — before any connection is looked up, and without touching anything —
-//! > with HTTP 400 `BadRequestException` and the message `Invalid connectionId: ` plus the
-//! > `ConnectionId` the request sent. `GoneException` (HTTP 410) is reserved for an id it
-//! > DID issue whose connection has since closed: "The connection with the provided id no
-//! > longer exists" (`smithy_query(query="shape", shape="GoneException")`).
+//! > A connection id is not an arbitrary string: API Gateway MINTS it when a client's
+//! > handshake completes — standard base64 of `CONNECTION_ID_BYTES` bytes, the
+//! > 16-character single-padded token — and the three `@connections` operations address a
+//! > connection BY it. So the answer is decided by the id's SHAPE first: a value that could
+//! > never have been minted is refused, from the value alone and before the registry is
+//! > consulted, with HTTP 400 `BadRequestException` and the message `Invalid connectionId: `
+//! > plus the `ConnectionId` the request sent; a value of that shape naming no open
+//! > connection is the modelled `GoneException` (HTTP 410, memberless, so its message is
+//! > empty) — whether it was never minted or minted and since closed.
 //!
 //! WHY the two are not interchangeable: a caller that pushes to a connection prunes its
 //! own record of that connection on the 410, which is the right thing to do for a socket
-//! that has closed and the wrong thing to do for an id it got wrong — answering 410 there
+//! that has closed and the wrong thing to do for an id it mis-spelled — answering 410 there
 //! makes it delete a record it should keep, and a 410 carries no message (the modelled
-//! shape has no members), so nothing says what was wrong with the request.
+//! shape has no members), so nothing would say what was wrong with the request.
 //!
-//! The rows span what the rule generalises over: the form of the `ConnectionId` (the
-//! padded base64 shape AWS mints, an all-`A` one of that same shape, unpadded, dashed,
-//! very short, very long, percent-encoded), the operation (all three), and the connection
-//! id's history (never issued, open, closed).
+//! The rows span what the rule generalises over: the FORM of the `ConnectionId` (the padded
+//! base64 shape AWS mints, an all-`A` one of that same shape, and — malformed — an unpadded
+//! token, a dashed one, a single character, a very long one, text that is not base64 at all,
+//! base64 of the wrong number of bytes), the operation (all three), and the connection id's
+//! history (never minted, open, closed).
 //!
 //! The router, request builder and response readers live in `crate::support`.
 
@@ -36,35 +37,71 @@ use engine::InMemoryEngine;
 
 use service_com_amazonaws_apigatewaymanagementapi_apigatewaymanagementapi as mgmt;
 
-use crate::support::{call, error_code, register};
+use crate::support::{call, call_at, error_code, minted, register, HOST};
 
-/// The status and code API Gateway refuses a `ConnectionId` that identifies no connection
-/// with, and the fixed text of its message.
+/// The status and code API Gateway refuses a `ConnectionId` that could never have been
+/// minted with, and the fixed text of its message.
 const INVALID_STATUS: u16 = 400;
 const INVALID_TYPE: &str = "BadRequestException";
 const INVALID_MESSAGE: &str = "Invalid connectionId: ";
 
-/// The modelled refusal for an issued id whose connection has closed
+/// The modelled refusal for a well-formed id that names no open connection
 /// (`@httpError(410)`).
 const GONE_STATUS: u16 = 410;
 const GONE_TYPE: &str = "GoneException";
 
-/// `ConnectionId` forms. The model declares no syntax for one — `__string` with
-/// `@httpLabel` and `@required`, no `@pattern` and no `@length`
-/// (`smithy_query(query="shape", shape="PostToConnectionRequest")`) — so what decides the
-/// answer is whether this service issued the id, which is what these rows vary against.
-const ID_FORMS: [(&str, &str); 7] = [
-    ("the padded base64 shape AWS mints", "Lx9ZKcvPmjQCJhA="),
-    ("an all-A id of that same shape", "AAAAAAAAAAAAAAA="),
-    ("an unpadded hex-shaped id", "0123456789abcdef"),
-    ("a dashed id", "cid-with-dashes"),
-    ("a single character", "x"),
+/// `ConnectionId` forms that ARE of the shape API Gateway mints: standard base64 of
+/// `mgmt::state::CONNECTION_ID_BYTES` bytes.
+fn well_formed_ids() -> Vec<(&'static str, String)> {
+    vec![
+        ("the padded base64 shape AWS mints", minted("validity-1")),
+        ("another token of that same shape", minted("validity-2")),
+        (
+            "an all-A id of that same shape",
+            "AAAAAAAAAAAAAAA=".to_string(),
+        ),
+    ]
+}
+
+/// `ConnectionId` forms that could never have been minted, and so are refused from the
+/// value alone: the form, the token as the request SENDS it (percent-encoded where a path
+/// segment has to be), and the value the service reads back out of the path.
+///
+/// The rows span the ways a value fails the shape: the alphabet, the padding, the decoded
+/// length (too few bytes, too many), length extremes, and a token whose characters a path
+/// segment carries encoded.
+const MALFORMED_IDS: [(&str, &str, &str); 8] = [
+    ("a single character", "x", "x"),
+    (
+        "text that is not base64, percent-encoded as a path segment carries it",
+        "not%20base64%21%21",
+        "not base64!!",
+    ),
+    ("an unpadded token", "Fabc1cWIPHcCJ7A", "Fabc1cWIPHcCJ7A"),
+    ("a dashed id", "cid-with-dashes", "cid-with-dashes"),
     (
         "a long underscore-separated id",
         "ZZZ_0000000000000000000000000000",
+        "ZZZ_0000000000000000000000000000",
     ),
-    ("an id of base64url characters", "a-b_c9DEF0123456"),
+    (
+        "an id of base64url characters",
+        "a-b_c9DEF0123456",
+        "a-b_c9DEF0123456",
+    ),
+    ("base64 of too few bytes", "jR4tQ%3D%3D", "jR4tQ=="),
+    (
+        "base64 of too many bytes",
+        "0123456789abcdef",
+        "0123456789abcdef",
+    ),
 ];
+
+/// A 200-character token, the longest form the recorded cases send. Built rather than
+/// spelled out, so the length is readable.
+fn very_long_id() -> String {
+    "A".repeat(200)
+}
 
 /// The three operations, by the method each is reached with, and the payload each sends.
 fn operations() -> Vec<(&'static str, Vec<u8>)> {
@@ -92,16 +129,30 @@ fn message(body: &bytes::Bytes) -> String {
 }
 
 #[tokio::test]
-async fn an_id_this_service_never_issued_is_refused_as_an_invalid_connection_id() {
-    for (id_form, connection_id) in ID_FORMS {
+async fn a_malformed_connection_id_is_refused_as_an_invalid_connection_id() {
+    let mut forms: Vec<(&str, String, String)> = MALFORMED_IDS
+        .iter()
+        .map(|(form, sent, read)| (*form, (*sent).to_string(), (*read).to_string()))
+        .collect();
+    forms.push(("a 200-character token", very_long_id(), very_long_id()));
+
+    for (id_form, sent, read) in forms {
         for (method, payload) in operations() {
             // One OTHER connection is open, so each refusal below is about the id that
             // was asked for and not about an empty registry.
             let engine: Arc<InMemoryEngine> = Arc::new(InMemoryEngine::new());
-            register(&engine, "issued", "192.0.2.1", "other/1", connected_at());
+            let open = minted("open");
+            register(&engine, &open, "192.0.2.1", "other/1", connected_at());
 
-            let case = format!("{method} on {id_form} ({connection_id})");
-            let (status, body) = call(&engine, method, connection_id, payload).await;
+            let case = format!("{method} on {id_form} ({sent})");
+            let (status, body) = call_at(
+                &engine,
+                HOST,
+                method,
+                &format!("/@connections/{sent}"),
+                payload,
+            )
+            .await;
             assert_eq!(
                 status, INVALID_STATUS,
                 "case {case:?}: expected HTTP {INVALID_STATUS}, got {status} {body:?}"
@@ -113,7 +164,7 @@ async fn an_id_this_service_never_issued_is_refused_as_an_invalid_connection_id(
             );
             assert_eq!(
                 message(&body),
-                format!("{INVALID_MESSAGE}{connection_id}"),
+                format!("{INVALID_MESSAGE}{read}"),
                 "case {case:?}: expected the message to name the id the request sent, \
                  got {body:?}"
             );
@@ -121,10 +172,10 @@ async fn an_id_this_service_never_issued_is_refused_as_an_invalid_connection_id(
             // The refusal changed nothing: no connection was registered for the id, and
             // the open one is untouched.
             assert!(
-                mgmt::state::connection(&*engine, connection_id).is_none(),
+                mgmt::state::connection(&*engine, &read).is_none(),
                 "case {case:?}: a refused call must not register the id it refused"
             );
-            let other = mgmt::state::connection(&*engine, "issued")
+            let other = mgmt::state::connection(&*engine, &open)
                 .unwrap_or_else(|| panic!("case {case:?}: the open connection must still exist"));
             assert_eq!(
                 other.delivered_count, 0,
@@ -136,37 +187,78 @@ async fn an_id_this_service_never_issued_is_refused_as_an_invalid_connection_id(
 }
 
 #[tokio::test]
-async fn an_issued_id_is_served_while_its_connection_is_open_and_gone_once_it_closes() {
-    for (id_form, connection_id) in ID_FORMS {
-        // Open: the id this service issued names a live connection, so each operation
-        // serves it.
+async fn a_well_formed_id_that_names_no_open_connection_is_gone() {
+    for (id_form, connection_id) in well_formed_ids() {
+        for (method, payload) in operations() {
+            // One OTHER connection is open, so each refusal below is about the id that
+            // was asked for and not about an empty registry.
+            let engine: Arc<InMemoryEngine> = Arc::new(InMemoryEngine::new());
+            let open = minted("open");
+            register(&engine, &open, "192.0.2.1", "other/1", connected_at());
+
+            let case = format!("{method} on {id_form} ({connection_id})");
+            let (status, body) = call(&engine, method, &connection_id, payload).await;
+            assert_eq!(
+                status, GONE_STATUS,
+                "case {case:?}: a well-formed id naming no open connection must answer \
+                 HTTP {GONE_STATUS}, got {status} {body:?}"
+            );
+            assert_eq!(
+                error_code(&body),
+                GONE_TYPE,
+                "case {case:?}: expected {GONE_TYPE}, got {body:?}"
+            );
+            assert_eq!(
+                message(&body),
+                "<no message>",
+                "case {case:?}: GoneException is memberless, so it carries no message, \
+                 got {body:?}"
+            );
+            assert!(
+                mgmt::state::connection(&*engine, &connection_id).is_none(),
+                "case {case:?}: a refused call must not register the id it refused"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_minted_id_is_served_while_its_connection_is_open_and_gone_once_it_closes() {
+    for (id_form, connection_id) in well_formed_ids() {
+        // Open: the id names a live connection, so each operation serves it.
         let engine: Arc<InMemoryEngine> = Arc::new(InMemoryEngine::new());
-        register(&engine, connection_id, "198.51.100.7", "sender/1", connected_at());
+        register(
+            &engine,
+            &connection_id,
+            "198.51.100.7",
+            "sender/1",
+            connected_at(),
+        );
 
         let case = format!("{id_form} ({connection_id})");
-        let (status, body) = call(&engine, "GET", connection_id, Vec::new()).await;
+        let (status, body) = call(&engine, "GET", &connection_id, Vec::new()).await;
         assert_eq!(
             status, 200,
             "case {case:?}: GetConnection on the open connection must answer 200, got \
              {status} {body:?}"
         );
-        let (status, body) = call(&engine, "POST", connection_id, b"payload".to_vec()).await;
+        let (status, body) = call(&engine, "POST", &connection_id, b"payload".to_vec()).await;
         assert_eq!(
             status, 200,
             "case {case:?}: PostToConnection on the open connection must answer 200, got \
              {status} {body:?}"
         );
-        let (status, body) = call(&engine, "DELETE", connection_id, Vec::new()).await;
+        let (status, body) = call(&engine, "DELETE", &connection_id, Vec::new()).await;
         assert_eq!(
             status, 204,
             "case {case:?}: DeleteConnection must answer the modelled 204, got {status} \
              {body:?}"
         );
 
-        // Closed: the id is still one this service issued, so every later call is the
-        // modelled Gone and not the invalid-id refusal.
+        // Closed: the id is still of the shape the service mints, so every later call is
+        // the modelled Gone and not the invalid-id refusal.
         for (method, payload) in operations() {
-            let (status, body) = call(&engine, method, connection_id, payload).await;
+            let (status, body) = call(&engine, method, &connection_id, payload).await;
             assert_eq!(
                 status, GONE_STATUS,
                 "case {case:?}: {method} after the delete must answer {GONE_STATUS}, got \

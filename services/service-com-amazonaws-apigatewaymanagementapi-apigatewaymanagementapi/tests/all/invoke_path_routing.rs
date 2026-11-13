@@ -34,7 +34,7 @@ use serde_json::Value;
 
 use service_com_amazonaws_apigatewaymanagementapi_apigatewaymanagementapi as mgmt;
 
-use crate::support::{as_wire_timestamp, call_at, error_code, register, HOST};
+use crate::support::{as_wire_timestamp, call_at, error_code, minted, register, HOST};
 
 /// The `Data` maximum this service's model declares (`@length(min: 0, max: 131072)` on
 /// the `Data` blob). Read from the crate constant so the two cannot disagree.
@@ -49,7 +49,10 @@ struct Row {
     /// The invoke endpoint's path prefix, exactly as it appears in front of the
     /// modelled binding. Empty for the modelled path itself — the baseline row.
     prefix: &'static str,
-    connection_id: &'static str,
+    /// What the row's connection is called; its `ConnectionId` is the token
+    /// [`crate::support::minted`] makes of it, since a connection exists only under an id
+    /// of the shape the service mints.
+    connection: &'static str,
     source_ip: &'static str,
     user_agent: &'static str,
     /// Seconds past the epoch the connection is registered at. In the past, so an
@@ -67,7 +70,7 @@ const ROWS: &[Row] = &[
         case: "the modelled path with no invoke prefix at all",
         host: HOST,
         prefix: "",
-        connection_id: "abc123",
+        connection: "baseline",
         source_ip: "192.0.2.1",
         user_agent: "baseline/1",
         connected_at_secs: 1_600_000_000,
@@ -77,17 +80,17 @@ const ROWS: &[Row] = &[
         case: "a deployed stage in front of the modelled path",
         host: "a1b2c3d4e5.execute-api.us-east-1.amazonaws.com",
         prefix: "/prod",
-        connection_id: "Lx9ZKcvPmjQCJhA=",
+        connection: "deployed",
         source_ip: "198.51.100.17",
         user_agent: "sdk-client/2.1",
         connected_at_secs: 1_700_000_000,
         payload: b"{\"action\":\"echo\"}",
     },
     Row {
-        case: "a different stage, and a connection id with no padding",
+        case: "a different stage, and an empty payload",
         host: "zzz999aaa0.execute-api.eu-west-1.amazonaws.com",
         prefix: "/dev",
-        connection_id: "0123456789abcdef",
+        connection: "other-stg",
         source_ip: "2001:db8::2:1",
         user_agent: "curl/8.4.0",
         connected_at_secs: 1,
@@ -97,7 +100,7 @@ const ROWS: &[Row] = &[
         case: "a stage spelling every character class a stage name allows",
         host: "mix3dstage.execute-api.ap-southeast-2.amazonaws.com",
         prefix: "/Stage_name-1",
-        connection_id: "cid-with-dashes",
+        connection: "mixed-stg",
         source_ip: "203.0.113.9",
         user_agent: "agent (with spaces)",
         connected_at_secs: 0,
@@ -107,7 +110,7 @@ const ROWS: &[Row] = &[
         case: "a two-segment base path, as a custom domain mapping serves it",
         host: "sockets.example.com",
         prefix: "/v1/socket",
-        connection_id: "jR4tQ==",
+        connection: "mapped",
         source_ip: "192.0.2.250",
         user_agent: "mapped-domain/0.1",
         connected_at_secs: 1_234_567_890,
@@ -118,6 +121,12 @@ const ROWS: &[Row] = &[
 impl Row {
     fn connected_at(&self) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(self.connected_at_secs)
+    }
+
+    /// This row's `ConnectionId`: a token of the shape the service mints, carrying the
+    /// row's own name.
+    fn connection_id(&self) -> String {
+        minted(self.connection)
     }
 
     /// The request path this row's caller sends for `connection_id`.
@@ -138,7 +147,7 @@ fn engine_with(row: &Row) -> Arc<InMemoryEngine> {
     let engine: Arc<InMemoryEngine> = Arc::new(InMemoryEngine::new());
     register(
         &engine,
-        row.connection_id,
+        &row.connection_id(),
         row.source_ip,
         row.user_agent,
         row.connected_at(),
@@ -150,11 +159,12 @@ fn engine_with(row: &Row) -> Arc<InMemoryEngine> {
 async fn get_connection_reports_the_registry_through_the_invoke_path() {
     for row in ROWS {
         let engine = engine_with(row);
+        let connection_id = row.connection_id();
         let (status, body) = call_at(
             &engine,
             row.host,
             "GET",
-            &row.path(row.connection_id),
+            &row.path(&connection_id),
             Vec::new(),
         )
         .await;
@@ -162,7 +172,7 @@ async fn get_connection_reports_the_registry_through_the_invoke_path() {
             status, 200,
             "case {:?}: GetConnection at {:?} must answer 200, got {status} {body:?}",
             row.case,
-            row.path(row.connection_id)
+            row.path(&connection_id)
         );
 
         let value = json(row.case, &body);
@@ -200,11 +210,12 @@ async fn get_connection_reports_the_registry_through_the_invoke_path() {
 async fn post_to_connection_delivers_through_the_invoke_path_and_advances_last_active_at() {
     for row in ROWS {
         let engine = engine_with(row);
+        let connection_id = row.connection_id();
         let (status, body) = call_at(
             &engine,
             row.host,
             "POST",
-            &row.path(row.connection_id),
+            &row.path(&connection_id),
             row.payload.to_vec(),
         )
         .await;
@@ -212,7 +223,7 @@ async fn post_to_connection_delivers_through_the_invoke_path_and_advances_last_a
             status, 200,
             "case {:?}: PostToConnection at {:?} must answer 200, got {status} {body:?}",
             row.case,
-            row.path(row.connection_id)
+            row.path(&connection_id)
         );
         assert!(
             body.is_empty(),
@@ -222,7 +233,7 @@ async fn post_to_connection_delivers_through_the_invoke_path_and_advances_last_a
 
         // Delivered to the ONE record the registry holds for this id, read back through
         // the emulator-internal read seam.
-        let stored = mgmt::state::connection(&*engine, row.connection_id)
+        let stored = mgmt::state::connection(&*engine, &connection_id)
             .unwrap_or_else(|| panic!("case {:?}: the connection must still exist", row.case));
         assert_eq!(
             stored.messages.as_slice(),
@@ -249,7 +260,7 @@ async fn post_to_connection_delivers_through_the_invoke_path_and_advances_last_a
             &engine,
             row.host,
             "GET",
-            &row.path(row.connection_id),
+            &row.path(&connection_id),
             Vec::new(),
         )
         .await;
@@ -274,11 +285,12 @@ async fn post_to_connection_delivers_through_the_invoke_path_and_advances_last_a
 async fn delete_connection_through_the_invoke_path_removes_the_connection() {
     for row in ROWS {
         let engine = engine_with(row);
+        let connection_id = row.connection_id();
         let (status, body) = call_at(
             &engine,
             row.host,
             "DELETE",
-            &row.path(row.connection_id),
+            &row.path(&connection_id),
             Vec::new(),
         )
         .await;
@@ -286,7 +298,7 @@ async fn delete_connection_through_the_invoke_path_removes_the_connection() {
             status, 204,
             "case {:?}: DeleteConnection at {:?} must answer 204, got {status} {body:?}",
             row.case,
-            row.path(row.connection_id)
+            row.path(&connection_id)
         );
         assert!(
             body.is_empty(),
@@ -294,7 +306,7 @@ async fn delete_connection_through_the_invoke_path_removes_the_connection() {
             row.case
         );
         assert!(
-            mgmt::state::connection(&*engine, row.connection_id).is_none(),
+            mgmt::state::connection(&*engine, &connection_id).is_none(),
             "case {:?}: the deleted connection must be gone from the registry",
             row.case
         );
@@ -309,7 +321,7 @@ async fn delete_connection_through_the_invoke_path_removes_the_connection() {
                 &engine,
                 row.host,
                 method,
-                &row.path(row.connection_id),
+                &row.path(&connection_id),
                 payload,
             )
             .await;
@@ -332,9 +344,10 @@ async fn delete_connection_through_the_invoke_path_removes_the_connection() {
 async fn the_modelled_failures_answer_the_same_under_an_invoke_prefix() {
     for row in ROWS {
         let engine = engine_with(row);
+        let connection_id = row.connection_id();
 
-        // An id this service never issued is refused as an invalid `ConnectionId`,
-        // whatever the prefix.
+        // An id that could never have been minted is refused as an invalid
+        // `ConnectionId`, whatever the prefix.
         let (status, body) = call_at(
             &engine,
             row.host,
@@ -345,24 +358,45 @@ async fn the_modelled_failures_answer_the_same_under_an_invoke_prefix() {
         .await;
         assert_eq!(
             status, 400,
-            "case {:?}: an id this service never issued must answer 400, got {status} {body:?}",
+            "case {:?}: a malformed id must answer 400, got {status} {body:?}",
             row.case
         );
         assert_eq!(
             error_code(&body),
             "BadRequestException",
-            "case {:?}: an id this service never issued must answer BadRequestException, \
-             got {body:?}",
+            "case {:?}: a malformed id must answer BadRequestException, got {body:?}",
             row.case
         );
 
-        // A payload one byte past the modelled maximum is the modelled 413, judged
+        // A well-formed id naming no open connection is the modelled Gone, whatever the
+        // prefix.
+        let (status, body) = call_at(
+            &engine,
+            row.host,
+            "GET",
+            &row.path(&minted("not-minted")),
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(
+            status, 410,
+            "case {:?}: a well-formed unknown id must answer 410, got {status} {body:?}",
+            row.case
+        );
+        assert_eq!(
+            error_code(&body),
+            "GoneException",
+            "case {:?}: a well-formed unknown id must answer GoneException, got {body:?}",
+            row.case
+        );
+
+        // A payload one byte past the modelled maximum is the endpoint's own 413, judged
         // before the connection is resolved — so the prefix cannot change it either.
         let (status, body) = call_at(
             &engine,
             row.host,
             "POST",
-            &row.path(row.connection_id),
+            &row.path(&connection_id),
             vec![b'x'; MAX_DATA_BYTES + 1],
         )
         .await;
@@ -371,13 +405,7 @@ async fn the_modelled_failures_answer_the_same_under_an_invoke_prefix() {
             "case {:?}: a payload past the maximum must answer 413, got {status} {body:?}",
             row.case
         );
-        assert_eq!(
-            error_code(&body),
-            "PayloadTooLargeException",
-            "case {:?}: expected PayloadTooLargeException, got {body:?}",
-            row.case
-        );
-        let stored = mgmt::state::connection(&*engine, row.connection_id)
+        let stored = mgmt::state::connection(&*engine, &connection_id)
             .unwrap_or_else(|| panic!("case {:?}: the connection must still exist", row.case));
         assert_eq!(
             stored.delivered_count, 0,
@@ -438,7 +466,13 @@ async fn a_path_that_does_not_carry_the_modelled_binding_is_not_served() {
 
     for (case, path, expected) in near_misses {
         let engine: Arc<InMemoryEngine> = Arc::new(InMemoryEngine::new());
-        register(&engine, "abc123", "192.0.2.1", "near-miss/1", SystemTime::UNIX_EPOCH);
+        register(
+            &engine,
+            &minted("near-miss"),
+            "192.0.2.1",
+            "near-miss/1",
+            SystemTime::UNIX_EPOCH,
+        );
 
         for method in ["GET", "POST", "DELETE"] {
             let (status, body) = call_at(&engine, HOST, method, path, Vec::new()).await;

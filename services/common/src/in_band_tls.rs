@@ -17,10 +17,6 @@
 //! server has to see byte 0, and so does an HTTP or WebSocket parser — which is what
 //! [`Prefixed`] is for. The rule is here so the sniff and the replay are written once:
 //! a fix to either is a fix for every plane.
-//!
-//! Services still carrying their own copy of this reading, to be MIGRATED onto it (it
-//! postdates them): `services/service-com-amazonaws-apigatewayv2-apigatewayv2/src/service/
-//! websocket/transport.rs`. Nothing new inlines it again — call this module.
 
 use ::std::pin::Pin;
 use ::std::task::{Context, Poll};

@@ -16,8 +16,9 @@
 //!    `https://{api-id}.execute-api.{region}.amazonaws.com/{stage}/@connections/{id}`,
 //!    and answer from the API Gateway Management API's connection registry: the modelled
 //!    200/200/204 for a registered connection, the modelled `GoneException` (410) once it
-//!    is deleted, and the invalid-`ConnectionId` refusal (400 `BadRequestException`) for
-//!    an id that service never issued.
+//!    is deleted or for a well-formed id the registry does not hold, and the
+//!    invalid-`ConnectionId` refusal (400 `BadRequestException`) for an id that could
+//!    never have been minted.
 //!
 //! Two services, one engine, one router, so this is a router suite: the deploy half is
 //! served by the API Gateway V2 crate (signing name `apigateway`) and the data-plane
@@ -85,6 +86,11 @@ struct Row {
 
 /// The rows differ along the api's route set, whether the deployment carries a
 /// description, the stage the client addresses, the connection-id form and the payload.
+///
+/// Every `connection_id` is of the shape API Gateway MINTS — standard base64 of
+/// `mgmt::state::CONNECTION_ID_BYTES` bytes, the 16-character single-padded token — since
+/// that is the only shape a connection can be registered under, and the shape the three
+/// `@connections` operations read an id by.
 const ROWS: &[Row] = &[
     Row {
         case: "the three route keys a socket api needs, deployed with no description",
@@ -116,7 +122,7 @@ const ROWS: &[Row] = &[
         route_keys: &["$connect"],
         deployment: || json!({ "description": "the first cut" }),
         stage: "dev",
-        connection_id: "0123456789abcdef",
+        connection_id: "EzCyjTUad5uklZ0=",
         source_ip: "2001:db8::2:1",
         user_agent: "curl/8.4.0",
         payload: b"",
@@ -429,9 +435,9 @@ fn a_websocket_api_deploys_and_its_connections_endpoint_serves_the_registry() {
                         stored.messages
                     );
 
-                    // An id this service never issued identifies no connection, so it is
-                    // refused as an invalid `ConnectionId` — the endpoint is answering
-                    // from state and not from the path.
+                    // An id that could never have been minted names no connection
+                    // anywhere, so it is refused as an invalid `ConnectionId` — the
+                    // endpoint is answering from the value and not from the path.
                     let (status, text) = call(
                         &router,
                         EXECUTE_API_AUTHORIZATION,
@@ -443,15 +449,40 @@ fn a_websocket_api_deploys_and_its_connections_endpoint_serves_the_registry() {
                     .await;
                     assert_eq!(
                         status, 400,
-                        "case {:?}: an id that was never issued must answer 400, got \
-                         {status} {text}",
+                        "case {:?}: a malformed id must answer 400, got {status} {text}",
                         row.case
                     );
                     assert_eq!(
                         error_code(&text),
                         "BadRequestException",
-                        "case {:?}: an id that was never issued must answer \
-                         BadRequestException, got {text}",
+                        "case {:?}: a malformed id must answer BadRequestException, got \
+                         {text}",
+                        row.case
+                    );
+
+                    // A WELL-FORMED id the registry does not hold is the modelled Gone
+                    // instead: it could have named a connection, and a caller prunes its
+                    // own record on that answer.
+                    let (status, text) = call(
+                        &router,
+                        EXECUTE_API_AUTHORIZATION,
+                        &host,
+                        "GET",
+                        &format!("/{}/@connections/AAAAAAAAAAAAAAA=", row.stage),
+                        Vec::new(),
+                    )
+                    .await;
+                    assert_eq!(
+                        status, 410,
+                        "case {:?}: a well-formed id naming no connection must answer 410, \
+                         got {status} {text}",
+                        row.case
+                    );
+                    assert_eq!(
+                        error_code(&text),
+                        "GoneException",
+                        "case {:?}: a well-formed id naming no connection must answer \
+                         GoneException, got {text}",
                         row.case
                     );
 
@@ -518,9 +549,10 @@ fn the_two_execute_api_services_route_apart_under_one_signing_name() {
         status: Option<u16>,
     }
 
-    // `@connections` rows address an id no registry holds — one this emulator never
-    // issued — so the management API's own answer is its invalid-`ConnectionId` refusal
-    // (400 `BadRequestException`), an answer only that service can give.
+    // `@connections` rows address an id that could never have been MINTED — the shape
+    // decides the refusal before any registry is consulted — so the management API's own
+    // answer is its invalid-`ConnectionId` refusal (400 `BadRequestException`), an answer
+    // only that service can give.
     const CLAIMS: &[Claim] = &[
         Claim {
             name: "GetConnection at the modelled path",
@@ -622,7 +654,7 @@ fn the_two_execute_api_services_route_apart_under_one_signing_name() {
                         // error shape are as much a part of the fix as the status. Both
                         // are the management API's restJson1 answer — `BadRequestException`
                         // is the shape all three `@connections` operations refuse a
-                        // `ConnectionId` that identifies no connection with.
+                        // `ConnectionId` that could never have been minted with.
                         assert_eq!(
                             header(&headers, "content-type"),
                             "application/json",

@@ -7,10 +7,11 @@
 //! in particular it does NOT bump `LastActiveAt`, which moves only when data actually
 //! flows to the connection.
 //!
-//! A connection id this service ISSUED whose connection has since been deleted answers
-//! the modeled `GoneException` (HTTP 410), and a `ConnectionId` it never issued is
-//! refused HTTP 400 `BadRequestException`; see [`crate::state`] for the registration
-//! rule and for why the two refusals are split.
+//! A `ConnectionId` of the shape API Gateway mints whose connection is not open at the
+//! endpoint the request reached answers the modeled `GoneException` (HTTP 410), and a
+//! `ConnectionId` that could never have been minted is refused HTTP 400
+//! `BadRequestException`; see [`crate::state`] for the shape rule, for the endpoint a
+//! connection is addressed through, and for why the two refusals are split.
 //!
 //! ## Shape of an operation
 //!
@@ -144,30 +145,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(crate::state::registry_unavailable(Self::NAME));
         };
+        // A `ConnectionId` that is not of the shape this service mints names no connection
+        // anywhere, so it is refused from the VALUE alone, before the registry is consulted
+        // (`crate::state::invalid_connection_id`).
+        if !crate::state::is_well_formed_connection_id(&input.connection_id) {
+            return Err(crate::state::invalid_connection_id(&input.connection_id));
+        }
+        // Which api's connections this request addresses is decided by the endpoint it
+        // reached; see `crate::state`.
+        let addressed_at = crate::state::addressed_at(ctx.parts());
 
         // Clone the record out under the guard and release the guard before building
         // the response. Nothing here writes: a report must not change what a later
         // caller sees.
-        let (issued, connection) = {
-            let guard = state.lock();
-            (
-                guard.identifies_a_connection(&input.connection_id),
-                guard.connections.get(&input.connection_id).cloned(),
-            )
-        };
-        // A `ConnectionId` this service never issued identifies no connection of its, so
-        // it is refused as an invalid `ConnectionId` rather than reported as a connection
-        // that once existed (`crate::state::invalid_connection_id`).
-        if !issued {
-            return Err(crate::state::invalid_connection_id(&input.connection_id));
-        }
+        let connection = state
+            .lock()
+            .connection_at(&input.connection_id, addressed_at.as_deref())
+            .cloned();
         let Some(connection) = connection else {
-            // No registry entry for an id this service issued: the connection was
-            // deleted, so it "no longer exists" as far as this API is concerned.
+            // No open connection of that id at this endpoint: it was never minted, it was
+            // deleted, or it belongs to another api — in each case it "no longer exists" as
+            // far as this endpoint is concerned.
             return Err(GetConnectionErrorModeled::GoneException(GoneException {}).into());
         };
 

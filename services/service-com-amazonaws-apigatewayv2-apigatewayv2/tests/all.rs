@@ -281,6 +281,8 @@ mod vpc_link_update;
 mod websocket_connect_authorization;
 #[path = "all/websocket_connect_backend.rs"]
 mod websocket_connect_backend;
+#[path = "all/websocket_endpoint_connections.rs"]
+mod websocket_endpoint_connections;
 #[path = "all/websocket_handshake_data_plane.rs"]
 mod websocket_handshake_data_plane;
 #[path = "all/websocket_lambda_routes.rs"]

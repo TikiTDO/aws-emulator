@@ -136,3 +136,18 @@ pub fn register(
         "the registration seam must register {connection_id}"
     );
 }
+
+/// A `ConnectionId` of the shape API Gateway mints — standard base64 of
+/// `mgmt::state::CONNECTION_ID_BYTES` bytes, which is the 16-character single-padded token
+/// its endpoints hand out — carrying `label`, so each case addresses a connection of its own
+/// and nothing here spells a token out by hand.
+///
+/// `label` is folded into exactly those bytes: a shorter one is padded, a longer one
+/// truncated, so every answer is a well-formed id whatever the case called itself.
+pub fn minted(label: &str) -> String {
+    use base64::Engine as _;
+
+    let mut bytes = label.as_bytes().to_vec();
+    bytes.resize(mgmt::state::CONNECTION_ID_BYTES, b'-');
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}

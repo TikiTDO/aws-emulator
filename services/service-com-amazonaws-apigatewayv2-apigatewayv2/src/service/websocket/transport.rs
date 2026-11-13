@@ -19,19 +19,23 @@
 //! # What this module does with a connection, in order
 //!
 //! 1. ENCRYPTION, negotiated in band. The socket is handed over plaintext and the first byte
-//!    says what the client opened with: a TLS record (`0x16`) is handed to the core's own TLS
-//!    server ([`::emulator_server::TlsUpgrader`]) and everything after it is read decrypted,
-//!    while an HTTP method is read as it stands. So ONE announced address serves both the
-//!    `wss://` a client of AWS dials and the `ws://` a client that does not verify a
-//!    self-signed certificate dials, and the service never touches a key or a certificate.
+//!    says what the client opened with: a TLS record is handed to the core's own TLS server
+//!    and everything after it is read decrypted, while an HTTP method is read as it stands
+//!    (the tree's one reading of that, [`::service_common::in_band_tls`]). So ONE announced
+//!    address serves both the `wss://` a client of AWS dials and the `ws://` a client that
+//!    does not verify a self-signed certificate dials, and the service never touches a key
+//!    or a certificate.
 //! 2. The HANDSHAKE's own bytes, read here before the WebSocket implementation sees them:
 //!    the decision this connection needs is AWAITED — the `$connect` route's integration
 //!    and the authorizer in front of it are each a Lambda invocation — while that
 //!    implementation's handshake callback is synchronous, so the request head is read and
 //!    parsed first ([`Offer`], by the maintained `httparse`), the decision is made, and
-//!    every byte read is then REPLAYED to the implementation ([`Prefixed`]), which derives
+//!    every byte read is then REPLAYED to the implementation, which derives
 //!    `Sec-WebSocket-Accept` and writes either `101 Switching Protocols` or the refusal that
 //!    decision carries ([`admission`]). Nothing about the protocol is hand-written here.
+//!    A request that is NOT an opening handshake is served as the ordinary HTTP it is
+//!    ([`super::endpoint_http`]): this socket is the api's whole `ApiEndpoint`, and the
+//!    `@connections` management API is published at that same endpoint.
 //! 3. The FRAMES, each dispatched to the route the api's `RouteSelectionExpression` selects
 //!    and answered by that route's integration PERFORMED ([`super::integration`]), and each
 //!    frame pushed TO the connection written back over the same socket.
@@ -48,28 +52,25 @@
 use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::SystemTime;
 
 use ::emulator_server::{ListenerConn, NativeHandler, TlsUpgrader};
 use ::futures_util::{SinkExt, StreamExt};
 use ::service_com_amazonaws_apigatewaymanagementapi_apigatewaymanagementapi::state as connections;
+use ::service_common::in_band_tls::{negotiated, Prefixed};
 use ::smithy_server_runtime::EmbeddedEmulator;
-use ::tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+use ::tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use ::tokio::sync::mpsc::{channel, Receiver, Sender};
 use ::tokio_tungstenite::tungstenite::handshake::server::{
     ErrorResponse, Request as HandshakeRequest, Response as HandshakeResponse,
 };
+use ::tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use ::tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use ::tokio_tungstenite::tungstenite::Message;
 
 use super::event::{Call, Connection};
 use super::{dispatch, event, integration};
 use crate::state::ComAmazonawsApigatewayv2Apigatewayv2State as ServiceStore;
-
-/// The first byte of a TLS record, which is what a client that dialled `wss://` opens with:
-/// the `handshake` content type (22) of TLS 1.0 and later. An opening handshake made in the
-/// clear begins with an HTTP method instead, so one byte tells the two apart.
-const TLS_RECORD_FIRST_BYTE: u8 = 0x16;
 
 /// The member a gateway frame carries its reason under, and the two members it names the
 /// call by: API Gateway's own frames for a message it cannot route or serve are
@@ -107,7 +108,7 @@ pub async fn open_for_api<Eng: Send + Sync + 'static>(
     })?;
     let handler = StageSocket {
         state: state.clone(),
-        registry,
+        registry: registry.clone(),
         api_id: api_id.to_string(),
         callback,
         // The core's own TLS server, for a client that dialled `wss://`. A core that cannot
@@ -123,6 +124,11 @@ pub async fn open_for_api<Eng: Send + Sync + 'static>(
         .lock()
         .websocket_transport
         .remember_listener(api_id, Arc::new(listener));
+    // The address this socket landed on is the api's whole `ApiEndpoint`, and the
+    // `@connections` management API is published at that same endpoint, so the registry is
+    // told which address serves this api's connections: a call made THERE addresses exactly
+    // the connections established there, and another api's live id is `GoneException` on it.
+    connections::serve_connections_at(&registry, &authority);
     tracing::info!(%api_id, %authority, "opened a WebSocket api's data-plane socket");
     Ok(authority)
 }
@@ -185,15 +191,21 @@ async fn serve_connection(
         tracing::debug!(%api_id, "a connection opened with no readable HTTP request head");
         return;
     };
+    if !offer.is_opening_handshake() {
+        // Not a handshake: this socket is the api's whole `ApiEndpoint`, and the
+        // `@connections` management API is published at that same endpoint, so the request
+        // is served as the ordinary HTTP it is — with every byte already read replayed, so
+        // the HTTP implementation reads the request the client sent. Whatever the verdict,
+        // such a request is ANSWERED rather than dropped.
+        let conn: ListenerConn = Box::new(Prefixed::new(head, conn));
+        super::endpoint_http::serve(callback, conn).await;
+        return;
+    }
     let (admitted, refusal) = match admission(&state, &callback, &api_id, &offer).await {
         Ok(admitted) => (Some(admitted), None),
         Err(refusal) => (None, Some(refusal)),
     };
-    let conn: ListenerConn = Box::new(Prefixed {
-        prefix: head,
-        read: 0,
-        inner: conn,
-    });
+    let conn: ListenerConn = Box::new(Prefixed::new(head, conn));
     let decide = move |_request: &HandshakeRequest,
                        response: HandshakeResponse|
      -> Result<HandshakeResponse, ErrorResponse> {
@@ -269,6 +281,9 @@ const MAX_HEADER_FIELDS: usize = 96;
 /// itself reads a handshake with), so no request grammar is written here.
 #[derive(Debug, Clone)]
 struct Offer {
+    /// The method the request line names, kept because what distinguishes an opening
+    /// handshake from an ordinary request begins with it (RFC 6455 §4.1: a `GET`).
+    method: String,
     /// The request target as written: the path, and any query string after it.
     target: String,
     /// Every header field, under the name the client sent it with; a field that appeared
@@ -290,6 +305,7 @@ impl Offer {
             return None;
         }
         let target = request.path?.to_string();
+        let method = request.method?.to_string();
         let mut headers: BTreeMap<String, String> = BTreeMap::new();
         for field in request.headers.iter() {
             let Ok(value) = std::str::from_utf8(field.value) else {
@@ -310,7 +326,27 @@ impl Offer {
                 }
             }
         }
-        Some(Self { target, headers })
+        Some(Self {
+            method,
+            target,
+            headers,
+        })
+    }
+
+    /// Whether these bytes are an RFC 6455 OPENING HANDSHAKE, by the one reading of that
+    /// question this service has ([`super::Handshake::is_opening`]) — so the socket and the
+    /// service endpoint cannot disagree about what a handshake is. Everything else on this
+    /// socket is an ordinary HTTP request ([`super::endpoint_http`]).
+    fn is_opening_handshake(&self) -> bool {
+        super::Handshake::of_fields(
+            &self.method,
+            event::field(&self.headers, ::http::header::HOST.as_str()).unwrap_or_default(),
+            self.path(),
+            event::field(&self.headers, "connection"),
+            event::field(&self.headers, "upgrade"),
+            event::field(&self.headers, super::SEC_WEBSOCKET_KEY),
+        )
+        .is_opening()
     }
 
     /// The value this handshake carries for the header `name`, read case-insensitively as a
@@ -354,87 +390,6 @@ fn socket_limits() -> ::tokio_tungstenite::tungstenite::protocol::WebSocketConfi
         .max_frame_size(Some(MAX_FRAME_BYTES))
         .write_buffer_size(0)
         .max_write_buffer_size(MAX_WRITE_BUFFER_BYTES)
-}
-
-/// The connection with encryption negotiated: handed to the core's TLS server when the
-/// client opened with a TLS record, and read as it stands otherwise. `None` for a client that
-/// sent nothing, or whose TLS handshake this emulator could not complete.
-async fn negotiated(mut conn: ListenerConn, upgrader: Option<TlsUpgrader>) -> Option<ListenerConn> {
-    let mut first = [0u8; 1];
-    match conn.read(&mut first).await {
-        Ok(1) => {}
-        // A client that closed before sending anything, or a read that failed: there is no
-        // handshake to serve.
-        _ => return None,
-    }
-    let prefixed: ListenerConn = Box::new(Prefixed {
-        prefix: first.to_vec(),
-        read: 0,
-        inner: conn,
-    });
-    if first[0] != TLS_RECORD_FIRST_BYTE {
-        return Some(prefixed);
-    }
-    let upgrader = upgrader?;
-    // ALPN `None`: a WebSocket client offers `http/1.1` or nothing, and the handshake that
-    // follows is HTTP/1.1 either way.
-    match upgrader.accept(prefixed, None).await {
-        Ok((upgraded, _negotiated)) => Some(upgraded),
-        Err(error) => {
-            tracing::debug!(%error, "a wss client's TLS handshake was not completed");
-            None
-        }
-    }
-}
-
-/// A connection whose first bytes have already been read: they are served from the prefix
-/// before the socket itself is read again, so a reader that has to see byte 0 — the core's
-/// TLS server — reads the stream as the client sent it.
-struct Prefixed<S> {
-    prefix: Vec<u8>,
-    read: usize,
-    inner: S,
-}
-
-impl<S: AsyncRead + Unpin> AsyncRead for Prefixed<S> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-        buffer: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        if self.read < self.prefix.len() {
-            let remaining = &self.prefix[self.read..];
-            let taken = remaining.len().min(buffer.remaining());
-            buffer.put_slice(&remaining[..taken]);
-            self.read += taken;
-            return Poll::Ready(Ok(()));
-        }
-        Pin::new(&mut self.inner).poll_read(context, buffer)
-    }
-}
-
-impl<S: AsyncWrite + Unpin> AsyncWrite for Prefixed<S> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-        buffer: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_write(context, buffer)
-    }
-
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(context)
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(context)
-    }
 }
 
 /// What the handshake resolved: the CONNECTION it offered, as every event of that
@@ -758,9 +713,12 @@ async fn carry_frames<S>(
     // `$connect` route's own event already reported.
     let connection_id = connection.connection_id.clone();
     // The connection EXISTS from here: it is registered in the registry the `@connections`
-    // management API serves, with the channel that makes a `PostToConnection` to it a real
-    // delivery over this socket. The registry holds the only sender, so a `DeleteConnection`
-    // that removes the record also ends this loop and closes the socket.
+    // management API serves, with the ENDPOINT this api is reached at (so a `@connections`
+    // call made at another api's endpoint does not address it) and the channel that makes a
+    // `PostToConnection` to it a real delivery over this socket. The registry holds the only
+    // sender, so a `DeleteConnection` that removes the record also ends this loop and closes
+    // the socket.
+    let endpoint = state.lock().websocket_transport.authority(&api_id);
     let registered = connections::open_connection(
         &registry,
         connection_id.clone(),
@@ -772,6 +730,7 @@ async fn carry_frames<S>(
                 .to_string(),
         },
         SystemTime::now(),
+        endpoint,
         Some(pushes),
     );
     if !registered {
@@ -790,7 +749,16 @@ async fn carry_frames<S>(
     loop {
         ::tokio::select! {
             push = pushed.recv() => {
-                let Some(frame) = push else { break };
+                let Some(frame) = push else {
+                    // The registry dropped this connection's sender: a `DeleteConnection`
+                    // removed the record (or the api's socket is closing), and "the
+                    // connection is closed" is what that call does to the client. The
+                    // close is stated to it rather than left to the socket being dropped,
+                    // so a client library reports a NORMAL closure instead of an abnormal
+                    // one it would otherwise retry through.
+                    let _ = outgoing.send(Message::Close(Some(server_close()))).await;
+                    break;
+                };
                 if outgoing.send(frame_of(frame)).await.is_err() {
                     break;
                 }
@@ -889,12 +857,23 @@ async fn disconnected(
 /// loopback, so that is what a connection is attributed to.
 const LOOPBACK_SOURCE_IP: &str = "127.0.0.1";
 
-/// A pushed payload as a frame: text when the bytes are text, which is what a client reading
-/// a JSON payload expects, and binary otherwise.
+/// A pushed payload as a frame: always a TEXT frame, which is what API Gateway delivers a
+/// `PostToConnection` payload as — bytes that are not valid UTF-8 travel with each invalid
+/// sequence replaced by the Unicode replacement character, as a text frame's payload must be
+/// (RFC 6455 §5.6, "text frames … interpreted as UTF-8"), rather than being relayed as a
+/// binary frame the client would read as a different kind of message.
 fn frame_of(frame: Vec<u8>) -> Message {
-    match String::from_utf8(frame) {
-        Ok(text) => Message::Text(text.into()),
-        Err(not_text) => Message::Binary(not_text.into_bytes().into()),
+    Message::Text(String::from_utf8_lossy(&frame).into_owned().into())
+}
+
+/// The close the GATEWAY states when it ends a connection the client did not close: the
+/// normal closure of RFC 6455 §7.4.1 (1000, "the purpose for which the connection was
+/// established has been fulfilled"), with no reason phrase — a `DeleteConnection` is an
+/// ordinary end of the connection, not a protocol or policy failure.
+fn server_close() -> CloseFrame {
+    CloseFrame {
+        code: CloseCode::Normal,
+        reason: String::new().into(),
     }
 }
 
