@@ -7,7 +7,7 @@
 use bytes::Bytes;
 use serde_json::Value;
 use service_common::payload_store::{
-    Checkpoint, CommitError, OwnerKey, PayloadStore, ProtocolMetadata, RecordChange,
+    Checkpoint, CommitError, PayloadStore, ProtocolMetadata, RecordChange,
     RecordCondition, RecordData, RecordKey, RecordRevision, ReferenceTransaction,
     StageSpec, StoreError, UploadSnapshot,
 };

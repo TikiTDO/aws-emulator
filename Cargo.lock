@@ -12520,6 +12520,7 @@ dependencies = [
  "hex",
  "http",
  "http-body",
+ "parking_lot",
  "reqwest",
  "serde",
  "serde_json",

@@ -148,7 +148,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let result: Result<Self::Output, Self::Error> = async {
 
         let _ = ctx;
-        let Some(state) = crate::state::service_state(&*self.engine) else {
+        let Some(_state) = crate::state::service_state(&*self.engine) else {
             return Err(PutSigningConfigurationErrorModeled::ServerException(
                 ServerException {
                     message: Some("the ecr registry store is unavailable".to_string()),

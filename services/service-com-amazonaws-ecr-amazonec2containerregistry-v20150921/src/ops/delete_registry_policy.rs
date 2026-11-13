@@ -144,7 +144,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // here, so the request names nothing to resolve.
         let _ = (&input, ctx);
 
-        let Some(state) = crate::state::service_state(&*self.engine) else {
+        let Some(_state) = crate::state::service_state(&*self.engine) else {
             return Err(
                 DeleteRegistryPolicyErrorModeled::ServerException(ServerException {
                     message: Some("the ecr registry store is unavailable".to_string()),

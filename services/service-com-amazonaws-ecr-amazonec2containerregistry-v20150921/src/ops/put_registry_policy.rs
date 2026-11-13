@@ -162,7 +162,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // `PutRegistryPolicyRequest` carries only `policyText`; one registry is served
         // here, so there is no registry to resolve.
-        let Some(state) = crate::state::service_state(&*self.engine) else {
+        let Some(_state) = crate::state::service_state(&*self.engine) else {
             return Err(PutRegistryPolicyErrorModeled::ServerException(ServerException {
                 message: Some("the ecr registry store is unavailable".to_string()),
             })

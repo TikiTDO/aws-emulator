@@ -174,7 +174,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut candidate = crate::state::catalog_global::snapshot(&*self.engine).map_err(|_| catalog_failure())?;
         let result: Result<Self::Output, Self::Error> = async {
 
-        let Some(state) = crate::state::service_state(&*self.engine) else {
+        let Some(_state) = crate::state::service_state(&*self.engine) else {
             return Err(DeletePullThroughCacheRuleErrorModeled::ServerException(
                 ServerException {
                     message: Some("the ecr registry store is unavailable".to_string()),

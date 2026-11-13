@@ -7,7 +7,7 @@
 
 use super::registry_v2::{RegistryV2Target, registry_error as error, registry_headers};
 use super::*;
-use crate::state::{self, LayerUpload};
+use crate::state;
 
 const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 const UPLOAD_UNKNOWN: &str = "blob upload unknown";
