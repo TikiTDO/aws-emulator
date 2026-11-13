@@ -23,6 +23,8 @@ mod mime_header_field_position;
 mod mime_header_octets;
 #[path = "all/raw_message_content.rs"]
 mod raw_message_content;
+#[path = "all/read_access_record.rs"]
+mod read_access_record;
 #[path = "all/regional_message_namespace.rs"]
 mod regional_message_namespace;
 #[path = "all/s3_object_resolution.rs"]

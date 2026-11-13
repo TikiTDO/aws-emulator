@@ -30,17 +30,17 @@ use crate::raw_message_content::{
 
 /// The access key id every request in this suite presents, which is the one the
 /// harness signs with: the record has to carry the caller it was told about.
-const PRESENTED_AKID: &str = "AKIDEXAMPLE";
+pub(crate) const PRESENTED_AKID: &str = "AKIDEXAMPLE";
 
 /// One captured event: its fields rendered as strings, whatever type each was
 /// recorded as.
 #[derive(Clone, Debug)]
-struct CapturedEvent {
-    fields: BTreeMap<String, String>,
+pub(crate) struct CapturedEvent {
+    pub(crate) fields: BTreeMap<String, String>,
 }
 
 impl CapturedEvent {
-    fn field(&self, name: &str) -> Option<&str> {
+    pub(crate) fn field(&self, name: &str) -> Option<&str> {
         self.fields.get(name).map(String::as_str)
     }
 }
@@ -73,13 +73,13 @@ impl Visit for FieldCollector<'_> {
 /// A `tracing` subscriber that keeps every event it is handed, so a test can read
 /// the records back.
 #[derive(Clone, Default)]
-struct Capture {
+pub(crate) struct Capture {
     events: Arc<Mutex<Vec<CapturedEvent>>>,
 }
 
 impl Capture {
     /// Every captured record of `operation`, oldest first.
-    fn records_for(&self, operation: &str) -> Vec<CapturedEvent> {
+    pub(crate) fn records_for(&self, operation: &str) -> Vec<CapturedEvent> {
         self.events
             .lock()
             .expect("the capture buffer")
@@ -163,7 +163,7 @@ fn pin_callsite_interest() {
 }
 
 /// Capture this thread's `tracing` events for the life of the returned guard.
-fn capture_events() -> (Capture, tracing::subscriber::DefaultGuard) {
+pub(crate) fn capture_events() -> (Capture, tracing::subscriber::DefaultGuard) {
     pin_callsite_interest();
     let capture = Capture::default();
     let guard = tracing::subscriber::set_default(capture.clone());

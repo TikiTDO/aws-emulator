@@ -4,10 +4,16 @@
 //!
 //! Reports the MIME bytes currently stored for an in-transit message. A pure read:
 //! it returns the content stored for the `messageId` in the message flow of the
-//! region the request was made in, verbatim as the HTTP payload, and writes
-//! nothing, so a later caller sees exactly what this one saw. A message that is
+//! region the request was made in, verbatim as the HTTP payload, and writes nothing
+//! to the store, so a later caller sees exactly what this one saw. A message that is
 //! frozen (no longer eligible for update) is still readable — only
 //! `PutRawMessageContent` refuses it.
+//!
+//! Every call leaves a structured record of the ACCESS it granted — the caller's
+//! access key id, the message, the region and the outcome — and never the content it
+//! reported, so access to an in-transit message's content is reconstructable from
+//! the emulator's own records without those records holding a second copy of the
+//! message.
 //!
 //! ## Shape of an operation
 //!
@@ -138,43 +144,94 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // in is half of the address: a message in transit in another region's
         // message flow is not reachable through this endpoint at all.
         let request_region = crate::state::request_region(ctx.parts());
-        let state = crate::state::service_state(&*self.engine).ok_or_else(store_unavailable)?;
-        let state = state.lock();
+        // The access key id the request presented, for the access record below. An
+        // AKID is an identifier, not a secret; it is what attributes the access to a
+        // caller.
+        let akid = ::emulator_server::extract_akid(&ctx.parts().headers);
+        let store = crate::state::service_state(&*self.engine)
+            .ok_or_else(|| store_unavailable(&akid, &input.message_id, &request_region))?;
 
         // The bytes come out of the store and nowhere else: no canned MIME blob, and
         // nothing derived from the request beyond the region and id used to look the
-        // message up.
-        //
-        // An access record belongs to the call that DECIDES something about a message:
-        // this service leaves one for every outcome of its mutating operation (see
-        // `crate::ops::put_raw_message_content`) and none here, because reporting the
-        // stored content decides nothing — a reader that recorded its own reads would
-        // make every poll of a message indistinguishable from a change to one.
-        let message = state
-            .message(&request_region, &input.message_id)
-            .ok_or_else(|| {
-            // The text is the service's own rule — the fixed prefix plus the
-            // rejected id — and both operations render it from the one place that
-            // states it, `crate::state::unknown_message_id`.
-            GetRawMessageContentErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
-                message: Some(crate::state::unknown_message_id(&input.message_id)),
-            })
-        })?;
+        // message up. The guard is released as soon as the content has been read, so
+        // nothing below holds this service's store while it builds the answer.
+        let content = {
+            let state = store.lock();
+            state
+                .message(&request_region, &input.message_id)
+                .map(|message| message.content.clone())
+        };
+
+        let Some(content) = content else {
+            return Err(refuse_missing(&akid, &input.message_id, &request_region));
+        };
+
+        // Reading an in-transit message's content is an ACCESS to it, so every call
+        // leaves a record of that access — who asked, which message and in which
+        // region — the way every outcome of the mutating operation does (see
+        // `crate::ops::put_raw_message_content`). The record names the SIZE of what
+        // was reported and never the content itself: the record of an access must
+        // not become a second copy of the message it granted access to. `messageId`
+        // is interpolated as a display value because the model constrains it to
+        // `^[a-z0-9\-]*$`, which admits no CR or LF and is enforced before this
+        // handler runs.
+        ::tracing::info!(
+            operation = "GetRawMessageContent",
+            akid = %akid,
+            message_id = %input.message_id,
+            region = %request_region,
+            content_octets = content.len(),
+            outcome = "success",
+            "reported the raw content of an in-transit message"
+        );
 
         Ok(GetRawMessageContentOutput {
-            message_content: message.content.clone(),
+            message_content: content,
         })
     }
 }
 
-/// The answer when this service's store is not reachable at all.
+/// Record the access and build the refusal for a message that is not in transit in
+/// the region the request was made in.
+///
+/// The record is the one every other outcome of a read leaves; the wire text is the
+/// service's own rule — the fixed prefix plus the rejected id — which both
+/// operations render from the one place that states it,
+/// [`crate::state::unknown_message_id`].
+fn refuse_missing(akid: &str, message_id: &str, region: &str) -> GetRawMessageContentError {
+    ::tracing::info!(
+        operation = "GetRawMessageContent",
+        akid = %akid,
+        message_id = %message_id,
+        region = %region,
+        outcome = "ResourceNotFoundException",
+        "no in-transit message is stored under this id in this region"
+    );
+    GetRawMessageContentErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+        message: Some(crate::state::unknown_message_id(message_id)),
+    })
+    .into()
+}
+
+/// Record the access and answer when this service's store is not reachable at all.
 ///
 /// Not a modeled failure: `GetRawMessageContent` declares only
 /// `ResourceNotFoundException`, and "the emulator cannot reach its own state" is
 /// not "the message does not exist". It can only happen when the service is
 /// mounted on an engine that is not the shared in-memory one, so it is reported as
 /// 501 with wording that says exactly that rather than as a missing resource.
-fn store_unavailable() -> GetRawMessageContentError {
+///
+/// It leaves the same access record every other outcome of a read leaves: who
+/// asked, which message, in which region, and the outcome.
+fn store_unavailable(akid: &str, message_id: &str, region: &str) -> GetRawMessageContentError {
+    ::tracing::info!(
+        operation = "GetRawMessageContent",
+        akid = %akid,
+        message_id = %message_id,
+        region = %region,
+        outcome = "NotImplemented",
+        "could not report an in-transit message's content: no store to read it from"
+    );
     crate::scaffolded::Scaffolded::NotImplemented(crate::scaffolded::NotImplemented {
         message: "the WorkMail Message Flow in-transit message store is unavailable: this \
                   service is mounted on an engine that holds no state for it"
