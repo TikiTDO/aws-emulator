@@ -6,13 +6,13 @@
 //! policy witnesses, NOT signature/IAM authorization proofs. All resource changes go
 //! over the real in-process APIs; no owner registry is seeded or inspected directly.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use smithy_server_runtime::MultiServiceRouter;
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::stack_lifecycle::{
-    call, create_stack, describe_stack, member, resource_event_reason, wait_for_the_transition,
-    xml_blocks, xml_text, REGION,
+    REGION, call, create_stack, describe_stack, member, resource_event_reason,
+    wait_for_the_transition, xml_blocks, xml_text,
 };
 
 fn router() -> MultiServiceRouter {
@@ -167,10 +167,17 @@ async fn absent(router: &MultiServiceRouter, name: &str) {
 }
 
 async fn s3(router: &MultiServiceRouter, method: &str, bucket: &str, body: &str) -> (u16, String) {
+    // Auth is OFF in this lifecycle fixture. This synthetic account scope selects
+    // the private owner's read path, exactly as `trail` selects its account above;
+    // it is not a valid signature or authentication/authorization proof. Keep S3's
+    // default Block Public Access and BucketOwnerEnforced settings unchanged.
     let request = http::Request::builder()
         .method(method)
         .uri(format!(
             "https://s3.{REGION}.amazonaws.com/{bucket}/preserved-log"
+        ))
+        .header("authorization", format!(
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/{REGION}/s3/aws4_request, SignedHeaders=host, Signature=0123456789abcdef"
         ))
         .body(bytes::Bytes::from(body.to_owned()))
         .expect("S3 request");
@@ -232,13 +239,12 @@ async fn trail_stack_creates_updates_clears_and_deletes_the_actual_owner() {
         "WriteOnly"
     );
     assert_eq!(
-        trail_ok(&router, "GetInsightSelectors", json!({"TrailName":name})).await
-            ["InsightSelectors"][0]["InsightType"],
+        trail_ok(&router, "GetInsightSelectors", json!({"TrailName":name})).await["InsightSelectors"]
+            [0]["InsightType"],
         "ApiCallRateInsight"
     );
     assert_eq!(
-        trail_ok(&router, "GetEventConfiguration", json!({"TrailName":name})).await
-            ["AggregationConfigurations"],
+        trail_ok(&router, "GetEventConfiguration", json!({"TrailName":name})).await["AggregationConfigurations"],
         json!([{"EventCategory":"Data","Templates":["API_ACTIVITY"]}])
     );
     let initial_tags = tags(&router, &arn).await;
@@ -281,8 +287,8 @@ async fn trail_stack_creates_updates_clears_and_deletes_the_actual_owner() {
         false
     );
     assert_eq!(
-        trail_ok(&router, "GetEventSelectors", json!({"TrailName":name})).await
-            ["AdvancedEventSelectors"][0]["Name"],
+        trail_ok(&router, "GetEventSelectors", json!({"TrailName":name})).await["AdvancedEventSelectors"]
+            [0]["Name"],
         "management"
     );
     let changed_tags = tags(&router, &arn).await;
@@ -326,9 +332,11 @@ async fn trail_stack_creates_updates_clears_and_deletes_the_actual_owner() {
         selectors["EventSelectors"][0]["IncludeManagementEvents"],
         true
     );
-    assert!(selectors
-        .get("AdvancedEventSelectors")
-        .is_none_or(|v| v.is_null() || v == &json!([])));
+    assert!(
+        selectors
+            .get("AdvancedEventSelectors")
+            .is_none_or(|v| v.is_null() || v == &json!([]))
+    );
     // The owner reports disabled Insights as its modeled exception, not an empty success.
     let (status, insights) = trail(&router, "GetInsightSelectors", json!({"TrailName":name})).await;
     assert_eq!(status, 400, "{insights}");
@@ -351,6 +359,11 @@ async fn trail_stack_creates_updates_clears_and_deletes_the_actual_owner() {
     assert!(!tags(&router, &arn).await.contains_key("phase"));
     let (status, answer) = s3(&router, "PUT", bucket, "existing-log-data").await;
     assert_eq!(status, 200, "S3 PutObject: {answer}");
+    assert_eq!(
+        s3(&router, "GET", bucket, "").await,
+        (200, "existing-log-data".into()),
+        "the retention witness must be readable before the trail is deleted"
+    );
     let (status, answer) = call(&router, "DeleteStack", &[member("StackName", stack)]).await;
     assert_eq!(status, 200, "DeleteStack: {answer}");
     wait_for_the_transition().await;
@@ -371,6 +384,12 @@ async fn trail_stack_creates_updates_clears_and_deletes_the_actual_owner() {
         successor["Name"], name,
         "deletion must release the owner name"
     );
+    // Negative control: this same owner read must observe actual object deletion,
+    // not a cached response or a witness detached from S3's stored object.
+    let (status, answer) = s3(&router, "DELETE", bucket, "").await;
+    assert_eq!(status, 204, "S3 DeleteObject negative control: {answer}");
+    let (status, answer) = s3(&router, "GET", bucket, "").await;
+    assert_eq!(status, 404, "deleted sentinel must not be served: {answer}");
 }
 
 #[tokio::test]
@@ -394,7 +413,8 @@ async fn missing_delivery_policy_is_an_owner_refusal_not_create_complete() {
     settled(&router, "trail-no-policy", "CREATE_FAILED").await;
     let reason = resource_event_reason(&router, "trail-no-policy", "Trail", "CREATE_FAILED").await;
     assert!(
-        reason.contains("InsufficientS3BucketPolicyException"),
+        reason.contains("Incorrect S3 bucket policy is detected for bucket:")
+            && reason.contains("HandlerErrorCode: InvalidRequest"),
         "{reason}"
     );
     absent(&router, name).await;
@@ -429,7 +449,8 @@ async fn post_create_selector_refusal_cleans_up_even_when_stack_rollback_is_disa
     let reason =
         resource_event_reason(&router, "trail-create-cleanup", "Trail", "CREATE_FAILED").await;
     assert!(
-        reason.contains("InvalidEventSelectorsException"),
+        reason.contains("When includeManagementEvents is false, DataResources must not be empty")
+            && reason.contains("HandlerErrorCode: InvalidRequest"),
         "{reason}"
     );
     absent(&router, name).await;
@@ -570,7 +591,8 @@ async fn failed_update(drift_aware: bool) {
     settled(&router, stack, "UPDATE_FAILED").await;
     let reason = resource_event_reason(&router, stack, "Trail", "UPDATE_FAILED").await;
     assert!(
-        reason.contains("InvalidEventSelectorsException"),
+        reason.contains("When includeManagementEvents is false, DataResources must not be empty")
+            && reason.contains("HandlerErrorCode: InvalidRequest"),
         "{reason}"
     );
     assert_eq!(
