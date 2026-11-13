@@ -313,6 +313,14 @@ fn action_type_json(id: &ActionTypeId) -> Value {
     })
 }
 
+/// The same identity as a RESPONSE of this service carries it: an `ActionTypeId` arrives
+/// with the awsJson shape discriminator beside the four members the shape declares.
+fn reported_action_type_json(id: &ActionTypeId) -> Value {
+    let mut reported = action_type_json(id);
+    reported["__type"] = json!("ActionTypeId");
+    reported
+}
+
 /// One configuration property as `CreateCustomActionType` declares it. A queryable
 /// property "must be both required and not secret"
 /// (`state::validate_configuration_properties`).
@@ -584,7 +592,7 @@ async fn an_execution_reaching_a_custom_action_queues_a_job_for_its_worker() {
     );
     assert_eq!(
         job["data"]["actionTypeId"],
-        action_type_json(&action_type),
+        reported_action_type_json(&action_type),
         "case \"a queued job\": expected the polled action type, got {job}"
     );
     assert_eq!(

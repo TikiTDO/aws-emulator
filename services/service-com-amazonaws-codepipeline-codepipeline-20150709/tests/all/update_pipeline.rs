@@ -17,7 +17,8 @@ use serde_json::{json, Value};
 // The harness, the base declaration and the stage builders are shared with the
 // create/read suite rather than copied (`tests/all/pipeline_lifecycle.rs`).
 use crate::pipeline_lifecycle::{
-    build_stage, declaration, reported_stages, source_stage, Emulator, ROLE_ARN,
+    build_stage, declaration, reported_artifact_store, reported_stages, source_stage, Emulator,
+    ROLE_ARN,
 };
 
 /// A cross-region `artifactStores` map, the other form of artifact store a
@@ -48,7 +49,7 @@ async fn an_update_replaces_the_stored_structure_at_the_next_version() {
                 "artifactStore": {"type": "S3", "location": "my-bucket"},
                 "stages": [source_stage("Source"), build_stage("Build", 2), build_stage("Test", 1)],
             }),
-            "V1",
+            "V2",
             "SUPERSEDED",
         ),
         (
@@ -63,7 +64,7 @@ async fn an_update_replaces_the_stored_structure_at_the_next_version() {
                 // replacement of the source stage is a different SOURCE stage.
                 "stages": [source_stage("Origin"), build_stage("Build", 1)],
             }),
-            "V1",
+            "V2",
             "SUPERSEDED",
         ),
         (
@@ -74,11 +75,11 @@ async fn an_update_replaces_the_stored_structure_at_the_next_version() {
                 "artifactStores": artifact_stores(),
                 "stages": [source_stage("Source"), build_stage("Build", 1)],
             }),
-            "V1",
+            "V2",
             "SUPERSEDED",
         ),
         (
-            "V2 parameters added, so the type resolves to V2",
+            "V2 parameters added",
             json!({
                 "name": "demo",
                 "roleArn": ROLE_ARN,
@@ -118,6 +119,18 @@ async fn an_update_replaces_the_stored_structure_at_the_next_version() {
                 },
                 "stages": [source_stage("Source"), build_stage("Build", 1)],
             }),
+            "V2",
+            "SUPERSEDED",
+        ),
+        (
+            "an explicitly V1 declaration keeps the type it states",
+            json!({
+                "name": "demo",
+                "roleArn": ROLE_ARN,
+                "artifactStore": {"type": "S3", "location": "my-bucket"},
+                "stages": [source_stage("Source"), build_stage("Build", 1)],
+                "pipelineType": "V1",
+            }),
             "V1",
             "SUPERSEDED",
         ),
@@ -131,10 +144,10 @@ async fn an_update_replaces_the_stored_structure_at_the_next_version() {
                 // The version the pipeline had when it was read: the service owns
                 // this member, so the update does not take it from the request.
                 "version": 1,
-                "pipelineType": "V1",
+                "pipelineType": "V2",
                 "executionMode": "SUPERSEDED",
             }),
-            "V1",
+            "V2",
             "SUPERSEDED",
         ),
         (
@@ -146,11 +159,11 @@ async fn an_update_replaces_the_stored_structure_at_the_next_version() {
                 "artifactStores": {},
                 "stages": [source_stage("Source"), build_stage("Build", 1)],
             }),
-            "V1",
+            "V2",
             "SUPERSEDED",
         ),
         (
-            "a present-but-empty variables list is no V2 parameter",
+            "a present-but-empty variables list",
             json!({
                 "name": "demo",
                 "roleArn": ROLE_ARN,
@@ -158,7 +171,7 @@ async fn an_update_replaces_the_stored_structure_at_the_next_version() {
                 "stages": [source_stage("Source"), build_stage("Build", 1)],
                 "variables": [],
             }),
-            "V1",
+            "V2",
             "SUPERSEDED",
         ),
     ];
@@ -194,9 +207,13 @@ async fn an_update_replaces_the_stored_structure_at_the_next_version() {
         expected["version"] = json!(2);
         expected["pipelineType"] = json!(pipeline_type);
         expected["executionMode"] = json!(execution_mode);
-        // An action's artifact lists are reported present, empty where the action
-        // declares none, so the sent stages take that form here too.
+        // An action's artifact lists, its configuration and its run order are reported
+        // present, and an action type id and an encryption key carry the awsJson shape
+        // discriminator, so the sent structure takes that form here too.
         expected["stages"] = reported_stages(&updated);
+        if !updated["artifactStore"].is_null() {
+            expected["artifactStore"] = reported_artifact_store(&updated["artifactStore"]);
+        }
         assert_eq!(
             reported, expected,
             "case {case:?}: the stored declaration must be the sent structure with \

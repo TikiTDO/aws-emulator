@@ -1,89 +1,58 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! The WIRE FORM of an `ActionType`: the shape discriminator its `id` carries.
+//! The WIRE FORM of this service's responses: the shape discriminator its structures
+//! carry.
 //!
 //! # The gap this closes
 //!
-//! This service speaks `awsJson1_1` (`smithy_query query="service_info"`), and on that
-//! protocol an `ActionTypeId` arrives at a client carrying `__type` — the member the
-//! awsJson family names a serialized shape with — beside the four members the shape
-//! declares:
-//!
-//! ```text
-//! "id": {"__type": "ActionTypeId", "category": "Source", "owner": "AWS", …}
-//! ```
-//!
-//! `__type` is a PROTOCOL member rather than a modelled one: the model declares it
-//! nowhere, so the generated serializer (which writes exactly the members `ActionTypeId`
-//! declares) cannot emit it, and a client that keys an action type's shape off that
-//! discriminator — the same discriminator it reads an error's class from — finds nothing.
-//! The framework writes one for an ERROR body
-//! (`vendor/smithy-schema-server/src/rpc.rs`'s `__TYPE_MEMBER_SCHEMA`), but nothing on the
-//! success path does, and `vendor/` is read-only.
-//!
-//! So it is closed here, on the SERVICE side, at the typed [`Operation`] seam: the wrapped
-//! operation's output is serialized with the discriminator written into every
-//! `ActionTypeId` it carries, and nothing else about the walk changes — every other
-//! member, its name, its order and its schema stay the ones the model gave it.
+//! On `awsJson1_1` some of this service's structures arrive at a client carrying `__type`,
+//! the member the awsJson family names a serialized shape with, beside the members the
+//! shape declares — `ActionTypeId` and `EncryptionKey`, wherever either is serialized.
+//! WHICH structures those are, and why the model cannot say so itself, is
+//! [`crate::service::shape_discriminator`]; this module is the serializer that WRITES one,
+//! on the SERVICE side, at the typed [`Operation`] seam: the wrapped operation's output is
+//! serialized with the discriminator written into every discriminated structure it
+//! carries, and nothing else about the walk changes — every other member, its name, its
+//! order and its schema stay the ones the model gave it.
 //!
 //! # Which operations serve one
 //!
-//! The two whose output carries an `ActionType`: `ListActionTypes` (`actionTypes`) and
-//! `CreateCustomActionType` (`actionType`) — the only two members in this model that
-//! target the `ActionType` shape. Both are served through this wrapper from
-//! [`crate::service::management_events::audited_table`], where every operation of this
-//! service is constructed.
+//! EVERY operation of this service is served through this wrapper
+//! ([`crate::service::management_events::audited_table`]), because the rule is a property
+//! of the SHAPE rather than of any one answer: an action type's identity reaches a client
+//! from a catalog listing, from a pipeline's structure, from an action execution and from
+//! a job worker's data, and an encryption key from an artifact store and from that same
+//! job data. Serving them all through it is what keeps those answers from disagreeing
+//! about the form one structure takes.
 
 use aws_smithy_runtime_api::http::{Request as RtRequest, Response as RtResponse};
 use aws_smithy_schema::serde::{SerdeError, SerializableStruct, ShapeSerializer};
-use aws_smithy_schema::{Schema, ShapeId, ShapeType};
+use aws_smithy_schema::Schema;
 use aws_smithy_types::{BigDecimal, BigInteger, DateTime, Document};
 use smithy_server_runtime::{
     BoxFuture, ErasedOperation, Operation, OperationContext, PreDispatchProtocol, Service,
 };
 
-/// The member the awsJson protocols name a serialized shape in, as the framework's own
-/// error renderer declares it.
-static TYPE_MEMBER_SCHEMA: Schema = Schema::new_member(
-    ShapeId::from_static("smithy.api#__type", "smithy.api", "__type"),
-    ShapeType::String,
-    "__type",
-    0,
-)
-.with_json_name("__type");
+use crate::service::shape_discriminator::{discriminator_of, TYPE_MEMBER_SCHEMA};
 
-/// The member whose value carries the discriminator: `ActionType$id`, the one member of
-/// this model that a recorded response shows it on.
+/// One output shape, serialized with the discriminator on every discriminated structure
+/// under it.
 ///
-/// Matched on the MEMBER's shape id, which is what the codec hands the serializer for a
-/// nested structure, so the rule holds wherever an `ActionType` is serialized — inside
-/// `ListActionTypes`' list and inside `CreateCustomActionType`'s single answer alike —
-/// and reaches no other structure of this service.
-static ACTION_TYPE_ID_MEMBER: ShapeId = ShapeId::from_static(
-    "com.amazonaws.codepipeline#ActionType$id",
-    "com.amazonaws.codepipeline",
-    "id",
-);
+/// Built by [`DiscriminatedOperation`]; there is no reason to name this type elsewhere.
+pub struct Discriminating<T>(pub T);
 
-/// The shape name the discriminator carries, which is the target of that member.
-const ACTION_TYPE_ID_SHAPE: &str = "ActionTypeId";
-
-/// One output shape, serialized with the discriminator on every `ActionTypeId` under it.
-///
-/// Built by [`ActionTypeWireFormOperation`]; there is no reason to name this type
-/// elsewhere.
-pub struct ActionTypeWireForm<T>(pub T);
-
-impl<T: SerializableStruct> SerializableStruct for ActionTypeWireForm<T> {
+impl<T: SerializableStruct> SerializableStruct for Discriminating<T> {
     fn serialize_members(&self, s: &mut dyn ShapeSerializer) -> Result<(), SerdeError> {
-        self.0.serialize_members(&mut DiscriminatingSerializer { inner: s })
+        self.0
+            .serialize_members(&mut DiscriminatingSerializer { inner: s })
     }
 }
 
 /// One structure NESTED under a wrapped output, re-wrapped so the rule reaches every
-/// depth: the `id` sits inside an `ActionType`, which sits inside the output or inside a
-/// list of them, and the framework's codec walks a nested structure with its OWN
-/// serializer, so the wrapper has to re-enter at each level.
+/// depth: a discriminated structure sits inside a declaration, a catalog entry or a job's
+/// data, which sits inside the output or inside a list of them, and the framework's codec
+/// walks a nested structure with its OWN serializer, so the wrapper has to re-enter at
+/// each level.
 struct Nested<'a>(&'a dyn SerializableStruct);
 
 impl SerializableStruct for Nested<'_> {
@@ -93,23 +62,27 @@ impl SerializableStruct for Nested<'_> {
     }
 }
 
-/// The `ActionTypeId` structure, serialized with the shape discriminator beside its own
-/// members.
-struct Discriminated<'a>(&'a dyn SerializableStruct);
+/// A discriminated structure, serialized with its shape name beside its own members.
+struct Discriminated<'a> {
+    /// The structure the codec handed the serializer.
+    value: &'a dyn SerializableStruct,
+    /// The shape name its discriminator carries.
+    shape: &'static str,
+}
 
 impl SerializableStruct for Discriminated<'_> {
     fn serialize_members(&self, s: &mut dyn ShapeSerializer) -> Result<(), SerdeError> {
-        s.write_string(&TYPE_MEMBER_SCHEMA, ACTION_TYPE_ID_SHAPE)?;
+        s.write_string(&TYPE_MEMBER_SCHEMA, self.shape)?;
         // Still through the wrapper, so a structure nested under this one would be
         // reached by the same rule rather than escaping it.
-        self.0
+        self.value
             .serialize_members(&mut DiscriminatingSerializer { inner: s })
     }
 }
 
 /// The serializer the wrapped output is walked with: every call is forwarded to the
-/// codec's own serializer unchanged, except the `ActionType$id` member, which is written
-/// carrying the shape discriminator.
+/// codec's own serializer unchanged, except a member the discriminator catalog names,
+/// which is written carrying the shape discriminator.
 struct DiscriminatingSerializer<'a> {
     inner: &'a mut dyn ShapeSerializer,
 }
@@ -122,8 +95,10 @@ impl ShapeSerializer for DiscriminatingSerializer<'_> {
         schema: &Schema,
         value: &dyn SerializableStruct,
     ) -> Result<(), SerdeError> {
-        if schema.shape_id() == &ACTION_TYPE_ID_MEMBER {
-            return self.inner.write_struct(schema, &Discriminated(value));
+        if let Some(shape) = discriminator_of(schema.shape_id()) {
+            return self
+                .inner
+                .write_struct(schema, &Discriminated { value, shape });
         }
         self.inner.write_struct(schema, &Nested(value))
     }
@@ -205,9 +180,9 @@ impl ShapeSerializer for DiscriminatingSerializer<'_> {
     }
 }
 
-/// One modelled operation served with every `ActionTypeId` of its response carrying the
-/// awsJson shape discriminator.
-pub struct ActionTypeWireFormOperation<O> {
+/// One modelled operation served with every discriminated structure of its response
+/// carrying the awsJson shape discriminator.
+pub struct DiscriminatedOperation<O> {
     /// The operation that serves the call.
     operation: O,
     /// The protocol envelope the framework renders a pre-dispatch failure of this
@@ -215,7 +190,7 @@ pub struct ActionTypeWireFormOperation<O> {
     pre_dispatch: PreDispatchProtocol<'static>,
 }
 
-impl<O> ActionTypeWireFormOperation<O> {
+impl<O> DiscriminatedOperation<O> {
     /// Wrap one operation, already constructed from the shared engine, whose pre-dispatch
     /// failures render in `pre_dispatch`.
     pub fn new(operation: O, pre_dispatch: PreDispatchProtocol<'static>) -> Self {
@@ -226,9 +201,9 @@ impl<O> ActionTypeWireFormOperation<O> {
     }
 }
 
-impl<O: Operation> Operation for ActionTypeWireFormOperation<O> {
+impl<O: Operation> Operation for DiscriminatedOperation<O> {
     type Input = O::Input;
-    type Output = ActionTypeWireForm<O::Output>;
+    type Output = Discriminating<O::Output>;
     type Error = O::Error;
 
     const NAME: &'static str = O::NAME;
@@ -243,14 +218,11 @@ impl<O: Operation> Operation for ActionTypeWireFormOperation<O> {
     ) -> Result<Self::Output, Self::Error> {
         // The handler's own answer, untouched: only how it is RENDERED changes, which is
         // the wrapper around it rather than anything about the output it built.
-        self.operation
-            .handle(input, ctx)
-            .await
-            .map(ActionTypeWireForm)
+        self.operation.handle(input, ctx).await.map(Discriminating)
     }
 }
 
-impl<O> ErasedOperation for ActionTypeWireFormOperation<O>
+impl<O> ErasedOperation for DiscriminatedOperation<O>
 where
     O: Operation + ErasedOperation,
 {

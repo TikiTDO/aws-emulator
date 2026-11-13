@@ -517,8 +517,9 @@ fn plan_stage_at(
 fn plan_action(action: &ActionDeclaration, now: SystemTime) -> ActionRun {
     ActionRun {
         name: action.name.clone(),
-        // `ActionDeclaration$runOrder` documents "The default is 1".
-        run_order: action.run_order.unwrap_or(1),
+        // The order an action with no declared one runs in, which is also the order the
+        // reported structure carries (`super::run_order`).
+        run_order: super::run_order(action),
         action_execution_id: super::random_uuid_v4(),
         status: None,
         due: None,

@@ -76,6 +76,8 @@ pub mod identity_authorization;
 /// The job records a worker polls for: a `Custom` action's job and a `ThirdParty`
 /// integration's, and how each is reported.
 mod job_records;
+mod declaration_defaults;
+pub use declaration_defaults::*;
 pub use job_records::*;
 // Named rather than a glob, so what `crate::state` publishes stays explicit — the same
 // way the re-exports below name what they take.
@@ -128,6 +130,17 @@ pub const ACTION_OWNER_THIRD_PARTY: &str = "ThirdParty";
 /// The `PipelineType` values the model declares
 /// (`smithy_query query="shape" shape="PipelineType"` -> `V1`, `V2`).
 pub const PIPELINE_TYPES: [&str; 2] = ["V1", "V2"];
+
+/// The `PipelineType` a pipeline whose declaration states none is created and updated
+/// as.
+///
+/// The newer of the two types the model declares: `PipelineDeclaration$pipelineType`
+/// describes it as having "the same structure as a V1 type, along with additional
+/// parameters for release safety and trigger configuration", so a declaration that names
+/// no type is the type that accepts the whole parameter set — including the "V2
+/// parameters, such as triggers on Git tags" the same member documents as making a
+/// pipeline V2 — rather than the restricted one, which a caller asks for by naming it.
+pub const DEFAULT_PIPELINE_TYPE: &str = PIPELINE_TYPES[1];
 
 /// The `ExecutionMode` values the model declares
 /// (`smithy_query query="shape" shape="ExecutionMode"` -> `QUEUED`, `SUPERSEDED`,
@@ -3501,48 +3514,6 @@ pub fn request_region(headers: &::http::HeaderMap) -> String {
         .unwrap_or_else(|| DEFAULT_REGION.to_string())
 }
 
-/// The `pipelineType` a declaration resolves to.
-///
-/// An explicit `pipelineType` is kept. Otherwise `PipelineDeclaration$pipelineType`
-/// documents the rule: "Including V2 parameters, such as triggers on Git tags, in
-/// the pipeline JSON when creating or updating a pipeline will result in the
-/// pipeline having the V2 type of pipeline" — so a declaration carrying a V2-only
-/// parameter (`variables` or `triggers`) resolves to `V2`, and one carrying neither
-/// to `V1`.
-pub fn resolved_pipeline_type(declaration: &PipelineDeclaration) -> String {
-    if let Some(declared) = declaration
-        .pipeline_type
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        return declared.to_string();
-    }
-    let carries_v2_parameters = declaration
-        .variables
-        .as_ref()
-        .is_some_and(|variables| !variables.is_empty())
-        || declaration
-            .triggers
-            .as_ref()
-            .is_some_and(|triggers| !triggers.is_empty());
-    if carries_v2_parameters {
-        PIPELINE_TYPES[1].to_string()
-    } else {
-        PIPELINE_TYPES[0].to_string()
-    }
-}
-
-/// The `executionMode` a declaration resolves to: the one it states, else
-/// [`DEFAULT_EXECUTION_MODE`].
-pub fn resolved_execution_mode(declaration: &PipelineDeclaration) -> String {
-    declaration
-        .execution_mode
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .unwrap_or(DEFAULT_EXECUTION_MODE)
-        .to_string()
-}
-
 /// The `TriggerType` an execution started by the pipeline's own creation records, from
 /// the model's enum (`smithy_query query="shape" shape="TriggerType"`, as
 /// `crate::ops::types::TRIGGER_TYPE_VALUES` lists it): creating a pipeline RUNS it once,
@@ -3632,37 +3603,6 @@ pub fn start_execution(
         rollback_target: None,
     };
     Some(store.record_execution(record, None))
-}
-
-/// The pipeline structure to REPORT for `declaration`: the stored one, with every
-/// action's artifact-list members present.
-///
-/// `ActionDeclaration$inputArtifacts` ("The name or ID of the artifact consumed by
-/// the action") and `$outputArtifacts` ("The name or ID of the result of the action
-/// declaration") target lists with no minimum length, so an action that consumes or
-/// produces nothing has an EMPTY list rather than no list at all: both members
-/// belong to every action declaration the service reports, and the reported
-/// structure is what a caller reads a definition back as — to diff it against the
-/// structure it submitted, to render the stage graph, or to edit it and send it to
-/// `UpdatePipeline`, each of which reads the two members on every action. Omitting
-/// them would also drop them from such an edit-then-update cycle.
-///
-/// The ONE place this projection lives, so `CreatePipeline`, `UpdatePipeline` and
-/// `GetPipeline` cannot disagree about the structure they report. Nothing else is
-/// resolved here: every other member is reported exactly as stored.
-pub fn reported_declaration(declaration: &PipelineDeclaration) -> PipelineDeclaration {
-    let mut reported = declaration.clone();
-    for stage in &mut reported.stages {
-        for action in &mut stage.actions {
-            if action.input_artifacts.is_none() {
-                action.input_artifacts = Some(Vec::new());
-            }
-            if action.output_artifacts.is_none() {
-                action.output_artifacts = Some(Vec::new());
-            }
-        }
-    }
-    reported
 }
 
 /// The message `ConcurrentPipelineExecutionsLimitExceededException` carries, for every
@@ -4564,7 +4504,7 @@ pub fn validate_declaration(
             BTreeMap::new();
         for action in &stage.actions {
             groups
-                .entry(action.run_order.unwrap_or(1))
+                .entry(run_order(action))
                 .or_default()
                 .push(action);
         }

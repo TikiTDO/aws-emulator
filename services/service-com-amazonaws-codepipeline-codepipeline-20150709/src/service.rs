@@ -61,8 +61,11 @@
 //! What is served there, and why that plane is unsigned, is documented in
 //! [`webhook_trigger`].
 
-/// The wire form of an `ActionType`: the awsJson shape discriminator its `id` carries.
+/// The serializer that renders this service's responses in the wire form the protocol
+/// gives them: the awsJson shape discriminator on every structure that carries one.
 pub mod action_type_wire_form;
+/// WHICH structures carry that discriminator, and the shape name each one carries.
+pub mod shape_discriminator;
 pub mod management_events;
 pub mod webhook_trigger;
 

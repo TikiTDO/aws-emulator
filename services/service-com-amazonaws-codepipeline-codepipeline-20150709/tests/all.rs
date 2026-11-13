@@ -73,6 +73,8 @@ mod job_result_state_statements;
 mod job_worker_refusals_and_poll_results;
 #[path = "all/management_event_recording.rs"]
 mod management_event_recording;
+#[path = "all/pipeline_declaration_wire_form.rs"]
+mod pipeline_declaration_wire_form;
 #[path = "all/pipeline_lifecycle.rs"]
 mod pipeline_lifecycle;
 #[path = "all/pipeline_not_found_wording.rs"]

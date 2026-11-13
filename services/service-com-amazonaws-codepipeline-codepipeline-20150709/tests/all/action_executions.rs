@@ -787,7 +787,15 @@ async fn a_record_reports_the_input_its_declaration_configures() {
             "the declared action type id",
             "Inherits",
             "actionTypeId",
-            json!({"category": "Source", "owner": "Custom", "provider": "MySource", "version": "1"}),
+            // On the wire an `ActionTypeId` carries the awsJson shape discriminator beside
+            // the four members the shape declares, wherever this service serializes one.
+            json!({
+                "__type": "ActionTypeId",
+                "category": "Source",
+                "owner": "Custom",
+                "provider": "MySource",
+                "version": "1",
+            }),
         ),
         (
             "the declared configuration",

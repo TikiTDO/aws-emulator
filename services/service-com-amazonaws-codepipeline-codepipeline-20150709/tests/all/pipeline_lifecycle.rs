@@ -260,10 +260,13 @@ pub(crate) fn build_stage(name: &str, action_count: usize) -> Value {
     json!({"name": name, "actions": actions})
 }
 
-/// The `stages` a declaration is REPORTED with: the ones the request declares, with
-/// each action's artifact-list members made present — empty for an action that
-/// declares no artifact, which is how every reported action declaration carries them
-/// (that rule has its own suite, `tests/all/action_artifact_lists.rs`).
+/// The `stages` a declaration is REPORTED with: the ones the request declares, with every
+/// member the SERVICE fills in for an action made present — the artifact lists empty for
+/// an action that declares no artifact, the configuration empty for one that configures
+/// nothing, the run order the first one for an action that declares none, and the awsJson
+/// shape discriminator on each action type id (each rule has its own suite,
+/// `tests/all/action_artifact_lists.rs` and
+/// `tests/all/pipeline_declaration_wire_form.rs`).
 ///
 /// Used by the suites that compare a reported structure against the one they sent, so
 /// "as stored" stays strict about every other member.
@@ -276,9 +279,26 @@ pub(crate) fn reported_stages(declaration: &Value) -> Value {
                     action[member] = Value::Array(Vec::new());
                 }
             }
+            if action["configuration"].is_null() {
+                action["configuration"] = json!({});
+            }
+            if action["runOrder"].is_null() {
+                action["runOrder"] = json!(1);
+            }
+            action["actionTypeId"]["__type"] = json!("ActionTypeId");
         }
     }
     stages
+}
+
+/// The `artifactStore` a declaration is REPORTED with: the one the request declares, with
+/// the awsJson shape discriminator on its encryption key when it names one.
+pub(crate) fn reported_artifact_store(store: &Value) -> Value {
+    let mut reported = store.clone();
+    if !reported["encryptionKey"].is_null() {
+        reported["encryptionKey"]["__type"] = json!("EncryptionKey");
+    }
+    reported
 }
 
 pub(crate) fn stage_names(pipeline: &Value) -> Vec<String> {
@@ -435,8 +455,8 @@ async fn every_declaration_round_trips_as_stored() {
         (
             "the smallest declaration there is",
             declaration("single"),
-            // No V2-only parameter, so the type resolves to V1.
-            "V1",
+            // No `pipelineType` declared, so it is stored as the service's default type.
+            "V2",
             "SUPERSEDED",
         ),
         (
@@ -447,7 +467,7 @@ async fn every_declaration_round_trips_as_stored() {
                 "artifactStore": {"type": "S3", "location": "my-bucket"},
                 "stages": [source_stage("Source"), build_stage("Build", 3), build_stage("Test", 1)],
             }),
-            "V1",
+            "V2",
             "SUPERSEDED",
         ),
         (
@@ -460,6 +480,18 @@ async fn every_declaration_round_trips_as_stored() {
                     "eu-west-1": {"type": "S3", "location": "west"},
                 },
                 "stages": [source_stage("Source"), build_stage("Build", 1)],
+            }),
+            "V2",
+            "SUPERSEDED",
+        ),
+        (
+            "an explicitly V1 declaration keeps the type it states",
+            json!({
+                "name": "legacy",
+                "roleArn": ROLE_ARN,
+                "artifactStore": {"type": "S3", "location": "my-bucket"},
+                "stages": [source_stage("Source"), build_stage("Build", 1)],
+                "pipelineType": "V1",
             }),
             "V1",
             "SUPERSEDED",
@@ -506,7 +538,7 @@ async fn every_declaration_round_trips_as_stored() {
                 },
                 "stages": [source_stage("Source"), build_stage("Build", 1)],
             }),
-            "V1",
+            "V2",
             "SUPERSEDED",
         ),
     ];
@@ -534,7 +566,8 @@ async fn every_declaration_round_trips_as_stored() {
             "case {case:?}: the stages must come back exactly as stored, got {stored}"
         );
         assert_eq!(
-            stored["artifactStore"], declaration["artifactStore"],
+            stored["artifactStore"],
+            reported_artifact_store(&declaration["artifactStore"]),
             "case {case:?}: artifactStore must come back as stored, got {stored}"
         );
         assert_eq!(

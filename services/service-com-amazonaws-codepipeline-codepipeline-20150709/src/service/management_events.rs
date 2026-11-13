@@ -31,6 +31,8 @@
 use std::sync::Arc;
 
 use service_common::audited_operation::{AuditedService, AuditedTable, CallKind};
+
+use crate::service::action_type_wire_form::DiscriminatedOperation;
 use service_common::management_events::{ManagementEventLog, RecordedSession, ServedApiCall};
 use smithy_server_runtime::{OperationContext, OperationRoutingTable, PreDispatchProtocol};
 
@@ -170,17 +172,37 @@ const JSON_ENVELOPE: PreDispatchProtocol<'static> = PreDispatchProtocol::Json {
 /// for an operation that only REPORTS state, `mutates` for one that CHANGES the account's
 /// resources — which is the event's `readOnly`, and what a lookup can filter on.
 ///
-/// The kind per row names the shared table's own method for it
-/// ([`AuditedTable::reports`] / [`AuditedTable::mutates`]), so nothing about what a kind
-/// means is restated here.
+/// The kind per row names the shared table's own value for it
+/// ([`CallKind::Reporting`] / [`CallKind::Mutating`]), so nothing about what a kind means
+/// is restated here.
+macro_rules! call_kind {
+    (reports) => {
+        CallKind::Reporting
+    };
+    (mutates) => {
+        CallKind::Mutating
+    };
+}
+
+/// Serve one operation of this service audited, as a call of the stated kind: `reports`
+/// for an operation that only REPORTS state, `mutates` for one that CHANGES the account's
+/// resources — which is the event's `readOnly`, and what a lookup can filter on.
+///
+/// Every row is served behind the one wrapper that renders this service's responses in the
+/// wire form the protocol gives them ([`crate::service::action_type_wire_form`]), with the
+/// audited call INSIDE it: the record a lookup reports is the operation's own document,
+/// while the response on the wire carries the shape discriminator wherever a structure of
+/// this service has one.
 macro_rules! audited {
     (
         $table:expr, $engine:expr,
         $( $module:ident :: $operation:ident => $kind:ident ),* $(,)?
     ) => {{
         $(
-            $table.$kind(
+            $table.serve_behind(
                 crate::ops::$module::$operation::new(::std::sync::Arc::clone($engine)),
+                call_kind!($kind),
+                DiscriminatedOperation::new,
             );
         )*
     }};
@@ -192,9 +214,6 @@ macro_rules! audited {
 /// EVERY one is here, the ones this emulator has not implemented included: a stub answers
 /// 501 and the wrapper records nothing for it, so an operation implemented later is
 /// auditable the moment it serves a call rather than when someone remembers to add it.
-/// The two whose answer carries an `ActionType` are listed BELOW the table's rows rather
-/// than in them, because each is served behind one more wire-form wrapper
-/// ([`crate::service::action_type_wire_form`]) — audited exactly like every other row.
 ///
 /// The kind per row is the operation's own semantics: `reports` for the `Get*` / `List*`
 /// readers, which report state and change none of it, and `mutates` for every operation
@@ -209,6 +228,7 @@ pub fn audited_table<Eng: Send + Sync + 'static>(engine: &Arc<Eng>) -> Operation
         table, engine,
         acknowledge_job::AcknowledgeJob => mutates,
         acknowledge_third_party_job::AcknowledgeThirdPartyJob => mutates,
+        create_custom_action_type::CreateCustomActionType => mutates,
         create_pipeline::CreatePipeline => mutates,
         delete_custom_action_type::DeleteCustomActionType => mutates,
         delete_pipeline::DeletePipeline => mutates,
@@ -223,6 +243,7 @@ pub fn audited_table<Eng: Send + Sync + 'static>(engine: &Arc<Eng>) -> Operation
         get_pipeline_state::GetPipelineState => reports,
         get_third_party_job_details::GetThirdPartyJobDetails => reports,
         list_action_executions::ListActionExecutions => reports,
+        list_action_types::ListActionTypes => reports,
         list_deploy_action_execution_targets::ListDeployActionExecutionTargets => reports,
         list_pipeline_executions::ListPipelineExecutions => reports,
         list_pipelines::ListPipelines => reports,
@@ -249,21 +270,6 @@ pub fn audited_table<Eng: Send + Sync + 'static>(engine: &Arc<Eng>) -> Operation
         untag_resource::UntagResource => mutates,
         update_action_type::UpdateActionType => mutates,
         update_pipeline::UpdatePipeline => mutates,
-    );
-    // The two operations whose answer carries an `ActionType`, each served behind the one
-    // more wrapper that writes the awsJson shape discriminator into every `ActionTypeId`
-    // under it ([`crate::service::action_type_wire_form`]). The audited call stays INSIDE,
-    // so the record a lookup reports is the operation's own document while the response on
-    // the wire carries the discriminator.
-    table.serve_behind(
-        crate::ops::list_action_types::ListActionTypes::new(Arc::clone(engine)),
-        CallKind::Reporting,
-        crate::service::action_type_wire_form::ActionTypeWireFormOperation::new,
-    );
-    table.serve_behind(
-        crate::ops::create_custom_action_type::CreateCustomActionType::new(Arc::clone(engine)),
-        CallKind::Mutating,
-        crate::service::action_type_wire_form::ActionTypeWireFormOperation::new,
     );
     table.finish()
 }
