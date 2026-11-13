@@ -65,6 +65,8 @@ mod authentication_success_shape;
 mod case_insensitive_user_resolution;
 #[path = "all/change_password.rs"]
 mod change_password;
+#[path = "all/client_secret_absence_sentence.rs"]
+mod client_secret_absence_sentence;
 #[path = "all/client_secret_not_found_message.rs"]
 mod client_secret_not_found_message;
 #[path = "all/clock_dependent_state.rs"]

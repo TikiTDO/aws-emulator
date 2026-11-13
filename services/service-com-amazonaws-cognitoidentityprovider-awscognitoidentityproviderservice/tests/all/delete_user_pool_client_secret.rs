@@ -81,10 +81,14 @@ const UNKNOWN_CLIENT_ID: &str = "nosuchappclient0000";
 /// A `ClientSecretIdType`-shaped id (length 1..128) no add minted.
 const UNKNOWN_SECRET_ID: &str = "nosuchappclient0000--1700000000000";
 
-/// The one sentence a `ClientSecretId` lookup that resolves nothing answers: fixed
-/// text, quoting neither the id asked for nor the app client, and with no trailing
-/// period.
+/// The one sentence a `ClientSecretId` lookup answers when the app client holds secrets
+/// and none of them is the one asked for: fixed text, quoting neither the id asked for
+/// nor the app client, and with no trailing period.
 const SECRET_NOT_FOUND_MESSAGE: &str = "Client secret does not exist";
+
+/// The one sentence that lookup answers when the app client holds no secret at all, so
+/// the app client's secret itself is what does not exist: fixed text as well.
+const NO_CLIENT_SECRET_MESSAGE: &str = "User pool client secret does not exist.";
 
 /// The one sentence the refusal to take an app client's only secret away carries:
 /// fixed text, quoting neither the app client, the pool nor the `ClientSecretId`
@@ -792,7 +796,7 @@ async fn a_delete_for_a_resource_no_app_client_holds_is_refused() {
                 public.user_pool_id.clone(),
                 public.client_id.clone(),
                 UNKNOWN_SECRET_ID.to_string(),
-                SECRET_NOT_FOUND_MESSAGE.to_string(),
+                NO_CLIENT_SECRET_MESSAGE.to_string(),
             ),
         };
 

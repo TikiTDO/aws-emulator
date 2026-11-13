@@ -173,12 +173,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // operation's own doc): the secret deleted is the one `ClientSecretId`
         // names, so an id this app client holds no secret for names nothing to
         // delete — including every id of ANOTHER app client, and every id an
-        // earlier delete already took away.
-        let at = client
+        // earlier delete already took away. Which sentence that refusal carries
+        // reports WHAT did not resolve: the app client's secret altogether, for
+        // a client that holds none, or the one secret among those it holds
+        // (`crate::state::UserPoolClient::client_secret_lookup_refusal`).
+        let at = match client
             .client_secrets
             .iter()
             .position(|held| held.id == input.client_secret_id)
-            .ok_or_else(client_secret_not_found)?;
+        {
+            Some(at) => at,
+            None => {
+                return Err(client_secret_not_found(
+                    client.client_secret_lookup_refusal(),
+                ))
+            }
+        };
 
         // "You cannot delete the last remaining secret for an app client" (this
         // operation's own doc), so a confidential app client never loses the
@@ -219,12 +229,13 @@ fn client_not_found(message: String) -> DeleteUserPoolClientSecretError {
 }
 
 /// This operation's `ResourceNotFoundException` for a `ClientSecretId` the named
-/// app client holds no secret for, worded as
-/// [`crate::state::CLIENT_SECRET_NOT_FOUND_MESSAGE`] — the one sentence the
-/// secret lookup answers whatever id was asked for, quoting none of it.
-fn client_secret_not_found() -> DeleteUserPoolClientSecretError {
+/// app client holds no secret for, carrying the sentence the store's secret
+/// lookup words for it
+/// ([`crate::state::UserPoolClient::client_secret_lookup_refusal`]) — the one
+/// sentence that miss answers whatever id was asked for, quoting none of it.
+fn client_secret_not_found(message: &str) -> DeleteUserPoolClientSecretError {
     DeleteUserPoolClientSecretErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
-        message: Some(crate::state::CLIENT_SECRET_NOT_FOUND_MESSAGE.to_string()),
+        message: Some(message.to_string()),
     })
     .into()
 }

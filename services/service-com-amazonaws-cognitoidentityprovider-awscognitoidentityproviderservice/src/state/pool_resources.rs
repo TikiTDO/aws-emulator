@@ -352,6 +352,17 @@ pub const MAX_CLIENT_SECRETS_PER_CLIENT: usize = 2;
 /// identifier back to it.
 pub const CLIENT_SECRET_NOT_FOUND_MESSAGE: &str = "Client secret does not exist";
 
+/// The message a `ResourceNotFoundException` carries when the app client the
+/// request names holds NO secret at all, so there is no secret of that app
+/// client for any `ClientSecretId` to name.
+///
+/// Amazon Cognito reports the two misses apart: a public app client holds no
+/// secret, and the refusal reports the app client's secret itself as absent
+/// rather than one secret of a set the client holds, which is what
+/// [`CLIENT_SECRET_NOT_FOUND_MESSAGE`] reports. Like that one it is a fixed
+/// sentence that quotes neither the id asked for, the app client nor the pool.
+pub const CLIENT_HOLDS_NO_SECRET_MESSAGE: &str = "User pool client secret does not exist.";
+
 /// The message `DeleteUserPoolClientSecret`'s `InvalidParameterException`
 /// carries when the secret the request names is the only one the app client
 /// still holds: "you cannot delete the last remaining secret for an app client"
@@ -636,6 +647,24 @@ impl UserPoolClient {
         self.client_secrets
             .first()
             .map(|secret| secret.value.as_str())
+    }
+
+    /// The sentence a `ResourceNotFoundException` carries when this app client
+    /// holds no secret under the `ClientSecretId` a request named: whether the
+    /// miss is of the app client's secret altogether, because the client holds
+    /// none ([`CLIENT_HOLDS_NO_SECRET_MESSAGE`]), or of one secret among those
+    /// the client does hold ([`CLIENT_SECRET_NOT_FOUND_MESSAGE`]).
+    ///
+    /// Either way one fixed sentence answers every id: the refusal quotes
+    /// neither the id asked for, this app client nor its pool, so an id no add
+    /// ever minted, an id another app client holds and an id an earlier delete
+    /// took away are all reported identically.
+    pub fn client_secret_lookup_refusal(&self) -> &'static str {
+        if self.client_secrets.is_empty() {
+            CLIENT_HOLDS_NO_SECRET_MESSAGE
+        } else {
+            CLIENT_SECRET_NOT_FOUND_MESSAGE
+        }
     }
 
     /// Whether this app client already holds every secret it may hold at once,

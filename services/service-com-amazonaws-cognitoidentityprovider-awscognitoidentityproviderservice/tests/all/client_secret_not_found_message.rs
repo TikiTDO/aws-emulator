@@ -7,9 +7,12 @@
 //! The rule under test: a `ClientSecretId` the named app client holds no active secret
 //! for is refused with `ResourceNotFoundException` at HTTP 400 carrying ONE fixed
 //! sentence — the same text for every id, quoting neither the id asked for, the app
-//! client (which the model marks `@sensitive`) nor the pool, and ending with no period.
-//! So a caller that classifies refusals by message sees one not-found class rather than
-//! one error per request, and the refusal never echoes the caller's secret identifier.
+//! client (which the model marks `@sensitive`) nor the pool. Which sentence it is
+//! reports WHAT the lookup failed to resolve: one secret among those the app client
+//! holds, or the app client's secret altogether, for a client that holds none. So a
+//! caller that classifies refusals by message sees one not-found class per fact rather
+//! than one error per request, and the refusal never echoes the caller's secret
+//! identifier.
 //!
 //! The rows below differ along what that rule generalises over: the FORM of the id
 //! (hex, UUID, the `<client-id>--<epoch-millis>` form an add mints, each published
@@ -31,8 +34,13 @@ const AUTHORIZATION: &str = "AWS4-HMAC-SHA256 \
      Credential=AKIDEXAMPLE/20260101/us-east-1/cognito-idp/aws4_request, \
      SignedHeaders=host;x-amz-date, Signature=0000";
 
-/// The one sentence a `ClientSecretId` lookup that resolves nothing answers.
+/// The one sentence a `ClientSecretId` lookup answers when the app client holds secrets
+/// and none of them is the one asked for.
 const SECRET_NOT_FOUND_MESSAGE: &str = "Client secret does not exist";
+
+/// The one sentence a `ClientSecretId` lookup answers when the app client holds no secret
+/// at all, so the app client's secret itself is what does not exist.
+const NO_CLIENT_SECRET_MESSAGE: &str = "User pool client secret does not exist.";
 
 /// The length bounds of `ClientSecretIdType`
 /// (`smithy_query(query="shape",shape="ClientSecretIdType")`: length 1..128), used to
@@ -184,6 +192,7 @@ struct NotFoundCase {
     user_pool_id: String,
     client_id: String,
     client_secret_id: String,
+    expected: &'static str,
 }
 
 #[tokio::test]
@@ -242,18 +251,21 @@ async fn a_client_secret_lookup_that_resolves_nothing_answers_one_fixed_sentence
             user_pool_id: user_pool_id.clone(),
             client_id: holder.clone(),
             client_secret_id: deleted.clone(),
+            expected: SECRET_NOT_FOUND_MESSAGE,
         },
         NotFoundCase {
             case: "the id of a secret ANOTHER app client of the same pool holds".to_string(),
             user_pool_id: user_pool_id.clone(),
             client_id: holder.clone(),
             client_secret_id: sibling_secret.clone(),
+            expected: SECRET_NOT_FOUND_MESSAGE,
         },
         NotFoundCase {
             case: "the id of a secret an app client of ANOTHER pool holds".to_string(),
             user_pool_id: user_pool_id.clone(),
             client_id: holder.clone(),
             client_secret_id: elsewhere_secret.clone(),
+            expected: SECRET_NOT_FOUND_MESSAGE,
         },
     ];
 
@@ -276,16 +288,23 @@ async fn a_client_secret_lookup_that_resolves_nothing_answers_one_fixed_sentence
     ];
     for (case, client_secret_id) in &never_minted {
         // The same id asked of the app client that holds secrets, and of the public app
-        // client that holds none: both resolve nothing, so both answer the same sentence.
-        for (who, asked_client) in [
-            ("a confidential app client", &holder),
-            ("a public app client", &public),
+        // client that holds none: both resolve nothing, and each reports what IT failed to
+        // resolve — one secret of a client that has them, the client's secret altogether
+        // for one that has none.
+        for (who, asked_client, expected) in [
+            (
+                "a confidential app client",
+                &holder,
+                SECRET_NOT_FOUND_MESSAGE,
+            ),
+            ("a public app client", &public, NO_CLIENT_SECRET_MESSAGE),
         ] {
             cases.push(NotFoundCase {
                 case: format!("{case}, asked of {who}"),
                 user_pool_id: user_pool_id.clone(),
                 client_id: asked_client.clone(),
                 client_secret_id: client_secret_id.clone(),
+                expected,
             });
         }
     }
@@ -297,6 +316,7 @@ async fn a_client_secret_lookup_that_resolves_nothing_answers_one_fixed_sentence
             user_pool_id: user_pool_id.clone(),
             client_id: holder.clone(),
             client_secret_id: "z".repeat(length),
+            expected: SECRET_NOT_FOUND_MESSAGE,
         });
     }
 
@@ -305,6 +325,7 @@ async fn a_client_secret_lookup_that_resolves_nothing_answers_one_fixed_sentence
         user_pool_id: asked_pool,
         client_id: asked_client,
         client_secret_id,
+        expected,
     } in cases
     {
         let (status, payload) = call(
@@ -324,8 +345,8 @@ async fn a_client_secret_lookup_that_resolves_nothing_answers_one_fixed_sentence
         );
         let message = error_message(&payload);
         assert_eq!(
-            message, SECRET_NOT_FOUND_MESSAGE,
-            "case {case:?}: expected the fixed not-found sentence, got {message:?}"
+            message, expected,
+            "case {case:?}: expected {expected:?}, got {message:?}"
         );
         for quoted_by_nothing in [&client_secret_id, &asked_client, &asked_pool] {
             assert!(
@@ -420,9 +441,9 @@ async fn an_unresolved_pool_or_app_client_keeps_its_own_wording() {
             "case {case:?}: the refusal must report {names_the_resource:?} as what did not \
              resolve, got {message:?}"
         );
-        assert_ne!(
-            message, SECRET_NOT_FOUND_MESSAGE,
-            "case {case:?}: a lookup that fails before the secret must not answer the \
+        assert!(
+            message != SECRET_NOT_FOUND_MESSAGE && message != NO_CLIENT_SECRET_MESSAGE,
+            "case {case:?}: a lookup that fails before the secret must not answer either \
              client-secret sentence, got {message:?}"
         );
     }
