@@ -775,6 +775,18 @@ pub(super) enum Provisioner {
     /// a stack declaring both has to create this one for real too — exactly the position
     /// `AWS::RDS::DBSubnetGroup` is in ([`Provisioner::RdsDbSubnetGroup`]).
     RedshiftClusterSubnetGroup,
+    /// `AWS::Redshift::ClusterParameterGroup`: the parameter group a provisioned Redshift
+    /// cluster's `ClusterParameterGroupName` names, which `CreateClusterParameterGroup`
+    /// creates under the name the declaration states — the name this type's `Ref` returns —
+    /// `ModifyClusterParameterGroup` writes the declared settings of and
+    /// `DeleteClusterParameterGroup` deletes.
+    ///
+    /// Amazon Redshift resolves a cluster's `ClusterParameterGroupName` against the groups it
+    /// HOLDS before it will create a cluster configured from one
+    /// (`ClusterParameterGroupNotFoundFault`), so a stack declaring both has to create this
+    /// one for real too — exactly the position [`Provisioner::RedshiftClusterSubnetGroup`] is
+    /// in.
+    RedshiftClusterParameterGroup,
     EventsRule,
     /// `AWS::Pipes::Pipe`: a pipe of Amazon EventBridge Pipes, which `CreatePipe` creates
     /// under the name the template states, `UpdatePipe` changes and `DeletePipe` deletes.
@@ -996,6 +1008,7 @@ pub(super) fn provisioner_for(resource_type: &str) -> Option<Provisioner> {
         RDS_DB_PROXY_TARGET_GROUP => Some(Provisioner::RdsDbProxyTargetGroup),
         REDSHIFT_CLUSTER => Some(Provisioner::RedshiftCluster),
         REDSHIFT_CLUSTER_SUBNET_GROUP => Some(Provisioner::RedshiftClusterSubnetGroup),
+        REDSHIFT_CLUSTER_PARAMETER_GROUP => Some(Provisioner::RedshiftClusterParameterGroup),
         EVENTS_RULE => Some(Provisioner::EventsRule),
         PIPES_PIPE => Some(Provisioner::PipesPipe),
         SSM_PARAMETER => Some(Provisioner::SsmParameter),
@@ -1271,6 +1284,18 @@ impl Provisioner {
             }
             Self::RedshiftClusterSubnetGroup => {
                 create_cluster_subnet_group(ctx, region, resource, propagated).await
+            }
+            // `AWS::Redshift::ClusterParameterGroup` publishes `Tags` as the `{Key, Value}`
+            // list `CreateClusterParameterGroup`'s own `Tags` member takes, so a group a
+            // stack creates carries the tags CloudFormation gives it beside the declared ones.
+            Self::RedshiftClusterParameterGroup => {
+                Box::pin(create_cluster_parameter_group(
+                    ctx,
+                    region,
+                    resource,
+                    propagated,
+                ))
+                .await
             }
             Self::RdsDbSubnetGroup => {
                 create_db_subnet_group(ctx, region, resource, propagated).await
@@ -1856,6 +1881,12 @@ impl Provisioner {
             Self::MwaaEnvironment => {
                 mwaa_environment_readiness(ctx, region, physical_resource_id).await
             }
+            // `CreateCluster` answers a cluster `creating`, in which it serves no connection
+            // and publishes no endpoint at all, so the resource's creation is finished once
+            // Amazon Redshift reports it `available`.
+            Self::RedshiftCluster => {
+                Box::pin(redshift_cluster_readiness(ctx, region, physical_resource_id)).await
+            }
             _ => Ok(Readiness::Ready),
         }
     }
@@ -1925,6 +1956,18 @@ impl Provisioner {
             // `available`.
             Self::ElastiCacheCacheCluster => {
                 Box::pin(cache_cluster_ready_attributes(ctx, region, physical_resource_id)).await
+            }
+            // A Redshift cluster has no connection endpoint while it is `creating`: the
+            // address and the port a client connects to are what Amazon Redshift publishes
+            // once the cluster is serving, so the type's endpoint attributes are read off the
+            // cluster when it reports it `available`.
+            Self::RedshiftCluster => {
+                Box::pin(redshift_cluster_ready_attributes(
+                    ctx,
+                    region,
+                    physical_resource_id,
+                ))
+                .await
             }
             _ => Ok(BTreeMap::new()),
         }
@@ -2137,6 +2180,14 @@ impl Provisioner {
                     DB_CLUSTER_PARAMETER_GROUP_CALLS,
                 )
                 .await
+            }
+            // A Redshift parameter group's `Parameters` are the one part of its declaration
+            // Amazon Redshift can change on a group that exists, and the modify is the call
+            // that changes it — the same call the create makes for the declared values — so a
+            // changed declaration is applied to the group the stack created rather than
+            // dropped ([`update_cluster_parameter_group`]).
+            Self::RedshiftClusterParameterGroup => {
+                Box::pin(update_cluster_parameter_group(ctx, region, resource, declared)).await
             }
             // Every member of a health check's configuration that can change on a live one
             // is a member of `UpdateHealthCheck`, so a changed declaration is applied to the
@@ -2532,6 +2583,9 @@ impl Provisioner {
             Self::RedshiftCluster => {
                 delete_redshift_cluster(ctx, region, physical_resource_id, final_snapshot)
                     .await
+            }
+            Self::RedshiftClusterParameterGroup => {
+                delete_cluster_parameter_group(ctx, region, physical_resource_id).await
             }
             Self::RedshiftClusterSubnetGroup => {
                 delete_cluster_subnet_group(ctx, region, physical_resource_id).await
@@ -3209,6 +3263,11 @@ impl Provisioner {
             Self::BedrockKnowledgeBase => {
                 describe_bedrock_knowledge_base(ctx, region, physical_resource_id).await
             }
+            // Amazon Redshift's own read of the parameter group the stack created, by the
+            // name it was created under.
+            Self::RedshiftClusterParameterGroup => {
+                describe_cluster_parameter_group(ctx, region, physical_resource_id).await
+            }
             // Amazon Redshift's own read of the subnet group the stack created, by the name
             // it was created under.
             Self::RedshiftClusterSubnetGroup => {
@@ -3286,7 +3345,9 @@ pub(super) mod compute_fleet;
 mod network_and_delivery;
 mod ssm_associations;
 pub(super) mod elasticache_caches;
+pub(super) mod redshift_parameter_groups;
 use elasticache_caches::*;
+use redshift_parameter_groups::*;
 use ssm_associations::*;
 use compute_fleet::*;
 pub(crate) use network_and_delivery::*;

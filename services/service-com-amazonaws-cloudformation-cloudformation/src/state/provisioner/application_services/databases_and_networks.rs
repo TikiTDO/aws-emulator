@@ -1538,8 +1538,11 @@ pub(crate) const CLUSTER_PROPERTIES_NOT_SENT: &[&str] = &[
 /// The cluster is created in the service that OWNS it, so Amazon Redshift's own
 /// `DescribeClusters` reports the cluster the stack claims to have created. Its identity is
 /// CloudFormation's ("Ref returns the name of the cluster"), so nothing here replaces the
-/// physical id, and the endpoint is NOT reported as an attribute: Amazon Redshift publishes
-/// a cluster's endpoint only once that cluster is serving, so a create answers none.
+/// physical id, and the endpoint is not an attribute this create can report: Amazon Redshift
+/// publishes a cluster's endpoint only once that cluster is serving, so the resource's
+/// creation is held open until it reports it `available` ([`redshift_cluster_readiness`]) and
+/// the type's endpoint attributes are read off it then
+/// ([`redshift_cluster_ready_attributes`]).
 pub(crate) async fn create_redshift_cluster(
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
@@ -1739,6 +1742,24 @@ pub(crate) async fn describe_redshift_cluster(
     region: &str,
     physical_resource_id: &str,
 ) -> Result<Option<Value>, Refusal> {
+    Ok(read_redshift_cluster(ctx, region, physical_resource_id)
+        .await?
+        .map(|answered| Value::Object(xml_scalar_children(&answered, "Cluster"))))
+}
+
+/// Amazon Redshift's OWN answer for the cluster `physical_resource_id`, as that service
+/// wrote it, or `None` for a cluster it no longer has (`ClusterNotFound`).
+///
+/// The ONE read behind the drift document ([`describe_redshift_cluster`]), the readiness
+/// answer ([`redshift_cluster_readiness`]) and the endpoint attributes
+/// ([`redshift_cluster_ready_attributes`]), so the three ask that service the same way and
+/// each reads the part of one answer it is about — the cluster's scalar members for the
+/// first two, its `Endpoint` structure for the third.
+pub(crate) async fn read_redshift_cluster(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    physical_resource_id: &str,
+) -> Result<Option<String>, Refusal> {
     let parameters = vec![(
         "ClusterIdentifier".to_string(),
         physical_resource_id.to_string(),
@@ -1753,12 +1774,93 @@ pub(crate) async fn describe_redshift_cluster(
     )
     .await
     {
-        Ok(answered) => Ok(Some(Value::Object(xml_scalar_children(
-            &answered, "Cluster",
-        )))),
+        Ok(answered) => Ok(Some(answered)),
         Err(refusal) if refusal.code == REDSHIFT_CLUSTER_NOT_FOUND => Ok(None),
         Err(refusal) => Err(refusal),
     }
+}
+
+/// The `Cluster$ClusterStatus` a provisioned cluster SERVES in, and the ones a new cluster is
+/// still coming up out of (that member's own doc lists the statuses a cluster is reported in:
+/// `available`, `available, prep-for-resize`, `available, resize-cleanup`,
+/// `cancelling-resize`, `creating`, `deleting`, `final-snapshot`, `hardware-failure`,
+/// `incompatible-hsm`, `incompatible-network`, `incompatible-parameters`,
+/// `incompatible-restore`, `modifying`, `paused`, `rebooting`, `renaming`, `resizing`,
+/// `rotating-keys`, `storage-full`, `updating-hsm`).
+///
+/// A cluster in any other status is in one no wait brings a NEW cluster out of, which is a
+/// resource that failed to come up rather than one still coming.
+pub(crate) const REDSHIFT_CLUSTER_STATUS_AVAILABLE: &str = "available";
+pub(crate) const REDSHIFT_CLUSTER_STATUSES_COMING_UP: &[&str] =
+    &["creating", "modifying", "resizing"];
+
+/// Whether Amazon Redshift reports the cluster a stack created UP.
+///
+/// `CreateCluster` answers the cluster `creating`, and in that status it serves no connection
+/// and publishes no `Cluster$Endpoint` — "the connection endpoint" is reported once the
+/// cluster is available — so the resource's creation is held open until that service reports
+/// it there. A status no new cluster comes out of, and a cluster Amazon Redshift no longer
+/// holds, is a failure, because nothing is going to bring it up.
+pub(crate) async fn redshift_cluster_readiness(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    physical_resource_id: &str,
+) -> Result<Readiness, Refusal> {
+    let reported = read_redshift_cluster(ctx, region, physical_resource_id)
+        .await?
+        .map(|answered| xml_scalar_children(&answered, "Cluster"))
+        .filter(|reported| !reported.is_empty());
+    let Some(reported) = reported else {
+        return Ok(Readiness::Failed(format!(
+            "Amazon Redshift holds no cluster named {physical_resource_id}"
+        )));
+    };
+    let status = reported
+        .get("ClusterStatus")
+        .and_then(scalar_text)
+        .unwrap_or_default();
+    if status == REDSHIFT_CLUSTER_STATUS_AVAILABLE {
+        return Ok(Readiness::Ready);
+    }
+    if REDSHIFT_CLUSTER_STATUSES_COMING_UP.contains(&status.as_str()) {
+        return Ok(Readiness::Pending(status));
+    }
+    Ok(Readiness::Failed(format!(
+        "Amazon Redshift reports the cluster {physical_resource_id} in status {status}"
+    )))
+}
+
+/// The endpoint attributes `AWS::Redshift::Cluster` publishes, read off the cluster once
+/// Amazon Redshift reports it serving.
+///
+/// That type's published return values include the two members of its connection endpoint —
+/// `Endpoint.Address`, "the connection endpoint for the Amazon Redshift cluster", and
+/// `Endpoint.Port`, "the port number on which the cluster accepts connections" — and Amazon
+/// Redshift reports both as `Cluster$Endpoint`'s own `Address` and `Port`
+/// (`smithy_query(query="shape", shape="Endpoint")`). A cluster that is still `creating`
+/// carries no endpoint at all, so the create's answer could report neither: they are read
+/// HERE, off the service that owns them, so a stack output reading either carries the address
+/// a client really connects to rather than no value.
+pub(crate) async fn redshift_cluster_ready_attributes(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    physical_resource_id: &str,
+) -> Result<BTreeMap<String, String>, Refusal> {
+    let mut attributes = BTreeMap::new();
+    let Some(answered) = read_redshift_cluster(ctx, region, physical_resource_id).await? else {
+        return Ok(attributes);
+    };
+    // `Endpoint` is a STRUCTURE of the cluster's answer, so it is read out of the same
+    // document on its own ([`xml_scalar_children`] leaves a composite member out), and its
+    // own composite member (`VpcEndpoints`) is left out of it the same way.
+    let endpoint = xml_scalar_children(&answered, "Endpoint");
+    for member in ["Address", "Port"] {
+        let Some(value) = endpoint.get(member).and_then(scalar_text) else {
+            continue;
+        };
+        attributes.insert(format!("Endpoint.{member}"), value);
+    }
+    Ok(attributes)
 }
 
 /// The error code Amazon Redshift answers for a cluster subnet group it does not hold:

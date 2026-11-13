@@ -209,6 +209,16 @@ pub(super) fn naming_rules(resource_type: &str) -> Option<NameRules> {
         // ("Amazon Redshift stores the value as a lowercase string"), so only the LENGTH is
         // a bound a generated name could break.
         REDSHIFT_CLUSTER_SUBNET_GROUP => rules(255, Characters::AsGenerated),
+        // Amazon Redshift `CreateClusterParameterGroup.ParameterGroupName`: "Must be 1 to 255
+        // alphanumeric characters or hyphens", "First character must be a letter", "Cannot end
+        // with a hyphen or contain two consecutive hyphens" (that member's own doc) —
+        // Redshift's model carries no `@length` for it. That member also states "This value is
+        // stored as a lower-case string", so a name carrying upper case names a group that
+        // service does not hold under it — the position the Amazon RDS group names above are
+        // in.
+        crate::state::provisioner::redshift_parameter_groups::REDSHIFT_CLUSTER_PARAMETER_GROUP => {
+            rules(255, Characters::LowercaseAlphanumeric)
+        }
         // Amazon EC2 `CreateSecurityGroup.GroupName`: "Up to 255 characters in length"
         // (Amazon EC2 API reference) — EC2's model carries no `@length` for it.
         EC2_SECURITY_GROUP => rules(255, Characters::AsGenerated),
@@ -600,6 +610,13 @@ pub(super) fn declared_name_property(resource_type: &str) -> Option<&'static str
         // the type publishes `ClusterIdentifier`; the type's last segment is `Cluster`, so
         // neither `ClusterName` nor `Name` finds it.
         REDSHIFT_CLUSTER => Some("ClusterIdentifier"),
+        // The same service's `CreateClusterParameterGroup` takes a `ParameterGroupName`, and
+        // the type publishes it — "Ref returns the parameter group name" — so the name the
+        // template states is the group's. The type's last segment is `ClusterParameterGroup`,
+        // so neither `ClusterParameterGroupName` nor `Name` finds it.
+        crate::state::provisioner::redshift_parameter_groups::REDSHIFT_CLUSTER_PARAMETER_GROUP => {
+            Some("ParameterGroupName")
+        }
         // Amazon ElastiCache's `CreateCacheCluster` takes a `CacheClusterId`, and the type
         // publishes it as `ClusterName` — "Ref returns the name of the cache cluster" — so
         // neither `CacheClusterName` nor `Name` finds it. That name is what the cluster is

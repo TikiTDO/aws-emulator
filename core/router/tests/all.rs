@@ -35,7 +35,6 @@ mod workmailmessageflow_resolves_an_s3_object;
 // crate's own test target can train a model and then invoke what it deployed.
 #[path = "all/sagemaker_endpoint_serves_a_trained_model.rs"]
 mod sagemaker_endpoint_serves_a_trained_model;
-// Declared here, in this same head region, for the reason the entry above records: what a
 // configuration set's Kinesis Data Firehose event destination does with a message's events
 // spans SESv2, IAM, Firehose and Amazon S3 at once, so no single service's test target can
 // follow a published event to the object it lands in.
@@ -572,9 +571,6 @@ mod cloudhsm_signing_name_routing;
 // Declared here, in the SORTED block rather than appended at the end: the tail is where
 // every suite landing in the same window appends, so it is the contended region, while
 // this span of the list is stable.
-// Declared here, in the SORTED block rather than appended at the end: the tail is where
-// every suite landing in the same window appends, so it is the contended region, while
-// this span of the list is stable.
 #[path = "all/cloudtrail_api_call_events_by_region.rs"]
 mod cloudtrail_api_call_events_by_region;
 #[path = "all/cloudtrail_channel_target_routing.rs"]
@@ -884,13 +880,6 @@ mod logs_emf_declared_projections;
 mod logs_export_task_destination_bucket;
 #[path = "all/logs_subscription_delivery_role.rs"]
 mod logs_subscription_delivery_role;
-// Declared HERE, beside the sibling `logs_*` suites in the same quiet `n`/`o` gap, for the
-// reason those entries record: the appended tail at the end of this file and the head of the
-// list are both regions every concurrently landing router suite puts its line in.
-#[path = "all/logs_delivery_source_cloudfront_resource.rs"]
-mod logs_delivery_source_cloudfront_resource;
-#[path = "all/logs_subscription_filter_role_trust.rs"]
-mod logs_subscription_filter_role_trust;
 #[path = "all/partnercentral_channel_target_routing.rs"]
 mod partnercentral_channel_target_routing;
 #[path = "all/personalize_signing_name_routing.rs"]
@@ -1567,6 +1556,16 @@ mod cloudformation_rotation_schedule_rotates_its_secret;
 // destination that decides the refusal) at once.
 #[path = "all/cloudformation_rollback_deletes_the_buckets_it_created.rs"]
 mod cloudformation_rollback_deletes_the_buckets_it_created;
+// completed stack PUBLISHES for the Amazon Redshift resources it declared — an `OutputValue`
+// on every output, carrying the endpoint, port and parameter-group name Amazon Redshift
+// itself reports — which spans CloudFormation (the outputs) and Amazon Redshift (the cluster
+// and its parameter group) at once.
+#[path = "all/cloudformation_redshift_stack_outputs.rs"]
+mod cloudformation_redshift_stack_outputs;
+#[path = "all/logs_delivery_source_cloudfront_resource.rs"]
+mod logs_delivery_source_cloudfront_resource;
+#[path = "all/logs_subscription_filter_role_trust.rs"]
+mod logs_subscription_filter_role_trust;
 // Declared in the appended tail, which is where every new suite inserts its lines: what a log
 // group's subscription filter whose destination is a LAMBDA FUNCTION really hands that
 // function, and the lines the run it caused left in the function's own log group — CloudWatch
