@@ -202,6 +202,9 @@ pub(crate) async fn simulated<Eng: Send + Sync + 'static>(
         authorizer_name: authorizer.name.clone(),
         authorizer_uri: authorizer.authorizer_uri.clone().unwrap_or_default(),
         authorizer_arn: super::authorizer_arn(api, &authorizer.id),
+        // The same record decides a SIMULATED execution: the role the authorizer names is who
+        // the invocation would be made under, so what admits it is the same question here.
+        authorizer_credentials: authorizer.authorizer_credentials.clone(),
         event,
         trace_header: call.trace.authorizer_header.clone(),
         // A simulation holds nothing (see the module docs), so no result is looked for and

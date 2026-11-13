@@ -138,6 +138,10 @@ pub(super) struct Pending {
     /// The ARN of the AUTHORIZER, which is the `aws:SourceArn` a grant to API Gateway for
     /// an authorizer's function is narrowed by.
     pub authorizer_arn: String,
+    /// `Authorizer$authorizerCredentials`: the role API Gateway invokes the authorizer's
+    /// function UNDER, or `None`/empty for an authorizer that names none — "to use
+    /// resource-based permissions on the Lambda function, specify null".
+    pub authorizer_credentials: Option<String>,
     /// The event the function is handed; see the module docs.
     pub event: Value,
     /// The X-Ray trace context this invocation carries — the header the stage propagates
@@ -255,14 +259,10 @@ pub(super) async fn obtained(ctx: &OperationContext<'_>, pending: &Pending) -> O
         addressed_region
     };
     let client = super::lambda_proxy::lambda_client(ctx, at);
-    if !super::lambda_proxy::invocation_admitted(&client, function, &pending.authorizer_arn).await {
+    if let Some(reason) = unadmitted(ctx, at, &client, function, pending).await {
         return Obtained::Unobtained {
             refusal: super::AUTHORIZER_CONFIGURATION_ERROR,
-            reason: format!(
-                "the authorizer's function allows this api's authorizer {} no invocation of \
-                 it, so no invocation was made",
-                pending.authorizer_name
-            ),
+            reason,
         };
     }
     let Ok(payload) = ::serde_json::to_vec(&pending.event) else {
@@ -366,6 +366,38 @@ pub(super) async fn obtained(ctx: &OperationContext<'_>, pending: &Pending) -> O
             reason,
         },
     }
+}
+
+/// Why this authorizer's function is not invoked at all, or `None` when it is.
+///
+/// WHICH records decide it is what `Authorizer$authorizerCredentials` chooses: an authorizer
+/// naming a ROLE has its function invoked UNDER that role, so the permissions in force on the
+/// role admit the invocation and the function's own resource-based policy is not consulted;
+/// one naming none — "to use resource-based permissions on the Lambda function, specify
+/// null" — has it invoked as this service's own principal, so the FUNCTION's resource policy
+/// is the grant. Both readings are [`super::lambda_proxy`]'s, called rather than copied: an
+/// integration's own `credentials` member words the same choice.
+async fn unadmitted(
+    ctx: &OperationContext<'_>,
+    region: &str,
+    client: &::aws_sdk_lambda::Client,
+    function: &str,
+    pending: &Pending,
+) -> Option<String> {
+    if let Some(role_arn) =
+        super::lambda_proxy::stated_role(pending.authorizer_credentials.as_deref())
+    {
+        let function_arn = super::lambda_proxy::resolved_function_arn(client, function).await;
+        return super::lambda_proxy::role_unpermitted(ctx, region, role_arn, &function_arn).await;
+    }
+    if super::lambda_proxy::invocation_admitted(client, function, &pending.authorizer_arn).await {
+        return None;
+    }
+    Some(format!(
+        "the authorizer's function allows this api's authorizer {} no invocation of it, so no \
+         invocation was made",
+        pending.authorizer_name
+    ))
 }
 
 /// The error message a failed run reported, when its payload carries one.

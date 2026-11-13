@@ -130,6 +130,11 @@ impl Planned {
 /// `latency` is how long the whole invoke took, which is what `$context.responseLatency`
 /// ("the response latency in ms") reports.
 ///
+/// `authorized` is what this request's own AUTHORIZATION published about the caller — a
+/// custom authorizer's `principalId` and context values, a user pool's claims — each under the
+/// `$context` member path a reference reads it by, which the record's format may name as
+/// `$context.authorizer.<member>`; it is empty for a request no authorizer decided.
+///
 /// Nothing here can fail the request: the stage has already answered, so a delivery that
 /// could not be made is traced by `service_common` and nothing else.
 pub(super) async fn delivered<Eng: Send + Sync + 'static>(
@@ -139,8 +144,9 @@ pub(super) async fn delivered<Eng: Send + Sync + 'static>(
     request_id: &str,
     response: &RtResponse,
     latency: Duration,
+    authorized: &BTreeMap<String, String>,
 ) {
-    let planned = planned(engine, req, request_id, response, latency);
+    let planned = planned(engine, req, request_id, response, latency, authorized);
     let Some(planned) = planned.filter(|planned| !planned.is_empty()) else {
         return;
     };
@@ -179,6 +185,7 @@ fn planned<Eng: Send + Sync + 'static>(
     request_id: &str,
     response: &RtResponse,
     latency: Duration,
+    authorized: &BTreeMap<String, String>,
 ) -> Option<Planned> {
     let state = crate::state::service_state(engine)?;
     let store = state.lock();
@@ -210,6 +217,13 @@ fn planned<Eng: Send + Sync + 'static>(
         request_id,
         ::std::time::SystemTime::now(),
     );
+    // What the request's own AUTHORIZATION published, under the same `$context` member paths
+    // the call's mapping templates read it by: `$context.authorizer.principalId` is "the
+    // principal user identification associated with the token sent by the client and returned
+    // from an API Gateway Lambda authorizer function", which is an access-log variable of its
+    // own, and a user pool's claims are read as `$context.authorizer.claims.<name>`. A
+    // request no authorizer decided publishes nothing, so such a reference stays unresolved.
+    context.extend(authorized.iter().map(|(member, value)| (member.clone(), value.clone())));
     answered_context(&mut context, response, latency);
 
     let access = stage

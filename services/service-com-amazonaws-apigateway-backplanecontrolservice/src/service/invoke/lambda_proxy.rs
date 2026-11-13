@@ -288,7 +288,7 @@ pub(super) async fn performed(
     } else {
         addressed_region.to_string()
     };
-    Some(served(ctx, &at, function, call, waited_for(integration)).await)
+    Some(served(ctx, &at, function, call, waited_for(integration), integration.credentials.as_deref()).await)
 }
 
 /// The two parts of an `AWS_PROXY` `uri` that decide the invocation: the Region of the
@@ -332,6 +332,7 @@ async fn served(
     function: &str,
     call: &MethodRequest,
     within: Duration,
+    credentials: Option<&str>,
 ) -> Result<IntegratedResponse, UnservedIntegration> {
     // The stage's own work begins here. The trace context it propagates onto the invocation
     // was decided when the method request was built — ONCE for the request, so an
@@ -346,6 +347,7 @@ async fn served(
         call,
         within,
         propagated.header.as_deref(),
+        credentials,
     )
     .await;
     // What the stage recorded about the request it served, submitted once the outcome is
@@ -384,9 +386,10 @@ async fn invoked(
     call: &MethodRequest,
     within: Duration,
     trace: Option<&str>,
+    credentials: Option<&str>,
 ) -> Result<IntegratedResponse, UnservedIntegration> {
     let client = lambda_client(ctx, region);
-    if let Some(reason) = unpermitted(&client, function, call).await {
+    if let Some(reason) = unpermitted(ctx, region, &client, function, call, credentials).await {
         return Err(UnservedIntegration {
             refusal: API_CONFIGURATION_ERROR,
             reason,
@@ -518,16 +521,27 @@ fn bad_gateway() -> IntegratedResponse {
     }
 }
 
-/// Why the function's own resource policy does not admit this invocation, or `None` when it
-/// does — and when nothing about it could be shown, which refuses nothing.
+/// Why this invocation is not admitted, or `None` when it is — and when nothing about it
+/// could be shown, which refuses nothing.
 ///
-/// The phrase is the one AWS states in the execution log of a method whose integration's
-/// function admits it nothing ([`INVALID_PERMISSIONS_REASON`]).
+/// WHICH records decide it is what `Integration$credentials` chooses: an integration naming a
+/// ROLE has the call made under that role, so the role's own permissions admit it
+/// ([`role_unpermitted`]); one naming none has it made as this service's own principal, so the
+/// FUNCTION's resource-based policy admits it. The phrase a refusal carries is the one AWS
+/// states in the execution log of a method whose integration's function admits it nothing
+/// ([`INVALID_PERMISSIONS_REASON`]).
 async fn unpermitted(
+    ctx: &OperationContext<'_>,
+    region: &str,
     client: &::aws_sdk_lambda::Client,
     function: &str,
     call: &MethodRequest,
+    credentials: Option<&str>,
 ) -> Option<String> {
+    if let Some(role_arn) = stated_role(credentials) {
+        let function_arn = resolved_function_arn(client, function).await;
+        return role_unpermitted(ctx, region, role_arn, &function_arn).await;
+    }
     // A call that names no method at all leaves a grant's `aws:SourceArn` nothing to be
     // judged against, so there is no decision to take about it.
     let source_arn = call.proxy.source_arn.as_deref()?;
@@ -541,6 +555,94 @@ async fn unpermitted(
 /// grants it no invocation: "Invalid permissions on Lambda function", the sentence it words
 /// that configuration error with before answering the method's own `500`.
 const INVALID_PERMISSIONS_REASON: &str = "Invalid permissions on Lambda function";
+
+/// The ROLE an api's record names for API Gateway to make a call under, out of the value that
+/// record carries, or `None` where it names none.
+///
+/// `Integration$credentials` is "the credentials required for the integration … To specify an
+/// IAM role, specify the role's Amazon Resource Name (ARN)", and
+/// `Authorizer$authorizerCredentials` is "the required credentials as an IAM role for API
+/// Gateway to invoke the authorizer. To specify an IAM role, specify the role's ARN. To use
+/// resource-based permissions on the Lambda function, specify null" — so the two records word
+/// one choice, and an EMPTY value, a missing one and the spelling that asks for the caller's
+/// own identity to be passed through each name no role to assume.
+pub(super) fn stated_role(credentials: Option<&str>) -> Option<&str> {
+    credentials
+        .map(str::trim)
+        .filter(|role| !role.is_empty() && *role != CALLER_CREDENTIALS)
+}
+
+/// The `credentials` spelling that asks for the CALLER's own identity to be passed through
+/// rather than for a role to be assumed, as `Integration$credentials` documents it.
+///
+/// The same reading [`super::aws_integration`] takes of that member; stated once here, because
+/// the value is the same member of the same record whichever integration type carries it.
+const CALLER_CREDENTIALS: &str = "arn:aws:iam::*:user/*";
+
+/// Why the ROLE `role_arn` does not admit an invocation of `function` made under it, or `None`
+/// when it does — and when nothing about the role could be shown, which refuses nothing.
+///
+/// Where an api's record names a role ([`stated_role`]), that role is WHO the call is made as,
+/// so the permissions in force on it are what admit the invocation and the function's own
+/// resource-based policy is not consulted — which is exactly what
+/// `Authorizer$authorizerCredentials` offers as the alternative to "resource-based permissions
+/// on the Lambda function". Two things have to hold, and each is asked of IAM itself over the
+/// in-process hop (`service_common::iam_role`, the one route this tree has to either answer):
+/// the role must let this service ASSUME it, and it must allow `lambda:InvokeFunction` on the
+/// function. Neither reading refuses on silence: a role this emulator's IAM holds nothing
+/// under, and an answer it could not read, leave the call to be made.
+///
+/// `pub(super)` because an authorizer's function is invoked under the role ITS record names,
+/// by the same rule ([`super::custom_authorizer`]).
+pub(super) async fn role_unpermitted(
+    ctx: &OperationContext<'_>,
+    region: &str,
+    role_arn: &str,
+    function_arn: &str,
+) -> Option<String> {
+    if ::service_common::iam_role::role_is_unassumable(ctx, region, role_arn, SERVICE_PRINCIPAL)
+        .await
+    {
+        return Some(format!(
+            "the role {role_arn} the api names for this call does not let {SERVICE_PRINCIPAL} \
+             assume it, so no invocation was made under it"
+        ));
+    }
+    if ::service_common::iam_role::role_withholds_action(
+        ctx,
+        region,
+        role_arn,
+        INVOKE_FUNCTION_ACTION,
+        function_arn,
+    )
+    .await
+    {
+        return Some(format!(
+            "the role {role_arn} the api names for this call is allowed no \
+             {INVOKE_FUNCTION_ACTION} on {function_arn}, so no invocation was made under it"
+        ));
+    }
+    None
+}
+
+/// The ARN Lambda reports for `function`, whatever spelling a record addressed it by, or the
+/// value itself where Lambda answers nothing about it — which is a function this module judges
+/// nothing about.
+///
+/// `pub(super)` for the reason [`role_unpermitted`] gives.
+pub(super) async fn resolved_function_arn(
+    client: &::aws_sdk_lambda::Client,
+    function: &str,
+) -> String {
+    client
+        .get_function_configuration()
+        .function_name(function)
+        .send()
+        .await
+        .ok()
+        .and_then(|reported| reported.function_arn)
+        .unwrap_or_else(|| function.to_string())
+}
 
 /// Whether the resource policy of `function` admits an invocation API Gateway makes for
 /// `source_arn` — the ARN of the resource of this api the grant's `aws:SourceArn` narrows a

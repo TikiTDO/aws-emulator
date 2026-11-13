@@ -558,6 +558,11 @@ mod stage_logging_role_sequence;
 // Object's `content` map.
 #[path = "all/stage_export_oas30_containers.rs"]
 mod stage_export_oas30_containers;
+// Appended for the reason the note above gives: what a `CUSTOM`-authorized method answers,
+// whether its BACKEND runs, and the access-log record the stage leaves — the three halves of
+// one request, across API Gateway, AWS Lambda and CloudWatch Logs on one engine.
+#[path = "all/stage_authorizer_deny_blocks_the_backend.rs"]
+mod stage_authorizer_deny_blocks_the_backend;
 // Appended for the reason the note above gives: WHAT an `execute-api` authorization refusal
 // reports — the method ARN of the path the client addressed, and the clause naming the
 // document class that refused the call.

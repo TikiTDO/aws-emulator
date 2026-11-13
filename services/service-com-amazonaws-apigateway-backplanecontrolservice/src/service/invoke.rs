@@ -1353,6 +1353,12 @@ pub async fn serve<Eng: Send + Sync + 'static>(
     // latency of answering this request: the clock starts before anything is resolved and is
     // read once the response has been computed.
     let started = ::std::time::Instant::now();
+    // What this request's own AUTHORIZATION published about the caller — a custom authorizer's
+    // values and principal, a user pool's claims — filled by the resolution below. The STAGE's
+    // access-log record is rendered from the call's `$context` values, and these are part of
+    // them (`$context.authorizer.principalId` is an access-log variable of its own), so they
+    // are carried out to the delivery rather than reaching the integration alone.
+    let mut authorized: BTreeMap<String, String> = BTreeMap::new();
     let served = ::service_common::query_error_envelope::with_stated_request_id_header(
         // The documented payload limit is the ENDPOINT's, and it is answered HERE, before
         // anything the api's own records decide: not the stage, the route, the
@@ -1373,7 +1379,7 @@ pub async fn serve<Eng: Send + Sync + 'static>(
             None => compression::compressed(
                 engine,
                 req,
-                serve_resolved(engine, req, ctx, 0, &request_id).await,
+                serve_resolved(engine, req, ctx, 0, &request_id, &mut authorized).await,
             ),
         },
         &request_id,
@@ -1389,6 +1395,7 @@ pub async fn serve<Eng: Send + Sync + 'static>(
         &request_id,
         &served,
         started.elapsed(),
+        &authorized,
     )
     .await;
     served
@@ -1411,8 +1418,9 @@ fn serve_resolved<'a, 'c: 'a, Eng: Send + Sync + 'static>(
     ctx: &'a OperationContext<'c>,
     hop: u8,
     request_id: &'a str,
+    authorized: &'a mut BTreeMap<String, String>,
 ) -> BoxFuture<'a, RtResponse> {
-    Box::pin(async move { serving(engine, req, ctx, hop, request_id).await })
+    Box::pin(async move { serving(engine, req, ctx, hop, request_id, authorized).await })
 }
 
 /// [`serve_resolved`]'s body, written as an ordinary `async fn` so only the recursion
@@ -1423,6 +1431,7 @@ async fn serving<Eng: Send + Sync + 'static>(
     ctx: &OperationContext<'_>,
     hop: u8,
     request_id: &str,
+    authorized: &mut BTreeMap<String, String>,
 ) -> RtResponse {
     let Some(state) = crate::state::service_state(engine) else {
         return refusal_response(None, API_CONFIGURATION_ERROR);
@@ -1707,7 +1716,11 @@ async fn serving<Eng: Send + Sync + 'static>(
                 }
             };
             // What the authorization published is part of the call: a mapping template reads
-            // a user pool's claims and a custom authorizer's own values off `$context`.
+            // a user pool's claims and a custom authorizer's own values off `$context`. The
+            // STAGE's own access-log record is rendered from those same values, so what the
+            // authorization published is handed back to the funnel that delivers it
+            // ([`stage_logs`]) rather than being left to the integration alone.
+            *authorized = published.clone();
             call.inputs.context.extend(published);
 
             // The api's own RESOURCE POLICY, which "applies to this RestApi regardless of the
@@ -1995,7 +2008,18 @@ async fn serving<Eng: Send + Sync + 'static>(
                 // The onward request is a request of its own at another endpoint, so it is
                 // answered under its own id, as AWS names each request it processes by one.
                 let onward_id = ::service_common::query_error_envelope::new_request_id();
-                serve_resolved(engine, &onward, ctx, hop + 1, &onward_id).await
+                // A request of its own: what the endpoint it reaches publishes about ITS
+                // own authorization belongs to that request, not to this one's record.
+                let mut onward_authorized = BTreeMap::new();
+                serve_resolved(
+                    engine,
+                    &onward,
+                    ctx,
+                    hop + 1,
+                    &onward_id,
+                    &mut onward_authorized,
+                )
+                .await
             }
             // Another endpoint of this emulator: the request crosses the in-process
             // transport, and what the service claiming that endpoint answered IS the
@@ -2595,6 +2619,7 @@ fn authorization_refusal<Eng: Send + Sync + 'static>(
                     authorizer_name: authorizer.name.clone(),
                     authorizer_uri: authorizer.authorizer_uri.clone().unwrap_or_default(),
                     authorizer_arn: authorizer_arn(api, &authorizer.id),
+                    authorizer_credentials: authorizer.authorizer_credentials.clone(),
                     event,
                     // The trace context this stage propagates onto the authorizer's own
                     // invocation: the SAME chain and decision the integration's call carries
