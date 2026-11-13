@@ -268,7 +268,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // `Bucket::object_acl_grants` is where that one rule lives.
             grants: Some(
                 bucket
-                    .object_acl_grants(object)
+                    .object_acl_grants(object, store.owner_account_public_access_block())
                     .into_iter()
                     .map(|grant| Grant {
                         grantee: Some(Grantee {

@@ -312,6 +312,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // while this service's own guard is held.
         let caller = crate::service::request_authorization::request_caller(&*self.engine, ctx);
         let mut store = state.lock();
+        // The ACCOUNT-level half of the Block Public Access configuration, read before the
+        // bucket record is borrowed mutably: the setting in force on a bucket is its own
+        // together with its account's ([`crate::state::settings_in_force`]).
+        let account_block = store.owner_account_public_access_block();
         let Some(bucket) = store.bucket_mut(&input.bucket) else {
             return Err(crate::scaffolded::Scaffolded::unmodeled(
                 crate::state::NO_SUCH_BUCKET_CODE,
@@ -342,16 +346,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // Block Public Access: with `BlockPublicPolicy` on, S3 "causes Amazon S3 to reject
         // calls to PUT Bucket policy if the specified bucket policy allows public access"
-        // (`PublicAccessBlockConfiguration$BlockPublicPolicy`). The refusal is
+        // (`PublicAccessBlockConfiguration$BlockPublicPolicy`). The setting is in force when
+        // it is on in the BUCKET's own configuration or in the one the owning ACCOUNT carries
+        // (S3 Control's `PutPublicAccessBlock` writes that one, and
+        // [`crate::state::settings_in_force`] carries the rule): the most restrictive of the
+        // configurations that apply governs, so an account-level block refuses a public
+        // document for a bucket carrying no configuration of its own. The refusal is
         // `AccessDenied` — the guardrail denies the call, naming the principal, the action,
         // the resource and the setting that prevented it, the way the ACL half of the same
         // guardrail words it — and the policy the bucket already carries is left untouched,
         // so a re-put of a policy that was accepted before the switch went on is refused
         // too. Whether a policy allows public access is the same classification
         // `GetBucketPolicyStatus` reports.
-        if bucket
-            .public_access_block()
-            .is_some_and(|settings| settings.block_public_policy)
+        if crate::state::settings_in_force(bucket.public_access_block(), account_block)
+            .block_public_policy
             && crate::state::policy_grants_public_access(&input.policy)
         {
             return Err(crate::scaffolded::Scaffolded::unmodeled(

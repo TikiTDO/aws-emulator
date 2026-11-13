@@ -13,6 +13,8 @@
 // points it into `tests/all/`.
 #[path = "all/access_point_data_plane.rs"]
 mod access_point_data_plane;
+#[path = "all/account_public_access_block.rs"]
+mod account_public_access_block;
 #[path = "all/anonymous_object_reads.rs"]
 mod anonymous_object_reads;
 #[path = "all/aws_published_sample_data.rs"]

@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListAccessGrantsLocations
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListAccessGrantsLocations`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListAccessGrantsLocations::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the locations `CreateAccessGrantsLocation` registered in the account's
+//! S3 Access Grants instance in the Region the request was signed for, in location
+//! id order, one page at a time. Refuses with `AccessGrantsInstanceNotExistsError`
+//! when that account has no instance in that Region: the locations a listing
+//! reports are the instance's, so there is no collection to page through. A pure
+//! read: it writes nothing.
+//!
+//! `LocationScope` narrows the listing to the location registered under that S3
+//! path; `MaxResults` and `NextToken` page it, over the shared page token of this
+//! service ([`crate::state::encode_page_token`]).
 //!
 //! ## Shape of an operation
 //!
@@ -150,18 +152,81 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListAccessGrantsLocations` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListAccessGrantsLocationsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListAccessGrantsLocations"))
+        let page_size = crate::state::access_grants_listing::page_size(input.max_results)?;
+        // The token is the opaque form of the last location id the previous page
+        // reported; the scan resumes strictly after it.
+        let resume_after =
+            crate::state::access_grants_listing::resume_after(input.next_token.as_deref())?;
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(crate::state::state_unavailable());
+        };
+        // A location belongs to the Access Grants instance of this account in the
+        // Region the request was signed for, which is the key the register
+        // recorded it under.
+        let region = crate::state::signing_region(ctx.parts());
+        let store = state.lock();
+        // "Returns a list of the locations registered in your S3 Access Grants
+        // instance" (this operation's own documentation): the locations are the
+        // INSTANCE's, so an account with no instance in this Region has no
+        // collection to list rather than an empty one.
+        if !store
+            .access_grants_instances
+            .contains_key(&(input.account_id.clone(), region.clone()))
+        {
+            return Err(crate::state::no_such_access_grants_instance());
+        }
+
+        // Scan this instance's slice of the keyspace in location id order,
+        // starting just after the id the token named. `Excluded` on the empty id —
+        // which no location can have, `AccessGrantsLocationId` being at least one
+        // character — is how an un-tokened scan starts at the first location.
+        let start = (
+            input.account_id.clone(),
+            region.clone(),
+            resume_after.unwrap_or_default(),
+        );
+        let mut matching = store
+            .access_grants_locations
+            .range((
+                ::std::ops::Bound::Excluded(start),
+                ::std::ops::Bound::Unbounded,
+            ))
+            .take_while(|((account_id, held_region, _), _)| {
+                account_id == &input.account_id && held_region == &region
+            })
+            .map(|(_, record)| record)
+            // Narrowing by `LocationScope` asks for the location registered under
+            // that S3 path, which is what a registered location is identified by
+            // besides its id ("The S3 path to the location that you are
+            // registering", `ListAccessGrantsLocationsRequest$LocationScope`).
+            .filter(|record| match input.location_scope.as_deref() {
+                Some(scope) => record.location_scope == scope,
+                None => true,
+            });
+
+        let page: Vec<crate::state::AccessGrantsLocationRecord> =
+            matching.by_ref().take(page_size).cloned().collect();
+        // A token is returned only when the scan stopped short of the end, which is
+        // exactly when another matching record follows this page.
+        let next_token = matching
+            .next()
+            .and(page.last())
+            .map(|last| crate::state::encode_page_token(&last.id));
+
+        Ok(ListAccessGrantsLocationsOutput {
+            access_grants_locations_list: Some(
+                page.iter()
+                    .map(|record| ListAccessGrantsLocationsEntry {
+                        created_at: Some(record.created_at),
+                        access_grants_location_id: Some(record.id.clone()),
+                        access_grants_location_arn: Some(record.arn.clone()),
+                        location_scope: Some(record.location_scope.clone()),
+                        iam_role_arn: Some(record.iam_role_arn.clone()),
+                    })
+                    .collect(),
+            ),
+            next_token,
+        })
     }
 }

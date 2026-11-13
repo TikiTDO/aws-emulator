@@ -23,8 +23,7 @@
 
 use std::sync::Arc;
 
-use service_com_amazonaws_s3control_awss3controlservicev20180820::ops::types::PublicAccessBlockConfiguration;
-use service_com_amazonaws_s3control_awss3controlservicev20180820::state::service_state;
+use service_com_amazonaws_s3_amazons3::state::BucketPublicAccessBlock;
 use smithy_server_runtime::MultiServiceRouter;
 
 // The status a call of this surface whose response carries no document — the
@@ -141,19 +140,21 @@ impl Emulator {
     /// caller's own is refused before anything is stored. The store-wide bound
     /// exists for the store, not for one caller, so it is reached here by
     /// seeding it and then asking the service to record one more.
+    ///
+    /// Seeded where the configurations LIVE — the object store Amazon S3
+    /// enforces them from, which this service writes them in — so the count a
+    /// put is judged against is the one the service really reads.
     fn hold_configurations_for(&self, count: usize) {
-        let state = service_state(&*self.engine)
-            .expect("the shared engine must hold this service's state");
+        let state = ::service_com_amazonaws_s3_amazons3::state::service_state(&*self.engine)
+            .expect("the shared engine must hold the object store");
         let mut store = state.lock();
         for index in 0..count {
-            store.public_access_blocks.insert(
-                account_id(index),
-                PublicAccessBlockConfiguration {
-                    block_public_acls: true,
-                    ignore_public_acls: true,
-                    block_public_policy: true,
-                    restrict_public_buckets: true,
-                },
+            assert!(
+                store.record_account_public_access_block(
+                    &account_id(index),
+                    BucketPublicAccessBlock::all_enabled(),
+                ),
+                "seeding account {index} must be recorded"
             );
         }
     }

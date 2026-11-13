@@ -163,30 +163,32 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let _ = ctx;
-        let Some(state) = crate::state::service_state(&*self.engine) else {
-            return Err(crate::state::state_unavailable());
-        };
-
-        let mut store = state.lock();
-        // The store is bounded: past its quota a configuration for a FURTHER
-        // account is refused rather than recorded, so a caller cannot grow this
-        // process's state without end by varying the account id. An account
-        // already in the store is always writable, because replacing its
-        // configuration adds no record.
-        if !store.public_access_blocks.contains_key(&input.account_id)
-            && store.public_access_blocks.len() >= crate::state::PUBLIC_ACCESS_BLOCK_QUOTA
-        {
-            return Err(crate::state::public_access_block_store_full(
-                &input.account_id,
-            ));
+        // The configuration this call sets is what Amazon S3 judges a public bucket
+        // policy, a public ACL and a public read by, so it is recorded in the store
+        // that enforces it rather than in this service's own
+        // ([`crate::state::account_public_access_block`] carries that rule and this
+        // service's bound on how many accounts' configurations it records).
+        //
+        // Create or modify: an account has at most one configuration, so a second
+        // put replaces the first rather than adding to it.
+        match crate::state::account_public_access_block::record(
+            &*self.engine,
+            &input.account_id,
+            &input.public_access_block_configuration,
+        ) {
+            crate::state::account_public_access_block::Recorded::Stored => {
+                Ok(PutPublicAccessBlockOutput)
+            }
+            // Past the bound a configuration for a FURTHER account is refused rather
+            // than recorded, so a caller cannot grow this process's state without end
+            // by varying the account id. An account already recorded is always
+            // writable, because replacing its configuration adds no record.
+            crate::state::account_public_access_block::Recorded::StoreFull => Err(
+                crate::state::public_access_block_store_full(&input.account_id),
+            ),
+            crate::state::account_public_access_block::Recorded::Unavailable => {
+                Err(crate::state::state_unavailable())
+            }
         }
-        // Create or modify: an account has at most one configuration, so a
-        // second put replaces the first rather than adding to it.
-        store.public_access_blocks.insert(
-            input.account_id.clone(),
-            input.public_access_block_configuration.clone(),
-        );
-
-        Ok(PutPublicAccessBlockOutput)
     }
 }

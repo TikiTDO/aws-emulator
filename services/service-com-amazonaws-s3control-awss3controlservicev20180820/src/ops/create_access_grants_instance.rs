@@ -5,8 +5,10 @@
 //! Creates the one S3 Access Grants instance the account the request names has
 //! in the Region the request was signed for, and records it for
 //! `GetAccessGrantsInstance` to report. Answers
-//! `AccessGrantsInstanceAlreadyExistsError` when that account already has an
-//! instance in that Region, because an account has at most one per Region.
+//! `AccessGrantsInstanceAlreadyExists` when that account already has an
+//! instance in that Region, because an account has at most one per Region
+//! ([`crate::state::access_grants_instance_already_exists`] carries that code
+//! and the fixed message it is answered with).
 //!
 //! ## Shape of an operation
 //!
@@ -185,10 +187,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let key = (input.account_id.clone(), region.clone());
         let mut store = state.lock();
         if store.access_grants_instances.contains_key(&key) {
-            return Err(crate::state::access_grants_instance_already_exists(
-                &input.account_id,
-                &region,
-            ));
+            return Err(crate::state::access_grants_instance_already_exists());
         }
         // The store is bounded: past its quota a create is refused rather than
         // adding another record, so a caller cannot grow this process's state

@@ -153,28 +153,37 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let _ = ctx;
-        let Some(state) = crate::state::service_state(&*self.engine) else {
-            return Err(crate::state::state_unavailable());
-        };
-
-        let store = state.lock();
+        // The configuration is read where it lives: the store Amazon S3 enforces it
+        // from ([`crate::state::account_public_access_block`]).
+        //
         // An account that has had no configuration put on it holds no entry at
         // all, which is the state this operation's one modelled error reports.
         // An entry whose every setting is `false` is a configuration like any
         // other, and is reported below rather than read as absence.
-        let Some(configuration) = store.public_access_blocks.get(&input.account_id).cloned() else {
-            return Err(
-                GetPublicAccessBlockErrorModeled::NoSuchPublicAccessBlockConfiguration(
-                    NoSuchPublicAccessBlockConfiguration {
-                        message: Some(NO_SUCH_CONFIGURATION_MESSAGE.to_string()),
-                        // The account the refusal is ABOUT: the one the request
-                        // addressed, so a client reads it out of the refusal
-                        // rather than out of its own request.
-                        account_id: Some(input.account_id.clone()),
-                    },
-                )
-                .into(),
-            );
+        let configuration = match crate::state::account_public_access_block::configuration(
+            &*self.engine,
+            &input.account_id,
+        ) {
+            crate::state::account_public_access_block::Configured::Held(held) => held,
+            crate::state::account_public_access_block::Configured::None => {
+                return Err(
+                    GetPublicAccessBlockErrorModeled::NoSuchPublicAccessBlockConfiguration(
+                        NoSuchPublicAccessBlockConfiguration {
+                            message: Some(NO_SUCH_CONFIGURATION_MESSAGE.to_string()),
+                            // The account the refusal is ABOUT: the one the request
+                            // addressed, so a client reads it out of the refusal
+                            // rather than out of its own request.
+                            account_id: Some(input.account_id.clone()),
+                        },
+                    )
+                    .into(),
+                );
+            }
+            // Nothing could be read at all, which is not an account holding no
+            // configuration: a not-found would be a false statement about it.
+            crate::state::account_public_access_block::Configured::Unavailable => {
+                return Err(crate::state::state_unavailable());
+            }
         };
 
         Ok(GetPublicAccessBlockOutput {

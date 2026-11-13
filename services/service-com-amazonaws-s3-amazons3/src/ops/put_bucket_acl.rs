@@ -283,6 +283,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // names the principal that really signed this request.
         let caller = crate::service::request_authorization::request_caller(&*self.engine, ctx);
         let mut store = state.lock();
+        // The ACCOUNT-level half of the Block Public Access configuration, read before the
+        // bucket record is borrowed mutably: the setting in force on a bucket is its own
+        // together with its account's ([`crate::state::settings_in_force`]).
+        let account_block = store.owner_account_public_access_block();
         let Some(bucket) = store.bucket_mut(&input.bucket) else {
             return Err(PutBucketAclErrorModeled::NoSuchBucket(NoSuchBucket {}).into());
         };
@@ -307,13 +311,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // Block Public Access: with `BlockPublicAcls` on, S3 "causes the following
         // behavior: PUT Bucket ACL and PUT Object ACL calls fail if the specified ACL is
-        // public" (`PublicAccessBlockConfiguration$BlockPublicAcls`). The refusal is
+        // public" (`PublicAccessBlockConfiguration$BlockPublicAcls`). The setting is in force
+        // when it is on in the BUCKET's own configuration or in the one the owning ACCOUNT
+        // carries ([`crate::state::settings_in_force`]). The refusal is
         // `AccessDenied` — the guardrail denies the call, naming the principal, the action,
         // the resource and the setting that prevented it, the way the object half of the
         // same guardrail words it — and the stored ACL is left exactly as it was.
-        if bucket
-            .public_access_block()
-            .is_some_and(|settings| settings.block_public_acls)
+        if crate::state::settings_in_force(bucket.public_access_block(), account_block)
+            .block_public_acls
             && crate::state::acl_grants_public_access(&grants)
         {
             return Err(crate::scaffolded::Scaffolded::unmodeled(

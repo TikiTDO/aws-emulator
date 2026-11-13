@@ -1,15 +1,26 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListCallerAccessGrants
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListCallerAccessGrants`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListCallerAccessGrants::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the grants of the account's S3 Access Grants instance, in the Region the
+//! request was signed for, that grant THE CALLER access — "the access grants that grant
+//! the caller access to Amazon S3 data through S3 Access Grants. The caller (grantee) can
+//! be an Identity and Access Management (IAM) identity or Amazon Web Services Identity
+//! Center corporate directory identity. You must pass the Amazon Web Services account of
+//! the S3 data owner (grantor) in the request" (this operation's own documentation). Who
+//! the caller is comes from the credential the request signed with, resolved through STS's
+//! own resolution of it ([`caller_principals`]), so a grant to the role a session is of
+//! grants that session.
+//!
+//! Refuses with `AccessGrantsInstanceNotExistsError` when the account named has no
+//! instance in that Region: the grants are the instance's, so there is no collection to
+//! page through. A pure read: it writes nothing.
+//!
+//! `GrantScope` narrows it "using a fragment of the data's S3 path, and S3 Access Grants
+//! will return only the grants with a path that contains the path fragment";
+//! `AllowedByApplication` keeps only the grants authorized for an Identity Center
+//! application; `MaxResults` and `NextToken` page it
+//! ([`crate::state::access_grants_listing`]).
 //!
 //! ## Shape of an operation
 //!
@@ -161,18 +172,145 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListCallerAccessGrants` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListCallerAccessGrantsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListCallerAccessGrants"))
+        let page_size = crate::state::access_grants_listing::page_size(input.max_results)?;
+        // The token is the opaque form of the last grant id the previous page
+        // reported; the scan resumes strictly after it.
+        let resume_after =
+            crate::state::access_grants_listing::resume_after(input.next_token.as_deref())?;
+        // WHO is asking is resolved BEFORE this service's store is locked, so the STS
+        // and IAM stores the calling principal is read from are never reached while
+        // this service's own guard is held.
+        let caller = caller_principals(&*self.engine, ctx);
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(crate::state::state_unavailable());
+        };
+        let region = crate::state::signing_region(ctx.parts());
+        let store = state.lock();
+        // The grants are the INSTANCE's, so an account with no instance in this
+        // Region has no collection to list rather than an empty one.
+        if !store
+            .access_grants_instances
+            .contains_key(&(input.account_id.clone(), region.clone()))
+        {
+            return Err(crate::state::no_such_access_grants_instance());
+        }
+
+        let start = (
+            input.account_id.clone(),
+            region.clone(),
+            resume_after.unwrap_or_default(),
+        );
+        let mut matching = store
+            .access_grants
+            .range((
+                ::std::ops::Bound::Excluded(start),
+                ::std::ops::Bound::Unbounded,
+            ))
+            .take_while(|((account_id, held_region, _), _)| {
+                account_id == &input.account_id && held_region == &region
+            })
+            .map(|(_, record)| record)
+            .filter(|record| grants_the_caller(record, &caller))
+            // "You can, optionally, narrow the results by `GrantScope`, using a
+            // fragment of the data's S3 path, and S3 Access Grants will return only
+            // the grants with a path that contains the path fragment" — a FRAGMENT,
+            // where `ListAccessGrants` filters on the whole scope.
+            .filter(|record| match input.grant_scope.as_deref() {
+                Some(fragment) => record.grant_scope.contains(fragment),
+                None => true,
+            })
+            // "the `AllowedByApplication` filter in the request … returns only the
+            // grants authorized for applications": a grant is authorized for one
+            // when it carries that application's ARN, and a grant created without
+            // one is authorized for no application at all.
+            .filter(|record| !input.allowed_by_application || record.application_arn.is_some());
+
+        let page: Vec<crate::state::AccessGrantRecord> =
+            matching.by_ref().take(page_size).cloned().collect();
+        let next_token = matching
+            .next()
+            .and(page.last())
+            .map(|last| crate::state::encode_page_token(&last.id));
+
+        Ok(ListCallerAccessGrantsOutput {
+            caller_access_grants_list: Some(
+                page.iter()
+                    .map(|record| ListCallerAccessGrantsEntry {
+                        permission: Some(record.permission.clone()),
+                        grant_scope: Some(record.grant_scope.clone()),
+                        application_arn: record.application_arn.clone(),
+                    })
+                    .collect(),
+            ),
+            next_token,
+        })
+    }
+}
+
+/// The `GranteeType` value naming "an IAM user or role"
+/// (`ListAccessGrantsRequest$GranteeType`), which is the kind of grantee a REQUEST's
+/// credential can be: a corporate directory user or group signs no AWS request, so a grant
+/// to one grants no caller of this API.
+const IAM_GRANTEE_TYPE: &str = "IAM";
+
+/// Whether `record` grants access to the caller `principals` names: an `IAM` grantee whose
+/// identifier is one of the identities the request speaks for.
+///
+/// "If the grantee type is IAM, the identifier is the IAM Amazon Resource Name (ARN) of the
+/// user or role" (`ListAccessGrantsRequest$GranteeIdentifier`), so the comparison is against
+/// the ARN of the identity that signed and — for an assumed-role session — the ARN of the
+/// ROLE it is a session of, because that is the grantee a grant to the role names.
+fn grants_the_caller(record: &crate::state::AccessGrantRecord, principals: &[String]) -> bool {
+    record.grantee.grantee_type.as_deref() == Some(IAM_GRANTEE_TYPE)
+        && record
+            .grantee
+            .grantee_identifier
+            .as_deref()
+            .is_some_and(|identifier| principals.iter().any(|named| named == identifier))
+}
+
+/// Every IAM identity the request speaks for, resolved from the access key id it signed
+/// with.
+///
+/// The resolution is STS's own — the service that answers "the IAM user or role whose
+/// credentials are used to call the operation" (`GetCallerIdentity`) — read out of the same
+/// shared engine, so a session this emulator minted speaks for the identity it was minted
+/// for rather than for whatever a header says. A credential naming no session is the
+/// long-term identity that holds it, and an EXPIRED session speaks for nobody, which is an
+/// empty list: no grant can name it.
+fn caller_principals<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+) -> Vec<String> {
+    use ::service_com_amazonaws_sts_awssecuritytokenservicev20110615::state as sts_store;
+
+    let access_key_id = ::service_common::request_access_key_id(ctx.parts());
+    let iam = sts_store::iam_state(engine);
+    let long_term = match &iam {
+        Some(iam) => sts_store::long_term_identity(Some(&iam.lock()), &access_key_id),
+        None => sts_store::ambient_identity(),
+    };
+    let Some(sts) = sts_store::service_state(engine) else {
+        return vec![long_term.arn];
+    };
+    let resolved = sts_store::resolve_request_caller(
+        &mut sts.lock(),
+        &access_key_id,
+        ::std::time::SystemTime::now(),
+        ctx.credential_store(),
+        long_term,
+    );
+    match resolved {
+        Ok(caller) => {
+            let mut named = vec![caller.identity.arn];
+            if let Some(role_arn) = caller.role_arn {
+                if !named.contains(&role_arn) {
+                    named.push(role_arn);
+                }
+            }
+            named
+        }
+        Err(_expired) => Vec::new(),
     }
 }

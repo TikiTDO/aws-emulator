@@ -22,6 +22,11 @@ service-com-amazonaws-s3-amazons3 = { workspace = true }
 # (`state::batch_job_role`), the way every service with those records at hand
 # reads them, rather than keeping a second copy of a role here.
 service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+# WHO a signed request speaks for: STS's own resolution of an access key id to the
+# session or the IAM user it was minted for, which is what decides whether a grant
+# of the account's S3 Access Grants instance grants THE CALLER
+# (`ops::list_caller_access_grants`).
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }
 aws-smithy-schema-server = { workspace = true }

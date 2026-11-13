@@ -965,12 +965,18 @@ impl Bucket {
     /// ([`Self::acls_disabled`]) reports the default too: "requests to read ACLs are
     /// still supported and return the bucket-owner-full-control ACL with the owner being
     /// the account that created the bucket" (`GetBucketAcl`'s own documentation).
-    pub fn acl_grants(&self) -> Vec<AclGrant> {
+    ///
+    /// `account` is the Block Public Access configuration the owning ACCOUNT carries, which
+    /// the reader takes off the store
+    /// ([`ComAmazonawsS3Amazons3State::owner_account_public_access_block`]): it is in force on
+    /// this bucket together with the bucket's own ([`settings_in_force`]), so a public grant
+    /// an account-level `IgnorePublicAcls` ignores is not reported either.
+    pub fn acl_grants(&self, account: Option<BucketPublicAccessBlock>) -> Vec<AclGrant> {
         let stored = match self.acl.as_deref() {
             Some(grants) if !self.acls_disabled() => grants.to_vec(),
             _ => default_acl_grants(),
         };
-        self.reported_acl_grants(stored)
+        self.reported_acl_grants(stored, account)
     }
 
     /// The grants of `stored` an ACL READ reports, given the bucket's Block Public Access
@@ -986,12 +992,15 @@ impl Bucket {
     /// disabling ACLs hides them without taking them away.
     ///
     /// ONE rule for the bucket's own ACL and for the ACL of any object it contains, which
-    /// is what the setting says it covers.
-    pub(super) fn reported_acl_grants(&self, stored: Vec<AclGrant>) -> Vec<AclGrant> {
-        if self
-            .public_access_block()
-            .is_some_and(|settings| settings.ignore_public_acls)
-        {
+    /// is what the setting says it covers — and one rule for the two LEVELS the setting is
+    /// configured at: `account` is the owning account's configuration, in force together with
+    /// the bucket's own ([`settings_in_force`]).
+    pub(super) fn reported_acl_grants(
+        &self,
+        stored: Vec<AclGrant>,
+        account: Option<BucketPublicAccessBlock>,
+    ) -> Vec<AclGrant> {
+        if settings_in_force(self.public_access_block(), account).ignore_public_acls {
             return stored
                 .into_iter()
                 .filter(|grant| !acl_grant_is_public(grant))
@@ -1042,12 +1051,16 @@ impl Bucket {
     /// ([`Self::reported_acl_grants`], which drops the public grants S3 ignores), exactly as
     /// [`Self::object_expiration`] lives here because it turns on the bucket's lifecycle
     /// configuration.
-    pub fn object_acl_grants(&self, object: &Object) -> Vec<AclGrant> {
+    pub fn object_acl_grants(
+        &self,
+        object: &Object,
+        account: Option<BucketPublicAccessBlock>,
+    ) -> Vec<AclGrant> {
         let stored = match object.acl.as_deref() {
             Some(grants) if !self.acls_disabled() => grants.to_vec(),
             _ => default_acl_grants(),
         };
-        self.reported_acl_grants(stored)
+        self.reported_acl_grants(stored, account)
     }
 
     /// Why S3 refuses a read of `key` — the bytes or the metadata of the version `object`
@@ -1072,21 +1085,25 @@ impl Bucket {
     ///
     /// A Requester Pays bucket refuses it ahead of all of that
     /// ([`Self::requester_pays_anonymous_refusal`]): there is no account to charge.
+    ///
+    /// `account` is the Block Public Access configuration the owning ACCOUNT carries, in
+    /// force on this bucket together with its own ([`settings_in_force`]), so either level's
+    /// `IgnorePublicAcls` or `RestrictPublicBuckets` governs this read.
     pub fn anonymous_object_read_refusal(
         &self,
         bucket: &str,
         key: &str,
         object: Option<&Object>,
+        account: Option<BucketPublicAccessBlock>,
     ) -> Option<&'static str> {
         if let Some(message) = self.requester_pays_anonymous_refusal() {
             return Some(message);
         }
         let granted_by_acl = object.is_some_and(|object| {
-            acl_grants_to_all_users(&self.object_acl_grants(object), PERMISSION_READ)
+            acl_grants_to_all_users(&self.object_acl_grants(object, account), PERMISSION_READ)
         });
-        let restricted = self
-            .public_access_block()
-            .is_some_and(|settings| settings.restrict_public_buckets);
+        let restricted = settings_in_force(self.public_access_block(), account)
+            .restrict_public_buckets;
         let by_policy = self
             .policy
             .as_deref()

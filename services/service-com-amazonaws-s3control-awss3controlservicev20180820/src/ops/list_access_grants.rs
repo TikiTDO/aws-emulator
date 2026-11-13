@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListAccessGrants
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListAccessGrants`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListAccessGrants::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the grants `CreateAccessGrant` recorded in the account's S3 Access Grants
+//! instance in the Region the request was signed for, in grant id order, one page at a
+//! time. Refuses with `AccessGrantsInstanceNotExistsError` when that account has no
+//! instance in that Region: the grants a listing reports are the instance's, so there
+//! is no collection to page through. A pure read: it writes nothing.
+//!
+//! Every filter the model declares narrows the listing, each against the member of the
+//! grant record it names — `GranteeType` and `GranteeIdentifier` the grantee,
+//! `Permission` the access granted, `GrantScope` the S3 path the grant covers and
+//! `ApplicationArn` the Identity Center application a grantee must come through;
+//! `MaxResults` and `NextToken` page it
+//! ([`crate::state::access_grants_listing`]).
 //!
 //! ## Shape of an operation
 //!
@@ -167,18 +171,119 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListAccessGrants` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListAccessGrantsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListAccessGrants"))
+        let page_size = crate::state::access_grants_listing::page_size(input.max_results)?;
+        // The token is the opaque form of the last grant id the previous page
+        // reported; the scan resumes strictly after it.
+        let resume_after =
+            crate::state::access_grants_listing::resume_after(input.next_token.as_deref())?;
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(crate::state::state_unavailable());
+        };
+        // A grant belongs to the Access Grants instance of this account in the
+        // Region the request was signed for, which is the key the create recorded
+        // it under.
+        let region = crate::state::signing_region(ctx.parts());
+        let store = state.lock();
+        // "Returns the list of access grants in your S3 Access Grants instance"
+        // (this operation's own documentation): the grants are the INSTANCE's, so
+        // an account with no instance in this Region has no collection to list
+        // rather than an empty one.
+        if !store
+            .access_grants_instances
+            .contains_key(&(input.account_id.clone(), region.clone()))
+        {
+            return Err(crate::state::no_such_access_grants_instance());
+        }
+
+        // Scan this instance's slice of the keyspace in grant id order, starting
+        // just after the id the token named. `Excluded` on the empty id — which no
+        // grant can have, `AccessGrantId` being at least one character — is how an
+        // un-tokened scan starts at the first grant.
+        let start = (
+            input.account_id.clone(),
+            region.clone(),
+            resume_after.unwrap_or_default(),
+        );
+        let mut matching = store
+            .access_grants
+            .range((
+                ::std::ops::Bound::Excluded(start),
+                ::std::ops::Bound::Unbounded,
+            ))
+            .take_while(|((account_id, held_region, _), _)| {
+                account_id == &input.account_id && held_region == &region
+            })
+            .map(|(_, record)| record)
+            .filter(|record| matches_every_filter(record, &input));
+
+        let page: Vec<crate::state::AccessGrantRecord> =
+            matching.by_ref().take(page_size).cloned().collect();
+        // A token is returned only when the scan stopped short of the end, which is
+        // exactly when another matching record follows this page.
+        let next_token = matching
+            .next()
+            .and(page.last())
+            .map(|last| crate::state::encode_page_token(&last.id));
+
+        Ok(ListAccessGrantsOutput {
+            access_grants_list: Some(page.iter().map(entry_of).collect()),
+            next_token,
+        })
+    }
+}
+
+/// Whether `record` satisfies every filter `input` carries — a request that carries none
+/// matches every grant of the instance.
+///
+/// Each filter is compared against the member of the grant it names, exactly as the model
+/// describes that member: the grantee's type and identifier, the permission granted, the S3
+/// path the grant covers, and the Identity Center application ARN a grant may carry (absent
+/// on a grant created without one, which therefore matches no application filter).
+fn matches_every_filter(
+    record: &crate::state::AccessGrantRecord,
+    input: &ListAccessGrantsInput,
+) -> bool {
+    let grantee_type_matches = match input.grantee_type.as_deref() {
+        Some(wanted) => record.grantee.grantee_type.as_deref() == Some(wanted),
+        None => true,
+    };
+    let grantee_identifier_matches = match input.grantee_identifier.as_deref() {
+        Some(wanted) => record.grantee.grantee_identifier.as_deref() == Some(wanted),
+        None => true,
+    };
+    let permission_matches = match input.permission.as_deref() {
+        Some(wanted) => record.permission == wanted,
+        None => true,
+    };
+    let grant_scope_matches = match input.grant_scope.as_deref() {
+        Some(wanted) => record.grant_scope == wanted,
+        None => true,
+    };
+    let application_matches = match input.application_arn.as_deref() {
+        Some(wanted) => record.application_arn.as_deref() == Some(wanted),
+        None => true,
+    };
+    grantee_type_matches
+        && grantee_identifier_matches
+        && permission_matches
+        && grant_scope_matches
+        && application_matches
+}
+
+/// The listing entry for one grant: every member `ListAccessGrantEntry` declares, from the
+/// record the create wrote — the same facts `GetAccessGrant` reports, less the usage limit,
+/// which the listing's entry shape does not carry.
+fn entry_of(record: &crate::state::AccessGrantRecord) -> ListAccessGrantEntry {
+    ListAccessGrantEntry {
+        created_at: Some(record.created_at),
+        access_grant_id: Some(record.id.clone()),
+        access_grant_arn: Some(record.arn.clone()),
+        grantee: Some(record.grantee.clone()),
+        permission: Some(record.permission.clone()),
+        access_grants_location_id: Some(record.access_grants_location_id.clone()),
+        access_grants_location_configuration: record.location_configuration.clone(),
+        grant_scope: Some(record.grant_scope.clone()),
+        application_arn: record.application_arn.clone(),
     }
 }

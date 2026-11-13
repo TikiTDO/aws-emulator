@@ -909,10 +909,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutObject<Eng> {
             // request includes a public ACL" (Amazon S3 User Guide, Block Public Access) —
             // the same guardrail `PutObjectAcl` answers for a later ACL write, refused with
             // the same `AccessDenied` naming the principal, the action, the resource and
-            // the setting that prevented it.
-            if bucket_record
-                .public_access_block()
-                .is_some_and(|settings| settings.block_public_acls)
+            // the setting that prevented it. In force when the setting is on in the BUCKET's
+            // own configuration or in the one the owning ACCOUNT carries
+            // ([`crate::state::settings_in_force`]).
+            if store.public_access_block_in_force(bucket_record).block_public_acls
                 && crate::state::acl_grants_public_access(grants)
             {
                 return Err(crate::scaffolded::Scaffolded::unmodeled(

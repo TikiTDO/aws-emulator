@@ -195,10 +195,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let key = (input.account_id.clone(), input.name.clone());
+        // The ACCOUNT-level half of the Block Public Access configuration, read
+        // before this store's guard is taken: that record lives in the store Amazon
+        // S3 enforces it from, and the lock order this service keeps is to hold no
+        // guard of its own while reaching it.
+        let account_blocks_public_policy =
+            crate::state::account_public_access_block::blocks_public_policy(
+                &*self.engine,
+                &input.account_id,
+            );
         let mut store = state.lock();
         // Read before the record is borrowed mutably: the setting in force is
         // the access point's own together with its account's configuration.
-        let public_policies_blocked = store.block_public_policy_in_force(&key);
+        let public_policies_blocked =
+            store.block_public_policy_in_force(&key, account_blocks_public_policy);
         let Some(record) = store.access_points.get_mut(&key) else {
             return Err(crate::state::no_such_access_point(&input.name));
         };

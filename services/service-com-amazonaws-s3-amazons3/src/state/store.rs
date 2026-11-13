@@ -136,6 +136,19 @@ pub struct ComAmazonawsS3Amazons3State {
     /// record and forget a route, so it holds exactly the addresses of the routes above and
     /// is bounded with them.
     pub(super) access_point_addresses: BTreeMap<String, String>,
+    /// The ACCOUNT-level Block Public Access configurations in force on this store's
+    /// buckets, by account id.
+    ///
+    /// S3 Block Public Access is configured on a bucket and on the ACCOUNT, and the settings
+    /// in force on a bucket are the most restrictive of both — so the account-level record
+    /// belongs to the store the data plane is served and judged from, which is this one, and
+    /// the service that owns the API over it writes it here exactly as it writes an access
+    /// point's route. See `state/account_public_access_block.rs` for the record, the union
+    /// the guardrails read, and the bound on how many accounts are held.
+    ///
+    /// Private: the methods in that file are the only way in or out, so the ceiling cannot
+    /// be applied in one place and skipped in another.
+    pub(super) account_public_access_blocks: BTreeMap<String, BucketPublicAccessBlock>,
 }
 
 impl Default for ComAmazonawsS3Amazons3State {
@@ -163,6 +176,7 @@ impl Default for ComAmazonawsS3Amazons3State {
             page_tokens: ::service_common::page_tokens::PageTokenKey::new(),
             access_points: BTreeMap::new(),
             access_point_addresses: BTreeMap::new(),
+            account_public_access_blocks: BTreeMap::new(),
         };
         store.record_published_buckets();
         store

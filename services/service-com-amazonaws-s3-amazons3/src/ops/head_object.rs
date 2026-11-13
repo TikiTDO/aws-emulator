@@ -461,10 +461,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // answered with S3's authorization status — ahead of the 404 below, so it says
         // nothing about whether the key is there. A HEAD carries no body, so the status is
         // the whole answer.
+        let account_block = store.owner_account_public_access_block();
         let refused = store.bucket(&input.bucket).and_then(|bucket| {
             match crate::state::request_is_anonymous(ctx.parts()) {
                 true => bucket
-                    .anonymous_object_read_refusal(&input.bucket, &input.key, object)
+                    .anonymous_object_read_refusal(
+                        &input.bucket,
+                        &input.key,
+                        object,
+                        account_block,
+                    )
                     .map(str::to_string),
                 false => crate::service::request_authorization::object_read_denial(
                     &caller,

@@ -439,7 +439,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // all. Either way the refusal is S3's authorization code.
         let refusal = match crate::state::request_is_anonymous(ctx.parts()) {
             true => bucket
-                .anonymous_object_read_refusal(&input.bucket, &input.key, addressed)
+                .anonymous_object_read_refusal(
+                    &input.bucket,
+                    &input.key,
+                    addressed,
+                    store.owner_account_public_access_block(),
+                )
                 .map(str::to_string),
             false => crate::service::request_authorization::object_read_denial(
                 &caller,

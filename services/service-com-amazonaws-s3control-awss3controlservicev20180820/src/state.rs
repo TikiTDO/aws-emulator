@@ -30,6 +30,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Publishing an access point's DATA PATH into the object store that serves it.
 pub mod access_point_routes;
+/// The ACCOUNT-level `PublicAccessBlock` configuration, held in the object store
+/// that enforces it.
+pub mod account_public_access_block;
+/// The paging every S3 Access Grants listing reads: the page size a request asked
+/// for, and where a continuation token resumes the scan.
+pub mod access_grants_listing;
 /// Reading a job's manifest and rendering what its run writes back — the
 /// derivations the worker below runs over, held apart from it because they are
 /// pure functions of a manifest, a filter and a set of task outcomes.
@@ -1875,20 +1881,11 @@ pub struct ComAmazonawsS3controlAwss3controlservicev20180820State {
     /// record and its policy.
     pub access_points: BTreeMap<AccessPointKey, AccessPointRecord>,
 
-    /// The account-level `PublicAccessBlock` configuration each account has set,
-    /// by account id — what `PutPublicAccessBlock` records,
-    /// `GetPublicAccessBlock` reports and `DeletePublicAccessBlock` removes.
-    ///
-    /// An account is a KEY here only once a configuration has been put for it:
-    /// an ABSENT entry is what `GetPublicAccessBlock` answers
-    /// `NoSuchPublicAccessBlockConfiguration` for, and it is a different state
-    /// from a PRESENT configuration whose four settings are all `false`, which
-    /// that read reports as a configuration.
-    ///
-    /// BOUNDED: one fixed-size record per account and at most
-    /// [`PUBLIC_ACCESS_BLOCK_QUOTA`] accounts, released by
-    /// `DeletePublicAccessBlock`.
-    pub public_access_blocks: BTreeMap<String, PublicAccessBlockConfiguration>,
+    // The account-level `PublicAccessBlock` configuration is NOT held here: it
+    // is what Amazon S3 judges a public bucket policy, a public ACL and a public
+    // read by, so it lives once in the store that serves those requests, which
+    // this service writes and reads it in (`account_public_access_block`) —
+    // exactly as a bucket's tag set and an access point's data path do.
 
     /// S3 Storage Lens configurations by (account id, configuration id).
     ///
@@ -2014,20 +2011,25 @@ pub struct ComAmazonawsS3controlAwss3controlservicev20180820State {
 
 impl ComAmazonawsS3controlAwss3controlservicev20180820State {
     /// Whether `BlockPublicPolicy` is in force for the access point `key` names:
-    /// the access point's OWN setting or the owning account's `PublicAccessBlock`
-    /// configuration, either of which blocks on its own — the most restrictive of
-    /// the settings that apply is the one in force. False when the store holds no
-    /// such access point.
-    pub fn block_public_policy_in_force(&self, key: &AccessPointKey) -> bool {
+    /// the access point's OWN setting or the owning account's configuration,
+    /// either of which blocks on its own — the most restrictive of the settings
+    /// that apply is the one in force. False when the store holds no such access
+    /// point.
+    ///
+    /// `account_blocks_public_policy` is the ACCOUNT-level half, read where that
+    /// configuration lives ([`account_public_access_block::blocks_public_policy`])
+    /// before this store's guard is taken, since that record belongs to the store
+    /// Amazon S3 enforces it from.
+    pub fn block_public_policy_in_force(
+        &self,
+        key: &AccessPointKey,
+        account_blocks_public_policy: bool,
+    ) -> bool {
         let own = self
             .access_points
             .get(key)
             .is_some_and(|record| record.public_access_block_configuration.block_public_policy);
-        let account = self
-            .public_access_blocks
-            .get(&key.0)
-            .is_some_and(|configuration| configuration.block_public_policy);
-        own || account
+        own || account_blocks_public_policy
     }
 
     /// A fresh service-assigned id for a resource this store is about to hold,
@@ -4365,24 +4367,52 @@ pub fn no_such_access_grants_instance<E>() -> crate::scaffolded::Scaffolded<E> {
 /// operations that need an instance before they can act answer.
 pub const NO_SUCH_ACCESS_GRANTS_INSTANCE_MESSAGE: &str = "Access Grants Instance does not exist";
 
-/// `AccessGrantsInstanceAlreadyExistsError` (HTTP 409): the account already has
-/// an S3 Access Grants instance in this Region, and
-/// `CreateAccessGrantsInstance` documents one instance per Region per account —
-/// so creating it again would be a second resource under one identity, not a
-/// replacement.
-pub fn access_grants_instance_already_exists<E>(
-    account_id: &str,
-    region: &str,
-) -> crate::scaffolded::Scaffolded<E> {
+/// `InvalidRequest` (HTTP 400): the account named has no S3 Access Grants
+/// instance in this Region, so there is no instance to take an Identity Center
+/// association off.
+///
+/// The SAME precondition as [`no_such_access_grants_instance`], answered the way
+/// `DissociateAccessGrantsIdentityCenter` answers it: the code and status this
+/// service gives a well-formed request it cannot carry out (see
+/// [`untaggable_resource_arn`]), with the fixed sentence naming the instance the
+/// request asked about — the request's own account and Region are not
+/// interpolated, for the same reason they are not in the read's refusal.
+pub fn no_access_grants_instance_to_dissociate<E>() -> crate::scaffolded::Scaffolded<E> {
     crate::scaffolded::Scaffolded::service_failure(
-        "AccessGrantsInstanceAlreadyExistsError",
-        409,
-        format!(
-            "Access Grants Instance already exists: account {account_id} already has an S3 \
-             Access Grants instance in {region}."
-        ),
+        "InvalidRequest",
+        400,
+        NO_ACCESS_GRANTS_INSTANCE_TO_DISSOCIATE_MESSAGE,
     )
 }
+
+/// The message of [`no_access_grants_instance_to_dissociate`].
+pub const NO_ACCESS_GRANTS_INSTANCE_TO_DISSOCIATE_MESSAGE: &str =
+    "The specified Access Grants Instance does not exist";
+
+/// `AccessGrantsInstanceAlreadyExists` (HTTP 409): the account already has an S3
+/// Access Grants instance in this Region, and `CreateAccessGrantsInstance`
+/// documents one instance per Region per account — so creating it again would be
+/// a second resource under one identity, not a replacement.
+///
+/// The code carries NO `Error` suffix, where the missing-instance refusal's does
+/// ([`no_such_access_grants_instance`]): recorded behaviour gives the two
+/// conditions those two codes, and a client branches on the code.
+///
+/// The message is FIXED text, for the same reason that refusal's is: an instance
+/// is a Region-scoped singleton of which an account has at most one, so there is
+/// no instance identity to name, and the account and the Region a sentence could
+/// name are the request's own.
+pub fn access_grants_instance_already_exists<E>() -> crate::scaffolded::Scaffolded<E> {
+    crate::scaffolded::Scaffolded::service_failure(
+        "AccessGrantsInstanceAlreadyExists",
+        409,
+        ACCESS_GRANTS_INSTANCE_ALREADY_EXISTS_MESSAGE,
+    )
+}
+
+/// The message of [`access_grants_instance_already_exists`].
+pub const ACCESS_GRANTS_INSTANCE_ALREADY_EXISTS_MESSAGE: &str =
+    "Access Grants Instance already exists";
 
 /// `AccessDenied` (HTTP 403): the store already holds
 /// [`ACCESS_GRANTS_INSTANCE_QUOTA`] instances, so recording one for a further

@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DissociateAccessGrantsIdentityCenter
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DissociateAccessGrantsIdentityCenter`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DissociateAccessGrantsIdentityCenter::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! "Dissociates the Amazon Web Services IAM Identity Center instance from the S3 Access
+//! Grants instance" (this operation's own documentation): the Identity Center instance and
+//! the application S3 Access Grants created for it come off the account's instance in the
+//! Region the request was signed for, so `GetAccessGrantsInstance` reports neither
+//! afterwards.
+//!
+//! Refuses with `InvalidRequest` when that account has no instance in that Region
+//! ([`crate::state::no_access_grants_instance_to_dissociate`]): there is nothing to take an
+//! association off. An instance that carries no association is already in the state the
+//! call asks for, so the call succeeds and removes nothing — the same shape as every other
+//! removal of a subresource this service serves.
 //!
 //! ## Shape of an operation
 //!
@@ -156,18 +159,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DissociateAccessGrantsIdentityCenter` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DissociateAccessGrantsIdentityCenterErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DissociateAccessGrantsIdentityCenter"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(crate::state::state_unavailable());
+        };
+
+        // An S3 Access Grants instance is Region-scoped — one per Region per
+        // account — so the Region the request was signed for is half the
+        // resource's identity, exactly as it is for the create that recorded it.
+        let region = crate::state::signing_region(ctx.parts());
+        let key = (input.account_id.clone(), region);
+        let mut store = state.lock();
+        let Some(record) = store.access_grants_instances.get_mut(&key) else {
+            return Err(crate::state::no_access_grants_instance_to_dissociate());
+        };
+
+        // Both halves of the association go together: the application is the one S3
+        // Access Grants created FOR the associated Identity Center instance, so an
+        // instance carrying no Identity Center instance carries no application
+        // either (`AccessGrantsInstanceRecord::identity_center_application_arn`).
+        record.identity_center_instance_arn = None;
+        record.identity_center_application_arn = None;
+
+        Ok(DissociateAccessGrantsIdentityCenterOutput)
     }
 }

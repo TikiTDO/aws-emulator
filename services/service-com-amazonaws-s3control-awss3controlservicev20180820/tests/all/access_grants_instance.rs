@@ -392,8 +392,18 @@ async fn a_repeat_create_in_the_same_region_conflicts_and_leaves_the_instance_al
         );
         assert_eq!(
             conflict.code(),
-            "AccessGrantsInstanceAlreadyExistsError",
+            "AccessGrantsInstanceAlreadyExists",
             "case {:?}: expected the conflict error code, got body {}",
+            case.case,
+            conflict.body
+        );
+        assert_eq!(
+            conflict.text("Message").as_deref(),
+            Some(
+                ::service_com_amazonaws_s3control_awss3controlservicev20180820::state::
+                    ACCESS_GRANTS_INSTANCE_ALREADY_EXISTS_MESSAGE
+            ),
+            "case {:?}: expected the service's fixed conflict message, got body {}",
             case.case,
             conflict.body
         );

@@ -321,9 +321,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutObjectAcl<Eng>
         };
         let region = bucket.region.clone();
         let acls_disabled = bucket.acls_disabled();
-        let blocks_public_acls = bucket
-            .public_access_block()
-            .is_some_and(|settings| settings.block_public_acls);
+        // In force when the setting is on in the BUCKET's own configuration or in the one the
+        // owning ACCOUNT carries ([`crate::state::settings_in_force`]).
+        let blocks_public_acls = store.public_access_block_in_force(bucket).block_public_acls;
 
         // Both the ACL the request names and the published rules it is judged against are
         // decided BEFORE anything is written, so a refused put leaves the object's current

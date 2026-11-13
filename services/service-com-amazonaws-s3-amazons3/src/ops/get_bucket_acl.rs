@@ -213,7 +213,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }),
             grants: Some(
                 bucket
-                    .acl_grants()
+                    .acl_grants(store.owner_account_public_access_block())
                     .into_iter()
                     .map(|grant| Grant {
                         grantee: Some(Grantee {

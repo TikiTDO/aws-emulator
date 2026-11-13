@@ -4243,6 +4243,9 @@ pub struct DeleteMarker {
 // Every name stays part of this module's API: a handler keeps writing
 // `crate::state::Bucket` wherever the record itself lives.
 
+// The ACCOUNT-level Block Public Access configuration in force on this store's buckets,
+// which the service that owns the API over it writes here.
+pub mod account_public_access_block;
 // One general purpose bucket and everything it carries.
 mod bucket;
 // The continuation token every listing of a bucket's id-addressed configurations pages
@@ -4271,6 +4274,7 @@ mod uploads;
 // A bucket's website configuration, and the schema its document has to validate against.
 mod website;
 
+pub use account_public_access_block::*;
 pub use bucket::*;
 pub use configuration_tokens::*;
 pub use lifecycle::*;

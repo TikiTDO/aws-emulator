@@ -159,15 +159,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let _ = ctx;
-        let Some(state) = crate::state::service_state(&*self.engine) else {
-            return Err(crate::state::state_unavailable());
-        };
-
-        let mut store = state.lock();
         // Idempotent, and it releases the slot the account held in the bounded
         // store: whether an entry was there or not, the account holds none
-        // afterwards.
-        store.public_access_blocks.remove(&input.account_id);
+        // afterwards — and the guardrail stops applying to Amazon S3's buckets at
+        // that moment, because the configuration is removed where that service
+        // enforces it ([`crate::state::account_public_access_block`]).
+        if !crate::state::account_public_access_block::forget(&*self.engine, &input.account_id) {
+            return Err(crate::state::state_unavailable());
+        }
 
         Ok(DeletePublicAccessBlockOutput)
     }

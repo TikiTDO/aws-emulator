@@ -21,6 +21,8 @@ mod access_grants_data_plane;
 mod access_grants_instance;
 #[path = "all/access_grants_instance_resource_policy.rs"]
 mod access_grants_instance_resource_policy;
+#[path = "all/access_grants_listings.rs"]
+mod access_grants_listings;
 #[path = "all/access_grants_location_delete.rs"]
 mod access_grants_location_delete;
 #[path = "all/access_grants_location_register.rs"]
@@ -43,6 +45,8 @@ mod access_point_public_access_block_default;
 mod access_point_reads_and_refusals;
 #[path = "all/account_authorization.rs"]
 mod account_authorization;
+#[path = "all/account_public_access_block_bucket_policy.rs"]
+mod account_public_access_block_bucket_policy;
 #[path = "all/batch_job_absent_refusal.rs"]
 mod batch_job_absent_refusal;
 #[path = "all/batch_job_execution.rs"]
