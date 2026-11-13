@@ -16,7 +16,8 @@
 use serde_json::{json, Value};
 
 use crate::harness::{
-    call, create_startable, error_code, error_message, router, ACCOUNT, SETTLE_WAIT,
+    call, create_startable, error_code, error_message, listed_snapshots, router, ACCOUNT,
+    SETTLE_WAIT,
 };
 
 /// Snapshot names spanning the modelled `SnapshotName` form — len 1..256, pattern
@@ -83,29 +84,6 @@ async fn creation_timestamp(
         .unwrap_or_else(|| panic!("case {snapshot}: expected a stored creation timestamp, got {described}"))
 }
 
-/// Every snapshot name the list reader reports for one application, in the order it
-/// reports them.
-async fn listed(router: &smithy_server_runtime::MultiServiceRouter, application: &str) -> Vec<String> {
-    let (status, page) = call(
-        router,
-        "ListApplicationSnapshots",
-        &json!({"ApplicationName": application}),
-    )
-    .await;
-    assert_eq!(status, 200, "case {application}: ListApplicationSnapshots got {status} {page}");
-    page["SnapshotSummaries"]
-        .as_array()
-        .unwrap_or_else(|| panic!("case {application}: expected summaries, got {page}"))
-        .iter()
-        .map(|summary| {
-            summary["SnapshotName"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string()
-        })
-        .collect()
-}
-
 /// A delete that identifies a stored snapshot removes THAT snapshot and leaves the rest:
 /// the readers stop reporting it, and the snapshots not named are still reported.
 #[tokio::test]
@@ -143,7 +121,7 @@ async fn deleting_a_snapshot_removes_only_the_snapshot_named() {
         let mut expected = remaining.clone();
         expected.sort();
         assert_eq!(
-            listed(&router, application).await,
+            listed_snapshots(&router, case, application).await,
             expected,
             "case {case}: expected the list to report exactly the snapshots not deleted"
         );
@@ -162,7 +140,7 @@ async fn deleting_a_snapshot_removes_only_the_snapshot_named() {
     }
 
     assert_eq!(
-        listed(&router, application).await,
+        listed_snapshots(&router, "all-deleted", application).await,
         Vec::<String>::new(),
         "case all-deleted: expected the application to report no snapshot"
     );
@@ -296,7 +274,7 @@ async fn a_delete_that_identifies_no_stored_snapshot_is_refused() {
         // A refused delete removes nothing: the snapshot the application does hold is
         // still there to be read and, with the stored timestamp, still deletable.
         assert_eq!(
-            listed(&router, application).await,
+            listed_snapshots(&router, case, application).await,
             vec![held.clone()],
             "case {case}: expected the refused delete to leave the stored snapshot"
         );
@@ -318,7 +296,7 @@ async fn a_delete_that_identifies_no_stored_snapshot_is_refused() {
          {status} {deleted}"
     );
     assert_eq!(
-        listed(&router, application).await,
+        listed_snapshots(&router, "stored-timestamp", application).await,
         Vec::<String>::new(),
         "case stored-timestamp: expected no snapshot to remain"
     );

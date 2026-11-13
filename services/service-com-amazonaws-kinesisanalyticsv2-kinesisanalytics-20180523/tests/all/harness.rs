@@ -153,6 +153,38 @@ pub(crate) async fn create_startable(
     body["ApplicationDetail"].clone()
 }
 
+/// Every `SnapshotName` `ListApplicationSnapshots` reports for one application, in the
+/// order it reports them, asserting the call succeeded. Shared plumbing, so no two suites
+/// that read one application's snapshots back can drift on where a summary carries its
+/// name.
+pub(crate) async fn listed_snapshots(
+    router: &MultiServiceRouter,
+    case: &str,
+    application: &str,
+) -> Vec<String> {
+    let (status, page) = call(
+        router,
+        "ListApplicationSnapshots",
+        &json!({"ApplicationName": application}),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "case {case}: ListApplicationSnapshots got {status} {page}"
+    );
+    page["SnapshotSummaries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("case {case}: expected the summaries member, got {page}"))
+        .iter()
+        .map(|summary| {
+            summary["SnapshotName"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect()
+}
+
 /// Describe an application, asserting the call succeeded.
 pub(crate) async fn describe(router: &MultiServiceRouter, name: &str) -> Value {
     let (status, body) = call(

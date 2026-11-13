@@ -31,6 +31,8 @@ mod ops_name_bindings;
 mod runtime_configuration_defaults;
 #[path = "all/scratch.rs"]
 mod scratch;
+#[path = "all/snapshot_delete_application_status.rs"]
+mod snapshot_delete_application_status;
 #[path = "all/snapshot_deletion.rs"]
 mod snapshot_deletion;
 #[path = "all/sql_input_and_configuration_defaults.rs"]
