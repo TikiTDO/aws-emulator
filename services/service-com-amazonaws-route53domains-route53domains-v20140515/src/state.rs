@@ -6,6 +6,11 @@
 //! operation record that every mutating Route 53 Domains call appends. A handler reaches
 //! it through [`service_state`].
 //!
+//! What the REGISTRY knows rather than what the account holds — the names registered
+//! outside this account, and the standard registration price of a TLD — lives in the
+//! [`registry`] child module and is re-exported here, so a handler reaches all of it
+//! through `crate::state`.
+//!
 //! The domain-model helpers live here too — name normalisation, the documented name
 //! syntax, the public-suffix rule that decides what a registry delegates, the delegation
 //! set, and the registration period — for two reasons: `src/lib.rs` is generated, so this
@@ -13,8 +18,15 @@
 //! `DomainName` has to resolve it exactly the same way, which only holds if there is one
 //! implementation.
 
+mod registry;
+pub use registry::{
+    seeded_registrations, standard_registration_price, standard_registration_rate,
+    unavailable_domain_message, AVAILABILITY_AVAILABLE, AVAILABILITY_UNAVAILABLE, CURRENCY_USD,
+    DEFAULT_STANDARD_REGISTRATION_RATE, PRICE_TYPE_STANDARD, STANDARD_REGISTRATION_RATES,
+};
+
 use crate::ops::types::{ContactDetail, Nameserver};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 // ---------------------------------------------------------------------------
 // Modelled enum members this slice writes
@@ -127,15 +139,40 @@ pub struct OperationRecord {
 }
 
 /// Per-service state for com-amazonaws-route53domains-route53domains-v20140515. A handler reaches it through [`service_state`].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ComAmazonawsRoute53domainsRoute53domainsV20140515State {
     /// The account's domains, keyed by the lower-cased domain name.
     pub domains: BTreeMap<String, Domain>,
     /// Every operation record, in submission order — the order `ListOperations` sorts.
     pub operations: Vec<OperationRecord>,
+    /// The names this registry holds for somebody else — see [`seeded_registrations`].
+    /// They are registered, so they are not available, but they are not this account's:
+    /// no domain-scoped read or mutation resolves one.
+    pub registered_elsewhere: BTreeSet<String>,
+}
+
+/// The store a fresh process starts from: no domains of its own, no operation records,
+/// and the registry's standing third-party registrations.
+impl Default for ComAmazonawsRoute53domainsRoute53domainsV20140515State {
+    fn default() -> Self {
+        Self {
+            domains: BTreeMap::new(),
+            operations: Vec::new(),
+            registered_elsewhere: seeded_registrations(),
+        }
+    }
 }
 
 impl ComAmazonawsRoute53domainsRoute53domainsV20140515State {
+    /// Whether the REGISTRY holds `name` for anybody: this account, or a third party.
+    ///
+    /// This is the question `CheckDomainAvailability` answers, and it is wider than
+    /// "does this account hold it" — the account's own domains are only part of what is
+    /// already registered.
+    pub fn is_registered(&self, name: &str) -> bool {
+        self.domains.contains_key(name) || self.registered_elsewhere.contains(name)
+    }
+
     /// Append the operation record a mutating call owes and return its `OperationId`.
     ///
     /// The record starts `SUBMITTED` and the clock owes its move to `SUCCESSFUL`
@@ -281,6 +318,12 @@ pub fn resolve_domain_name(raw: &str) -> Result<String, DomainNameError> {
 /// It names the member and the rule the value failed, the way the framework's boundary
 /// validator words a refusal, so a caller can fix the request from the message alone.
 pub fn invalid_domain_name_message(raw: &str) -> String {
+    // A value with nothing in it is not a name that broke one of the syntax rules: the
+    // member carries no name at all, and that condition is refused in its own words
+    // ("Invalid request. Problems: " followed by the problem).
+    if raw.trim().is_empty() {
+        return "Invalid request. Problems: Domain name cannot be blank".to_string();
+    }
     format!(
         "Value '{raw}' at 'domainName' failed to satisfy constraint: Member must be a \
          domain name of one label under a top-level domain, where every label is made up \
@@ -289,8 +332,15 @@ pub fn invalid_domain_name_message(raw: &str) -> String {
 }
 
 /// The message an `UnsupportedTLD` refusal carries.
+///
+/// Wording the real service is observed to use for this refusal: the fixed text is the
+/// leading "The " and the trailing " TLD is not supported", and the one variable part is
+/// the TOP-LEVEL DOMAIN of the requested name — the labels after the first, unquoted —
+/// since the TLD, not the whole name, is what the registrar does not offer. The TLD is
+/// lower-cased, the way every other use of a domain name in this crate is, because
+/// domain names are not case sensitive.
 pub fn unsupported_tld_message(raw: &str) -> String {
-    format!("Amazon Route 53 does not support the top-level domain of '{raw}'")
+    format!("The {} TLD is not supported", tld_of(raw).to_ascii_lowercase())
 }
 
 /// The message the `InvalidInput` refusal of a domain this account does not hold carries.

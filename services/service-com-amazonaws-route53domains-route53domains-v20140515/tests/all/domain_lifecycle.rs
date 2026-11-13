@@ -16,12 +16,12 @@ use time::{Month, OffsetDateTime};
 
 /// One emulator: this service mounted on a single shared `InMemoryEngine`, exactly as
 /// `router/src/lib.rs` mounts it.
-struct Emulator {
+pub(crate) struct Emulator {
     router: MultiServiceRouter,
 }
 
 impl Emulator {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
         let mut router = MultiServiceRouter::new();
         router
@@ -38,7 +38,7 @@ impl Emulator {
 
     /// Call `operation`, signed the way an AWS SDK signs it, and return the HTTP status
     /// and the parsed JSON body.
-    async fn call(&self, operation: &str, body: &Value) -> (u16, Value) {
+    pub(crate) async fn call(&self, operation: &str, body: &Value) -> (u16, Value) {
         self.send(operation, body, true).await
     }
 
@@ -72,7 +72,7 @@ impl Emulator {
 
 /// The awsJson1_1 error code of a failure body: its `__type`, with any namespace prefix
 /// (`com.amazonaws.route53domains#InvalidInput`) stripped.
-fn error_code(body: &Value) -> String {
+pub(crate) fn error_code(body: &Value) -> String {
     let raw = body
         .get("__type")
         .or_else(|| body.get("code"))
@@ -103,7 +103,7 @@ fn domain_names(body: &Value) -> Vec<String> {
 
 /// A contact good enough for a registration: the fields Route 53 asks for, with modelled
 /// enum members (`ContactType` -> `PERSON`, `CountryCode` -> `US`).
-fn person_contact() -> Value {
+pub(crate) fn person_contact() -> Value {
     json!({
         "FirstName": "Ada",
         "LastName": "Lovelace",
@@ -119,7 +119,7 @@ fn person_contact() -> Value {
 }
 
 /// A `RegisterDomain` body for `name`, holding `years` and the contact `contact`.
-fn registration(name: &str, years: i64, contact: &Value) -> Value {
+pub(crate) fn registration(name: &str, years: i64, contact: &Value) -> Value {
     json!({
         "DomainName": name,
         "DurationInYears": years,
@@ -130,7 +130,7 @@ fn registration(name: &str, years: i64, contact: &Value) -> Value {
 }
 
 /// Register `name` and return the `OperationId`, failing the test if it did not succeed.
-async fn register(emulator: &Emulator, name: &str) -> String {
+pub(crate) async fn register(emulator: &Emulator, name: &str) -> String {
     let (status, body) = emulator
         .call("RegisterDomain", &registration(name, 1, &person_contact()))
         .await;

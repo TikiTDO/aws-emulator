@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CheckDomainAvailability
-//! Answers from the domain store.
-//! A name this account already holds is `UNAVAILABLE`; any other well-formed name under a
-//! TLD the registrar offers is `AVAILABLE`, so the answer flips as `RegisterDomain` and
-//! `DeleteDomain` write that store.
+//! Answers for the registry: a name ANY registrant holds is `UNAVAILABLE`, whether that
+//! is this account (the domain store, which `RegisterDomain` and `DeleteDomain` write) or
+//! a third party (the registry's standing registrations). Any other well-formed name
+//! under a TLD the registrar offers is `AVAILABLE`, and carries the standard
+//! registration price of its TLD.
 //!
 //! This operation is a pure read: it never writes.
 //!
@@ -198,18 +199,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let state = crate::state::service_state(&*self.engine)
             .ok_or_else(|| crate::state::state_unavailable(Self::NAME))?;
-        let registered = state.lock().domains.contains_key(&name);
+        // The answer is the REGISTRY's, not this account's: a name any registrant holds
+        // is already registered, so the account's own domain store is only part of what
+        // makes a name unavailable.
+        let registered = state.lock().is_registered(&name);
 
         // `DomainAvailability`'s own documentation: `UNAVAILABLE` is "[t]he domain name is
-        // not available", `AVAILABLE` is "[t]he domain name is available". The registry
-        // this emulator speaks for is its own domain store, so already holding the name
-        // is exactly what makes it unavailable.
-        let availability = if registered { "UNAVAILABLE" } else { "AVAILABLE" };
+        // not available", `AVAILABLE` is "[t]he domain name is available".
+        let availability = if registered {
+            crate::state::AVAILABILITY_UNAVAILABLE
+        } else {
+            crate::state::AVAILABILITY_AVAILABLE
+        };
         Ok(CheckDomainAvailabilityOutput {
             availability: Some(availability.to_string()),
-            // `Price` is the registry premium price, which this emulator does not model;
-            // it is optional, so it is omitted rather than invented.
-            price: None,
+            // `Price` "is returned only when Availability is AVAILABLE" — so it is
+            // present for exactly the names a caller may go on to register, and it is
+            // the standard rate of the name's TLD (`PriceType` `STANDARD`), not an
+            // individual name's registry premium.
+            price: (!registered)
+                .then(|| crate::state::standard_registration_price(crate::state::tld_of(&name))),
         })
     }
 }

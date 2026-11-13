@@ -261,6 +261,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        // A name held by another registrant is not this account's duplicate request: it
+        // is a name that is not available, and `CheckDomainAvailability`'s own note is
+        // "You can register only domains designated as AVAILABLE". `InvalidInput` is the
+        // modelled refusal of a request whose "requested item is not acceptable".
+        if state.registered_elsewhere.contains(&name) {
+            return Err(RegisterDomainErrorModeled::InvalidInput(InvalidInput {
+                message: Some(crate::state::unavailable_domain_message(&name)),
+            })
+            .into());
+        }
+
         let now = crate::state::now_millis();
         let tld = crate::state::tld_of(&name).to_string();
         // The domain store is driven by the caller, so it has a stated ceiling; the model

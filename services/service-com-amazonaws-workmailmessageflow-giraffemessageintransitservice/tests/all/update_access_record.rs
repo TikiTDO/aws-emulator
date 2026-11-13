@@ -159,6 +159,9 @@ fn pin_callsite_interest() {
         // Another suite of this binary may have installed one already, which serves
         // the same purpose: nothing is wrong when this does not win.
         let _ = tracing::subscriber::set_global_default(AlwaysEnabled);
+        // A callsite reached before this point keeps the interest it was cached
+        // with, so the cache is rebuilt once with the new default in place.
+        tracing::callsite::rebuild_interest_cache();
     });
 }
 

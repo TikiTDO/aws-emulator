@@ -113,17 +113,29 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // `AdminContact`, a `DurationInYears` outside the modelled 1..10 range, a
         // `DomainName` past 255 characters — must come back under that code rather
         // than the framework's generic `ValidationException`, because that is the
-        // code a Route 53 Domains client branches on. The message keeps the
-        // framework's clause, which names the member and the constraint it failed.
+        // code a Route 53 Domains client branches on.
+        //
+        // The message is the framework's clause for each violated member, wrapped in
+        // the envelope AWS reports a constraint refusal in: the number of violations
+        // found, then the clauses. The count is what tells a caller whether one
+        // member or several are wrong, so it is the violation count of THIS request,
+        // never a fixed number.
         match refusal {
-            Refusal::Invalid(violations) => Some(Refused {
-                code: "InvalidInput".to_string(),
-                message: violations
+            Refusal::Invalid(violations) => {
+                let clauses: Vec<String> = violations
                     .iter()
                     .map(smithy_server_runtime::Violation::message)
-                    .collect::<Vec<String>>()
-                    .join("; "),
-            }),
+                    .collect();
+                let found = clauses.len();
+                let noun = if found == 1 { "error" } else { "errors" };
+                Some(Refused {
+                    code: "InvalidInput".to_string(),
+                    message: format!(
+                        "{found} validation {noun} detected: {}",
+                        clauses.join("; ")
+                    ),
+                })
+            }
             // An unauthenticated caller is not an input problem: leave the
             // framework's 403 wording alone.
             _ => None,
