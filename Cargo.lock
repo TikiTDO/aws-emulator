@@ -17765,6 +17765,7 @@ dependencies = [
  "serde_json",
  "service-com-amazonaws-cloudwatch-graniteserviceversion20100801",
  "service-com-amazonaws-ec2-amazonec2",
+ "service-common",
  "sha2 0.10.9",
  "tokio",
  "tracing",

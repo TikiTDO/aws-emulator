@@ -140,6 +140,10 @@ mod state_roundtrip;
 // TOGETHER — the listing a client pages and the tag set it selects a zone by.
 #[path = "all/tag_driven_zone_discovery.rs"]
 mod tag_driven_zone_discovery;
+// Declared beside the tagging suites: this one is the FIELD a refusal of a tag
+// operation's resource id names, across the three operations that take one.
+#[path = "all/tag_resource_id_refusal.rs"]
+mod tag_resource_id_refusal;
 #[path = "all/traffic_policies.rs"]
 mod traffic_policies;
 #[path = "all/traffic_policy_comment_updates.rs"]

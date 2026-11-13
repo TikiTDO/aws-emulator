@@ -32,7 +32,10 @@ use crate::resource_tags::{change_tags, element_text, list_tags, tag_pairs_in};
 /// `TagResourceIdList`'s member carries `xmlName: ResourceId`, so the ids are
 /// `<ResourceId>` elements inside the `<ResourceIds>` container
 /// (smithy_query(query="shape",shape="TagResourceIdList")).
-fn list_tags_batch_body(resource_ids: &[&str]) -> String {
+///
+/// `pub(crate)` so a sibling suite sends a batch through the SAME request rather
+/// than growing a second copy of it.
+pub(crate) fn list_tags_batch_body(resource_ids: &[&str]) -> String {
     let ids: String = resource_ids
         .iter()
         .map(|id| format!("<ResourceId>{}</ResourceId>", escape_xml(id)))
@@ -44,7 +47,9 @@ fn list_tags_batch_body(resource_ids: &[&str]) -> String {
 }
 
 /// Read the tags of a batch of resources of one type.
-async fn list_tags_batch(
+///
+/// `pub(crate)` for the same reason [`list_tags_batch_body`] is.
+pub(crate) async fn list_tags_batch(
     router: &MultiServiceRouter,
     resource_type: &str,
     resource_ids: &[&str],

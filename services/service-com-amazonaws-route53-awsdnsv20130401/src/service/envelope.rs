@@ -220,7 +220,14 @@ impl ErasedOperation for ErrorEnvelope {
             if let Some(refused) = crate::service::xml_schema::refusal(svc, req) {
                 return refused;
             }
-            with_request_id(op.run(svc, req, ctx).await)
+            // The resource type a tag request names is put in scope around the run, so
+            // a refusal of one of its resource ids can be stated at the field that type
+            // reports its own id at: the seam that words a refusal
+            // (`Service::override_refusal`) is handed no request, and the type is a
+            // property of this one. Every other request is run untouched.
+            with_request_id(
+                crate::service::tag_resource_id::serving(req, op.run(svc, req, ctx)).await,
+            )
         })
     }
 }

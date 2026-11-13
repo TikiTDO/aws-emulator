@@ -33,6 +33,12 @@ sha2 = { workspace = true }
 # maintained XML reader rather than looking at the text, and takes the position a
 # schema violation names from that reader's own progress through the body.
 quick-xml = "0.41"
+# `service-common` carries the readers `service::tag_resource_id` needs rather than a
+# private copy of each: the PATH of a request target an SDK may send absolutely, the
+# segment a modelled `@httpLabel` sits at and its percent decoding, and the spelling
+# the framework's constraint walk reports a list ELEMENT at
+# (`service_common::validation::list_of_element`).
+service-common = { path = "../common" }
 # A health check's aggregate assessment is published as CloudWatch metric data in the
 # `AWS/Route53` namespace, which lives in the CloudWatch emulator's own metric store: it is
 # reached through the shared engine and needs the owning service's state TYPE.

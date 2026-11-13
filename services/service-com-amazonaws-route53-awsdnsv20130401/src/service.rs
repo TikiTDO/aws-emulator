@@ -59,6 +59,11 @@ pub mod envelope;
 /// held to that set.
 pub mod xml_schema;
 
+/// The field a refusal of a tag operation's resource id is stated at: the id field of
+/// the resource TYPE the request names, rather than the path the framework walked to
+/// the offending value.
+pub mod tag_resource_id;
+
 use smithy_server_runtime::{
     http, ErasedOperation, ErasedServiceDefinition, Refusal, Refused, Service,
 };
@@ -245,11 +250,12 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // The MESSAGE is the one the framework already renders and the one the
         // service answers: the per-member envelope `N validation error(s)
         // detected: Value '<value>' at '<member path>' failed to satisfy
-        // constraint: <requirement>`, built from the request. ONE rendering
-        // inside it is this service's rather than the framework's, because no
-        // model records it — the order an enum's value set is listed in
-        // ([`STATED_VALUE_ORDERS`]); everything else about the envelope is taken
-        // from the framework rather than restated here.
+        // constraint: <requirement>`, built from the request. TWO renderings
+        // inside it are this service's rather than the framework's, because no
+        // model records either — the order an enum's value set is listed in
+        // ([`STATED_VALUE_ORDERS`]), and the field a tag operation's resource id
+        // is named by ([`tag_resource_id`]); everything else about the envelope
+        // is taken from the framework rather than restated here.
         //
         // The ONE exception is a value this service RESOLVES rather than one the
         // request has to have — see [`unresolvable_regions`].
@@ -276,8 +282,11 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
                     // the framework's own wording rather than answering an empty
                     // message. The clauses are the framework's; the ORDER an
                     // enum's value set is listed in is this service's
-                    // ([`as_stated`]).
-                    message: aws_smithy_schema_server::envelope(&as_stated(violations))?,
+                    // ([`as_stated`]), as is the field a tag operation's resource
+                    // id is named by ([`tag_resource_id::stated`]).
+                    message: aws_smithy_schema_server::envelope(&tag_resource_id::stated(
+                        &as_stated(violations),
+                    ))?,
                 })
             }
             // An unauthenticated caller is not an input problem at all: keep the
