@@ -189,6 +189,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
+        // Settle any cancelled/unknown catalog publication before policy or
+        // projection reads. An unresolved outcome refuses, never serves stale RAM.
+        let _mutation = crate::state::payloads::mutation_guard(&*self.engine).await
+            .map_err(|_| ValidatePullThroughCacheRuleError::from(ValidatePullThroughCacheRuleErrorModeled::ServerException(ServerException {
+                message: Some("durable ECR read admission unavailable".to_string()),
+            })))?;
         let _ = ctx;
 
         crate::state::check_registry(input.registry_id.as_ref()).map_err(fault_error)?;

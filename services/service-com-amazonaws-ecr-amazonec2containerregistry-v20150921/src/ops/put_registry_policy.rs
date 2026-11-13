@@ -156,6 +156,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        let mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| catalog_failure())?;
+        let mut candidate = crate::state::catalog_global::snapshot(&*self.engine).map_err(|_| catalog_failure())?;
+        let result: Result<Self::Output, Self::Error> = async {
+
         // `PutRegistryPolicyRequest` carries only `policyText`; one registry is served
         // here, so there is no registry to resolve.
         let Some(state) = crate::state::service_state(&*self.engine) else {
@@ -188,11 +192,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // re-indented and nothing more. A second put replaces the first (last writer
         // wins).
         let policy_text = crate::state::canonical_policy_document(&input.policy_text);
-        state.lock().registry_policy = Some(policy_text.clone());
+        candidate.registry_policy = Some(policy_text.clone());
 
         Ok(PutRegistryPolicyOutput {
             registry_id: Some(crate::state::registry_id().to_string()),
             policy_text: Some(policy_text),
         })
+        }.await;
+        let output = result?;
+        crate::state::catalog_global::publish(&*self.engine, &mutation, candidate).await.map_err(|_| catalog_failure())?;
+        Ok(output)
     }
+}
+
+/// Storage failures never masquerade as a successful in-memory mutation.
+fn catalog_failure() -> PutRegistryPolicyError {
+    PutRegistryPolicyErrorModeled::ServerException(ServerException { message: Some("the durable ecr registry catalog is unavailable".to_string()) }).into()
 }

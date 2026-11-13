@@ -184,6 +184,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        let mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| catalog_failure())?;
+        let mut candidate = crate::state::catalog_global::snapshot(&*self.engine).map_err(|_| catalog_failure())?;
+        let result: Result<Self::Output, Self::Error> = async {
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(UpdateRepositoryCreationTemplateErrorModeled::ServerException(
                 ServerException {
@@ -233,7 +237,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let now = ::std::time::SystemTime::now();
-        let mut store = state.lock();
+        let store = &mut candidate;
 
         // An update names a template that must already exist: a prefix no template
         // answers to — never created, or already deleted — is refused with
@@ -291,5 +295,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             registry_id: Some(crate::state::registry_id().to_string()),
             repository_creation_template: Some(template.to_template()),
         })
+        }.await;
+        let output = result?;
+        crate::state::catalog_global::publish(&*self.engine, &mutation, candidate).await.map_err(|_| catalog_failure())?;
+        Ok(output)
     }
+}
+
+/// Storage failures never masquerade as a successful in-memory mutation.
+fn catalog_failure() -> UpdateRepositoryCreationTemplateError {
+    UpdateRepositoryCreationTemplateErrorModeled::ServerException(ServerException { message: Some("the durable ecr registry catalog is unavailable".to_string()) }).into()
 }

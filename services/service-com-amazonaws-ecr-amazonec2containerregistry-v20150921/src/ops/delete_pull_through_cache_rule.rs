@@ -170,6 +170,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        let mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| catalog_failure())?;
+        let mut candidate = crate::state::catalog_global::snapshot(&*self.engine).map_err(|_| catalog_failure())?;
+        let result: Result<Self::Output, Self::Error> = async {
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(DeletePullThroughCacheRuleErrorModeled::ServerException(
                 ServerException {
@@ -183,7 +187,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // one registry — its own account's.
         crate::state::check_registry(input.registry_id.as_ref()).map_err(invalid_parameter)?;
 
-        let mut store = state.lock();
+        let store = &mut candidate;
         // A delete addresses a rule by its prefix, whichever way the trailing slash the
         // prefix documentation calls assumed is written, and removes it from the one rule
         // table every pull through cache rule operation reads. A prefix no rule answers
@@ -216,6 +220,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             custom_role_arn: rule.custom_role_arn,
             upstream_repository_prefix: rule.upstream_repository_prefix,
         })
+        }.await;
+        let output = result?;
+        crate::state::catalog_global::publish(&*self.engine, &mutation, candidate).await.map_err(|_| catalog_failure())?;
+        Ok(output)
     }
 }
 
+
+/// Storage failures never masquerade as a successful in-memory mutation.
+fn catalog_failure() -> DeletePullThroughCacheRuleError {
+    DeletePullThroughCacheRuleErrorModeled::ServerException(ServerException { message: Some("the durable ecr registry catalog is unavailable".to_string()) }).into()
+}

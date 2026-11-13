@@ -201,6 +201,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // Resolve cancelled publication/checkpoint outcomes BEFORE policy and snapshot.
+        let mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| catalog_failure())?;
+        let payload_store = crate::state::payloads::bound_store(&*self.engine).map_err(|_| catalog_failure())?;
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(
                 UpdateImageStorageClassErrorModeled::ServerException(ServerException {
@@ -228,13 +232,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let to_archive = input.target_storage_class == ARCHIVE_TARGET_STORAGE_CLASS;
 
         let now = ::std::time::SystemTime::now();
-        let mut store = state.lock();
-        let repo = store
-            .repository_mut(&input.repository_name)
-            .map_err(fault_error)?;
+        let before = { state.lock().repository(&input.repository_name).map_err(fault_error)?.clone() };
+        let mut repo = before.clone();
         // A restore the clock has already made due is written down first, so a transition
         // decided here starts from the status the image was already in.
-        repo.settle_image_storage_classes(now);
+        // Only the selected event target is materialized below.
 
         // The image is resolved the way every operation taking an `imageId` resolves one,
         // so a transition names an image exactly as a read does.
@@ -253,6 +255,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into(),
             );
         };
+
+        image.settle_storage_class(now);
 
         // The transition is recorded on the image itself, so it moves that image's status
         // and nothing else in the repository. A storage class update is supported only
@@ -291,11 +295,39 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let image_status = image.status.clone();
         let image_id = image.identifier(input.image_id.image_tag.as_deref());
 
+        crate::state::catalog::publish_images(&mutation, &payload_store, &before, &mut repo).await.map_err(|_| catalog_failure())?;
+        state.lock().repositories.insert(repo.name.clone(),repo);
+
         Ok(UpdateImageStorageClassOutput {
             registry_id: Some(registry_id),
             repository_name: Some(repository_name),
             image_id: Some(image_id),
             image_status: Some(image_status),
         })
+    }
+}
+
+fn catalog_failure() -> UpdateImageStorageClassError {
+    UpdateImageStorageClassErrorModeled::ServerException(ServerException { message: Some("the durable ecr image catalog is unavailable".to_string()) }).into()
+}
+
+#[cfg(test)]
+mod clock_view_tests {
+    #[test]
+    fn fixed_due_view_does_not_mutate_the_stored_event() {
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(100);
+        let mut stored = crate::state::ImageRecord::pushed("fixture".into(),"{}".into(),None,now);
+        stored.archive(now);
+        stored.activate(now + std::time::Duration::from_secs(1));
+        let due = stored.activate_due_at.unwrap();
+        let mut first_view = stored.clone();
+        first_view.settle_storage_class(due - std::time::Duration::from_nanos(1));
+        assert_eq!(first_view.status,crate::state::ACTIVATING_IMAGE_STATUS);
+        let mut completed_view = stored.clone();
+        completed_view.settle_storage_class(due);
+        assert_eq!(completed_view.status,crate::state::ACTIVE_IMAGE_STATUS);
+        assert!(completed_view.activate_due_at.is_none());
+        assert_eq!(stored.status,crate::state::ACTIVATING_IMAGE_STATUS);
+        assert_eq!(stored.activate_due_at,Some(due));
     }
 }

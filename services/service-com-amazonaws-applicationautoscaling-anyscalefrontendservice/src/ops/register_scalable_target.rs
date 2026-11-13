@@ -490,7 +490,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // target is clamped into, and the movement this call may have made is one the scaled
         // resource is owed, so both are settled here — and the clock is left watching for the
         // next breach of the target's policies.
-        crate::state::policy_execution::settle_policy_executions(&*self.engine, &region);
+        crate::state::policy_execution::settle_policy_executions(&*self.engine, &region).await;
         crate::state::policy_execution::drive_scaling_clock(&self.engine, &region, ctx.callback());
 
         // "Application Auto Scaling uses a service-linked role, which it creates if it does

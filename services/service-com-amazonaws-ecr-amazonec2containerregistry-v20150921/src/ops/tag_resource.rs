@@ -186,12 +186,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let name =
             crate::state::repository_name_from_arn(&input.resource_arn).map_err(fault_error)?;
 
-        let mut store = state.lock();
-        let repo = store.repository_mut(&name).map_err(fault_error)?;
+        let storage_error = || TagResourceError::from(TagResourceErrorModeled::ServerException(ServerException {
+            message: Some("durable repository configuration unavailable".to_string()),
+        }));
+        let mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| storage_error())?;
+        let payload_store = crate::state::payloads::bound_store(&*self.engine).map_err(|_| storage_error())?;
+        if let Some(denied) = crate::state::authorization::denied_on_repository(&*self.engine, ctx, Self::NAME, &name) { return Err(denied); }
+        let mut repo = { state.lock().repository(&name).map_err(fault_error)?.clone() };
         // The limit is on the tags the resource ends up carrying, so it is checked
         // against what this repository already holds.
         crate::state::check_tag_count(&repo.tags, &input.tags).map_err(fault_error)?;
         repo.merge_tags(input.tags);
+
+        let (change, retirement) = crate::state::catalog::repository_change(&payload_store, &repo).await.map_err(|_| storage_error())?;
+        if let Some(denied) = crate::state::authorization::denied_on_repository(&*self.engine, ctx, Self::NAME, &repo.name) { return Err(denied); }
+        let receipt = mutation.commit(&payload_store, service_common::payload_store::ReferenceTransaction {
+            id: payload_store.new_commit_id(), owner: crate::state::payloads::registry_owner().map_err(|_| storage_error())?,
+            changes: vec![change], retire: vec![retirement],
+        }).await.map_err(|_| storage_error())?;
+        repo.payload_revision = Some(receipt.revision);
+        state.lock().repositories.insert(repo.name.clone(), repo.clone());
 
         Ok(TagResourceOutput {})
     }

@@ -247,7 +247,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         crate::state::check_registry(input.registry_id.as_ref())
             .map_err(|fault| refusal("another registry", &caller_akid, fault_error(fault)))?;
 
-        let mut store = state.lock();
+        let storage_error = || InitiateLayerUploadError::from(InitiateLayerUploadErrorModeled::ServerException(ServerException {
+            message: Some("durable layer upload unavailable".to_string()),
+        }));
+        let _mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| storage_error())?;
+        let payload_store = crate::state::payloads::bound_store(&*self.engine).map_err(|_| storage_error())?;
+        let capacity = emulator_server::ecr_capacity::configured().map_err(|_| storage_error())?;
+        {
+            let store = state.lock();
+            store.repository(&input.repository_name)
+                .map_err(|fault| refusal("no such repository", &caller_akid, fault_error(fault)))?;
+        }
+        crate::state::payload_upload::reclaim_abandoned(&*self.engine, &_mutation, &payload_store,
+            ::std::time::SystemTime::now()).await.map_err(|_| storage_error())?;
+        let store = state.lock();
 
         // The layer is uploaded into a repository, so there has to be one: an upload
         // against a repository that does not exist is refused rather than opened.
@@ -255,15 +268,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .repository(&input.repository_name)
             .map_err(|fault| refusal("no such repository", &caller_akid, fault_error(fault)))?;
 
-        // An upload a client opened and abandoned otherwise holds its slot — and the bytes
-        // it received — for the life of the process, so the registry reclaims those it no
-        // longer owes anybody before it decides it is full. Nothing is reclaimed while
-        // there is room, and no upload younger than
-        // [`crate::state::ABANDONED_UPLOAD_AGE`] is ever dropped.
-        if store.uploads.len() >= crate::state::MAX_LAYER_UPLOADS {
-            store.reclaim_abandoned_uploads(::std::time::SystemTime::now());
-        }
-
+        // Old uploads are credited only after exact catalog retirement/reload above.
         // The store is bounded: past its cap an upload is not opened. The refusal is
         // this operation's `ServerException` — reaching the cap is this registry's own
         // capacity, not a fault in the caller's request. See
@@ -287,18 +292,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // passed: a refused call consumes no id.
         let upload_id = new_upload_id();
         let part_size = crate::state::REPORTED_LAYER_PART_SIZE;
-        store.uploads.insert(
-            upload_id.clone(),
-            crate::state::LayerUpload {
-                    registry_principal: None,
-                repository_name: input.repository_name,
-                part_size,
-                started_at: ::std::time::SystemTime::now(),
-                // A freshly opened upload has received nothing: `UploadLayerPart` is
-                // what streams the layer's bytes into it.
-                received_bytes: Vec::new(),
-            },
-        );
+        let owner = crate::state::payloads::repository_owner(store.repository(&input.repository_name)
+            .map_err(|fault| fault_error(fault))?).map_err(|_| storage_error())?;
+        drop(store);
+        let bound = crate::state::payload_upload::initiate(
+            &_mutation, &payload_store, owner.clone(), &upload_id,
+            crate::state::payload_upload::UploadProtocol {
+                principal: None, repository: owner.name.clone(), generation: owner.generation.clone(), part_size, started_at: ::std::time::SystemTime::now(),
+            }, capacity.layer_bytes as u64,
+        ).await.map_err(|_| storage_error())?;
+        {
+            let mut state = state.lock();
+            state.repository_mut(&input.repository_name).map_err(fault_error)?.payload_revision = Some(bound.revision);
+            state.uploads.insert(upload_id.clone(), bound.index_projection());
+        }
 
         // Audit record for a state-changing operation: who asked, what changed, how it
         // ended. Only wire metadata and server-minted identifiers.

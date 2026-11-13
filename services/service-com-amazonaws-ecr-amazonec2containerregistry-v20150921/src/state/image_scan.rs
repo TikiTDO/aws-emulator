@@ -110,15 +110,30 @@ pub(super) const MAX_RELEASE_FILE_BYTES: u64 = 64 * 1024;
 /// built by one tool lists `etc/os-release` and one built by another lists
 /// `./etc/os-release` for the same file.
 pub fn scan_layer_filesystem(blob: &[u8]) -> LayerFilesystem {
-    use ::std::io::Read;
+    scan_layer_reader(blob)
+}
+
+/// Inspect a bounded pull reader without materializing its compressed layer. The
+/// caller owns its read lease; this routine neither opens paths nor retains payload
+/// bytes. Async callers must bridge to a blocking worker with bounded backpressure,
+/// never hold a service state lock while waiting for storage.
+pub fn scan_layer_reader(reader: impl ::std::io::Read) -> LayerFilesystem {
+    use ::std::io::{BufReader, Cursor, Read};
 
     let mut found = LayerFilesystem::default();
+    let mut reader = BufReader::with_capacity(8192, reader);
+    let mut prefix = Vec::with_capacity(2);
+    if reader.by_ref().take(2).read_to_end(&mut prefix).is_err() {
+        return found;
+    }
+    let gzip = prefix.starts_with(&[0x1f, 0x8b]);
+    let reader = Cursor::new(prefix).chain(reader);
     // The decompressed stream is read through a bound, so a layer whose compressed bytes
     // expand without limit costs this call a bounded amount of work.
-    let decompressed: Box<dyn Read> = if blob.starts_with(&[0x1f, 0x8b]) {
-        Box::new(::flate2::read::GzDecoder::new(blob))
+    let decompressed: Box<dyn Read + '_> = if gzip {
+        Box::new(::flate2::read::GzDecoder::new(reader))
     } else {
-        Box::new(blob)
+        Box::new(reader)
     };
     let mut archive = ::tar::Archive::new(decompressed.take(MAX_SCANNED_LAYER_BYTES));
     let Ok(entries) = archive.entries() else {
@@ -213,7 +228,7 @@ pub(super) fn os_release_id(content: &str) -> Option<String> {
 /// start call created it, and reading it back computes nothing new. Its status follows
 /// from the instant the clock owes it its completion, so every reader derives the same
 /// answer from the same record and no read has to write.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ImageScan {
     /// When the call that started this scan was made. It is what the once-per-image
     /// [`BASIC_SCAN_INTERVAL`] is measured from, and what counts this scan towards the
@@ -230,6 +245,7 @@ pub struct ImageScan {
     /// the outcome is the run's own and every reader derives the same one. A scan is a
     /// record of what examining THAT image came to, which is why the terminal status is
     /// not re-derived — nor defaulted to success — on a read.
+    #[serde(with = "super::catalog_codec::model")]
     pub terminal: ImageScanStatus,
     /// What the scan found, computed once when it was started (see
     /// [`basic_scan_findings`]) and stored, so paging through the findings reports the
@@ -237,6 +253,7 @@ pub struct ImageScan {
     /// once stored, so a finding's INDEX in this list is the stable, unique and ascending
     /// key a page of findings is addressed by — see [`Self::finding_page_keys`]; a
     /// finding's `name` is neither unique nor ordered, so it is not that key.
+    #[serde(with = "super::catalog_codec::model_vec")]
     pub findings: Vec<ImageScanFinding>,
 }
 
@@ -415,7 +432,7 @@ pub(super) fn scanned_filesystem(
     layers: &BTreeMap<String, LayerBlob>,
 ) -> LayerFilesystem {
     let mut identified = LayerFilesystem::default();
-    for descriptor in manifest_layer_descriptors(&image.manifest) {
+    for descriptor in &image.filesystem_layers {
         // A digest the repository holds no blob for contributes no content: only a
         // registered layer has bytes this registry has read.
         if let Some(held) = layers.get(&descriptor.digest) {
@@ -440,4 +457,45 @@ pub(super) fn scanned_filesystem(
 /// cannot be scanned") reports.
 pub fn is_scannable_image_manifest(manifest: &str) -> bool {
     !manifest_layer_descriptors(manifest).is_empty()
+}
+
+#[cfg(test)]
+mod payload_reader_tests {
+    use super::*;
+    use std::io::{Cursor, Read, Write};
+
+    struct OneByte<R>(R);
+    impl<R: Read> Read for OneByte<R> {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            let count = output.len().min(1);
+            self.0.read(&mut output[..count])
+        }
+    }
+
+    #[test]
+    fn fragmented_reader_preserves_gzip_detection_and_bounded_summary() {
+        let mut tar = tar::Builder::new(Vec::new());
+        for (path, bytes) in [
+            ("etc/os-release", b"ID=alpine\n".as_slice()),
+            ("lib/apk/db/installed", b"P:synthetic\n".as_slice()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, path, bytes).unwrap();
+        }
+        let tar = tar.into_inner().unwrap();
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(&tar).unwrap();
+        let compressed = gzip.finish().unwrap();
+        let expected = LayerFilesystem {
+            operating_system: Some("alpine".to_string()),
+            package_manager: Some("apk".to_string()),
+        };
+        assert_eq!(scan_layer_filesystem(&compressed), expected);
+        assert_eq!(scan_layer_reader(OneByte(Cursor::new(compressed))), expected);
+        assert_eq!(scan_layer_reader(OneByte(Cursor::new(tar))), expected);
+        assert_eq!(scan_layer_reader(Cursor::new([0x1f])), LayerFilesystem::default());
+    }
 }

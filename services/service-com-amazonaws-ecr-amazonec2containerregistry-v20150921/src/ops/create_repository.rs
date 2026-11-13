@@ -262,7 +262,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Region.
         let region = crate::state::request_region(ctx.parts());
         let name = input.repository_name;
-        let mut store = state.lock();
+        let storage_error = || CreateRepositoryError::from(CreateRepositoryErrorModeled::ServerException(ServerException {
+            message: Some("durable repository creation unavailable".to_string()),
+        }));
+        let _mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| storage_error())?;
+        let payload_store = crate::state::payloads::bound_store(&*self.engine).map_err(|_| storage_error())?;
+        let store = state.lock();
 
         if store.repositories.contains_key(&name) {
             return Err(
@@ -294,6 +299,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let mut repo = crate::state::Repo {
+            payload_generation: crate::state::mint_hex(32),
+            payload_revision: None,
             arn: crate::state::repository_arn(&region, &name),
             registry_id: crate::state::registry_id().to_string(),
             name: name.clone(),
@@ -328,7 +335,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let repository =
             repo.to_repository(&crate::state::announced_registry_endpoint(ctx));
-        store.repositories.insert(name, repo);
+        drop(store);
+        crate::state::catalog::publish_repository(&_mutation, &payload_store, &mut repo).await.map_err(|_| storage_error())?;
+        state.lock().repositories.insert(name, repo);
 
         Ok(CreateRepositoryOutput {
             repository: Some(repository),

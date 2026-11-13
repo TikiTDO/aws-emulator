@@ -43,8 +43,9 @@
 //! against.
 //!
 //! LOCK ORDER: the authorization decision is taken BEFORE this service's store is locked
-//! (it reads the IAM store), and the resolution and the import hold this store's lock
-//! alone. A caller reaches this with no lock of its own held.
+//! (it reads the IAM store), and is repeated after async mutation admission and
+//! before publication. RAM guards cover only snapshot/apply; no store lock spans
+//! staging or commit awaits. A caller reaches this with no lock of its own held.
 
 use super::*;
 
@@ -130,6 +131,7 @@ pub enum PullRefusal {
     },
     /// Nothing in this registry answers to the reference, and no pull through cache rule
     /// covers the repository it names: the message the repository's own lookup words.
+    StorageUnavailable,
     NotFound {
         /// Why no image was found, in this registry's own words.
         message: String,
@@ -151,7 +153,7 @@ pub enum PullRefusal {
 ///
 /// A WRITE, and only through the import: a pull of an image this registry already holds
 /// changes nothing a later caller sees.
-pub fn serve_pull<Eng: Send + Sync + 'static>(
+pub async fn serve_pull<Eng: Send + Sync + 'static>(
     engine: &Eng,
     reference: &RegistryReference,
     principal: Option<&str>,
@@ -161,23 +163,36 @@ pub fn serve_pull<Eng: Send + Sync + 'static>(
         return Err(refusal);
     }
     let Some(state) = service_state(engine) else {
-        // No store of this service to ask: nothing is known about the image, so the pull
-        // is not refused on it.
-        return Ok(());
+        // A selected local registry cannot claim it served an image when its
+        // engine binding is unavailable. This is not an image-not-found result.
+        return Err(PullRefusal::StorageUnavailable);
     };
-    let mut store = state.lock();
-    let identifier = reference.identifier();
-    if let Some(repository) = store.repositories.get(&reference.repository_name) {
-        if repository.lookup_image(&identifier).is_ok() {
-            return Ok(());
-        }
-    }
-    match import_through_cache_rule(&mut store, reference, now) {
-        Some(_) => Ok(()),
-        None => Err(PullRefusal::NotFound {
+    let mutation = payloads::mutation_guard(engine).await.map_err(|_| PullRefusal::StorageUnavailable)?;
+    // The gate may have waited/recovered. Re-read the actual role/repository policy.
+    if let Some(refusal) = withheld_pull(engine, reference, principal) { return Err(refusal); }
+    let plan = {
+        let store = state.lock();
+        if store.repositories.get(&reference.repository_name)
+            .is_some_and(|repo| repo.lookup_image(&reference.identifier()).is_ok()) { return Ok(()); }
+        plan_cache_import(&store, reference, now).ok_or_else(|| PullRefusal::NotFound {
             message: not_found_message(&store, reference),
-        }),
-    }
+        })?
+    };
+    let payload_store = payloads::bound_store(engine).map_err(|_| PullRefusal::StorageUnavailable)?;
+    let expected_config = plan.config.clone();
+    let imported = super::payload_import::publish(engine, &mutation, &payload_store, plan, || {
+        if let Some(refusal) = withheld_pull(engine, reference, principal) { return Err(refusal); }
+        // Fresh rule/cap selection after staging, not merely the rule observed
+        // before awaits. Repository generation/revision is fenced by publisher.
+        let store = state.lock();
+        let fresh = plan_cache_import(&store, reference, now).ok_or(PullRefusal::StorageUnavailable)?;
+        if fresh.config != expected_config { return Err(PullRefusal::StorageUnavailable); }
+        Ok(())
+    }).await?;
+    // The commit helper returns only after durable publication. No await separates
+    // that receipt from RAM application; cancellation before this cut is recovered.
+    state.lock().repositories.insert(imported.name.clone(), imported);
+    Ok(())
 }
 
 /// The reference `image` names when it addresses a repository of THIS registry, and `None`
@@ -444,59 +459,40 @@ pub fn service_pull_denied_by_repository_policy<Eng: Send + Sync + 'static>(
 /// cap on each of them. EVERY bound is checked before ANYTHING is written, so a rejected
 /// import leaves the store exactly as it found it — a client pulling tag after tag under a
 /// cache rule is bounded by those caps rather than growing this process without end.
-fn import_through_cache_rule(
-    store: &mut ComAmazonawsEcrAmazonec2containerregistryV20150921State,
+pub(super) struct CacheImportPlan {
+    pub before: Repo,
+    pub after: Repo,
+    pub config: String,
+    pub config_digest: String,
+}
+
+/// Pure bounded plan. No RAM mutation or successful import is reported here.
+fn plan_cache_import(
+    store: &ComAmazonawsEcrAmazonec2containerregistryV20150921State,
     reference: &RegistryReference,
     now: SystemTime,
-) -> Option<String> {
+) -> Option<CacheImportPlan> {
     let rule = covering_cache_rule(store, &reference.repository_name)?;
-    // A pull addressing a DIGEST names content, and an import has none to match: the
-    // upstream manifest is not here to be digested, so only a tag is cached.
     let tag = reference.tag.clone()?;
     let upstream = upstream_reference(&rule, &reference.repository_name, &tag);
     match store.repositories.get(&reference.repository_name) {
-        // A cached copy the registry has no room for is not cached at all.
         None if store.repositories.len() >= MAX_REPOSITORIES => return None,
-        Some(repository)
-            if repository.images.len() >= MAX_IMAGES_PER_REPOSITORY
-                || repository.tag_index.len() >= MAX_TAGS_PER_REPOSITORY
-                || repository.layer_blobs.len() >= MAX_IMPORTED_BLOBS_PER_REPOSITORY =>
-        {
-            return None
-        }
-        _ => {}
+        Some(repo) if repo.images.len() >= MAX_IMAGES_PER_REPOSITORY
+            || repo.tag_index.len() >= MAX_TAGS_PER_REPOSITORY
+            || repo.layer_blobs.len() >= MAX_IMPORTED_BLOBS_PER_REPOSITORY => return None,
+        _ => {},
     }
     let (manifest, config) = imported_manifest(&upstream);
     let digest = manifest_digest(&manifest);
     let config_digest = content_digest(config.as_bytes());
-    let repository = store
-        .repositories
-        .entry(reference.repository_name.clone())
-        .or_insert_with(|| cache_repository(&reference.region, &reference.repository_name, now));
-    // The configuration document the imported manifest describes is held as the blob it
-    // describes, under the digest of its own bytes, so the manifest references nothing the
-    // repository does not have.
-    repository.layer_blobs.insert(
-        config_digest.clone(),
-        LayerBlob {
-            digest: config_digest,
-            size: i64::try_from(config.len()).ok(),
-            media_type: Some(OCI_IMAGE_CONFIG_MEDIA_TYPE.to_string()),
-            filesystem: LayerFilesystem::default(),
-            content: config.into_bytes(),
-        },
-    );
-    repository.images.entry(digest.clone()).or_insert_with(|| {
-        ImageRecord::pushed(
-            digest.clone(),
-            manifest,
-            Some(OCI_IMAGE_MANIFEST_MEDIA_TYPE.to_string()),
-            now,
-        )
-    });
-    repository.move_tag(&tag, &digest);
-    repository.refresh_image_sizes();
-    Some(digest)
+    let before = store.repositories.get(&reference.repository_name).cloned()
+        .unwrap_or_else(|| cache_repository(&reference.region, &reference.repository_name, now));
+    let mut after = before.clone();
+    after.images.entry(digest.clone()).or_insert_with(|| ImageRecord::pushed(
+        digest.clone(), manifest, Some(OCI_IMAGE_MANIFEST_MEDIA_TYPE.to_string()), now,
+    ));
+    after.move_tag(&tag, &digest);
+    Some(CacheImportPlan { before, after, config, config_digest })
 }
 
 /// The pull through cache rule that covers `repository_name`: the one whose
@@ -553,6 +549,8 @@ fn upstream_reference(rule: &PullThroughCacheRule, repository_name: &str, tag: &
 /// and the service-default encryption.
 fn cache_repository(region: &str, name: &str, now: SystemTime) -> Repo {
     Repo {
+        payload_generation: crate::state::mint_hex(32),
+            payload_revision: None,
         arn: repository_arn(region, name),
         registry_id: registry_id().to_string(),
         name: name.to_string(),
@@ -795,12 +793,15 @@ mod tests {
             digest: None,
         };
         let now = SystemTime::UNIX_EPOCH;
-        let case = "the first pull of a covered reference";
+        let case = "planning the first pull of a covered reference";
         assert!(
-            import_through_cache_rule(&mut store, &reference("1"), now).is_some(),
-            "case {case:?}: expected the upstream image to be cached"
+            plan_cache_import(&store, &reference("1"), now).is_some(),
+            "case {case:?}: expected a synthetic import plan"
         );
 
+        // Pure planning does not mutate the store; install only the synthetic
+        // metadata fixture needed to exercise planning's capacity refusal.
+        store.repositories.insert(repository_name.to_string(), cache_repository("us-east-1", repository_name, now));
         // The repository at its blob cap: a further pull is the one this bound is about, a
         // client asking for tag after tag.
         let repository = store
@@ -816,7 +817,7 @@ mod tests {
                     size: None,
                     media_type: None,
                     filesystem: LayerFilesystem::default(),
-                    content: Vec::new(),
+                    payload: None,
                 },
             );
         }
@@ -828,7 +829,7 @@ mod tests {
 
         let case = "a pull past the blob cap";
         assert!(
-            import_through_cache_rule(&mut store, &reference("2"), now).is_none(),
+            plan_cache_import(&store, &reference("2"), now).is_none(),
             "case {case:?}: expected no image to be cached"
         );
         let repository = store

@@ -612,7 +612,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // dropped, since it takes the IAM, Amazon EC2 and Amazon ECR stores' locks
         // ([`crate::state::settle_task_launches`]).
         drop(guard);
-        crate::state::settle_task_launches(&*self.engine);
+        crate::state::settle_task_launches(&*self.engine).await;
         // The status each task this call placed now reports is an `ECS Task State Change`
         // on the account's default event bus, and the transitions the clock still owes
         // these tasks are published as they fall due

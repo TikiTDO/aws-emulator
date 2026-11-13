@@ -80,7 +80,7 @@ struct Awaiting {
 /// This is work the CLOCK owes and not any request's: the capacity took effect in the owning
 /// service at an instant of its own, whether or not anybody called this service afterwards,
 /// so a reporting operation may materialise it.
-pub fn settle_activity_fulfilments<Eng: Send + Sync + 'static>(engine: &Eng, region: &str) {
+pub async fn settle_activity_fulfilments<Eng: Send + Sync + 'static>(engine: &Eng, region: &str) {
     let Some(state) = service_state(engine) else {
         return;
     };
@@ -89,11 +89,14 @@ pub fn settle_activity_fulfilments<Eng: Send + Sync + 'static>(engine: &Eng, reg
     if awaiting.is_empty() {
         return;
     }
-    let confirmed: BTreeSet<String> = awaiting
-        .into_iter()
-        .filter(|movement| owner_has_fulfilled(engine, &movement.target, movement.capacity))
-        .map(|movement| movement.activity_id)
-        .collect();
+    let mut confirmed = BTreeSet::new();
+    // Sequential and bounded by MAX_CONFIRMATIONS_PER_PASS. Each owner's clock
+    // completes in this pass; no detached future postpones confirmation.
+    for movement in awaiting {
+        if owner_has_fulfilled(engine, &movement.target, movement.capacity).await {
+            confirmed.insert(movement.activity_id);
+        }
+    }
     if confirmed.is_empty() {
         return;
     }
@@ -145,13 +148,13 @@ fn confirm_fulfilled(
 ///
 /// One arm per namespace whose owning service distinguishes the capacity it was asked for
 /// from the capacity it has reached; see the module docs.
-fn owner_has_fulfilled<Eng: Send + Sync + 'static>(
+async fn owner_has_fulfilled<Eng: Send + Sync + 'static>(
     engine: &Eng,
     target: &TargetKey,
     capacity: i32,
 ) -> bool {
     match target.service_namespace.as_str() {
-        ECS_NAMESPACE => ecs_has_fulfilled(engine, &target.resource_id, capacity),
+        ECS_NAMESPACE => ecs_has_fulfilled(engine, &target.resource_id, capacity).await,
         _ => true,
     }
 }
@@ -174,7 +177,7 @@ fn owner_has_fulfilled<Eng: Send + Sync + 'static>(
 /// already made due — including the launch steps a task's start waits on, which is why it is
 /// made with no guard of that store held and through the owner's own entry point rather than
 /// by calling its clock pass directly.
-fn ecs_has_fulfilled<Eng: Send + Sync + 'static>(
+async fn ecs_has_fulfilled<Eng: Send + Sync + 'static>(
     engine: &Eng,
     resource_id: &str,
     capacity: i32,
@@ -184,7 +187,7 @@ fn ecs_has_fulfilled<Eng: Send + Sync + 'static>(
     let Some((cluster, service_name)) = super::split_ecs_resource_id(resource_id) else {
         return true;
     };
-    ecs::state::advance_task_clock(engine, SystemTime::now());
+    ecs::state::advance_task_clock(engine, SystemTime::now()).await;
     let Some(store) = ecs::state::service_state(engine) else {
         return true;
     };

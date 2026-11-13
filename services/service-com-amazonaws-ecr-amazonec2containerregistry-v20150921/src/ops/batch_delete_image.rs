@@ -197,7 +197,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // than the batch maximum, was already refused at the boundary. The store is written
         // under its lock, which the helper below holds for its own body alone: the guard is
         // not `Send`, and the publication that follows is awaited.
-        let (output, removals) = Self::delete_images(&state, &input, now)?;
+        let (output, removals) = Self::delete_images(&*self.engine, &state, &input, now).await?;
         // One image action per delete this batch really performed, published with the
         // store's lock released, for the reason `PutImage` gives: a rule's target may call
         // back into this service.
@@ -207,13 +207,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     }
 }
 
-impl<Eng> BatchDeleteImage<Eng> {
+impl<Eng: Send + Sync + 'static> BatchDeleteImage<Eng> {
     /// Remove what the batch names, and answer both the response the delete gives its
     /// caller and the image actions it performed.
     ///
     /// Everything this operation writes happens here, under the store's lock; the caller
     /// publishes those actions once that lock is gone.
-    fn delete_images(
+    async fn delete_images(
+        engine: &Eng,
         state: &::engine::ServiceState<
             crate::state::ComAmazonawsEcrAmazonec2containerregistryV20150921State,
         >,
@@ -226,10 +227,13 @@ impl<Eng> BatchDeleteImage<Eng> {
         ),
         BatchDeleteImageError,
     > {
-        let mut store = state.lock();
-        let repo = store
-            .repository_mut(&input.repository_name)
-            .map_err(fault_error)?;
+        let storage_error = || BatchDeleteImageError::from(BatchDeleteImageErrorModeled::ServerException(ServerException {
+            message: Some("durable image deletion unavailable".to_string()),
+        }));
+        let _mutation = crate::state::payloads::mutation_guard(engine).await.map_err(|_| storage_error())?;
+        let payload_store = crate::state::payloads::bound_store(engine).map_err(|_| storage_error())?;
+        let before = { state.lock().repository(&input.repository_name).map_err(fault_error)?.clone() };
+        let mut repo = before.clone();
 
         let mut deleted = Vec::new();
         let mut failures = Vec::new();
@@ -316,6 +320,8 @@ impl<Eng> BatchDeleteImage<Eng> {
                 })
             })
             .collect();
+        crate::state::catalog::publish_images(&_mutation, &payload_store, &before, &mut repo).await.map_err(|_| storage_error())?;
+        state.lock().repositories.insert(repo.name.clone(), repo);
         Ok((output, removals))
     }
 }

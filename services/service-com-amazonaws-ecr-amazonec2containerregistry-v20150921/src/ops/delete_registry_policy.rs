@@ -136,6 +136,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        let mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| catalog_failure())?;
+        let mut candidate = crate::state::catalog_global::snapshot(&*self.engine).map_err(|_| catalog_failure())?;
+        let result: Result<Self::Output, Self::Error> = async {
+
         // `DeleteRegistryPolicyRequest` models no members, and one registry is served
         // here, so the request names nothing to resolve.
         let _ = (&input, ctx);
@@ -151,7 +155,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // One take under one lock: the policy is removed and reported in the same step,
         // so two concurrent deletes cannot both report having deleted it.
-        let deleted = state.lock().registry_policy.take();
+        let deleted = candidate.registry_policy.take();
 
         let Some(policy_text) = deleted else {
             return Err(
@@ -168,5 +172,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             registry_id: Some(crate::state::registry_id().to_string()),
             policy_text: Some(policy_text),
         })
+        }.await;
+        let output = result?;
+        crate::state::catalog_global::publish(&*self.engine, &mutation, candidate).await.map_err(|_| catalog_failure())?;
+        Ok(output)
     }
+}
+
+/// Storage failures never masquerade as a successful in-memory mutation.
+fn catalog_failure() -> DeleteRegistryPolicyError {
+    DeleteRegistryPolicyErrorModeled::ServerException(ServerException { message: Some("the durable ecr registry catalog is unavailable".to_string()) }).into()
 }

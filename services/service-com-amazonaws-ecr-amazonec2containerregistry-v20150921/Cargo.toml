@@ -19,7 +19,10 @@ aws-smithy-types = { workspace = true }
 tokio = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
+# B1 payload response frames over B2 bounded read leases.
+http-body = "1"
 serde_json = { workspace = true }
+serde = { workspace = true }
 tracing = { workspace = true }
 # The content digest of an image manifest (`sha256:<hex>`) and its hex rendering.
 sha2 = { workspace = true }

@@ -179,14 +179,14 @@ const OCI_IMAGE_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.
 /// referrers of a digest are exactly the stored manifests whose `subject.digest` is that
 /// digest. Nothing is re-synthesised from the request — every member reported here is
 /// read out of the stored manifest or the stored record.
-fn referrer_of(image: &crate::state::ImageRecord, subject_digest: &str) -> Option<ImageReferrer> {
+fn referrer_of(image: &crate::state::ImageRecord, subject_digest: &str, manifest: &str) -> Option<ImageReferrer> {
     // A manifest that does not carry the subject digest in its bytes cannot declare it as
     // its subject, so the parse — which a manifest is modelled to carry up to 4 MiB of —
     // only runs for the stored manifests that could possibly match.
-    if !image.manifest.contains(subject_digest) {
+    if !manifest.contains(subject_digest) {
         return None;
     }
-    let document = image.manifest_document()?;
+    let document: ::serde_json::Value = ::serde_json::from_str(manifest).ok()?;
     let subject = document.get("subject")?.get("digest")?.as_str()?;
     if subject != subject_digest {
         return None;
@@ -271,6 +271,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // Resolve cancelled publication/checkpoint outcomes BEFORE policy and snapshot.
+        let _mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| catalog_failure())?;
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(
                 ListImageReferrersErrorModeled::ServerException(ServerException {
@@ -301,39 +304,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .unwrap_or_else(|| DEFAULT_ARTIFACT_STATUS_FILTER.to_string());
         let artifact_types = filter.artifact_types.unwrap_or_default();
 
-        let now = ::std::time::SystemTime::now();
-        let mut store = state.lock();
-        // The subject is addressed inside one repository, so the repository has to exist
-        // before anything can refer to anything: an unknown one is refused with
-        // `RepositoryNotFoundException`. A subject digest this repository does not hold is
-        // NOT a refusal — this operation models no image-not-found error, and nothing
-        // refers to an image that is not there, which is an empty list.
-        let repo = store
-            .repository_mut(&input.repository_name)
-            .map_err(fault_error)?;
-        // A restore the clock has already made due is written down before the artifacts
-        // are reported, so this read reports the status each one was already in.
-        repo.settle_image_storage_classes(now);
-        let repo = &*repo;
+        let snapshots = {
+            let mut repo = state.lock().repository(&input.repository_name).map_err(fault_error)?.clone();
+            repo.settle_image_storage_classes(::std::time::SystemTime::now());
+            repo.images.values().filter(|image| artifact_status == ANY_ARTIFACT_STATUS_FILTER || artifact_status == image.status)
+                .cloned().collect::<Vec<_>>()
+        };
+        let storage_error = || ListImageReferrersError::from(ListImageReferrersErrorModeled::ServerException(ServerException {
+            message: Some("committed manifest unavailable".to_string()),
+        }));
+        let payload_store = crate::state::payloads::bound_store(&*self.engine).map_err(|_| storage_error())?;
+        let mut candidates = Vec::new();
+        for image in snapshots {
+            let manifest = image.manifest.read(&payload_store).await.map_err(|_| storage_error())?;
+            if let Some(referrer) = referrer_of(&image, &input.subject_id.image_digest, &manifest) {
+                if artifact_types.is_empty() || referrer.artifact_type.as_ref().is_some_and(|kind| artifact_types.contains(kind)) {
+                    candidates.push((referrer.digest.clone(), referrer));
+                }
+            }
+        }
 
-        let candidates: Vec<(String, ImageReferrer)> = repo
-            .images
-            .values()
-            // The status filter is applied per artifact, against the stored status of the
-            // manifest that refers to the subject.
-            .filter(|image| {
-                artifact_status == ANY_ARTIFACT_STATUS_FILTER || artifact_status == image.status
-            })
-            .filter_map(|image| referrer_of(image, &input.subject_id.image_digest))
-            .filter(|referrer| {
-                artifact_types.is_empty()
-                    || referrer
-                        .artifact_type
-                        .as_ref()
-                        .is_some_and(|artifact_type| artifact_types.contains(artifact_type))
-            })
-            .map(|referrer| (referrer.digest.clone(), referrer))
-            .collect();
+        // Payload reads can await: preserve current policy at response admission.
+        if let Some(denied) = crate::state::authorization::denied_on_repository(
+            &*self.engine, ctx, Self::NAME, &input.repository_name,
+        ) { return Err(denied); }
 
         let (referrers, next_token) = crate::state::paginate(
             candidates,
@@ -347,4 +341,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             next_token,
         })
     }
+}
+
+fn catalog_failure() -> ListImageReferrersError {
+    ListImageReferrersErrorModeled::ServerException(ServerException { message: Some("the durable ecr image catalog is unavailable".to_string()) }).into()
 }

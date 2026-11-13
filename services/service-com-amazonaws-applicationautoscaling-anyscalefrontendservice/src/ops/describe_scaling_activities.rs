@@ -254,7 +254,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // that alarm transitioned, and the activity it records is one this log already held
         // at that instant — so what the clock has made due is performed before the log is
         // read, and the clock is left watching for the next breach.
-        crate::state::policy_execution::settle_policy_executions(&*self.engine, &region);
+        crate::state::policy_execution::settle_policy_executions(&*self.engine, &region).await;
         crate::state::policy_execution::drive_scaling_clock(&self.engine, &region, ctx.callback());
 
         let now = ::std::time::SystemTime::now();

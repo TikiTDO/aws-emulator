@@ -219,7 +219,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // capacity it moved is part of what the target reports now, not of the next read.
         // The Region the request was sent to is also the only Region it reports over.
         let region = crate::state::request_region(ctx.parts());
-        crate::state::policy_execution::settle_policy_executions(&*self.engine, &region);
+        crate::state::policy_execution::settle_policy_executions(&*self.engine, &region).await;
 
         // A `NextToken` carries the identity of the last target the previous page
         // emitted, so this page resumes at the next key in order. A token this service
@@ -286,7 +286,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // A movement an occurrence just made is one the scaled resource is owed: delivered
         // with this service's lock released, and the clock is left watching for the next
         // breach of the target's policies.
-        crate::state::policy_execution::settle_policy_executions(&*self.engine, &region);
+        crate::state::policy_execution::settle_policy_executions(&*self.engine, &region).await;
         crate::state::policy_execution::drive_scaling_clock(&self.engine, &region, ctx.callback());
 
         Ok(DescribeScalableTargetsOutput {

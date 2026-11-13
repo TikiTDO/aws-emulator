@@ -250,6 +250,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // exactly one registry — its own account's.
         crate::state::check_registry(input.registry_id.as_ref()).map_err(fault_error)?;
 
+        let storage_error = || SetRepositoryPolicyError::from(SetRepositoryPolicyErrorModeled::ServerException(ServerException {
+            message: Some("durable repository configuration unavailable".to_string()),
+        }));
+        let mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| storage_error())?;
+        let payload_store = crate::state::payloads::bound_store(&*self.engine).map_err(|_| storage_error())?;
+        if let Some(denied) = crate::state::authorization::denied_on_repository(&*self.engine, ctx, Self::NAME, &input.repository_name) { return Err(denied); }
+
         // The repository the policy is for is resolved FIRST: a policy for a repository
         // that does not exist is reported as the missing repository, whatever else is
         // wrong with the document. The store is released again before the document's
@@ -291,16 +298,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(fault_error(fault).into());
         }
 
-        let mut store = state.lock();
-        let repo = store
-            .repository_mut(&input.repository_name)
-            .map_err(fault_error)?;
+        let mut repo = { state.lock().repository(&input.repository_name).map_err(fault_error)?.clone() };
         // The policy replaces whatever the repository carried: one repository holds one
         // policy, and it is stored in the canonical IAM-policy rendering ECR echoes an
         // attached policy in — the caller's own tokens, in the caller's own order,
         // re-indented and nothing more — so the read and the delete report the same
         // document this call answers with.
         repo.policy_text = Some(crate::state::canonical_policy_document(&input.policy_text));
+
+        let (change, retirement) = crate::state::catalog::repository_change(&payload_store, &repo).await.map_err(|_| storage_error())?;
+        if let Some(denied) = crate::state::authorization::denied_on_repository(&*self.engine, ctx, Self::NAME, &repo.name) { return Err(denied); }
+        let receipt = mutation.commit(&payload_store, service_common::payload_store::ReferenceTransaction {
+            id: payload_store.new_commit_id(), owner: crate::state::payloads::registry_owner().map_err(|_| storage_error())?,
+            changes: vec![change], retire: vec![retirement],
+        }).await.map_err(|_| storage_error())?;
+        repo.payload_revision = Some(receipt.revision);
+        state.lock().repositories.insert(repo.name.clone(), repo.clone());
 
         Ok(SetRepositoryPolicyOutput {
             registry_id: Some(repo.registry_id.clone()),

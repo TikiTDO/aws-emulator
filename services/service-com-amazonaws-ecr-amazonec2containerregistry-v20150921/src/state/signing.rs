@@ -68,7 +68,7 @@ pub const IMAGE_SIGNING_DELAY: Duration = Duration::from_secs(3);
 /// Why a signing job could not sign the image: the `failureCode` and the `failureReason`
 /// its status carries, "only present if `status` is `FAILED`"
 /// (`ImageSigningStatus$failureCode`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SigningFailure {
     pub code: String,
     pub reason: String,
@@ -79,7 +79,7 @@ pub struct SigningFailure {
 /// The job's outcome is decided when it is created — a signing job signs with the profile
 /// the rule named, as that profile stood at the push — and the status it reports follows
 /// from the instant the clock owes it that outcome, so every read derives the same answer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ImageSigning {
     /// The ARN of the AWS Signer signing profile this job signs with: the one the matched
     /// rule named.

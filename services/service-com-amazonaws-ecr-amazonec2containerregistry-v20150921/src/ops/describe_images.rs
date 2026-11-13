@@ -208,6 +208,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // Resolve cancelled publication/checkpoint outcomes BEFORE policy and snapshot.
+        let _mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| catalog_failure())?;
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(DescribeImagesErrorModeled::ServerException(ServerException {
                 message: Some("the ecr repository store is unavailable".to_string()),
@@ -242,14 +245,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .unwrap_or_else(|| ANY_IMAGE_STATUS_FILTER.to_string());
 
         let now = ::std::time::SystemTime::now();
-        let mut store = state.lock();
-        let repo = store
-            .repository_mut(&input.repository_name)
-            .map_err(fault_error)?;
+        // A deterministic clock view, never a new durable event or live RAM write.
+        let mut repo = { state.lock().repository(&input.repository_name).map_err(fault_error)?.clone() };
         // A restore the clock has already made due is written down before the images are
         // reported, so this read reports the status the image was already in.
         repo.settle_image_storage_classes(now);
-        let repo = &*repo;
+        let repo = &repo;
 
         // Each requested identifier must name a stored image; the whole call is refused
         // when one does not. The resolution lives on `Repo`, so every operation that
@@ -289,4 +290,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             next_token,
         })
     }
+}
+
+fn catalog_failure() -> DescribeImagesError {
+    DescribeImagesErrorModeled::ServerException(ServerException { message: Some("the durable ecr image catalog is unavailable".to_string()) }).into()
 }

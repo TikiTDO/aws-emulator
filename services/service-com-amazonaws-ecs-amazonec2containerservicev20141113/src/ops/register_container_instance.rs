@@ -451,7 +451,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // STOPPED. Read with OUR guard dropped, since it takes the IAM, Amazon EC2 and
             // Amazon ECR stores' locks ([`crate::state::settle_task_launches`]).
             drop(guard);
-            crate::state::settle_task_launches(&*self.engine);
+            crate::state::settle_task_launches(&*self.engine).await;
             // The placement this registration gave each parked task moves that task, which
             // is an `ECS Task State Change` on the account's default event bus
             // ([`crate::state::publish_task_state_changes`]).
@@ -519,7 +519,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // OUR guard dropped, since it takes the IAM, Amazon EC2 and Amazon ECR stores' locks
         // ([`crate::state::settle_task_launches`]).
         drop(guard);
-        crate::state::settle_task_launches(&*self.engine);
+        crate::state::settle_task_launches(&*self.engine).await;
         // The placement this registration gave each parked task moves that task, which is
         // an `ECS Task State Change` on the account's default event bus
         // ([`crate::state::publish_task_state_changes`]).

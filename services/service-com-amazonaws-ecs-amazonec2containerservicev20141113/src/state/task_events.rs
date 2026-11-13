@@ -669,7 +669,7 @@ pub fn drive_task_clock<Eng: Send + Sync + 'static>(
             // materialises what is due, because both steps happen where the task would
             // otherwise start — and again after it, for the tasks that pass placed
             // ([`super::advance_task_clock`], the same prologue every operation runs).
-            super::advance_task_clock(&*engine, SystemTime::now());
+            super::advance_task_clock(&*engine, SystemTime::now()).await;
             // A task the clock has just started or stopped is one the load balancers its
             // service binds have to be brought in line with — the same side effect the door
             // that wrote a status settles, owed here for the statuses NO door wrote

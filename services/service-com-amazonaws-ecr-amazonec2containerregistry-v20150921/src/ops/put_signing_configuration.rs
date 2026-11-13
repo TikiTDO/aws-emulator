@@ -143,6 +143,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        let mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| catalog_failure())?;
+        let mut candidate = crate::state::catalog_global::snapshot(&*self.engine).map_err(|_| catalog_failure())?;
+        let result: Result<Self::Output, Self::Error> = async {
+
         let _ = ctx;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(PutSigningConfigurationErrorModeled::ServerException(
@@ -155,7 +159,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "Creates or updates the registry's signing configuration": the request carries
         // the configuration whole, so the stored one is replaced rather than merged.
-        let mut store = state.lock();
+        let store = &mut candidate;
         store.signing_configuration = Some(input.signing_configuration);
 
         // "The registry's updated signing configuration" — read back out of the record
@@ -163,5 +167,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         Ok(PutSigningConfigurationOutput {
             signing_configuration: store.signing_configuration.clone(),
         })
+        }.await;
+        let output = result?;
+        crate::state::catalog_global::publish(&*self.engine, &mutation, candidate).await.map_err(|_| catalog_failure())?;
+        Ok(output)
     }
+}
+
+/// Storage failures never masquerade as a successful in-memory mutation.
+fn catalog_failure() -> PutSigningConfigurationError {
+    PutSigningConfigurationErrorModeled::ServerException(ServerException { message: Some("the durable ecr registry catalog is unavailable".to_string()) }).into()
 }

@@ -478,7 +478,9 @@ pub struct LayerBlob {
     ///
     /// Empty for a DESCRIPTOR read out of a manifest document, which carries a digest, a
     /// size and a media type and none of the content they describe.
-    pub content: Vec<u8>,
+    /// None only for a parsed manifest descriptor. Stored blob records carry a
+    /// catalog-validated immutable handle; absence is never an empty layer.
+    pub payload: Option<service_common::payload_store::PayloadHandle>,
 }
 
 /// How many levels of manifest list [`Repo::refresh_image_sizes`] resolves when it
@@ -617,7 +619,8 @@ pub fn manifest_artifact_media_type(manifest: &str) -> Option<String> {
 /// repository, which is why a rule stored afterwards adds none ("replication is not
 /// retroactive"). Its status follows from the instant the clock owes the copy its
 /// completion, so every reader derives the same answer and no read has to write.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ImageReplication {
     /// The destination Region the image is copied to.
     pub region: String,
@@ -656,7 +659,9 @@ impl ImageReplication {
 pub struct ImageRecord {
     pub digest: String,
     pub tags: BTreeSet<String>,
-    pub manifest: String,
+    pub manifest: payloads::ManifestDocument,
+    pub filesystem_layers: Vec<LayerBlob>,
+    pub scannable_manifest: bool,
     pub manifest_media_type: Option<String>,
     pub artifact_media_type: Option<String>,
     /// What [`Self::manifest`] references, read ONCE when the image was stored (see
@@ -722,7 +727,9 @@ impl ImageRecord {
             tags: BTreeSet::new(),
             artifact_media_type: manifest_artifact_media_type(&manifest),
             references: manifest_content(&manifest),
-            manifest,
+            filesystem_layers: manifest_layer_descriptors(&manifest),
+            scannable_manifest: is_scannable_image_manifest(&manifest),
+            manifest: payloads::ManifestDocument::Pending(manifest),
             manifest_media_type,
             size_in_bytes: None,
             pushed_at,
@@ -792,7 +799,7 @@ impl ImageRecord {
     /// another schema reports ITS length through the same function
     /// ([`manifest_document_size`]).
     pub fn manifest_size(&self) -> i64 {
-        manifest_document_size(&self.manifest)
+        i64::try_from(self.manifest.len()).unwrap_or(i64::MAX)
     }
 
     /// Whether this image's storage class is Amazon ECR archive — including while a
@@ -858,15 +865,6 @@ impl ImageRecord {
         }
     }
 
-    /// The manifest as a JSON document, for the members a registry reads out of it
-    /// (an OCI artifact's `subject`, `artifactType` and `annotations`).
-    ///
-    /// `None` when the stored manifest is not JSON at all, which is what a caller who
-    /// pushed something else gets: no member can be read out of it.
-    pub fn manifest_document(&self) -> Option<serde_json::Value> {
-        serde_json::from_str(&self.manifest).ok()
-    }
-
     /// The `(digest, tag)` pairs this image is addressable by: one per tag, or a single
     /// tagless identifier when nothing points at it.
     pub fn identifiers(&self) -> Vec<ImageIdentifier> {
@@ -890,7 +888,7 @@ impl ImageRecord {
 /// `InitiateLayerUpload` and shrinks when an upload is completed. An upload a client
 /// opened and then abandoned is reclaimed only when the registry needs its slot — see
 /// [`ABANDONED_UPLOAD_AGE`] and
-/// [`reclaim_abandoned_uploads`](ComAmazonawsEcrAmazonec2containerregistryV20150921State::reclaim_abandoned_uploads)
+/// [`abandoned_upload_candidates`](ComAmazonawsEcrAmazonec2containerregistryV20150921State::abandoned_upload_candidates)
 /// — so the registry needs a ceiling on how many in-flight layer uploads it holds at
 /// once. Past it, with nothing reclaimable, the open is refused with the
 /// `ServerException` `InitiateLayerUpload` models: reaching the ceiling is this
@@ -976,13 +974,11 @@ pub struct LayerUpload {
     /// expires, so this registry expires none while it has room; it is read only when a
     /// new upload needs a slot the store does not have, to reclaim an upload nothing has
     /// touched for [`ABANDONED_UPLOAD_AGE`]
-    /// ([`reclaim_abandoned_uploads`](ComAmazonawsEcrAmazonec2containerregistryV20150921State::reclaim_abandoned_uploads)).
+    /// ([`abandoned_upload_candidates`](ComAmazonawsEcrAmazonec2containerregistryV20150921State::abandoned_upload_candidates)).
     pub started_at: SystemTime,
-    /// The layer bytes accepted so far, in the order they arrived. Each part starts
-    /// where the previous one ended, so this is the prefix of the layer the registry
-    /// holds and its length is both the byte count received and the offset the next
-    /// part must start at — see [`LayerUpload::receive_part`].
-    pub received_bytes: Vec<u8>,
+    /// The authoritative durable checkpoint and stage identity. No payload bytes
+    /// live in the service index; resume revalidates this against the catalog.
+    pub snapshot: service_common::payload_store::UploadSnapshot,
 }
 
 /// Why a layer part is not accepted into an upload. The caller-facing error each one
@@ -1005,7 +1001,7 @@ impl LayerUpload {
     /// The offset the next part must start at: the number of bytes already accepted, so
     /// the first part of an upload starts at byte 0.
     pub fn next_part_first_byte(&self) -> i64 {
-        i64::try_from(self.received_bytes.len()).unwrap_or(i64::MAX)
+        i64::try_from(self.snapshot.checkpoint.offset()).unwrap_or(i64::MAX)
     }
 
     /// The last byte of the layer this upload has accepted, or `None` while it has
@@ -1016,48 +1012,7 @@ impl LayerUpload {
             .filter(|last| *last >= 0)
     }
 
-    /// Append one layer part to this upload, answering the last byte the upload has now
-    /// received.
-    ///
-    /// A part is accepted only when its declared `[partFirstByte, partLastByte]` range
-    /// spans exactly as many bytes as the blob carries AND starts where the upload's
-    /// received bytes end; a rejected part changes nothing, so the upload stays exactly
-    /// as the last accepted part left it.
-    pub fn receive_part(
-        &mut self,
-        part_first_byte: i64,
-        part_last_byte: i64,
-        blob: &[u8],
-    ) -> Result<i64, LayerPartRejection> {
-        let capacity = emulator_server::ecr_capacity::configured()
-            .map_err(|_| LayerPartRejection::UploadTooLarge)?;
-        self.receive_part_with_capacity(part_first_byte, part_last_byte, blob, *capacity)
-    }
 
-    fn receive_part_with_capacity(
-        &mut self,
-        part_first_byte: i64,
-        part_last_byte: i64,
-        blob: &[u8],
-        capacity: emulator_server::ecr_capacity::EcrCapacity,
-    ) -> Result<i64, LayerPartRejection> {
-        let declared_len = part_last_byte
-            .checked_sub(part_first_byte)
-            .and_then(|span| span.checked_add(1))
-            .filter(|len| *len > 0);
-        let carried_len = i64::try_from(blob.len()).unwrap_or(i64::MAX);
-        if declared_len != Some(carried_len) {
-            return Err(LayerPartRejection::PartSizeMismatch);
-        }
-        if part_first_byte != self.next_part_first_byte() {
-            return Err(LayerPartRejection::NonConsecutivePart);
-        }
-        if !capacity.layer_fits(self.received_bytes.len(), blob.len()) {
-            return Err(LayerPartRejection::UploadTooLarge);
-        }
-        self.received_bytes.extend_from_slice(blob);
-        Ok(self.last_byte_received().unwrap_or(part_last_byte))
-    }
 }
 
 /// How long a layer download URL `GetDownloadUrlForLayer` hands out stays valid.
@@ -1108,11 +1063,13 @@ pub const MAX_LAYER_DOWNLOAD_GRANTS: usize = 10_000;
 /// for itself names no grant and serves nothing.
 ///
 /// The layer's bytes are NOT copied here. A download reads the repository's own record of
-/// the blob ([`LayerBlob::content`]) when it is fetched, so a grant for a layer this
+/// the blob ([`LayerBlob::payload`]) when it is fetched, so a grant for a layer this
 /// registry no longer holds has nothing to serve, and two grants for one layer are two
 /// capabilities over one copy of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayerDownloadGrant {
+    /// Exact repository incarnation; name reuse never revives a capability.
+    pub payload_generation: String,
     /// The repository whose blob this grant serves. A blob is per-repository, so the
     /// grant names the repository as well as the digest.
     pub repository_name: String,
@@ -1129,8 +1086,9 @@ pub struct LayerDownloadGrant {
 impl LayerDownloadGrant {
     /// The grant for one layer of one repository, minted at `now` and valid from then for
     /// [`LAYER_DOWNLOAD_URL_TTL`].
-    pub fn issued(repository_name: &str, layer_digest: &str, now: SystemTime) -> Self {
+    pub fn issued(repository_name: &str, payload_generation: &str, layer_digest: &str, now: SystemTime) -> Self {
         Self {
+            payload_generation: payload_generation.to_string(),
             repository_name: repository_name.to_string(),
             layer_digest: layer_digest.to_string(),
             issued_at: now,
@@ -1269,7 +1227,8 @@ impl LifecycleRule {
 
 /// One image a preview acts on: the image as it stood when the preview was started, and
 /// the rule that claimed it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PreviewedImage {
     pub digest: String,
     pub tags: BTreeSet<String>,
@@ -1345,7 +1304,8 @@ pub fn identifier_members(id: &ImageIdentifier) -> String {
 /// [`normalize_lifecycle_policy`] removes once, on the way in.
 /// [`parse_lifecycle_policy`] reads the document to validate it and to evaluate it, and
 /// throws the parse away.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StoredLifecyclePolicy {
     /// The document as ECR reports it: the document the `PutLifecyclePolicy` that stored
     /// it supplied, with the whitespace between its JSON tokens removed
@@ -1370,7 +1330,8 @@ pub struct StoredLifecyclePolicy {
 /// The evaluation is computed once, when the preview is started, from the images the
 /// repository held at that instant: a preview is a snapshot, so an image pushed after it
 /// started does not appear in it, and reading the preview back computes nothing new.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LifecyclePreview {
     /// The policy the preview was started with — the text the start call named, or the
     /// repository's own policy when it named none.
@@ -1989,6 +1950,11 @@ pub fn evaluate_lifecycle_policy(
 /// ([`Repo::to_repository`]).
 #[derive(Debug, Clone)]
 pub struct Repo {
+    /// Stable incarnation identity, minted once at creation and restored by the
+    /// repository envelope BEFORE payload catalog lookup. Never regenerate on
+    /// restore: old uploads must not attach to a recreated repository name.
+    pub payload_generation: String,
+    pub payload_revision: Option<service_common::payload_store::RecordRevision>,
     pub name: String,
     pub registry_id: String,
     pub arn: String,
@@ -2252,19 +2218,20 @@ impl Repo {
                         size: blob.size,
                         media_type: blob.media_type.clone(),
                         filesystem: blob.filesystem.clone(),
-                        content: Vec::new(),
+                        payload: None,
                     },
                 )
             })
             .collect();
         for image in self.images.values() {
-            for blob in manifest_blobs(&image.manifest) {
+            let ManifestContent::Blobs(blobs) = &image.references else { continue; };
+            for blob in blobs {
                 // A descriptor for a blob the repository does not hold describes
                 // nothing here: only a held blob is a layer of this repository.
                 if let Entry::Occupied(mut held) = layers.entry(blob.digest.clone()) {
                     let record = held.get_mut();
                     if record.media_type.is_none() {
-                        record.media_type = blob.media_type;
+                        record.media_type = blob.media_type.clone();
                     }
                 }
             }
@@ -2765,7 +2732,8 @@ impl ComAmazonawsEcrAmazonec2containerregistryV20150921State {
         if self.layer_download_grants.len() >= MAX_LAYER_DOWNLOAD_GRANTS {
             return None;
         }
-        let grant = LayerDownloadGrant::issued(repository_name, layer_digest, now);
+        let generation = &self.repositories.get(repository_name)?.payload_generation;
+        let grant = LayerDownloadGrant::issued(repository_name, generation, layer_digest, now);
         let token = mint_hex(LAYER_DOWNLOAD_TOKEN_BYTES);
         self.layer_download_grants
             .insert(token.clone(), grant.clone());
@@ -2776,7 +2744,10 @@ impl ComAmazonawsEcrAmazonec2containerregistryV20150921State {
     /// has expired is the FETCH's question, because an expired URL and a URL this
     /// registry never handed out are not the same answer.
     pub fn layer_download_grant(&self, token: &str) -> Option<&LayerDownloadGrant> {
-        self.layer_download_grants.get(token)
+        self.layer_download_grants.get(token).filter(|grant| {
+            self.repositories.get(&grant.repository_name)
+                .is_some_and(|repo| repo.payload_generation == grant.payload_generation)
+        })
     }
 
     /// The rule registered for `prefix`, whichever way its trailing slash is written, or
@@ -2793,7 +2764,7 @@ impl ComAmazonawsEcrAmazonec2containerregistryV20150921State {
     /// The one accounting behind [`MAX_REGISTRY_CALLER_BYTES`], so the two paths that
     /// grow the store — `UploadLayerPart` and `PutImage` — are held to one aggregate
     /// rather than to their own per-record caps alone. A registered blob's bytes are
-    /// counted here as well as an in-flight upload's ([`LayerBlob::content`]): closing an
+    /// counted here as well as an in-flight upload's ([`LayerBlob::payload`]): closing an
     /// upload moves the same bytes from one record to the other, so a client cannot free
     /// the aggregate by completing uploads and keep streaming new ones.
     ///
@@ -2805,11 +2776,13 @@ impl ComAmazonawsEcrAmazonec2containerregistryV20150921State {
             .uploads
             .values()
             .fold(0usize, |held, upload| {
-                held.saturating_add(upload.received_bytes.len())
+                held.saturating_add(usize::try_from(upload.snapshot.sealed.as_ref()
+                    .map_or(upload.snapshot.checkpoint.offset(), |payload| payload.len().max(upload.snapshot.checkpoint.offset())))
+                    .unwrap_or(usize::MAX))
             });
         self.repositories.values().fold(upload_bytes, |held, repo| {
             let with_blobs = repo.layer_blobs.values().fold(held, |held, blob| {
-                held.saturating_add(blob.content.len())
+                held.saturating_add(blob.payload.as_ref().map_or(0, |p| usize::try_from(p.len()).unwrap_or(usize::MAX)))
             });
             repo.images.values().fold(with_blobs, |held, image| {
                 held.saturating_add(image.manifest.len())
@@ -2895,22 +2868,14 @@ impl ComAmazonawsEcrAmazonec2containerregistryV20150921State {
         planned.into_values().collect()
     }
 
-    /// Drop every in-flight upload nothing has touched for [`ABANDONED_UPLOAD_AGE`] as of
-    /// `now`.
-    ///
-    /// Called by `InitiateLayerUpload` when it needs a slot: an upload a client opened and
-    /// abandoned otherwise holds its slot and its received bytes for the life of the
-    /// process, so without this the entry cap and the byte budget could both be pinned by
-    /// sessions nobody will ever complete. Nothing is dropped while the registry has room,
-    /// and an upload younger than that age is never dropped, so a push in progress keeps
-    /// its session.
-    pub fn reclaim_abandoned_uploads(&mut self, now: SystemTime) {
-        self.uploads.retain(|_, upload| {
-            let abandoned = now
-                .duration_since(upload.started_at)
-                .is_ok_and(|age| age >= ABANDONED_UPLOAD_AGE);
-            !abandoned
-        });
+    /// Select old upload IDs without granting capacity credit. The async catalog
+    /// owner must retire exact checkpoint/index records before removing projections.
+    /// Age deliberately retains the existing started_at (not last-touch) policy.
+    pub fn abandoned_upload_candidates(&self, now: SystemTime, limit: usize) -> Vec<(String, String)> {
+        self.uploads.iter().filter(|(_, upload)| now.duration_since(upload.started_at)
+            .is_ok_and(|age| age >= ABANDONED_UPLOAD_AGE))
+            .take(limit.min(MAX_LAYER_UPLOADS))
+            .map(|(id, upload)| (id.clone(), upload.repository_name.clone())).collect()
     }
 
     /// The value of the account setting `name`: what was last set for it, or its
@@ -3951,9 +3916,10 @@ const INTERCHANGEABLE_DESCRIPTOR_MEDIA_TYPES: [(&str, &str); 3] = [
 /// registry holds to serve, and it is reported under the media type it really has.
 pub fn negotiated_manifest(
     image: &ImageRecord,
+    document: &str,
     accepted: Option<&[String]>,
 ) -> (String, Option<String>) {
-    let as_stored = || (image.manifest.clone(), image.manifest_media_type.clone());
+    let as_stored = || (document.to_string(), image.manifest_media_type.clone());
     // A request that names no accepted media type accepts whatever the registry holds.
     let Some(accepted) = accepted.filter(|types| !types.is_empty()) else {
         return as_stored();
@@ -3969,7 +3935,7 @@ pub fn negotiated_manifest(
     else {
         return as_stored();
     };
-    match rendered_in_schema(&image.manifest, target) {
+    match rendered_in_schema(document, target) {
         Some(rendered) => (rendered, Some(target.to_string())),
         None => as_stored(),
     }
@@ -4096,7 +4062,7 @@ pub fn manifest_layer_descriptors(manifest: &str) -> Vec<LayerBlob> {
                 size: None,
                 media_type: None,
                 filesystem: LayerFilesystem::default(),
-                content: Vec::new(),
+                payload: None,
             })
         }));
     }
@@ -4115,7 +4081,7 @@ fn blob_descriptor(descriptor: &serde_json::Value) -> Option<LayerBlob> {
         // A descriptor carries no blob content: the bytes, and what reading them
         // identified, live on the repository's own record of the blob.
         filesystem: LayerFilesystem::default(),
-        content: Vec::new(),
+        payload: None,
     })
 }
 
@@ -4299,28 +4265,106 @@ pub use scanning::*;
 mod configured_capacity_tests {
     use super::*;
 
-    #[test]
-    fn actual_layer_append_respects_injected_capacity_without_mutation() {
+    #[tokio::test]
+    async fn actual_layer_append_respects_injected_capacity_without_mutation() {
+        use service_common::payload_store::{PayloadStore, PayloadStoreBinding, StoreConfig, StoreLimits};
         let capacity = emulator_server::ecr_capacity::EcrCapacity::parse(Some("4"), Some("8")).unwrap();
-        for registry_principal in [None, Some("synthetic-native".to_string())] {
-            let mut upload = LayerUpload {
-                registry_principal,
-                repository_name: "synthetic".to_string(),
-                part_size: 4,
-                started_at: SystemTime::UNIX_EPOCH,
-                received_bytes: Vec::new(),
+        for (n, registry_principal) in [None, Some("synthetic-native".to_string())].into_iter().enumerate() {
+            // Control documents need their own B2 staging room. The caller's
+            // four-byte layer limit is independent of this physical store quota.
+            let limits = StoreLimits {
+                max_storage_bytes: 8 * 1024 * 1024, max_catalog_bytes: 1024 * 1024,
+                max_stage_bytes: 4 * 1024 * 1024, max_chunk_bytes: 64, max_metadata_bytes: 8192,
+                max_records_per_transaction: 16, max_references_per_record: 8,
+                max_page_records: 16, max_page_bytes: 16384, max_stages: 16,
+                max_records: 32, max_commits: 32, max_transaction_bytes: 16384,
+                max_inflight_operations: 4, max_read_leases: 4, max_data_files: 64,
             };
-            assert_eq!(upload.receive_part_with_capacity(0, 2, b"abc", capacity), Ok(2));
-            assert_eq!(upload.receive_part_with_capacity(3, 4, b"de", capacity), Err(LayerPartRejection::UploadTooLarge));
-            assert_eq!(upload.received_bytes, b"abc");
-            assert_eq!(upload.receive_part_with_capacity(3, 3, b"d", capacity), Ok(3));
-            assert_eq!(upload.received_bytes, b"abcd");
-            let mut store = ComAmazonawsEcrAmazonec2containerregistryV20150921State::default();
-            store.uploads.insert("synthetic".to_string(), upload);
-            assert_eq!(store.caller_bytes_held(), 4);
-            assert!(store.has_byte_budget_with_capacity(4, capacity));
-            assert!(!store.has_byte_budget_with_capacity(5, capacity));
-            assert_eq!(store.caller_bytes_held(), 4);
+            let payloads = PayloadStore::open_store(
+                StoreConfig::memory("ecr-test", &format!("case-{n}"), limits).unwrap(),
+            ).await.unwrap();
+            let engine = engine::InMemoryEngine::new();
+            engine.state::<PayloadStoreBinding>().lock().store = Some(payloads.clone());
+            let mutation = payloads::mutation_guard(&engine).await.unwrap();
+            let name = format!("synthetic/team-{n}");
+            let mut repo = Repo {
+                payload_generation: format!("{n:064x}"), payload_revision: None,
+                arn: repository_arn("us-east-1", &name), name: name.clone(),
+                registry_id: registry_id().into(), created_at: SystemTime::UNIX_EPOCH,
+                image_tag_mutability: DEFAULT_IMAGE_TAG_MUTABILITY.into(),
+                image_tag_mutability_exclusion_filters: Vec::new(),
+                image_scanning_config: ImageScanningConfiguration::default(),
+                encryption_config: EncryptionConfiguration {
+                    encryption_type: DEFAULT_ENCRYPTION_TYPE.into(), kms_key: None,
+                },
+                tags: Vec::new(), policy_text: None, lifecycle_policy: None,
+                lifecycle_preview: None, images: BTreeMap::new(),
+                tag_index: BTreeMap::new(), layer_blobs: BTreeMap::new(),
+            };
+            // Publish a real repository config/reference group, not a fabricated
+            // revision or a scope whose stable owner is mistaken for authority.
+            catalog::publish_repository(&mutation, &payloads, &mut repo).await.unwrap();
+            mutation.reconcile(&engine).await.unwrap();
+            let scope = {
+                let state = service_state(&engine).unwrap();
+                let state = state.lock();
+                payloads::repository_owner(state.repository(&name).unwrap()).unwrap()
+            };
+            scope.assertion(&payloads).await.unwrap();
+            let id = format!("synthetic-{n}");
+            let protocol = payload_upload::UploadProtocol {
+                principal: registry_principal.clone(), repository: scope.name.clone(),
+                generation: scope.generation.clone(), part_size: 4,
+                started_at: SystemTime::UNIX_EPOCH,
+            };
+            let decoded = payload_upload::UploadProtocol::decode(&protocol.encode().unwrap()).unwrap();
+            assert_eq!(decoded.repository, scope.name);
+            assert_eq!(decoded.generation, scope.generation);
+            assert_eq!(decoded.principal, registry_principal);
+            let mut bound = payload_upload::initiate(
+                &mutation, &payloads, scope.clone(), &id, protocol, 4,
+            ).await.unwrap();
+            // Initiation rewrites the config assertion. Subsequent requests
+            // reconcile the retained commit, then use the returned fresh scope.
+            mutation.reconcile(&engine).await.unwrap();
+            assert!(scope.assertion(&payloads).await.is_err());
+            bound.scope.assertion(&payloads).await.unwrap();
+            assert_eq!(payload_upload::validate_part(&bound.snapshot.checkpoint, 0, 2, 3, 4), Ok(()));
+            bound.snapshot.checkpoint = payload_upload::append_modeled_part(
+                &mutation, &payloads, &bound, b"abc",
+            ).await.unwrap();
+            let accepted = bound.snapshot.checkpoint.clone();
+            assert_eq!(payload_upload::validate_part(&accepted, 3, 4, 2, 4), Err(LayerPartRejection::UploadTooLarge));
+            assert_eq!(payload_upload::lookup(&payloads, &bound.scope, &id).await.unwrap().unwrap().snapshot.checkpoint, accepted);
+            assert_eq!(payload_upload::validate_part(&accepted, 3, 3, 1, 4), Ok(()));
+            // A completed checkpoint still belongs to the retained pending slot
+            // until authoritative global+repository reload, as in real admission.
+            mutation.reconcile(&engine).await.unwrap();
+            bound.snapshot.checkpoint = payload_upload::append_modeled_part(
+                &mutation, &payloads, &bound, b"d",
+            ).await.unwrap();
+            assert_eq!(bound.snapshot.checkpoint.offset(), 4);
+            assert_eq!(bound.snapshot.checkpoint.sha256().to_string(), content_digest(b"abcd"));
+            mutation.reconcile(&engine).await.unwrap();
+            let state = service_state(&engine).unwrap();
+            let state = state.lock();
+            assert_eq!(state.uploads.get(&id).unwrap().snapshot.checkpoint, bound.snapshot.checkpoint);
+            assert_eq!(state.caller_bytes_held(), 4);
+            assert!(state.has_byte_budget_with_capacity(4, capacity));
+            assert!(!state.has_byte_budget_with_capacity(5, capacity));
         }
     }
 }
+
+/// Shared payload-store adapters; boot supplies the only store handle.
+pub mod payloads;
+
+pub mod payload_upload;
+
+pub mod catalog_codec;
+
+pub mod catalog;
+
+pub mod catalog_global;
+
+pub mod payload_import;

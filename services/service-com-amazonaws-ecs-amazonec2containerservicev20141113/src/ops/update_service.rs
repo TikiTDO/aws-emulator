@@ -1197,7 +1197,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // no path to the registry, is what settles such a task into STOPPED. Read with OUR
         // guard dropped, since it takes the IAM, Amazon EC2 and Amazon ECR stores' locks
         // ([`crate::state::settle_task_launches`]).
-        crate::state::settle_task_launches(&*self.engine);
+        crate::state::settle_task_launches(&*self.engine).await;
         // The targets this service's bindings hold are brought in line with the tasks that
         // are now running: a task this update placed becomes one, and a task it asked to stop
         // drains out ([`crate::state::settle_load_balancer_targets`]).

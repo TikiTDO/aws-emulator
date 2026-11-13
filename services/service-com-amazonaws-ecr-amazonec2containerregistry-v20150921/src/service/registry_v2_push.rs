@@ -61,235 +61,23 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
                 self.change_upload(state, req, repository, upload_id, principal)
             }
             RegistryV2Target::Manifest { reference, .. } => {
-                self.push_manifest(state, req, repository, reference, now)
+                let _ = reference;
+                error(501, "UNSUPPORTED", "use the streaming HTTP connector for manifest publication")
             }
             _ => error(405, "UNSUPPORTED", "the operation is unsupported"),
         }
     }
 
-    fn start_upload(
-        &self,
-        state: &Store,
-        req: &RtRequest,
-        repo: &str,
-        principal: &str,
-        now: std::time::SystemTime,
-    ) -> RtResponse {
-        // A cross-repository mount may be declined by starting a regular upload,
-        // as specified by RegistryV2. Never fetch the caller's `from` as a URL.
-        let capacity = match emulator_server::ecr_capacity::configured() {
-            Ok(capacity) => capacity,
-            Err(_) => return error(500, "UNKNOWN", "invalid ECR capacity configuration"),
-        };
-        let bytes = match body(req, capacity.layer_bytes) {
-            Ok(bytes) => bytes,
-            Err(response) => return response,
-        };
-        let digest = match query(req, "digest") {
-            Ok(digest) => digest,
-            Err(response) => return response,
-        };
-        if let Some(digest) = digest.as_deref() {
-            if !state::is_layer_digest(digest) || state::content_digest(bytes) != digest {
-                return error(
-                    400,
-                    "DIGEST_INVALID",
-                    "digest does not match uploaded content",
-                );
-            }
-            for action in ["UploadLayerPart", "CompleteLayerUpload"] {
-                if !state::authorization::registry_write_allowed(
-                    &*self.engine,
-                    principal,
-                    repo,
-                    action,
-                ) {
-                    return error(403, "DENIED", "requested access to the resource is denied");
-                }
-            }
-        }
-        if digest.is_none() && !bytes.is_empty() {
-            return error(
-                400,
-                "BLOB_UPLOAD_INVALID",
-                "start an upload before sending chunks",
-            );
-        }
-        let mut store = state.lock();
-        if store.repository(repo).is_err() {
-            return error(404, "NAME_UNKNOWN", "repository name not known to registry");
-        }
-        if store.uploads.len() >= state::MAX_LAYER_UPLOADS {
-            store.reclaim_abandoned_uploads(now);
-        }
-        if store.uploads.len() >= state::MAX_LAYER_UPLOADS
-            || !store.has_byte_budget_for(bytes.len())
-        {
-            return error(
-                413,
-                "BLOB_UPLOAD_INVALID",
-                "registry upload capacity exceeded",
-            );
-        }
-        let id = crate::ops::initiate_layer_upload::new_upload_id();
-        store.uploads.insert(
-            id.clone(),
-            LayerUpload {
-                registry_principal: Some(principal.to_string()),
-                repository_name: repo.to_string(),
-                part_size: state::REPORTED_LAYER_PART_SIZE,
-                started_at: now,
-                received_bytes: Vec::new(),
-            },
-        );
-        drop(store);
-        if digest.is_some() {
-            // Single-request upload uses the same atomic completion path.
-            let response = self.change_upload(state, req, repo, &id, principal);
-            if response.status().as_u16() != 201 {
-                state.lock().uploads.remove(&id);
-            }
-            response
-        } else {
-            upload_response(202, repo, &id, 0)
-        }
+    fn start_upload(&self, _: &Store, _: &RtRequest, _: &str, _: &str, _: std::time::SystemTime) -> RtResponse {
+        error(501, "UNSUPPORTED", "use the streaming HTTP connector for uploads")
+    }
+    fn change_upload(&self, _: &Store, _: &RtRequest, _: &str, _: &str, _: &str) -> RtResponse {
+        error(501, "UNSUPPORTED", "use the streaming HTTP connector for uploads")
     }
 
-    fn change_upload(
-        &self,
-        state: &Store,
-        req: &RtRequest,
-        repo: &str,
-        id: &str,
-        principal: &str,
-    ) -> RtResponse {
-        if req.method() == "PUT"
-            && req.body().bytes().is_some_and(|bytes| !bytes.is_empty())
-            && !state::authorization::registry_write_allowed(
-                &*self.engine,
-                principal,
-                repo,
-                "UploadLayerPart",
-            )
-        {
-            return error(403, "DENIED", "requested access to the resource is denied");
-        }
-        let mut store = state.lock();
-        if store.repository(repo).is_err() {
-            return error(404, "NAME_UNKNOWN", "repository name not known to registry");
-        }
-        let held = match store.uploads.get(id) {
-            Some(upload)
-                if upload.repository_name == repo
-                    && upload.registry_principal.as_deref() == Some(principal) =>
-            {
-                upload.received_bytes.len()
-            }
-            _ => return error(404, "BLOB_UPLOAD_UNKNOWN", UPLOAD_UNKNOWN),
-        };
-        match req.method() {
-            "GET" => return upload_response(204, repo, id, held),
-            "DELETE" => {
-                store.uploads.remove(id);
-                return empty_response(204);
-            }
-            _ => {}
-        }
-        let capacity = match emulator_server::ecr_capacity::configured() {
-            Ok(capacity) => capacity,
-            Err(_) => return error(500, "UNKNOWN", "invalid ECR capacity configuration"),
-        };
-        let bytes = match body(req, capacity.layer_bytes) {
-            Ok(bytes) => bytes,
-            Err(response) => return response,
-        };
-        if !capacity.layer_fits(held, bytes.len())
-            || !store.has_byte_budget_for(bytes.len())
-        {
-            return error(
-                413,
-                "BLOB_UPLOAD_INVALID",
-                "registry upload capacity exceeded",
-            );
-        }
-        if !range_matches(req, held, bytes.len()) {
-            let mut response = error(
-                416,
-                "BLOB_UPLOAD_INVALID",
-                "chunk does not continue this upload",
-            );
-            response
-                .headers_mut()
-                .insert("range", format!("0-{}", held.saturating_sub(1)));
-            return response;
-        }
-        if req.method() == "PATCH" {
-            // Validate every dimension before mutation; empty PATCH is a no-op.
-            if let Some(upload) = store.uploads.get_mut(id) {
-                upload.received_bytes.extend_from_slice(bytes);
-            }
-            return upload_response(202, repo, id, held + bytes.len());
-        }
-        let digest = match query(req, "digest") {
-            Ok(Some(digest)) if state::is_layer_digest(&digest) => digest,
-            _ => {
-                return error(
-                    400,
-                    "DIGEST_INVALID",
-                    "completion requires one sha256 digest",
-                );
-            }
-        };
-        let Some(upload) = store.uploads.get(id) else {
-            return error(404, "BLOB_UPLOAD_UNKNOWN", UPLOAD_UNKNOWN);
-        };
-        // Hash the held prefix and final bytes without cloning the entire upload.
-        use sha2::Digest;
-        let mut hash = sha2::Sha256::new();
-        hash.update(&upload.received_bytes);
-        hash.update(bytes);
-        if format!("sha256:{}", hex::encode(hash.finalize())) != digest {
-            return error(
-                400,
-                "DIGEST_INVALID",
-                "digest does not match uploaded content",
-            );
-        }
-        let Ok(repository) = store.repository(repo) else {
-            return error(404, "NAME_UNKNOWN", "repository name not known to registry");
-        };
-        if !repository.layer_blobs.contains_key(&digest)
-            && repository.layer_blobs.len() >= state::MAX_LAYERS_PER_REPOSITORY
-        {
-            return error(
-                413,
-                "BLOB_UPLOAD_INVALID",
-                "repository blob capacity exceeded",
-            );
-        }
-        let Some(mut upload) = store.uploads.remove(id) else {
-            return error(404, "BLOB_UPLOAD_UNKNOWN", UPLOAD_UNKNOWN);
-        };
-        upload.received_bytes.extend_from_slice(bytes);
-        let content = upload.received_bytes;
-        let Ok(repository) = store.repository_mut(repo) else {
-            return error(404, "NAME_UNKNOWN", "repository name not known to registry");
-        };
-        repository
-            .layer_blobs
-            .entry(digest.clone())
-            .or_insert_with(|| state::LayerBlob {
-                digest: digest.clone(),
-                size: Some(content.len() as i64),
-                media_type: None,
-                filesystem: state::scan_layer_filesystem(&content),
-                content,
-            });
-        blob_stored(repo, &digest)
-    }
-
-    fn push_manifest(
-        &self,
+    pub(super) async fn push_manifest(
+        engine: &Eng,
+        mutation: &state::payloads::MutationGuard,
         state: &Store,
         req: &RtRequest,
         repo: &str,
@@ -399,7 +187,7 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
             let actual = if index {
                 repository.images.get(child).map(|v| v.manifest.len())
             } else {
-                repository.layer_blobs.get(child).map(|v| v.content.len())
+                repository.layer_blobs.get(child).and_then(|v| v.payload.as_ref()).map(|v| v.len() as usize)
             };
             if actual != usize::try_from(size).ok() {
                 return error(
@@ -425,14 +213,14 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
             repository_name: repo.to_string(),
             registry_id: None,
         };
-        let signing = state::signing::planned_signings(&*self.engine, repo, now);
-        let result = crate::ops::put_image::PutImage::<Eng>::store_pushed_image(
-            state,
+        let signing = state::signing::planned_signings(engine, repo, now);
+        let result = crate::ops::put_image::PutImage::<Eng>::store_pushed_image_guarded(
+            engine, mutation, state,
             &input,
             digest.clone(),
             now,
             signing,
-        );
+        ).await;
         use crate::ops::put_image::PutImageErrorModeled as E;
         use crate::scaffolded::Scaffolded;
         match result {
@@ -475,7 +263,7 @@ fn body(req: &RtRequest, cap: usize) -> Result<&[u8], RtResponse> {
     Ok(bytes)
 }
 
-fn range_matches(req: &RtRequest, start: usize, len: usize) -> bool {
+pub(super) fn range_matches(req: &RtRequest, start: usize, len: usize) -> bool {
     let Some(range) = req.headers().get("content-range") else {
         return true;
     };
@@ -486,7 +274,7 @@ fn range_matches(req: &RtRequest, start: usize, len: usize) -> bool {
     matches!((first.parse::<usize>(), last.parse::<usize>()), (Ok(first), Ok(last)) if first == start && last.checked_sub(first).and_then(|n| n.checked_add(1)) == Some(len))
 }
 
-fn query(req: &RtRequest, name: &str) -> Result<Option<String>, RtResponse> {
+pub(super) fn query(req: &RtRequest, name: &str) -> Result<Option<String>, RtResponse> {
     let Some((_, query)) = req.uri().split_once('?') else {
         return Ok(None);
     };
@@ -507,14 +295,14 @@ fn query(req: &RtRequest, name: &str) -> Result<Option<String>, RtResponse> {
     Ok(value)
 }
 
-fn empty_response(code: u16) -> RtResponse {
+pub(super) fn empty_response(code: u16) -> RtResponse {
     let mut response = RtResponse::new(status(code), SdkBody::empty());
     registry_headers(&mut response);
     response.headers_mut().insert("content-length", "0");
     response
 }
 
-fn upload_response(code: u16, repo: &str, id: &str, held: usize) -> RtResponse {
+pub(super) fn upload_response(code: u16, repo: &str, id: &str, held: usize) -> RtResponse {
     let mut response = empty_response(code);
     response
         .headers_mut()
@@ -528,7 +316,7 @@ fn upload_response(code: u16, repo: &str, id: &str, held: usize) -> RtResponse {
     response
 }
 
-fn blob_stored(repo: &str, digest: &str) -> RtResponse {
+pub(super) fn blob_stored(repo: &str, digest: &str) -> RtResponse {
     let mut response = empty_response(201);
     response
         .headers_mut()
@@ -539,7 +327,7 @@ fn blob_stored(repo: &str, digest: &str) -> RtResponse {
     response
 }
 
-fn valid_repository(name: &str) -> bool {
+pub(super) fn valid_repository(name: &str) -> bool {
     name.len() <= 256
         && !name.is_empty()
         && name.split('/').all(|part| {

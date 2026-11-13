@@ -194,10 +194,10 @@ pub fn registry_host(image: &str) -> &str {
 /// store's lock and no other.
 ///
 /// Nothing is recorded for a fact this emulator does not hold — a subnet the Amazon EC2
-/// store does not hold is not evidence of a blocked path, and an engine carrying no Amazon
-/// ECR store says nothing about an image — and nothing is attempted twice: a task that
+/// store does not hold is not evidence of a blocked path. A selected ECR binding failure
+/// is a storage failure, not a successful pull. Nothing is attempted twice: a task that
 /// already carries its pull instants is not pulled again.
-pub fn evaluate_image_pulls<Eng: Send + Sync + 'static>(engine: &Eng) {
+pub async fn evaluate_image_pulls<Eng: Send + Sync + 'static>(engine: &Eng) {
     let Some(state) = service_state(engine) else {
         return;
     };
@@ -226,7 +226,7 @@ pub fn evaluate_image_pulls<Eng: Send + Sync + 'static>(engine: &Eng) {
     let now = SystemTime::now();
     for (launch, failure) in launches.iter().zip(failures.iter_mut()) {
         if failure.1.is_none() {
-            failure.1 = unservable_image(engine, launch, now);
+            failure.1 = unservable_image(engine, launch, now).await;
         }
     }
     state.lock().record_image_pulls(&failures, now);
@@ -240,32 +240,32 @@ pub fn evaluate_image_pulls<Eng: Send + Sync + 'static>(engine: &Eng) {
 /// caches an upstream image where a pull through cache rule covers the repository, which is
 /// why the import happens on the FIRST pull of such a reference and is visible to every
 /// later read of that repository.
-fn unservable_image<Eng: Send + Sync + 'static>(
+async fn unservable_image<Eng: Send + Sync + 'static>(
     engine: &Eng,
     launch: &TaskLaunch,
     now: SystemTime,
 ) -> Option<String> {
     use ::service_com_amazonaws_ecr_amazonec2containerregistry_v20150921::state::registry_pull;
 
-    launch.images.iter().find_map(|image| {
-        // A reference naming another registry is not this one's to serve: whether it can be
-        // fetched was decided by the path above.
-        let reference = registry_pull::parse_reference(image)?;
+    for image in &launch.images {
+        // Other registries remain the network half's responsibility.
+        let Some(reference) = registry_pull::parse_reference(image) else { continue; };
         match registry_pull::serve_pull(
-            engine,
-            &reference,
-            launch.execution_role_arn.as_deref(),
-            now,
-        ) {
-            Ok(_) => None,
+            engine, &reference, launch.execution_role_arn.as_deref(), now,
+        ).await {
+            Ok(_) => {},
             Err(registry_pull::PullRefusal::NotAuthorized { message, .. }) => {
-                Some(pull_access_denied_message(image, &message))
+                return Some(pull_access_denied_message(image, &message));
+            }
+            Err(registry_pull::PullRefusal::StorageUnavailable) => {
+                return Some(format!("CannotPullContainerError: registry storage outcome unavailable for {image}"));
             }
             Err(registry_pull::PullRefusal::NotFound { message }) => {
-                Some(image_not_found_message(image, &message))
+                return Some(image_not_found_message(image, &message));
             }
         }
-    })
+    }
+    None
 }
 
 /// Why the containers of `launch` cannot be launched where the task is placed — the

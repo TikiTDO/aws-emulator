@@ -191,7 +191,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // dropped, exactly as every other call that places a task takes them
         // ([`crate::state::settle_task_launches`]).
         drop(guard);
-        crate::state::settle_task_launches(&*self.engine);
+        crate::state::settle_task_launches(&*self.engine).await;
 
         match stopped {
             Ok(()) => Ok(StopServiceDeploymentOutput {
