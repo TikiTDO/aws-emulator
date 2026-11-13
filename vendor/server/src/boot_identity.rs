@@ -849,7 +849,7 @@ mod tests {
                         (case == "late-auth").then(SigV4Authenticator::for_this_process);
                     let original_tls =
                         (case == "late-tls").then(TlsCertificateAuthority::for_this_process);
-                    let absent = root.join(case);
+                    let absent = root.join(&case);
                     assert!(!absent.exists());
                     assert_eq!(
                         prepare(IdentityConfig::Retained {
