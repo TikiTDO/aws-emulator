@@ -25,6 +25,8 @@ mod build_artifacts_destination;
 mod build_batch_fan_out;
 #[path = "all/buildspec_execution.rs"]
 mod buildspec_execution;
+#[path = "all/buildspec_parse_refusal.rs"]
+mod buildspec_parse_refusal;
 #[path = "all/command_execution_lifecycle.rs"]
 mod command_execution_lifecycle;
 #[path = "all/delete_build_batch.rs"]

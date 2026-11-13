@@ -16,12 +16,14 @@
 //! The buildspec is YAML, read through the one bounded parse this crate reads a
 //! buildspec with ([`super::batchspec::buildspec_document`]), and its command lines are
 //! run by the build environment's shell ([`super::build_shell`]). A build whose
-//! buildspec cannot be read has no phase to run, which is the `YAML_FILE_ERROR` the
-//! source-download phase reports.
+//! buildspec cannot be read has no phase to run: the source-download phase fails, and
+//! what it reports is what the reading answered — the YAML parser's own diagnostic for a
+//! buildspec that is not YAML, and CodeBuild's `YAML_FILE_ERROR` classification for a
+//! buildspec there was none of to parse.
 
 use std::collections::BTreeMap;
 
-use super::batchspec::{buildspec_document, mapping_get, scalar_string};
+use super::batchspec::{buildspec_document, mapping_get, scalar_string, UnreadableBuildspec};
 use super::build_shell::BuildShell;
 use super::{finished_phase, open_phase};
 use crate::ops::types::{Build, BuildPhase, ExportedEnvironmentVariable, PhaseContext};
@@ -68,7 +70,10 @@ const YAML_FILE_ERROR: &str = "YAML_FILE_ERROR";
 /// this build environment fetches none.
 const NO_YAML_FILE_MESSAGE: &str = "YAML file does not exist";
 
-/// What CodeBuild states when the buildspec is there but is not readable YAML.
+/// What CodeBuild states when the buildspec is there, parses, and is still not the
+/// document a build runs — it holds no mapping, or it is outside the bounds this crate
+/// reads a buildspec in. A document the PARSER refused is not this: the parser's own
+/// diagnostic is what the phase reports for that, unclassified.
 const UNREADABLE_YAML_MESSAGE: &str = "Unable to parse YAML file";
 
 /// The `PhaseContext$statusCode` a phase whose command failed reports.
@@ -146,15 +151,16 @@ pub struct DeclaredPhase {
     pub abort_on_failure: bool,
 }
 
-/// Read `buildspec` as the phases a build runs, or `None` when it is not readable YAML
-/// inside the bounds this crate parses a buildspec in.
+/// Read `buildspec` as the phases a build runs, or WHY it could not be read: what the
+/// YAML parser answered about a text that is not YAML, and [`UnreadableBuildspec::NotRead`]
+/// for one this crate does not read inside the bounds it parses a buildspec in.
 ///
 /// A readable buildspec that declares no `phases`, or a phase that declares no
 /// `commands`, declares no command: the build then has nothing to run, which is a build
 /// that runs to success rather than one that failed.
-pub fn read_buildspec(buildspec: &str) -> Option<Buildspec> {
+pub fn read_buildspec(buildspec: &str) -> Result<Buildspec, UnreadableBuildspec> {
     let document = buildspec_document(buildspec)?;
-    let root = document.as_hash()?;
+    let root = document.as_hash().ok_or(UnreadableBuildspec::NotRead)?;
     let mut read = Buildspec {
         declares_artifacts: mapping_get(root, ARTIFACTS_KEY).is_some(),
         ..Buildspec::default()
@@ -195,7 +201,31 @@ pub fn read_buildspec(buildspec: &str) -> Option<Buildspec> {
             });
         }
     }
-    Some(read)
+    Ok(read)
+}
+
+/// What the source-download phase reports about a buildspec it could not read.
+///
+/// A document the parser REFUSED is reported as the parser answered it — its own
+/// diagnostic, unclassified, which is what names the construct and the line a caller has
+/// to fix. CodeBuild's own `YAML_FILE_ERROR` classification is what it states about a
+/// buildspec it could not obtain or make a specification of at all.
+fn unreadable_context(unreadable: &UnreadableBuildspec) -> PhaseContext {
+    match unreadable {
+        UnreadableBuildspec::Diagnostic(diagnostic) => PhaseContext {
+            status_code: None,
+            message: Some(diagnostic.clone()),
+        },
+        UnreadableBuildspec::NotRead => yaml_file_error_context(UNREADABLE_YAML_MESSAGE),
+    }
+}
+
+/// The context CodeBuild's `YAML_FILE_ERROR` classification is reported with.
+fn yaml_file_error_context(message: &str) -> PhaseContext {
+    PhaseContext {
+        status_code: Some(YAML_FILE_ERROR.to_string()),
+        message: Some(message.to_string()),
+    }
 }
 
 /// What running a build answered: its terminal status, the phase it ends in, the phases
@@ -251,12 +281,14 @@ pub fn run_build(build: &Build, start_millis: i64, due_millis: i64) -> BuildRun 
         .map(str::trim)
         .filter(|buildspec| !buildspec.is_empty());
     let read = match buildspec {
-        None => Err(NO_YAML_FILE_MESSAGE),
-        Some(buildspec) => read_buildspec(buildspec).ok_or(UNREADABLE_YAML_MESSAGE),
+        None => Err(yaml_file_error_context(NO_YAML_FILE_MESSAGE)),
+        Some(buildspec) => {
+            read_buildspec(buildspec).map_err(|unreadable| unreadable_context(&unreadable))
+        }
     };
     let read = match read {
         Ok(read) => read,
-        Err(message) => {
+        Err(context) => {
             // The specification the build would run could not be read, so no phase of
             // it ran: the build fails where CodeBuild reports a buildspec it cannot
             // read.
@@ -265,10 +297,7 @@ pub fn run_build(build: &Build, start_millis: i64, due_millis: i64) -> BuildRun 
                 BUILD_STATUS_FAILED,
                 due_millis,
                 due_millis,
-                Some(vec![PhaseContext {
-                    status_code: Some(YAML_FILE_ERROR.to_string()),
-                    message: Some(message.to_string()),
-                }]),
+                Some(vec![context]),
             ));
             phases.push(open_phase(PHASE_COMPLETED, due_millis));
             return BuildRun {

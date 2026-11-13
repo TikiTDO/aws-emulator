@@ -91,6 +91,13 @@ const MAX_BATCHSPEC_FLOW_INDICATORS: usize = 2048;
 /// scalar or a comment closes nothing, so a scan that decremented on one would read a
 /// deep document as shallow. That question is the parser's, and
 /// [`structure_within_bounds`] puts it to the parser.
+///
+/// The lines are the SCANNER's lines: YAML breaks a line at a line feed, at a carriage
+/// return followed by one, and at a carriage return ALONE, so this scan breaks them the
+/// same way. A scan that only broke at line feeds would measure a document written with
+/// carriage returns alone as one long line, whose leading run is its first line's — and a
+/// bound that did not see the indentation of the deepest line is no bound on the block
+/// nesting the loader would descend.
 fn within_size_bounds(buildspec: &str) -> bool {
     if buildspec.len() > MAX_BATCHSPEC_BYTES {
         return false;
@@ -102,12 +109,76 @@ fn within_size_bounds(buildspec: &str) -> bool {
     if opened > MAX_BATCHSPEC_FLOW_INDICATORS {
         return false;
     }
-    buildspec.lines().all(|line| {
+    buildspec.split(['\n', '\r']).all(|line| {
         line.bytes()
             .take_while(|byte| matches!(byte, b' ' | b'\t' | b'-' | b'?'))
             .count()
             <= MAX_BATCHSPEC_NESTING
     })
+}
+
+/// Why a buildspec could not be read as the document a build runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnreadableBuildspec {
+    /// The text is not YAML, and this is what the PARSER answered about it: its own
+    /// diagnostic, worded the way a build reports it.
+    Diagnostic(String),
+    /// The text parses as YAML, but is not read here: it holds no document, its one
+    /// document is not a mapping, or it falls outside the bounds this parse is given.
+    NotRead,
+}
+
+/// How a buildspec parse refusal is worded: the problem the parser named, and the line
+/// of the parse MARK it named it at.
+///
+/// CodeBuild hands the caller its YAML parser's OWN diagnostic, so the wording is the
+/// parser's and the position is the one it reports. The parser this crate reads YAML
+/// with is a reimplementation of the same C scanner CodeBuild's wording comes from, so
+/// most of its problems are already worded identically ("mapping values are not allowed
+/// in this context"); [`CHARACTER_STARTS_NO_TOKEN`] are the ones it words its own way,
+/// and each of them is the one refusal that family states as a character that can start
+/// no token. Every other family passes through as this parser words it, which can be
+/// shorter than the C scanner's phrasing of the same problem ("expected ',' or ']'"
+/// against "did not find expected ',' or ']'").
+const CANNOT_START_ANY_TOKEN: &str = "found character that cannot start any token";
+
+/// The ways this crate's parser words [`CANNOT_START_ANY_TOKEN`]: a TAB where block
+/// indentation belongs — which it words two ways, by whether the tab interrupts a scalar
+/// — and any other character that opens no token.
+const CHARACTER_STARTS_NO_TOKEN: [&str; 3] =
+    ["tabs disallowed", "found a tab", "unexpected character"];
+
+/// The clause a libyaml-style diagnostic states the construct it was scanning in, before
+/// the problem itself.
+const SCANNING_CONTEXT_PREFIX: &str = "while ";
+
+/// The parser's diagnostic as a build reports it: the PROBLEM the parser named and the
+/// line of the MARK it named it at.
+///
+/// A libyaml-style diagnostic states the construct the parser was scanning before the
+/// problem itself ("while scanning …, <problem>"); only the problem and the source
+/// position are reported, so a leading context clause of that form is dropped.
+///
+/// The position is the mark's line as the diagnostic numbers it, which counts the
+/// document's FIRST line as line 0 — the parser here numbers the same mark from one, so
+/// the line it reports is one more than the diagnostic's.
+fn parser_diagnostic(error: &::yaml_rust2::ScanError) -> String {
+    let info = error.info();
+    let problem = info
+        .starts_with(SCANNING_CONTEXT_PREFIX)
+        .then(|| info.split_once(", "))
+        .flatten()
+        .map_or(info, |(_context, problem)| problem);
+    let problem = if CHARACTER_STARTS_NO_TOKEN
+        .iter()
+        .any(|worded| problem.starts_with(worded))
+    {
+        CANNOT_START_ANY_TOKEN
+    } else {
+        problem
+    };
+    let mark_line = error.marker().line().saturating_sub(1);
+    format!("{problem} at line {mark_line}")
 }
 
 /// Whether `buildspec`'s own STRUCTURE is inside the bounds the loader is given, read
@@ -128,9 +199,9 @@ fn within_size_bounds(buildspec: &str) -> bool {
 /// bound; the event stream reports an alias and copies nothing. An anchor no alias refers
 /// to expands nothing and is accepted.
 ///
-/// A document that does not parse is outside these bounds too: it declares nothing, which
-/// is what its reader reports.
-fn structure_within_bounds(buildspec: &str) -> bool {
+/// A document that does not parse is outside these bounds too, and what the parser
+/// answered about it is handed back so the reading that failed can report it.
+fn structure_within_bounds(buildspec: &str) -> Result<(), UnreadableBuildspec> {
     #[derive(Default)]
     struct Structure {
         depth: usize,
@@ -156,8 +227,13 @@ fn structure_within_bounds(buildspec: &str) -> bool {
     }
 
     let mut structure = Structure::default();
-    let parsed = ::yaml_rust2::parser::Parser::new_from_str(buildspec).load(&mut structure, true);
-    parsed.is_ok() && !structure.saw_alias && structure.deepest <= MAX_BATCHSPEC_NESTING
+    ::yaml_rust2::parser::Parser::new_from_str(buildspec)
+        .load(&mut structure, true)
+        .map_err(|error| UnreadableBuildspec::Diagnostic(parser_diagnostic(&error)))?;
+    if structure.saw_alias || structure.deepest > MAX_BATCHSPEC_NESTING {
+        return Err(UnreadableBuildspec::NotRead);
+    }
+    Ok(())
 }
 
 /// The builds the `batch` section of `buildspec` declares, in the order it declares
@@ -182,7 +258,7 @@ fn structure_within_bounds(buildspec: &str) -> bool {
 /// ([`within_parse_bounds`], [`uses_an_alias`]) yields an empty list: there is then no
 /// batch to fan out, which is what the handler reports rather than inventing a group.
 pub fn batch_build_declarations(buildspec: &str) -> Vec<BatchBuildDeclaration> {
-    let Some(document) = buildspec_document(buildspec) else {
+    let Ok(document) = buildspec_document(buildspec) else {
         return Vec::new();
     };
     let Some(batch) = document.as_hash().and_then(|root| mapping_get(root, "batch")) else {
@@ -262,16 +338,21 @@ pub fn declaration_levels(declarations: &[BatchBuildDeclaration]) -> Vec<usize> 
 /// The one document of `buildspec`, when it is YAML inside the bounds this parse is
 /// given ([`within_size_bounds`], [`structure_within_bounds`]) — the single reading every
 /// part of a buildspec is taken from, so the batch section and the phases come off the
-/// same bounded parse.
-pub(super) fn buildspec_document(buildspec: &str) -> Option<::yaml_rust2::Yaml> {
-    if !within_size_bounds(buildspec) || !structure_within_bounds(buildspec) {
-        return None;
+/// same bounded parse. A text that is not read answers WHY, so a reading that has to
+/// report the refusal can state what the parser said about it.
+pub(super) fn buildspec_document(
+    buildspec: &str,
+) -> Result<::yaml_rust2::Yaml, UnreadableBuildspec> {
+    if !within_size_bounds(buildspec) {
+        return Err(UnreadableBuildspec::NotRead);
     }
-    let mut documents = ::yaml_rust2::YamlLoader::load_from_str(buildspec).ok()?;
+    structure_within_bounds(buildspec)?;
+    let mut documents = ::yaml_rust2::YamlLoader::load_from_str(buildspec)
+        .map_err(|error| UnreadableBuildspec::Diagnostic(parser_diagnostic(&error)))?;
     if documents.is_empty() {
-        return None;
+        return Err(UnreadableBuildspec::NotRead);
     }
-    Some(documents.remove(0))
+    Ok(documents.remove(0))
 }
 
 /// Look `key` up in a YAML mapping.

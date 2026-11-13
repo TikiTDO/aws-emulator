@@ -9,7 +9,8 @@
 //! phase's `phaseStatus` `FAILED` and its context naming the command and the status it
 //! exited with. The phases after a failure that aborts the build never ran, so the build
 //! reports none of them. A buildspec that cannot be read is the source-download phase's
-//! `YAML_FILE_ERROR`.
+//! `YAML_FILE_ERROR`, and a buildspec the PARSER refused is the parser's own diagnostic
+//! (the suite that owns that rule is `buildspec_parse_refusal`).
 //!
 //! Each row below differs along what that rule generalises over: which phase declares the
 //! command, how the command answers (a utility the environment runs, a program it has
@@ -19,7 +20,7 @@
 use serde_json::{json, Value};
 
 use super::project_build_lifecycle::{
-    call, create_project, emulator, start_build, PAST_THE_SETTLE_SPAN,
+    create_project, emulator, phase_pairs, settled_build,
 };
 
 /// A `CreateProject` source carrying `buildspec` inline, with no input source code of
@@ -35,39 +36,6 @@ fn buildspec_for(phase: &str, commands: &[&str]) -> String {
         .map(|command| format!("      - {command}\n"))
         .collect::<String>();
     format!("version: 0.2\nphases:\n  {phase}:\n    commands:\n{listed}")
-}
-
-/// Start a build of `project`, let the transition the clock owes it fall due, and hand
-/// back the settled record.
-async fn settled_build(
-    router: &smithy_server_runtime::MultiServiceRouter,
-    project: &str,
-) -> Value {
-    let build = start_build(router, json!({"projectName": project})).await;
-    let id = build["id"].as_str().expect("a build id").to_string();
-    tokio::time::sleep(PAST_THE_SETTLE_SPAN).await;
-    let (status, read) = call(router, "BatchGetBuilds", json!({"ids": [id.clone()]})).await;
-    assert_eq!(
-        status, 200,
-        "BatchGetBuilds {id}: expected 200, got {status} with {read}"
-    );
-    read["builds"][0].clone()
-}
-
-/// The `(phaseType, phaseStatus)` pairs a settled build reports, in order.
-fn phase_pairs(build: &Value) -> Vec<(String, Option<String>)> {
-    build["phases"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .map(|phase| {
-            (
-                phase["phaseType"].as_str().unwrap_or_default().to_string(),
-                phase["phaseStatus"].as_str().map(str::to_string),
-            )
-        })
-        .collect()
 }
 
 /// RULE: the build's terminal status is what its own commands answered.
@@ -164,7 +132,7 @@ async fn a_builds_status_is_what_its_buildspec_commands_answered() {
     for (index, (case, buildspec, expected_status, failing_phase)) in rows.iter().enumerate() {
         let project = format!("spec-proj-{index}");
         create_project(&router, &project, source_with(buildspec)).await;
-        let build = settled_build(&router, &project).await;
+        let build = settled_build(&router, &project, json!({})).await;
         assert_eq!(
             build["buildStatus"], json!(expected_status),
             "case {case:?}: expected buildStatus {expected_status}, got {build}"
@@ -223,7 +191,7 @@ async fn an_aborting_phase_failure_reports_no_later_phase() {
                             - echo second\n  build:\n    commands:\n      - echo third\n";
 
     create_project(&router, "abort-proj", source_with(aborting)).await;
-    let aborted = settled_build(&router, "abort-proj").await;
+    let aborted = settled_build(&router, "abort-proj", json!({})).await;
     let pairs = phase_pairs(&aborted);
     assert_eq!(
         aborted["buildStatus"], json!("FAILED"),
@@ -235,7 +203,7 @@ async fn an_aborting_phase_failure_reports_no_later_phase() {
     );
 
     create_project(&router, "continue-proj", source_with(continuing)).await;
-    let continued = settled_build(&router, "continue-proj").await;
+    let continued = settled_build(&router, "continue-proj", json!({})).await;
     let pairs = phase_pairs(&continued);
     assert_eq!(
         continued["buildStatus"], json!("FAILED"),
@@ -249,7 +217,7 @@ async fn an_aborting_phase_failure_reports_no_later_phase() {
     );
 
     create_project(&router, "continue-three-proj", source_with(continuing_three)).await;
-    let three = settled_build(&router, "continue-three-proj").await;
+    let three = settled_build(&router, "continue-three-proj", json!({})).await;
     let pairs = phase_pairs(&three);
     assert_eq!(
         three["buildStatus"], json!("FAILED"),
@@ -336,7 +304,7 @@ async fn the_finishing_phases_report_what_the_build_put_where() {
             super::project_build_lifecycle::merged(source_with(buildspec), extra.clone()),
         )
         .await;
-        let build = settled_build(&router, &project).await;
+        let build = settled_build(&router, &project, json!({})).await;
         assert_eq!(
             build["buildStatus"], json!(expected),
             "case {case:?}: expected buildStatus {expected}, got {build}"
@@ -435,7 +403,7 @@ async fn a_buildspec_past_a_bound_still_settles() {
     for (index, (case, buildspec)) in rows.iter().enumerate() {
         let project = format!("bounded-proj-{index}");
         create_project(&router, &project, source_with(buildspec)).await;
-        let build = settled_build(&router, &project).await;
+        let build = settled_build(&router, &project, json!({})).await;
         assert_eq!(
             build["buildComplete"], json!(true),
             "case {case:?}: the build must settle, got {build}"
@@ -468,7 +436,7 @@ async fn a_failing_phase_reports_the_command_and_its_exit_status() {
     for (index, (case, command, status)) in rows.iter().enumerate() {
         let project = format!("context-proj-{index}");
         create_project(&router, &project, source_with(&buildspec_for("build", &[command]))).await;
-        let build = settled_build(&router, &project).await;
+        let build = settled_build(&router, &project, json!({})).await;
         let failing = build["phases"]
             .as_array()
             .cloned()
@@ -491,33 +459,40 @@ async fn a_failing_phase_reports_the_command_and_its_exit_status() {
 }
 
 /// RULE: a build whose buildspec cannot be read runs no phase of it; the source-download
-/// phase fails with CodeBuild's `YAML_FILE_ERROR`.
+/// phase fails, with CodeBuild's `YAML_FILE_ERROR` for a buildspec there was none of to
+/// read and with the YAML parser's own diagnostic for one the parser refused.
 #[tokio::test]
 async fn a_buildspec_that_cannot_be_read_fails_the_download_phase() {
     let router = emulator();
-    // (case, the project's source, the message the phase context carries)
-    let rows = [
+    // (case, the project's source, the status code the context carries, its message)
+    let rows: [(&str, Value, Option<&str>, &str); 6] = [
         (
             "a source that keeps its buildspec in a tree nothing fetched",
             json!({"source": {"type": "CODEPIPELINE"}}),
+            Some("YAML_FILE_ERROR"),
             "YAML file does not exist",
         ),
         (
+            // The tab interrupts the plain scalar the first line opens, which is the
+            // construct the parser marks — and the diagnostic numbers the document's
+            // first line 0.
             "a buildspec that is not YAML at all",
             source_with("version: 0.2\n\tphases: [oops"),
-            "Unable to parse YAML file",
+            None,
+            "found character that cannot start any token at line 0",
         ),
         (
             // A `]` inside a comment closes no collection, so a scan that decremented on
-            // one would read this document as flat; its real nesting is the parser's
-            // answer. The closers are on the last line, so the document is well-formed
+            // one would read this document as flatter than it is; its real nesting is the
+            // parser's answer. Every collection is closed, so the document is well-formed
             // YAML and only its DEPTH puts it outside the bounds.
             "a buildspec whose collections nest far past the nesting bound",
             source_with(&format!(
-                "version: 0.2\nphases: {}{}",
-                "[ # ]\n".repeat(200),
+                "version: 0.2\nphases: {}{} # ]]]\n",
+                "[".repeat(200),
                 "]".repeat(200)
             )),
+            Some("YAML_FILE_ERROR"),
             "Unable to parse YAML file",
         ),
         (
@@ -526,13 +501,31 @@ async fn a_buildspec_that_cannot_be_read_fails_the_download_phase() {
             // indentation, so a line of them would otherwise descend once per byte.
             "a buildspec opening more flow collections than the parse is given",
             source_with(&format!("version: 0.2\nphases: {}", "[".repeat(3_000))),
+            Some("YAML_FILE_ERROR"),
+            "Unable to parse YAML file",
+        ),
+        (
+            // The indentation bound is measured per LINE, and a line of the document is
+            // whatever the YAML scanner breaks one at. This row and the next carry the
+            // same two-level mapping indented past the bound, written with the two line
+            // breaks YAML has — a line feed, and a carriage return alone — so the bound
+            // holds for a document however it ends its lines.
+            "a buildspec indented past the bound, written with line feeds",
+            source_with(&format!("version: 0.2\ndeep:\n{}key: value\n", " ".repeat(70))),
+            Some("YAML_FILE_ERROR"),
+            "Unable to parse YAML file",
+        ),
+        (
+            "the same document written with carriage returns alone",
+            source_with(&format!("version: 0.2\rdeep:\r{}key: value\r", " ".repeat(70))),
+            Some("YAML_FILE_ERROR"),
             "Unable to parse YAML file",
         ),
     ];
-    for (index, (case, source, message)) in rows.iter().enumerate() {
+    for (index, (case, source, status_code, message)) in rows.iter().enumerate() {
         let project = format!("yaml-proj-{index}");
         create_project(&router, &project, source.clone()).await;
-        let build = settled_build(&router, &project).await;
+        let build = settled_build(&router, &project, json!({})).await;
         assert_eq!(
             build["buildStatus"], json!("FAILED"),
             "case {case:?}: expected FAILED, got {build}"
@@ -555,8 +548,9 @@ async fn a_buildspec_that_cannot_be_read_fails_the_download_phase() {
             "case {case:?}: the download phase carries the failure, got {download}"
         );
         assert_eq!(
-            download["contexts"][0]["statusCode"], json!("YAML_FILE_ERROR"),
-            "case {case:?}: expected CodeBuild's YAML status code, got {download}"
+            download["contexts"][0]["statusCode"],
+            status_code.map_or(Value::Null, |code| json!(code)),
+            "case {case:?}: unexpected YAML status code, got {download}"
         );
         assert_eq!(
             download["contexts"][0]["message"], json!(message),
@@ -595,7 +589,7 @@ async fn exported_variables_report_what_the_builds_session_held() {
         ),
     )
     .await;
-    let build = settled_build(&router, "exported-proj").await;
+    let build = settled_build(&router, "exported-proj", json!({})).await;
     assert_eq!(
         build["buildStatus"], json!("SUCCEEDED"),
         "the exporting build must succeed, got {build}"

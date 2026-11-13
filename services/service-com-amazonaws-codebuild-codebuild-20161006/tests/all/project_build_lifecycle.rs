@@ -141,6 +141,54 @@ pub(crate) async fn start_build(router: &MultiServiceRouter, body: Value) -> Val
     response["build"].clone()
 }
 
+/// Start a build of `project`, with `extra`'s members merged into the `StartBuild`
+/// request, let the transition the clock owes it fall due, and hand back the settled
+/// record `BatchGetBuilds` reports.
+///
+/// Shared by every suite whose subject is what a BUILD answered, so each of them drives
+/// one build the same way.
+pub(crate) async fn settled_build(
+    router: &MultiServiceRouter,
+    project: &str,
+    extra: Value,
+) -> Value {
+    let build = start_build(router, merged(json!({"projectName": project}), extra)).await;
+    let id = build["id"].as_str().expect("a build id").to_string();
+    tokio::time::sleep(PAST_THE_SETTLE_SPAN).await;
+    let (status, read) = call(router, "BatchGetBuilds", json!({"ids": [id.clone()]})).await;
+    assert_eq!(
+        status, 200,
+        "BatchGetBuilds {id}: expected 200, got {status} with {read}"
+    );
+    read["builds"][0].clone()
+}
+
+/// The `(phaseType, phaseStatus)` pairs a build reports, in the order it reached them.
+pub(crate) fn phase_pairs(build: &Value) -> Vec<(String, Option<String>)> {
+    build["phases"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|phase| {
+            (
+                phase["phaseType"].as_str().unwrap_or_default().to_string(),
+                phase["phaseStatus"].as_str().map(str::to_string),
+            )
+        })
+        .collect()
+}
+
+/// The one phase of `build` whose `phaseType` is `phase_type`, when it reports one.
+pub(crate) fn phase_of(build: &Value, phase_type: &str) -> Option<Value> {
+    build["phases"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|phase| phase["phaseType"] == json!(phase_type))
+}
+
 /// The `__type` an error body carries, for asserting the error code a client branches on.
 pub(crate) fn error_type(body: &Value) -> String {
     body["__type"].as_str().unwrap_or_default().to_string()
