@@ -555,12 +555,14 @@ fn resolve_query<'a>(
 /// The properties the request selected, de-duplicated and in name order, each
 /// one checked to BE a property of what the request addressed.
 ///
-/// A selected property is one of the addressed component's when the component
-/// itself carries it or when the component type it instantiates (or a type that
-/// type extends) defines it; a name that is none of them addresses no property
-/// at all, and is refused rather than reported with an empty value. Where the
-/// request also names a `propertyGroupName`, the selection has to lie inside
-/// that group, which is what naming a group asks for.
+/// A selected property is one of the addressed scope's under the one rule every
+/// property this request names is held to ([`addresses_property`]): a component
+/// in scope carries it or a declaration reaches it — the component's own, one it
+/// inherits, or one the named component type's own chain makes. A name that is
+/// none of them addresses no property at all, and is refused rather than
+/// reported with an empty value. Where the request also names a
+/// `propertyGroupName`, the selection has to lie inside that group, which is
+/// what naming a group asks for.
 ///
 /// Sorted and de-duplicated because the selection is what the answer is keyed
 /// and paged by: one entry per property, in a stable order, so a `nextToken`
@@ -608,20 +610,34 @@ fn selected_properties(
 /// definition for it is reachable (the component's own, or one it inherits), or
 /// a value has been written to it, which a property with no definition of its
 /// own can still carry.
+///
+/// Every source is asked whatever the request ADDRESSED with, because they are
+/// sources of the one answer and the addressing member only decides which
+/// components are in scope: a `componentTypeId` query is admitted by the named
+/// component type's own chain — which declares the property for every instance,
+/// including a workspace holding none yet — and ALSO by any component that query
+/// reads, exactly as an entity-addressed one is. A declaration a component made
+/// inline and a value written to a property no declaration reaches are
+/// properties of that component however the request reached it, and this is the
+/// one rule the selection, the `propertyFilters` and the `orderBy` keys are held
+/// to, so the same scope cannot report a cell here
+/// ([`crate::state::effective_property_value`]) and refuse to be asked for it.
 fn addresses_property(
     workspace: &crate::state::Workspace,
     query: &Query<'_>,
     property_name: &str,
 ) -> bool {
-    if let Some(component_type_id) = query.component_type_id() {
-        return workspace
+    if query.component_type_id().is_some_and(|component_type_id| {
+        workspace
             .component_type_chain(component_type_id)
             .into_iter()
             .any(|component_type| {
                 component_type
                     .property_definitions
                     .contains_key(property_name)
-            });
+            })
+    }) {
+        return true;
     }
     query.components().iter().any(|component| {
         component.properties.contains_key(property_name)

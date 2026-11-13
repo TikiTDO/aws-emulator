@@ -254,6 +254,9 @@ mod sync_resource_listing;
 #[path = "all/tabular_page_token_scope.rs"]
 mod tabular_page_token_scope;
 
+#[path = "all/tabular_property_sources.rs"]
+mod tabular_property_sources;
+
 #[path = "all/time_series_latest_value.rs"]
 mod time_series_latest_value;
 
