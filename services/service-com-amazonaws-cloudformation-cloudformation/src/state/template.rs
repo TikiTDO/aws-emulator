@@ -2672,6 +2672,9 @@ pub fn name_property(resource_type: &str, properties: &Value) -> Option<String> 
 /// stating one of them differently asks for a different resource.
 pub fn replacement_properties(resource_type: &str) -> &'static [&'static str] {
     match resource_type {
+        // Queue URLs are owner-assigned, but changing the FIFO variant still replaces
+        // the queue rather than carrying its old identity into an in-place update.
+        SQS_QUEUE => &["FifoQueue"],
         IAM_ACCESS_KEY => &["Serial", "UserName"],
         // A spending limit is a cost control ABOUT one device: `UpdateSpendingLimit` takes
         // the limit's amount and its period and no device at all, so a declaration naming

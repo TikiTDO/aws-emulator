@@ -78,8 +78,8 @@ pub(super) fn return_values(
         }
         // "Ref returns the queue URL"; Fn::GetAtt: Arn, QueueName, QueueUrl. This is the
         // type `super::provisioning` creates in Amazon SQS itself, which then reports the
-        // queue's own url back over the `QueueUrl` attribute — the same url this computes,
-        // since both are built from the one account id and the queue's name.
+        // queue's own url back as both its identity and `QueueUrl` attribute. The URL
+        // below is only a planning stand-in; the owner supplies its published endpoint.
         SQS_QUEUE => {
             let url = format!(
                 "https://sqs.{region}.{URL_SUFFIX}/{}/{name}",
@@ -2217,6 +2217,9 @@ pub fn identity_is_service_assigned(resource_type: &str) -> bool {
         // qualifier.
         || resource_type == LAMBDA_VERSION
         || resource_type == KMS_KEY
+        // SQS assigns the routable QueueUrl from its published endpoint. A name alone
+        // cannot recompute it; keep that URL on updates, just like other owner IDs.
+        || resource_type == SQS_QUEUE
         || resource_type == AOSS_COLLECTION
         || resource_type == ACM_ACME_ENDPOINT
         // An ACM certificate is the same case: `RequestCertificate` takes no identifier
