@@ -570,6 +570,7 @@ pub fn invalid_fpga_image_id_malformed<E>(fpga_image_id: &str) -> Scaffolded<E> 
 /// `failed` state carrying [`FpgaImageRecord::failure_message`], which says so, rather than
 /// in an `available` AFI nothing built.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FpgaImageRecord {
     /// The AFI as the model shapes it, with `State` left for [`FpgaImageRecord::view_at`].
     pub view: FpgaImage,
@@ -580,6 +581,7 @@ pub struct FpgaImageRecord {
     pub load_permissions: Vec<LoadPermission>,
     /// The instant from which this AFI's `pending` -> `failed` move is due. Monotonic
     /// ([`Instant`]) for the same reason [`VolumeRecord::available_at`] is.
+    #[serde(with = "::service_common::persist::instant")]
     pub resolved_at: Instant,
     /// Why the creation failed, reported as `FpgaImageState$Message` once the move above is
     /// due. Built from the request's own storage location, never from a recording.
@@ -907,6 +909,7 @@ impl ComAmazonawsEc2Amazonec2State {
 /// one rebuilt from the entry's members — the entry carries neither the volume's tags nor
 /// its encryption, and a restored volume keeps both.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RecycledVolumeRecord {
     /// What `ListVolumesInRecycleBin` reports for this volume, derived from the volume when
     /// it entered the bin ([`ComAmazonawsEc2Amazonec2State::move_volume_to_recycle_bin`] is
@@ -922,6 +925,7 @@ pub struct RecycledVolumeRecord {
     /// The instant from which this entry's permanent deletion is due — the monotonic
     /// reading of its `RecycleBinExitTime`, never reported, so it is the clock's and not a
     /// member of the entry two writers could disagree about.
+    #[serde(with = "::service_common::persist::instant")]
     pub exit_due_at: Instant,
 }
 

@@ -30,6 +30,7 @@ pub struct DescribeCapacityReservationFleetsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CapacityReservationFleet")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CapacityReservationFleet {
     pub capacity_reservation_fleet_id: Option<String>,
     pub capacity_reservation_fleet_arn: Option<String>,
@@ -37,7 +38,9 @@ pub struct CapacityReservationFleet {
     pub total_target_capacity: Option<i32>,
     pub total_fulfilled_capacity: Option<f64>,
     pub tenancy: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub end_date: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_time: Option<::aws_smithy_types::DateTime>,
     pub instance_match_criteria: Option<String>,
     pub allocation_strategy: Option<String>,

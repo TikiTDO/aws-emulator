@@ -29,6 +29,7 @@ pub struct ListVolumesInRecycleBinOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VolumeRecycleBinInfo")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VolumeRecycleBinInfo {
     pub volume_id: Option<String>,
     pub volume_type: Option<String>,
@@ -42,8 +43,11 @@ pub struct VolumeRecycleBinInfo {
     pub source_volume_id: Option<String>,
     pub snapshot_id: Option<String>,
     pub operator: Option<OperatorResponse>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_time: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub recycle_bin_enter_time: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub recycle_bin_exit_time: Option<::aws_smithy_types::DateTime>,
 }
 

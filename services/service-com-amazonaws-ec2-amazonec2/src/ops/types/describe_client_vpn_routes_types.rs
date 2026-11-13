@@ -30,6 +30,7 @@ pub struct DescribeClientVpnRoutesOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ClientVpnRoute")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ClientVpnRoute {
     pub client_vpn_endpoint_id: Option<String>,
     pub destination_cidr: Option<String>,

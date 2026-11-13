@@ -30,6 +30,7 @@ pub struct DescribeLocalGatewaysOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LocalGateway")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LocalGateway {
     pub local_gateway_id: Option<String>,
     pub outpost_arn: Option<String>,

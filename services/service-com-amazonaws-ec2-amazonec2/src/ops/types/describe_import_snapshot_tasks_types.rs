@@ -30,6 +30,7 @@ pub struct DescribeImportSnapshotTasksOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ImportSnapshotTask")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ImportSnapshotTask {
     pub description: Option<String>,
     pub import_task_id: Option<String>,

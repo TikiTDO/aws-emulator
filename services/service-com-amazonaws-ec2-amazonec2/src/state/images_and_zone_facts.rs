@@ -559,6 +559,7 @@ pub const VPC_ATTRIBUTE_ENABLE_NETWORK_ADDRESS_USAGE_METRICS: &str =
 /// Held in [`ComAmazonawsEc2Amazonec2State::vpc_attributes`] rather than on the modelled
 /// [`Vpc`] shape, which carries no member for any of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpcAttributes {
     /// `enableDnsSupport`: "whether the DNS resolution is supported for the VPC"
     /// (`ModifyVpcAttributeRequest$EnableDnsSupport`).
@@ -2199,6 +2200,7 @@ pub const AGGREGATION_EXCLUDED: &str = "excluded";
 /// `DisableApplicationStatusCheckSuppression` lifts it; while it is in force the
 /// instance-level status is [`APPLICATION_STATUS_SUPPRESSED`] whatever the checks report.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ApplicationStatusSuppression {
     /// When the suppression took effect: the `StatusSince` of the `suppressed` status it
     /// produces ("The date and time when the current status started",
@@ -2232,6 +2234,7 @@ impl ApplicationStatusSuppression {
 /// status is NOT stored: it is a function of these details and of the suppression
 /// ([`aggregated_application_status`]), so two operations cannot disagree about it.
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceApplicationStatusRecord {
     /// The result of every application status check associated with this instance, by
     /// `ApplicationStatusCheckId`.

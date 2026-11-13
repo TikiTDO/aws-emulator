@@ -80,6 +80,7 @@ pub const MAX_VPC_BPA_OPTION_REGIONS: usize = MAX_ENCRYPTION_BY_DEFAULT_REGIONS;
 /// rather than of the setting, and the two words it carries are catalog members this store
 /// holds as `&'static str` so a request's own text can never reach it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpcBlockPublicAccessOptionsRecord {
     /// "The current mode of VPC BPA" (`VpcBlockPublicAccessOptions$InternetGatewayBlockMode`),
     /// as a member of the modelled catalog ([`internet_gateway_block_mode`]).

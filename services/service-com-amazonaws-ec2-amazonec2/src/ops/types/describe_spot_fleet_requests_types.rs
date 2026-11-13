@@ -29,8 +29,10 @@ pub struct DescribeSpotFleetRequestsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SpotFleetRequestConfig")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SpotFleetRequestConfig {
     pub activity_status: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_time: Option<::aws_smithy_types::DateTime>,
     pub spot_fleet_request_config: Option<SpotFleetRequestConfigData>,
     pub spot_fleet_request_id: Option<String>,

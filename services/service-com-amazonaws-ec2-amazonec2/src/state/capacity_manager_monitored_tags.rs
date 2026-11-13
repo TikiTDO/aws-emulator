@@ -65,12 +65,15 @@ pub const MAX_MONITORED_TAG_KEYS_PER_REQUEST: usize = MAX_MONITORED_TAG_KEYS;
 /// ([`Self::status_at`]) — so reporting the monitored keys never writes, and a key cannot be
 /// left in a status the clock has already carried it out of.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MonitoredTagKeyRecord {
     /// When this key's activation falls due: the instant it stops being `activating` and
     /// becomes `activated`, one [`TRANSITION_DELAY`] after the update that asked for it.
+    #[serde(with = "::service_common::persist::instant")]
     pub(super) activation_due: Instant,
     /// When this key's deactivation falls due, and `None` while no update has asked for one:
     /// the instant it stops being `deactivating` and is monitored no more.
+    #[serde(with = "::service_common::persist::instant_opt")]
     pub(super) deactivation_due: Option<Instant>,
 }
 

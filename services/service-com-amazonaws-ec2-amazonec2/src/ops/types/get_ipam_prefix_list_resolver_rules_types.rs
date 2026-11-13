@@ -30,6 +30,7 @@ pub struct GetIpamPrefixListResolverRulesOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpamPrefixListResolverRule")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamPrefixListResolverRule {
     pub rule_type: Option<String>,
     pub static_cidr: Option<String>,
@@ -40,6 +41,7 @@ pub struct IpamPrefixListResolverRule {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpamPrefixListResolverRuleCondition")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamPrefixListResolverRuleCondition {
     pub operation: Option<String>,
     pub ipam_pool_id: Option<String>,

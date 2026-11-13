@@ -29,12 +29,15 @@ pub struct DescribeDeclarativePoliciesReportsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#DeclarativePoliciesReport")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DeclarativePoliciesReport {
     pub report_id: Option<String>,
     pub s3_bucket: Option<String>,
     pub s3_prefix: Option<String>,
     pub target_id: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub start_time: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub end_time: Option<::aws_smithy_types::DateTime>,
     pub status: Option<String>,
     pub tags: Option<Vec<Tag>>,

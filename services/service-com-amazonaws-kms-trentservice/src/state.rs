@@ -88,6 +88,7 @@ pub const MAX_IMPORTED_MATERIAL_VALIDITY_DAYS: u64 = 365;
 /// What a caller stated about the key material it imported: whether it expires, when,
 /// and the description it gave the material.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ImportedKeyMaterial {
     /// An `ExpirationModelType` value — [`EXPIRATION_MODEL_EXPIRES`] or
     /// [`EXPIRATION_MODEL_DOES_NOT_EXPIRE`].
@@ -322,7 +323,7 @@ pub const MAX_GRANTS: usize = 5_000;
 pub const MAX_CUSTOM_KEY_STORES: usize = 5_000;
 
 /// Per-service state for com-amazonaws-kms-trentservice. A handler reaches it through [`service_state`].
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ComAmazonawsKmsTrentserviceState {
     /// Every persisted key, keyed by its KEY ARN
     /// (`arn:aws:kms:<region>:<account>:key/<key-id>`) rather than by its key id:
@@ -368,6 +369,24 @@ pub struct ComAmazonawsKmsTrentserviceState {
     /// seen expire, keyed by the import token that names each — see
     /// [`ImportParameters`]. `ImportKeyMaterial` is the only reader.
     pub import_parameters: HashMap<String, ImportParameters>,
+}
+
+/// KMS survives a restart: its keys, their material, aliases, grants and key stores. Secrets
+/// Manager seals every secret under a KMS data key, so without this a restored secret would be
+/// unreadable.
+impl ::service_common::persist::Persisted for ComAmazonawsKmsTrentserviceState {
+    const SERVICE: &'static str = "kms";
+    const VERSION: u32 = 1;
+
+    fn snapshot(&self) -> serde_json::Value {
+        // Every field is plain data; a failure here is a bug, and an empty snapshot would
+        // silently lose every key, so it is refused loudly instead.
+        serde_json::to_value(self).expect("KMS state serializes")
+    }
+
+    fn restore(_version: u32, snapshot: serde_json::Value) -> Result<Self, String> {
+        serde_json::from_value(snapshot).map_err(|error| error.to_string())
+    }
 }
 
 impl ComAmazonawsKmsTrentserviceState {
@@ -1594,6 +1613,7 @@ pub fn validate_alias_name(alias_name: &str) -> Result<(), AliasNameRefusal> {
 /// (`smithy_query(query="doc",shape="CreateAlias")`), so resolving one is a single
 /// step and can never chain.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Alias {
     /// `alias/<name>`, as the request gave it.
     pub alias_name: String,
@@ -1733,6 +1753,7 @@ pub fn mint_custom_key_store_id() -> Option<String> {
 /// One custom key store: a key store the customer owns and manages, which KMS
 /// reports and connects to but holds no key material of.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CustomKeyStore {
     /// The minted key store id, which is also this record's map key.
     pub custom_key_store_id: String,
@@ -1884,6 +1905,7 @@ impl CustomKeyStore {
 /// A connection change a connect or disconnect started and the clock owes: the
 /// `ConnectionStateType` the custom key store reaches, and the instant it falls due.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PendingConnectionChange {
     /// The `ConnectionStateType` the key store takes on at [`Self::due_at`].
     pub connection_state: String,
@@ -1894,6 +1916,7 @@ pub struct PendingConnectionChange {
 
 /// What backs a custom key store, and so what it reports about itself.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum CustomKeyStoreBacking {
     /// An CloudHSM cluster the customer owns.
     CloudHsm(CloudHsmCluster),
@@ -1903,6 +1926,7 @@ pub enum CustomKeyStoreBacking {
 
 /// The CloudHSM cluster behind an `AWS_CLOUDHSM` custom key store.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CloudHsmCluster {
     /// "A unique identifier for the CloudHSM cluster that is associated with an
     /// CloudHSM key store" (`smithy_query(shape="CustomKeyStoresListEntry")`).
@@ -1919,6 +1943,7 @@ pub struct CloudHsmCluster {
 /// (`smithy_query(shape="XksProxyConfigurationType")`), and a derived one would
 /// print it into any log line or panic message that formats a key store record.
 #[derive(Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct XksProxy {
     /// An `XksProxyConnectivityType` value: "whether the external key store proxy
     /// uses a public endpoint or an Amazon VPC endpoint service to communicate with
@@ -2016,6 +2041,7 @@ pub const XKS_PROXY_UNREACHABLE_MESSAGE: &str =
 /// `Debug` is written by hand rather than derived so the key material is REDACTED:
 /// a derived one would print the 32 secret bytes into any `tracing` line or panic
 /// message that formats a key record.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Cmk {
     /// The minted key id (a UUID), which is also this record's map key.
     pub key_id: String,
@@ -2138,6 +2164,7 @@ pub struct Cmk {
 ///
 /// `Debug` is written by hand rather than derived so the material is REDACTED.
 #[derive(Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct OnDemandRotation {
     /// The material that becomes current when the rotation completes.
     pub material: KeyMaterial,
@@ -2188,6 +2215,7 @@ impl std::fmt::Debug for OnDemandRotation {
 ///
 /// `Debug` is written by hand rather than derived so the material is REDACTED.
 #[derive(Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PendingRotationMaterial {
     /// The material itself, which becomes the key's current material when the rotation
     /// completes.
@@ -2216,6 +2244,7 @@ impl std::fmt::Debug for PendingRotationMaterial {
 /// use — which is what a reader sees as "the KeyLastUsage response element is empty"
 /// straight after the first cryptographic operation on a key.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct KeyUsage {
     /// The name of the KMS API operation that used the key.
     pub operation: String,
@@ -3273,6 +3302,7 @@ impl Cmk {
 /// `smithy_query(query="doc",shape="RotateKeyOnDemand")`), kept oldest first on the
 /// key record so the order it is reported in is the order the rotations happened in.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct KeyRotation {
     /// The `KeyMaterialId` of the material this rotation made current, or `None`
     /// for material KMS gives no id — see [`KeyMaterial::id`].
@@ -3296,6 +3326,7 @@ pub struct KeyRotation {
 /// rather than stored, so it cannot drift from the period a later
 /// `EnableKeyRotation` set.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RotationSchedule {
     /// The number of days between automatic rotations — a
     /// `RotationPeriodInDaysType` (90..2560,
@@ -3581,6 +3612,7 @@ impl MaterialKind {
 /// ciphertext produced in one Region decryptable in another. The bytes never leave
 /// this process either way.
 #[derive(Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum KeyMaterial {
     /// The 256-bit AES-GCM key of a symmetric encryption KMS key, from the OS
     /// CSPRNG. `Encrypt` and `Decrypt` seal and open under exactly these bytes.
@@ -3798,6 +3830,7 @@ const SM2_SCALAR_LEN: usize = 32;
 
 /// One freshly generated asymmetric key pair, in the two DER encodings every key pair
 /// in this service is held and reported in.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct GeneratedKeyPair {
     /// The public half, as a DER-encoded X.509 `SubjectPublicKeyInfo` (SPKI), which is
     /// the encoding `PublicKeyType` carries.

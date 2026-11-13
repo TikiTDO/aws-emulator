@@ -177,6 +177,7 @@ pub struct ManagedPrefixListSpec {
 /// reading as [`PrefixListReferenceMove::Removed`] has of a route that is no longer in its
 /// table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum ManagedPrefixListMove {
     /// The state of the catalog the list settles into:
     /// [`PREFIX_LIST_STATE_CREATE_COMPLETE`] after a create, `modify-complete` after a
@@ -194,6 +195,8 @@ pub type ManagedPrefixListTransition = ClockTransition<ManagedPrefixListMove>;
 /// One stored managed prefix list: the modelled shape every operation that reports one
 /// answers with, plus the facts that shape carries no member for.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "'de: 'static"))]
 pub struct ManagedPrefixListRecord {
     /// The list as `CreateManagedPrefixList` answered it and `DescribeManagedPrefixLists`
     /// reports it.
@@ -745,6 +748,7 @@ pub const PREFIX_LIST_REFERENCE_STATE_DELETING: &str = "deleting";
 /// been carried out the pair is not a route of that route table at all, and the state catalog
 /// has no word for "not a route" — the same reading as [`PropagationMove::Removed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum PrefixListReferenceMove {
     /// `pending` -> `available`: the route is in the table.
     Available,
@@ -787,6 +791,8 @@ pub fn transit_gateway_prefix_list_reference_not_found<E>(
 /// attachment and announcement stores are: the create and the read answer the one stored
 /// item, so they cannot describe one reference differently.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "'de: 'static"))]
 pub struct TransitGatewayPrefixListReferenceRecord {
     /// The reference as the model shapes it, carrying the state reached so far.
     pub view: TransitGatewayPrefixListReference,
@@ -1533,6 +1539,7 @@ pub const ROUTE_SERVER_ID_PREFIX: &str = "rs";
 /// age, so [`RouteServerRecord::view_at`] derives them rather than letting two writers
 /// store two different words for one route server.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RouteServerRecord {
     /// The route server as the model shapes it, with `State` and `PersistRoutesState` left
     /// for [`RouteServerRecord::view_at`] to fill.
@@ -1541,6 +1548,7 @@ pub struct RouteServerRecord {
     /// Monotonic ([`Instant`]), because it is only ever compared against the clock and
     /// never reported, so a wall-clock adjustment cannot move a route server back to
     /// `pending`.
+    #[serde(with = "::service_common::persist::instant")]
     pub available_at: Instant,
     /// Whether route persistence was asked for: "Indicates whether routes should be
     /// persisted after all BGP sessions are terminated"
@@ -1549,6 +1557,7 @@ pub struct RouteServerRecord {
     /// The instant from which the persistence state is settled — `enabling` -> `enabled`
     /// for a route server that asked for persistence. A route server that did not is
     /// `disabled` from the start, so its instant is the create's own.
+    #[serde(with = "::service_common::persist::instant")]
     pub persist_routes_settled_at: Instant,
     /// The transient `RouteServerPersistRoutesState` the clock has yet to settle
     /// ([`PERSIST_ROUTES_STATE_ENABLING`], [`PERSIST_ROUTES_STATE_DISABLING`] or
@@ -1561,6 +1570,7 @@ pub struct RouteServerRecord {
     /// owes. Monotonic for the reason [`Self::available_at`] is, and the CREATE's own
     /// instant for a route server no modification has been asked for, which is already
     /// behind every read.
+    #[serde(with = "::service_common::persist::instant")]
     pub modify_settled_at: Instant,
     /// The instant from which this route server's `deleting` -> `deleted` move is due, for a
     /// route server whose delete has been asked for; `None` while none has.
@@ -1569,6 +1579,7 @@ pub struct RouteServerRecord {
     /// and `deleted` from it, which [`Self::state_at`] derives, so the record reports the
     /// state the clock has reached without anybody writing it. Monotonic for the reason
     /// [`Self::available_at`] is.
+    #[serde(with = "::service_common::persist::instant_opt")]
     pub deleted_at: Option<Instant>,
 }
 

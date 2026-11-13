@@ -34,6 +34,7 @@ pub struct DescribeImagesOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Image")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Image {
     pub platform_details: Option<String>,
     pub usage_operation: Option<String>,
@@ -79,6 +80,7 @@ pub struct Image {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#InstanceTypeSpecification")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceTypeSpecification {
     pub supported_instance_types: Option<Vec<InstanceTypeItem>>,
     pub unsupported_instance_types: Option<Vec<InstanceTypeItem>>,
@@ -86,6 +88,7 @@ pub struct InstanceTypeSpecification {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#InstanceTypeItem")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceTypeItem {
     pub instance_type: Option<String>,
 }

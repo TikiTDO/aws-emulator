@@ -85,6 +85,8 @@ mod local_gateways;
 // request's own, which version a request names, and what a template the account does not hold
 // refuses. Declared beside `prefix_lists` for the reason the note above gives: the sorted
 // neighbourhood and the tail of this file are where every new ec2 suite inserts its lines.
+#[path = "all/restart_persistence.rs"]
+mod restart_persistence;
 #[path = "all/run_instances_from_launch_template.rs"]
 mod run_instances_from_launch_template;
 // `RunInstances` with a NETWORK INTERFACE SPECIFICATION: the interfaces a launch names are

@@ -34,6 +34,7 @@ use super::{iso8601_utc, ComAmazonawsEc2Amazonec2State, InstanceRecord, Instance
 /// through is the instance's CONSOLE ([`instance_boot_lines`]), which is where the boot
 /// identity of a guest that restarted becomes observable.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceBoot {
     /// Which boot of this guest it is, counted from 1 at the instance's launch.
     pub number: u32,
