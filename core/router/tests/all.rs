@@ -1596,3 +1596,8 @@ mod logs_subscription_filter_to_lambda;
 // service crate's test target can see both ends of it.
 #[path = "all/cloudformation_ci_topology_runs_its_pipeline.rs"]
 mod cloudformation_ci_topology_runs_its_pipeline;
+// resource whose create was refused PART-WAY leaves behind spans CloudFormation (which
+// deploys and disposes), Amazon S3 (which refuses the follow-up call and then answers the
+// read) and the service owning the destination that decides the refusal, so no single
+#[path = "all/cloudformation_half_made_resource_is_not_left_behind.rs"]
+mod cloudformation_half_made_resource_is_not_left_behind;
