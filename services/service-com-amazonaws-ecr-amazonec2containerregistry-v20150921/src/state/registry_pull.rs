@@ -366,6 +366,75 @@ fn withheld_pull<Eng: Send + Sync + 'static>(
     None
 }
 
+/// The call a pull makes against the LAYERS of the image it resolved: "Retrieves the
+/// pre-signed Amazon S3 download URL corresponding to an image layer"
+/// (`GetDownloadUrlForLayer`), decided on the repository the reference names — the second
+/// of the two repository-scoped calls a pull of a private image takes.
+pub const GET_DOWNLOAD_URL_FOR_LAYER_ACTION: &str = "GetDownloadUrlForLayer";
+
+/// The calls a pull makes on the REPOSITORY, in the order a client makes them: the manifest
+/// first, then the layers it references.
+pub const REPOSITORY_PULL_ACTIONS: [&str; 2] =
+    [BATCH_GET_IMAGE_ACTION, GET_DOWNLOAD_URL_FOR_LAYER_ACTION];
+
+/// The first of [`REPOSITORY_PULL_ACTIONS`] that the repository `repository_name`'s own
+/// policy explicitly DENIES the SERVICE principal `principal`, as the fully qualified IAM
+/// action (`ecr:<OperationName>`) — and `None` when its policy denies none of them.
+///
+/// A pull an AWS service makes as its OWN service principal is decided by the repository's
+/// resource-based policy alone: a service principal is no principal of this account's IAM,
+/// so no identity-based document is in force on it, and a service that is entitled to the
+/// images of this account's repositories carries that entitlement itself. What a policy
+/// therefore decides for such a pull is whether it REFUSES it — "even if multiple
+/// statements allow the operation on the resource, if only one statement denies that
+/// operation, then the explicit deny overrides any allow" — so a repository carrying no
+/// policy, and one whose policy says nothing about this principal, deny nothing.
+///
+/// A READ: the store is only consulted, so deciding a pull changes nothing a later caller
+/// sees. `region` names the repository's ARN, which is the resource the decision is taken
+/// on.
+#[must_use]
+pub fn service_pull_denied_by_repository_policy<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    region: &str,
+    repository_name: &str,
+    principal: &str,
+) -> Option<String> {
+    let document = service_state(engine).and_then(|state| {
+        let store = state.lock();
+        store
+            .repositories
+            .get(repository_name)
+            .and_then(|repository| repository.policy_text.clone())
+    })?;
+    let principals = [principal.to_string()];
+    let resource = repository_arn(region, repository_name);
+    for action in REPOSITORY_PULL_ACTIONS {
+        let action = super::authorization::action_for(action);
+        let request = iam::Request::new(&action, &resource, &principals);
+        if iam::resource_decision(&document, &request) != Decision::Denied {
+            continue;
+        }
+        // The refusal is the security-relevant event of this pull, so it is attributable in
+        // the emulator's audit log the way the role-borne pull above logs its own: who the
+        // pull was made as, what it asked for, and the outcome. The policy document itself
+        // is not logged.
+        ::tracing::info!(
+            target: "emulator::audit",
+            audit = true,
+            operation = "ServeImagePull",
+            outcome = "refused_access_denied",
+            principal = %principal,
+            action = %action,
+            resource = %resource,
+            explicit_deny = true,
+            "this repository's policy denies this service principal the pull"
+        );
+        return Some(action);
+    }
+    None
+}
+
 /// Import the image `reference` names into the cache repository, when a pull through cache
 /// rule of this registry covers that repository — answering the digest the import stored.
 ///

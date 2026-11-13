@@ -488,15 +488,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // A new container image is FOLLOWED into the registry exactly as the create's was:
         // the same rule decides whether the reference names an image of this Region's
-        // registry at all, and pins the function to the manifest digest that registry
-        // minted for it (see [`crate::state::image_source`]).
+        // registry at all, whether the registry lets this service pull it, and pins the
+        // function to the manifest digest that registry minted for it (see
+        // [`crate::state::image_source`]).
         if let Some(image_uri) = code.image_uri.clone() {
-            let resolution = crate::state::resolve_image_source(&*self.engine, &region, &image_uri);
-            if let Some(message) = crate::state::source_image_message(&image_uri, &resolution) {
-                return Err(invalid_parameter(message));
-            }
-            if let crate::state::ImageResolution::Resolved(digest) = resolution {
-                code.resolved_image_digest = Some(digest);
+            match crate::state::image_package_digest(&*self.engine, ctx, &region, &image_uri) {
+                Ok(digest) => code.resolved_image_digest = digest,
+                Err(crate::state::ImageSourceRefusal::NotUsable(message)) => {
+                    return Err(invalid_parameter(message))
+                }
+                Err(crate::state::ImageSourceRefusal::NotPermitted(message)) => {
+                    return Err(crate::scaffolded::AccessDeniedException::new(message).into())
+                }
             }
         }
 

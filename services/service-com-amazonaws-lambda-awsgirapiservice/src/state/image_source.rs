@@ -1,27 +1,42 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! Resolving the CONTAINER IMAGE a function's package names, against the registry that
-//! holds it.
+//! holds it, and whether that registry lets this service pull it.
 //!
 //! "For a container image, the code property must include the URI of a container image in
 //! the Amazon ECR registry" (`CreateFunction`): a container-image package is a reference
-//! into Amazon ECR, and Lambda follows that reference when the package is stored. Two
-//! things come out of following it, and both are settled by the call that WRITES the
+//! into Amazon ECR, and Lambda follows that reference when the package is stored. Three
+//! things come out of following it, and all of them are settled by the call that WRITES the
 //! package rather than by an invocation:
 //!
 //! 1. whether the reference names an image at all — a URI that is no image of the
 //!    function's own Region's registry is refused, and nothing is created, so a customer
 //!    learns about a mistyped tag or Region from the refusal instead of from a function
 //!    that can never start;
-//! 2. WHICH image bytes the function is frozen to — the manifest digest the registry holds
+//! 2. whether the registry lets THIS SERVICE pull that image — Lambda fetches the image
+//!    with its own service principal ([`crate::state::EXECUTION_ROLE_PRINCIPAL`]), so a
+//!    repository whose own policy denies that principal the pull refuses the write as a
+//!    permission failure ([`ImageSourceRefusal::NotPermitted`]) rather than as a bad
+//!    reference;
+//! 3. WHICH image bytes the function is frozen to — the manifest digest the registry holds
 //!    for the reference, which is what `FunctionCodeLocation$ResolvedImageUri` pins the
 //!    repository to, and so what a client audits the function against
 //!    (`DescribeImages`/`BatchGetImage` report that same digest).
 //!
 //! The registry is the Amazon ECR emulator's OWN store, reached through the SAME shared
 //! engine this service's store lives in, so the digest a function reports is the one
-//! `PutImage` minted rather than a second copy of it — the same seam
+//! `PutImage` minted rather than a second copy of it, and the pull decision is the one that
+//! registry takes for any other principal — the same seam
 //! [`super::event_source_authorization`] reads IAM's roles through.
+//!
+//! A reference addresses that registry either at one of AWS's own registry hosts
+//! (`<account-id>.dkr.ecr.<region>.<domain>`) or at the address the registry ANNOUNCES to a
+//! client that pushed the image here: `Repository$repositoryUri` is "The URI for the
+//! repository. You can use this URI for container image `push` and `pull` operations", and
+//! on this emulator that URI is built on the endpoint the emulator answers the registry at,
+//! because AWS's own registry host resolves nowhere on the machine it runs on. A reference
+//! carrying the URI a client pushed to is therefore a reference to this registry, and is
+//! followed exactly like the AWS-hosted spelling ([`emulator_registry_authorities`]).
 //!
 //! Nothing is refused on evidence this emulator does not have: an engine carrying no ECR
 //! store, and a registry belonging to another account, show nothing about the image and
@@ -41,9 +56,14 @@ fn ecr_state<Eng: Send + Sync + 'static>(engine: &Eng) -> Option<::engine::Servi
 /// What following a container-image reference established.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageResolution {
-    /// The registry holds the image: its manifest digest, exactly as the registry minted
-    /// it (`sha256:<hex>`).
-    Resolved(String),
+    /// The registry holds the image: the repository it is held in, as the registry keys
+    /// one, and its manifest digest exactly as the registry minted it (`sha256:<hex>`).
+    Resolved {
+        /// The repository of this registry the reference named.
+        repository: String,
+        /// The manifest digest the registry holds for the reference.
+        digest: String,
+    },
     /// The reference is no image URI of this function's Region's registry: Lambda resolves
     /// a package in the function's own Region, so a URI naming another Region's registry,
     /// or no registry at all, is not a source image for it.
@@ -55,6 +75,25 @@ pub enum ImageResolution {
     /// names a registry of another account, which this emulator holds none of.
     Unknown,
 }
+
+/// Why a container-image package was not stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageSourceRefusal {
+    /// The reference names no image this registry can be pulled from, which is a bad
+    /// parameter value: the sentence it is refused with ([`source_image_message`]).
+    NotUsable(String),
+    /// The image is there and the registry does not let this service pull it, which is a
+    /// permission failure: the sentence it is refused with
+    /// ([`IMAGE_ACCESS_DENIED_MESSAGE`]).
+    NotPermitted(String),
+}
+
+/// The sentence Lambda refuses an image its own service principal may not pull with.
+///
+/// Wholly fixed text: what the caller has to fix is the repository's permissions, which the
+/// sentence names as a class rather than by repeating the reference back.
+pub const IMAGE_ACCESS_DENIED_MESSAGE: &str =
+    "Lambda does not have permission to access the ECR image. Check the ECR permissions.";
 
 /// The sentence Lambda refuses a source image it cannot use with.
 ///
@@ -70,32 +109,106 @@ pub fn source_image_message(image_uri: &str, resolution: &ImageResolution) -> Op
         ImageResolution::Missing => Some(format!(
             "Source image {image_uri} does not exist. Provide a valid source image."
         )),
-        ImageResolution::Resolved(_) | ImageResolution::Unknown => None,
+        ImageResolution::Resolved { .. } | ImageResolution::Unknown => None,
     }
 }
 
-/// Follow `image_uri` into the registry of a function being written in `region`.
+/// Follow `image_uri` into the registry of a function being written in `region`, and check
+/// the pull against the repository it names: the manifest digest the function is frozen to,
+/// `None` where the registry shows nothing about the image, and the refusal otherwise.
+///
+/// The ONE reading both writes that store a container-image package take, so a create and a
+/// code update resolve a reference and decide a pull alike.
+///
+/// A READ of the registry: it decides and pins, and changes nothing there.
+pub fn image_package_digest<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    image_uri: &str,
+) -> Result<Option<String>, ImageSourceRefusal> {
+    let resolution =
+        resolve_image_source(engine, &emulator_registry_authorities(ctx), region, image_uri);
+    if let Some(message) = source_image_message(image_uri, &resolution) {
+        return Err(ImageSourceRefusal::NotUsable(message));
+    }
+    let ImageResolution::Resolved { repository, digest } = resolution else {
+        return Ok(None);
+    };
+    // "Lambda needs to pull the image" with its own service principal, which the registry
+    // decides over the repository's own policy: an explicit deny there is this service
+    // being refused the image rather than the image being wrong.
+    if ::service_com_amazonaws_ecr_amazonec2containerregistry_v20150921::state::registry_pull::service_pull_denied_by_repository_policy(
+        engine,
+        region,
+        &repository,
+        super::EXECUTION_ROLE_PRINCIPAL,
+    )
+    .is_some()
+    {
+        return Err(ImageSourceRefusal::NotPermitted(
+            IMAGE_ACCESS_DENIED_MESSAGE.to_string(),
+        ));
+    }
+    Ok(Some(digest))
+}
+
+/// The `host[:port]` authorities an image URI addresses THIS emulator's registry by, beside
+/// AWS's own registry hosts: the endpoint the request reached this emulator on, and the
+/// address this emulator is served at.
+///
+/// Those are the two addresses the registry builds a `repositoryUri` on, read through the
+/// tree's own readings of them (`service_common::data_plane_addressing`), so a reference
+/// carrying the URI a client was handed for a push is followed here. One endpoint serves
+/// every Region, so such a reference names no Region of its own and is resolved in the
+/// function's.
+#[must_use]
+pub fn emulator_registry_authorities(
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+) -> Vec<String> {
+    let parts = ctx.parts();
+    let reached = ::service_common::data_plane_addressing::reached_emulator_endpoint(
+        &parts.uri.to_string(),
+        parts
+            .headers
+            .get(::http::header::HOST)
+            .and_then(|value| value.to_str().ok()),
+    );
+    let served = ::service_common::data_plane_addressing::emulator_endpoint_authority(ctx);
+    let mut authorities = vec![served];
+    if let Some(reached) = reached.filter(|reached| !authorities.contains(reached)) {
+        authorities.push(reached);
+    }
+    authorities
+}
+
+/// Follow `image_uri` into the registry of a function being written in `region`, where
+/// `registry_authorities` are the addresses that registry is also reached at
+/// ([`emulator_registry_authorities`]).
 ///
 /// A READ of the registry: it decides and pins, and changes nothing there.
 #[must_use]
 pub fn resolve_image_source<Eng: Send + Sync + 'static>(
     engine: &Eng,
+    registry_authorities: &[String],
     region: &str,
     image_uri: &str,
 ) -> ImageResolution {
-    let Some(reference) = EcrImageRef::parse(image_uri) else {
+    let Some(reference) = EcrImageRef::parse(image_uri, registry_authorities) else {
         return ImageResolution::NotValid;
     };
-    // "the URI of a container image in the Amazon ECR registry" is followed in the
-    // function's OWN Region: a registry of another Region holds images this function could
-    // never be given, so such a URI is no source image for it.
-    if reference.region != region {
-        return ImageResolution::NotValid;
-    }
-    // A registry of another account is one this emulator holds nothing for, so it shows
-    // nothing about the image.
-    if reference.registry_id != ::engine::emulator_account_id() {
-        return ImageResolution::Unknown;
+    if let Some(registry) = reference.registry {
+        // "the URI of a container image in the Amazon ECR registry" is followed in the
+        // function's OWN Region: a registry of another Region holds images this function
+        // could never be given, so such a URI is no source image for it.
+        if registry.region != region {
+            return ImageResolution::NotValid;
+        }
+        // A registry of another account is one this emulator holds nothing for, so it shows
+        // nothing about the image.
+        if registry.registry_id != ::engine::emulator_account_id() {
+            return ImageResolution::Unknown;
+        }
     }
     let Some(ecr) = ecr_state(engine) else {
         return ImageResolution::Unknown;
@@ -115,7 +228,10 @@ pub fn resolve_image_source<Eng: Send + Sync + 'static>(
             .map(|image| image.digest.clone()),
     };
     match digest {
-        Some(digest) => ImageResolution::Resolved(digest),
+        Some(digest) => ImageResolution::Resolved {
+            repository: reference.repository.to_string(),
+            digest,
+        },
         None => ImageResolution::Missing,
     }
 }
@@ -142,13 +258,23 @@ const ECR_HOST_LABELS: [&str; 2] = ["dkr", "ecr"];
 /// URI's first host label has.
 const ACCOUNT_ID_LEN: usize = 12;
 
-/// An image URI broken into the parts the registry is addressed by.
+/// The registry an AWS registry host names: the account whose registry it is, and the
+/// Region that registry serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EcrImageRef<'a> {
+struct AwsRegistry<'a> {
     /// The account whose registry holds the image — the URI's first host label.
     registry_id: &'a str,
     /// The Region of that registry.
     region: &'a str,
+}
+
+/// An image URI broken into the parts the registry is addressed by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EcrImageRef<'a> {
+    /// The registry the reference addresses, when its host names one of AWS's own —
+    /// `None` for a reference addressing the endpoint this emulator answers the registry
+    /// at, which names neither an account nor a Region.
+    registry: Option<AwsRegistry<'a>>,
     /// The repository inside it, which may itself be namespaced (`team/app`).
     repository: &'a str,
     /// Which image of that repository the reference addresses.
@@ -156,39 +282,63 @@ struct EcrImageRef<'a> {
 }
 
 impl<'a> EcrImageRef<'a> {
-    /// `image_uri` broken up, or `None` when it is no Amazon ECR image URI at all.
-    fn parse(image_uri: &'a str) -> Option<Self> {
+    /// `image_uri` broken up, or `None` when it addresses no registry this emulator
+    /// serves: neither one of AWS's own registry hosts nor an address in
+    /// `registry_authorities`.
+    fn parse(image_uri: &'a str, registry_authorities: &[String]) -> Option<Self> {
         let (authority, path) = image_uri.split_once('/')?;
-        let mut labels = authority.split('.');
-        let registry_id = labels.next()?;
-        if registry_id.len() != ACCOUNT_ID_LEN
-            || !registry_id.bytes().all(|byte| byte.is_ascii_digit())
-        {
-            return None;
-        }
-        for expected in ECR_HOST_LABELS {
-            if labels.next()? != expected {
-                return None;
+        // The AWS-hosted spelling first, so a registry host this emulator is also reached
+        // at keeps naming the account and the Region it spells out.
+        let registry = match aws_registry(authority) {
+            Some(registry) => Some(registry),
+            // A host is case-insensitive, so the address a client was handed is matched
+            // however it was written back.
+            None
+                if registry_authorities
+                    .iter()
+                    .any(|known| known.eq_ignore_ascii_case(authority)) =>
+            {
+                None
             }
-        }
-        let region = labels.next()?;
-        if region.is_empty() {
-            return None;
-        }
-        // Whatever domain the partition's registries are served under follows; what makes
-        // this a registry URI is the labels above, not the domain.
-        labels.next()?;
+            None => return None,
+        };
         let (repository, selector) = split_reference(path)?;
         if repository.is_empty() {
             return None;
         }
         Some(Self {
-            registry_id,
-            region,
+            registry,
             repository,
             selector,
         })
     }
+}
+
+/// The AWS registry `authority` names (`<account-id>.dkr.ecr.<region>.<domain>`), or `None`
+/// when it is no such host.
+fn aws_registry(authority: &str) -> Option<AwsRegistry<'_>> {
+    let mut labels = authority.split('.');
+    let registry_id = labels.next()?;
+    if registry_id.len() != ACCOUNT_ID_LEN || !registry_id.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    for expected in ECR_HOST_LABELS {
+        if labels.next()? != expected {
+            return None;
+        }
+    }
+    let region = labels.next()?;
+    if region.is_empty() {
+        return None;
+    }
+    // Whatever domain the partition's registries are served under follows; what makes
+    // this a registry URI is the labels above, not the domain.
+    labels.next()?;
+    Some(AwsRegistry {
+        registry_id,
+        region,
+    })
 }
 
 /// The repository and the image it addresses, out of the path part of an image URI.
@@ -219,22 +369,26 @@ mod tests {
         source_image_message, split_reference, EcrImageRef, ImageResolution, ImageSelector,
     };
 
-    /// The parts a registry URI breaks into: the account, the Region, the repository and
-    /// the image it addresses.
-    type Parts<'a> = (&'a str, &'a str, &'a str, ImageSelector<'a>);
+    /// The address this emulator's registry announces itself at in these rows, which is the
+    /// one a client that pushed an image here was handed.
+    const ANNOUNCED: &str = "127.0.0.1:9297";
 
-    /// A registry URI breaks into the account, the Region, the repository and the image it
-    /// addresses; anything that is not a registry URI breaks into nothing.
+    /// The parts a registry URI breaks into: the account and the Region of the registry
+    /// (none for the announced address), the repository, and the image it addresses.
+    type Parts<'a> = (Option<(&'a str, &'a str)>, &'a str, ImageSelector<'a>);
+
+    /// A registry URI breaks into the registry, the repository and the image it addresses;
+    /// anything that is not a URI of a registry this emulator serves breaks into nothing.
     #[test]
-    fn a_registry_uri_names_an_account_a_region_a_repository_and_an_image() {
+    fn a_registry_uri_names_a_registry_a_repository_and_an_image() {
+        let announced = [ANNOUNCED.to_string()];
         // (case, the URI, the parsed parts)
-        let rows: [(&str, &str, Option<Parts<'_>>); 9] = [
+        let rows: [(&str, &str, Option<Parts<'_>>); 12] = [
             (
                 "a tag",
                 "000000000000.dkr.ecr.us-west-2.amazonaws.com/app:v1",
                 Some((
-                    "000000000000",
-                    "us-west-2",
+                    Some(("000000000000", "us-west-2")),
                     "app",
                     ImageSelector::Tag("v1"),
                 )),
@@ -243,8 +397,7 @@ mod tests {
                 "a namespaced repository",
                 "000000000000.dkr.ecr.eu-west-1.amazonaws.com/team/app:latest",
                 Some((
-                    "000000000000",
-                    "eu-west-1",
+                    Some(("000000000000", "eu-west-1")),
                     "team/app",
                     ImageSelector::Tag("latest"),
                 )),
@@ -253,8 +406,7 @@ mod tests {
                 "no tag at all, which names the default one",
                 "000000000000.dkr.ecr.us-east-1.amazonaws.com/app",
                 Some((
-                    "000000000000",
-                    "us-east-1",
+                    Some(("000000000000", "us-east-1")),
                     "app",
                     ImageSelector::Tag("latest"),
                 )),
@@ -263,8 +415,7 @@ mod tests {
                 "a digest",
                 "000000000000.dkr.ecr.us-east-2.amazonaws.com/app@sha256:abc",
                 Some((
-                    "000000000000",
-                    "us-east-2",
+                    Some(("000000000000", "us-east-2")),
                     "app",
                     ImageSelector::Digest("sha256:abc"),
                 )),
@@ -273,12 +424,22 @@ mod tests {
                 "another partition's domain",
                 "000000000000.dkr.ecr.cn-north-1.amazonaws.com.cn/app:v1",
                 Some((
-                    "000000000000",
-                    "cn-north-1",
+                    Some(("000000000000", "cn-north-1")),
                     "app",
                     ImageSelector::Tag("v1"),
                 )),
             ),
+            (
+                "the address the registry announced, with a digest",
+                "127.0.0.1:9297/app@sha256:abc",
+                Some((None, "app", ImageSelector::Digest("sha256:abc"))),
+            ),
+            (
+                "the announced address, with a tag",
+                "127.0.0.1:9297/team/app:v1",
+                Some((None, "team/app", ImageSelector::Tag("v1"))),
+            ),
+            ("another endpoint entirely", "127.0.0.1:1/app:v1", None),
             ("no registry host", "app:v1", None),
             (
                 "a public registry, which is not this one",
@@ -297,10 +458,11 @@ mod tests {
             ),
         ];
         for (case, uri, expected) in rows {
-            let parsed = EcrImageRef::parse(uri).map(|reference| {
+            let parsed = EcrImageRef::parse(uri, &announced).map(|reference| {
                 (
-                    reference.registry_id,
-                    reference.region,
+                    reference
+                        .registry
+                        .map(|registry| (registry.registry_id, registry.region)),
                     reference.repository,
                     reference.selector,
                 )
@@ -347,7 +509,10 @@ mod tests {
             ),
             (
                 "an image the registry holds",
-                ImageResolution::Resolved("sha256:abc".to_string()),
+                ImageResolution::Resolved {
+                    repository: "app".to_string(),
+                    digest: "sha256:abc".to_string(),
+                },
                 None,
             ),
             ("no registry to ask", ImageResolution::Unknown, None),

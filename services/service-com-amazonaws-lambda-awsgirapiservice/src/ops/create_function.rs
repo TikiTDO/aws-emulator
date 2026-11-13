@@ -464,18 +464,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // image in the Amazon ECR registry": Lambda FOLLOWS that reference when the
         // package is stored, in the function's own Region. A URI that is no image of that
         // Region's registry, or names nothing pushed there, is refused and nothing is
-        // created; one the registry holds pins the function to the manifest digest the
-        // registry minted, which is what `ResolvedImageUri` reports (see
+        // created; an image the registry will not let THIS SERVICE pull is refused as the
+        // permission failure it is; and one it serves pins the function to the manifest
+        // digest the registry minted, which is what `ResolvedImageUri` reports (see
         // [`crate::state::image_source`]). A registry this emulator cannot ask shows
         // nothing about the image and refuses nothing.
         if let Some(image_uri) = code.image_uri.clone() {
-            let resolution =
-                crate::state::resolve_image_source(&*self.engine, &region, &image_uri);
-            if let Some(message) = crate::state::source_image_message(&image_uri, &resolution) {
-                return Err(invalid_parameter(message));
-            }
-            if let crate::state::ImageResolution::Resolved(digest) = resolution {
-                code.resolved_image_digest = Some(digest);
+            match crate::state::image_package_digest(&*self.engine, ctx, &region, &image_uri) {
+                Ok(digest) => code.resolved_image_digest = digest,
+                Err(crate::state::ImageSourceRefusal::NotUsable(message)) => {
+                    return Err(invalid_parameter(message))
+                }
+                Err(crate::state::ImageSourceRefusal::NotPermitted(message)) => {
+                    return Err(crate::scaffolded::AccessDeniedException::new(message).into())
+                }
             }
         }
 

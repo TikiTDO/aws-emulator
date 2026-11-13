@@ -269,11 +269,15 @@ pub mod vpc_attachment_authorization;
 pub use vpc_attachment_authorization::unattachable_vpc_config;
 
 /// Following a container-image package's reference into the Amazon ECR registry — whether
-/// it names an image at all, and which image bytes the function is frozen to — lives in
-/// [`image_source`], reached through the same shared engine as the stores above and
-/// re-exported for the same reason: a handler names it as `crate::state::…`.
+/// it names an image at all, whether that registry lets this service pull it, and which
+/// image bytes the function is frozen to — lives in [`image_source`], reached through the
+/// same shared engine as the stores above and re-exported for the same reason: a handler
+/// names it as `crate::state::…`.
 pub mod image_source;
-pub use image_source::{resolve_image_source, source_image_message, ImageResolution};
+pub use image_source::{
+    emulator_registry_authorities, image_package_digest, resolve_image_source,
+    source_image_message, ImageResolution, ImageSourceRefusal, IMAGE_ACCESS_DENIED_MESSAGE,
+};
 
 /// Following a .zip package's Amazon S3 location — whether Amazon S3 hands the object over,
 /// and which bytes the package is — lives in [`s3_source`], beside the reference-following
