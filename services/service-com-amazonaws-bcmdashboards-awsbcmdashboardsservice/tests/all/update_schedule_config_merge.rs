@@ -29,7 +29,9 @@
 //! an omitted bound is not "unchanged" but the default its own member documents ("defaults
 //! to the time of the create or update request", "defaults to 3 years from the time of the
 //! create or update request", `smithy_query(query="shape",shape="SchedulePeriod")`), so a
-//! period the request carries is one whole parameter.
+//! period the request carries is one whole parameter. A row whose update names none keeps
+//! the period the CREATE resolved, which its expectation inherits from the created record
+//! (`tests/all/schedule_period_defaults.rs` owns the defaults' own table).
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

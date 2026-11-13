@@ -27,12 +27,7 @@ use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
 use super::dashboard_lifecycle::{call, error_code, ok_call, router};
-use super::scheduled_report_lifecycle::{source_dashboard, EXECUTION_ROLE_ARN};
-
-/// A `SchedulePeriod` a row can submit: two epoch-second instants, the form the
-/// `schedulePeriod` member takes on the wire.
-const PERIOD_START: i64 = 1_767_225_600;
-const PERIOD_END: i64 = 1_798_761_600;
+use super::scheduled_report_lifecycle::{acceptable_period, source_dashboard, EXECUTION_ROLE_ARN};
 
 /// One row: how the report is created, what the update submits, and the state the stored
 /// record must read back as.
@@ -68,7 +63,7 @@ fn cases() -> Vec<StateCase> {
             label: "a paused report keeps DISABLED when the update only sets a period",
             created_state: Some("DISABLED"),
             submitted: Some(json!({
-                "schedulePeriod": {"startTime": PERIOD_START, "endTime": PERIOD_END}
+                "schedulePeriod": acceptable_period()
             })),
             expected_state: "DISABLED",
         },
@@ -160,13 +155,21 @@ async fn report_in_state(
         .to_string()
 }
 
-/// The `scheduleConfig` of the stored report `arn`, as `GetScheduledReport` answers it.
-async fn stored_schedule(router: &MultiServiceRouter, arn: &str, label: &str) -> Value {
+/// The stored record of the report `arn`, as `GetScheduledReport` answers it.
+async fn stored_record(router: &MultiServiceRouter, arn: &str, label: &str) -> Value {
     let fetched = ok_call(router, "GetScheduledReport", &json!({"arn": arn})).await;
     fetched
         .get("scheduledReport")
-        .and_then(|report| report.get("scheduleConfig"))
-        .unwrap_or_else(|| panic!("case {label}: no scheduleConfig in {fetched}"))
+        .unwrap_or_else(|| panic!("case {label}: no scheduledReport in {fetched}"))
+        .clone()
+}
+
+/// The `scheduleConfig` of the stored report `arn`, as `GetScheduledReport` answers it.
+async fn stored_schedule(router: &MultiServiceRouter, arn: &str, label: &str) -> Value {
+    stored_record(router, arn, label)
+        .await
+        .get("scheduleConfig")
+        .unwrap_or_else(|| panic!("case {label}: the stored record carries no scheduleConfig"))
         .clone()
 }
 
@@ -219,7 +222,11 @@ async fn an_update_moves_the_schedule_state_only_when_it_names_one() {
         let before = stored_schedule(&router, &arn, label).await;
         ok_call(&router, "UpdateScheduledReport", &request).await;
 
-        let schedule = stored_schedule(&router, &arn, label).await;
+        let record = stored_record(&router, &arn, label).await;
+        let schedule = record
+            .get("scheduleConfig")
+            .unwrap_or_else(|| panic!("case {label}: no scheduleConfig in {record}"))
+            .clone();
         assert_eq!(
             schedule.get("state").and_then(Value::as_str),
             Some(case.expected_state),

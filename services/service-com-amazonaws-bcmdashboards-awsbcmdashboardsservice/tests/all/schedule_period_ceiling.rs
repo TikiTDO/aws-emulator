@@ -17,9 +17,11 @@
 //! differ in which operation submits the period, in how far past the ceiling the end time
 //! reaches (a minute, a day, a year, centuries), and in whether the period also names a
 //! start time or the request other members. The acceptances differ in where inside the
-//! window the end time sits (the published ceiling itself, just inside it, a day away, a
-//! period that has already ended) and in whether the period names an end time at all —
-//! each one stored and read back through `GetScheduledReport`.
+//! window the end time sits (the published ceiling itself, just inside it, a day away) and
+//! in whether the period names an end time at all — each one stored and read back through
+//! `GetScheduledReport`, where a bound the request did not name reads back as the instant
+//! its own member's documented default resolves to
+//! (`tests/all/schedule_period_defaults.rs` owns that rule's table).
 //!
 //! The ceiling is 3 CALENDAR years, which is what the test computes for itself from the
 //! documented rule rather than asking the emulator: a span of 365-day years would place the
@@ -31,7 +33,7 @@ use chrono::{DateTime, Months, SecondsFormat, Utc};
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
-use super::dashboard_lifecycle::{call, error_code, ok_call, router};
+use super::dashboard_lifecycle::{call, error_code, ok_call, router, timestamp};
 use super::scheduled_report_lifecycle::{source_dashboard, EXECUTION_ROLE_ARN};
 
 /// The documented ceiling, in calendar months: "3 years from the current time"
@@ -53,15 +55,85 @@ fn ceiling_secs() -> i64 {
         .timestamp()
 }
 
+/// How far apart two renderings of ONE instant may be for this test to call them the same
+/// instant: the bounds travel as epoch seconds with a fractional part, so only the rounding
+/// of that rendering is in play.
+const INSTANT_TOLERANCE_SECONDS: f64 = 0.001;
+
+/// [`CEILING_MONTHS`] calendar months on from the instant `secs` (epoch seconds) — the
+/// instant `SchedulePeriod$endTime` both defaults to and is bounded by, for a write made at
+/// `secs`.
+fn ceiling_from(secs: f64) -> f64 {
+    let whole = secs.floor();
+    let instant = DateTime::<Utc>::from_timestamp(whole as i64, 0)
+        .unwrap_or_else(|| panic!("{secs} is an instant"));
+    let moved = instant
+        .checked_add_months(Months::new(CEILING_MONTHS))
+        .unwrap_or_else(|| panic!("3 calendar years on from {instant} is a date"));
+    moved.timestamp() as f64 + (secs - whole)
+}
+
+/// Assert the stored period of `record`: a bound the submitted period named is stored as
+/// submitted, and a bound it did not name is the default its own member documents at the
+/// write — the start at the instant of the write, the end [`CEILING_MONTHS`] calendar
+/// months on — measured from the instant the record itself reports in `written_at_member`
+/// (`createdAt` for a create, `updatedAt` for an update). The defaults have their own table
+/// in `tests/all/schedule_period_defaults.rs`; here they only have to leave every accepted
+/// period readable back as two concrete instants.
+fn assert_stored_period(
+    label: &str,
+    record: &Value,
+    submitted: &Value,
+    written_at_member: &str,
+) {
+    let written_at = timestamp(record, written_at_member, label);
+    let period = record
+        .get("scheduleConfig")
+        .and_then(|config| config.get("schedulePeriod"))
+        .unwrap_or_else(|| {
+            panic!("case {label}: the stored scheduleConfig carries no schedulePeriod: {record}")
+        });
+    for (bound, default) in [
+        ("startTime", written_at),
+        ("endTime", ceiling_from(written_at)),
+    ] {
+        let actual = period
+            .get(bound)
+            .and_then(Value::as_f64)
+            .unwrap_or_else(|| {
+                panic!("case {label}: schedulePeriod.{bound} is absent or not an instant: {period}")
+            });
+        match submitted.get(bound).and_then(Value::as_f64) {
+            // A bound the request named is stored as submitted, to the instant: nothing
+            // recomputes it, so nothing may perturb it either.
+            Some(submitted) => assert_eq!(
+                actual, submitted,
+                "case {label}: schedulePeriod.{bound} must be the submitted {submitted}, got \
+                 {actual}"
+            ),
+            // A bound the request left out is the default its member documents, computed
+            // here from the write's own instant — within the rounding of the epoch-seconds
+            // rendering both sides travel as.
+            None => assert!(
+                (actual - default).abs() <= INSTANT_TOLERANCE_SECONDS,
+                "case {label}: schedulePeriod.{bound} must be the default its member \
+                 documents for the write at {written_at}, {default}, got {actual}"
+            ),
+        }
+    }
+}
+
 /// This instant, as an epoch second — the form a `GenericTimeStamp` takes on the
-/// `awsJson1_0` wire.
-fn now_secs() -> i64 {
+/// `awsJson1_0` wire. Shared with the sibling suite that tables the rule on the period's
+/// OTHER bound (`tests/all/schedule_period_start_time.rs`), so one spelling serves both.
+pub(crate) fn now_secs() -> i64 {
     DateTime::<Utc>::from(SystemTime::now()).timestamp()
 }
 
 /// How a refusal names the instant `secs`: the RFC 3339 instant it spells. An independent
-/// oracle — written out here rather than imported from the service.
-fn instant_text(secs: i64) -> String {
+/// oracle — written out here rather than imported from the service, and shared with the
+/// sibling suite, so the two cannot drift on how an instant is spelled.
+pub(crate) fn instant_text(secs: i64) -> String {
     DateTime::<Utc>::from_timestamp(secs, 0)
         .unwrap_or_else(|| panic!("{secs} is an instant"))
         .to_rfc3339_opts(SecondsFormat::Secs, true)
@@ -193,13 +265,18 @@ async fn report_with_period(
         .to_string()
 }
 
-/// The `scheduleConfig` of the stored report `arn`, as `GetScheduledReport` answers it.
-async fn stored_schedule(router: &MultiServiceRouter, arn: &str, label: &str) -> Value {
+/// The stored record of the report `arn`, as `GetScheduledReport` answers it. Shared with
+/// the sibling suite that tables the rule on the period's OTHER bound
+/// (`tests/all/schedule_period_start_time.rs`).
+pub(crate) async fn stored_record(
+    router: &MultiServiceRouter,
+    arn: &str,
+    label: &str,
+) -> Value {
     let fetched = ok_call(router, "GetScheduledReport", &json!({"arn": arn})).await;
     fetched
         .get("scheduledReport")
-        .and_then(|report| report.get("scheduleConfig"))
-        .unwrap_or_else(|| panic!("case {label}: no scheduleConfig in {fetched}"))
+        .unwrap_or_else(|| panic!("case {label}: no scheduledReport in {fetched}"))
         .clone()
 }
 
@@ -290,11 +367,6 @@ async fn a_refused_schedule_period_changes_no_state() {
 struct AcceptedPeriod {
     label: &'static str,
     schedule_period: Value,
-    /// The `endTime` the stored record must read back as. `None` for a row whose period
-    /// names none: what the service reports for an absent end time is the member's
-    /// documented DEFAULT rather than this rule, so such a row asserts only that the write
-    /// was accepted and stored.
-    expected_end: Option<i64>,
 }
 
 fn accepted_periods() -> Vec<AcceptedPeriod> {
@@ -304,38 +376,36 @@ fn accepted_periods() -> Vec<AcceptedPeriod> {
         AcceptedPeriod {
             label: "the published ceiling itself, which is the maximum ALLOWED value",
             schedule_period: period(Some(now), Some(ceiling)),
-            expected_end: Some(ceiling),
         },
         AcceptedPeriod {
             label: "a minute inside the ceiling",
             schedule_period: period(None, Some(ceiling - MARGIN)),
-            expected_end: Some(ceiling - MARGIN),
         },
         AcceptedPeriod {
             label: "a day from now",
             schedule_period: period(Some(now), Some(now + 86_400)),
-            expected_end: Some(now + 86_400),
         },
         AcceptedPeriod {
+            // The start time sits inside the grace its own member states ("not more than 5
+            // minutes before the time of the request"), and no documented rule refuses an
+            // end time that has already passed.
             label: "a period that has already ended, which no documented rule refuses",
-            schedule_period: period(Some(now - 2 * 86_400), Some(now - 86_400)),
-            expected_end: Some(now - 86_400),
+            schedule_period: period(Some(now - 240), Some(now - 120)),
         },
         AcceptedPeriod {
             label: "a period that names a start time and no end time",
             schedule_period: period(Some(now), None),
-            expected_end: None,
         },
         AcceptedPeriod {
             label: "an empty period, which names neither bound",
             schedule_period: period(None, None),
-            expected_end: None,
         },
     ]
 }
 
 /// A period inside the window is stored and reads back verbatim, on the create path and on
-/// the update path alike.
+/// the update path alike — with every bound the request did not name materialised to the
+/// instant its own member's documented default resolves to at that write.
 #[tokio::test]
 async fn an_end_time_within_the_ceiling_round_trips() {
     let router = router();
@@ -351,19 +421,12 @@ async fn an_end_time_within_the_ceiling_round_trips() {
             label,
         )
         .await;
-        let created = stored_schedule(&router, &arn, label).await;
-        if let Some(expected_end) = case.expected_end {
-            assert_eq!(
-                created
-                    .get("schedulePeriod")
-                    .and_then(|period| period.get("endTime"))
-                    .and_then(Value::as_f64),
-                Some(expected_end as f64),
-                "case {label}: the created endTime must be the submitted one, got {created}"
-            );
-        }
+        let created = stored_record(&router, &arn, label).await;
+        assert_stored_period(label, &created, &case.schedule_period, "createdAt");
         assert_eq!(
-            created.get("scheduleExpression").and_then(Value::as_str),
+            created["scheduleConfig"]
+                .get("scheduleExpression")
+                .and_then(Value::as_str),
             Some("cron(0 8 1 * ? *)"),
             "case {label}: the accepted create must have stored its schedule, got {created}"
         );
@@ -389,19 +452,12 @@ async fn an_end_time_within_the_ceiling_round_trips() {
             }),
         )
         .await;
-        let updated = stored_schedule(&router, &other, label).await;
-        if let Some(expected_end) = case.expected_end {
-            assert_eq!(
-                updated
-                    .get("schedulePeriod")
-                    .and_then(|period| period.get("endTime"))
-                    .and_then(Value::as_f64),
-                Some(expected_end as f64),
-                "case {label}: the updated endTime must be the submitted one, got {updated}"
-            );
-        }
+        let updated = stored_record(&router, &other, label).await;
+        assert_stored_period(label, &updated, &case.schedule_period, "updatedAt");
         assert_eq!(
-            updated.get("scheduleExpression").and_then(Value::as_str),
+            updated["scheduleConfig"]
+                .get("scheduleExpression")
+                .and_then(Value::as_str),
             Some("rate(1 day)"),
             "case {label}: the accepted update must have stored its schedule, got {updated}"
         );

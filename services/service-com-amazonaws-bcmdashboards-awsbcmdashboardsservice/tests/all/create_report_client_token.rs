@@ -23,7 +23,7 @@ use service_com_amazonaws_bcmdashboards_awsbcmdashboardsservice::state::service_
 use service_com_amazonaws_bcmdashboards_awsbcmdashboardsservice::EmulatedService;
 
 use super::dashboard_lifecycle::{ok_call, router};
-use super::scheduled_report_lifecycle::{source_dashboard, EXECUTION_ROLE_ARN};
+use super::scheduled_report_lifecycle::{acceptable_period, source_dashboard, EXECUTION_ROLE_ARN};
 
 /// The token the first create presents and every later call below presents again. Every
 /// character is in the printable range `ClientToken`'s pattern `^[\u{21}-\u{7e}]+$`
@@ -42,7 +42,10 @@ pub(crate) fn first_request(dashboard_arn: &str, widget_id: &str) -> Value {
             "scheduleConfig": {
                 "scheduleExpression": "cron(0 8 1 * ? *)",
                 "scheduleExpressionTimeZone": "Europe/Berlin",
-                "schedulePeriod": {"startTime": 1_767_225_600, "endTime": 1_798_761_600}
+                // Both bounds are built relative to this instant, because each is held to
+                // a rule measured from the request that submits it
+                // (`tests/all/schedule_period_defaults.rs`).
+                "schedulePeriod": acceptable_period()
             },
             "description": "Monthly spend rollup.",
             "widgetIds": [widget_id],

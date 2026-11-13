@@ -1760,32 +1760,76 @@ fn instant_text(value: &::aws_smithy_types::DateTime) -> String {
         .unwrap_or_else(|_| value.secs().to_string())
 }
 
+/// How far BEFORE the write request that submits it the START of a schedule period may
+/// sit.
+///
+/// `SchedulePeriod$startTime` is documented "The start time cannot be more than 5 minutes
+/// before the time of the request" (`smithy_query(query="shape",shape="SchedulePeriod")`),
+/// and that sentence, like the ceiling on the period's end, is written for both write paths
+/// — the member it is on defaults to "the time of the create or update request".
+pub const SCHEDULE_PERIOD_MAX_START_TIME_LAG: Duration = Duration::from_secs(5 * 60);
+
+/// The earliest `startTime` a schedule period submitted at `now` may carry:
+/// [`SCHEDULE_PERIOD_MAX_START_TIME_LAG`] before `now`.
+pub fn schedule_period_earliest_start_time(now: SystemTime) -> SystemTime {
+    now.checked_sub(SCHEDULE_PERIOD_MAX_START_TIME_LAG)
+        .unwrap_or(now)
+}
+
+/// Whether the instant `earlier` is at or before the instant `later`.
+fn at_or_before(
+    earlier: &::aws_smithy_types::DateTime,
+    later: &::aws_smithy_types::DateTime,
+) -> bool {
+    (earlier.secs(), earlier.subsec_nanos()) <= (later.secs(), later.subsec_nanos())
+}
+
 /// How this service refuses the `schedulePeriod` of the `scheduleConfig` a write submits at
 /// the member path `path`, made at `now`, or `None` when the period is one it can store.
 ///
-/// One rule, the one the model states on the member: the `endTime` of a submitted period
-/// may be at most [`SCHEDULE_PERIOD_MAX_END_TIME_MONTHS`] calendar months past the request
-/// that carries it ([`schedule_period_end_time_ceiling`]), and a period reaching beyond
-/// that ceiling is refused with the modelled `ValidationException` — which is what
-/// `SchedulePeriod$endTime` documents, for the create request and the update request alike.
-/// The ceiling itself is admitted: it is the maximum ALLOWED value.
+/// The two rules the model states on the period's bounds, each measured from the request
+/// that submits it:
 ///
-/// A period that names no `endTime` breaks no rule: the member is optional, and an absent
-/// one is the documented default rather than a value to check.
+/// * the `startTime` may be at most [`SCHEDULE_PERIOD_MAX_START_TIME_LAG`] before it
+///   ([`schedule_period_earliest_start_time`]) — "The start time cannot be more than 5
+///   minutes before the time of the request";
+/// * the `endTime` may be at most [`SCHEDULE_PERIOD_MAX_END_TIME_MONTHS`] calendar months
+///   past it ([`schedule_period_end_time_ceiling`]) — "The maximum allowed value is 3 years
+///   from the current time. Setting an end time beyond this limit returns a
+///   `ValidationException`".
+///
+/// Each is written for the create request and the update request alike, and a period
+/// outside either is refused with the modelled `ValidationException`. Both bounds
+/// themselves are admitted: one is the maximum ALLOWED value and the other the earliest a
+/// start time may sit. A period that names a bound not at all breaks neither rule — the
+/// member is optional, and an absent one is the documented default this service resolves at
+/// write time ([`resolved_schedule_period`]) rather than a value to check. A request that
+/// breaks both is refused for its `startTime`, the first member of the structure.
 ///
 /// One helper for every write that submits a schedule, so the create path and the update
-/// path cannot drift apart on the rule. The refusal quotes the instant the request carried
+/// path cannot drift apart on the rules. The refusal quotes the instant the request carried
 /// within the maximum `ValidationException$message` declares ([`MAX_MESSAGE_LENGTH`]).
 pub fn schedule_period_refusal(
     path: &str,
     config: &ScheduleConfig,
     now: SystemTime,
 ) -> Option<String> {
-    let end_time = config.schedule_period.as_ref()?.end_time.as_ref()?;
+    let period = config.schedule_period.as_ref()?;
+    if let Some(start_time) = period.start_time.as_ref() {
+        let earliest =
+            ::aws_smithy_types::DateTime::from(schedule_period_earliest_start_time(now));
+        if !at_or_before(&earliest, start_time) {
+            return Some(within_message_bound(format!(
+                "{path}.schedulePeriod.startTime: '{}' is before the earliest allowed value; \
+                 the start time of a schedule period may be at most 5 minutes before the time \
+                 of the request",
+                instant_text(start_time)
+            )));
+        }
+    }
+    let end_time = period.end_time.as_ref()?;
     let ceiling = ::aws_smithy_types::DateTime::from(schedule_period_end_time_ceiling(now));
-    let submitted_at_or_before_ceiling = (end_time.secs(), end_time.subsec_nanos())
-        <= (ceiling.secs(), ceiling.subsec_nanos());
-    if submitted_at_or_before_ceiling {
+    if at_or_before(end_time, &ceiling) {
         return None;
     }
     Some(within_message_bound(format!(

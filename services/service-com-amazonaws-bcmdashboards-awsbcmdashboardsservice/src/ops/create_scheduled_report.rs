@@ -24,13 +24,14 @@
 //! * a `scheduledReport.dashboardArn` no stored dashboard answers to is refused with
 //!   `ValidationException` (400) — a report can only be scheduled on a dashboard that
 //!   exists, and this operation models no `ResourceNotFoundException`;
-//! * a `scheduleConfig.schedulePeriod` whose end reaches past the ceiling the model states
-//!   on it — "The maximum allowed value is 3 years from the current time. Setting an end
+//! * a `scheduleConfig.schedulePeriod` outside either bound the model states on its own
+//!   members — "The start time cannot be more than 5 minutes before the time of the
+//!   request", "The maximum allowed value is 3 years from the current time. Setting an end
 //!   time beyond this limit returns a `ValidationException`"
 //!   (`smithy_query(query="shape",shape="SchedulePeriod")`) — is refused with that
 //!   `ValidationException` (400) and creates nothing
 //!   ([`crate::state::schedule_period_refusal`], shared with the update path the same
-//!   sentence is written for);
+//!   sentences are written for);
 //! * a `clientToken` already claimed by a create this call does NOT repeat is refused with
 //!   the modelled `ConflictException` (409) — what the model documents it for, "a resource
 //!   that already exists or is being created" — and creates nothing. The claim's own state
@@ -303,11 +304,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let now = ::std::time::SystemTime::now();
 
-        // The submitted schedule's period is held to the ceiling the model states on its
-        // end — "The maximum allowed value is 3 years from the current time", measured
-        // from this request (`crate::state::schedule_period_refusal`), the same rule the
-        // update path applies to a period it submits. A request beyond it creates NO
-        // report: no ARN is minted and its `clientToken` stays free.
+        // The submitted schedule's period is held to the two bounds the model states on
+        // its own members — a start time at most 5 minutes before this request and an end
+        // time at most 3 years past it (`crate::state::schedule_period_refusal`), the same
+        // rules the update path applies to a period it submits. A request outside either
+        // creates NO report: no ARN is minted and its `clientToken` stays free.
         if let Some(message) = crate::state::schedule_period_refusal(
             "scheduledReport.scheduleConfig",
             &requested.schedule_config,

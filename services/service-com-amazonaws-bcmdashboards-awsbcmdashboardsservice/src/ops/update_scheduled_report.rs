@@ -25,17 +25,18 @@
 //! cannot hold together, so it is refused with the modelled `ValidationException` (400)
 //! and changes nothing.
 //!
-//! A submitted `scheduleConfig` carries a `schedulePeriod` whose end is bounded: "The
-//! maximum allowed value is 3 years from the current time. Setting an end time beyond this
-//! limit returns a `ValidationException`"
-//! (`smithy_query(query="shape",shape="SchedulePeriod")`), a sentence the member writes for
-//! the create and the update request alike, and the ceiling is measured from the instant of
-//! THIS call ([`crate::state::schedule_period_refusal`]). Refused that way, the stored
-//! record keeps the period it had. A period this call stores carries both its bounds: the
-//! two members document their own service-side defaults for the create and the update
-//! request alike, so a bound the submitted period omits is resolved — to the time of this
-//! request, and to 3 years on from it ([`crate::state::resolved_schedule_period`]) — rather
-//! than stored absent.
+//! A submitted `scheduleConfig` carries a `schedulePeriod` whose bounds are each held to
+//! the rule its own member states: "The start time cannot be more than 5 minutes before the
+//! time of the request" and "The maximum allowed value is 3 years from the current time.
+//! Setting an end time beyond this limit returns a `ValidationException`"
+//! (`smithy_query(query="shape",shape="SchedulePeriod")`), sentences the members write for
+//! the create and the update request alike, measured from the instant of THIS call
+//! ([`crate::state::schedule_period_refusal`]). Refused that way, the stored record keeps
+//! the period it had. A period this call stores carries both its bounds: the two members
+//! document their own service-side defaults for the create and the update request alike, so
+//! a bound the submitted period omits is resolved — to the time of this request, and to 3
+//! years on from it ([`crate::state::resolved_schedule_period`]) — rather than stored
+//! absent.
 //!
 //! The refusals that come before the write:
 //!
@@ -268,14 +269,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let now = ::std::time::SystemTime::now();
 
-        // The schedule this request submits is held to the ceiling the model states on the
-        // period's end — "The maximum allowed value is 3 years from the current time", a
-        // sentence written for the create request and this one alike
-        // (`crate::state::schedule_period_refusal`). Measured from the instant of THIS
-        // call, so what the ceiling admits is decided by the request that submits the
-        // period and not by the one that first created the report; refused before the ARN
-        // is resolved, like the other rules on the submitted members, so the stored record
-        // keeps the period it had.
+        // The schedule this request submits is held to the two bounds the model states on
+        // the period's own members — a start time at most 5 minutes before the request and
+        // an end time at most 3 years past it, sentences written for the create request and
+        // this one alike (`crate::state::schedule_period_refusal`). Measured from the
+        // instant of THIS call, so what the rules admit is decided by the request that
+        // submits the period and not by the one that first created the report; refused
+        // before the ARN is resolved, like the other rules on the submitted members, so the
+        // stored record keeps the period it had.
         if let Some(message) = input
             .schedule_config
             .as_ref()

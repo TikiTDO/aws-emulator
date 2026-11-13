@@ -23,7 +23,9 @@ use super::dashboard_lifecycle::{call, ok_call, router};
 // The `HealthStatusCode` a report whose health nothing has refreshed reports, declared
 // once for the crate's suites beside the other health constants.
 use super::scheduled_report_execution::HEALTHY;
-use super::scheduled_report_lifecycle::{error_code, source_dashboard, EXECUTION_ROLE_ARN};
+use super::scheduled_report_lifecycle::{
+    acceptable_period, error_code, source_dashboard, EXECUTION_ROLE_ARN,
+};
 
 /// One row of the listing table: the `scheduleConfig` a report is created with, and
 /// the summary members that configuration must be projected onto.
@@ -99,7 +101,10 @@ fn rows(widget_id: &str) -> Vec<ReportRow> {
             schedule_config: json!({
                 // `GenericString`, length 0..1024, so the empty string is legal.
                 "scheduleExpression": "",
-                "schedulePeriod": {"startTime": 1_767_225_600, "endTime": 1_798_761_600}
+                // Both bounds relative to this instant, because each is held to a rule
+                // measured from the request that submits it
+                // (`tests/all/schedule_period_defaults.rs`).
+                "schedulePeriod": acceptable_period()
             }),
             expected_expression: "",
             expected_state: "ENABLED",

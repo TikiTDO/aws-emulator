@@ -34,6 +34,22 @@ pub(crate) const EXECUTION_ROLE_ARN: &str =
 /// create naming it is a reference to a missing resource rather than a malformed input.
 const MISSING_DASHBOARD_ARN: &str = "arn:aws:bcm-dashboards::123456789012:dashboard/no-such-board";
 
+/// A `schedulePeriod` both write paths accept, as the suites of this crate submit one: a
+/// start time at this instant and an end time a year on.
+///
+/// Built relative to the call rather than spelled as a calendar date, because each bound is
+/// held to a rule measured from the request that submits it — "The start time cannot be more
+/// than 5 minutes before the time of the request" and "The maximum allowed value is 3 years
+/// from the current time" (`smithy_query(query="shape",shape="SchedulePeriod")`) — so a
+/// fixed date would be a period the service refuses once the clock passes it.
+pub(crate) fn acceptable_period() -> Value {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is past the epoch")
+        .as_secs();
+    json!({"startTime": now, "endTime": now + 365 * 86_400})
+}
+
 /// `ScheduledReportArn`'s modelled `@pattern`, checked by hand because this crate has
 /// no regex dependency. Source: the `arn` member of `CreateScheduledReportResponse`
 /// reported by `smithy_query(query="operation",operation="CreateScheduledReport")` —
@@ -145,8 +161,11 @@ fn cases(widget_id: &str) -> Vec<ReportCase> {
             schedule_config: json!({
                 "scheduleExpression": "rate(7 days)",
                 "scheduleExpressionTimeZone": "Europe/Berlin",
-                // GenericTimeStamp members, epoch seconds on the awsJson1_0 wire.
-                "schedulePeriod": {"startTime": 1_767_225_600, "endTime": 1_798_761_600}
+                // GenericTimeStamp members, epoch seconds on the awsJson1_0 wire. Both
+                // bounds are built relative to this instant, because both are held to a
+                // rule measured from the request that submits them (the start time's grace
+                // and the end time's ceiling, `tests/all/schedule_period_defaults.rs`).
+                "schedulePeriod": acceptable_period()
             }),
             expected_state: "ENABLED",
             widget_ids: Some(vec![]),

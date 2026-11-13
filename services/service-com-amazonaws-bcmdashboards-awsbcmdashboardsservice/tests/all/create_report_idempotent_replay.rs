@@ -26,7 +26,7 @@
 use serde_json::{json, Value};
 
 use super::dashboard_lifecycle::{call, ok_call, router};
-use super::scheduled_report_lifecycle::{source_dashboard, EXECUTION_ROLE_ARN};
+use super::scheduled_report_lifecycle::{acceptable_period, source_dashboard, EXECUTION_ROLE_ARN};
 
 /// How many times each row presents its request: the first call creates, and every call
 /// after it is a repeat — more than one, so a replay that only worked once is caught.
@@ -68,7 +68,9 @@ fn cases() -> Vec<ReplayCase> {
                         "scheduleConfig": {
                             "scheduleExpression": "rate(7 days)",
                             "scheduleExpressionTimeZone": "Europe/Berlin",
-                            "schedulePeriod": {"startTime": 1_767_225_600, "endTime": 1_798_761_600},
+                            // Built relative to the call: each bound of a submitted period
+                            // is held to a rule measured from the request that carries it.
+                            "schedulePeriod": acceptable_period(),
                             // `ScheduleState` values, source: the `ScheduleState` enum in
                             // the model.
                             "state": "DISABLED"
@@ -144,7 +146,7 @@ fn cases() -> Vec<ReplayCase> {
                         "scheduleConfig": {
                             "scheduleExpression": "cron(0 8 1 * ? *)",
                             "scheduleExpressionTimeZone": "UTC",
-                            "schedulePeriod": {"startTime": 1_767_225_600},
+                            "schedulePeriod": {"startTime": acceptable_period()["startTime"]},
                             "state": "ENABLED"
                         },
                         "description": "All of it.",
