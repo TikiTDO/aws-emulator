@@ -1635,3 +1635,10 @@ mod lambda_in_function_dynamodb_partition_conditions;
 // at once, so no single service crate's test target can ask it.
 #[path = "all/cloudformation_lambda_function_log_destination.rs"]
 mod cloudformation_lambda_function_log_destination;
+// Declared in the appended tail, which is where every new suite inserts its lines: the EBS
+// direct-API write loop driven THROUGH a refused block write and then observed as completed
+// spans the EBS direct APIs (which mint, refuse, write and seal) and Amazon EC2 (the only
+// read of a snapshot's state, and the delete), so no single service crate's test target owns
+// both ends of it.
+#[path = "all/ebs_refused_block_write_then_ec2_snapshot_completion.rs"]
+mod ebs_refused_block_write_then_ec2_snapshot_completion;
