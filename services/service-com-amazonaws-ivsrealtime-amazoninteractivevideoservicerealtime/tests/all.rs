@@ -51,6 +51,8 @@ mod create_storage_configuration_inputs;
 mod date_time_members_wire_form;
 #[path = "all/delete_ingest_configuration.rs"]
 mod delete_ingest_configuration;
+#[path = "all/delete_public_key.rs"]
+mod delete_public_key;
 #[path = "all/delete_stage_associations.rs"]
 mod delete_stage_associations;
 #[path = "all/delete_stage_ends_replications.rs"]

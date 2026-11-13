@@ -17,7 +17,7 @@
 //! 1. every response class the service can answer carries all seven headers, each with the
 //!    endpoint's own value: a success whose output shape binds them beside a body, a
 //!    success whose whole modelled output IS those members, a handler refusal, a boundary
-//!    refusal, a not-found refusal and a scaffold's 501;
+//!    refusal and a not-found refusal, from a read and from a delete alike;
 //! 2. the value of each is the one the endpoint states, read off the crate's single
 //!    statement of the policy, so no header is served from a framework default;
 //! 3. each value is one its own header admits, and the exposed-header list publishes every
@@ -226,9 +226,9 @@ fn absent_stage_arn(id: &str) -> String {
     format!("arn:aws:ivs:{REGION}:{ACCOUNT}:stage/{id}")
 }
 
-/// A well-formed public-key ARN, for the row that calls a still-scaffolded operation: the
-/// ARN satisfies the modelled `PublicKeyArn` pattern, so the request reaches the handler
-/// and the 501 is the scaffold's rather than a boundary refusal.
+/// A well-formed public-key ARN naming no imported key: the ARN satisfies the modelled
+/// `PublicKeyArn` pattern, so the request reaches the handler and the 404 is the
+/// handler's own rather than a boundary refusal.
 fn public_key_arn(id: &str) -> String {
     format!("arn:aws:ivs:{REGION}:{ACCOUNT}:public-key/{id}")
 }
@@ -247,7 +247,7 @@ async fn every_response_class_carries_the_endpoints_header_policy() {
     // Rows span the response CLASSES: a success whose output shape binds the members beside
     // a body (three shapes of request, so the policy is not a function of the input), the
     // two successes whose whole modelled output IS those members, a handler refusal, a
-    // boundary refusal, a not-found refusal, and a scaffold's 501.
+    // boundary refusal, and a not-found refusal from a read and from a delete alike.
     let cases: Vec<(&str, &str, Value, u16)> = vec![
         (
             "a created ingest configuration over RTMPS",
@@ -319,10 +319,10 @@ async fn every_response_class_carries_the_endpoints_header_policy() {
             200,
         ),
         (
-            "a scaffolded operation",
+            "a not-found refusal from a delete",
             "DeletePublicKey",
             json!({ "arn": public_key_arn("neverImported") }),
-            501,
+            404,
         ),
     ];
 

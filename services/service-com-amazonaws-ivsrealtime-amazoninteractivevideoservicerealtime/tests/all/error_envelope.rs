@@ -194,8 +194,8 @@ fn is_request_id_shaped(id: &str) -> bool {
 /// Assert the whole envelope of ONE refusal: the document's three members, the three
 /// headers carrying the same three facts, and the `message` key an SDK reads.
 ///
-/// `expected_message` is `None` for a failure whose text no rule of this service fixes
-/// (the scaffold's 501), where the requirement is only that a text is stated.
+/// `expected_message` is `None` for a failure whose text no rule of this service fixes,
+/// where the requirement is only that a text is stated.
 fn assert_stated_failure(
     case: &str,
     answer: &Answer,
@@ -274,8 +274,8 @@ async fn every_refused_call_states_its_code_its_text_and_the_request_it_answers(
     let absent = absent_stage_arn("neverCreated");
 
     // Rows span the error CLASSES this service answers (404 from a handler, 400 from the
-    // constraint walk, 400 from a handler's own check, 501 from a scaffold) across the
-    // operations that answer them.
+    // constraint walk, 400 from a handler's own check) across the operations that answer
+    // them.
     let cases: Vec<RefusalCase> = vec![
         RefusalCase {
             case: "a token for a stage that does not exist",
@@ -335,12 +335,12 @@ async fn every_refused_call_states_its_code_its_text_and_the_request_it_answers(
             ),
         },
         RefusalCase {
-            case: "an operation this emulator has not implemented",
+            case: "a delete naming a public key this account holds none of",
             operation: "DeletePublicKey",
             request: json!({ "arn": public_key_arn("neverImported") }),
-            status: 501,
-            code: "NotImplemented",
-            message: None,
+            status: 404,
+            code: "ResourceNotFoundException",
+            message: Some(not_found_message(&public_key_arn("neverImported"))),
         },
     ];
 
@@ -611,8 +611,8 @@ async fn every_response_names_the_one_request_it_answers() {
     let absent = absent_stage_arn("neverCreated2");
 
     // Rows span every response class: a success with a body, the modelled empty-body
-    // success, a handler refusal, a boundary refusal, a scaffold's 501, and a request
-    // naming no modelled operation at all.
+    // success, a handler refusal, a boundary refusal, and a request naming no modelled
+    // operation at all.
     let calls: Vec<(&str, &str, Value)> = vec![
         ("a success with a body", "GetStage", json!({ "arn": stage })),
         ("a list success", "ListStages", json!({})),
@@ -632,7 +632,7 @@ async fn every_response_names_the_one_request_it_answers() {
             json!({ "stageArn": stage, "duration": 20_161 }),
         ),
         (
-            "a scaffolded operation",
+            "a handler refusal from a delete",
             "DeletePublicKey",
             json!({ "arn": public_key_arn("neverImported3") }),
         ),

@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeletePublicKey
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeletePublicKey`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeletePublicKey::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -69,6 +60,8 @@
 //!   exist.
 //! * `ValidationException` (HTTP 400) — The input fails to satisfy the constraints specified
 //!   by an Amazon Web Services service.
+//! * `InternalServerException` (HTTP 500) — widened in through `extra_errors` (see below):
+//!   the SERVICE models it though this operation does not list it.
 
 #[allow(unused_imports)]
 use super::types::*;
@@ -84,11 +77,18 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-ivsrealtime-amazoninter
 // here — hence the `DeletePublicKeyError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
-#[smithy_macros::operation_error("com.amazonaws.ivsrealtime#DeletePublicKey")]
+#[smithy_macros::operation_error(
+    "com.amazonaws.ivsrealtime#DeletePublicKey",
+    extra_errors = ["InternalServerException"]
+)]
 #[derive(Debug)]
 pub enum DeletePublicKeyErrorModeled {
     AccessDeniedException(AccessDeniedException),
     ConflictException(ConflictException),
+    // Widened in through `extra_errors`: the SERVICE models `InternalServerException`
+    // (HTTP 500) though `DeletePublicKey` does not list it, and it is the only honest
+    // answer if the shared engine cannot hand back this service's store.
+    InternalServerException(InternalServerException),
     PendingVerification(PendingVerification),
     ResourceNotFoundException(ResourceNotFoundException),
     ValidationException(ValidationException),
@@ -145,18 +145,72 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeletePublicKey` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeletePublicKeyErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeletePublicKey"))
+        // "Deletes the specified public key used to sign stage participant tokens": a
+        // mutation the spec names, so the record the ARN denotes is taken out of the
+        // store, after which no projection of this service reports it — the read, the
+        // listing and the tagging surface alike, since each of them answers off that one
+        // record. The key is resolved in this request's own region's view of the account:
+        // a key imported through another region's endpoint is not a resource this request
+        // can delete.
+        let region = crate::state::request_region(ctx);
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            crate::state::store_unavailable(DeletePublicKeyErrorModeled::InternalServerException)
+        })?;
+        let mut store = state.lock();
+
+        // A delete of a key this view does not hold is the modelled
+        // `ResourceNotFoundException` (HTTP 404), the same answer `GetPublicKey` and the
+        // sibling deletes of this service give — so a second delete of the same ARN is
+        // refused rather than silently accepted.
+        let Some(record) = store.public_key_in(&region, &input.arn) else {
+            drop(store);
+            audit(ctx, "", &input.arn, "rejected-not-found");
+            return Err(crate::state::resource_not_found(
+                DeletePublicKeyErrorModeled::ResourceNotFoundException,
+                &input.arn,
+            ));
+        };
+
+        // The fingerprint identifies the key MATERIAL, and is the only thing about the
+        // deleted key the record below states: it is the public identifier every read of
+        // the key already reported.
+        let fingerprint = record.fingerprint.clone();
+        let arn = record.arn.clone();
+
+        // Nothing of this service holds a reference to a public key — a key verifies the
+        // participant tokens a customer signs OUTSIDE this service — so there is no state
+        // this delete can contradict, and hence no condition under which the modelled
+        // `ConflictException` is its answer: the record goes, and with it every projection
+        // of it.
+        store.public_keys.remove(&arn);
+        drop(store);
+
+        audit(ctx, &fingerprint, &arn, "deleted");
+
+        Ok(DeletePublicKeyOutput {})
     }
+}
+
+/// The record this state change leaves: who presented which access key id, which key the
+/// call took out of the store and how it ended.
+///
+/// Deleting a key invalidates every future participant token signed with the private half
+/// of its pair, so the call is worth a record. Only the key's PUBLIC identifiers are in it
+/// — its ARN and its fingerprint, both of which every read of the key already answered —
+/// and the access key id is the public half the request carries in its SigV4 scope: no
+/// secret and no key material is logged.
+fn audit(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    fingerprint: &str,
+    arn: &str,
+    outcome: &str,
+) {
+    ::tracing::info!(
+        operation = "DeletePublicKey",
+        access_key_id = %::emulator_server::extract_akid(&ctx.parts().headers),
+        public_key_arn = %arn,
+        fingerprint = %fingerprint,
+        outcome = outcome,
+        "ivs realtime state change"
+    );
 }
