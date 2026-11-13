@@ -217,8 +217,8 @@ fn summary_of(
         // `ValidateTemplate` reports (`crate::state::template_summary`).
         capabilities: (!required.capabilities.is_empty()).then_some(required.capabilities),
         capabilities_reason: required.reason,
-        // "A list of all the template resource types that are defined in the template": each
-        // distinct type its `Resources` section declares, in ascending order
+        // "A list of all the template resource types that are defined in the template": the
+        // type of each resource its `Resources` section declares, in declared order
         // (`crate::state::template_summary::resource_types`).
         resource_types: Some(crate::state::template_summary::resource_types(body, declared)),
         // "The Amazon Web Services template format version, which identifies the

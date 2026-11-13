@@ -280,7 +280,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // refused for lack of privileges, so no read can disclose whether
         // another account holds the point it names
         // (`crate::state::authorized_recovery_point`).
-        crate::state::authorized_recovery_point(Self::NAME, &input.recovery_point_arn)?;
+        crate::state::authorized_recovery_point(&input.recovery_point_arn)?;
 
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             DescribeRecoveryPointErrorModeled::ServiceUnavailableException(

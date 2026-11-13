@@ -4,11 +4,11 @@
 //! end over the awsQuery wire.
 //!
 //! THE RULE: "a list of all the template resource types that are defined in the template" is
-//! the SET of types the body declares — each type once, in ascending order — whatever order
-//! the body declares resources of them in and however many resources share a type. The
-//! per-RESOURCE reading of the same section is `ResourceIdentifierSummaries`, which carries
-//! the logical ids of each type in the order the body DECLARES them, so the two members are
-//! ordered by different things and this suite asserts both of one response.
+//! the type of EACH resource the body declares, in the order the body declares them — so a
+//! type several resources share is reported once per resource and nothing is collapsed or
+//! re-ordered. The per-TYPE reading of the same section is `ResourceIdentifierSummaries`,
+//! which carries one entry per type with the logical ids declared with it, so the two members
+//! are two readings of one order and this suite asserts both of one response.
 //!
 //! The rows differ along what the rule generalises over: how many resources share a type,
 //! whether the declared order agrees with the ascending one, how many types the body
@@ -71,7 +71,7 @@ fn rows() -> Vec<Row> {
                 "Store":{"Type":"AWS::S3::Bucket"},
                 "Access":{"Type":"AWS::IAM::Role"}}}"#
                 .to_string(),
-            types: vec!["AWS::IAM::Role", "AWS::S3::Bucket"],
+            types: vec!["AWS::S3::Bucket", "AWS::IAM::Role"],
             summaries: vec![
                 ("AWS::S3::Bucket", vec!["Store"]),
                 ("AWS::IAM::Role", vec!["Access"]),
@@ -84,7 +84,7 @@ fn rows() -> Vec<Row> {
                 "First":{"Type":"AWS::SNS::Topic"},
                 "Second":{"Type":"AWS::SNS::Topic"}}}"#
                 .to_string(),
-            types: vec!["AWS::SNS::Topic"],
+            types: vec!["AWS::SNS::Topic", "AWS::SNS::Topic", "AWS::SNS::Topic"],
             summaries: vec![("AWS::SNS::Topic", vec!["Third", "First", "Second"])],
         },
         Row {
@@ -107,7 +107,12 @@ fn rows() -> Vec<Row> {
                  Mid:\n    Type: AWS::SQS::Queue\n  \
                  Store:\n    Type: AWS::S3::Bucket\n"
                 .to_string(),
-            types: vec!["AWS::S3::Bucket", "AWS::SNS::Topic", "AWS::SQS::Queue"],
+            types: vec![
+                "AWS::SQS::Queue",
+                "AWS::SNS::Topic",
+                "AWS::SQS::Queue",
+                "AWS::S3::Bucket",
+            ],
             summaries: vec![
                 ("AWS::SQS::Queue", vec!["Zebra", "Mid"]),
                 ("AWS::SNS::Topic", vec!["Alpha"]),
@@ -124,7 +129,7 @@ fn rows() -> Vec<Row> {
 }
 
 #[tokio::test]
-async fn a_summary_reports_each_declared_type_once_in_ascending_order() {
+async fn a_summary_reports_the_type_of_every_declared_resource_as_declared() {
     let router = router();
     for row in rows() {
         let case = row.case;
@@ -137,14 +142,14 @@ async fn a_summary_reports_each_declared_type_once_in_ascending_order() {
         let reported = reported_types(&body);
         assert_eq!(
             reported, row.types,
-            "case {case:?}: expected the declared types once each, ascending, {:?}, got \
-             {reported:?}",
+            "case {case:?}: expected one entry per declared resource, in declared order, \
+             {:?}, got {reported:?}",
             row.types
         );
 
-        // The same response's per-resource reading: the identifier summaries follow the
-        // order the BODY declares its resources in, which is what shows the ordering above
-        // is this member's own rather than the reader's.
+        // The same response's per-TYPE reading: the identifier summaries carry each type
+        // once, which is what shows the repetition above is this member's own rather than
+        // the reader's.
         let expected: Vec<(String, Vec<String>)> = row
             .summaries
             .iter()
@@ -159,6 +164,49 @@ async fn a_summary_reports_each_declared_type_once_in_ascending_order() {
         assert_eq!(
             summaries, expected,
             "case {case:?}: expected the identifier summaries {expected:?}, got {summaries:?}"
+        );
+    }
+}
+
+/// A body declaring MANY resources of one type is summarised with as many entries as it
+/// declares resources: the list is as long as the `Resources` section, whatever that length
+/// is, while the identifier summary of that one type stays a single entry carrying every
+/// logical id. The rows differ along the COUNT, which is the dimension a client reads the
+/// list's length for.
+#[tokio::test]
+async fn a_summary_reports_as_many_entries_as_the_body_declares_resources() {
+    // `AWS::CloudFormation::WaitConditionHandle` is a type whose declaration needs no
+    // properties, so a body of any length can be written out of it.
+    const TYPE: &str = "AWS::CloudFormation::WaitConditionHandle";
+    let router = router();
+
+    for count in [1usize, 2, 7, 40] {
+        let case = format!("{count} resources of one type");
+        let declarations: Vec<String> = (0..count)
+            .map(|index| format!(r#""Handle{index}":{{"Type":"{TYPE}"}}"#))
+            .collect();
+        let template = format!(r#"{{"Resources":{{{}}}}}"#, declarations.join(","));
+
+        let (status, body) = summarise(&router, &template).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: expected the body summarised, got {status} {body}"
+        );
+
+        let reported = reported_types(&body);
+        assert_eq!(
+            reported,
+            vec![TYPE.to_string(); count],
+            "case {case:?}: expected {count} entries of {TYPE:?}, got {reported:?}"
+        );
+
+        let expected_ids: Vec<String> = (0..count).map(|index| format!("Handle{index}")).collect();
+        let summaries = reported_summaries(&body);
+        assert_eq!(
+            summaries,
+            vec![(TYPE.to_string(), expected_ids.clone())],
+            "case {case:?}: expected one identifier summary carrying every logical id, got \
+             {summaries:?}"
         );
     }
 }

@@ -4475,11 +4475,11 @@ pub fn decode_page_token(token: &str) -> Option<String> {
 /// token this service did not mint, one minted for another listing, and one whose
 /// position no longer exists all fail the one check a listing makes of a token —
 /// whether it recognises it — and leave the caller the one thing to act on, which is
-/// to start the listing again. So the sentence states that the token the request
-/// supplied is not one this service can read, and names neither the listing nor the
-/// token.
-pub const INVALID_NEXT_TOKEN_MESSAGE: &str =
-    "The specified nextToken is invalid: unrecognized format.";
+/// to start the listing again. Amazon EKS states exactly that, in one sentence that
+/// covers both halves of the condition — a token it cannot read and a token whose
+/// position is gone — and names neither the listing nor the token the request
+/// carried.
+pub const INVALID_NEXT_TOKEN_MESSAGE: &str = "nextToken is not valid or expired.";
 
 /// The ARN of one managed capability of one cluster.
 ///

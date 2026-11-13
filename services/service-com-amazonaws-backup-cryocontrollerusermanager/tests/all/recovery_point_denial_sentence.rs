@@ -4,29 +4,25 @@
 //! by ARN answers.
 //!
 //! The rule under test: when such a call is refused because the recovery point
-//! its ARN names belongs to another account, the refusal's `Message` is AWS's
-//! authorization sentence, whose fixed text is "User: ", " is not authorized to
-//! perform: ", " on resource: ", " because no resource-based policy allows the "
-//! and " action", filled in with THREE values the request itself decides: the
-//! principal the request was signed by, the action asked for (this service's
-//! action namespace plus the API name of the operation) and the `RecoveryPointArn`
-//! exactly as the request carried it. So the sentence is not one fixed string: it
-//! changes with the operation and with the ARN, and a client that parses it learns
-//! which principal lacked which permission on which resource.
+//! its ARN names belongs to another account, the refusal's `Message` is AWS
+//! Backup's own fixed sentence — the SAME one every refusal this service does not
+//! grant carries (`vault_read_visibility::DENIED_MESSAGE`) — built from nothing in
+//! the request, so it names neither the principal that signed, nor the action
+//! asked for, nor the `RecoveryPointArn` the request carried, and discloses
+//! nothing about what the other account holds.
 //!
 //! The table spans every implemented operation that addresses a recovery point by
-//! the ARN the request supplies — so the action name varies — crossed with ARNs
-//! that differ in each part the sentence quotes back: the account id, the Region,
-//! the partition, the spelling of the point id, and an ARN with no account field
-//! at all. The controls are the other half of the rule: a refusal this decision
-//! did not take (an own-account ARN that names no stored point) is NOT this
-//! sentence, and the account's own stored point is still answered.
+//! the ARN the request supplies — so the action varies — crossed with ARNs that
+//! differ in every part a refusal could have quoted back: the account id, the
+//! Region, the partition, the spelling of the point id, and an ARN with no account
+//! field at all. The controls are the other half of the rule: a refusal this
+//! decision did not take (an own-account ARN that names no stored point) is NOT
+//! this sentence, and the account's own stored point is still answered.
 //!
 //! Every case drives real HTTP through the router, so what is asserted is the wire
-//! behaviour a `backup` SDK client sees. The request harness, the operation table
-//! and the sentence itself are the shared ones in
-//! `recovery_point_cross_account_authorization.rs`, so this suite drives the same
-//! wire path rather than growing a second copy of it.
+//! behaviour a `backup` SDK client sees. The request harness and the operation
+//! table are the shared ones in `recovery_point_cross_account_authorization.rs`,
+//! so this suite drives the same wire path rather than growing a second copy of it.
 
 use std::collections::BTreeSet;
 
@@ -35,40 +31,8 @@ use crate::recovery_point_cross_account_authorization::{
 };
 use crate::vault_and_backup_job::{error_code, string_at, ACCOUNT, REGION};
 
-/// The FIXED text of AWS's authorization sentence, in order, as the recorded
-/// refusal of a cross-account recovery-point call words it. Everything between
-/// these segments is a value the request decided.
-const FIXED: [&str; 5] = [
-    "User: ",
-    " is not authorized to perform: ",
-    " on resource: ",
-    " because no resource-based policy allows the ",
-    " action",
-];
-
-/// The three variable parts of `message` — the principal, the action and the
-/// resource — or `None` when `message` is not that sentence at all.
-///
-/// The sentence names ONE action, in both of the places it appears, so a message
-/// whose two action slots disagree is not the template either.
-fn filled(message: &str) -> Option<(String, String, String)> {
-    let rest = message.strip_prefix(FIXED[0])?;
-    let (principal, rest) = rest.split_once(FIXED[1])?;
-    let (action, rest) = rest.split_once(FIXED[2])?;
-    let (resource, rest) = rest.split_once(FIXED[3])?;
-    let repeated = rest.strip_suffix(FIXED[4])?;
-    if repeated != action {
-        return None;
-    }
-    Some((
-        principal.to_string(),
-        action.to_string(),
-        resource.to_string(),
-    ))
-}
-
 /// Recovery-point ARNs of accounts other than the one serving the request, each
-/// differing in a part the sentence quotes back.
+/// differing in a part a refusal could have quoted back.
 ///
 /// The id spellings are the ones the model's own `RecoveryPointArn` examples use
 /// (`smithy_query(query="shape", shape="DescribeRecoveryPointInput")`:
@@ -106,15 +70,13 @@ fn foreign_arns() -> Vec<(&'static str, String)> {
     ]
 }
 
-/// The refusal's `Message` is AWS's sentence with the request's own principal,
-/// action and resource ARN in it — for every operation that addresses a recovery
-/// point by ARN and every foreign-account ARN form.
+/// The refusal's `Message` is the service's own sentence, for every operation that
+/// addresses a recovery point by ARN and every foreign-account ARN form.
 #[tokio::test]
-async fn the_refusal_states_the_principal_the_action_and_the_arn_the_request_carried() {
+async fn the_refusal_states_the_services_own_sentence() {
     for operation in addressed_operations() {
         let router = crate::vault_and_backup_job::router();
         let _stored = stored_point(&router).await;
-        let action = format!("{ACTION_NAMESPACE}:{}", operation.operation);
 
         for (case, arn) in foreign_arns() {
             let (status, error_type, refused) = address(&router, &operation, &arn).await;
@@ -128,33 +90,27 @@ async fn the_refusal_states_the_principal_the_action_and_the_arn_the_request_car
 
             let message = string_at(&refused, "Message");
             assert_eq!(
-                filled(&message),
-                Some((caller_principal(), action.clone(), arn.clone())),
-                "case {case:?} on {}: expected AWS's authorization sentence over the \
-                 caller, {action:?} and the ARN the request carried, got {message:?}",
-                operation.operation
-            );
-            assert_eq!(
                 message,
-                denial(&action, &arn),
-                "case {case:?} on {}: expected the sentence rendered whole, got {message:?}",
+                denial(),
+                "case {case:?} on {}: expected this service's refusal sentence, got \
+                 {message:?}",
                 operation.operation
             );
         }
     }
 }
 
-/// The sentence is built from the request, so it is a DIFFERENT sentence for a
-/// different resource and for a different action: no two of the table's cases
-/// share a message.
+/// The sentence is built from NOTHING in the request: it quotes back neither the
+/// signing principal, nor the action, nor the ARN — so every case of the table
+/// answers the one same message.
 #[tokio::test]
-async fn the_sentence_varies_with_the_resource_and_with_the_action() {
+async fn the_sentence_quotes_nothing_the_request_carried() {
     let mut messages: BTreeSet<String> = BTreeSet::new();
-    let mut cases = 0usize;
 
     for operation in addressed_operations() {
         let router = crate::vault_and_backup_job::router();
         let _stored = stored_point(&router).await;
+        let action = format!("{ACTION_NAMESPACE}:{}", operation.operation);
 
         for (case, arn) in foreign_arns() {
             let (status, _, refused) = address(&router, &operation, &arn).await;
@@ -165,22 +121,24 @@ async fn the_sentence_varies_with_the_resource_and_with_the_action() {
                  {refused:?}",
                 operation.operation
             );
-            assert!(
-                messages.insert(message.clone()),
-                "case {case:?} on {}: the sentence must name this request's own action and \
-                 resource, so no earlier case may have produced {message:?}",
-                operation.operation
-            );
-            cases += 1;
+            for quoted in [caller_principal(), action.clone(), arn.clone()] {
+                assert!(
+                    !message.contains(&quoted),
+                    "case {case:?} on {}: the refusal must not quote {quoted:?} back, got \
+                     {message:?}",
+                    operation.operation
+                );
+            }
+            messages.insert(message);
         }
     }
 
+    let distinct: Vec<&String> = messages.iter().collect();
     assert_eq!(
-        messages.len(),
-        cases,
-        "case the whole table: expected one distinct sentence per case, got \
-         {} for {cases} cases",
-        messages.len()
+        distinct,
+        vec![&denial()],
+        "case the whole table: expected the one fixed sentence for every case, got \
+         {distinct:?}"
     );
 }
 
@@ -197,8 +155,8 @@ async fn an_own_account_refusal_is_not_the_authorization_sentence() {
         let (status, _, refused) = address(&router, &operation, &absent).await;
         let message = string_at(&refused, "Message");
         assert_eq!(
-            (status, filled(&message)),
-            (400, None),
+            (status, message == denial()),
+            (400, false),
             "case an own-account ARN naming nothing on {}: expected a 400 refusal that is \
              not the authorization sentence, got {status} {refused:?}",
             operation.operation

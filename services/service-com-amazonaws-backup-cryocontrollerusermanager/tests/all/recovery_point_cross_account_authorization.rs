@@ -5,13 +5,12 @@
 //!
 //! The rule under test: when the account field of the `RecoveryPointArn` a
 //! request carries is not the account serving the request, the call is refused
-//! HTTP 403 with the error type `AccessDeniedException` and AWS's authorization
-//! sentence — the calling principal, the action (this service's namespace plus
-//! the API name) and the `RecoveryPointArn` exactly as the request carried it —
-//! and the refusal discloses nothing about whether that point exists. A recovery
-//! point belongs to the account its ARN names, and only that account's own
-//! resource-based policy could grant a caller anything on it, so there is nothing
-//! here to resolve it against and nothing to report as absent.
+//! HTTP 403 with the error type `AccessDeniedException` and this service's own
+//! fixed refusal sentence, and the refusal discloses nothing — neither whether
+//! that point exists nor what was asked for. A recovery point belongs to the
+//! account its ARN names, and only that account's own resource-based policy could
+//! grant a caller anything on it, so there is nothing here to resolve it against
+//! and nothing to report as absent.
 //!
 //! The table spans every implemented operation that addresses a recovery point
 //! by the ARN the request supplies (the delete and the read, which bind it into
@@ -49,17 +48,11 @@ pub(crate) fn caller_principal() -> String {
     format!("arn:aws:iam::{ACCOUNT}:user/emulator")
 }
 
-/// The sentence AWS refuses a request with when no resource-based policy grants
-/// the calling principal the action it asked for on the resource it named: the
-/// fixed text, filled in from the caller's principal, the action and the ARN the
-/// request carried
-/// (`service_common::iam_authorization::not_authorized_by_resource_policy`).
-pub(crate) fn denial(action: &str, resource: &str) -> String {
-    format!(
-        "User: {} is not authorized to perform: {action} on resource: {resource} \
-         because no resource-based policy allows the {action} action",
-        caller_principal()
-    )
+/// The sentence AWS Backup refuses a call it does not grant with: the service's
+/// own fixed string, the SAME one every vault-scoped refusal carries
+/// (`vault_read_visibility::DENIED_MESSAGE`).
+pub(crate) fn denial() -> String {
+    crate::vault_read_visibility::DENIED_MESSAGE.to_string()
 }
 
 /// The IAM action namespace AWS Backup publishes its actions under, the service's
@@ -164,8 +157,8 @@ pub(crate) async fn stored_point(router: &MultiServiceRouter) -> String {
 }
 
 /// A recovery-point ARN of an account other than the one serving the request is
-/// refused by the authorization decision — 403 `AccessDeniedException` with
-/// AWS's denial sentence — on every operation that addresses a point by ARN.
+/// refused by the authorization decision — 403 `AccessDeniedException` with this
+/// service's denial sentence — on every operation that addresses a point by ARN.
 #[tokio::test]
 async fn a_recovery_point_arn_of_another_account_is_denied() {
     // The rows differ along what the rule generalises over: the account id, the
@@ -199,7 +192,6 @@ async fn a_recovery_point_arn_of_another_account_is_denied() {
         let stored = stored_point(&router).await;
 
         for (case, arn) in &foreign {
-            let action = format!("{ACTION_NAMESPACE}:{}", operation.operation);
             let (status, error_type, refused) = address(&router, &operation, arn).await;
             assert_eq!(
                 (
@@ -208,12 +200,7 @@ async fn a_recovery_point_arn_of_another_account_is_denied() {
                     error_code(&refused).as_str(),
                     string_at(&refused, "Message")
                 ),
-                (
-                    403,
-                    "AccessDeniedException",
-                    "AccessDeniedException",
-                    denial(&action, arn)
-                ),
+                (403, "AccessDeniedException", "AccessDeniedException", denial()),
                 "case {case:?} on {}: expected the authorization refusal, got {status} \
                  {error_type} {refused:?}",
                 operation.operation

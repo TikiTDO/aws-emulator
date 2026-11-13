@@ -438,7 +438,7 @@ async fn a_next_token_this_service_did_not_issue_is_refused_in_the_services_own_
             );
             assert_eq!(
                 answer.message(),
-                "The specified nextToken is invalid: unrecognized format.",
+                "nextToken is not valid or expired.",
                 "case {operation}/{case}: expected the page-token sentence, got {:?}",
                 answer.message()
             );

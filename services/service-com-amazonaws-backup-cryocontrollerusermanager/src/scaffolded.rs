@@ -231,20 +231,6 @@ impl AccessDeniedException {
             message: "Insufficient privileges to perform this action.".to_string(),
         }
     }
-
-    /// The same refusal, carrying a sentence a CALLER words.
-    ///
-    /// The error channel's entry point for a refusal whose wording belongs to the rule
-    /// that reached it rather than to this channel: a decision taken on a resource the
-    /// request NAMES states AWS's authorization sentence over that principal, action and
-    /// ARN ([`crate::state::authorized_recovery_point`]), while a decision taken on a
-    /// resource the request only addresses BY NAME keeps the fixed
-    /// [`Self::insufficient_privileges`] sentence, which names nothing.
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
 }
 
 impl std::fmt::Display for AccessDeniedException {

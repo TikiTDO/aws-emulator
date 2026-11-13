@@ -741,7 +741,7 @@ async fn a_page_token_no_listing_minted_is_a_malformed_parameter_on_every_listin
             // is then checked against the same text once below, which is what ties
             // every listing to it.
             assert_eq!(
-                actual, "The specified nextToken is invalid: unrecognized format.",
+                actual, "nextToken is not valid or expired.",
                 "case {case:?}: expected this service's page-token sentence, got {actual:?}"
             );
             assert!(
@@ -752,7 +752,7 @@ async fn a_page_token_no_listing_minted_is_a_malformed_parameter_on_every_listin
     }
 
     assert_eq!(
-        INVALID_NEXT_TOKEN_MESSAGE, "The specified nextToken is invalid: unrecognized format.",
+        INVALID_NEXT_TOKEN_MESSAGE, "nextToken is not valid or expired.",
         "the constant every listing words this refusal with must be AWS's sentence, got \
          {INVALID_NEXT_TOKEN_MESSAGE:?}"
     );

@@ -190,9 +190,9 @@ fn cases() -> Vec<Case> {
             capabilities: Vec::new(),
             reason_types: Vec::new(),
             // "A list of all the template resource types that are defined in the template":
-            // each DISTINCT type the body declares, in ascending order, so a type two
-            // resources share is one entry.
-            resource_types: vec!["AWS::S3::Bucket", "AWS::SNS::Topic"],
+            // the type of EACH declared resource, in declared order, so a type two
+            // resources share is two entries.
+            resource_types: vec!["AWS::S3::Bucket", "AWS::SNS::Topic", "AWS::S3::Bucket"],
             transforms: Vec::new(),
         },
         Case {
@@ -219,8 +219,8 @@ fn cases() -> Vec<Case> {
             resource_types: vec![
                 "AWS::S3::Bucket",
                 "AWS::S3Tables::TableBucket",
-                "AWS::S3Vectors::Index",
                 "AWS::S3Vectors::VectorBucket",
+                "AWS::S3Vectors::Index",
             ],
             transforms: Vec::new(),
         },
@@ -416,7 +416,7 @@ async fn get_template_summary_reports_what_the_template_declares() {
         assert_eq!(
             wire_list(&body, "ResourceTypes"),
             case.resource_types,
-            "case {label:?}: expected each declared resource type once, in ascending order, \
+            "case {label:?}: expected the type of each declared resource, in declared order, \
              got {body}"
         );
         assert_eq!(
@@ -615,7 +615,8 @@ struct WarningCase {
     template: String,
     /// The types the warning must name, in wire order.
     unrecognized: Vec<&'static str>,
-    /// Every type the template declares, once each, which the summary reports either way.
+    /// The type of every resource the template declares, in wire order, which the summary
+    /// reports either way.
     resource_types: Vec<&'static str>,
 }
 
@@ -631,7 +632,7 @@ fn warning_cases() -> Vec<WarningCase> {
             })
             .to_string(),
             unrecognized: vec!["AWS::Nonesuch::Thing"],
-            resource_types: vec!["AWS::Nonesuch::Thing", "AWS::S3::Bucket"],
+            resource_types: vec!["AWS::S3::Bucket", "AWS::Nonesuch::Thing"],
         },
         WarningCase {
             case: "two unrecognised types, one of them declared twice",
@@ -644,7 +645,11 @@ fn warning_cases() -> Vec<WarningCase> {
             })
             .to_string(),
             unrecognized: vec!["AWS::Nonesuch::Thing", "Example::Private::Resource"],
-            resource_types: vec!["AWS::Nonesuch::Thing", "Example::Private::Resource"],
+            resource_types: vec![
+                "AWS::Nonesuch::Thing",
+                "Example::Private::Resource",
+                "AWS::Nonesuch::Thing",
+            ],
         },
         WarningCase {
             // The configuration asked for warnings and this template gives them nothing to
@@ -733,11 +738,10 @@ async fn unrecognized_resource_types_are_warnings_only_where_the_request_asks_fo
             case.unrecognized,
             "case {label:?}: expected the unrecognised types as warnings, got {body}"
         );
-        let mut reported = wire_list(&body, "ResourceTypes");
-        reported.sort();
+        let reported = wire_list(&body, "ResourceTypes");
         assert_eq!(
             reported, case.resource_types,
-            "case {label:?}: expected every declared type reported, got {body}"
+            "case {label:?}: expected every declared resource's type reported, got {body}"
         );
     }
 }
