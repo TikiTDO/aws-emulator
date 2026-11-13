@@ -226,6 +226,7 @@ pub async fn taken_names(
             metadata: None,
             properties: Value::Null,
             materialised: true,
+            managed_tags: None,
             deletion_policy: None,
         };
         if matches!(

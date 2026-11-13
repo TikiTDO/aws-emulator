@@ -591,6 +591,7 @@ impl StoredStack {
                 // reported about it, and an identity that service MINTED (which no
                 // deployment recomputes) carry forward here.
                 resource.materialised = true;
+                resource.managed_tags = existing.managed_tags.clone();
                 if keeps_its_identifier {
                     // The identifier in force is the one that service minted, or the one an
                     // adopted resource already had, so the record keeps it: an output naming

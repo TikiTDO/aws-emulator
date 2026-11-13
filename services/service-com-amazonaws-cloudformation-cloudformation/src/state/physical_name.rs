@@ -248,6 +248,7 @@ mod tests {
                 "LogStreamName": "app",
             }),
             materialised: true,
+            managed_tags: None,
             deletion_policy: None,
         };
         let rows: &[(&str, &str, &str, Option<&str>)] = &[
@@ -308,6 +309,7 @@ mod tests {
                 metadata: None,
                 properties: ::serde_json::Value::Null,
                 materialised: made,
+                managed_tags: None,
                 deletion_policy: None,
             }
         };
@@ -366,6 +368,7 @@ mod tests {
             metadata: None,
             properties: ::serde_json::Value::Null,
             materialised: false,
+            managed_tags: None,
             deletion_policy: None,
         };
         let held = |resource_type: &str, physical: &str, stack_id: &str| ManagedName {

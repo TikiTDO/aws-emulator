@@ -1725,6 +1725,7 @@ pub fn provision(
                 // service has created the resource.
                 properties: Value::Null,
                 materialised: false,
+                managed_tags: None,
                 deletion_policy: declared_deletion_policy(declared),
             },
         );
@@ -2675,6 +2676,10 @@ pub fn replacement_properties(resource_type: &str) -> &'static [&'static str] {
         // Queue URLs are owner-assigned, but changing the FIFO variant still replaces
         // the queue rather than carrying its old identity into an in-place update.
         SQS_QUEUE => &["FifoQueue"],
+        "AWS::CloudTrail::Trail" => &["TrailName"],
+        crate::state::provisioning::security_group_ingress::SECURITY_GROUP_INGRESS => {
+            crate::state::provisioning::security_group_ingress::REPLACEMENT_PROPERTIES
+        },
         IAM_ACCESS_KEY => &["Serial", "UserName"],
         // A spending limit is a cost control ABOUT one device: `UpdateSpendingLimit` takes
         // the limit's amount and its period and no device at all, so a declaration naming

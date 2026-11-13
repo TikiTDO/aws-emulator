@@ -208,6 +208,7 @@ mod appconfig_resources;
 /// own NAMES live here, beside the arms that provision them
 /// ([`super::template::return_values`] names the two whose identity their create answers).
 pub(super) mod application_auto_scaling;
+pub(super) mod cloudtrail_trail;
 mod cognito_identity_pool;
 /// The three Amazon Cognito user-pool types a stack declares — the user pool, the app client
 /// that signs in against it and the identity provider it federates with: visible to the rest
@@ -223,6 +224,8 @@ pub(super) mod dynamodb_table;
 /// ([`ec2_instance`]).
 mod ec2_instance;
 mod ec2_vpc_network;
+/// One actual EC2 ingress rule, independent of the group that owns it.
+pub(super) mod security_group_ingress;
 /// `AWS::ECS::TaskDefinition`: the revision a stack declares, registered in Amazon ECS
 /// itself ([`ecs_task_definition`]).
 mod ecs_task_definition;
@@ -285,6 +288,8 @@ mod outstanding_teardown;
 /// Where each of this algorithm's questions is PUT to the module that owns a resource type
 /// ([`Owner`]'s own methods, moved out so adding a type's arms does not grow this file).
 mod owner;
+#[cfg(test)]
+mod managed_tags_tests;
 
 /// The success signals the INSTANCES of a signalled resource send: what releases the
 /// resource-signal wait of a resource whose signals come from the instances it consists of
@@ -331,6 +336,18 @@ pub(super) fn applicable_tags(propagated: &[(String, String)]) -> Vec<(String, S
         .filter(|(key, _)| !is_reserved_tag_key(key))
         .cloned()
         .collect()
+}
+
+/// Ownership bookkeeping for the owners that preserve unrelated live tags. This is the
+/// same effective set those owners send, captured from resolved properties; recognizing a
+/// type alone must never give an unimplemented owner tag-removal authority.
+fn managed_tags_for(
+    resource_type: &str,
+    declared: &Value,
+    propagated: &[(String, String)],
+) -> Option<Vec<(String, String)>> {
+    (resource_type == "AWS::CloudTrail::Trail")
+        .then(|| applicable_tags(&super::provisioner::tags_of(declared, propagated)))
 }
 
 /// One tag set as the `[{Key, Value}]` LIST most AWS models spell a `Tag` with — Amazon
@@ -823,6 +840,10 @@ pub(super) enum Owner {
     LogsResource(logs_resources::Kind),
     /// `AWS::IoT::Authorizer`, whose arms are [`iot_authorizer`]'s.
     IotAuthorizer,
+    /// A real trail in CloudTrail, configured through its signed service APIs.
+    CloudTrailTrail,
+    /// A single actual inbound rule whose identity EC2 assigns.
+    SecurityGroupIngress,
     /// One of the Amazon EC2 VPC-network types [`ec2_vpc_network`] creates: the route table,
     /// the subnet association that puts a subnet on one, the VPC endpoint reached through it,
     /// the internet and virtual private gateways, the attachment that puts one of those on a
@@ -913,6 +934,12 @@ pub(super) fn owner_for(resource_type: &str) -> Option<Owner> {
     }
     if let Some(kind) = logs_resources::kind_of(resource_type) {
         return Some(Owner::LogsResource(kind));
+    }
+    if resource_type == cloudtrail_trail::TRAIL {
+        return Some(Owner::CloudTrailTrail);
+    }
+    if resource_type == security_group_ingress::SECURITY_GROUP_INGRESS {
+        return Some(Owner::SecurityGroupIngress);
     }
     if resource_type == iot_authorizer::IOT_AUTHORIZER {
         return Some(Owner::IotAuthorizer);
@@ -2129,6 +2156,13 @@ pub async fn reconcile(
             // change. Only a type with a re-tagging arm has anything asked of its service
             // ([`super::provisioner::Provisioner::retag`]), and that arm is idempotent, so a
             // resource whose tags already agree with the set has nothing called about it.
+            // Capture from the resolved request, not the public declaration or live drift.
+            // The old witness stays on the resource until the tagging call succeeds.
+            let desired_managed_tags = managed_tags_for(
+                &resource.resource_type,
+                &deployed_properties,
+                &stack.tags_for(&resource.logical_id),
+            );
             let retagged = match owner_for(&resource.resource_type) {
                 Some(provisioner) => {
                     let tags = stack.tags_for(&resource.logical_id);
@@ -2144,6 +2178,9 @@ pub async fn reconcile(
                 // Both halves of the change landed, which is what ends a resource this
                 // deployment acted on.
                 Ok(()) => {
+                    if let Some(tags) = desired_managed_tags {
+                        resource.managed_tags = Some(tags);
+                    }
                     if changed {
                         outcome.transitions.push(ResourceTransition::finished(
                             &resource,
@@ -2376,6 +2413,13 @@ pub async fn reconcile(
         // readiness read that follows it are two questions for the same provisioner, and
         // one lookup is what keeps them from ever being asked of different ones.
         let owner = owner_for(&resource.resource_type);
+        // The create below moves the resolved properties into its request. Keep the exact
+        // managed set before that move, but record ownership only after owner success.
+        let desired_managed_tags = managed_tags_for(
+            &resource.resource_type,
+            &deployed_properties,
+            &stack.tags_for(&resource.logical_id),
+        );
         let created = match owner {
             // The resource is created WITH the tags CloudFormation gives it: the stack's
             // own, plus the three that name the stack and this resource's place in it.
@@ -2422,6 +2466,9 @@ pub async fn reconcile(
             // itself, where that service ASSIGNS the id rather than taking it from a name
             // the template or CloudFormation decided.
             Ok(created) => {
+                if let Some(tags) = desired_managed_tags {
+                    resource.managed_tags = Some(tags);
+                }
                 let computed = resource.physical_resource_id.clone();
                 let computed_attributes = resource.attributes.clone();
                 adopt_minted_identity(&mut resource, created.physical_resource_id);
@@ -2912,6 +2959,7 @@ fn carry_forward(existing: &StoredResource, resource: &mut StoredResource) {
     // says: carrying one resource forward cannot make a declared-only resource — one of a
     // type no service here provisions — into a resource some service holds.
     resource.materialised = existing.materialised;
+    resource.managed_tags = existing.managed_tags.clone();
     for (name, value) in &existing.attributes {
         resource.attributes.insert(name.clone(), value.clone());
     }

@@ -15,6 +15,7 @@ fn declared_record_set(properties: Value) -> StoredResource {
         metadata: None,
         properties,
         materialised: false,
+        managed_tags: None,
         deletion_policy: None,
     }
 }
