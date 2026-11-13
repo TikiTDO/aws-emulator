@@ -199,7 +199,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // is consulted at all — never reported as a resource this account happens not to
         // hold.
         if !crate::state::arn_is_in_caller_account(&input.acme_endpoint_arn) {
-            return Err(cross_account_arn());
+            return Err(cross_account_arn(&input.acme_endpoint_arn));
         }
 
         // A token is only ever read against the endpoint it was issued for, so it is
@@ -329,11 +329,11 @@ fn invalid_next_token(
 }
 
 /// The refusal for an ARN input member that names another account's resource: the same
-/// `ValidationException` class, worded once for the whole service
-/// ([`crate::service::cross_account_arn_refusal`]).
-fn cross_account_arn() -> ListAcmeExternalAccountBindingsError {
+/// `ValidationException` class, worded once for the whole service from the ARN the
+/// request carried ([`crate::service::cross_account_arn_refusal`]).
+fn cross_account_arn(arn: &str) -> ListAcmeExternalAccountBindingsError {
     ListAcmeExternalAccountBindingsErrorModeled::ValidationException(ValidationException {
-        message: Some(crate::service::cross_account_arn_refusal()),
+        message: Some(crate::service::cross_account_arn_refusal(arn)),
     })
     .into()
 }

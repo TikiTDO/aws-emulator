@@ -193,7 +193,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(
                 DeleteAcmeExternalAccountBindingErrorModeled::ValidationException(
                     ValidationException {
-                        message: Some(crate::service::cross_account_arn_refusal()),
+                        message: Some(crate::service::cross_account_arn_refusal(
+                            &input.acme_external_account_binding_arn,
+                        )),
                     },
                 )
                 .into(),

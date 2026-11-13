@@ -318,9 +318,9 @@ async fn an_endpoint_arn_of_another_account_is_refused_as_invalid_input() {
             );
             assert_eq!(
                 error_message(&refusal),
-                crate::acme_authorization::CROSS_ACCOUNT_ARN_MESSAGE,
-                "case {case:?}: expected the cross-account verdict's fixed sentence, got \
-                 {refusal}"
+                crate::acme_authorization::cross_account_arn_message("acme-endpoint"),
+                "case {case:?}: expected the cross-account verdict for the endpoint's own \
+                 resource type, got {refusal}"
             );
         }
     }

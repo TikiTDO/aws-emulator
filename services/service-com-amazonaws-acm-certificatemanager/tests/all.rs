@@ -23,6 +23,8 @@ mod acme_account_listing;
 mod acme_account_registration;
 #[path = "all/acme_authorization.rs"]
 mod acme_authorization;
+#[path = "all/acme_cross_account_arn_envelope.rs"]
+mod acme_cross_account_arn_envelope;
 #[path = "all/acme_directory_endpoint.rs"]
 mod acme_directory_endpoint;
 #[path = "all/acme_domain_validation_delete.rs"]

@@ -320,8 +320,9 @@ async fn deleting_a_validation_of_another_account_is_refused_and_writes_nothing(
         );
         assert_eq!(
             message,
-            crate::acme_authorization::CROSS_ACCOUNT_ARN_MESSAGE,
-            "case {case:?}: expected the cross-account verdict's fixed sentence, got {refusal}"
+            crate::acme_authorization::cross_account_arn_message("acme-domain-validation"),
+            "case {case:?}: expected the cross-account verdict for the validation's own \
+             resource type, got {refusal}"
         );
     }
 

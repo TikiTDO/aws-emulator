@@ -46,11 +46,16 @@ use smithy_server_runtime::MultiServiceRouter;
 use crate::acme_endpoint_lifecycle::{AUTHORIZATION_BEHAVIORS, CONTACTS};
 use crate::certificate_lifecycle::{error_code, error_message, ACCOUNT, REGION};
 
-/// The sentence ACM refuses a cross-account ARN with: WHOLLY FIXED text for this class,
-/// carrying nothing from the request or from the store. Stated here once for every suite
-/// of this crate that pins it.
-pub(crate) const CROSS_ACCOUNT_ARN_MESSAGE: &str =
-    "Invalid ARN in request: Same account ARN expected but got cross-account ARN";
+/// The sentence ACM refuses a cross-account ARN with: the identifier-validation
+/// envelope, scoped to the resource TYPE the offending ARN carries, and carrying nothing
+/// else from the request or from the store. Stated here once for every suite of this
+/// crate that pins it.
+pub(crate) fn cross_account_arn_message(resource_type: &str) -> String {
+    format!(
+        "Resource identifier for {resource_type} has a validation error: Same account ARN \
+         expected but got cross-account ARN"
+    )
+}
 
 /// The access key id of the account's own published credential, as every other suite in
 /// this crate signs with it: a key neither STS nor IAM holds a record for, which is the
@@ -882,30 +887,36 @@ async fn an_arn_of_another_account_is_refused_as_invalid_input() {
 
         // Each row: the operation and the body carrying the foreign ARN — one per ARN
         // member of this service's ACME surface that names the resource a request acts on.
-        let requests: Vec<(&str, Value)> = vec![
+        let requests: Vec<(&str, Value, &str)> = vec![
             (
                 "GetAcmeExternalAccountBindingCredentials",
                 json!({ "AcmeExternalAccountBindingArn": foreign_binding }),
+                "acme-external-account-binding",
             ),
             (
                 "DescribeAcmeExternalAccountBinding",
                 json!({ "AcmeExternalAccountBindingArn": foreign_binding }),
+                "acme-external-account-binding",
             ),
             (
                 "RevokeAcmeExternalAccountBinding",
                 json!({ "AcmeExternalAccountBindingArn": foreign_binding }),
+                "acme-external-account-binding",
             ),
             (
                 "DescribeAcmeEndpoint",
                 json!({ "AcmeEndpointArn": foreign_endpoint }),
+                "acme-endpoint",
             ),
             (
                 "UpdateAcmeEndpoint",
                 json!({ "AcmeEndpointArn": foreign_endpoint, "Contact": CONTACTS[1] }),
+                "acme-endpoint",
             ),
             (
                 "DescribeAcmeDomainValidation",
                 json!({ "AcmeDomainValidationArn": foreign_validation }),
+                "acme-domain-validation",
             ),
             (
                 "UpdateAcmeDomainValidation",
@@ -913,10 +924,11 @@ async fn an_arn_of_another_account_is_refused_as_invalid_input() {
                     "AcmeDomainValidationArn": foreign_validation,
                     "PrevalidationOptions": { "DnsPrevalidation": {} },
                 }),
+                "acme-domain-validation",
             ),
         ];
 
-        for (operation, body) in requests {
+        for (operation, body, resource_type) in requests {
             let case = format!("{operation} on {case}");
             let (status, refusal) = call_as(&router, ACCOUNT_KEY_ID, operation, &body).await;
             assert_eq!(
@@ -935,8 +947,10 @@ async fn an_arn_of_another_account_is_refused_as_invalid_input() {
                  {refusal}"
             );
             assert_eq!(
-                message, CROSS_ACCOUNT_ARN_MESSAGE,
-                "case {case:?}: expected the cross-account verdict's fixed sentence, got {refusal}"
+                message,
+                cross_account_arn_message(resource_type),
+                "case {case:?}: expected the cross-account verdict scoped to {resource_type}, got \
+                 {refusal}"
             );
         }
     }

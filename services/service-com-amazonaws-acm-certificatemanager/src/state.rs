@@ -2925,12 +2925,23 @@ pub fn certificate_domain_not_found_message(certificate_arn: &str, domain_name: 
 /// resource section carries no type at all is named by the generic noun, since there is
 /// no type in the request to report.
 pub fn resource_not_found_message(resource_arn: &str) -> String {
-    let resource_type = acm_arn_resource_type(resource_arn).unwrap_or(UNTYPED_RESOURCE_NOUN);
+    let resource_type = acm_arn_resource_noun(resource_arn);
     format!("Could not find {resource_type} {resource_arn}.")
 }
 
-/// How a not-found sentence names a resource whose ARN carries no resource type to
-/// report.
+/// How a sentence about one ARN names the kind of resource it addressed: the resource
+/// TYPE the ARN itself carries ([`acm_arn_resource_type`]), and the generic noun for an
+/// ARN whose resource section carries no type at all, since there is then no type in the
+/// request to report.
+///
+/// Read by every sentence that has to say WHICH kind of resource an ARN member named —
+/// a lookup that found none ([`resource_not_found_message`]) and a verdict on the ARN
+/// itself — so the two cannot name one resource type differently.
+pub fn acm_arn_resource_noun(arn: &str) -> &str {
+    acm_arn_resource_type(arn).unwrap_or(UNTYPED_RESOURCE_NOUN)
+}
+
+/// How a sentence names a resource whose ARN carries no resource type to report.
 const UNTYPED_RESOURCE_NOUN: &str = "resource";
 
 /// The `ValidationException` message for a CERTIFICATE ARN handed to one of the

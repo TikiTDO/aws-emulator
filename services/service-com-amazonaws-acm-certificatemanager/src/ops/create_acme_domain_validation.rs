@@ -209,7 +209,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // never reported as a resource this account happens not to hold.
         if !crate::state::arn_is_in_caller_account(&input.acme_endpoint_arn) {
             return Err(validation_exception(
-                crate::service::cross_account_arn_refusal(),
+                crate::service::cross_account_arn_refusal(&input.acme_endpoint_arn),
             ));
         }
 

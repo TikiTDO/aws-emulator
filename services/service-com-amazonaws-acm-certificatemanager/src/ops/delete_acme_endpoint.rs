@@ -206,7 +206,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if !crate::state::arn_is_in_caller_account(&input.acme_endpoint_arn) {
             return Err(DeleteAcmeEndpointErrorModeled::ValidationException(
                 ValidationException {
-                    message: Some(crate::service::cross_account_arn_refusal()),
+                    message: Some(crate::service::cross_account_arn_refusal(
+                        &input.acme_endpoint_arn,
+                    )),
                 },
             )
             .into());

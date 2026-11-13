@@ -215,13 +215,23 @@ pub(crate) fn enum_value_refusal(path: &str, allowed: &[&str]) -> String {
 ///
 /// A cross-account ARN is a fact about the REQUEST rather than about the store, so ACM
 /// states it as a verdict on the ARN the request carried: an ARN of the caller's own
-/// account was expected and one of another account arrived. The sentence is WHOLLY FIXED
-/// text for this class — it carries nothing from the request or from the store, so a
-/// refusal cannot echo a caller's own ARN back or say whether a record with that id
-/// exists — and it is rendered here once, so every operation that holds an ARN member to
-/// the caller's account answers the same sentence.
-pub(crate) fn cross_account_arn_refusal() -> String {
-    "Invalid ARN in request: Same account ARN expected but got cross-account ARN".to_string()
+/// account was expected and one of another account arrived. ACM states that verdict in
+/// the envelope it words every identifier-validation refusal in — a resource identifier
+/// of some KIND failed to validate, then the verdict on it — so the sentence is
+/// member-scoped: the one part that comes from the request is the resource TYPE the
+/// offending ARN carries ([`crate::state::acm_arn_resource_noun`]), which is what says
+/// WHICH identifier member of a multi-ARN request was rejected. Nothing else from the
+/// request or the store appears, so a refusal cannot echo a caller's own ARN or account
+/// back, or say whether a record with that id exists.
+///
+/// Rendered here once, so every operation that holds an ARN member to the caller's
+/// account answers the same sentence about its own member.
+pub(crate) fn cross_account_arn_refusal(arn: &str) -> String {
+    format!(
+        "Resource identifier for {} has a validation error: Same account ARN expected but got \
+         cross-account ARN",
+        crate::state::acm_arn_resource_noun(arn)
+    )
 }
 
 /// The subject a clause about `path` opens with: the position that failed

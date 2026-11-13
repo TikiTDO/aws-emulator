@@ -172,7 +172,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(
                 DescribeAcmeDomainValidationErrorModeled::ValidationException(
                     ValidationException {
-                        message: Some(crate::service::cross_account_arn_refusal()),
+                        message: Some(crate::service::cross_account_arn_refusal(
+                            &input.acme_domain_validation_arn,
+                        )),
                     },
                 )
                 .into(),
