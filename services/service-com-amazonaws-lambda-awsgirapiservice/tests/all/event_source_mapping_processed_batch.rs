@@ -34,7 +34,7 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use crate::event_source_mappings::{
     call, call_sqs, create_mapping, create_queue, get_mapping, messages_held,
-    queue_message_counts, router_on,
+    processing_result_within_budget, queue_message_counts, router_on,
 };
 use crate::synchronous_invoke_run::package;
 
@@ -63,9 +63,9 @@ const POLL: Duration = Duration::from_millis(100);
 /// poller which was going to consume anything more has had the chance to.
 const POLL_WINDOWS: Duration = Duration::from_secs(3);
 
-/// Several of the one-second visibility windows the last suite's queue hands a message over
-/// for, for the same reason.
-const VISIBILITY_WINDOWS: Duration = Duration::from_secs(3);
+/// What `LastProcessingResult` reports for an attempt whose function could not be run at
+/// all (`EventSourceMappingConfiguration$LastProcessingResult`).
+const RESULT_FUNCTION_CALL_FAILED: &str = "PROBLEM: Function call failed";
 
 /// Create a function whose handler is `source`, with a `Timeout` of one second so the hold a
 /// batch's delivery takes stays short.
@@ -403,7 +403,22 @@ async fn a_mapping_whose_function_cannot_run_consumes_nothing() {
     wait_for_enabled(&router, case, &uuid).await;
 
     send_message(&router, case, &url, r#"{"id":1}"#).await;
-    tokio::time::sleep(VISIBILITY_WINDOWS).await;
+    // Handing the batch to an invocation and deciding what that invocation came to is a span
+    // no caller controls, so the attempt is waited FOR rather than waited OUT: the row looks
+    // again until the mapping reports the attempt it made.
+    //
+    // "The result of the last Lambda invocation of your function"
+    // (`EventSourceMappingConfiguration$LastProcessingResult`): the attempt failed, so that
+    // is what the mapping reports rather than a success nothing earned.
+    let reported = processing_result_within_budget(&router, case, &uuid).await;
+    assert_eq!(
+        reported.as_deref(),
+        Some(RESULT_FUNCTION_CALL_FAILED),
+        "case {case:?}: expected the mapping to report the failed attempt, got {reported:?}"
+    );
+
+    // The attempt has been decided, so what the queue holds now is what that attempt
+    // consumed: nothing.
     let counts = queue_message_counts(&router, case, &url).await;
     assert_eq!(
         messages_held(counts),
@@ -416,15 +431,5 @@ async fn a_mapping_whose_function_cannot_run_consumes_nothing() {
         held,
         BTreeSet::from([r#"{"id":1}"#.to_string()]),
         "case {case:?}: expected the message to keep its body, got {held:?}"
-    );
-    let read = get_mapping(&router, &uuid).await;
-    // "The result of the last Lambda invocation of your function"
-    // (`EventSourceMappingConfiguration$LastProcessingResult`): the attempt failed, so that
-    // is what the mapping reports rather than a success nothing earned.
-    assert_eq!(
-        read.string("LastProcessingResult").as_deref(),
-        Some("PROBLEM: Function call failed"),
-        "case {case:?}: expected the mapping to report the failed attempt, got {}",
-        read.text()
     );
 }

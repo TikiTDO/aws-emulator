@@ -1211,17 +1211,20 @@ impl UsageReportSubscriptionRecord {
 /// against, and that index is eventually consistent: creates issued together all find the
 /// identity free, all succeed, and the pool ends up holding it exactly once. A create
 /// issued once the identity is ESTABLISHED — the case AWS refuses as an already-taken
-/// username — is one a caller sends after that view has caught up, as a caller which has
-/// already read the user back has.
+/// username — is one a caller sends after that view has caught up.
 ///
-/// AWS publishes no propagation window, so this span is the emulator's own, and it is
-/// SHORT: a caller that has already read the user back has waited a round trip, which is
-/// an order of magnitude longer than this, so that caller's next create is refused as AWS
-/// refuses it. The window is ABSOLUTE — measured from the create that allocated the
-/// identity, and never extended by a later one — so the identity becomes established at an
-/// instant that create fixed, whatever arrives in the meantime. Nothing sleeps for it: the
-/// instant the identity is established is stored on the record.
-pub const USER_ALLOCATION_GRACE: ::std::time::Duration = ::std::time::Duration::from_millis(5);
+/// AWS publishes no propagation window, so this span is the emulator's own, and it is the
+/// same span every other transition this crate owes the clock takes ([`FLEET_START_SPAN`]):
+/// a caller acting straight after the create still observes the allocation that is open —
+/// however many calls it makes in between and however slowly the host runs them — while a
+/// caller that waits for the span sees the identity established and its next create refused
+/// as AWS refuses it. A span short enough to elapse between two calls would make the
+/// OUTCOME of a create depend on how fast the host executed the calls before it, which is
+/// not something this service decides on. The window is ABSOLUTE — measured from the create
+/// that allocated the identity, and never extended by a later one — so the identity becomes
+/// established at an instant that create fixed, whatever arrives in the meantime. Nothing
+/// sleeps for it: the instant the identity is established is stored on the record.
+pub const USER_ALLOCATION_GRACE: ::std::time::Duration = FLEET_START_SPAN;
 
 /// A persisted user pool user.
 ///

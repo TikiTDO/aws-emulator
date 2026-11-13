@@ -43,6 +43,8 @@ mod streaming_url;
 mod update_stack;
 #[path = "all/usage_report_subscription.rs"]
 mod usage_report_subscription;
+#[path = "all/user_allocation_window.rs"]
+mod user_allocation_window;
 #[path = "all/user_enable_disable.rs"]
 mod user_enable_disable;
 #[path = "all/user_identity_allocation.rs"]

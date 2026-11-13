@@ -35,6 +35,7 @@ use serde_json::{json, Value};
 
 use crate::refusal_messages::refusal;
 use crate::stack_fleet_lifecycle::{assert_error, Emulator};
+use crate::user_allocation_window::refused_once_the_allocation_settles;
 
 /// The account every emulated resource belongs to.
 const ACCOUNT: &str = engine::EMULATOR_ACCOUNT_ID;
@@ -726,17 +727,20 @@ async fn the_user_store_refuses_a_user_past_its_ceiling() {
 
     // An identity already held allocates nothing, so a create of one is answered by the
     // identity gate rather than by the ceiling: the username is taken, at the ceiling as
-    // below it.
-    assert_error(
+    // below it. The identity the first create allocated settles on an instant that create
+    // fixed, so this looks again until it has rather than assuming the loop above took
+    // longer than the span.
+    let message = refused_once_the_allocation_settles(
         &emulator,
         case,
-        "CreateUser",
-        json!({
+        &json!({
             "UserName": "u00000@example.com",
             "AuthenticationType": USER_POOL,
         }),
-        400,
-        "ResourceAlreadyExistsException",
     )
     .await;
+    assert_eq!(
+        message, USER_ALREADY_EXISTS_MESSAGE,
+        "case {case:?}: expected message {USER_ALREADY_EXISTS_MESSAGE:?}, got {message:?}"
+    );
 }
