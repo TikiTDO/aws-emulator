@@ -8,6 +8,7 @@ use super::*;
 /// Regional, like the DB instances and snapshots above: a subscription is created in one
 /// region and `DescribeEventSubscriptions` lists that region's subscriptions.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct EventSubscriptionRecord {
     /// The caller's `SubscriptionName`, and the second half of this record's key.
     pub subscription_name: String,

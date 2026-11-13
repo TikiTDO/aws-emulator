@@ -303,6 +303,8 @@ mod requests_aws_refuses;
 mod resource_member_projection;
 #[path = "all/resource_tags.rs"]
 mod resource_tags;
+#[path = "all/restart_persistence.rs"]
+mod restart_persistence;
 #[path = "all/scratch_aurora_truth.rs"]
 mod scratch_aurora_truth;
 #[path = "all/serverless_v2_capacity_range.rs"]

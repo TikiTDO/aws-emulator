@@ -71,6 +71,7 @@ pub fn tenant_database_master_user_secret_name(
 
 /// A persisted tenant database.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TenantDatabaseRecord {
     /// The region whose credential scope the create was signed with.
     pub region: String,
@@ -98,6 +99,7 @@ pub struct TenantDatabaseRecord {
     /// The status change the clock owes this record, if any.
     pub pending_status: Option<PendingStatus>,
     /// `TenantDatabaseCreateTime`.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub create_time: ::aws_smithy_types::DateTime,
     /// `TagList`.
     pub tags: Vec<Tag>,

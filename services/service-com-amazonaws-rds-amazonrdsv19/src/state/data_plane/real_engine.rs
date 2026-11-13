@@ -75,7 +75,7 @@ pub struct RealInstance {
 }
 
 /// Handle retained on the RDS store so `DeleteDBInstance` can stop and clean up the workload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RealWorkload {
     pub handle: WorkloadHandle,
     pub volume: String,
@@ -99,6 +99,57 @@ pub fn postgres_image(engine_version: Option<&str>) -> String {
 /// The named volume an instance's data lives in.
 pub fn volume_name(dbi_resource_id: &str) -> String {
     format!("aws-emulator-rds-{}", dbi_resource_id.to_ascii_lowercase())
+}
+
+/// The named volume a manual or final DB snapshot's `PGDATA` copy lives in.
+///
+/// `DBSnapshotIdentifier` preserves caller case and may be up to 255 characters long, so the
+/// volume name pairs a bounded lowercase slug with a SHA-256 digest suffix to stay collision-free
+/// and within Docker volume-name limits.
+pub fn snapshot_volume_name(snapshot_identifier: &str) -> String {
+    use sha2::Digest as _;
+
+    let digest = hex::encode(sha2::Sha256::digest(snapshot_identifier.as_bytes()));
+    let slug: String = snapshot_identifier
+        .chars()
+        .take(32)
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        format!("aws-emulator-rds-snap-{}", &digest[..16])
+    } else {
+        format!("aws-emulator-rds-snap-{slug}-{}", &digest[..12])
+    }
+}
+
+/// Copy a PostgreSQL `PGDATA` volume (`from_volume`) into `to_volume` on the RDS workload
+/// placement, excluding stale postmaster lockfiles (`postmaster.pid`, `postmaster.opts`) just as
+/// `pg_basebackup` does so `global/pg_control` drives clean WAL recovery on restore.
+pub async fn copy_volume(from_volume: &str, to_volume: &str) -> Result<(), String> {
+    Workloads::default()
+        .copy_volume_excluding(
+            WORKLOAD_KIND,
+            from_volume,
+            to_volume,
+            &["postmaster.pid", "postmaster.opts"],
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Remove a retained DB snapshot volume on the RDS workload placement.
+pub async fn remove_snapshot_volume(volume: &str) -> Result<(), String> {
+    Workloads::default()
+        .remove_volume(WORKLOAD_KIND, volume)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Ensure (adopt or start) the instance's engine workload and wait until the PostgreSQL v3 wire
@@ -361,6 +412,35 @@ mod tests {
         assert!(spec.env.contains(&("POSTGRES_USER".into(), "postgres".into())));
         assert!(spec.env.contains(&("POSTGRES_DB".into(), "app".into())));
         assert_eq!(spec.volumes[0].0, "aws-emulator-rds-db-abc");
+    }
+
+    #[test]
+    fn snapshot_volumes_stay_bounded_and_distinguish_case_and_real_workload_roundtrips_json() {
+        let upper = snapshot_volume_name("Daily-Prod-Snap");
+        let lower = snapshot_volume_name("daily-prod-snap");
+        assert!(upper.starts_with("aws-emulator-rds-snap-daily-prod-snap-"));
+        assert_ne!(upper, lower, "case-distinct snapshot ids must not share one volume");
+
+        let max_len_id = format!("a{}", "b".repeat(254));
+        let max_vol = snapshot_volume_name(&max_len_id);
+        assert!(max_vol.len() <= 72, "got len {}: {max_vol}", max_vol.len());
+        assert!(
+            max_vol
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        );
+
+        let workload = RealWorkload {
+            handle: WorkloadHandle {
+                kind: WORKLOAD_KIND.into(),
+                id: "container-xyz".into(),
+                adopted: false,
+            },
+            volume: volume_name("db-ABC"),
+        };
+        let encoded = serde_json::to_string(&workload).unwrap();
+        let decoded: RealWorkload = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, workload);
     }
 
     #[tokio::test]

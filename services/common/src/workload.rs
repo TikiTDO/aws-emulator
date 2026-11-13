@@ -58,7 +58,7 @@ pub struct WorkloadSpec {
 }
 
 /// A workload [`Workloads::ensure`] made exist.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkloadHandle {
     pub kind: String,
     /// The runtime's own id for it.
@@ -226,6 +226,94 @@ impl Workloads {
         }
         Ok(())
     }
+
+    /// Copy the contents of named volume `from_volume` into `to_volume` on `kind`'s placement,
+    /// creating `to_volume` under this emulator's namespace first.
+    pub async fn copy_volume(
+        &self,
+        kind: &str,
+        from_volume: &str,
+        to_volume: &str,
+    ) -> Result<(), RuntimeError> {
+        self.copy_volume_excluding(kind, from_volume, to_volume, &[])
+            .await
+    }
+
+    /// Copy named volume `from_volume` into `to_volume` on `kind`'s placement, removing any
+    /// top-level entries named in `exclude` from the destination copy before syncing.
+    pub async fn copy_volume_excluding(
+        &self,
+        kind: &str,
+        from_volume: &str,
+        to_volume: &str,
+        exclude: &[&str],
+    ) -> Result<(), RuntimeError> {
+        // Each entry is removed as `/to/<entry>` inside the copy container, so only a plain
+        // file name in the volume's root is admitted: a `/` or `..` would reach elsewhere.
+        if let Some(bad) = exclude
+            .iter()
+            .find(|entry| entry.is_empty() || entry.contains('/') || **entry == "." || **entry == "..")
+        {
+            return Err(RuntimeError {
+                status: Some(500),
+                message: format!("volume copy exclusion {bad:?} is not a plain file name"),
+            });
+        }
+        let runtime = self.runtime(kind);
+        runtime.inspect_volume(from_volume).await?;
+        runtime.ensure_volume(to_volume).await?;
+        let spec = copy_volume_spec(kind, from_volume, to_volume, exclude);
+        let id = runtime.run(&spec).await?;
+        let waited = runtime.wait(&id).await;
+        let _ = runtime.remove(&id).await;
+        let code = waited?;
+        if code != 0 {
+            return Err(RuntimeError {
+                status: Some(500),
+                message: format!(
+                    "volume copy from {from_volume} to {to_volume} exited with code {code}"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Remove named volume `volume` on `kind`'s placement. A volume already gone is not an error.
+    pub async fn remove_volume(&self, kind: &str, volume: &str) -> Result<(), RuntimeError> {
+        match self.runtime(kind).remove_volume(volume).await {
+            Ok(()) | Err(RuntimeError {
+                status: Some(404), ..
+            }) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// The one-shot container specification used to copy `from_volume` into `to_volume`.
+fn copy_volume_spec(
+    kind: &str,
+    from_volume: &str,
+    to_volume: &str,
+    exclude: &[&str],
+) -> ContainerSpec {
+    let mut command = vec![
+        "sh".to_string(),
+        "-ce".to_string(),
+        "cp -a /from/. /to/ && chown \"$(stat -c '%u:%g' /from)\" /to && chmod \"$(stat -c '%a' /from)\" /to; for f in \"$@\"; do rm -f \"/to/$f\"; done; sync".to_string(),
+        "volcopy".to_string(),
+    ];
+    command.extend(exclude.iter().map(|entry| (*entry).to_string()));
+    ContainerSpec {
+        name: format!("aws-emulator-volcopy-{}", uuid::Uuid::new_v4().simple()),
+        image: "alpine:3.20".to_string(),
+        labels: [(KIND_LABEL.to_string(), kind.to_string())].into(),
+        command,
+        volumes: vec![
+            (from_volume.to_string(), "/from".to_string()),
+            (to_volume.to_string(), "/to".to_string()),
+        ],
+        ..ContainerSpec::default()
+    }
 }
 
 /// The identity label's value: kind and identity together, so two kinds never adopt each
@@ -301,5 +389,34 @@ mod tests {
         assert_eq!(Phase::Running { address: None }.endpoint(5432), None);
         assert_eq!(Phase::Pending.endpoint(5432), None);
         assert_eq!(Phase::Exited { code: 1 }.endpoint(5432), None);
+    }
+
+    #[test]
+    fn workload_handle_roundtrips_json_and_copy_volume_spec_mounts_both_volumes() {
+        let handle = WorkloadHandle {
+            kind: "rds".into(),
+            id: "cid-123".into(),
+            adopted: true,
+        };
+        let json = serde_json::to_string(&handle).unwrap();
+        let restored: WorkloadHandle = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, handle);
+
+        let spec = copy_volume_spec(
+            "rds",
+            "aws-emulator-rds-db-a",
+            "aws-emulator-rds-snap-s1",
+            &["postmaster.pid", "postmaster.opts"],
+        );
+        assert_eq!(spec.image, "alpine:3.20");
+        assert_eq!(spec.labels[KIND_LABEL], "rds");
+        assert_eq!(
+            spec.volumes,
+            vec![
+                ("aws-emulator-rds-db-a".to_string(), "/from".to_string()),
+                ("aws-emulator-rds-snap-s1".to_string(), "/to".to_string()),
+            ]
+        );
+        assert_eq!(&spec.command[4..], ["postmaster.pid", "postmaster.opts"]);
     }
 }

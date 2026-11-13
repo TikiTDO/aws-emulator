@@ -346,16 +346,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
         if let Some(snapshot_identifier) = &input.final_db_snapshot_identifier {
-            if store.real_workloads.contains_key(&key) {
-                return Err(DeleteDBInstanceErrorModeled::InvalidDBInstanceStateFault(
-                    InvalidDBInstanceStateFault {
-                        message: Some(format!(
-                            "Final DB snapshots are not supported for host-backed DB instance {identifier}; delete with SkipFinalSnapshot enabled"
-                        )),
-                    },
-                )
-                .into());
-            }
             let snapshot_key = (region.clone(), snapshot_identifier.clone());
             if store.db_snapshots.contains_key(&snapshot_key) {
                 return Err(DeleteDBInstanceErrorModeled::DBSnapshotAlreadyExistsFault(
@@ -382,15 +372,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into());
             }
             // The final snapshot holds the data the instance's storage held when the
-            // delete was accepted, copied above, so restoring it brings those rows back —
-            // which is the point of taking a final snapshot before the delete.
+            // delete was accepted, copied above (or retained on its named host volume for
+            // a real-engine DB instance), so restoring it brings those rows back — which
+            // is the point of taking a final snapshot before the delete.
+            let retained_volume = store
+                .real_workloads
+                .get(&key)
+                .map(|workload| workload.volume.clone());
             let source = &store.db_instances[&key];
-            let snapshot = crate::state::DbSnapshotRecord::from_instance(
+            let mut snapshot = crate::state::DbSnapshotRecord::from_instance(
                 source,
                 snapshot_identifier,
                 source.tags.clone(),
                 storage,
             );
+            snapshot.real_volume = retained_volume;
             let snapshot_arn = snapshot.arn();
             store.db_snapshots.insert(snapshot_key, snapshot);
             // The final snapshot is a DB snapshot this service just started taking, so it
@@ -489,8 +485,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .await;
         }
+        let keep_data = input.final_db_snapshot_identifier.is_some();
         if let Some(workload) = real_workload {
-            let _ = crate::state::data_plane::real_engine::release(&workload, false).await;
+            let _ = crate::state::data_plane::real_engine::release(&workload, keep_data).await;
         }
 
         Ok(DeleteDBInstanceOutput {

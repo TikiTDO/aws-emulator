@@ -208,6 +208,7 @@ pub(crate) fn secure_transport_in_force(
 /// The address a DB instance's engine listener accepts connections on, which is what the
 /// modelled `Endpoint` reports for an instance that has one.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ServedEndpoint {
     /// The host the core bound the listener to.
     pub host: String,
@@ -616,6 +617,17 @@ pub async fn open_relayed_endpoint<Eng: Send + Sync + 'static>(
     engine: &Eng,
     upstream: std::net::SocketAddr,
 ) -> Result<DbEngineEndpoint, String> {
+    open_relayed_endpoint_at(engine, upstream, None).await
+}
+
+/// Open the endpoint of a REAL ENGINE instance ([`real_engine`]), accepting a `preferred_port`
+/// from a restored snapshot so listener port-persistence can rebind the previously published port.
+pub async fn open_relayed_endpoint_at<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    upstream: std::net::SocketAddr,
+    preferred_port: Option<u16>,
+) -> Result<DbEngineEndpoint, String> {
+    let _ = preferred_port;
     let listeners = shared_engine(engine)
         .ok_or_else(|| "this emulator's engine has no listener surface".to_string())?
         .listeners();
@@ -643,6 +655,100 @@ pub async fn open_relayed_endpoint<Eng: Send + Sync + 'static>(
         _listener: listener,
         _reader_listener: None,
     })
+}
+
+/// Reconcile host-backed PostgreSQL workloads after restoring `ComAmazonawsRdsAmazonrdsv19State`
+/// from disk: for every non-deleting DB instance in `real_workloads` that has no live listener in
+/// `db_engine_endpoints`, adopt or restart its container + `PGDATA` volume via
+/// [`real_engine::start`] and re-open its relayed listener.
+pub async fn reconcile_restored_real_engines<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    state: &::engine::ServiceState<ComAmazonawsRdsAmazonrdsv19State>,
+) -> Result<usize, String> {
+    let pending: Vec<(
+        RegionalKey,
+        real_engine::RealInstance,
+        Option<u16>,
+        String,
+        ::service_common::db_data_sources::MonitoringConfiguration,
+    )> = {
+        let store = state.lock();
+        store
+            .real_workloads
+            .keys()
+            .filter(|key| !store.db_engine_endpoints.contains_key(*key))
+            .filter_map(|key| {
+                let record = store.db_instances.get(key)?;
+                if record.is_deleting() {
+                    return None;
+                }
+                let preferred_port = record
+                    .served_endpoint
+                    .as_ref()
+                    .and_then(|endpoint| u16::try_from(endpoint.port).ok());
+                let monitoring = ::service_common::db_data_sources::MonitoringConfiguration {
+                    performance_insights_enabled: record.performance_insights_enabled,
+                    database_insights_mode: Some(record.database_insights_mode.clone()),
+                };
+                Some((
+                    key.clone(),
+                    real_engine::RealInstance {
+                        dbi_resource_id: record.dbi_resource_id.clone(),
+                        engine_version: record.engine_version.clone(),
+                        master_username: record.master_username.clone().unwrap_or_default(),
+                        master_password: String::new(),
+                        db_name: record.db_name.clone(),
+                    },
+                    preferred_port,
+                    record.engine.clone(),
+                    monitoring,
+                ))
+            })
+            .collect()
+    };
+
+    let mut reconciled = 0usize;
+    for (key, real_instance, preferred_port, engine_name, monitoring) in pending {
+        let (upstream, workload) = real_engine::start(&real_instance).await?;
+        let endpoint = match open_relayed_endpoint_at(engine, upstream, preferred_port).await {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                let _ = real_engine::release(&workload, true).await;
+                return Err(error);
+            }
+        };
+        let dbi_resource_id = real_instance.dbi_resource_id.clone();
+        let attached = {
+            let mut store = state.lock();
+            if let Some(record) = store.db_instances.get_mut(&key) {
+                if !record.is_deleting() {
+                    record.served_endpoint = Some(endpoint.endpoint.clone());
+                    store.real_workloads.insert(key.clone(), workload.clone());
+                    store.db_engine_endpoints.insert(key, endpoint);
+                    if let Some(directory) = super::data_source_directory(engine) {
+                        let mut directory = directory.lock();
+                        directory.register(
+                            &dbi_resource_id,
+                            ::service_common::db_data_sources::SERVICE_TYPE_RDS,
+                            &engine_name,
+                        );
+                        directory.record_monitoring(&dbi_resource_id, monitoring);
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        if attached {
+            reconciled += 1;
+        } else {
+            let _ = real_engine::release(&workload, true).await;
+        }
+    }
+    Ok(reconciled)
 }
 
 /// The SHARED engine this service is mounted on, which owns the listener surface: call it

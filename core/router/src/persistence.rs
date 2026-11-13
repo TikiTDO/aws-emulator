@@ -95,8 +95,16 @@ impl Persistence {
             engine,
             entries: vec![
                 Entry::of::<service_com_amazonaws_kms_trentservice::state::ComAmazonawsKmsTrentserviceState>(),
+                // Sealed with KMS keys, so after KMS.
+                Entry::of::<service_com_amazonaws_secretsmanager_secretsmanager::state::ComAmazonawsSecretsmanagerSecretsmanagerState>(),
+                Entry::of::<service_com_amazonaws_ssm_amazonssm::state::ComAmazonawsSsmAmazonssmState>(),
                 Entry::of::<service_com_amazonaws_iam_awsidentitymanagementv20100508::state::ComAmazonawsIamAwsidentitymanagementv20100508State>(),
                 Entry::of::<service_com_amazonaws_ec2_amazonec2::state::ComAmazonawsEc2Amazonec2State>(),
+                Entry::of::<service_com_amazonaws_route53_awsdnsv20130401::state::ComAmazonawsRoute53Awsdnsv20130401State>(),
+                Entry::of::<service_com_amazonaws_acm_certificatemanager::state::ComAmazonawsAcmCertificatemanagerState>(),
+                Entry::of::<service_common::acm_certificate_key_material::CertificateKeyMaterialDirectory>(),
+                // Instances sit in EC2 subnets and may hold Secrets Manager credentials.
+                Entry::of::<service_com_amazonaws_rds_amazonrdsv19::state::ComAmazonawsRdsAmazonrdsv19State>(),
                 Entry::of::<service_com_amazonaws_cloudwatchlogs_logs_20140328::state::ComAmazonawsCloudwatchlogsLogs20140328State>(),
             ],
             written: tokio::sync::Mutex::new(HashMap::new()),

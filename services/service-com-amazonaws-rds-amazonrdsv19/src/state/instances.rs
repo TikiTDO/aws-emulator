@@ -15,6 +15,7 @@ pub const MASKED_PENDING_MASTER_USER_PASSWORD: &str = "****";
 /// after `ModifyDBInstance` renames an instance — a stored ARN would still name the
 /// old identifier.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DbInstanceRecord {
     pub identifier: String,
     /// The region the instance was created in; the scope of its ARN and endpoint.
@@ -113,6 +114,7 @@ pub struct DbInstanceRecord {
     pub engine_lifecycle_support: String,
     /// The storage throughput provisioned for the instance, in MiBps.
     pub storage_throughput: i32,
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub instance_create_time: ::aws_smithy_types::DateTime,
     /// When this instance's database engine last came UP: the create that provisioned it,
     /// or the most recent restart of the engine (`RebootDBInstance`, `StartDBInstance`).
@@ -122,6 +124,7 @@ pub struct DbInstanceRecord {
     /// `pg_postmaster_start_time()` reports and what decides whether a parameter change
     /// that waits for a reboot is in force yet
     /// ([`data_plane::pg_server::running_parameters`]).
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub engine_started_at: ::aws_smithy_types::DateTime,
     pub tags: Vec<Tag>,
     /// `AssociatedRoles`: the IAM roles associated with this instance, in the order they

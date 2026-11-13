@@ -19,6 +19,7 @@ aws-smithy-types = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net", "sync", "time"] }
 bytes = { workspace = true }
 http = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 # The DB instance DATA plane (`src/state/data_plane/`): the engine endpoint a PostgreSQL

@@ -17471,6 +17471,7 @@ dependencies = [
  "parquet",
  "rusqlite",
  "rustls",
+ "serde",
  "serde_json",
  "service-com-amazonaws-ec2-amazonec2",
  "service-com-amazonaws-iam-awsidentitymanagementv20100508",

@@ -482,7 +482,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // below is opened asynchronously, and a state guard cannot be held across an
         // await. The copy of the snapshot's storage leaves the block as a handle, so the
         // data loaded below is the data the snapshot held when it was taken.
-        let (mut record, snapshot_storage) = {
+        let (mut record, snapshot_storage, snapshot_real_volume) = {
             let mut store = state.lock();
             store.settle_due_transitions(&region);
 
@@ -822,48 +822,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 named_source.describe(),
                 record.status
             ));
-            (record, source.storage.clone())
+            (record, source.storage.clone(), source.real_volume.clone())
         };
 
-        // The restored instance's own ENGINE ENDPOINT, opened with the state lock
-        // released, exactly as a create opens one: binding is asynchronous and the core
-        // owns the socket, the bind interface and the port. It is opened AFTER every
-        // refusal above has been answered, and before the record is admitted to the store.
-        let endpoint = match crate::state::engine_wire(&record.engine) {
-            Some(wire) => Some(
-                crate::state::open_engine_endpoint(
-                    &*self.engine,
-                    &state,
-                    crate::state::EngineEndpointPlan {
-                        target: crate::state::SessionTarget::DbInstance {
-                            region: region.clone(),
-                            resource_id: record.dbi_resource_id.clone(),
-                        },
-                        wire,
-                        role: crate::state::EndpointRole::Writer,
-                        // A DB instance publishes ONE address, its own `Endpoint`: no
-                        // read-only endpoint is opened for it.
-                        reader: false,
-                        storage: None,
-                    },
-                )
-                .await
-                .map_err(RestoreDBInstanceFromDBSnapshotError::internal_failure)?,
-            ),
-            // An engine whose native wire this emulator does not speak: no listener is
-            // opened and the instance keeps the DNS-form endpoint this service has always
-            // reported for it, rather than publishing a port that would answer nothing.
-            None => None,
-        };
-        record.served_endpoint = endpoint
-            .as_ref()
-            .map(|endpoint| endpoint.endpoint.clone());
         // `ManageMasterUserPassword` has RDS "generate and manage the master user password
         // with Amazon Web Services Secrets Manager" for the instance this call creates, and
         // report the secret it created as `MasterUserSecret` — a NEW secret of the restored
         // instance's own, which is why the restored record carries the generated credential
         // rather than the source's. Minted with the store's guard released and after every
         // refusal has been answered, exactly as `CreateDBInstance` mints one.
+        let mut master_password = None;
         if input.manage_master_user_password == Some(true) {
             let minted = crate::state::mint_master_user_secret(
                 &*self.engine,
@@ -889,32 +857,145 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     &minted.password,
                 )
             });
+            master_password = Some(minted.password.clone());
             record.master_user_secret = Some(minted.secret);
         }
+
+        // The restored instance's own ENGINE ENDPOINT, opened with the state lock
+        // released, exactly as a create opens one: binding is asynchronous and the core
+        // owns the socket, the bind interface and the port. It is opened AFTER every
+        // refusal above has been answered, and before the record is admitted to the store.
+        let real = record.db_cluster_identifier.is_none()
+            && crate::state::data_plane::real_engine::applies(&record.engine);
+        let mut real_workload = None;
+        let opened_endpoint = match crate::state::engine_wire(&record.engine) {
+            Some(_) if real => {
+                let target_volume =
+                    crate::state::data_plane::real_engine::volume_name(&record.dbi_resource_id);
+                let copied = match &snapshot_real_volume {
+                    Some(from_volume) => crate::state::data_plane::real_engine::copy_volume(
+                        from_volume,
+                        &target_volume,
+                    )
+                    .await
+                    .map(|()| true),
+                    None => Ok(false),
+                };
+                match copied {
+                    Ok(copied_volume) => {
+                        match crate::state::data_plane::real_engine::start(
+                            &crate::state::data_plane::real_engine::RealInstance {
+                                dbi_resource_id: record.dbi_resource_id.clone(),
+                                engine_version: record.engine_version.clone(),
+                                master_username: record.master_username.clone().unwrap_or_default(),
+                                master_password: master_password.unwrap_or_default(),
+                                db_name: record.db_name.clone(),
+                            },
+                        )
+                        .await
+                        {
+                            Ok((upstream, workload)) => {
+                                match crate::state::data_plane::open_relayed_endpoint(
+                                    &*self.engine,
+                                    upstream,
+                                )
+                                .await
+                                {
+                                    Ok(endpoint) => {
+                                        real_workload = Some(workload);
+                                        Ok(Some(endpoint))
+                                    }
+                                    Err(error) => {
+                                        let _ = crate::state::data_plane::real_engine::release(
+                                            &workload, false,
+                                        )
+                                        .await;
+                                        Err(error)
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                if copied_volume {
+                                    let _ = crate::state::data_plane::real_engine::remove_snapshot_volume(
+                                        &target_volume,
+                                    )
+                                    .await;
+                                }
+                                Err(error)
+                            }
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Some(wire) => crate::state::open_engine_endpoint(
+                &*self.engine,
+                &state,
+                crate::state::EngineEndpointPlan {
+                    target: crate::state::SessionTarget::DbInstance {
+                        region: region.clone(),
+                        resource_id: record.dbi_resource_id.clone(),
+                    },
+                    wire,
+                    role: crate::state::EndpointRole::Writer,
+                    // A DB instance publishes ONE address, its own `Endpoint`: no
+                    // read-only endpoint is opened for it.
+                    reader: false,
+                    storage: None,
+                },
+            )
+            .await
+            .map(Some),
+            // An engine whose native wire this emulator does not speak: no listener is
+            // opened and the instance keeps the DNS-form endpoint this service has always
+            // reported for it, rather than publishing a port that would answer nothing.
+            None => Ok(None),
+        };
+        let endpoint = match opened_endpoint {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                if let Some(secret) = &record.master_user_secret {
+                    crate::state::release_orphaned_master_user_secret(
+                        &*self.engine,
+                        ctx,
+                        &region,
+                        &crate::state::db_instance_arn(&region, &record.identifier),
+                        &secret.secret_arn,
+                    )
+                    .await;
+                }
+                return Err(RestoreDBInstanceFromDBSnapshotError::internal_failure(error));
+            }
+        };
+        record.served_endpoint = endpoint
+            .as_ref()
+            .map(|endpoint| endpoint.endpoint.clone());
         // THE RESTORE ITSELF: the data the snapshot holds is loaded into the new
         // instance's own storage, by the engine, before the endpoint is published — so the
         // first session a client opens on it finds the snapshot's rows and not an empty
         // database. A snapshot that holds no copy at all (one taken of an instance whose
-        // engine this emulator serves no data plane for) leaves the new storage empty,
-        // which is all it has to restore.
+        // engine this emulator serves no data plane for, or a real-engine instance whose
+        // `PGDATA` volume was copied above) leaves the in-process storage empty.
         //
         // On a blocking task and with no state lock held: the copy is engine work, bounded
         // by the engine's own copy deadline, exactly as the capture that took it was.
-        if let (Some(endpoint), Some(storage)) = (endpoint.as_ref(), snapshot_storage) {
-            let destination = endpoint.database();
-            ::tokio::task::spawn_blocking(move || destination.load_from(&storage))
-                .await
-                .map_err(|error| {
-                    RestoreDBInstanceFromDBSnapshotError::internal_failure(format!(
-                        "the DB snapshot's data could not be restored: {error}"
-                    ))
-                })?
-                .map_err(|error| {
-                    RestoreDBInstanceFromDBSnapshotError::internal_failure(format!(
-                        "the DB snapshot's data could not be restored: {}",
-                        error.message
-                    ))
-                })?;
+        if !real {
+            if let (Some(endpoint), Some(storage)) = (endpoint.as_ref(), snapshot_storage) {
+                let destination = endpoint.database();
+                ::tokio::task::spawn_blocking(move || destination.load_from(&storage))
+                    .await
+                    .map_err(|error| {
+                        RestoreDBInstanceFromDBSnapshotError::internal_failure(format!(
+                            "the DB snapshot's data could not be restored: {error}"
+                        ))
+                    })?
+                    .map_err(|error| {
+                        RestoreDBInstanceFromDBSnapshotError::internal_failure(format!(
+                            "the DB snapshot's data could not be restored: {}",
+                            error.message
+                        ))
+                    })?;
+            }
         }
 
         // Another request may have created this identifier while this one was binding, so
@@ -926,6 +1007,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             store.db_instances.contains_key(&key)
         };
         if taken {
+            if let Some(workload) = &real_workload {
+                let _ = crate::state::data_plane::real_engine::release(workload, false).await;
+            }
             if let Some(secret) = &record.master_user_secret {
                 crate::state::release_orphaned_master_user_secret(
                     &*self.engine,
@@ -961,7 +1045,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The listener is the instance's: the store holds it, so it stays open for as
         // long as the instance does and closes with it.
         if let Some(endpoint) = endpoint {
-            store.db_engine_endpoints.insert(key, endpoint);
+            store.db_engine_endpoints.insert(key.clone(), endpoint);
+        }
+        if let Some(workload) = real_workload {
+            store.real_workloads.insert(key, workload);
         }
         // A DB instance was created, so the region's event log records it: the restore is
         // how this one came to exist, and `DescribeEvents` reports that entry for it from
@@ -1038,6 +1125,8 @@ struct SourceSettings {
     tags: Vec<crate::ops::types::Tag>,
     /// The copy of the source's storage the snapshot holds, if the source had any.
     storage: Option<::std::sync::Arc<crate::state::data_plane::sql_engine::InstanceDatabase>>,
+    /// The retained host volume for a real-engine DB snapshot, if the source had one.
+    real_volume: Option<String>,
 }
 
 /// Resolve the snapshot `named` names in `region`, and read the settings a restore of it
@@ -1119,6 +1208,7 @@ fn resolve_source(
                     &snapshot.tags,
                 ),
                 storage: snapshot.storage.clone(),
+                real_volume: snapshot.real_volume.clone(),
             })
         }
         NamedSource::ClusterSnapshot(requested) => {
@@ -1201,6 +1291,7 @@ fn resolve_source(
                     &snapshot.tags,
                 ),
                 storage: None,
+                real_volume: None,
             })
         }
     }

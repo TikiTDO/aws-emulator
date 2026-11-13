@@ -253,7 +253,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 input
                     .source_type
                     .as_ref()
-                    .is_none_or(|wanted| wanted == record.source_type)
+                    .is_none_or(|wanted| *wanted == record.source_type)
             })
             .filter(|record| {
                 input.source_identifier.as_ref().is_none_or(|wanted| {
@@ -267,7 +267,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 wanted_categories.is_empty()
                     || wanted_categories
                         .iter()
-                        .any(|wanted| wanted == record.category)
+                        .any(|wanted| *wanted == record.category)
             })
             .map(|record| (record.marker(), record.to_wire()))
             .collect();

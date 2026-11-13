@@ -305,6 +305,7 @@ pub fn export_part_id(export_task_identifier: &str) -> String {
 /// progress fields belong to the export that is writing the objects, so a reader reports
 /// exactly what the writer last left.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ExportTaskRecord {
     /// `ExportTaskIdentifier`, which is half this record's key.
     pub identifier: String,
@@ -319,10 +320,13 @@ pub struct ExportTaskRecord {
     /// the whole source is exported.
     pub export_only: Vec<String>,
     /// `SnapshotTime`: when the exported snapshot was created.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub snapshot_time: ::aws_smithy_types::DateTime,
     /// `TaskStartTime`.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub task_start_time: ::aws_smithy_types::DateTime,
     /// `TaskEndTime`, once the task has reached a terminal status.
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub task_end_time: Option<::aws_smithy_types::DateTime>,
     /// `S3Bucket`.
     pub s3_bucket: String,

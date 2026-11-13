@@ -11,6 +11,7 @@ use super::*;
 /// [`OptionRecord::to_wire`] reads at projection time, so a stored group cannot drift
 /// from the catalogue the way a stored copy could.
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct OptionRecord {
     /// The catalogue's own spelling of the option's name.
     pub name: String,
@@ -160,6 +161,7 @@ pub fn option_group_in_use_message(name: &str) -> String {
 /// which [`OptionGroupRecord::to_wire`] computes, so it cannot drift from the record
 /// the way a stored copy could.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct OptionGroupRecord {
     pub name: String,
     /// The region the group was created in; the scope of its ARN.
@@ -184,6 +186,7 @@ pub struct OptionGroupRecord {
 /// `OptionGroup` publishes for a copied group, recorded ONCE when the copy is taken, so
 /// every later read of the group reports the same answer.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CopiedOptionGroup {
     /// `SourceOptionGroup` — "the name of the option group from which this option group
     /// is copied": the source's own name, whichever form the request named it by.
@@ -193,6 +196,7 @@ pub struct CopiedOptionGroup {
     pub source_account_id: String,
     /// `CopyTimestamp` — "when the option group was copied", fixed at the instant the
     /// copy was taken.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub copy_timestamp: ::aws_smithy_types::DateTime,
 }
 

@@ -29,6 +29,7 @@ const DEFAULT_FOR_AZ_FILTER: &str = "default-for-az";
 /// The network the account's `default` DB subnet group covers: the default VPC and its
 /// default subnets, as the owner of subnets reported them.
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DefaultSubnetGroupNetwork {
     /// The VPC those subnets belong to, as EC2 reported it; `None` where it named none.
     pub vpc_id: Option<String>,

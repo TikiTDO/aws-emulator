@@ -133,6 +133,7 @@ pub fn check_kms_key_id(value: &str) -> Result<(), String> {
 
 /// A persisted zero-ETL integration.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IntegrationRecord {
     /// `IntegrationName`, which is half this record's key.
     pub name: String,
@@ -157,6 +158,7 @@ pub struct IntegrationRecord {
     /// The status change the clock owes this record, if any.
     pub pending_status: Option<PendingStatus>,
     /// `CreateTime`.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub create_time: ::aws_smithy_types::DateTime,
     /// `Tags`.
     pub tags: Vec<Tag>,
