@@ -404,8 +404,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     ) -> Result<Self::Output, Self::Error> {
         // Conditional: "You must specify either TemplateBody or TemplateURL, but not
         // both" (`CreateStackInput$TemplateBody`).
-        let template_body = match (&input.template_body, &input.template_url) {
-            (Some(body), None) => body.clone(),
+        let (template_body, max_template_bytes) = match (&input.template_body, &input.template_url) {
+            (Some(body), None) => (body.clone(), crate::state::TEMPLATE_BODY_MAX_BYTES),
             (Some(_), Some(_)) => {
                 return Err(crate::scaffolded::Scaffolded::validation_error(
                     crate::state::BOTH_TEMPLATE_SOURCES,
@@ -420,13 +420,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // addresses is read from this emulator's own Amazon S3 and becomes the body
             // this create deploys, so a template submitted by reference and the same one
             // submitted inline create the same stack (`crate::state::template_url`).
-            (None, Some(url)) => crate::state::template_url::fetch(
-                ctx,
-                &crate::state::request_region(ctx.parts()),
-                url,
-            )
-            .await
-            .map_err(crate::scaffolded::Scaffolded::validation_error)?,
+            (None, Some(url)) => (
+                crate::state::template_url::fetch(
+                    ctx,
+                    &crate::state::request_region(ctx.parts()),
+                    url,
+                )
+                .await
+                .map_err(crate::scaffolded::Scaffolded::validation_error)?,
+                crate::state::TEMPLATE_MAX_BYTES,
+            ),
         };
         // "You can specify either DisableRollback or OnFailure, but not both."
         if input.disable_rollback.is_some() && input.on_failure.is_some() {
@@ -479,7 +482,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .map_err(crate::scaffolded::Scaffolded::validation_error)?;
         // The documented `TemplateBody` maximum, which the model carries no `@length` for:
         // a stored body is caller-sized otherwise.
-        crate::state::validate_template_body(&template_body)
+        crate::state::validate_template_body_within(&template_body, max_template_bytes)
             .map_err(crate::scaffolded::Scaffolded::validation_error)?;
         // "Only one of the Capabilities and ResourceType parameters can be specified": the
         // two members state two different bounds on this create, so a request stating both
