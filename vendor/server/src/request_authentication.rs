@@ -5,11 +5,18 @@
 //! `MultiServiceRouter::new` decides once whether to enforce it; the serve path then
 //! publishes the keys of [`SigV4Authenticator::minted_credentials`].
 
-use aws_sigv4::http_request::{PercentEncodingMode, SignableBody, SignableRequest, sign};
-use aws_sigv4::http_request::{SignatureLocation, SigningSettings, UriPathNormalizationMode};
 use crate::aws_credentials::{SECRET_ACCESS_KEY, SESSION_TOKEN, SIGV4_SCHEME};
 use crate::credential_store::{CredentialStore, random_from, same_secret};
+use aws_sigv4::http_request::{PercentEncodingMode, SignableBody, SignableRequest, sign};
+use aws_sigv4::http_request::{SignatureLocation, SigningSettings, UriPathNormalizationMode};
 use std::time::{Duration, SystemTime};
+
+mod stream;
+pub use stream::{
+    PayloadSignatureBinding, PayloadStep, RequestAuthenticationStream, StreamAuthentication,
+    StreamAuthenticationError, StreamIntegrityFailure, StreamValidationError,
+    begin_uncredentialed_stream,
+};
 
 type Parts = http::request::Parts;
 
@@ -42,6 +49,16 @@ pub trait RequestAuthenticator: Send + Sync {
         serving_signing_name: &str,
         credentials: &CredentialStore,
     ) -> Result<(), Denied>;
+    /// Incremental verification for an explicitly selected payload route. Unsupported is not
+    /// anonymous admission: the caller must retain its bounded route or refuse before polling.
+    fn begin_stream(
+        &'static self,
+        _parts: &Parts,
+        _serving_signing_name: &str,
+        _credentials: std::sync::Arc<CredentialStore>,
+    ) -> Result<Box<dyn RequestAuthenticationStream>, StreamAuthenticationError> {
+        Err(StreamAuthenticationError::Unsupported)
+    }
     /// What a caller must present to pass this authenticator, when it can be handed out.
     fn vended_credentials(&self) -> Option<VendedCredentials> {
         None
@@ -149,16 +166,7 @@ impl SigV4Authenticator {
         signed: &Signature,
         secret: &str,
     ) -> Option<String> {
-        let settings = signing_settings(signed.signing_name(), signed.expires_secs);
-        with_signing_params(signed, secret, settings, |params| {
-            let headers = signed.headers.iter().filter(|name| *name != X_AMZ_DATE);
-            let headers = headers.flat_map(|name| header_values(parts, name));
-            let uri = signable_uri_with_signed_host(parts, signed)?;
-            let payload = payload(parts, body, signed);
-            let request = SignableRequest::new(parts.method.as_str(), uri, headers, payload);
-            let signing = sign(request.ok()?, &params.into()).ok()?;
-            Some(signing.signature().to_string())
-        })
+        signature_for_payload(parts, signed, secret, payload(parts, body, signed))
     }
 }
 
@@ -185,6 +193,15 @@ impl RequestAuthenticator for SigV4Authenticator {
         )
     }
 
+    fn begin_stream(
+        &'static self,
+        parts: &Parts,
+        serving_signing_name: &str,
+        credentials: std::sync::Arc<CredentialStore>,
+    ) -> Result<Box<dyn RequestAuthenticationStream>, StreamAuthenticationError> {
+        stream::begin(self, parts, serving_signing_name, credentials)
+    }
+
     fn verify(
         &self,
         parts: &Parts,
@@ -192,35 +209,8 @@ impl RequestAuthenticator for SigV4Authenticator {
         serving_signing_name: &str,
         credentials: &CredentialStore,
     ) -> Result<(), Denied> {
-        let signed = Signature::of(parts).ok_or(ACCESS_DENIED)?;
-        let signed_for_serving = |service: &str| {
-            crate::normalize_service_key(service) == serving_signing_name
-                || (signs_like_s3(service) && signs_like_s3(serving_signing_name))
-        };
-        let scoped_key_id = match &signed.scope[..] {
-            [key_id, _, _, service, terminator]
-                if signed_for_serving(service) && terminator == "aws4_request" =>
-            {
-                Some(key_id)
-            }
-            _ => None,
-        };
-        let expired = signed.expires_secs.is_some_and(|secs| {
-            if secs > MAX_PRESIGNED_EXPIRES_SECS {
-                return true;
-            }
-            let at = parse_amz_date(&signed.amz_date);
-            let valid_until = at.and_then(|at| at.checked_add(Duration::from_secs(secs)));
-            valid_until.is_none_or(|valid_until| valid_until < SystemTime::now())
-        });
-        let (Some(key_id), false) = (scoped_key_id, expired) else {
-            return Err(ACCESS_DENIED);
-        };
-        if signed.expires_secs.is_none() && !within_clock_skew(&signed.amz_date) {
-            return Err(REQUEST_TIME_TOO_SKEWED);
-        }
-        let secret = self.secret_for(key_id, credentials)?;
-        own_session_token_presented(parts, key_id, credentials)?;
+        let (signed, secret) =
+            checked_signature_credentials(self, parts, serving_signing_name, credentials)?;
         let expected = self.signature_for(parts, body, &signed, &secret);
         let matches = expected.is_some_and(|expected| same_secret(&expected, &signed.value));
         let chunks_match =
@@ -229,6 +219,61 @@ impl RequestAuthenticator for SigV4Authenticator {
             .then_some(())
             .ok_or(SIGNATURE_MISMATCH)
     }
+}
+
+fn signature_for_payload(
+    parts: &Parts,
+    signed: &Signature,
+    secret: &str,
+    payload: SignableBody<'_>,
+) -> Option<String> {
+    let settings = signing_settings(signed.signing_name(), signed.expires_secs);
+    with_signing_params(signed, secret, settings, |params| {
+        let headers = signed.headers.iter().filter(|name| *name != X_AMZ_DATE);
+        let headers = headers.flat_map(|name| header_values(parts, name));
+        let uri = signable_uri_with_signed_host(parts, signed)?;
+        let request = SignableRequest::new(parts.method.as_str(), uri, headers, payload);
+        let signing = sign(request.ok()?, &params.into()).ok()?;
+        Some(signing.signature().to_string())
+    })
+}
+
+fn checked_signature_credentials(
+    authenticator: &SigV4Authenticator,
+    parts: &Parts,
+    serving_signing_name: &str,
+    credentials: &CredentialStore,
+) -> Result<(Signature, String), Denied> {
+    let signed = Signature::of(parts).ok_or(ACCESS_DENIED)?;
+    let signed_for_serving = |service: &str| {
+        crate::normalize_service_key(service) == serving_signing_name
+            || (signs_like_s3(service) && signs_like_s3(serving_signing_name))
+    };
+    let scoped_key_id = match &signed.scope[..] {
+        [key_id, _, _, service, terminator]
+            if signed_for_serving(service) && terminator == "aws4_request" =>
+        {
+            Some(key_id)
+        }
+        _ => None,
+    };
+    let expired = signed.expires_secs.is_some_and(|secs| {
+        if secs > MAX_PRESIGNED_EXPIRES_SECS {
+            return true;
+        }
+        let at = parse_amz_date(&signed.amz_date);
+        let valid_until = at.and_then(|at| at.checked_add(Duration::from_secs(secs)));
+        valid_until.is_none_or(|valid_until| valid_until < SystemTime::now())
+    });
+    let (Some(key_id), false) = (scoped_key_id, expired) else {
+        return Err(ACCESS_DENIED);
+    };
+    if signed.expires_secs.is_none() && !within_clock_skew(&signed.amz_date) {
+        return Err(REQUEST_TIME_TOO_SKEWED);
+    }
+    let secret = authenticator.secret_for(key_id, credentials)?;
+    own_session_token_presented(parts, key_id, credentials)?;
+    Ok((signed, secret))
 }
 
 /// The SigV4 fields of a request, from its `Authorization` header or else its presigned query.
@@ -312,7 +357,9 @@ fn own_session_token_presented(
         return Ok(());
     };
     let header = parts.headers.get("x-amz-security-token");
-    let header = header.and_then(|value| value.to_str().ok()).map(str::to_string);
+    let header = header
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let presented = header.or_else(|| presigned_field(parts, "X-Amz-Security-Token"));
     let matches = presented.is_some_and(|presented| same_secret(&expected, &presented));
     matches.then_some(()).ok_or(INVALID_SESSION_TOKEN)
@@ -541,10 +588,19 @@ pub fn presign_url(
     };
     let settings = signing_settings(target.signing_name, Some(expires_secs));
     let credentials = aws_credential_types::Credentials::builder().provider_name("emulator");
-    let identity = credentials.access_key_id(key_id).secret_access_key(secret).build().into();
+    let identity = credentials
+        .access_key_id(key_id)
+        .secret_access_key(secret)
+        .build()
+        .into();
     let params = aws_sigv4::sign::v4::SigningParams::builder().identity(&identity);
     let params = params.region(target.region).name(target.signing_name);
-    let params = params.time(signed_at).settings(settings).build().ok()?.into();
+    let params = params
+        .time(signed_at)
+        .settings(settings)
+        .build()
+        .ok()?
+        .into();
     let payload_header = presigned_payload_header(target.signing_name, target.method);
     let body = match signs_like_s3(target.signing_name) || payload_header.is_some() {
         true => SignableBody::UnsignedPayload,
@@ -554,7 +610,11 @@ pub fn presign_url(
     let request = SignableRequest::new(target.method, &uri, headers, body).ok()?;
     let (instructions, _) = sign(request, &params).ok()?.into_parts();
     let (_, signature_fields) = instructions.into_parts();
-    query.extend(signature_fields.iter().map(|(name, value)| format!("{name}={}", encode(value))));
+    query.extend(
+        signature_fields
+            .iter()
+            .map(|(name, value)| format!("{name}={}", encode(value))),
+    );
     Some(format!("{}{path}?{}", target.endpoint, query.join("&")))
 }
 

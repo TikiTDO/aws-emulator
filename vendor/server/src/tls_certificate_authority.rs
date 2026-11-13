@@ -45,7 +45,9 @@ impl TlsCertificateAuthority {
             return Ok(made);
         }
         let mut names: Vec<String> = ["localhost", "127.0.0.1", "::1"].map(String::from).into();
-        let bound = crate::bind_address_from_env().ok();
+        let bound = crate::runtime_profile::network()
+            .ok()
+            .map(|profile| profile.bind_address());
         for ip in [bound, client_host].into_iter().flatten() {
             let name = ip.to_string();
             if !ip.is_unspecified() && !names.contains(&name) {

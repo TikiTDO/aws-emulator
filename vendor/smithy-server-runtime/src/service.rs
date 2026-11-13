@@ -335,6 +335,12 @@ pub trait ErasedServiceDefinition {
 /// defaulting to "let the framework do the default." No deserialization, no
 /// telemetry, and no response construction happens here.
 pub trait Service: Send + Sync + 'static {
+    /// Optional raw payload route. Selection confers no authentication or commit authority.
+    /// Ambiguous and body-routed requests remain on the existing buffered path.
+    fn payload_route(&self, _parts: &http::request::Parts) -> Option<crate::transport::PayloadRoute> {
+        None
+    }
+
     /// This service's model-derived half (identity, wire protocol, routing table, and
     /// the protocol-correct error renderers), as an engine-erased
     /// [`ErasedServiceDefinition`].
