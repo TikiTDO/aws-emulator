@@ -1458,7 +1458,10 @@ async fn a_default_policy_may_not_state_its_configuration_twice() {
             "DefaultPolicy": "VOLUME",
             "PolicyDetails": {"PolicyLanguage": "SIMPLIFIED", "ResourceType": "VOLUME"},
         });
+        // The same parameter in BOTH places: the request body, and the
+        // configuration structure beside it.
         request[*member] = value.clone();
+        request["PolicyDetails"][*member] = value.clone();
         let answer = create(&router, request).await;
         assert_eq!(
             answer.status, 400,
@@ -1490,6 +1493,7 @@ async fn a_default_policy_may_not_state_its_configuration_twice() {
     });
     for (member, value) in &refused {
         all[*member] = value.clone();
+        all["PolicyDetails"][*member] = value.clone();
     }
     let answer = create(&router, all).await;
     assert_eq!(

@@ -588,6 +588,7 @@ async fn an_update_may_not_state_the_configuration_twice() {
         });
         patch[member] = value.clone();
         cases.push((format!("{member} stated in both places"), patch));
+        everything["PolicyDetails"][member] = value.clone();
         everything[member] = value;
     }
     cases.push(("every member stated in both places".to_string(), everything));

@@ -305,6 +305,15 @@ fn with_body_parameters(mut request: Value, stated: &[(&'static str, Value)]) ->
     request
 }
 
+/// `details` with each of `stated` set INSIDE it — the OTHER place a request can
+/// state the same parameter, which is what makes it stated twice.
+fn with_details_parameters(mut details: Value, stated: &[(&'static str, Value)]) -> Value {
+    for (member, value) in stated {
+        details[*member] = value.clone();
+    }
+    details
+}
+
 /// The members of `stated`, in the order the model declares them — what a
 /// refusal built from the one shared set must name.
 fn declared_order(stated: &[(&'static str, Value)]) -> Vec<&'static str> {
@@ -427,8 +436,10 @@ async fn the_create_and_the_update_refuse_the_same_body_parameter_set() {
 }
 
 /// The other refusal the same set feeds: a default policy's configuration stated
-/// in the request body AND in `PolicyDetails`. The create and the update name the
-/// same body parameters beside the structure they cannot be combined with.
+/// in the request body AND in `PolicyDetails`. Every row states each member in
+/// BOTH places — the two are alternatives per member — and the create and the
+/// update name the same body parameters beside the structure they cannot be
+/// combined with.
 #[tokio::test]
 async fn the_create_and_the_update_name_the_same_set_when_the_configuration_is_stated_twice() {
     let router = emulator();
@@ -453,36 +464,34 @@ async fn the_create_and_the_update_name_the_same_set_when_the_configuration_is_s
     for row in rows() {
         // The create states the configuration in both places: the body members,
         // and a `SIMPLIFIED` structure — which is what makes it a default policy.
-        let created = create(
-            &router,
-            with_body_parameters(
-                json!({
-                    "ExecutionRoleArn": role_arn(),
-                    "Description": "a default policy stating it twice",
-                    "State": "ENABLED",
-                    POLICY_DETAILS_MEMBER: {"PolicyLanguage": DEFAULT_POLICY_LANGUAGE},
-                }),
-                &row.stated,
-            ),
-        )
-        .await;
+        let mut create_request = with_body_parameters(
+            json!({
+                "ExecutionRoleArn": role_arn(),
+                "Description": "a default policy stating it twice",
+                "State": "ENABLED",
+            }),
+            &row.stated,
+        );
+        create_request[POLICY_DETAILS_MEMBER] = with_details_parameters(
+            json!({
+                "PolicyLanguage": DEFAULT_POLICY_LANGUAGE,
+                "ResourceType": DEFAULT_POLICY_TYPE,
+            }),
+            &row.stated,
+        );
+        let created = create(&router, create_request).await;
         let create_case = format!("{}: stated twice by a create", row.case);
         assert_refusal_names(&create_case, &row.stated, &created);
 
-        let patched = update(
-            &router,
-            &default_policy,
-            with_body_parameters(
-                json!({
-                    POLICY_DETAILS_MEMBER: {
-                        "PolicyLanguage": DEFAULT_POLICY_LANGUAGE,
-                        "ResourceType": DEFAULT_POLICY_TYPE,
-                    },
-                }),
-                &row.stated,
-            ),
-        )
-        .await;
+        let mut patch = with_body_parameters(json!({}), &row.stated);
+        patch[POLICY_DETAILS_MEMBER] = with_details_parameters(
+            json!({
+                "PolicyLanguage": DEFAULT_POLICY_LANGUAGE,
+                "ResourceType": DEFAULT_POLICY_TYPE,
+            }),
+            &row.stated,
+        );
+        let patched = update(&router, &default_policy, patch).await;
         let update_case = format!("{}: stated twice by an update", row.case);
         assert_refusal_names(&update_case, &row.stated, &patched);
 

@@ -12,9 +12,10 @@
 //! qualified by `PolicyDetails.`, every one in the order the model declares them.
 //! The set feeds two refusals: a policy that is not a default policy may carry
 //! none of those members (so stating one anywhere is refused), and a default
-//! policy's request states them "either in the request body, or in the
-//! PolicyDetails request structure, but not both" (so stating the structure and
-//! body members is refused, naming the body members beside the structure).
+//! policy's request states each of them "either in the request body, or in the
+//! PolicyDetails request structure, but not both" (so stating one parameter in
+//! both places is refused, naming the body members it duplicated beside the
+//! structure).
 //!
 //! Every case drives the router, so each one exercises routing, deserialization,
 //! the handler, the persisted record and serialization — the path a client takes.
@@ -480,9 +481,9 @@ async fn the_create_and_the_update_compose_one_refusal_for_a_custom_policy() {
 }
 
 /// And both compose the other refusal the same set feeds — a default policy's
-/// configuration stated in the request body AND in the structure — from the body
-/// half alone, naming those members beside the structure they cannot be combined
-/// with.
+/// configuration stated in the request body AND in the structure, member for
+/// member — naming the body members it stated twice beside the structure they
+/// cannot be combined with.
 #[tokio::test]
 async fn the_create_and_the_update_compose_one_stated_twice_refusal() {
     let router = emulator();
@@ -517,38 +518,36 @@ async fn the_create_and_the_update_compose_one_stated_twice_refusal() {
             .collect();
 
         // The create states the configuration in both places: the body members,
-        // and a `SIMPLIFIED` structure — which is what makes it a default policy.
-        let created = create(
-            &router,
-            with_body(
-                json!({
-                    "ExecutionRoleArn": role_arn(),
-                    "Description": "a default policy stating it twice",
-                    "State": "ENABLED",
-                    POLICY_DETAILS_MEMBER: {"PolicyLanguage": DEFAULT_POLICY_LANGUAGE},
-                }),
-                &row.body,
-            ),
-        )
-        .await;
+        // and a `SIMPLIFIED` structure restating every one of them.
+        let mut create_request = with_body(
+            json!({
+                "ExecutionRoleArn": role_arn(),
+                "Description": "a default policy stating it twice",
+                "State": "ENABLED",
+            }),
+            &row.body,
+        );
+        create_request[POLICY_DETAILS_MEMBER] = with_details(
+            json!({
+                "PolicyLanguage": DEFAULT_POLICY_LANGUAGE,
+                "ResourceType": DEFAULT_POLICY_TYPE,
+            }),
+            &row.body,
+        );
+        let created = create(&router, create_request).await;
         let create_case = format!("{}: stated twice by a create", row.case);
         assert_modelled_refusal(&create_case, &created);
         assert_names_composed(&create_case, &expected, &created);
 
-        let patched = update(
-            &router,
-            &default_policy,
-            with_body(
-                json!({
-                    POLICY_DETAILS_MEMBER: {
-                        "PolicyLanguage": DEFAULT_POLICY_LANGUAGE,
-                        "ResourceType": DEFAULT_POLICY_TYPE,
-                    },
-                }),
-                &row.body,
-            ),
-        )
-        .await;
+        let mut patch = with_body(json!({}), &row.body);
+        patch[POLICY_DETAILS_MEMBER] = with_details(
+            json!({
+                "PolicyLanguage": DEFAULT_POLICY_LANGUAGE,
+                "ResourceType": DEFAULT_POLICY_TYPE,
+            }),
+            &row.body,
+        );
+        let patched = update(&router, &default_policy, patch).await;
         let update_case = format!("{}: stated twice by an update", row.case);
         assert_modelled_refusal(&update_case, &patched);
         assert_names_composed(&update_case, &expected, &patched);

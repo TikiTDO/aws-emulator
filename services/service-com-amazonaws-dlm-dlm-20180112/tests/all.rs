@@ -4,10 +4,8 @@
 //!
 //! Put a new suite at `tests/all/<name>.rs` and declare it below, keeping the list
 //! sorted.
-//!
 //! A suite that is not declared here compiles nowhere and its tests never run. A
 //! suite left at the top level of `tests/` fails the build.
-
 // `tests/all.rs` is a test-target CRATE ROOT, so a bare `mod` resolves to a SIBLING
 // (`tests/state_roundtrip.rs`) — which the layout check refuses. The `#[path]` is what
 // points it into `tests/all/`.
@@ -17,8 +15,8 @@ mod archive_creation_frequency;
 mod configuration_kind_from_policy_type;
 #[path = "all/create_policy_kind_materialization.rs"]
 mod create_policy_kind_materialization;
-#[path = "all/custom_policy_only_parameters.rs"]
-mod custom_policy_only_parameters;
+#[path = "all/default_policy_configuration_one_place_each.rs"]
+mod default_policy_configuration_one_place_each;
 #[path = "all/default_policy_configuration_precedence.rs"]
 mod default_policy_configuration_precedence;
 #[path = "all/default_policy_managed_type.rs"]
@@ -81,3 +79,5 @@ mod tag_write_date_modified;
 mod unresolvable_policy_id;
 #[path = "all/validation_refusal_message_templates.rs"]
 mod validation_refusal_message_templates;
+#[path = "all/custom_policy_only_parameters.rs"]
+mod custom_policy_only_parameters;

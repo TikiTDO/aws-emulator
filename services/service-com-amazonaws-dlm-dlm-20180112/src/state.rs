@@ -659,9 +659,13 @@ impl DefaultPolicyConfiguration {
 
     /// This configuration where it states a member, `fallback` elsewhere.
     ///
-    /// A request that states the same member in both places is refused
-    /// ([`configuration_stated_twice`]), so at most one side states each member
-    /// and the precedence never decides anything a caller can observe.
+    /// One request may state some of its configuration in the request body and
+    /// the rest inside the structure — the two are alternatives per member, and
+    /// a member stated in both places is refused
+    /// ([`configuration_stated_twice`]) — so this MERGES the two halves, taking
+    /// each member from whichever of them stated it. At most one side states any
+    /// one member, so the precedence itself never decides anything a caller can
+    /// observe.
     pub fn or(self, fallback: Self) -> Self {
         Self {
             resource_type: self.resource_type.or(fallback.resource_type),
@@ -1315,6 +1319,25 @@ impl DefaultPolicyOnlyParameters {
         }
     }
 
+    /// The members BOTH sets state, member by member — the parameters one
+    /// request stated twice when the two sets are its two places.
+    ///
+    /// The "but not both" rule is about ONE parameter stated in two places, so
+    /// it is decided per member: a parameter stated in one place alone is
+    /// nowhere stated twice, whatever OTHER parameters the other place states.
+    pub fn stated_in_both(&self, other: &Self) -> Self {
+        Self {
+            resource_type: self.resource_type && other.resource_type,
+            create_interval: self.create_interval && other.create_interval,
+            retain_interval: self.retain_interval && other.retain_interval,
+            copy_tags: self.copy_tags && other.copy_tags,
+            cross_region_copy_targets: self.cross_region_copy_targets
+                && other.cross_region_copy_targets,
+            extend_deletion: self.extend_deletion && other.extend_deletion,
+            exclusions: self.exclusions && other.exclusions,
+        }
+    }
+
     /// The wire names of the members stated, in the order the model declares
     /// them, each qualified by `prefix` — [`POLICY_DETAILS_PREFIX`] for a member
     /// stated inside the configuration structure, `""` for a request-body one.
@@ -1429,22 +1452,19 @@ impl DefaultPolicyOnlyRequest<'_> {
     ///   so a request stating one anywhere — in the request body or inside the
     ///   configuration structure — is refused naming every place it stated one
     ///   ([`default_policy_only_parameters_refused`]);
-    /// * a DEFAULT policy's request states them "either in the request body, or
-    ///   in the PolicyDetails request structure, but not both", so a request
-    ///   carrying the structure AND body members is refused naming those body
-    ///   members ([`configuration_stated_twice`]).
+    /// * a DEFAULT policy's request states each of them "either in the request
+    ///   body, or in the PolicyDetails request structure, but not both", so a
+    ///   request is refused for the parameters it states in BOTH places, named
+    ///   by the body member it used ([`configuration_stated_twice`]) — and a
+    ///   parameter stated in one place alone is accepted however many other
+    ///   parameters the other place states.
     pub fn violation(&self) -> Option<InvalidRequestException> {
         if !self.default_policy {
             let refused = self.stated_names();
             return (!refused.is_empty())
                 .then(|| default_policy_only_parameters_refused(&refused));
         }
-        // A request carrying no configuration structure states the configuration
-        // in one place, so there is nothing for the second rule to refuse.
-        let duplicated = match self.details {
-            Some(_) => self.duplicated_body_names(),
-            None => Vec::new(),
-        };
+        let duplicated = self.duplicated_body_names();
         (!duplicated.is_empty()).then(|| configuration_stated_twice(&duplicated))
     }
 
@@ -1458,9 +1478,14 @@ impl DefaultPolicyOnlyRequest<'_> {
         stated
     }
 
-    /// The body parameters a request carrying the configuration structure states
-    /// a second time, named by the BODY member the caller used — the alternative
-    /// to the structure.
+    /// The body parameters this request states a SECOND time inside its
+    /// configuration structure, named by the BODY member the caller used — the
+    /// alternative to the structure.
+    ///
+    /// Each parameter is compared across the two places on its own, so the list
+    /// holds exactly the parameters the request really stated twice: a request
+    /// carrying no structure, or one whose structure states none of the body's
+    /// parameters, duplicates nothing.
     ///
     /// The resource type is one of those parameters, stated in the body as
     /// [`DEFAULT_POLICY_MEMBER`] and in the structure as
@@ -1469,8 +1494,9 @@ impl DefaultPolicyOnlyRequest<'_> {
     /// only when the structure states one too. It leads the list, the position
     /// [`DefaultPolicyOnlyParameters::stated_names`] gives it.
     fn duplicated_body_names(&self) -> Vec<String> {
-        let mut duplicated = self.body.stated_names("");
-        if self.body_resource_type && self.in_details().resource_type {
+        let in_details = self.in_details();
+        let mut duplicated = self.body.stated_in_both(&in_details).stated_names("");
+        if self.body_resource_type && in_details.resource_type {
             duplicated.insert(0, DEFAULT_POLICY_MEMBER.to_string());
         }
         duplicated
