@@ -1831,6 +1831,31 @@ pub(super) fn return_values(
             attributes.insert("VdmAttributesResourceId".to_string(), name.to_string());
             (name.to_string(), attributes)
         }
+        "AWS::SES::EmailIdentity" => {
+            let identity = properties
+                .get("EmailIdentity")
+                .and_then(|v| text(v, scope, 0, budget))
+                .unwrap_or_else(|| name.to_string());
+            let token1 = derived_digits("ses/dkim-token-1", &identity, 24, Alphabet::Lower);
+            let token2 = derived_digits("ses/dkim-token-2", &identity, 24, Alphabet::Lower);
+            let token3 = derived_digits("ses/dkim-token-3", &identity, 24, Alphabet::Lower);
+            attributes.insert("DkimDNSTokenName1".to_string(), format!("{token1}._domainkey.{identity}"));
+            attributes.insert("DkimDNSTokenValue1".to_string(), format!("{token1}.dkim.amazonses.com"));
+            attributes.insert("DkimDNSTokenName2".to_string(), format!("{token2}._domainkey.{identity}"));
+            attributes.insert("DkimDNSTokenValue2".to_string(), format!("{token2}.dkim.amazonses.com"));
+            attributes.insert("DkimDNSTokenName3".to_string(), format!("{token3}._domainkey.{identity}"));
+            attributes.insert("DkimDNSTokenValue3".to_string(), format!("{token3}.dkim.amazonses.com"));
+            (identity, attributes)
+        }
+        "AWS::SES::ConfigurationSetEventDestination" => {
+            let event_dest_name = properties
+                .get("EventDestination")
+                .and_then(|v| v.get("Name"))
+                .and_then(|v| text(v, scope, 0, budget))
+                .unwrap_or_else(|| name.to_string());
+            attributes.insert("Id".to_string(), event_dest_name.clone());
+            (event_dest_name, attributes)
+        }
         _ => (name.to_string(), attributes),
     }
 }
@@ -1936,6 +1961,17 @@ pub fn published_attribute_names(resource_type: &str) -> &'static [&'static str]
         S3VECTORS_VECTOR_BUCKET => &["VectorBucketArn"],
         S3VECTORS_INDEX => &["IndexArn"],
         "AWS::DynamoDB::Table" => &["Arn"],
+        "AWS::SES::EmailIdentity" => &[
+            "DkimDNSTokenName1",
+            "DkimDNSTokenValue1",
+            "DkimDNSTokenName2",
+            "DkimDNSTokenValue2",
+            "DkimDNSTokenName3",
+            "DkimDNSTokenValue3",
+        ],
+        "AWS::WAFv2::LoggingConfiguration" => &["ManagedByFirewallManager", "ResourceArn"],
+        "AWS::SES::VdmAttributes" => &["VdmAttributesResourceId"],
+        "AWS::SES::ConfigurationSetEventDestination" => &["Id"],
         "AWS::Lambda::Function" => &["Arn"],
         // "Fn::GetAtt … FunctionArn: the ARN of the version. Version: the version number."
         LAMBDA_VERSION => &["FunctionArn", "Version"],
