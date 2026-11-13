@@ -364,7 +364,9 @@ async fn not_enough_zones(
         ReplicationSubnetGroupDoesNotCoverEnoughAZs {
             message: Some(format!(
                 "Replication Subnet Group doesn't meet availability zone coverage requirement. \
-                 Please add subnets to cover at least {} availability zones. Current AZ \
+                 Please create a subnet group containing subnets to cover at least {} \
+                 availability zones using the DMS console or CLI commands \
+                 create-replication-subnet-group or modify-replication-subnet-group. Current AZ \
                  coverage: {covered}. Valid availability zones are: [{}]",
                 crate::state::MIN_SUBNET_GROUP_AVAILABILITY_ZONES,
                 zones.join(", ")
