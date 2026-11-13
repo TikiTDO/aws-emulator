@@ -457,8 +457,10 @@ async fn confirm_subscription_refuses_an_unknown_topic_and_a_value_that_is_not_a
     let token = token_of(&sns, "the subscription under test", &arn);
 
     // Well-formed topic ARNs this account holds no topic for: a name nobody created, a
-    // topic deleted with its subscriptions, another region, another account, another
-    // partition, another service.
+    // topic deleted with its subscriptions, another region, another partition, another
+    // service. An ARN naming another ACCOUNT is not one this endpoint resolves at all —
+    // it is refused before the lookup, with the account-resolution refusal every
+    // ARN-addressed call of this service shares (see the `arn_reference_refusals` suite).
     let deleted = sns.topic("confirm-deleted-topic").await;
     let deleted_answer = sns.call("DeleteTopic", &[("TopicArn", &deleted)]).await;
     assert_eq!(
@@ -470,7 +472,6 @@ async fn confirm_subscription_refuses_an_unknown_topic_and_a_value_that_is_not_a
         ("a name nobody created", "arn:aws:sns:us-east-1:000000000000:absent-topic".to_string()),
         ("a deleted topic", deleted.clone()),
         ("another region", "arn:aws:sns:eu-west-1:000000000000:elsewhere".to_string()),
-        ("another account", "arn:aws:sns:us-east-1:123456789012:theirs".to_string()),
         ("another partition", "arn:aws-us-gov:sns:us-gov-west-1:000000000000:gov".to_string()),
         ("another service", "arn:aws:sqs:us-east-1:000000000000:q".to_string()),
     ];

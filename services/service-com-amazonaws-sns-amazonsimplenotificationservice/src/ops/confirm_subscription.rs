@@ -176,8 +176,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         // Argument validation, BEFORE the store is consulted: a `TopicArn` that is not
-        // an ARN at all is bad input, not a topic that does not exist.
-        if let Some(message) = state::arn_refusal("TopicArn", &input.topic_arn) {
+        // an ARN at all — or whose resource is no topic name, which names no topic
+        // anywhere — is bad input, not a topic that does not exist.
+        if let Some(message) = state::arn_refusal("TopicArn", &input.topic_arn)
+            .or_else(|| state::topic_name_refusal(&input.topic_arn))
+        {
             return Err(ConfirmSubscriptionErrorModeled::InvalidParameterException(
                 InvalidParameterException {
                     message: Some(message),

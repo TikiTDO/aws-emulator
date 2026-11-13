@@ -449,6 +449,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 is_fifo,
                 created_at: std::time::SystemTime::now(),
                 subscriptions_deleted: 0,
+                subscriptions_deleting: Vec::new(),
                 archive_enabled_at: None,
             };
             // A topic created WITH an archive policy archives from the moment it exists.

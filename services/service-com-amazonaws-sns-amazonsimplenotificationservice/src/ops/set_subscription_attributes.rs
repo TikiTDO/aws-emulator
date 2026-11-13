@@ -205,10 +205,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> SetSubscriptionAt
         // is not a subscription ARN at all — including the `pending confirmation`
         // sentinel a `Subscribe` response carries in place of one — is bad input, not a
         // subscription that does not exist.
-        if let Some(reason) = state::malformed_subscription_arn(&input.subscription_arn) {
-            return Err(invalid_parameter(format!(
-                "Invalid parameter: SubscriptionArn Reason: {reason}"
-            )));
+        if let Some(message) =
+            state::subscription_arn_refusal("SubscriptionArn", &input.subscription_arn)
+        {
+            return Err(invalid_parameter(message));
         }
         // A subscription belongs to the region of the topic it extends, which its own
         // ARN carries: one naming another region names nothing this endpoint serves.
@@ -290,6 +290,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> SetSubscriptionAt
                 &input.attribute_name,
                 value,
                 &subscription.protocol,
+                state::AttributeMember::Named,
             ) {
                 return Err(invalid_parameter(message));
             }

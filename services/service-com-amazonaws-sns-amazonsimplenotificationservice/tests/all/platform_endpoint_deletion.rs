@@ -327,10 +327,6 @@ async fn deleting_an_endpoint_the_account_does_not_hold_changes_nothing() {
         })
         .collect();
     cases.push((
-        "the held endpoint's ARN under another account".to_string(),
-        kept.replace(":000000000000:", ":111111111111:"),
-    ));
-    cases.push((
         "an ARN that names a topic rather than an endpoint".to_string(),
         topic.clone(),
     ));

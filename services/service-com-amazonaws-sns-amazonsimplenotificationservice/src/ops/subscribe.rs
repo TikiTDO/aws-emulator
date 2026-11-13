@@ -258,24 +258,15 @@ fn endpoint_matches_protocol(protocol: &str, endpoint: &str) -> bool {
     }
 }
 
-/// How the refusal of a bad endpoint names what the protocol wanted.
+/// The sentence SNS refuses an `Endpoint` that is not in the form the requested
+/// `Protocol` requires with.
 ///
-/// Only the `lambda` wording is pinned by a recorded AWS response ("Invalid
-/// parameter: Lambda endpoint ARN"); the other entries say the same thing about the
-/// same kind of endpoint. The REQUIREMENT this refusal carries is its HTTP 400 and
-/// its `InvalidParameter` code — the text is an example of SNS's wording.
-fn endpoint_requirement(protocol: &str) -> &'static str {
-    match protocol {
-        "http" | "https" => "Endpoint must match the specified protocol",
-        "email" | "email-json" => "Email address",
-        "sms" => "PhoneNumber",
-        "sqs" => "SQS endpoint ARN",
-        "application" => "Application endpoint ARN",
-        "lambda" => "Lambda endpoint ARN",
-        "firehose" => "Firehose endpoint ARN",
-        _ => "Endpoint",
-    }
-}
+/// `Invalid parameter:` plus the input MEMBER whose value was not accepted, and nothing
+/// else: the sentence is the same whichever protocol was asked for and whatever the
+/// value was, so neither the protocol, nor the form its endpoint takes, nor any part of
+/// the request is in it. One sentence for one condition is what lets a client tell this
+/// refusal from the other conditions SNS groups under `InvalidParameter` on `Subscribe`.
+const INVALID_ENDPOINT_REFUSAL: &str = "Invalid parameter: Endpoint";
 
 /// The refusal for a subscription record whose attribute map would cross the
 /// per-record byte ceiling, or `None` when it fits.
@@ -395,7 +386,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> Subscribe<Eng> {
         // held to no such rule: a subscriber is reached in the region its own ARN
         // names, which need not be the topic's.
         if let Some(message) =
-            crate::state::regional_arn_refusal("TopicArn", &input.topic_arn, &region)
+            crate::state::topic_arn_refusal("TopicArn", &input.topic_arn, &region)
         {
             return Err(SubscribeErrorModeled::InvalidParameterException(
                 InvalidParameterException {
@@ -432,10 +423,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> Subscribe<Eng> {
         if !valid_endpoint {
             return Err(SubscribeErrorModeled::InvalidParameterException(
                 InvalidParameterException {
-                    message: Some(format!(
-                        "Invalid parameter: {}",
-                        endpoint_requirement(&protocol)
-                    )),
+                    // SNS names the INPUT MEMBER whose value it did not accept, and
+                    // nothing else: not the protocol, not the form that protocol's
+                    // endpoint takes, and no part of the value the caller sent. Recorded
+                    // evidence: an `sqs` subscription of a value that is not a queue ARN
+                    // and a `lambda` subscription of one that is not a function ARN are
+                    // both answered `400 InvalidParameter` with exactly this sentence.
+                    message: Some(INVALID_ENDPOINT_REFUSAL.to_string()),
                 },
             )
             .into());
@@ -569,7 +563,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> Subscribe<Eng> {
                 state::AttributeMember::Map,
             )
             .or_else(|| {
-                state::subscription_attribute_protocol_refusal(name, value, &protocol)
+                state::subscription_attribute_protocol_refusal(
+                    name,
+                    value,
+                    &protocol,
+                    state::AttributeMember::Map,
+                )
             });
             if let Some(message) = refusal {
                 return Err(SubscribeErrorModeled::InvalidParameterException(

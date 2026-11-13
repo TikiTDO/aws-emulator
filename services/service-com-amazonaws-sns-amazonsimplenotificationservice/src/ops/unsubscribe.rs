@@ -194,12 +194,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // A `SubscriptionArn` that is not a subscription ARN fails argument validation
         // BEFORE any lookup, so garbage is refused as bad input rather than reported as
         // a subscription that is merely absent.
-        if let Some(reason) = state::malformed_subscription_arn(&input.subscription_arn) {
+        if let Some(message) =
+            state::subscription_arn_refusal("SubscriptionArn", &input.subscription_arn)
+        {
             return Err(UnsubscribeErrorModeled::InvalidParameterException(
                 InvalidParameterException {
-                    message: Some(format!(
-                        "Invalid parameter: SubscriptionArn Reason: {reason}"
-                    )),
+                    message: Some(message),
                 },
             )
             .into());
@@ -240,10 +240,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Ok(UnsubscribeOutput);
         };
         // The messages delivered to a subscription go with it, but the topic keeps
-        // counting the deletion: that is its `SubscriptionsDeleted` attribute.
+        // counting the deletion: that is its `SubscriptionsDeleted` attribute, which the
+        // topic takes up once the count settles rather than as part of this call
+        // ([`state::SUBSCRIPTION_DELETION_SETTLES_AFTER`]).
         store.forget_deliveries(&input.subscription_arn);
         if let Some(topic) = store.topics.get_mut(&removed.topic_arn) {
-            topic.subscriptions_deleted = topic.subscriptions_deleted.saturating_add(1);
+            topic.count_deleted_subscription();
         }
 
         Ok(UnsubscribeOutput)

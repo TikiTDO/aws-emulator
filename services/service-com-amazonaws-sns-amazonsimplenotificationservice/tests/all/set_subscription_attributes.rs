@@ -584,11 +584,13 @@ async fn setting_a_subscription_attribute_sns_does_not_accept_is_refused() {
 }
 
 /// An attribute refused because the SUBSCRIPTION's delivery protocol is not one SNS
-/// documents it for is refused with SNS's own whole sentence — `Invalid parameter:
-/// Delivery protocol [<protocol>] does not support <feature>.` — and not with the
-/// `<member> Reason: ` frame this crate states a bad member VALUE in: the attribute's
-/// value broke no constraint of its own, the subscription it was set on is what refused
-/// it. The same sentence answers whichever call wrote the attribute.
+/// documents it for is refused with SNS's own whole sentence — `Delivery protocol
+/// [<protocol>] does not support <feature>.` — and not with the `<member> Reason:
+/// <attribute>: ` frame this crate states a bad member VALUE in: the attribute's value
+/// broke no constraint of its own, the subscription it was set on is what refused it.
+/// What the sentence is reported UNDER is the member the attribute arrived in: given by
+/// name it stands alone, and carried in a `Subscribe` request's `Attributes` map it is
+/// reported under that member, which is the member the caller has to change.
 ///
 /// The rows differ in the protocol refused, the attribute and so the feature, and the
 /// writing operation, which is what the rule generalises over; the recorded
@@ -662,8 +664,14 @@ async fn a_protocol_scoped_attribute_is_refused_with_the_whole_sentence() {
     ];
 
     for (index, (case, protocol, name, value, feature)) in cases.iter().enumerate() {
-        let want =
-            format!("Invalid parameter: Delivery protocol [{protocol}] does not support {feature}.");
+        let sentence = format!("Delivery protocol [{protocol}] does not support {feature}.");
+        // Given the attribute BY NAME, the sentence is the whole message.
+        let want = format!("Invalid parameter: {sentence}");
+        // Carried in the `Attributes` map, the same sentence is reported under that
+        // member. Recorded evidence: a `Subscribe` enabling raw message delivery on a
+        // `lambda` endpoint answers `Invalid parameter: Attributes Reason: ` and this
+        // sentence.
+        let want_on_subscribe = format!("Invalid parameter: Attributes Reason: {sentence}");
         let topic = sns.topic(&format!("protocol-scope-{index:02}")).await;
 
         // The write path the recorded check drove: SetSubscriptionAttributes.
@@ -686,7 +694,8 @@ async fn a_protocol_scoped_attribute_is_refused_with_the_whole_sentence() {
             "case {case:?}: expected the message {want:?}, got {message:?}"
         );
 
-        // And the SAME sentence when Subscribe carries the attribute instead.
+        // And the same sentence, under the member it arrived in, when Subscribe carries
+        // the attribute instead.
         let on_subscribe = sns
             .call(
                 "Subscribe",
@@ -707,8 +716,8 @@ async fn a_protocol_scoped_attribute_is_refused_with_the_whole_sentence() {
         );
         let subscribe_message = on_subscribe.element("Message").unwrap_or_default();
         assert_eq!(
-            subscribe_message, want,
-            "case {case:?}: Subscribe expected the message {want:?}, got \
+            subscribe_message, want_on_subscribe,
+            "case {case:?}: Subscribe expected the message {want_on_subscribe:?}, got \
              {subscribe_message:?}"
         );
     }

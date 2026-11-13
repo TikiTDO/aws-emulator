@@ -182,10 +182,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // A `TopicArn` naming another region names a topic this endpoint does not
         // serve, so the grant is refused as bad input rather than written into another
-        // region's state.
+        // region's state — and so is one whose resource is no topic name, which names
+        // no topic anywhere.
         let region = crate::state::request_region(ctx.parts());
         if let Some(message) =
             state::foreign_region_refusal("TopicArn", &input.topic_arn, &region)
+                .or_else(|| state::topic_name_refusal(&input.topic_arn))
         {
             return Err(invalid_parameter(message));
         }

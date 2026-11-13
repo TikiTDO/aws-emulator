@@ -362,9 +362,11 @@ async fn publish_batch_refuses_the_batch_level_failures_the_model_names() {
         // The awsQuery form has no spelling for a list that is PRESENT and empty: a
         // batch with no entries carries no `PublishBatchRequestEntries.member.*`
         // parameter at all, so the boundary validator refuses the absent required
-        // member before the handler's `EmptyBatchRequestException` can apply. Either
-        // way the batch is refused with 400 and publishes nothing.
-        ("no entries at all", topic.clone(), Vec::new(), 400, "MalformedInput"),
+        // member before the handler's `EmptyBatchRequestException` can apply. The
+        // member is not the one that addresses the topic, so the refusal is the
+        // validation layer's own, under its `ValidationError` code. Either way the
+        // batch is refused with 400 and publishes nothing.
+        ("no entries at all", topic.clone(), Vec::new(), 400, "ValidationError"),
         (
             "one past the ten entry maximum",
             topic.clone(),

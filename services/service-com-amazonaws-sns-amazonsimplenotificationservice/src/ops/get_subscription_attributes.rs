@@ -148,13 +148,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // is not a subscription ARN at all — including the `pending confirmation`
         // sentinel a `Subscribe` response carries in place of one — is bad input, not a
         // subscription that does not exist.
-        if let Some(reason) = state::malformed_subscription_arn(&input.subscription_arn) {
+        if let Some(message) =
+            state::subscription_arn_refusal("SubscriptionArn", &input.subscription_arn)
+        {
             return Err(
                 GetSubscriptionAttributesErrorModeled::InvalidParameterException(
                     InvalidParameterException {
-                        message: Some(format!(
-                            "Invalid parameter: SubscriptionArn Reason: {reason}"
-                        )),
+                        message: Some(message),
                     },
                 )
                 .into(),

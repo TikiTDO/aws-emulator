@@ -192,6 +192,7 @@ impl Emulator {
                 is_fifo: false,
                 created_at: std::time::SystemTime::now(),
                 subscriptions_deleted: 0,
+                subscriptions_deleting: Vec::new(),
                 archive_enabled_at: None,
             };
         state.lock().topics.insert(topic_arn.to_string(), record);

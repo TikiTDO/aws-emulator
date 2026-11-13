@@ -1358,8 +1358,9 @@ async fn get_topic_attributes_derives_its_subscription_counts() {
     let after = sns.call("GetTopicAttributes", &[("TopicArn", &topic)]).await;
     assert_eq!(
         counts(&after),
-        ("1".to_string(), "1".to_string(), "1".to_string()),
-        "case \"after one unsubscribe\": got {}",
+        ("1".to_string(), "1".to_string(), "0".to_string()),
+        "case \"straight after one unsubscribe\": the subscription stops being counted \
+         at once and the deleted count has not taken it up yet, got {}",
         after.body
     );
 

@@ -120,30 +120,78 @@ fn is_sensitive_path(path: &str) -> bool {
 /// [`without_sensitive_values`] declines any refusal that carries one.
 const BOUND_REFUSAL_CODE: &str = "ValidationError";
 
-/// A constraint refusal reworded so that no `@sensitive` member's value appears in
-/// it, or `None` when the refusal echoes no sensitive value and the framework's own
-/// wording stands.
+/// The code SNS names a refusal of the member that ADDRESSES the resource a call acts on
+/// with: the `awsQueryError` code of the modelled `InvalidParameterException`
+/// (`smithy_query(query="operation", operation="ListSubscriptionsByTopic")` reports
+/// `awsQueryError {code: InvalidParameter, httpResponseCode: 400}`), which is the error a
+/// generated client maps back to that exception.
+const ADDRESSED_MEMBER_REFUSAL_CODE: &str = "InvalidParameter";
+
+/// How SNS states that a required member carried no value at all: `Invalid parameter:`,
+/// the member as the request spells it, and the reason. Fixed text around the one
+/// variable part, which is the member name.
+fn no_value_for_required_parameter(member: &str) -> String {
+    format!("Invalid parameter: {member} Reason: no value for required parameter")
+}
+
+/// The ARN member a refusal reports as absent, or `None` when no violation is an absent
+/// ARN member.
 ///
-/// The clause is the framework's, with the echoed value lifted out of it: the
+/// The ARN member is the one SNS resolves BEFORE anything else about a request — it
+/// names the resource the call acts on, and the account that resource belongs to — so
+/// its absence is reported by the service itself, as the modelled `InvalidParameter`,
+/// rather than by the generic validation layer in front of it. Only such a member is
+/// resolved that early, which is why every other absence keeps the validation layer's
+/// own sentence below.
+fn absent_arn_member(violations: &[Violation]) -> Option<&'static str> {
+    violations.iter().find_map(|violation| {
+        matches!(violation.kind, ViolationKind::MissingRequiredMember)
+            .then(|| crate::state::account_resolution::arn_member_of_path(&violation.path))
+            .flatten()
+    })
+}
+
+/// How this service words a request the framework refused before any handler ran.
+///
+/// Two classes, told apart by WHICH layer of SNS judges the request:
+///
+/// 1. the member that addresses the resource is absent — resolved by the service itself,
+///    so it answers its own modelled `InvalidParameter`
+///    ([`no_value_for_required_parameter`]);
+/// 2. anything else the declared rules of the input reject — a value outside a bound, a
+///    member absent from a shape the service has no resource to resolve from — is a
+///    constraint violation of the REQUEST, stated in the validation layer's own
+///    `<n> validation error(s) detected: …` sentence under the code the query protocol's
+///    validation layer names ([`BOUND_REFUSAL_CODE`]). That code is the whole point of
+///    the arm: a body the service could not READ at all is a different failure
+///    (`MalformedInput`), and a request whose members were read and then judged must not
+///    be reported as one.
+///
+/// A `@sensitive` member's value is lifted out of the clause either way
+/// ([`without_sensitive_values`]).
+fn sns_refusal(violations: &[Violation]) -> Option<Refused> {
+    if let Some(member) = absent_arn_member(violations) {
+        return Some(Refused {
+            code: ADDRESSED_MEMBER_REFUSAL_CODE.to_string(),
+            message: no_value_for_required_parameter(member),
+        });
+    }
+    Some(Refused {
+        code: BOUND_REFUSAL_CODE.to_string(),
+        message: without_sensitive_values(violations)?,
+    })
+}
+
+/// The validation layer's own sentence for `violations`, with no `@sensitive` member's
+/// value in it, or `None` when there is nothing to state.
+///
+/// The clause is the framework's, with any echoed sensitive value lifted out of it: the
 /// requirement a caller has to read ("Member must satisfy regular expression
 /// pattern: …") is exactly as stated for every other member, and only the
 /// `Value '<the number>' at` opening becomes `Value at`. The pattern replaced is
 /// built from the SAME two fields the renderer interpolated, so it matches the
 /// echo exactly whatever the value holds.
-fn without_sensitive_values(violations: &[Violation]) -> Option<Refused> {
-    // An absent required member renders under a DIFFERENT code than a failed bound
-    // (see [`BOUND_REFUSAL_CODE`]), and it echoes no value to withhold, so a
-    // refusal carrying one is left to the framework entirely rather than reworded
-    // under a code it would not have answered with.
-    let absent_member = violations
-        .iter()
-        .any(|v| matches!(v.kind, ViolationKind::MissingRequiredMember));
-    let echoes_sensitive = violations
-        .iter()
-        .any(|v| (v.value.is_some() || v.sensitive) && is_sensitive_path(&v.path));
-    if absent_member || !echoes_sensitive {
-        return None;
-    }
+fn without_sensitive_values(violations: &[Violation]) -> Option<String> {
     let mut message = aws_smithy_schema_server::envelope(violations)?;
     for violation in violations {
         let Some(value) = violation.value.as_deref() else {
@@ -157,10 +205,7 @@ fn without_sensitive_values(violations: &[Violation]) -> Option<Refused> {
             &format!("Value at '{}'", violation.path),
         );
     }
-    Some(Refused {
-        code: BOUND_REFUSAL_CODE.to_string(),
-        message,
-    })
+    Some(message)
 }
 
 /// `resp` with the `<RequestId>` element an awsQuery error document carries, when
@@ -223,6 +268,37 @@ fn with_request_id(mut resp: RtResponse) -> RtResponse {
 /// rather than quietly moving it behind this wrapper.
 struct WithRequestId;
 
+/// The answer this endpoint gives a request addressing an account it does not serve: the
+/// awsQuery error document of the account-resolution refusal
+/// ([`crate::state::account_resolution`]), in the same envelope every other refusal of
+/// this service is stated in.
+fn no_account_response() -> RtResponse {
+    let body = aws_smithy_schema_server::query_error_body(
+        false,
+        crate::state::account_resolution::NO_ACCOUNT_CODE,
+        crate::state::account_resolution::NO_ACCOUNT_MESSAGE,
+    );
+    let status = ::aws_smithy_runtime_api::http::StatusCode::try_from(
+        crate::state::account_resolution::NO_ACCOUNT_STATUS,
+    )
+    .expect("the refusal's status is a valid constant");
+    let mut resp = RtResponse::new(status, SdkBody::from(body));
+    resp.headers_mut().insert("content-type", "text/xml");
+    resp
+}
+
+/// Whether `req` addresses an account this endpoint does not serve, and so is refused
+/// before any operation of this service reads it.
+fn addresses_another_account(req: &RtRequest, ctx: &OperationContext<'_>) -> bool {
+    let Some(body) = req.body().bytes() else {
+        // A body this process has not buffered is one no ARN could be read from; the
+        // request then travels on to the operation, which judges what it can read.
+        return false;
+    };
+    let region = crate::state::request_region(ctx.parts());
+    crate::state::account_resolution::addresses_another_account(body, &region)
+}
+
 impl ErasedOperation for WithRequestId {
     fn run<'r>(
         &'r self,
@@ -231,6 +307,14 @@ impl ErasedOperation for WithRequestId {
         ctx: &'r OperationContext<'r>,
     ) -> BoxFuture<'r, RtResponse> {
         Box::pin(async move {
+            // The account the request addresses is resolved BEFORE the operation reads
+            // the request: an ARN of another account names no resource this endpoint can
+            // resolve, and the refusal reports nothing about what the account it does
+            // serve holds. It is applied here, once, because it is the layer in front of
+            // every operation rather than a rule of any one of them.
+            if addresses_another_account(req, ctx) {
+                return with_request_id(no_account_response());
+            }
             let definition = svc.definition();
             let modeled = definition
                 .protocol()
@@ -305,14 +389,12 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
     }
 
     fn override_refusal(&self, refusal: &Refusal) -> Option<Refused> {
-        // The framework refuses a request that fails a modelled constraint before
-        // any handler runs, and its clause echoes the rejected value. A member the
-        // model marks `@sensitive` must not have its value reproduced in an error
-        // string, so the clause for one states the constraint alone. Every other
-        // refusal keeps the framework's wording, which is already what a caller
-        // needs.
+        // The framework refuses a request that fails a modelled rule before any handler
+        // runs; which error SNS names such a refusal by depends on which of its layers
+        // judged the request, and a `@sensitive` member's value is never reproduced in
+        // the sentence. See [`sns_refusal`].
         match refusal {
-            Refusal::Invalid(violations) => without_sensitive_values(violations),
+            Refusal::Invalid(violations) => sns_refusal(violations),
             _ => None,
         }
     }

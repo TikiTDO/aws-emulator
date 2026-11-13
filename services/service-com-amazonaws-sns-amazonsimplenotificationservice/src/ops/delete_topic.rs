@@ -170,7 +170,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // none.
         let region = crate::state::request_region(ctx.parts());
         if let Some(message) =
-            crate::state::regional_arn_refusal("TopicArn", &input.topic_arn, &region)
+            crate::state::topic_arn_refusal("TopicArn", &input.topic_arn, &region)
         {
             return Err(DeleteTopicErrorModeled::InvalidParameterException(
                 InvalidParameterException {

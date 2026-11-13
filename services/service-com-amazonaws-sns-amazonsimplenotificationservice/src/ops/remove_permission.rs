@@ -154,10 +154,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     ) -> Result<Self::Output, Self::Error> {
         // A `TopicArn` naming another region names a topic this endpoint does not
         // serve, so the request is refused as bad input rather than acted on in
-        // another region's state.
+        // another region's state — and so is one whose resource is no topic name, which
+        // names no topic anywhere.
         let region = crate::state::request_region(ctx.parts());
         if let Some(message) =
             crate::state::foreign_region_refusal("TopicArn", &input.topic_arn, &region)
+                .or_else(|| crate::state::topic_name_refusal(&input.topic_arn))
         {
             return Err(RemovePermissionErrorModeled::InvalidParameterException(
                 InvalidParameterException {

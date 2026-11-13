@@ -130,11 +130,14 @@ async fn every_awsquery_error_document_carries_a_request_id() {
             code: "ValidationError",
         },
         ErrorCase {
+            // The member that ADDRESSES the resource, which SNS resolves before the
+            // generic validation layer is reached — hence its own modelled code rather
+            // than the validation layer's.
             case: "an absent required member",
             action: "GetTopicAttributes",
             params: vec![],
             status: 400,
-            code: "MalformedInput",
+            code: "InvalidParameter",
         },
         ErrorCase {
             case: "an action this service does not model",

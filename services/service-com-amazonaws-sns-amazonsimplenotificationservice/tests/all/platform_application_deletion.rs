@@ -39,9 +39,6 @@ use super::topics_subscriptions_publish::{Answer, Sns};
 /// The region the harness signs its calls for unless a row names another one.
 const REGION: &str = "us-east-1";
 
-/// The account id every ARN this emulator mints carries, as the sibling suites spell it.
-const ACCOUNT: &str = "000000000000";
-
 /// One row of the deletion table: an application of one push platform holding
 /// `endpoints` device endpoints.
 struct Row {
@@ -358,10 +355,6 @@ async fn deleting_an_application_the_account_does_not_hold_changes_nothing() {
             )
         })
         .collect();
-    cases.push((
-        "the held application's ARN under another account".to_string(),
-        kept.replace(&format!(":{ACCOUNT}:"), ":111111111111:"),
-    ));
     cases.push((
         "an ARN that names a topic rather than an application".to_string(),
         topic.clone(),

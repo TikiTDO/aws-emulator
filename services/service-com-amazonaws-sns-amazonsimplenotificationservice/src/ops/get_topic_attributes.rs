@@ -149,11 +149,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         // Argument validation, BEFORE the store is consulted: a `TopicArn` that is
-        // not an ARN at all — or one naming another region, which this endpoint does
-        // not serve — is bad input, not a topic that does not exist.
+        // not an ARN at all — one naming another region, which this endpoint does
+        // not serve, or one whose resource is no topic name — is bad input, not a
+        // topic that does not exist.
         let region = crate::state::request_region(ctx.parts());
         if let Some(message) =
-            crate::state::regional_arn_refusal("TopicArn", &input.topic_arn, &region)
+            crate::state::topic_arn_refusal("TopicArn", &input.topic_arn, &region)
         {
             return Err(GetTopicAttributesErrorModeled::InvalidParameterException(
                 InvalidParameterException {
@@ -226,7 +227,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         );
         attributes.insert(
             state::SUBSCRIPTIONS_DELETED_ATTRIBUTE.into(),
-            topic.subscriptions_deleted.to_string(),
+            topic.reported_subscriptions_deleted().to_string(),
         );
         // DisplayName is reported whether or not it is set: SNS answers with an empty
         // value for a topic whose owner has set none.

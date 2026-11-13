@@ -502,7 +502,9 @@ async fn a_bad_arn_is_bad_input_and_an_unheld_one_is_the_lookup_miss() {
 
     // Well-formed ARNs of this region that name no application record of this account:
     // every platform of the catalog under a name nobody registered, the registered name
-    // under another platform, another account, and ARNs of other resources.
+    // under another platform, and ARNs of other resources. An ARN naming another ACCOUNT
+    // is refused before the lookup, by the account-resolution refusal every ARN-addressed
+    // call of this service shares (see the `arn_reference_refusals` suite).
     let mut missing: Vec<(String, String)> = PLATFORM_NAMES
         .iter()
         .map(|platform| {
@@ -515,10 +517,6 @@ async fn a_bad_arn_is_bad_input_and_an_unheld_one_is_the_lookup_miss() {
     missing.push((
         "the registered name under another platform".to_string(),
         platform_application_arn(REGION, "ADM", "resolved"),
-    ));
-    missing.push((
-        "the registered application's ARN under another account".to_string(),
-        arn.replace(&format!(":{ACCOUNT}:"), ":111111111111:"),
     ));
     missing.push((
         "an ARN that names a topic rather than an application".to_string(),

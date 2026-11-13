@@ -15,6 +15,9 @@ use sha2::{Digest, Sha256};
 use crate::ops::types::{MessageAttributeValue, Subscription};
 
 pub mod filter_policy;
+/// Which ACCOUNT the ARNs a request carries address, and what this endpoint answers a
+/// request addressing an account it does not serve.
+pub mod account_resolution;
 /// Whether IAM lets a signed request perform the action it asks for on the topic it
 /// addresses: the caller's identity-based policies read together with the topic's own
 /// access policy.
@@ -35,6 +38,12 @@ pub mod retry_policy_bounds;
 /// it attempted.
 pub mod delivery_status;
 mod message_structure;
+/// The rules a topic's TAG set is held to, shared by the operations that write one.
+mod tags;
+/// What an ARN of this service names, and how a value that is not one is refused.
+mod arn_references;
+pub use arn_references::*;
+pub use tags::*;
 /// How a message published under a `MessageStructure` is read, and which text of it one
 /// delivery protocol receives.
 pub use message_structure::*;
@@ -335,9 +344,15 @@ pub struct TopicRecord {
     /// A FIFO topic: its name ends with `.fifo`.
     pub is_fifo: bool,
     pub created_at: SystemTime,
-    /// How many of this topic's subscriptions have been deleted — the
-    /// `SubscriptionsDeleted` attribute, which outlives the subscription records.
+    /// How many of this topic's subscriptions have been deleted LONG ENOUGH AGO for the
+    /// count to have settled — the part of the `SubscriptionsDeleted` attribute that is
+    /// already reported. It outlives the subscription records.
     pub subscriptions_deleted: u64,
+    /// The deletions this topic's `SubscriptionsDeleted` count has not taken up yet, each
+    /// held as the instant it is DUE to: SNS does not advance the deleted count as part of
+    /// the `Unsubscribe` call, so a read taken straight after one still reports the count
+    /// from before it ([`SUBSCRIPTION_DELETION_SETTLES_AFTER`]).
+    pub subscriptions_deleting: Vec<SystemTime>,
     /// When this topic's message archive came into force: the instant the
     /// [`ARCHIVE_POLICY_ATTRIBUTE`] was last added to a topic that was not archiving,
     /// and `None` while it holds no archive policy. Nothing older than it is in the
@@ -379,6 +394,36 @@ pub const SUBSCRIPTIONS_PENDING_ATTRIBUTE: &str = "SubscriptionsPending";
 pub const SUBSCRIPTIONS_CONFIRMED_ATTRIBUTE: &str = "SubscriptionsConfirmed";
 pub const SUBSCRIPTIONS_DELETED_ATTRIBUTE: &str = "SubscriptionsDeleted";
 pub const EFFECTIVE_DELIVERY_POLICY_ATTRIBUTE: &str = "EffectiveDeliveryPolicy";
+
+/// How long after an `Unsubscribe` the deletion it performed is taken up by the topic's
+/// [`SUBSCRIPTIONS_DELETED_ATTRIBUTE`] count.
+///
+/// The deleted count is NOT part of the unsubscribe: SNS removes the subscription
+/// synchronously — it stops being listed and stops being delivered to at once, and the
+/// confirmed and pending counts follow it immediately — while the per-topic DELETED count
+/// is taken up on a cycle of the service's own. Recorded evidence: a client that
+/// unsubscribed the only subscription of a topic and then polled `GetTopicAttributes`
+/// until the confirmed and pending counts had settled still read `0` deleted on every one
+/// of those reads.
+///
+/// The span is this emulator's own — AWS documents no period for it — and is chosen
+/// longer than such a convergence loop runs for, which is what the recording requires: a
+/// span of a few seconds was measured against this same recorded sequence and the count
+/// had already moved to 1 by the read the recording shows as 0, because the client's own
+/// polling spans more than that. A count that moves inside a convergence loop reports a
+/// number no real client reading those three counters together ever sees.
+pub const SUBSCRIPTION_DELETION_SETTLES_AFTER: Duration = Duration::from_secs(15 * 60);
+
+/// How many not-yet-counted deletions ONE topic holds the instants of.
+///
+/// This is NOT an AWS quota: it is this emulator's own memory ceiling on a store a caller
+/// grows by unsubscribing, the deletion counterpart of [`MAX_RECORDS_PER_STORE`]. Each
+/// `Unsubscribe` of a topic adds one instant until that instant arrives, so without a
+/// ceiling a caller subscribing and unsubscribing in a loop would grow one topic record
+/// for the whole span. Crossing it takes the OLDEST pending deletions up early — they are
+/// the next to settle anyway — so the count a topic reports is never lost, only reported
+/// sooner.
+pub const MAX_SETTLING_DELETIONS_PER_TOPIC: usize = 64;
 
 /// The topic attribute a FIFO topic's message archive is configured under:
 /// "ArchivePolicy – The policy that sets the retention period for messages stored in the
@@ -716,6 +761,60 @@ pub fn permission_statement(
 }
 
 impl TopicRecord {
+    /// What [`SUBSCRIPTIONS_DELETED_ATTRIBUTE`] reports for this topic now: the deletions
+    /// that have settled, which is every one the clock has made due.
+    ///
+    /// COMPUTED from the record and the clock rather than stored, so reading it moves
+    /// nothing: a deletion becomes part of the count when its instant arrives, whether or
+    /// not anybody reads the topic in between.
+    pub fn reported_subscriptions_deleted(&self) -> u64 {
+        let now = SystemTime::now();
+        let settled = self
+            .subscriptions_deleting
+            .iter()
+            .filter(|due| **due <= now)
+            .count();
+        self.subscriptions_deleted
+            .saturating_add(settled.try_into().unwrap_or(u64::MAX))
+    }
+
+    /// Record one more deleted subscription, due to be counted once
+    /// [`SUBSCRIPTION_DELETION_SETTLES_AFTER`] has passed.
+    ///
+    /// The deletions whose instant has already arrived are folded into the settled count
+    /// as they are passed, so the pending list holds only the deletions of the last span
+    /// rather than growing with every `Unsubscribe` the topic ever sees — and no more than
+    /// [`MAX_SETTLING_DELETIONS_PER_TOPIC`] of those, past which the oldest are taken up
+    /// early. The total is never lost either way: a deletion only ever reaches the count
+    /// sooner.
+    pub fn count_deleted_subscription(&mut self) {
+        let now = SystemTime::now();
+        let settled = self
+            .subscriptions_deleting
+            .iter()
+            .filter(|due| **due <= now)
+            .count();
+        self.subscriptions_deleted = self
+            .subscriptions_deleted
+            .saturating_add(settled.try_into().unwrap_or(u64::MAX));
+        self.subscriptions_deleting.retain(|due| *due > now);
+        self.subscriptions_deleting
+            .push(now + SUBSCRIPTION_DELETION_SETTLES_AFTER);
+        // The list is a caller-grown store — one entry per `Unsubscribe` of this topic —
+        // so it is bounded here as well as pruned above: the entries past the ceiling are
+        // the oldest, which are the next to settle anyway.
+        let over = self
+            .subscriptions_deleting
+            .len()
+            .saturating_sub(MAX_SETTLING_DELETIONS_PER_TOPIC);
+        if over > 0 {
+            self.subscriptions_deleting.drain(..over);
+            self.subscriptions_deleted = self
+                .subscriptions_deleted
+                .saturating_add(over.try_into().unwrap_or(u64::MAX));
+        }
+    }
+
     /// This topic's access control policy document: the one its owner set, or the
     /// default SNS generates for a topic with none. `None` when the stored value is not
     /// a policy document at all, which the write paths refuse to create.
@@ -1801,6 +1900,25 @@ impl AttributeMember {
             Self::Named => format!("Invalid parameter: {name}: {reason}"),
         }
     }
+
+    /// The same, for a condition SNS states as a WHOLE sentence of its own rather than
+    /// about one attribute's value: the sentence stands as SNS words it, and only the
+    /// member it is reported under frames it.
+    ///
+    /// A request that carried the attribute in the `Attributes` MAP is told which member
+    /// it has to change, because that member holds every attribute it sent; one that was
+    /// given the attribute BY NAME needs no such frame, the name being the whole input.
+    /// Recorded evidence: enabling raw message delivery in a `Subscribe` request's
+    /// `Attributes` answers `400 InvalidParameter` with `Invalid parameter: Attributes
+    /// Reason: Delivery protocol [lambda] does not support raw message delivery.`, where
+    /// the same condition reached through `SetSubscriptionAttributes` answers that
+    /// sentence with no member frame.
+    pub fn whole_sentence_refusal(self, sentence: &str) -> String {
+        match self {
+            Self::Map => format!("Invalid parameter: {ATTRIBUTES_MEMBER} Reason: {sentence}"),
+            Self::Named => format!("Invalid parameter: {sentence}"),
+        }
+    }
 }
 
 /// The message a write of the subscription attribute `name` to `value` is refused
@@ -1924,17 +2042,21 @@ pub fn subscription_attribute_refusal(
 /// (`GetSubscriptionAttributesResponse$Attributes` doc), so every subscription accepts
 /// and reports one.
 ///
-/// The message is the complete sentence SNS states for this condition, directly after
-/// `Invalid parameter: ` — this refusal is about the SUBSCRIPTION the attribute was set
-/// on rather than about the value of one request member, so it is not nested in the
-/// `<member> Reason: ` frame this crate frames a member-level constraint failure in.
-/// Recorded evidence: enabling raw message delivery on a `lambda` subscription answers
-/// `400 InvalidParameter` with exactly `Invalid parameter: Delivery protocol [lambda]
-/// does not support raw message delivery.`
+/// The message is the complete sentence SNS states for this condition — this refusal is
+/// about the SUBSCRIPTION the attribute was set on rather than about the value of one
+/// request member, so it is not nested in the `<member> Reason: <attribute>: ` frame this
+/// crate frames a member-level constraint failure in — reported under the member the
+/// attribute arrived in ([`AttributeMember::whole_sentence_refusal`]). Recorded evidence:
+/// enabling raw message delivery on a `lambda` subscription answers `400 InvalidParameter`
+/// with exactly `Invalid parameter: Delivery protocol [lambda] does not support raw
+/// message delivery.` when the attribute was given by name, and that sentence under
+/// `Invalid parameter: Attributes Reason: ` when it arrived in a `Subscribe` request's
+/// attribute map.
 pub fn subscription_attribute_protocol_refusal(
     name: &str,
     value: &str,
     protocol: &str,
+    member: AttributeMember,
 ) -> Option<String> {
     let (scoped, feature): (&[&str], &str) = match name {
         // Raw delivery is a property of the envelope SNS puts a notification in, so
@@ -1951,10 +2073,9 @@ pub fn subscription_attribute_protocol_refusal(
         _ => return None,
     };
     (!scoped.contains(&protocol)).then(|| {
-        format!(
-            "Invalid parameter: Delivery protocol [{protocol}] does not support \
-             {feature}."
-        )
+        member.whole_sentence_refusal(&format!(
+            "Delivery protocol [{protocol}] does not support {feature}."
+        ))
     })
 }
 
@@ -2152,32 +2273,43 @@ pub fn effective_subscription_delivery_policy(
 /// (`arn:aws:sns:<region>:<account>:<topic>:<id>`, as `Subscribe` mints it).
 pub const SUBSCRIPTION_ARN_FIELDS: usize = ARN_ELEMENTS + 1;
 
-/// Why `arn` is not a subscription ARN, or `None` when it is one.
+/// The sentence SNS refuses an ARN-shaped `SubscriptionArn` that does not name a
+/// subscription with: `Invalid parameter:` plus the part of the ARN that is at fault, as
+/// SNS names it (`SubscriptionId`, not the Smithy member `SubscriptionArn`), and nothing
+/// else — no member frame, no reason clause, and no part of the value the caller sent.
+/// Recorded evidence: `GetSubscriptionAttributes` handed a TOPIC ARN answers `400
+/// InvalidParameter` with exactly this sentence.
+pub const INVALID_SUBSCRIPTION_ID: &str = "Invalid parameter: SubscriptionId";
+
+/// Whether `arn` names a subscription: an ARN whose resource is a topic name followed by
+/// the subscription's own id segment ([`SUBSCRIPTION_ARN_FIELDS`] elements).
+fn names_a_subscription(arn: &str) -> bool {
+    let fields: Vec<&str> = arn.split(':').collect();
+    fields.len() == SUBSCRIPTION_ARN_FIELDS
+        && fields[2] == "sns"
+        && fields[1..].iter().all(|field| !field.is_empty())
+        && topic_name_is_valid(fields[5])
+}
+
+/// The message a `SubscriptionArn`-typed `member` holding `arn` is refused with, or
+/// `None` when `arn` names a subscription.
 ///
-/// The reason names the member's constraint and is built from the request, the way
-/// SNS's own argument validation reports one ("An ARN must have at least 6 elements,
-/// not 1"); nothing of the recorded wire text is required beyond that. The generic
-/// ARN shape comes from [`arn_shape_reason`], the one place this crate judges it, so
-/// every ARN-typed member of this service states that part alike; what is added here
-/// is what makes an ARN a SUBSCRIPTION's.
+/// Two faults, each stated the way SNS states it. A value that is not an ARN AT ALL is
+/// the generic ARN-shape fault every ARN-typed member of this service shares
+/// ([`arn_refusal`]): the member and the constraint it failed. An ARN-shaped value whose
+/// SUBSCRIPTION ID is not one SNS could have minted — a topic ARN handed to a
+/// subscription call, an empty or extra element, a resource that is no topic name — is a
+/// fault in that one part of the ARN, so the refusal names that part and nothing else
+/// ([`INVALID_SUBSCRIPTION_ID`]). This is the subscription counterpart of the
+/// [`INVALID_TOPIC_NAME`] refusal a topic ARN's bad name takes.
 ///
 /// Shared, because every operation that takes a `SubscriptionArn` asks the same
 /// question of it — a subscription ARN one call accepts cannot be one another refuses.
-pub fn malformed_subscription_arn(arn: &str) -> Option<String> {
-    if let Some(reason) = arn_shape_reason(arn) {
-        return Some(reason);
+pub fn subscription_arn_refusal(member: &str, arn: &str) -> Option<String> {
+    if let Some(message) = arn_refusal(member, arn) {
+        return Some(message);
     }
-    let fields: Vec<&str> = arn.split(':').collect();
-    let well_formed = fields.len() == SUBSCRIPTION_ARN_FIELDS
-        && fields[2] == "sns"
-        && fields[1..].iter().all(|field| !field.is_empty())
-        && topic_name_is_valid(fields[5]);
-    (!well_formed).then(|| {
-        format!(
-            "A subscription ARN names a topic and the subscription's id, so it has \
-             {SUBSCRIPTION_ARN_FIELDS} elements: {arn}"
-        )
-    })
+    (!names_a_subscription(arn)).then(|| INVALID_SUBSCRIPTION_ID.to_string())
 }
 
 // =============================================================================
@@ -4383,194 +4515,6 @@ pub fn new_request_id() -> String {
     uuid_v4_shaped(MINTED.fetch_add(1, Ordering::Relaxed))
 }
 
-/// How many colon-separated elements an ARN has:
-/// `arn:<partition>:<service>:<region>:<account-id>:<resource>`.
-pub const ARN_ELEMENTS: usize = 6;
-
-/// Why `value` is not an ARN at all, worded as the `Reason:` clause of an
-/// `InvalidParameterException` states it — or `None` when it has an ARN's shape.
-///
-/// This is ARGUMENT validation, not a lookup: a value that could not name any
-/// resource in any account is bad input, so an ARN-typed member is checked for
-/// this BEFORE the store is consulted. Reporting it as a resource that does not
-/// exist tells a caller the opposite of what happened — "it is gone" instead of
-/// "you sent me something that is not an ARN" — and an idempotent delete then
-/// swallows the defect entirely.
-///
-/// Only the SHAPE is judged here. An ARN-shaped value that names no resource of
-/// this account is a lookup miss, which each operation reports as its own
-/// modelled `NotFoundException`.
-pub fn arn_shape_reason(value: &str) -> Option<String> {
-    let elements = value.split(':').count();
-    if elements < ARN_ELEMENTS {
-        return Some(format!(
-            "An ARN must have at least {ARN_ELEMENTS} elements, not {elements}"
-        ));
-    }
-    if !value.starts_with("arn:") {
-        return Some("An ARN must begin with 'arn:'".to_string());
-    }
-    None
-}
-
-/// The message an ARN-typed `member` holding `value` is refused with, or `None`
-/// when `value` has an ARN's shape: it names the member and the constraint the
-/// value failed, and never echoes the value itself.
-pub fn arn_refusal(member: &str, value: &str) -> Option<String> {
-    arn_shape_reason(value).map(|reason| format!("Invalid parameter: {member} Reason: {reason}"))
-}
-
-/// The most tags one topic holds: "Can't add more than 50 tags to a topic"
-/// ([`TagLimitExceededException`](crate::ops::types::TagLimitExceededException) doc).
-///
-/// Shared by every operation that writes a topic's tags, so a topic cannot hold a
-/// different number depending on which call put them there.
-pub const MAX_TAGS_PER_TOPIC: usize = 50;
-
-/// The sentence SNS refuses a write that would take a resource past
-/// [`MAX_TAGS_PER_TOPIC`] with: the quota that is exhausted, with neither the count
-/// held nor the count asked for in it. Shared by every operation that writes a
-/// topic's tags, so one condition reads the same whichever call carried the write.
-pub const TAG_QUOTA_EXCEEDED_REFUSAL: &str =
-    "Could not complete request: tag quota of per resource exceeded";
-
-/// The message a `ResourceArn` of one of SNS's TAG operations is refused with, or
-/// `None` when the value is a topic ARN.
-///
-/// Two rules, in order, and both are ARGUMENT validation rather than a lookup — a
-/// value that could not name a topic this endpoint serves is bad input, so it is judged
-/// before the store is consulted:
-///
-/// 1. it has to be an ARN of this endpoint's own region ([`regional_arn_refusal`]);
-/// 2. it has to be an ARN of an Amazon SNS TOPIC. Every tag operation documents its
-///    `ResourceArn` as "The ARN of the topic …", and SNS holds tags on topics alone,
-///    so an ARN of another service, or an SNS ARN whose resource part is not a topic
-///    name (a platform endpoint's `endpoint/GCM/app/…`, a subscription's
-///    `<topic>:<uuid>`), names nothing a tag operation could ever act on.
-///
-/// Neither clause reproduces the value the caller sent: both name the member and the
-/// constraint it failed, as every other refusal of this service does.
-pub fn tagged_topic_arn_refusal(member: &str, value: &str, region: &str) -> Option<String> {
-    if let Some(message) = regional_arn_refusal(member, value, region) {
-        return Some(message);
-    }
-    topic_name_from_arn(value).is_none().then(|| {
-        format!(
-            "Invalid parameter: {member} Reason: An SNS tag is held by a topic, so the \
-             ARN must name an Amazon SNS topic"
-        )
-    })
-}
-
-/// The refusal a topic's tag map is held to: `None` when `tags` is a map the topic may
-/// hold, a message when it is not.
-///
-/// Both ceilings are checked, in the order a caller fixes them: the documented
-/// [`MAX_TAGS_PER_TOPIC`] entry COUNT, then this emulator's own
-/// [`MAX_TAG_BYTES_PER_TOPIC`] byte ceiling on the one caller-sized map a topic record
-/// carries. The first is the modelled `TagLimitExceededException`'s sentence; the
-/// second is an `InvalidParameterException`'s — so the caller is told which it crossed.
-pub enum TagRefusal {
-    /// Too many entries: the documented per-topic tag limit.
-    TooMany(String),
-    /// Too many bytes: this emulator's per-record ceiling.
-    TooLarge(String),
-}
-
-/// The refusal for the tag map a write WOULD leave a topic holding, or `None` when
-/// the topic may hold it. Measured on the resulting map, so a caller cannot grow one
-/// record past either ceiling by repeating a call with ever larger values.
-pub fn tag_map_refusal(tags: &HashMap<String, String>) -> Option<TagRefusal> {
-    if tags.len() > MAX_TAGS_PER_TOPIC {
-        return Some(TagRefusal::TooMany(TAG_QUOTA_EXCEEDED_REFUSAL.to_string()));
-    }
-    let held = attribute_bytes(tags);
-    (held > MAX_TAG_BYTES_PER_TOPIC).then(|| {
-        TagRefusal::TooLarge(format!(
-            "Invalid parameter: Tags - a topic holds at most {MAX_TAG_BYTES_PER_TOPIC} \
-             bytes of Tags: {held}"
-        ))
-    })
-}
-
-/// The key prefix Amazon Web Services keeps for the tags IT puts on a resource, which a
-/// caller's own tag key may therefore not begin with.
-pub const RESERVED_TAG_KEY_PREFIX: &str = "aws:";
-
-/// Whether `key` lies in the namespace [`RESERVED_TAG_KEY_PREFIX`] reserves.
-///
-/// Compared without regard to case, and by BYTES rather than characters, so a key whose
-/// first bytes are a multi-byte character is simply not reserved instead of splitting a
-/// character boundary.
-pub fn is_reserved_tag_key(key: &str) -> bool {
-    key.get(..RESERVED_TAG_KEY_PREFIX.len())
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(RESERVED_TAG_KEY_PREFIX))
-}
-
-/// Who named the tag keys one request carries, which is what decides whether a key in the
-/// namespace [`RESERVED_TAG_KEY_PREFIX`] reserves may be stored.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TagKeyOrigin {
-    /// A request a CLIENT made: the `aws:` namespace is reserved for Amazon Web Services
-    /// use, so a key in it is refused.
-    Caller,
-    /// A request another emulated service made in-process while provisioning a resource
-    /// on a caller's behalf — the path the tags AWS applies from inside itself arrive on
-    /// (the stack provenance a provisioning service records on every resource it
-    /// creates). A key in the reserved namespace travels on it.
-    Service,
-}
-
-/// Where the tag keys this request names came from.
-///
-/// Told apart by where the request CAME FROM and by nothing in it: the framework stamps a
-/// request a handler sent through its in-process callback with that chain's depth
-/// ([`::smithy_server_runtime::CallbackRecursionDepth`]), and a request that arrived from
-/// a client carries none. The stamp is a typed request extension of this process, so
-/// nothing a client can send sets it.
-pub fn tag_key_origin(ctx: &::smithy_server_runtime::OperationContext<'_>) -> TagKeyOrigin {
-    let stamped = ctx
-        .parts()
-        .extensions
-        .get::<::smithy_server_runtime::CallbackRecursionDepth>()
-        .is_some_and(|depth| depth.0 > 0);
-    if stamped {
-        TagKeyOrigin::Service
-    } else {
-        TagKeyOrigin::Caller
-    }
-}
-
-/// The sentence a tag key under the reserved prefix is refused with, or `None` when every
-/// key of `keys` is one a request of this `origin` may write.
-///
-/// `aws:`-prefixed keys are the namespace Amazon Web Services writes its own (system and
-/// stack) tags in, so a CALLER cannot create, update or delete one: a client request
-/// naming such a key is refused rather than applied beside the service's own, while the
-/// in-process provisioning path that records them keeps writing them. Shared by every
-/// operation that writes a topic's tag set — the two that add tags and the one that
-/// removes them — so the reserved namespace is the same whichever call carried the
-/// write. The sentence states the condition and names the member the keys arrived in,
-/// and nothing of the request: the caller named the keys it sent.
-pub fn reserved_tag_key_refusal<'a, I>(
-    member: &str,
-    keys: I,
-    origin: TagKeyOrigin,
-) -> Option<String>
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    if origin == TagKeyOrigin::Service {
-        return None;
-    }
-    keys.into_iter().any(is_reserved_tag_key).then(|| {
-        format!(
-            "Invalid parameter: {member} Reason: Caller is an end user and not allowed \
-             to mutate system tags"
-        )
-    })
-}
-
 /// The sentence SNS states for a topic no account of this emulator holds.
 ///
 /// Fixed, and the SAME for every operation that looks a topic up: SNS names the
@@ -4735,139 +4679,6 @@ pub const FIFO_SUFFIX: &str = ".fifo";
 /// the same endpoint.
 pub fn addresses_fifo_queue(arn: &str) -> bool {
     arn.ends_with(FIFO_SUFFIX)
-}
-
-/// The longest topic name SNS accepts: "must be between 1 and 256 characters long"
-/// (`CreateTopicInput$Name` doc).
-pub const MAX_TOPIC_NAME_LEN: usize = 256;
-
-/// Whether `name` satisfies the name rule SNS documents for a topic: 1 to
-/// [`MAX_TOPIC_NAME_LEN`] characters of ASCII letters, digits, `_` and `-`, with the
-/// [`FIFO_SUFFIX`] of a FIFO topic the one exception.
-///
-/// Shared, because it is both what `CreateTopic` refuses a bad name with and what
-/// tells a topic ARN apart from another SNS ARN (a platform endpoint's, say) whose
-/// resource part is not a topic name.
-pub fn topic_name_is_valid(name: &str) -> bool {
-    let base = name.strip_suffix(FIFO_SUFFIX).unwrap_or(name);
-    !base.is_empty()
-        && name.len() <= MAX_TOPIC_NAME_LEN
-        && base
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-}
-
-/// Whether `name` is a name a topic may be CREATED under, given whether the create asks
-/// for a FIFO topic.
-///
-/// The name rule and the topic's KIND constrain each other: "For a FIFO
-/// (first-in-first-out) topic, the name must end with the .fifo suffix"
-/// (`CreateTopicInput$Name` doc), and the suffix is the one place a topic name carries a
-/// period at all — so a `.fifo` name names a FIFO topic and nothing else, and a create
-/// that does not ask for one is asking for a name no standard topic may hold. The two
-/// readings of the rule are therefore one: the suffix is present exactly when
-/// `FifoTopic` is asked for.
-///
-/// [`topic_name_is_valid`] stays the question an ARN's resource part is judged by, where
-/// both kinds of name are a topic's; this is the question a CREATE is judged by.
-pub fn create_topic_name_is_valid(name: &str, fifo_requested: bool) -> bool {
-    topic_name_is_valid(name) && name.ends_with(FIFO_SUFFIX) == fifo_requested
-}
-
-/// The topic name an SNS topic ARN names, or `None` when `arn` is not one
-/// (`arn:aws:sns:<region>:<account>:<name>` — six colon-separated fields whose last
-/// one is a topic name, which is what tells it from an `…:endpoint/GCM/app/…` ARN).
-pub fn topic_name_from_arn(arn: &str) -> Option<&str> {
-    let fields: Vec<&str> = arn.split(':').collect();
-    match fields[..] {
-        ["arn", _partition, "sns", _region, _account, name] if topic_name_is_valid(name) => {
-            Some(name)
-        }
-        _ => None,
-    }
-}
-
-/// The resource part of `arn` when `arn` is an ARN of `service`, or `None` when it is
-/// not an ARN at all or names another service.
-///
-/// An ARN is `arn:<partition>:<service>:<region>:<account-id>:<resource>`, and the
-/// resource is the ONLY field that may itself hold `:` separators (a Lambda
-/// function's `function:<name>:<qualifier>`, say) — hence the split bounded at six
-/// fields. Shared, because "is this string an ARN of that service?" is the question
-/// every per-protocol endpoint rule asks.
-pub fn arn_resource<'a>(arn: &'a str, service: &str) -> Option<&'a str> {
-    let fields: Vec<&str> = arn.splitn(6, ':').collect();
-    match fields[..] {
-        ["arn", partition, found, region, account, resource]
-            if found == service
-                && !partition.is_empty()
-                && !region.is_empty()
-                && !account.is_empty()
-                && !resource.is_empty() =>
-        {
-            Some(resource)
-        }
-        _ => None,
-    }
-}
-
-/// The region an ARN names, or `None` when `arn` is not shaped like an ARN.
-///
-/// The fourth field of `arn:<partition>:<service>:<region>:<account-id>:<resource>` —
-/// see [`arn_resource`] for why the split is bounded at six fields.
-pub fn arn_region(arn: &str) -> Option<&str> {
-    let fields: Vec<&str> = arn.splitn(ARN_ELEMENTS, ':').collect();
-    match fields[..] {
-        ["arn", partition, service, region, account, resource]
-            if !partition.is_empty()
-                && !service.is_empty()
-                && !region.is_empty()
-                && !account.is_empty()
-                && !resource.is_empty() =>
-        {
-            Some(region)
-        }
-        _ => None,
-    }
-}
-
-/// Whether the resource `arn` names belongs to `region`.
-///
-/// SNS is a regional service: a resource lives in the region its own ARN carries, and
-/// an endpoint of one region neither reports nor reaches another region's resources.
-/// This is the one rule each account-wide listing selects the records it reports by,
-/// so the same request answered by two regional endpoints reports two disjoint sets.
-pub fn belongs_to_region(arn: &str, region: &str) -> bool {
-    arn_region(arn) == Some(region)
-}
-
-/// The message an ARN-typed `member` naming a resource of ANOTHER region is refused
-/// with, or `None` when `value` names a resource of `region` — or is not an ARN at all,
-/// which is a fault of its own that each operation already judges.
-///
-/// A regional endpoint serves the resources of its own region only, so an ARN naming
-/// another region names nothing this endpoint can read or act on — and that is a fault
-/// in the VALUE the caller sent, judged before any record is looked up, rather than a
-/// resource that is merely absent here. The sentence is this service's bare parameter
-/// refusal: the member whose value was not accepted, with neither the region nor the
-/// ARN echoed back.
-///
-/// Shared by every operation that resolves an ARN of this service, so the rule does not
-/// depend on which call carried the ARN.
-pub fn foreign_region_refusal(member: &str, value: &str, region: &str) -> Option<String> {
-    arn_region(value)
-        .is_some_and(|named| named != region)
-        .then(|| format!("Invalid parameter: {member}"))
-}
-
-/// The whole refusal an ARN-typed `member` of a REGIONAL lookup is held to, or `None`
-/// when `value` is an ARN of `region`: it has to be an ARN at all ([`arn_refusal`]), and
-/// it has to name this endpoint's own region ([`foreign_region_refusal`]).
-///
-/// Both clauses are argument validation — neither consults the store — so an operation
-/// judges them before it looks anything up.
-pub fn regional_arn_refusal(member: &str, value: &str, region: &str) -> Option<String> {
-    arn_refusal(member, value).or_else(|| foreign_region_refusal(member, value, region))
 }
 
 /// One page of `items` starting at `token`, plus the token of the page after it.

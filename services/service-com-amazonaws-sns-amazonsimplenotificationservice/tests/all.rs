@@ -17,6 +17,9 @@ mod account_authorization;
 #[path = "all/account_subscriptions_listing.rs"]
 mod account_subscriptions_listing;
 
+#[path = "all/arn_reference_refusals.rs"]
+mod arn_reference_refusals;
+
 #[path = "all/confirm_subscription.rs"]
 mod confirm_subscription;
 

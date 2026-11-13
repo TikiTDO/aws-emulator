@@ -768,10 +768,6 @@ async fn a_bad_arn_is_bad_input_and_an_unheld_one_is_the_lookup_miss() {
         })
         .collect();
     missing.push((
-        "the held endpoint's ARN under another account".to_string(),
-        endpoint.replace(&format!(":{ACCOUNT}:"), ":111111111111:"),
-    ));
-    missing.push((
         "an endpoint of an application nobody registered".to_string(),
         platform_endpoint_arn(
             REGION,

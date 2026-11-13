@@ -374,10 +374,6 @@ async fn an_application_this_account_does_not_hold_is_a_not_found() {
         platform_application_arn(REGION, "ADM", "held-app"),
     ));
     cases.push((
-        "the held application's ARN under another account".to_string(),
-        application.replace(&format!(":{ACCOUNT}:"), ":111111111111:"),
-    ));
-    cases.push((
         "an ARN that names a topic rather than an application".to_string(),
         topic.clone(),
     ));

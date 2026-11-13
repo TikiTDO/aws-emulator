@@ -577,9 +577,11 @@ async fn both_reads_refuse_an_application_the_account_does_not_hold() {
     );
 
     // Well-formed ARNs this account holds no application for: a name nobody registered,
-    // another platform of a held name, another account, another service, and SNS ARNs
-    // naming another KIND of resource. An ARN naming another REGION is not one this
-    // endpoint can read at all, and is refused below.
+    // another platform of a held name, another service, and SNS ARNs naming another KIND
+    // of resource. An ARN naming another REGION is not one this endpoint can read at all,
+    // and is refused below; one naming another ACCOUNT is refused before the lookup, by
+    // the account-resolution refusal every ARN-addressed call of this service shares (see
+    // the `arn_reference_refusals` suite).
     let missing: &[(&str, &str)] = &[
         (
             "a name nobody registered",
@@ -588,10 +590,6 @@ async fn both_reads_refuse_an_application_the_account_does_not_hold() {
         (
             "another platform of a held name",
             "arn:aws:sns:us-east-1:000000000000:app/APNS/held-app",
-        ),
-        (
-            "another account",
-            "arn:aws:sns:us-east-1:123456789012:app/GCM/held-app",
         ),
         (
             "another service",

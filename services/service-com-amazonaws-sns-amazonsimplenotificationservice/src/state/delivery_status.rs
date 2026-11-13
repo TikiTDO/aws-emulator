@@ -752,6 +752,7 @@ mod tests {
             is_fifo: false,
             created_at: SystemTime::now(),
             subscriptions_deleted: 0,
+            subscriptions_deleting: Vec::new(),
             archive_enabled_at: None,
         }
     }

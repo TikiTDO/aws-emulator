@@ -143,11 +143,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         // Argument validation, BEFORE the store is consulted: a `TopicArn` that is
-        // not an ARN at all — or one naming another region, which this endpoint does
-        // not serve — is bad input, not a topic that does not exist.
+        // not an ARN at all — one naming another region, which this endpoint does
+        // not serve, or one whose resource is no topic name — is bad input, not a
+        // topic that does not exist.
         let region = state::request_region(ctx.parts());
         if let Some(message) =
-            crate::state::regional_arn_refusal("TopicArn", &input.topic_arn, &region)
+            crate::state::topic_arn_refusal("TopicArn", &input.topic_arn, &region)
         {
             return Err(ListSubscriptionsByTopicErrorModeled::InvalidParameterException(
                 InvalidParameterException {

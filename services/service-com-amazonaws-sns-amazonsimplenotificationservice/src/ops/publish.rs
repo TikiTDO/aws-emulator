@@ -311,6 +311,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     "Publish to a platform endpoint TargetArn",
                 ));
             }
+            // A topic ARN carries the topic's NAME as its resource, so a value whose
+            // resource is not a name a topic could ever have names no topic anywhere:
+            // SNS refuses it naming that part of the ARN, under the rule every
+            // operation that addresses a topic by ARN shares.
+            if let Some(message) = state::topic_name_refusal(&destination) {
+                return Err(invalid_parameter(message));
+            }
             return Err(invalid_parameter(format!(
                 "Invalid parameter: {member} Reason: not an SNS topic ARN"
             )));
