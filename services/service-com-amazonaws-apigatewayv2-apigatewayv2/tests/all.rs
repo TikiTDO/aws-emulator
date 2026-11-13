@@ -189,6 +189,8 @@ mod probe;
 mod product_page_deletion;
 #[path = "all/product_page_lifecycle.rs"]
 mod product_page_lifecycle;
+#[path = "all/product_page_not_found_sentence.rs"]
+mod product_page_not_found_sentence;
 #[path = "all/product_page_update.rs"]
 mod product_page_update;
 #[path = "all/product_rest_endpoint_page_deletion.rs"]
